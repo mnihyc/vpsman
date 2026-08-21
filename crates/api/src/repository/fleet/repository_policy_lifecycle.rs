@@ -296,6 +296,206 @@ pub(crate) async fn record_policy_evidence_in_tx(
     Ok(true)
 }
 
+/// Resolves every confirmed client-owned episode and clears all pending policy
+/// gates while the caller holds the client lifecycle row. Suspension is a
+/// subject-level scope exit, so this intentionally spans connectivity,
+/// resource, traffic, tunnel, backup, job, and future client-scoped policies.
+pub(crate) async fn suppress_client_policy_alerts_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+) -> Result<usize> {
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **tx)
+        .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, policy_rule_id, policy_rule_version,
+               COALESCE(last_evidence_id, trigger_evidence_id) AS evidence_id,
+               trigger_generation, lifecycle_state, schedule_lineage,
+               triggered_at, backfilled
+        FROM alert_episodes
+        WHERE client_id=$1
+          AND resolved_at IS NULL
+          AND last_confirmed_at IS NOT NULL
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(client_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for row in &rows {
+        let episode_id: Uuid = row.try_get("id")?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE alert_episodes
+            SET lifecycle_state='resolved',
+                resolved_at=GREATEST($2,last_confirmed_at),
+                resolution_reason='source_scope_exited',
+                resolution_note=NULL,
+                resolution_actor_id=NULL,
+                updated_at=$2
+            WHERE id=$1 AND resolved_at IS NULL
+            "#,
+        )
+        .bind(episode_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            continue;
+        }
+
+        let (Some(rule_id), Some(rule_version), Some(evidence_id)) = (
+            row.try_get::<Option<Uuid>, _>("policy_rule_id")?,
+            row.try_get::<Option<i32>, _>("policy_rule_version")?,
+            row.try_get::<Option<Uuid>, _>("evidence_id")?,
+        ) else {
+            continue;
+        };
+        let rule = load_evaluator_rule_by_id_in_tx(tx, rule_id, rule_version).await?;
+        let evidence = load_stored_evidence_in_tx(tx, evidence_id).await?;
+        let episode = ActiveEpisode {
+            id: episode_id,
+            last_evidence_id: evidence_id,
+            generation: row.try_get("trigger_generation")?,
+            lifecycle_state: "resolved".to_string(),
+            schedule_lineage: row.try_get("schedule_lineage")?,
+            triggered_at: row.try_get("triggered_at")?,
+            confirmed: true,
+            backfilled: row.try_get("backfilled")?,
+        };
+        emit_lifecycle_edge_in_tx(tx, &rule, &evidence, &episode, "alert.resolved", now).await?;
+    }
+
+    // Old pre-policy rows could own an unconfirmed Unknown placeholder. They
+    // were never user-visible alerts and cannot be marked Resolved without
+    // inventing a confirmation. Remove them before clearing their state so a
+    // later unsuspend can create a fresh episode under the unique live key.
+    sqlx::query(
+        r#"
+        DELETE FROM alert_episodes
+        WHERE client_id=$1 AND resolved_at IS NULL AND last_confirmed_at IS NULL
+        "#,
+    )
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
+
+    // Mark every surviving pre-suspension episode generation, including
+    // already-resolved history whose triggered edge has not yet reached a
+    // downstream materializer. Unsuspend creates fresh episode rows, so this
+    // durable provenance marker cannot suppress a genuinely new incident.
+    sqlx::query(
+        r#"
+        UPDATE alert_episodes
+        SET evidence=evidence || jsonb_build_object(
+                '_vpsman_client_suspension',
+                jsonb_build_object('client_id',$1::text,'suppressed_at',$2)
+            ),
+            updated_at=GREATEST(updated_at,$2)
+        WHERE client_id=$1
+        "#,
+    )
+    .bind(client_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM alert_policy_confirmations confirmation
+        USING alert_policy_evaluation_states state
+        WHERE state.subject_client_id=$1
+          AND confirmation.policy_rule_id=state.policy_rule_id
+          AND confirmation.rule_version=state.rule_version
+          AND confirmation.confirmation_bucket_key=state.confirmation_bucket_key
+        "#,
+    )
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
+
+    let states = sqlx::query(
+        r#"
+        SELECT state.policy_rule_id, state.rule_version,
+               state.confirmation_bucket_key, rule.rule_kind
+        FROM alert_policy_evaluation_states state
+        JOIN policy_rules rule
+          ON rule.id=state.policy_rule_id AND rule.rule_version=state.rule_version
+        WHERE state.subject_client_id=$1
+        ORDER BY state.policy_rule_id, state.confirmation_bucket_key
+        FOR UPDATE OF state
+        "#,
+    )
+    .bind(client_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for state in states {
+        let occurrence = state.try_get::<String, _>("rule_kind")? == "occurrence";
+        sqlx::query(
+            r#"
+            UPDATE alert_policy_evaluation_states
+            SET active_episode_id=NULL,
+                truth_state='not_matched', next_transition_at=NULL,
+                trigger_confirmed_duration_secs=0,
+                trigger_segment_started_at=NULL,
+                resolve_confirmed_duration_secs=0,
+                resolve_segment_started_at=NULL,
+                occurrence_cohort_id=CASE WHEN $4 THEN $5 ELSE occurrence_cohort_id END,
+                last_evaluated_at=$6, updated_at=$6
+            WHERE policy_rule_id=$1 AND rule_version=$2
+              AND confirmation_bucket_key=$3
+            "#,
+        )
+        .bind(state.try_get::<Uuid, _>("policy_rule_id")?)
+        .bind(state.try_get::<i32, _>("rule_version")?)
+        .bind(state.try_get::<String, _>("confirmation_bucket_key")?)
+        .bind(occurrence)
+        .bind(Uuid::new_v4())
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(rows.len())
+}
+
+/// Fences the slow missing-receipt repair path against a client suspension.
+/// Normal evidence producers already own the client row; repair does not, so
+/// this narrow advisory lock prevents a repaired historical fact from
+/// committing an episode just after suspension's final suppression scan.
+pub(crate) async fn lock_client_policy_suppression_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(vpsman_server_core::client_policy_suppression_lock_key(
+            client_id,
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn lock_client_policy_suppression_shared_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
+        .bind(vpsman_server_core::client_policy_suppression_lock_key(
+            client_id,
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+// One MVCC statement gives a coherent client/tags/rules subject. A source
+// transaction reads its own prior mutations; periodic reconciliation reads
+// the last committed subject without taking a client-row lock after the
+// operational advisory lock. Evidence stores a textual subject identity, so
+// deletion fencing is unnecessary and would invert the ingest lock order.
 async fn load_policy_subject_snapshot_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
@@ -336,7 +536,6 @@ async fn load_policy_subject_snapshot_in_tx(
         )) AS snapshot
         FROM clients client
         WHERE client.id=$1
-        FOR SHARE OF client
         "#,
     )
     .bind(client_id)
@@ -586,7 +785,7 @@ pub(crate) async fn repair_missing_policy_evidence_receipts(
     let candidates = sqlx::query(
         r#"
         SELECT rule.id AS rule_id, rule.rule_version, evidence.id AS evidence_id,
-               evidence.evidence_seq
+               evidence.evidence_seq, evidence.subject_client_id
         FROM alert_policy_evidence evidence
         JOIN policy_rules rule ON rule.evidence_source=evidence.source_kind
         JOIN policy_groups group_row ON group_row.id=rule.group_id
@@ -609,7 +808,11 @@ pub(crate) async fn repair_missing_policy_evidence_receipts(
         let rule_version: i32 = candidate.try_get("rule_version")?;
         let evidence_id: Uuid = candidate.try_get("evidence_id")?;
         let evidence_seq: i64 = candidate.try_get("evidence_seq")?;
+        let subject_client_id: Option<String> = candidate.try_get("subject_client_id")?;
         let mut tx = pool.begin().await?;
+        if let Some(client_id) = subject_client_id.as_deref() {
+            lock_client_policy_suppression_shared_in_tx(&mut tx, client_id).await?;
+        }
         sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext($1)::bigint)")
             .bind(POLICY_EVIDENCE_ARM_LOCK)
             .execute(&mut *tx)
@@ -618,6 +821,28 @@ pub(crate) async fn repair_missing_policy_evidence_receipts(
         let evidence = load_stored_evidence_in_tx(&mut tx, evidence_id).await?;
         if receipt_exists_in_tx(&mut tx, &rule, evidence_seq).await? {
             tx.commit().await?;
+            continue;
+        }
+        let subject_suspended = if let Some(client_id) = subject_client_id.as_deref() {
+            sqlx::query_scalar::<_, bool>("SELECT status='suspended' FROM clients WHERE id=$1")
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if subject_suspended {
+            record_receipt_in_tx(
+                &mut tx,
+                &rule,
+                &evidence,
+                "out_of_scope",
+                Some("client_suspended"),
+            )
+            .await?;
+            tx.commit().await?;
+            repaired += 1;
             continue;
         }
         sqlx::query("SAVEPOINT alert_policy_rule_repair")
@@ -696,12 +921,14 @@ pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
     let candidates = sqlx::query(
         r#"
         SELECT rule.id AS rule_id, rule.rule_version,
-               evidence.id AS evidence_id, evidence.evidence_seq
+               evidence.id AS evidence_id, evidence.evidence_seq,
+               COALESCE(subject.status='suspended',FALSE) AS subject_suspended
         FROM policy_rules rule
         JOIN policy_groups group_row ON group_row.id=rule.group_id
         JOIN alert_policy_evidence evidence
           ON evidence.source_kind=rule.evidence_source
          AND evidence.evidence_seq > rule.armed_after_evidence_seq
+        LEFT JOIN clients subject ON subject.id=evidence.subject_client_id
         LEFT JOIN alert_policy_evidence_receipts receipt
           ON receipt.policy_rule_id=rule.id
          AND receipt.rule_version=rule.rule_version
@@ -721,9 +948,22 @@ pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
         let rule_version: i32 = candidate.try_get("rule_version")?;
         let evidence_id: Uuid = candidate.try_get("evidence_id")?;
         let evidence_seq: i64 = candidate.try_get("evidence_seq")?;
+        let subject_suspended: bool = candidate.try_get("subject_suspended")?;
         let rule = load_evaluator_rule_by_id_in_tx(tx, rule_id, rule_version).await?;
         let evidence = load_stored_evidence_in_tx(tx, evidence_id).await?;
         if receipt_exists_in_tx(tx, &rule, evidence_seq).await? {
+            continue;
+        }
+        if subject_suspended {
+            record_receipt_in_tx(
+                tx,
+                &rule,
+                &evidence,
+                "out_of_scope",
+                Some("client_suspended"),
+            )
+            .await?;
+            drained += 1;
             continue;
         }
         sqlx::query("SAVEPOINT alert_policy_definition_fence_drain")
@@ -802,6 +1042,11 @@ pub(crate) async fn evaluate_due_policy_transitions(
             WHERE state.next_transition_at IS NOT NULL
               AND state.next_transition_at <= clock_timestamp()
               AND rule.enabled AND group_row.enabled
+              AND NOT EXISTS (
+                    SELECT 1 FROM clients suspended_subject
+                    WHERE suspended_subject.id=state.subject_client_id
+                      AND suspended_subject.status='suspended'
+              )
               AND (
                     rule.rule_kind='occurrence'
                     OR NOT EXISTS (
@@ -1659,9 +1904,14 @@ async fn evaluate_rule_in_tx(
             )
             .await?;
         if gate_passed {
-            let episode = trigger_episode_in_tx(tx, rule, evidence, &mut state, now).await?;
-            state.active_episode_id = Some(episode.id);
-            state.active_triggered_at = Some(episode.triggered_at);
+            if let Some(episode) =
+                trigger_episode_in_tx(tx, rule, evidence, &mut state, now).await?
+            {
+                state.active_episode_id = Some(episode.id);
+                state.active_triggered_at = Some(episode.triggered_at);
+            } else if rule.kind == AlertPolicyRuleKind::Occurrence {
+                state.occurrence_cohort_id = Some(Uuid::new_v4());
+            }
             // A completed trigger gate belongs only to the generation it
             // opened. Retaining its dwell would let a later recovery followed
             // by the same condition retrigger immediately.
@@ -1813,7 +2063,31 @@ async fn trigger_episode_in_tx(
     evidence: &StoredEvidence,
     state: &mut EvaluationState,
     now: DateTime<Utc>,
-) -> Result<ActiveEpisode> {
+) -> Result<Option<ActiveEpisode>> {
+    if rule.correlation_mode != AlertPolicyCorrelationMode::Global {
+        if let Some(client_id) = evidence.subject_client_id.as_deref() {
+            let suppression_lock_acquired: bool = sqlx::query_scalar(
+                "SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1, 0))",
+            )
+            .bind(vpsman_server_core::client_policy_suppression_lock_key(
+                client_id,
+            ))
+            .fetch_one(&mut **tx)
+            .await?;
+            let subject_suspended = suppression_lock_acquired
+                && sqlx::query_scalar::<_, bool>(
+                    "SELECT status='suspended' FROM clients WHERE id=$1",
+                )
+                .bind(client_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .unwrap_or(false);
+            if !suppression_lock_acquired || subject_suspended {
+                clear_confirmations_in_tx(tx, rule, evidence, GatePhase::Trigger).await?;
+                return Ok(None);
+            }
+        }
+    }
     let id = Uuid::new_v4();
     state.trigger_generation = state.trigger_generation.saturating_add(1);
     let natural_key = if rule.kind == AlertPolicyRuleKind::Occurrence
@@ -1949,7 +2223,7 @@ async fn trigger_episode_in_tx(
         let _ = seconds;
     }
     clear_confirmations_in_tx(tx, rule, evidence, GatePhase::Trigger).await?;
-    Ok(episode)
+    Ok(Some(episode))
 }
 
 fn validated_legacy_public_id(rule: &EvaluatorRule, evidence: &StoredEvidence) -> Result<String> {
@@ -2399,6 +2673,14 @@ fn parse_correlation_mode(value: &str) -> Result<AlertPolicyCorrelationMode> {
 }
 
 fn policy_scope_truth(rule: &EvaluatorRule, evidence: &StoredEvidence) -> Result<ScopeTruth> {
+    if evidence
+        .subject_snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        == Some("suspended")
+    {
+        return Ok(ScopeTruth::OutOfScope);
+    }
     if rule.group_selector.trim() == "*" {
         return Ok(ScopeTruth::InScope);
     }

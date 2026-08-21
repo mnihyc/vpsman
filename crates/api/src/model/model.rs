@@ -22,6 +22,7 @@ pub(crate) struct FleetSummary {
     pub(crate) online: usize,
     pub(crate) offline: usize,
     pub(crate) never: usize,
+    pub(crate) suspended: usize,
     pub(crate) revoked: usize,
     pub(crate) unknown: usize,
     pub(crate) stale: usize,
@@ -160,6 +161,53 @@ pub(crate) struct AgentView {
     pub(crate) stale_since: Option<String>,
     pub(crate) stale_reason: Option<String>,
     pub(crate) capabilities: AgentCapabilitySnapshot,
+}
+
+impl AgentView {
+    pub(crate) fn is_monitoring_visible(&self) -> bool {
+        self.status != "suspended"
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentSuspensionRecord {
+    pub(crate) suspended_at: String,
+    pub(crate) suspended_by: Option<Uuid>,
+    pub(crate) suspended_reason: Option<String>,
+    pub(crate) suspended_from_status: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SuspendAgentRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnsuspendAgentRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AgentSuspensionMutationResponse {
+    pub(crate) agent: AgentView,
+    pub(crate) suspended_at: Option<String>,
+    pub(crate) suspended_by: Option<Uuid>,
+    pub(crate) suspended_reason: Option<String>,
+    pub(crate) suspended_from_status: Option<String>,
+    pub(crate) skipped_unstarted_job_ids: Vec<Uuid>,
+    pub(crate) resolved_alert_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentSuspensionMutationResult {
+    pub(crate) record: Option<AgentSuspensionRecord>,
+    pub(crate) skipped_unstarted_job_ids: Vec<Uuid>,
+    pub(crate) resolved_alert_count: usize,
 }
 
 /// Host facts reported once per accepted agent session. These are kept apart

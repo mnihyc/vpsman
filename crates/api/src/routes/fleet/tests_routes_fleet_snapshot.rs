@@ -31,11 +31,11 @@ async fn live_snapshot_contains_only_the_live_sources() {
         unreachable!();
     };
     memory.agents.write().await.push(uptime_test_agent("v-1"));
-    memory
-        .telemetry_samples
-        .write()
-        .await
-        .push(crate::model::TelemetrySampleView {
+    let mut suspended = uptime_test_agent("suspended-vps");
+    suspended.status = "suspended".to_string();
+    memory.agents.write().await.push(suspended);
+    memory.telemetry_samples.write().await.extend([
+        crate::model::TelemetrySampleView {
             id: uuid::Uuid::new_v4(),
             client_id: "v-1".to_string(),
             observed_at: "200".to_string(),
@@ -43,7 +43,17 @@ async fn live_snapshot_contains_only_the_live_sources() {
             memory_total_bytes: 1,
             memory_available_bytes: 1,
             payload: serde_json::json!({"uptime_secs": 123}),
-        });
+        },
+        crate::model::TelemetrySampleView {
+            id: uuid::Uuid::new_v4(),
+            client_id: "suspended-vps".to_string(),
+            observed_at: "300".to_string(),
+            cpu_load_1: 0.1,
+            memory_total_bytes: 1,
+            memory_available_bytes: 1,
+            payload: serde_json::json!({"uptime_secs": 456}),
+        },
+    ]);
     let headers = crate::test_auth_headers(&state).await;
 
     let Json(snapshot) = fleet_snapshot(

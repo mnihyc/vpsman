@@ -9,12 +9,12 @@ use vpsman_common::{
 
 use crate::{
     model::{
-        AgentView, AuditLogView, AuthContext, MonitoringShareRecord, MonitoringShareTargetRecord,
-        MonitoringShareTargetReplacement, MonitoringShareView, MonitoringShareVisibilityView,
-        MonitoringShareVisitorRecord, PingRollupView, PingTargetAssignmentRecord,
-        PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
-        PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView, SystemInformationView,
-        TelemetryUptimeView,
+        AgentView, AuditLogView, AuthContext, MonitoringShareDefinitionUpdate,
+        MonitoringShareRecord, MonitoringShareTargetRecord, MonitoringShareTargetReplacement,
+        MonitoringShareView, MonitoringShareVisibilityView, MonitoringShareVisitorRecord,
+        PingRollupView, PingTargetAssignmentRecord, PingTargetAssignmentReplacement,
+        PingTargetAssignmentView, PingTargetDetailView, PingTargetRecord,
+        PingTargetRuntimeSyncView, PingTargetView, SystemInformationView, TelemetryUptimeView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -38,6 +38,7 @@ impl Repository {
                     .read()
                     .await
                     .iter()
+                    .filter(|agent| agent.status != "suspended")
                     .map(|agent| agent.id.clone())
                     .collect::<HashSet<_>>();
                 let hidden_clients = memory.hidden_clients.read().await;
@@ -81,6 +82,7 @@ impl Repository {
                         ORDER BY sample.observed_at DESC, sample.id DESC
                         LIMIT 1
                     ) latest ON TRUE
+                    WHERE client.status <> 'suspended'
                     ORDER BY client.id
                     "#,
                 )
@@ -1635,9 +1637,20 @@ impl Repository {
                         WHERE
                             p.bucket_secs >= 60
                             AND p.bucket_secs % 60 = 0
-                            AND ($2::BIGINT IS NULL OR p.bucket_start
-                                + make_interval(secs => p.bucket_secs) > to_timestamp($2))
-                            AND ($3::BIGINT IS NULL OR p.bucket_start <= to_timestamp($3))
+                            -- Keep the range predicates visible to generic
+                            -- plans.  Infinity preserves the historical
+                            -- None/None contract without an OR branch (and
+                            -- therefore without forcing a broad filter).
+                            AND p.bucket_start
+                                + make_interval(secs => p.bucket_secs)
+                                    > COALESCE(
+                                        to_timestamp($2::double precision),
+                                        '-infinity'::timestamptz
+                                    )
+                            AND p.bucket_start <= COALESCE(
+                                to_timestamp($3::double precision),
+                                'infinity'::timestamptz
+                            )
                     ), coverage AS MATERIALIZED (
                         SELECT
                             series_id,
@@ -1670,8 +1683,10 @@ impl Repository {
                             is_primary,
                             generation,
                             to_timestamp(
-                                floor(source_start::numeric / GREATEST($4, bucket_secs)::numeric)
-                                    * GREATEST($4, bucket_secs)
+                                floor(
+                                    source_start::double precision
+                                        / GREATEST($4, bucket_secs)::double precision
+                                )::bigint * GREATEST($4, bucket_secs)
                             ) AS chart_bucket_start,
                             GREATEST($4, bucket_secs)::integer AS chart_bucket_secs,
                             sample_count,
@@ -1809,8 +1824,7 @@ impl Repository {
                         target_id,
                         target_name,
                         generation,
-                        floor(checked_unix::numeric / $4::numeric)::bigint
-                            * $4::bigint AS chart_epoch,
+                        (checked_unix / $4::bigint) * $4::bigint AS chart_epoch,
                         LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
                         LEAST(count(latency_avg_ms)::bigint, 2147483647)::integer
                             AS success_count,
@@ -1921,8 +1935,14 @@ impl Repository {
                     WHERE series.client_id = $1
                       AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
                       AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
-                      AND ($2::BIGINT IS NULL OR fact.checked_unix >= $2)
-                      AND ($3::BIGINT IS NULL OR fact.checked_unix <= $3)
+                      -- Raw Ping facts enforce checked_unix > 0. Sentinel bounds
+                      -- preserve the None/None API contract while keeping both
+                      -- range predicates visible to generic prepared plans.
+                      AND fact.checked_unix >= COALESCE($2::BIGINT, 0)
+                      AND fact.checked_unix <= COALESCE(
+                            $3::BIGINT,
+                            9223372036854775807::BIGINT
+                          )
                 ), selected AS (
                     SELECT
                         accepted.client_id,
@@ -1950,8 +1970,7 @@ impl Repository {
                         target_name,
                         bool_or(is_primary) AS is_primary,
                         generation,
-                        floor(checked_unix::numeric / $4::numeric)::bigint
-                            * $4::bigint AS chart_epoch,
+                        (checked_unix / $4::bigint) * $4::bigint AS chart_epoch,
                         LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
                         LEAST(count(latency_avg_ms)::bigint, 2147483647)::integer
                             AS success_count,
@@ -2591,7 +2610,7 @@ impl Repository {
                         .find(|record| record.id == share_id)
                         .context("monitoring_share_preview_stale")?;
                     stored.targets = targets;
-                    stored.updated_at = now.to_string();
+                    stored.updated_at = next_monitoring_share_updated_at(&stored.updated_at);
                 }
                 drop(records);
                 record_memory_monitoring_audit(
@@ -2752,6 +2771,246 @@ impl Repository {
         Ok(())
     }
 
+    pub(crate) async fn update_monitoring_share_definition(
+        &self,
+        update: MonitoringShareDefinitionUpdate,
+        operator: &AuthContext,
+    ) -> Result<MonitoringShareView> {
+        let next_client_ids = normalized_client_ids(&update.next_client_ids);
+        anyhow::ensure!(
+            next_client_ids.len() <= 1_000,
+            "monitoring_share_target_count_too_large"
+        );
+        let now = crate::unix_now();
+        match self {
+            Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    &next_client_ids,
+                    "monitoring_share_resolution_stale",
+                )
+                .await?;
+                let mut records = memory.monitoring_shares.write().await;
+                let stored = records
+                    .iter_mut()
+                    .find(|record| record.id == update.expected_share.id)
+                    .context("monitoring_share_preview_stale")?;
+                if !same_monitoring_share_revision(stored, &update.expected_share)
+                    || monitoring_share_status(stored, now) != "active"
+                {
+                    bail!("monitoring_share_preview_stale");
+                }
+                let existing_keys = stored
+                    .targets
+                    .iter()
+                    .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
+                    .collect::<HashMap<_, _>>();
+                let targets = next_client_ids
+                    .iter()
+                    .cloned()
+                    .map(|client_id| MonitoringShareTargetRecord {
+                        public_client_key: existing_keys
+                            .get(&client_id)
+                            .cloned()
+                            .unwrap_or_else(generate_token),
+                        client_id,
+                    })
+                    .collect::<Vec<_>>();
+                validate_monitoring_share_targets(&targets)?;
+                stored.name = update.next_name.clone();
+                stored.selector_expression = update.next_selector_expression.clone();
+                stored.targets = targets;
+                stored.visibility = update.next_visibility.clone();
+                stored.updated_at = next_monitoring_share_updated_at(&stored.updated_at);
+                let persisted = stored.clone();
+                drop(records);
+                record_memory_monitoring_audit(
+                    memory,
+                    operator,
+                    "monitoring_share.definition_updated",
+                    format!("monitoring_share:{}", persisted.id),
+                    share_definition_update_audit_metadata(&update, operator),
+                )
+                .await;
+                let visitors = memory.monitoring_share_visitors.read().await.clone();
+                let creator = match persisted.created_by {
+                    Some(created_by) => memory
+                        .operators
+                        .read()
+                        .await
+                        .iter()
+                        .find(|candidate| candidate.id == created_by)
+                        .map(|candidate| candidate.username.clone()),
+                    None => None,
+                };
+                Ok(monitoring_share_view(&persisted, &visitors, creator))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &next_client_ids,
+                    "monitoring_share_resolution_stale",
+                )
+                .await?;
+                let locked = sqlx::query(
+                    r#"
+                    SELECT
+                        updated_at::text AS updated_at,
+                        expires_at > now() AS unexpired,
+                        revoked_at IS NOT NULL AS revoked
+                    FROM monitoring_share_links
+                    WHERE id = $1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(update.expected_share.id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .context("monitoring_share_preview_stale")?;
+                let updated_at: String = locked.try_get("updated_at")?;
+                let unexpired: bool = locked.try_get("unexpired")?;
+                let revoked: bool = locked.try_get("revoked")?;
+                if updated_at != update.expected_share.updated_at || !unexpired || revoked {
+                    bail!("monitoring_share_preview_stale");
+                }
+                let target_rows = sqlx::query(
+                    r#"
+                    SELECT client_id, public_client_key
+                    FROM monitoring_share_targets
+                    WHERE share_id = $1
+                    ORDER BY client_id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(update.expected_share.id)
+                .fetch_all(&mut *tx)
+                .await?;
+                let current_targets = target_rows
+                    .into_iter()
+                    .map(|row| {
+                        Ok(MonitoringShareTargetRecord {
+                            client_id: row.try_get("client_id")?,
+                            public_client_key: row.try_get("public_client_key")?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if current_targets != update.expected_share.targets {
+                    bail!("monitoring_share_preview_stale");
+                }
+                let existing_keys = current_targets
+                    .iter()
+                    .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
+                    .collect::<HashMap<_, _>>();
+                let targets = next_client_ids
+                    .iter()
+                    .cloned()
+                    .map(|client_id| MonitoringShareTargetRecord {
+                        public_client_key: existing_keys
+                            .get(&client_id)
+                            .cloned()
+                            .unwrap_or_else(generate_token),
+                        client_id,
+                    })
+                    .collect::<Vec<_>>();
+                validate_monitoring_share_targets(&targets)?;
+                let changed = sqlx::query(
+                    r#"
+                    UPDATE monitoring_share_links
+                    SET name = $2,
+                        selector_expression = $3,
+                        show_identity_context = $4,
+                        show_billing = $5,
+                        show_system_information = $6,
+                        show_resources = $7,
+                        show_network = $8,
+                        show_traffic = $9,
+                        show_ping = $10,
+                        allow_detail_history = $11,
+                        updated_at = GREATEST(
+                            clock_timestamp(),
+                            updated_at + interval '1 microsecond'
+                        )
+                    WHERE id = $1
+                      AND updated_at::text = $12
+                    "#,
+                )
+                .bind(update.expected_share.id)
+                .bind(&update.next_name)
+                .bind(&update.next_selector_expression)
+                .bind(update.next_visibility.identity_context)
+                .bind(update.next_visibility.billing)
+                .bind(update.next_visibility.system_information)
+                .bind(update.next_visibility.resources)
+                .bind(update.next_visibility.network)
+                .bind(update.next_visibility.traffic)
+                .bind(update.next_visibility.ping)
+                .bind(update.next_visibility.detail_history)
+                .bind(&update.expected_share.updated_at)
+                .execute(&mut *tx)
+                .await?;
+                if changed.rows_affected() != 1 {
+                    bail!("monitoring_share_preview_stale");
+                }
+                if current_targets != targets {
+                    sqlx::query("DELETE FROM monitoring_share_targets WHERE share_id = $1")
+                        .bind(update.expected_share.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    if !targets.is_empty() {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO monitoring_share_targets (
+                                share_id, client_id, public_client_key
+                            )
+                            SELECT $1, target.client_id, target.public_client_key
+                            FROM unnest($2::TEXT[], $3::TEXT[])
+                                AS target(client_id, public_client_key)
+                            "#,
+                        )
+                        .bind(update.expected_share.id)
+                        .bind(
+                            targets
+                                .iter()
+                                .map(|target| target.client_id.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .bind(
+                            targets
+                                .iter()
+                                .map(|target| target.public_client_key.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                }
+                insert_monitoring_audit(
+                    &mut tx,
+                    Some(operator.operator.id),
+                    "monitoring_share.definition_updated",
+                    &format!("monitoring_share:{}", update.expected_share.id),
+                    share_definition_update_audit_metadata(&update, operator),
+                )
+                .await?;
+                let mut persisted = postgres_monitoring_share_views(
+                    &mut *tx,
+                    None,
+                    Some(vec![update.expected_share.id]),
+                    1,
+                    0,
+                )
+                .await?;
+                let persisted = persisted
+                    .pop()
+                    .context("persisted monitoring share missing")?;
+                tx.commit().await?;
+                Ok(persisted)
+            }
+        }
+    }
+
     pub(crate) async fn extend_monitoring_shares(
         &self,
         share_ids: &[Uuid],
@@ -2790,7 +3049,7 @@ impl Repository {
                         .saturating_add(extend_by_secs)
                         .min(maximum)
                         .to_string();
-                    record.updated_at = now.to_string();
+                    record.updated_at = next_monitoring_share_updated_at(&record.updated_at);
                 }
                 let persisted_records = records
                     .iter()
@@ -2934,7 +3193,7 @@ impl Repository {
                 for record in records.iter_mut().filter(|record| ids.contains(&record.id)) {
                     record.revoked_at = Some(now.clone());
                     record.revoked_by = Some(operator.operator.id);
-                    record.updated_at = now.clone();
+                    record.updated_at = next_monitoring_share_updated_at(&record.updated_at);
                 }
                 let persisted_records = records
                     .iter()
@@ -4550,6 +4809,25 @@ pub(crate) fn monitoring_share_status(record: &MonitoringShareRecord, now: u64) 
     }
 }
 
+/// Advance the in-memory share revision even when several mutations happen
+/// within one wall-clock second. PostgreSQL uses `clock_timestamp()` for its
+/// persisted timestamp; the memory repository must provide the same CAS
+/// guarantee rather than reusing the second-resolution import timestamp.
+fn next_monitoring_share_updated_at(previous: &str) -> String {
+    let now = chrono::Utc::now();
+    let previous = chrono::DateTime::parse_from_rfc3339(previous)
+        .ok()
+        .map(|value| value.with_timezone(&chrono::Utc));
+    let next = previous.map_or(now, |previous| {
+        if now > previous {
+            now
+        } else {
+            previous + chrono::Duration::nanoseconds(1)
+        }
+    });
+    next.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+}
+
 fn same_monitoring_share_revision(
     stored: &MonitoringShareRecord,
     expected: &MonitoringShareRecord,
@@ -4618,6 +4896,39 @@ fn share_target_updates_audit_metadata(
         serde_json::json!({
             "share_ids": share_ids,
             "changes": changes,
+        }),
+    )
+}
+
+fn share_definition_update_audit_metadata(
+    update: &MonitoringShareDefinitionUpdate,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    let before = normalized_client_ids(&update.expected_share.target_client_ids());
+    let after = normalized_client_ids(&update.next_client_ids);
+    let before_set = before.iter().cloned().collect::<BTreeSet<_>>();
+    let after_set = after.iter().cloned().collect::<BTreeSet<_>>();
+    base_monitoring_audit_metadata(
+        operator,
+        serde_json::json!({
+            "share_id": update.expected_share.id,
+            "before": {
+                "name": update.expected_share.name,
+                "selector_expression": update.expected_share.selector_expression,
+                "target_client_ids": before,
+                "target_count": before_set.len(),
+                "visibility": update.expected_share.visibility,
+                "updated_at": update.expected_share.updated_at,
+            },
+            "after": {
+                "name": update.next_name,
+                "selector_expression": update.next_selector_expression,
+                "target_client_ids": after,
+                "target_count": after_set.len(),
+                "visibility": update.next_visibility,
+            },
+            "added_client_ids": after_set.difference(&before_set).cloned().collect::<Vec<_>>(),
+            "removed_client_ids": before_set.difference(&after_set).cloned().collect::<Vec<_>>(),
         }),
     )
 }

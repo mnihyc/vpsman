@@ -536,10 +536,12 @@ export function TopologyGraphPanel({
                   const stats =
                     nodeStatsById.get(node.client_id) ??
                     EMPTY_NODE_TUNNEL_STATS;
+                  const expectedOffline =
+                    nodeDisplayState(node, agentById)?.label === "Suspended";
                   return (
                     <g
                       aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
-                      className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${stats.attention > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
+                      className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${expectedOffline ? "unknown" : stats.attention > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
                       key={node.client_id}
                       onClick={() => setSelectedClientId(node.client_id)}
                       onKeyDown={(event) => {
@@ -1350,7 +1352,7 @@ function nodeStatusClass(
   if (displayState.label === "Online") {
     return "online";
   }
-  if (displayState.label === "Offline") {
+  if (displayState.label === "Offline" || displayState.label === "Suspended") {
     return "unknown";
   }
   return displayState.tone === "ok" ? "online" : "stale";

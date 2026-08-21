@@ -1163,6 +1163,7 @@ export function useDashboardData(activeView: ActiveView) {
     jobRolloutsTruncated: jobs.jobRolloutsTruncated,
     gatewaySessions: access.gatewaySessions,
     deleteAgents: fleet.deleteAgents,
+    mutateAgentSuspensions: fleet.mutateAgentSuspensions,
     fleetAlertsEvidenceAvailable: fleet.fleetAlertsEvidenceAvailable,
     fleetAlerts: fleet.fleetAlerts,
     fleetAlertsTruncated: fleet.fleetAlertsTruncated,

@@ -23,6 +23,12 @@ pub(crate) const SESSION_COMMAND_QUEUE_CAPACITY: usize = 1024;
 #[derive(Clone)]
 pub(crate) struct GatewayState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
+    /// Orders command enqueue against suspension-fence installation. The read
+    /// side is held only through `try_send`, never while awaiting an agent ACK.
+    pub(crate) dispatch_lifecycle: Arc<RwLock<()>>,
+    pub(crate) client_suspension_fences: Arc<RwLock<HashMap<String, GatewayClientSuspensionFence>>>,
+    pub(crate) command_enqueues:
+        Arc<RwLock<HashMap<(String, uuid::Uuid), GatewayCommandEnqueueMarker>>>,
     pub(crate) privilege_assertions: Arc<Mutex<PrivilegeAssertionReplayCache>>,
     pub(crate) disconnected_at: Arc<RwLock<HashMap<String, Instant>>>,
     pub(crate) forward_metrics: Arc<GatewayForwardMetrics>,
@@ -34,12 +40,35 @@ impl Default for GatewayState {
     fn default() -> Self {
         Self {
             sessions: Arc::default(),
+            dispatch_lifecycle: Arc::default(),
+            client_suspension_fences: Arc::default(),
+            command_enqueues: Arc::default(),
             privilege_assertions: Arc::default(),
             disconnected_at: Arc::default(),
             forward_metrics: Arc::default(),
             reconnect_grace_secs: Arc::new(AtomicU64::new(60)),
             dispatch_ack_secs: Arc::new(AtomicU64::new(30)),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GatewayClientSuspensionFence {
+    pub(crate) token: uuid::Uuid,
+    /// `None` is the persistent, post-commit state. A prepared fence expires
+    /// automatically if its API caller dies before the database mutation.
+    pub(crate) expires_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GatewayCommandEnqueueMarker {
+    pub(crate) generation: uuid::Uuid,
+    pub(crate) expires_at: Instant,
+}
+
+impl GatewayClientSuspensionFence {
+    pub(crate) fn active_at(self, now: Instant) -> bool {
+        self.expires_at.is_none_or(|expires_at| expires_at > now)
     }
 }
 
@@ -57,6 +86,13 @@ impl GatewayState {
             .store(reconnect_grace_secs.max(1), Ordering::Relaxed);
         self.dispatch_ack_secs
             .store(dispatch_ack_secs.max(1), Ordering::Relaxed);
+    }
+
+    pub(crate) async fn prune_expired_command_enqueues(&self, now: Instant) -> usize {
+        let mut enqueues = self.command_enqueues.write().await;
+        let before = enqueues.len();
+        enqueues.retain(|_, marker| marker.expires_at > now);
+        before.saturating_sub(enqueues.len())
     }
 }
 

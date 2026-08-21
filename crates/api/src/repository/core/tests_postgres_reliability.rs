@@ -1,15 +1,24 @@
-use std::{collections::BTreeMap, fs, path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Component, Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     body::{to_bytes, Body},
     http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderMap, Request, StatusCode},
 };
 use chrono::{Datelike, Utc};
+use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use sqlx::{
-    postgres::{PgConnectOptions, PgPoolOptions},
+    pool::PoolConnection,
+    postgres::{PgConnectOptions, PgPoolOptions, PgRow},
     types::Json as SqlJson,
-    PgPool, Row,
+    Executor, PgPool, Postgres, Row,
 };
 use tokio::sync::{broadcast, oneshot, Barrier};
 use tower::ServiceExt;
@@ -476,6 +485,151 @@ async fn postgres_policy_startup_drains_every_event_source_past_each_batch_limit
     .await
     .unwrap()
     .is_some());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_policy_subject_snapshot_does_not_deadlock_row_first_writer() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "policy-subject-snapshot-order";
+    let source_event_id = format!("policy-subject-snapshot-order:{}", Uuid::new_v4());
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+
+    let (row_locked_tx, row_locked_rx) = oneshot::channel();
+    let (attempt_advisory_tx, attempt_advisory_rx) = oneshot::channel();
+    let (advisory_started_tx, advisory_started_rx) = oneshot::channel();
+    let writer_pool = db.pool.clone();
+    let writer = tokio::spawn(async move {
+        let mut tx = writer_pool.begin().await?;
+        let writer_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query("SELECT id FROM clients WHERE id = $1 FOR UPDATE")
+            .bind(client_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            UPDATE clients
+            SET display_name = 'uncommitted subject', status = 'offline'
+            WHERE id = $1
+            "#,
+        )
+        .bind(client_id)
+        .execute(&mut *tx)
+        .await?;
+        row_locked_tx
+            .send(writer_backend_pid)
+            .map_err(|_| anyhow::anyhow!("row-lock readiness receiver dropped"))?;
+        attempt_advisory_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("advisory attempt sender dropped"))?;
+        advisory_started_tx
+            .send(())
+            .map_err(|_| anyhow::anyhow!("advisory readiness receiver dropped"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("vpsman:operational-alert-reconcile")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok::<(), anyhow::Error>(())
+    });
+    let writer_backend_pid = row_locked_rx.await.unwrap();
+
+    let mut periodic = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("vpsman:operational-alert-reconcile")
+        .execute(&mut *periodic)
+        .await
+        .unwrap();
+    attempt_advisory_tx.send(()).unwrap();
+    advisory_started_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_locks
+                    WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                )
+                "#,
+            )
+            .bind(writer_backend_pid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("row-first writer did not block on the periodic advisory holder");
+
+    let observed_at = Utc::now();
+    let inserted = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::repository_policy_lifecycle::record_policy_evidence_in_tx(
+            &mut periodic,
+            crate::repository_policy_lifecycle::PolicyEvidenceFact {
+                source_kind: "backup.failure".to_string(),
+                source_event_id: source_event_id.clone(),
+                fact_kind: AlertPolicyRuleKind::Occurrence,
+                natural_key: source_event_id.clone(),
+                confirmation_bucket_key: source_event_id.clone(),
+                subject_client_id: Some(client_id.to_string()),
+                target_kind: "backup_request".to_string(),
+                target_id: source_event_id.clone(),
+                source_status: "execution_failed".to_string(),
+                complete: true,
+                subject_snapshot: json!({}),
+                payload: json!({
+                    "status":"execution_failed",
+                    "backup_request_id":source_event_id,
+                    "client_id":client_id,
+                }),
+                observed_at,
+                state_started_at: None,
+                causation_id: None,
+                schedule_lineage: Vec::new(),
+            },
+        ),
+    )
+    .await
+    .expect("subject snapshot waited on the row-first client's FOR UPDATE lock")
+    .unwrap();
+    assert!(inserted);
+    periodic.commit().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .expect("row-first writer did not acquire the released advisory lock")
+        .unwrap()
+        .unwrap();
+    let subject: SqlJson<Value> = sqlx::query_scalar(
+        "SELECT subject_snapshot FROM alert_policy_evidence WHERE source_event_id = $1",
+    )
+    .bind(&source_event_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(subject.0["display_name"], client_id);
+    assert_eq!(subject.0["status"], "online");
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT display_name, status FROM clients WHERE id = $1",
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        ("uncommitted subject".to_string(), "offline".to_string())
+    );
 
     db.cleanup().await;
 }
@@ -1678,7 +1832,13 @@ use crate::{
         finish_job_in_tx_if_all_targets_terminal_and_enqueue_event,
     },
     repository_network_observations::NetworkObservationFilter,
-    repository_network_traffic_import::load_postgres_import_boundary_samples,
+    repository_network_traffic_import::{
+        load_postgres_import_boundary_samples, POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL,
+        POSTGRES_IMPORT_OWNED_RAW_COUNTS_SQL, POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_NONLOCKING_SQL,
+        POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL, POSTGRES_IMPORT_RAW_PREDECESSOR_SQL,
+        POSTGRES_IMPORT_RAW_SUCCESSOR_SQL,
+    },
+    repository_telemetry_rollups::LATEST_TELEMETRY_NETWORK_RATES_SQL,
     repository_terminal_sessions::upsert_postgres_terminal_session,
     runtime_config_workspace::{preview_runtime_config_override, runtime_config_override_revision},
     state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
@@ -7026,6 +7186,24 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         .await
         .unwrap();
     }
+    // These rate fixtures deliberately bypass telemetry ingest. Production
+    // ingest writes the host counter sample (and therefore this registry key)
+    // before it writes the corresponding telemetry rate row.
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_hourly_usage_streams (
+            client_id, source_kind, interface
+        ) VALUES
+            ('unrelated-telemetry', 'host', 'eth0'),
+            ('selected-telemetry', 'host', 'eth0'),
+            ('reset-telemetry', 'host', 'eth0'),
+            ('rate-selection-telemetry', 'host', 'eth0'),
+            ('rate-selection-telemetry', 'host', 'lo')
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let current = crate::unix_now() / 60 * 60;
     let previous = current.saturating_sub(60);
     for (client_id, load) in [
@@ -7297,6 +7475,22 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
     assert_eq!(latest_mixed.len(), 1);
     assert_eq!(latest_mixed[0].bucket_secs, 300);
     assert_eq!(latest_mixed[0].rx_bytes_delta, 21_000);
+    let latest_coarse = db
+        .repo
+        .list_latest_telemetry_network_rates(
+            10,
+            Some("selected-telemetry"),
+            Some("eth0"),
+            Some(300),
+        )
+        .await
+        .unwrap();
+    assert_eq!(latest_coarse.len(), 1);
+    assert_eq!(latest_coarse[0].bucket_secs, 300);
+    assert_eq!(
+        latest_coarse[0].rx_bytes_delta, 15_000,
+        "an explicit bucket tier derives against the preceding row in that tier"
+    );
     let latest_scoped = db
         .repo
         .list_latest_telemetry_network_rates_for_clients(&scope)
@@ -7797,6 +7991,446 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
     assert_eq!(adaptive_ping[0].bucket_secs, 300);
     assert_eq!(adaptive_ping[0].sample_count, 5);
     assert_eq!(adaptive_ping[0].success_count, 5);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_latest_network_rates_bound_five_year_fleet_work_and_match_legacy() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_count = 100_i64;
+    let five_year_secs = 5 * 365_i64 * 86_400;
+    let tier_specs = [
+        (60_i64, 0_i64, 2 * 86_400_i64),
+        (300, 2 * 86_400, 8 * 86_400),
+        (1_800, 8 * 86_400, 31 * 86_400),
+        (3_600, 31 * 86_400, 91 * 86_400),
+        (10_800, 91 * 86_400, 181 * 86_400),
+        (21_600, 181 * 86_400, 366 * 86_400),
+        (86_400, 366 * 86_400, five_year_secs),
+    ];
+    let retained_rows_per_stream = tier_specs
+        .iter()
+        .map(|(bucket_secs, newer_secs, older_secs)| (older_secs - newer_secs) / bucket_secs)
+        .sum::<i64>();
+    assert_eq!(retained_rows_per_stream, 10_071);
+    let current_day: i64 = sqlx::query_scalar(
+        r#"
+        SELECT extract(epoch FROM date_bin(
+            interval '1 day', now(), TIMESTAMPTZ '1970-01-01 00:00:00+00'
+        ))::bigint
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let history_start = current_day - five_year_secs;
+
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key, status)
+        SELECT
+            format('latest-rate-fast-%s', lpad(client_number::text, 3, '0')),
+            format('latest-rate-fast-%s', lpad(client_number::text, 3, '0')),
+            decode(md5(format('latest-rate-fast-%s', client_number)), 'hex'),
+            'online'
+        FROM generate_series(1::bigint, $1::bigint + 1) client_number
+        "#,
+    )
+    .bind(client_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET
+            status = 'deleted',
+            hidden_at = now(),
+            hidden_reason = 'latest-rate visibility fixture'
+        WHERE id = format('latest-rate-fast-%s', lpad(($1 + 1)::text, 3, '0'))
+        "#,
+    )
+    .bind(client_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_hourly_usage_streams (
+            client_id, source_kind, interface
+        )
+        SELECT
+            format('latest-rate-fast-%s', lpad(client_number::text, 3, '0')),
+            'host',
+            'eth0'
+        FROM generate_series(1::bigint, $1::bigint + 1) client_number
+        "#,
+    )
+    .bind(client_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH tiers(bucket_secs, newer_secs, older_secs) AS (
+            VALUES
+                (60::bigint, 0::bigint, 172800::bigint),
+                (300, 172800, 691200),
+                (1800, 691200, 2678400),
+                (3600, 2678400, 7862400),
+                (10800, 7862400, 15638400),
+                (21600, 15638400, 31622400),
+                (86400, 31622400, 157680000)
+        ), retained AS (
+            SELECT
+                client_number,
+                tier.bucket_secs,
+                $2::bigint - (age_bucket + 1) * tier.bucket_secs AS bucket_start_unix,
+                $2::bigint - age_bucket * tier.bucket_secs - 1 AS latest_unix,
+                (($2::bigint - age_bucket * tier.bucket_secs - $3::bigint) / 60)
+                    * 100 + client_number AS rx_bytes,
+                (($2::bigint - age_bucket * tier.bucket_secs - $3::bigint) / 60)
+                    * 200 + client_number AS tx_bytes
+            FROM generate_series(1::bigint, $1::bigint + 1) client_number
+            CROSS JOIN tiers tier
+            CROSS JOIN LATERAL generate_series(
+                tier.newer_secs / tier.bucket_secs,
+                tier.older_secs / tier.bucket_secs - 1
+            ) AS ages(age_bucket)
+        )
+        INSERT INTO telemetry_network_rates (
+            client_id, interface, bucket_start, bucket_secs,
+            sample_count, rx_bytes_sum, tx_bytes_sum,
+            rx_bytes_avg, tx_bytes_avg,
+            rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch,
+            latest_observed_at
+        )
+        SELECT
+            format('latest-rate-fast-%s', lpad(client_number::text, 3, '0')),
+            'eth0',
+            to_timestamp(bucket_start_unix::double precision),
+            bucket_secs::integer,
+            (bucket_secs / 60)::integer,
+            rx_bytes,
+            tx_bytes,
+            rx_bytes,
+            tx_bytes,
+            rx_bytes,
+            tx_bytes,
+            0,
+            0,
+            to_timestamp(latest_unix::double precision)
+        FROM retained
+        "#,
+    )
+    .bind(client_count)
+    .bind(current_day)
+    .bind(history_start)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // A guarded retention conflict may leave schema-valid overlapping tiers.
+    // The coarse row starts earlier but is observed later than the newest
+    // fine row, so bucket-start ordering would select the wrong physical row.
+    sqlx::query(
+        r#"
+        UPDATE telemetry_network_rates
+        SET latest_observed_at = to_timestamp(($1 - 2)::double precision)
+        WHERE client_id = 'latest-rate-fast-002'
+          AND interface = 'eth0'
+          AND bucket_secs = 60
+          AND bucket_start = to_timestamp(($1 - 60)::double precision)
+        "#,
+    )
+    .bind(current_day)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_network_rates (
+            client_id, interface, bucket_start, bucket_secs,
+            sample_count, rx_bytes_sum, tx_bytes_sum,
+            rx_bytes_avg, tx_bytes_avg,
+            rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch,
+            latest_observed_at
+        )
+        SELECT
+            client_id,
+            interface,
+            to_timestamp(($1 - 300)::double precision),
+            300,
+            5,
+            rx_bytes_last + 50,
+            tx_bytes_last + 100,
+            rx_bytes_last + 50,
+            tx_bytes_last + 100,
+            rx_bytes_last + 50,
+            tx_bytes_last + 100,
+            rx_counter_epoch,
+            tx_counter_epoch,
+            to_timestamp(($1 - 1)::double precision)
+        FROM telemetry_network_rates
+        WHERE client_id = 'latest-rate-fast-002'
+          AND interface = 'eth0'
+          AND bucket_secs = 60
+          AND bucket_start = to_timestamp(($1 - 60)::double precision)
+        "#,
+    )
+    .bind(current_day)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT count(*)::bigint, count(DISTINCT bucket_secs)::bigint
+            FROM telemetry_network_rates
+            WHERE client_id = 'latest-rate-fast-010'
+            "#,
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (retained_rows_per_stream, 7)
+    );
+
+    // The latest physical row is a reset for one visible stream. Both the
+    // legacy oracle and the indexed path must omit it until a new baseline
+    // exists, while the hidden 101st fixture must never become a stream key.
+    sqlx::query(
+        r#"
+        UPDATE telemetry_network_rates
+        SET
+            rx_bytes_last = 5,
+            tx_bytes_last = 7,
+            rx_counter_epoch = 1,
+            tx_counter_epoch = 1
+        WHERE client_id = 'latest-rate-fast-001'
+          AND bucket_start = to_timestamp(($1 - 60)::double precision)
+        "#,
+    )
+    .bind(current_day)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE clients, traffic_counter_hourly_usage_streams, telemetry_network_rates")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let latest = tokio::time::timeout(
+        Duration::from_secs(2),
+        db.repo
+            .list_latest_telemetry_network_rates(50_000, None, None, None),
+    )
+    .await
+    .expect("100-stream/five-year latest-rate query exceeded two seconds")
+    .unwrap();
+    assert_eq!(latest.len(), (client_count - 1) as usize);
+    assert!(latest.iter().all(|row| {
+        row.client_id != "latest-rate-fast-001"
+            && row.client_id != "latest-rate-fast-101"
+            && row.interface == "eth0"
+            && if row.client_id == "latest-rate-fast-002" {
+                row.bucket_secs == 300 && row.rx_bytes_delta == 50 && row.tx_bytes_delta == 100
+            } else {
+                row.bucket_secs == 60 && row.rx_bytes_delta == 100 && row.tx_bytes_delta == 200
+            }
+    }));
+
+    let legacy: Vec<(String, String, i64, i32, i64, i64, i64)> = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query_as(
+            r#"
+            WITH latest AS (
+                SELECT DISTINCT ON (rate.client_id, rate.interface)
+                    rate.client_id,
+                    rate.interface,
+                    rate.bucket_start,
+                    rate.bucket_secs,
+                    rate.rx_bytes_last,
+                    rate.tx_bytes_last,
+                    rate.rx_counter_epoch,
+                    rate.tx_counter_epoch,
+                    rate.latest_observed_at
+                FROM telemetry_network_rates rate
+                JOIN visible_clients client ON client.id = rate.client_id
+                WHERE rate.client_id = 'latest-rate-fast-002'
+                ORDER BY
+                    rate.client_id,
+                    rate.interface,
+                    rate.latest_observed_at DESC,
+                    rate.bucket_start DESC
+            )
+            SELECT
+                latest.client_id,
+                latest.interface,
+                extract(epoch FROM latest.bucket_start)::bigint,
+                latest.bucket_secs,
+                latest.rx_bytes_last - previous.rx_bytes_last,
+                latest.tx_bytes_last - previous.tx_bytes_last,
+                extract(epoch FROM latest.latest_observed_at)::bigint
+            FROM latest
+            LEFT JOIN LATERAL (
+                SELECT
+                    candidate.latest_observed_at AS effective_at,
+                    candidate.rx_bytes_last,
+                    candidate.tx_bytes_last,
+                    candidate.rx_counter_epoch,
+                    candidate.tx_counter_epoch
+                FROM telemetry_network_rates candidate
+                WHERE candidate.client_id = latest.client_id
+                  AND candidate.interface = latest.interface
+                  AND candidate.latest_observed_at < latest.latest_observed_at
+                ORDER BY candidate.latest_observed_at DESC
+                LIMIT 1
+            ) previous ON TRUE
+            WHERE previous.effective_at IS NOT NULL
+              AND latest.rx_counter_epoch = previous.rx_counter_epoch
+              AND latest.tx_counter_epoch = previous.tx_counter_epoch
+              AND latest.rx_bytes_last >= previous.rx_bytes_last
+              AND latest.tx_bytes_last >= previous.tx_bytes_last
+            ORDER BY latest.latest_observed_at DESC, latest.client_id, latest.interface
+            "#,
+        )
+        .fetch_all(&db.pool),
+    )
+    .await
+    .expect("legacy latest-rate parity oracle exceeded ten seconds")
+    .unwrap();
+    let indexed = latest
+        .iter()
+        .filter(|row| row.client_id == "latest-rate-fast-002")
+        .map(|row| {
+            (
+                row.client_id.clone(),
+                row.interface.clone(),
+                crate::util::parse_timestamp_unix(&row.bucket_start).unwrap() as i64,
+                row.bucket_secs,
+                row.rx_bytes_delta,
+                row.tx_bytes_delta,
+                crate::util::parse_timestamp_unix(&row.latest_observed_at).unwrap() as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(indexed, legacy);
+
+    let limited = db
+        .repo
+        .list_latest_telemetry_network_rates(5, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        limited
+            .iter()
+            .map(|row| row.client_id.as_str())
+            .collect::<Vec<_>>(),
+        latest
+            .iter()
+            .take(5)
+            .map(|row| row.client_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let scoped = db
+        .repo
+        .list_latest_telemetry_network_rates(
+            10,
+            Some("latest-rate-fast-010"),
+            Some("eth0"),
+            Some(86_400),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].rx_bytes_delta, 144_000);
+    let fine_scoped = db
+        .repo
+        .list_latest_telemetry_network_rates(
+            10,
+            Some("latest-rate-fast-010"),
+            Some("eth0"),
+            Some(60),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fine_scoped.len(), 1);
+    assert_eq!(fine_scoped[0].rx_bytes_delta, 100);
+    assert!(db
+        .repo
+        .list_latest_telemetry_network_rates(
+            10,
+            Some("latest-rate-fast-010"),
+            Some("eth0"),
+            Some(120),
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .repo
+        .list_latest_telemetry_network_rates(10, Some("latest-rate-fast-101"), Some("eth0"), None,)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let explain_sql =
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {LATEST_TELEMETRY_NETWORK_RATES_SQL}");
+    let plan: Value = tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar(&explain_sql)
+            .bind(Option::<String>::None)
+            .bind(Option::<Vec<String>>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<i32>::None)
+            .bind(50_000_i64)
+            .bind(true)
+            .bind(Vec::<String>::new())
+            .bind(Vec::<String>::new())
+            .bind(Vec::<String>::new())
+            .fetch_one(&db.pool),
+    )
+    .await
+    .expect("100-stream/five-year latest-rate EXPLAIN exceeded two seconds")
+    .unwrap();
+    let plan_text = plan.to_string();
+    assert!(
+        plan_text.contains("telemetry_network_rates_client_effective_idx"),
+        "latest-rate query did not use the bounded per-stream index: {plan_text}"
+    );
+    assert!(
+        !explain_relation_uses_sequential_scan(&plan[0]["Plan"], "telemetry_network_rates"),
+        "latest-rate query scanned fleet rate history: {plan_text}"
+    );
+    let mut index_conditions = Vec::new();
+    collect_explain_index_conditions(
+        &plan[0]["Plan"],
+        "telemetry_network_rates_client_effective_idx",
+        &mut index_conditions,
+    );
+    assert_eq!(index_conditions.len(), 2, "{plan_text}");
+    assert!(
+        index_conditions
+            .iter()
+            .all(|condition| condition.contains("client_id") && condition.contains("interface")),
+        "latest-rate probes were not keyed by stream: {index_conditions:?}: {plan_text}"
+    );
+    assert!(
+        index_conditions.iter().any(|condition| {
+            condition.contains("latest_observed_at") && condition.contains('<')
+        }),
+        "predecessor probe lacked an effective-time upper bound: {index_conditions:?}: {plan_text}"
+    );
+    let rate_rows = explain_relation_examined_rows(&plan[0]["Plan"], "telemetry_network_rates");
+    assert!(
+        rate_rows <= (client_count * 2 + 4) as f64,
+        "latest-rate query examined {rate_rows} rows for {client_count} streams: {plan_text}"
+    );
 
     db.cleanup().await;
 }
@@ -10110,6 +10744,34 @@ async fn query_monthly_traffic_usage(
         .collect()
 }
 
+async fn query_no_reset_traffic_usage(
+    pool: &PgPool,
+    client_ids: Vec<String>,
+    now_unix: i64,
+) -> Vec<(String, i64, i64, i64, i64, i64)> {
+    let row_count = client_ids.len();
+    sqlx::query(NO_RESET_TRAFFIC_COUNTER_USAGE_SQL)
+        .bind(client_ids)
+        .bind(vec!["host".to_string(); row_count])
+        .bind(vec!["eth0".to_string(); row_count])
+        .bind(now_unix)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("client_id"),
+                row.get("cycle_rx"),
+                row.get("cycle_tx"),
+                row.get("latest_rx"),
+                row.get("latest_tx"),
+                row.get("rx_counter_epochs_seen"),
+            )
+        })
+        .collect()
+}
+
 async fn assert_hourly_traffic_ledger_matches_raw(pool: &PgPool, client_id: &str) {
     let mismatches: i64 = sqlx::query_scalar(
         r#"
@@ -10216,6 +10878,460 @@ fn explain_relation_rows(plan: &Value, relation: &str) -> f64 {
             .sum::<f64>();
     }
     rows
+}
+
+fn explain_relation_examined_rows(plan: &Value, relation: &str) -> f64 {
+    let mut rows = 0.0;
+    if plan.get("Relation Name").and_then(Value::as_str) == Some(relation) {
+        let loops = plan
+            .get("Actual Loops")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        rows += [
+            "Actual Rows",
+            "Rows Removed by Filter",
+            "Rows Removed by Index Recheck",
+        ]
+        .into_iter()
+        .map(|field| plan.get(field).and_then(Value::as_f64).unwrap_or(0.0))
+        .sum::<f64>()
+            * loops;
+    }
+    if let Some(children) = plan.get("Plans").and_then(Value::as_array) {
+        rows += children
+            .iter()
+            .map(|child| explain_relation_examined_rows(child, relation))
+            .sum::<f64>();
+    }
+    rows
+}
+
+fn explain_plan_uses_node_type(plan: &Value, expected: &str) -> bool {
+    plan.get("Node Type").and_then(Value::as_str) == Some(expected)
+        || plan
+            .get("Plans")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| explain_plan_uses_node_type(child, expected))
+            })
+}
+
+fn explain_relation_uses_bitmap_scan(plan: &Value, relation: &str) -> bool {
+    let scans_relation = plan.get("Relation Name").and_then(Value::as_str) == Some(relation);
+    let is_bitmap = plan
+        .get("Node Type")
+        .and_then(Value::as_str)
+        .is_some_and(|node_type| node_type.starts_with("Bitmap"));
+    (scans_relation && is_bitmap)
+        || plan
+            .get("Plans")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| explain_relation_uses_bitmap_scan(child, relation))
+            })
+}
+
+fn collect_explain_index_conditions(plan: &Value, index: &str, conditions: &mut Vec<String>) {
+    if plan.get("Index Name").and_then(Value::as_str) == Some(index) {
+        conditions.push(
+            plan.get("Index Cond")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    if let Some(children) = plan.get("Plans").and_then(Value::as_array) {
+        for child in children {
+            collect_explain_index_conditions(child, index, conditions);
+        }
+    }
+}
+
+fn explain_relation_uses_sequential_scan(plan: &Value, relation: &str) -> bool {
+    let scans_relation = plan.get("Relation Name").and_then(Value::as_str) == Some(relation);
+    let is_sequential = plan
+        .get("Node Type")
+        .and_then(Value::as_str)
+        .is_some_and(|node_type| node_type.contains("Seq Scan"));
+    (scans_relation && is_sequential)
+        || plan
+            .get("Plans")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| explain_relation_uses_sequential_scan(child, relation))
+            })
+}
+
+const HOURLY_WHOLE_STREAM_PLAN_SQL: &str = r#"
+WITH changed_streams AS MATERIALIZED (
+    SELECT DISTINCT client_id, source_kind, interface
+    FROM UNNEST(
+        $1::text[],
+        $2::text[],
+        $3::text[],
+        $4::timestamptz[]
+    ) AS item(client_id, source_kind, interface, observed_at)
+)
+SELECT
+    changed.client_id,
+    changed.source_kind,
+    changed.interface,
+    hourly.bucket_start,
+    hourly.rx_bytes,
+    hourly.tx_bytes,
+    hourly.rx_reset_count,
+    hourly.tx_reset_count,
+    hourly.sample_count,
+    hourly.first_observed_at,
+    hourly.latest_observed_at
+FROM changed_streams changed
+CROSS JOIN LATERAL (
+    WITH sequenced AS (
+        SELECT
+            sample.observed_at,
+            sample.rx_bytes,
+            sample.tx_bytes,
+            sample.rx_counter_epoch,
+            sample.tx_counter_epoch,
+            sample.sample_source,
+            lag(sample.rx_bytes) OVER ordered AS previous_rx_bytes,
+            lag(sample.tx_bytes) OVER ordered AS previous_tx_bytes,
+            lag(sample.rx_counter_epoch) OVER ordered AS previous_rx_counter_epoch,
+            lag(sample.tx_counter_epoch) OVER ordered AS previous_tx_counter_epoch,
+            lag(sample.sample_source) OVER ordered AS previous_sample_source
+        FROM traffic_counter_samples sample
+        WHERE sample.client_id = changed.client_id
+          AND sample.source_kind = changed.source_kind
+          AND sample.interface = changed.interface
+          AND sample.observed_at >= '-infinity'::timestamptz
+          AND sample.observed_at <= 'infinity'::timestamptz
+        WINDOW ordered AS (ORDER BY sample.observed_at)
+    )
+    SELECT
+        date_bin(
+            interval '1 hour', observed_at,
+            TIMESTAMPTZ '1970-01-01 00:00:00+00'
+        ) AS bucket_start,
+        coalesce(sum(CASE
+            WHEN rx_counter_epoch = previous_rx_counter_epoch
+             AND rx_bytes >= previous_rx_bytes
+            THEN rx_bytes - previous_rx_bytes ELSE 0 END
+        ), 0)::bigint AS rx_bytes,
+        coalesce(sum(CASE
+            WHEN tx_counter_epoch = previous_tx_counter_epoch
+             AND tx_bytes >= previous_tx_bytes
+            THEN tx_bytes - previous_tx_bytes ELSE 0 END
+        ), 0)::bigint AS tx_bytes,
+        count(*) FILTER (
+            WHERE previous_rx_counter_epoch IS NOT NULL
+              AND rx_counter_epoch <> previous_rx_counter_epoch
+              AND NOT (
+                  previous_sample_source LIKE 'vnstat_import:%'
+                  AND sample_source NOT LIKE 'vnstat_import:%'
+              )
+        )::integer AS rx_reset_count,
+        count(*) FILTER (
+            WHERE previous_tx_counter_epoch IS NOT NULL
+              AND tx_counter_epoch <> previous_tx_counter_epoch
+              AND NOT (
+                  previous_sample_source LIKE 'vnstat_import:%'
+                  AND sample_source NOT LIKE 'vnstat_import:%'
+              )
+        )::integer AS tx_reset_count,
+        count(*)::integer AS sample_count,
+        min(observed_at) AS first_observed_at,
+        max(observed_at) AS latest_observed_at
+    FROM sequenced
+    GROUP BY date_bin(
+        interval '1 hour', observed_at,
+        TIMESTAMPTZ '1970-01-01 00:00:00+00'
+    )
+) hourly
+"#;
+
+#[tokio::test]
+async fn postgres_hourly_whole_stream_refresh_is_exact_without_default_work_mem_spill() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-hourly-streaming-rebuild";
+    let sample_count = 46_596_i64;
+    let latest_minute = Utc::now().timestamp().div_euclid(60) * 60;
+    let first_minute = latest_minute - (sample_count - 1) * 60;
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key)
+        SELECT
+            format('traffic-hourly-unrelated-%s', lpad(ordinal::text, 3, '0')),
+            format('traffic-hourly-unrelated-%s', lpad(ordinal::text, 3, '0')),
+            decode(md5(format('traffic-hourly-unrelated-%s', ordinal)), 'hex')
+        FROM generate_series(1, 128) ordinal
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // Seed the raw oracle without invoking its statement trigger. The direct
+    // refresh below is the only operation measured after pg_stat_reset().
+    let mut seed = db.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL session_replication_role = 'replica'")
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'eth0',
+            to_timestamp(($2 + minute_number * 60)::double precision),
+            CASE
+                WHEN minute_number = $3 - 1 THEN 10
+                WHEN minute_number >= 30000 THEN (minute_number - 30000) * 100
+                ELSE minute_number * 100
+            END,
+            CASE
+                WHEN minute_number = $3 - 1 THEN 20
+                WHEN minute_number >= 30000 THEN (minute_number - 30000) * 200
+                ELSE minute_number * 200
+            END,
+            CASE
+                WHEN minute_number = $3 - 1 THEN 2
+                WHEN minute_number >= 30000 THEN 1
+                ELSE 0
+            END,
+            CASE
+                WHEN minute_number = $3 - 1 THEN 2
+                WHEN minute_number >= 30000 THEN 1
+                ELSE 0
+            END,
+            CASE
+                WHEN minute_number = $3 - 1 THEN 'interface_counters'
+                ELSE 'vnstat_import:00000000-0000-4000-8000-000000000016'
+            END
+        FROM generate_series(0, $3 - 1) minute_number
+        "#,
+    )
+    .bind(client_id)
+    .bind(first_minute)
+    .bind(sample_count)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        )
+        SELECT
+            format('traffic-hourly-unrelated-%s', lpad(ordinal::text, 3, '0')),
+            'host',
+            'eth0',
+            to_timestamp(($1 + minute_number * 60)::double precision),
+            minute_number * 10 + ordinal,
+            minute_number * 20 + ordinal,
+            0,
+            0,
+            'interface_counters'
+        FROM generate_series(1, 128) ordinal
+        CROSS JOIN generate_series(0, 719) minute_number
+        "#,
+    )
+    .bind(first_minute)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    seed.commit().await.unwrap();
+    sqlx::query("ANALYZE traffic_counter_samples")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let mut connection = db.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_stat_reset()")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("BEGIN")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("SET LOCAL work_mem = '4MB'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        SELECT refresh_traffic_counter_hourly_usage(
+            ARRAY[$1]::text[],
+            ARRAY['host']::text[],
+            ARRAY['eth0']::text[],
+            ARRAY[to_timestamp($2::double precision)]::timestamptz[],
+            TRUE
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(first_minute)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("COMMIT")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let temporary_io: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT temp_files, temp_bytes
+        FROM pg_stat_database
+        WHERE datname = current_database()
+        "#,
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert_eq!(
+        temporary_io,
+        (0, 0),
+        "a bounded whole-stream repair spilled at the PostgreSQL default work_mem"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT source_revision, materialized_revision
+            FROM traffic_counter_hourly_usage_streams
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (1, 1)
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT
+                coalesce(sum(rx_reset_count), 0)::bigint,
+                coalesce(sum(tx_reset_count), 0)::bigint
+            FROM traffic_counter_hourly_usage
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (1, 1),
+        "the imported-to-live epoch boundary must remain reset-suppressed"
+    );
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+
+    let explain_sql =
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {HOURLY_WHOLE_STREAM_PLAN_SQL}");
+    let requested_clients = vec![
+        client_id.to_string(),
+        "traffic-hourly-unrelated-001".to_string(),
+        "traffic-hourly-unrelated-064".to_string(),
+        "traffic-hourly-unrelated-128".to_string(),
+    ];
+    let requested_source_kinds = vec!["host".to_string(); requested_clients.len()];
+    let requested_interfaces = vec!["eth0".to_string(); requested_clients.len()];
+    let requested_observed_at = vec![
+        chrono::DateTime::<Utc>::from_timestamp(first_minute, 0)
+            .unwrap();
+        requested_clients.len()
+    ];
+    let requested_sample_count = sample_count + 3 * 720;
+    for (mode, setting) in [
+        (
+            "force_custom_plan",
+            "SET LOCAL plan_cache_mode = 'force_custom_plan'",
+        ),
+        (
+            "force_generic_plan",
+            "SET LOCAL plan_cache_mode = 'force_generic_plan'",
+        ),
+    ] {
+        let mut plan_tx = db.pool.begin().await.unwrap();
+        sqlx::query(setting).execute(&mut *plan_tx).await.unwrap();
+        let plan: Value = sqlx::query_scalar(&explain_sql)
+            .bind(&requested_clients)
+            .bind(&requested_source_kinds)
+            .bind(&requested_interfaces)
+            .bind(&requested_observed_at)
+            .fetch_one(&mut *plan_tx)
+            .await
+            .unwrap();
+        plan_tx.commit().await.unwrap();
+        let plan_root = &plan[0]["Plan"];
+        let plan_text = plan.to_string();
+        let mut primary_key_conditions = Vec::new();
+        collect_explain_index_conditions(
+            plan_root,
+            "traffic_counter_samples_pkey",
+            &mut primary_key_conditions,
+        );
+        assert!(
+            primary_key_conditions.iter().any(|condition| {
+                !condition.is_empty()
+                    && condition.contains("client_id =")
+                    && condition.contains("source_kind =")
+                    && condition.contains("interface =")
+                    && condition.contains(">=")
+                    && condition.contains("<=")
+                    && condition.contains("observed_at")
+            }),
+            "{mode} did not retain the full primary-key range condition: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("traffic_counter_samples_observed_idx")
+                && !plan_text.contains("traffic_counter_samples_lookup_idx")
+                && !plan_text.contains("traffic_counter_samples_import_class_stream_idx"),
+            "{mode} selected a non-primary traffic sample index: {plan_text}"
+        );
+        assert!(
+            !explain_relation_uses_bitmap_scan(plan_root, "traffic_counter_samples"),
+            "{mode} selected a bitmap traffic sample scan: {plan_text}"
+        );
+        assert!(
+            !explain_relation_uses_sequential_scan(plan_root, "traffic_counter_samples"),
+            "{mode} selected a sequential traffic sample scan: {plan_text}"
+        );
+        assert!(
+            !explain_plan_uses_node_type(plan_root, "Sort")
+                && !explain_plan_uses_node_type(plan_root, "Incremental Sort"),
+            "{mode} sorted the bounded traffic sample streams: {plan_text}"
+        );
+        assert_eq!(
+            explain_relation_examined_rows(plan_root, "traffic_counter_samples"),
+            requested_sample_count as f64,
+            "{mode} examined rows outside the four requested streams: {plan_text}"
+        );
+    }
+
+    db.cleanup().await;
 }
 
 #[tokio::test]
@@ -10877,6 +11993,9 @@ async fn postgres_no_reset_traffic_combines_exact_transitions_with_the_rollup_le
     assert_eq!(accounting.latest_tx_bytes, 55);
     assert_eq!(accounting.counter_epochs_seen, 1);
 
+    let fast_usage =
+        query_no_reset_traffic_usage(&db.pool, vec![client_id.to_string()], now_unix).await;
+
     let explain_sql =
         format!("EXPLAIN (ANALYZE, FORMAT JSON) {NO_RESET_TRAFFIC_COUNTER_USAGE_SQL}");
     let plan: serde_json::Value = sqlx::query_scalar(&explain_sql)
@@ -10890,6 +12009,268 @@ async fn postgres_no_reset_traffic_combines_exact_transitions_with_the_rollup_le
     let plan_text = plan.to_string();
     assert!(plan_text.contains("WindowAgg"), "{plan_text}");
     assert!(plan_text.contains("traffic_counter_rollups"), "{plan_text}");
+    assert!(
+        plan_text.contains("traffic_counter_hourly_usage"),
+        "{plan_text}"
+    );
+
+    // Coverage is fail-closed. A dirty revision must select the complete raw
+    // oracle and remain byte/reset identical instead of returning a partial
+    // hourly approximation.
+    sqlx::query(
+        r#"
+        UPDATE traffic_counter_hourly_usage_streams
+        SET source_revision = source_revision + 1
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        DELETE FROM traffic_counter_hourly_usage
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        query_no_reset_traffic_usage(&db.pool, vec![client_id.to_string()], now_unix).await,
+        fast_usage
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_no_reset_fast_path_bounds_raw_work_for_99_five_year_streams() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_count = 99_i64;
+    let minute_count = 24 * 60_i64;
+    let rollup_days = 5 * 365_i64;
+    let (current_hour, current_minute): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            extract(epoch FROM date_bin(
+                interval '1 hour', now(), TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ))::bigint,
+            extract(epoch FROM date_trunc('minute', now()))::bigint
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let tail_start = current_minute - minute_count * 60;
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key)
+        SELECT
+            format('traffic-no-reset-fast-%s', client_number),
+            format('traffic-no-reset-fast-%s', client_number),
+            decode(md5(format('traffic-no-reset-fast-%s', client_number)), 'hex')
+        FROM generate_series(1, $1::bigint) client_number
+        "#,
+    )
+    .bind(client_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        )
+        SELECT
+            format('traffic-no-reset-fast-%s', client_number),
+            'host',
+            'eth0',
+            to_timestamp($2 + minute_number * 60),
+            minute_number * 100,
+            minute_number * 200,
+            0,
+            0,
+            'agent_networks'
+        FROM generate_series(1, $1::bigint) client_number
+        CROSS JOIN generate_series(0, $3::bigint) minute_number
+        "#,
+    )
+    .bind(client_count)
+    .bind(tail_start as f64)
+    .bind(minute_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_rollups (
+            client_id, source_kind, interface, origin_kind,
+            bucket_secs, bucket_start, rx_bytes, tx_bytes,
+            rx_valid_count, tx_valid_count, any_valid_count,
+            rx_reset_count, tx_reset_count, any_reset_count,
+            first_observed_at, latest_observed_at
+        )
+        SELECT
+            format('traffic-no-reset-fast-%s', client_number),
+            'host', 'eth0', 'live', 86400,
+            date_bin(
+                interval '1 day',
+                to_timestamp($2) - (day_number + 32) * interval '1 day',
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ),
+            1, 2, 1, 1, 1, 0, 0, 0,
+            date_bin(
+                interval '1 day',
+                to_timestamp($2) - (day_number + 32) * interval '1 day',
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ),
+            date_bin(
+                interval '1 day',
+                to_timestamp($2) - (day_number + 32) * interval '1 day',
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ) + interval '23 hours 59 minutes'
+        FROM generate_series(1, $1::bigint) client_number
+        CROSS JOIN generate_series(1, $3::bigint) day_number
+        "#,
+    )
+    .bind(client_count)
+    .bind(current_hour as f64)
+    .bind(rollup_days)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "ANALYZE traffic_counter_samples, traffic_counter_rollups, traffic_counter_hourly_usage, traffic_counter_hourly_usage_streams",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let client_ids = (1..=client_count)
+        .map(|client_number| format!("traffic-no-reset-fast-{client_number}"))
+        .collect::<Vec<_>>();
+    let usage = tokio::time::timeout(
+        Duration::from_secs(10),
+        query_no_reset_traffic_usage(&db.pool, client_ids.clone(), current_minute),
+    )
+    .await
+    .expect("99-stream no-reset accounting exceeded ten seconds");
+    assert_eq!(usage.len(), client_count as usize);
+    assert!(usage.iter().all(|row| {
+        row.1 == minute_count * 100 + rollup_days
+            && row.2 == minute_count * 200 + rollup_days * 2
+            && row.3 == minute_count * 100
+            && row.4 == minute_count * 200
+            && row.5 == 1
+    }));
+
+    let explain_sql =
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {NO_RESET_TRAFFIC_COUNTER_USAGE_SQL}");
+    let plan: Value = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query_scalar(&explain_sql)
+            .bind(client_ids.clone())
+            .bind(vec!["host".to_string(); client_count as usize])
+            .bind(vec!["eth0".to_string(); client_count as usize])
+            .bind(current_minute)
+            .fetch_one(&db.pool),
+    )
+    .await
+    .expect("99-stream no-reset EXPLAIN exceeded ten seconds")
+    .unwrap();
+    let plan_text = plan.to_string();
+    assert!(
+        plan_text.contains("traffic_counter_hourly_usage"),
+        "{plan_text}"
+    );
+    let raw_rows = explain_relation_rows(&plan[0]["Plan"], "traffic_counter_samples");
+    let seeded_raw_rows = client_count as f64 * (minute_count + 1) as f64;
+    assert!(
+        raw_rows < seeded_raw_rows / 4.0,
+        "fast path visited {raw_rows} raw rows out of {seeded_raw_rows}: {plan_text}"
+    );
+
+    let single_client_id = client_ids[1].clone();
+    let expected_single = usage
+        .iter()
+        .find(|row| row.0 == single_client_id)
+        .cloned()
+        .unwrap();
+    let single_usage = tokio::time::timeout(
+        Duration::from_secs(2),
+        query_no_reset_traffic_usage(&db.pool, vec![single_client_id.clone()], current_minute),
+    )
+    .await
+    .expect("single-stream ingest accounting exceeded two seconds");
+    assert_eq!(single_usage, vec![expected_single]);
+    let single_plan: Value = tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar(&explain_sql)
+            .bind(vec![single_client_id])
+            .bind(vec!["host".to_string()])
+            .bind(vec!["eth0".to_string()])
+            .bind(current_minute)
+            .fetch_one(&db.pool),
+    )
+    .await
+    .expect("single-stream ingest EXPLAIN exceeded two seconds")
+    .unwrap();
+    assert!(
+        !explain_relation_uses_sequential_scan(&single_plan[0]["Plan"], "traffic_counter_samples"),
+        "single-stream accounting scanned raw rows for unrelated clients: {single_plan}"
+    );
+
+    // Coverage is per stream: one damaged marker must use the raw oracle for
+    // only that stream, without degrading the other 98 healthy streams.
+    let dirty_client_id = &client_ids[0];
+    sqlx::query(
+        r#"
+        UPDATE traffic_counter_hourly_usage_streams
+        SET source_revision = source_revision + 1
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(dirty_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mixed_usage = tokio::time::timeout(
+        Duration::from_secs(10),
+        query_no_reset_traffic_usage(&db.pool, client_ids.clone(), current_minute),
+    )
+    .await
+    .expect("one dirty stream degraded the 98 healthy no-reset streams");
+    assert_eq!(mixed_usage, usage);
+    let mixed_plan: Value = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query_scalar(&explain_sql)
+            .bind(client_ids)
+            .bind(vec!["host".to_string(); client_count as usize])
+            .bind(vec!["eth0".to_string(); client_count as usize])
+            .bind(current_minute)
+            .fetch_one(&db.pool),
+    )
+    .await
+    .expect("mixed healthy/dirty no-reset EXPLAIN exceeded ten seconds")
+    .unwrap();
+    let mixed_plan_text = mixed_plan.to_string();
+    let mixed_raw_rows = explain_relation_rows(&mixed_plan[0]["Plan"], "traffic_counter_samples");
+    assert!(
+        mixed_raw_rows >= raw_rows + (minute_count - 60) as f64,
+        "dirty stream did not add one complete raw oracle scan: healthy={raw_rows}, \
+         mixed={mixed_raw_rows}: {mixed_plan_text}"
+    );
+    assert!(
+        mixed_raw_rows < seeded_raw_rows / 10.0,
+        "one dirty stream made healthy streams scan raw history: visited \
+         {mixed_raw_rows} raw rows out of {seeded_raw_rows}: {mixed_plan_text}"
+    );
 
     db.cleanup().await;
 }
@@ -11380,6 +12761,430 @@ async fn postgres_retained_traffic_keeps_bidirectional_diagnostics() {
 }
 
 #[tokio::test]
+async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_plans() {
+    fn relation_uses_bitmap_scan(plan: &Value, relation: &str) -> bool {
+        if plan["Node Type"]
+            .as_str()
+            .is_some_and(|node_type| node_type.starts_with("Bitmap"))
+            && plan["Relation Name"].as_str() == Some(relation)
+        {
+            return true;
+        }
+        plan["Plans"].as_array().is_some_and(|children| {
+            children
+                .iter()
+                .any(|child| relation_uses_bitmap_scan(child, relation))
+        })
+    }
+
+    fn plan_uses_node_type(plan: &Value, expected: &str) -> bool {
+        plan["Node Type"].as_str() == Some(expected)
+            || plan["Plans"].as_array().is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| plan_uses_node_type(child, expected))
+            })
+    }
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let target_client_id = "traffic-import-plan-target";
+    let distractor_client_id = "traffic-import-plan-distractor";
+    let boundary_unix = 1_722_470_400_i64;
+    insert_client(&db.pool, target_client_id, None).await;
+    insert_client(&db.pool, distractor_client_id, None).await;
+
+    sqlx::query(
+        r#"
+        WITH streams(client_id, interface) AS (
+            VALUES
+                ($1::text, 'eth0'::text),
+                ($1::text, 'eth1'::text),
+                ($2::text, 'eth0'::text),
+                ($2::text, 'eth1'::text)
+            UNION ALL
+            SELECT $1::text, format('noise-%s', ordinal)
+            FROM generate_series(0, 15) AS generated(ordinal)
+            UNION ALL
+            SELECT $2::text, format('noise-%s', ordinal)
+            FROM generate_series(0, 15) AS generated(ordinal)
+        )
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        )
+        SELECT
+            streams.client_id,
+            'host',
+            streams.interface,
+            to_timestamp(($3::bigint + point::bigint * 60)::double precision),
+            100000 + point::bigint + 60,
+            200000 + point::bigint + 60,
+            0,
+            0,
+            CASE
+                WHEN point IN (-3, 2) THEN 'interface_counters'
+                ELSE 'vnstat_import:planner-fixture'
+            END
+        FROM streams
+        CROSS JOIN generate_series(-60, 119) AS generated(point)
+        "#,
+    )
+    .bind(target_client_id)
+    .bind(distractor_client_id)
+    .bind(boundary_unix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'dirty-owned',
+            to_timestamp(($2::bigint - point::bigint * 60)::double precision),
+            point::bigint,
+            point::bigint * 2,
+            0,
+            0,
+            'vnstat_import:planner-dirty-fixture'
+        FROM generate_series(1, 50000) AS generated(point)
+        "#,
+    )
+    .bind(target_client_id)
+    .bind(boundary_unix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH streams(client_id, interface) AS (
+            VALUES
+                ($1::text, 'eth0'::text),
+                ($1::text, 'eth1'::text),
+                ($2::text, 'eth0'::text),
+                ($2::text, 'eth1'::text)
+            UNION ALL
+            SELECT $1::text, format('noise-%s', ordinal)
+            FROM generate_series(0, 15) AS generated(ordinal)
+            UNION ALL
+            SELECT $2::text, format('noise-%s', ordinal)
+            FROM generate_series(0, 15) AS generated(ordinal)
+        )
+        INSERT INTO traffic_counter_rollups (
+            client_id, source_kind, interface, origin_kind,
+            bucket_secs, bucket_start, rx_bytes, tx_bytes,
+            rx_valid_count, tx_valid_count, any_valid_count,
+            rx_reset_count, tx_reset_count, any_reset_count,
+            first_observed_at, latest_observed_at
+        )
+        SELECT
+            streams.client_id,
+            'host',
+            streams.interface,
+            'live',
+            3600,
+            to_timestamp($3::double precision) + bucket * interval '1 hour',
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            to_timestamp($3::double precision)
+                + bucket * interval '1 hour' + interval '2 minutes',
+            to_timestamp($3::double precision)
+                + bucket * interval '1 hour' + interval '2 minutes'
+        FROM streams
+        CROSS JOIN generate_series(0, 7) AS generated(bucket)
+        "#,
+    )
+    .bind(target_client_id)
+    .bind(distractor_client_id)
+    .bind(boundary_unix as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE traffic_counter_samples")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE traffic_counter_rollups")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let requested_interfaces = ["eth0".to_string(), "eth1".to_string()];
+    let requested_starts = [boundary_unix, boundary_unix];
+    let mut tied_boundaries = Vec::with_capacity(requested_interfaces.len());
+    for (interface, start) in requested_interfaces.iter().zip(&requested_starts) {
+        tied_boundaries.push(
+            sqlx::query(POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL)
+                .bind(target_client_id)
+                .bind(interface)
+                .bind(start)
+                .bind(false)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(tied_boundaries.len(), 2);
+    assert!(tied_boundaries.iter().all(|row| {
+        row.try_get::<String, _>("sample_source")
+            .is_ok_and(|source| source == "interface_counters")
+    }));
+
+    let preparations = [
+        (
+            "vnstat_owned_cap",
+            "(text, text, bigint, boolean)",
+            POSTGRES_IMPORT_OWNED_RAW_COUNTS_SQL,
+        ),
+        (
+            "vnstat_previous_locked",
+            "(text, text[], bigint[], boolean)",
+            POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL,
+        ),
+        (
+            "vnstat_previous_nonlocking",
+            "(text, text[], bigint[], boolean)",
+            POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_NONLOCKING_SQL,
+        ),
+        (
+            "vnstat_live_boundary",
+            "(text, text, bigint, boolean)",
+            POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL,
+        ),
+        (
+            "vnstat_raw_predecessor",
+            "(text, text, bigint, boolean)",
+            POSTGRES_IMPORT_RAW_PREDECESSOR_SQL,
+        ),
+        (
+            "vnstat_raw_successor",
+            "(text, text, bigint, boolean)",
+            POSTGRES_IMPORT_RAW_SUCCESSOR_SQL,
+        ),
+    ];
+    let interfaces = "ARRAY['eth0','eth1']::text[]";
+    let starts = format!("ARRAY[{boundary_unix},{boundary_unix}]::bigint[]");
+    let executions = vec![
+        (
+            "owned cap",
+            format!("vnstat_owned_cap('{target_client_id}', 'eth0', 47521, true)"),
+            178.0,
+            None,
+            true,
+            false,
+        ),
+        (
+            "dirty owned cap",
+            format!("vnstat_owned_cap('{target_client_id}', 'dirty-owned', 47521, true)"),
+            47_521.0,
+            None,
+            true,
+            false,
+        ),
+        (
+            "previous locked",
+            format!("vnstat_previous_locked('{target_client_id}', {interfaces}, {starts}, false)"),
+            2.0,
+            None,
+            true,
+            true,
+        ),
+        (
+            "previous nonlocking",
+            format!(
+                "vnstat_previous_nonlocking('{target_client_id}', {interfaces}, {starts}, false)"
+            ),
+            2.0,
+            None,
+            true,
+            false,
+        ),
+        (
+            "live raw branch",
+            format!("vnstat_live_boundary('{target_client_id}', 'eth0', {boundary_unix}, false)"),
+            1.0,
+            Some(16.0),
+            true,
+            false,
+        ),
+        (
+            "mutation predecessor",
+            format!("vnstat_raw_predecessor('{target_client_id}', 'eth0', {boundary_unix}, false)"),
+            1.0,
+            None,
+            true,
+            true,
+        ),
+        (
+            "mutation successor",
+            format!("vnstat_raw_successor('{target_client_id}', 'eth0', {boundary_unix}, false)"),
+            1.0,
+            None,
+            true,
+            true,
+        ),
+    ];
+
+    for (mode, setting) in [
+        (
+            "force_custom_plan",
+            "SET LOCAL plan_cache_mode = 'force_custom_plan'",
+        ),
+        (
+            "force_generic_plan",
+            "SET LOCAL plan_cache_mode = 'force_generic_plan'",
+        ),
+    ] {
+        let mut plan_tx = db.pool.begin().await.unwrap();
+        sqlx::query(setting).execute(&mut *plan_tx).await.unwrap();
+        for &(name, signature, query) in &preparations {
+            sqlx::query(&format!("PREPARE {name} {signature} AS {query}"))
+                .execute(&mut *plan_tx)
+                .await
+                .unwrap();
+        }
+        let mut plans = Vec::with_capacity(executions.len());
+        for (
+            label,
+            execution,
+            maximum_sample_rows,
+            maximum_rollup_rows,
+            require_observed_at,
+            require_lock_rows,
+        ) in &executions
+        {
+            let explain_sql =
+                format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE {execution}");
+            let plan: Value = sqlx::query_scalar(&explain_sql)
+                .fetch_one(&mut *plan_tx)
+                .await
+                .unwrap();
+            plans.push((
+                *label,
+                plan,
+                *maximum_sample_rows,
+                *maximum_rollup_rows,
+                *require_observed_at,
+                *require_lock_rows,
+            ));
+        }
+        for &(name, _, _) in &preparations {
+            sqlx::query(&format!("DEALLOCATE {name}"))
+                .execute(&mut *plan_tx)
+                .await
+                .unwrap();
+        }
+        plan_tx.commit().await.unwrap();
+
+        for (
+            label,
+            plan,
+            maximum_sample_rows,
+            maximum_rollup_rows,
+            require_observed_at,
+            require_lock_rows,
+        ) in plans
+        {
+            let plan_root = &plan[0]["Plan"];
+            let plan_text = plan.to_string();
+            let mut import_class_stream_conditions = Vec::new();
+            collect_explain_index_conditions(
+                plan_root,
+                "traffic_counter_samples_import_class_stream_idx",
+                &mut import_class_stream_conditions,
+            );
+            assert!(
+                import_class_stream_conditions.iter().any(|condition| {
+                    !condition.is_empty()
+                        && condition.contains("client_id =")
+                        && condition.contains("source_kind =")
+                        && condition.contains("interface =")
+                        && condition.contains("sample_source")
+                        && (!require_observed_at || condition.contains("observed_at"))
+                }),
+                "{mode} {label} lost its exact class+stream+time Index Cond: {plan_text}"
+            );
+            assert!(
+                !plan_text.contains("traffic_counter_samples_observed_idx")
+                    && !plan_text.contains("traffic_counter_samples_lookup_idx"),
+                "{mode} {label} selected a non-classified sample index: {plan_text}"
+            );
+            assert!(
+                !explain_relation_uses_sequential_scan(plan_root, "traffic_counter_samples"),
+                "{mode} {label} selected a sample sequential scan: {plan_text}"
+            );
+            assert!(
+                !relation_uses_bitmap_scan(plan_root, "traffic_counter_samples"),
+                "{mode} {label} selected a sample bitmap scan: {plan_text}"
+            );
+            if require_lock_rows {
+                assert!(
+                    plan_uses_node_type(plan_root, "LockRows"),
+                    "{mode} {label} lost its row lock: {plan_text}"
+                );
+            }
+            let examined_sample_rows =
+                explain_relation_examined_rows(plan_root, "traffic_counter_samples");
+            assert!(
+                examined_sample_rows > 0.0 && examined_sample_rows <= maximum_sample_rows,
+                "{mode} {label} examined {examined_sample_rows} sample rows (maximum {maximum_sample_rows}): {plan_text}"
+            );
+            if let Some(maximum_rollup_rows) = maximum_rollup_rows {
+                let mut rollup_stream_conditions = Vec::new();
+                collect_explain_index_conditions(
+                    plan_root,
+                    "traffic_counter_rollups_range_idx",
+                    &mut rollup_stream_conditions,
+                );
+                collect_explain_index_conditions(
+                    plan_root,
+                    "traffic_counter_rollups_pkey",
+                    &mut rollup_stream_conditions,
+                );
+                assert!(
+                    rollup_stream_conditions.iter().any(|condition| {
+                        !condition.is_empty()
+                            && condition.contains("client_id =")
+                            && condition.contains("source_kind =")
+                            && condition.contains("interface =")
+                    }),
+                    "{mode} {label} lost its exact rollup stream Index Cond: {plan_text}"
+                );
+                assert!(
+                    !plan_text.contains("traffic_counter_rollups_retention_idx")
+                        && !explain_relation_uses_sequential_scan(
+                            plan_root,
+                            "traffic_counter_rollups",
+                        ),
+                    "{mode} {label} selected an unbounded rollup scan: {plan_text}"
+                );
+                let examined_rollup_rows =
+                    explain_relation_examined_rows(plan_root, "traffic_counter_rollups");
+                assert!(
+                    examined_rollup_rows > 0.0 && examined_rollup_rows <= maximum_rollup_rows,
+                    "{mode} {label} examined {examined_rollup_rows} rollup rows (maximum {maximum_rollup_rows}): {plan_text}"
+                );
+            }
+        }
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_vnstat_rerun_hydrates_only_non_import_boundary_rows() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -11525,7 +13330,7 @@ async fn postgres_vnstat_reimport_replaces_only_imported_traffic_ledger() {
             rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
         ) VALUES (
             $1, 'host', 'eth0', to_timestamp($2::double precision),
-            10, 20, 0, 0, 'interface_counters'
+            10, 20, 5, 6, 'interface_counters'
         )
         "#,
     )
@@ -11712,6 +13517,4086 @@ async fn postgres_vnstat_reimport_replaces_only_imported_traffic_ledger() {
     .await
     .unwrap();
     assert!(import_predecessor_promoted);
+    let live_counter_epochs: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT rx_counter_epoch, tx_counter_epoch
+        FROM traffic_counter_samples
+        WHERE client_id = $1
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND sample_source = 'interface_counters'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(live_counter_epochs, (5, 6));
+    let imported_counter_epochs: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT rx_counter_epoch, tx_counter_epoch
+        FROM traffic_counter_samples
+        WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(imported_counter_epochs, (6, 7));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_old_vnstat_import_allows_retained_rollup_without_raw_successor() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-import-old-rollup-only";
+    let now_unix = Utc::now().timestamp().div_euclid(60) * 60;
+    let start_unix = now_unix - 40 * 86_400;
+    let live_unix = start_unix + 600;
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_rollups (
+            client_id, source_kind, interface, origin_kind,
+            bucket_secs, bucket_start, rx_bytes, tx_bytes,
+            rx_valid_count, tx_valid_count, any_valid_count,
+            rx_reset_count, tx_reset_count, any_reset_count,
+            first_observed_at, latest_observed_at
+        ) VALUES (
+            $1, 'host', 'eth0', 'live', 3600,
+            date_bin(
+                '1 hour', to_timestamp($2::double precision),
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ),
+            5, 7, 1, 1, 1, 0, 0, 0,
+            to_timestamp($2::double precision),
+            to_timestamp($2::double precision)
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(live_unix as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let result = NetworkTrafficImportResult {
+        r#type: "network_traffic_import_vnstat".to_string(),
+        status: "collected".to_string(),
+        requested_start_unix: u64::try_from(start_unix).unwrap(),
+        collected_until_unix: u64::try_from(live_unix).unwrap(),
+        interfaces: vec!["eth0".to_string()],
+        sources: vec![NetworkTrafficImportSource {
+            interface: "eth0".to_string(),
+            database_created_unix: Some(u64::try_from(start_unix).unwrap()),
+            retained_start_unix: u64::try_from(start_unix).unwrap(),
+            source_updated_unix: Some(u64::try_from(live_unix).unwrap()),
+        }],
+        batch_count: 1,
+        bucket_count: 1,
+        message: String::new(),
+    };
+    let import = |rx_bytes, tx_bytes| NetworkTrafficImportBucket {
+        interface: "eth0".to_string(),
+        start_unix: u64::try_from(start_unix).unwrap(),
+        duration_secs: 600,
+        rx_bytes,
+        tx_bytes,
+    };
+    for bucket in [import(100, 50), import(120, 60)] {
+        db.repo
+            .import_vnstat_traffic_history(
+                Uuid::new_v4(),
+                client_id,
+                &["eth0".to_string()],
+                u64::try_from(start_unix).unwrap(),
+                &result,
+                &[bucket],
+                u64::try_from(now_unix).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let imported_predecessor: (i64, bool, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*)::bigint,
+            bool_and(inbound_promoted),
+            min(rx_counter_epoch)::bigint,
+            min(tx_counter_epoch)::bigint
+        FROM traffic_counter_samples
+        WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(imported_predecessor, (1, true, 1, 1));
+    let live_raw_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM traffic_counter_samples
+        WHERE client_id = $1 AND sample_source NOT LIKE 'vnstat_import:%'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(live_raw_rows, 0);
+    let imported_rollup_bytes: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT sum(rx_bytes)::bigint, sum(tx_bytes)::bigint
+        FROM traffic_counter_rollups
+        WHERE client_id = $1 AND origin_kind = 'vnstat_import'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(imported_rollup_bytes, (120, 60));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_five_year_vnstat_import_stays_bounded_and_exact() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-import-five-year-bounded";
+    let live_unix = Utc::now().timestamp().div_euclid(60) * 60;
+    let year_secs = 365_i64 * 86_400;
+    let start_unix = live_unix - 5 * year_secs;
+    let minutes_per_year = u64::try_from(year_secs / 60).unwrap();
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        ) VALUES (
+            $1, 'host', 'eth0', to_timestamp($2::double precision),
+            10, 20, 0, 0, 'interface_counters'
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(live_unix as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let initial_ledger_revision: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT source_revision, materialized_revision
+        FROM traffic_counter_hourly_usage_streams
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(initial_ledger_revision.0, initial_ledger_revision.1);
+
+    let buckets = (0_u64..5)
+        .map(|year| NetworkTrafficImportBucket {
+            interface: "eth0".to_string(),
+            start_unix: u64::try_from(start_unix).unwrap() + year * 365 * 86_400,
+            duration_secs: u32::try_from(year_secs).unwrap(),
+            rx_bytes: (year + 1) * minutes_per_year,
+            tx_bytes: (year + 2) * minutes_per_year,
+        })
+        .collect::<Vec<_>>();
+    let expected_rx = buckets.iter().map(|bucket| bucket.rx_bytes).sum::<u64>();
+    let expected_tx = buckets.iter().map(|bucket| bucket.tx_bytes).sum::<u64>();
+    let result = NetworkTrafficImportResult {
+        r#type: "network_traffic_import_vnstat".to_string(),
+        status: "collected".to_string(),
+        requested_start_unix: u64::try_from(start_unix).unwrap(),
+        collected_until_unix: u64::try_from(live_unix).unwrap(),
+        interfaces: vec!["eth0".to_string()],
+        sources: vec![NetworkTrafficImportSource {
+            interface: "eth0".to_string(),
+            database_created_unix: Some(u64::try_from(start_unix).unwrap()),
+            retained_start_unix: u64::try_from(start_unix).unwrap(),
+            source_updated_unix: Some(u64::try_from(live_unix).unwrap()),
+        }],
+        batch_count: 1,
+        bucket_count: u32::try_from(buckets.len()).unwrap(),
+        message: String::new(),
+    };
+    let retention_cutoff_sql = r#"
+        SELECT extract(epoch FROM (
+            date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+            - interval '32 days'
+        ))::bigint
+    "#;
+    let raw_cutoff_before: i64 = sqlx::query_scalar(retention_cutoff_sql)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+    let import_started = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        db.repo.import_vnstat_traffic_history(
+            Uuid::new_v4(),
+            client_id,
+            &["eth0".to_string()],
+            u64::try_from(start_unix).unwrap(),
+            &result,
+            &buckets,
+            u64::try_from(live_unix + 60).unwrap(),
+        ),
+    )
+    .await
+    .expect("five-year vnStat import exceeded its bounded execution budget")
+    .unwrap();
+    let import_elapsed = import_started.elapsed();
+
+    let raw_cutoff_after: i64 = sqlx::query_scalar(retention_cutoff_sql)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let raw_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*)::bigint,
+            count(*) FILTER (WHERE inbound_promoted)::bigint,
+            extract(epoch FROM min(observed_at))::bigint,
+            extract(epoch FROM max(observed_at))::bigint,
+            extract(epoch FROM min(observed_at) FILTER (WHERE inbound_promoted))::bigint
+        FROM traffic_counter_samples
+        WHERE client_id = $1
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND sample_source LIKE 'vnstat_import:%'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let raw_cutoff_unix = raw_shape.2 + 60;
+    assert!(raw_shape.0 <= 33 * 24 * 60);
+    assert!(
+        raw_cutoff_unix == raw_cutoff_before || raw_cutoff_unix == raw_cutoff_after,
+        "oldest retained import must fence the database UTC retention cutoff",
+    );
+    assert_eq!(raw_shape.0, (live_unix - raw_cutoff_unix) / 60 + 1);
+    assert_eq!(raw_shape.1, 1);
+    assert_eq!(raw_shape.2, raw_cutoff_unix - 60);
+    assert_eq!(raw_shape.3, live_unix - 60);
+    assert_eq!(raw_shape.4, raw_cutoff_unix - 60);
+
+    let rollup_shape: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*)::bigint,
+            count(DISTINCT bucket_secs)::bigint,
+            coalesce(sum(rx_bytes), 0)::bigint,
+            coalesce(sum(tx_bytes), 0)::bigint
+        FROM traffic_counter_rollups
+        WHERE client_id = $1
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND origin_kind = 'vnstat_import'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(rollup_shape.0 < 5_000);
+    assert_eq!(rollup_shape.1, 4);
+
+    let recent_raw_bytes: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH sequenced AS (
+            SELECT
+                observed_at,
+                rx_bytes,
+                tx_bytes,
+                lag(rx_bytes) OVER (ORDER BY observed_at) AS previous_rx_bytes,
+                lag(tx_bytes) OVER (ORDER BY observed_at) AS previous_tx_bytes
+            FROM traffic_counter_samples
+            WHERE client_id = $1
+              AND source_kind = 'host'
+              AND interface = 'eth0'
+              AND sample_source LIKE 'vnstat_import:%'
+        )
+        SELECT
+            coalesce(sum(rx_bytes - previous_rx_bytes)
+                FILTER (WHERE observed_at >= to_timestamp($2)), 0)::bigint,
+            coalesce(sum(tx_bytes - previous_tx_bytes)
+                FILTER (WHERE observed_at >= to_timestamp($2)), 0)::bigint
+        FROM sequenced
+        "#,
+    )
+    .bind(client_id)
+    .bind(raw_cutoff_unix)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        u64::try_from(rollup_shape.2 + recent_raw_bytes.0).unwrap(),
+        expected_rx
+    );
+    assert_eq!(
+        u64::try_from(rollup_shape.3 + recent_raw_bytes.1).unwrap(),
+        expected_tx
+    );
+    let ledger_revision: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT source_revision, materialized_revision
+        FROM traffic_counter_hourly_usage_streams
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger_revision.0, initial_ledger_revision.0 + 2);
+    assert_eq!(ledger_revision.0, ledger_revision.1);
+    eprintln!(
+        "five-year vnStat import: elapsed_ms={} raw_rows={} rollup_rows={} revision_delta={}",
+        import_elapsed.as_millis(),
+        raw_shape.0,
+        rollup_shape.0,
+        ledger_revision.0 - initial_ledger_revision.0,
+    );
+
+    db.cleanup().await;
+}
+
+#[derive(Clone, Debug)]
+struct PostgresDatabaseCounters {
+    captured_at: String,
+    stats_reset_at: Option<String>,
+    xact_commit: i64,
+    xact_rollback: i64,
+    temp_files: i64,
+    temp_bytes: i64,
+    deadlocks: i64,
+}
+
+impl PostgresDatabaseCounters {
+    fn to_json(&self) -> Value {
+        json!({
+            "captured_at": &self.captured_at,
+            "stats_reset_at": &self.stats_reset_at,
+            "xact_commit": self.xact_commit,
+            "xact_rollback": self.xact_rollback,
+            "temp_files": self.temp_files,
+            "temp_bytes": self.temp_bytes,
+            "deadlocks": self.deadlocks,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PostgresDatabaseCounterDelta {
+    xact_commit: i64,
+    xact_rollback: i64,
+    temp_files: i64,
+    temp_bytes: i64,
+    deadlocks: i64,
+}
+
+impl PostgresDatabaseCounterDelta {
+    fn between(
+        baseline: &PostgresDatabaseCounters,
+        post: &PostgresDatabaseCounters,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            baseline.stats_reset_at == post.stats_reset_at,
+            "pg_stat_database was reset during the measured phase: baseline={:?} post={:?}",
+            baseline.stats_reset_at,
+            post.stats_reset_at,
+        );
+        let subtract = |name: &str, after: i64, before: i64| -> anyhow::Result<i64> {
+            let delta = after - before;
+            anyhow::ensure!(
+                delta >= 0,
+                "pg_stat_database {name} moved backwards without a stats_reset change: {before} -> {after}",
+            );
+            Ok(delta)
+        };
+        Ok(Self {
+            xact_commit: subtract("xact_commit", post.xact_commit, baseline.xact_commit)?,
+            xact_rollback: subtract("xact_rollback", post.xact_rollback, baseline.xact_rollback)?,
+            temp_files: subtract("temp_files", post.temp_files, baseline.temp_files)?,
+            temp_bytes: subtract("temp_bytes", post.temp_bytes, baseline.temp_bytes)?,
+            deadlocks: subtract("deadlocks", post.deadlocks, baseline.deadlocks)?,
+        })
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "xact_commit": self.xact_commit,
+            "xact_rollback": self.xact_rollback,
+            "temp_files": self.temp_files,
+            "temp_bytes": self.temp_bytes,
+            "deadlocks": self.deadlocks,
+        })
+    }
+}
+
+struct PostgresMeasuredPhaseStart {
+    phase: String,
+    importer_application_name: String,
+    importer_fence_connections: Vec<PoolConnection<Postgres>>,
+    retained_auxiliary_connections: Vec<Vec<PoolConnection<Postgres>>>,
+    importer_fence_backend_pids: Vec<i32>,
+    importer_workload_backend_pids: Vec<i32>,
+    flush_auxiliary_backend_pids: Vec<Vec<i32>>,
+    retained_auxiliary_backend_pids: Vec<Vec<i32>>,
+    statements_reset_at: String,
+    database_baseline: PostgresDatabaseCounters,
+}
+
+#[derive(Clone, Debug)]
+struct PostgresMeasuredPhaseActivity {
+    client_active_over_five_seconds: i64,
+    autovacuum_active_over_five_seconds: i64,
+    unknown_active_over_five_seconds: i64,
+    idle_in_transaction: i64,
+}
+
+impl PostgresMeasuredPhaseActivity {
+    fn active_over_five_seconds(&self) -> i64 {
+        self.client_active_over_five_seconds
+            + self.autovacuum_active_over_five_seconds
+            + self.unknown_active_over_five_seconds
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "active_over_five_seconds": self.active_over_five_seconds(),
+            "client_active_over_five_seconds": self.client_active_over_five_seconds,
+            "autovacuum_active_over_five_seconds": self.autovacuum_active_over_five_seconds,
+            "unknown_active_over_five_seconds": self.unknown_active_over_five_seconds,
+            "idle_in_transaction": self.idle_in_transaction,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PostgresMeasuredPhaseAttribution {
+    phase: String,
+    importer_application_name: String,
+    importer_fence_backend_pids_at_start: Vec<i32>,
+    importer_fence_backend_pids_at_finish: Vec<i32>,
+    importer_workload_backend_pids_at_start: Vec<i32>,
+    importer_workload_backend_pids_at_finish: Vec<i32>,
+    flush_auxiliary_backend_pids_at_start: Vec<Vec<i32>>,
+    flush_auxiliary_backend_pids_at_finish: Vec<Vec<i32>>,
+    retained_auxiliary_backend_pids_at_start: Vec<Vec<i32>>,
+    retained_auxiliary_backend_pids_at_finish: Vec<Vec<i32>>,
+    statements_reset_at: String,
+    statements_captured_reset_at: String,
+    database_baseline: PostgresDatabaseCounters,
+    database_post: PostgresDatabaseCounters,
+    database_delta: PostgresDatabaseCounterDelta,
+    activity: PostgresMeasuredPhaseActivity,
+    statements: Value,
+}
+
+impl PostgresMeasuredPhaseAttribution {
+    fn assert_clean(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.statements_reset_at == self.statements_captured_reset_at,
+            "pg_stat_statements was reset during phase {}: {} -> {}",
+            self.phase,
+            self.statements_reset_at,
+            self.statements_captured_reset_at,
+        );
+        anyhow::ensure!(
+            self.importer_fence_backend_pids_at_start
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                == self
+                    .importer_fence_backend_pids_at_finish
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+            "{} importer fence replaced a backend during the measured phase: {:?} -> {:?}",
+            self.phase,
+            self.importer_fence_backend_pids_at_start,
+            self.importer_fence_backend_pids_at_finish,
+        );
+        anyhow::ensure!(
+            self.importer_workload_backend_pids_at_start
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                == self
+                    .importer_workload_backend_pids_at_finish
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+            "{} importer workload replaced a backend during the measured phase: {:?} -> {:?}",
+            self.phase,
+            self.importer_workload_backend_pids_at_start,
+            self.importer_workload_backend_pids_at_finish,
+        );
+        anyhow::ensure!(
+            self.flush_auxiliary_backend_pids_at_start.len()
+                == self.flush_auxiliary_backend_pids_at_finish.len()
+                && self
+                    .flush_auxiliary_backend_pids_at_start
+                    .iter()
+                    .zip(&self.flush_auxiliary_backend_pids_at_finish)
+                    .all(|(start, finish)| {
+                        start.iter().copied().collect::<BTreeSet<_>>()
+                            == finish.iter().copied().collect::<BTreeSet<_>>()
+                    })
+                && self.retained_auxiliary_backend_pids_at_start.len()
+                    == self.retained_auxiliary_backend_pids_at_finish.len()
+                && self
+                    .retained_auxiliary_backend_pids_at_start
+                    .iter()
+                    .zip(&self.retained_auxiliary_backend_pids_at_finish)
+                    .all(|(start, finish)| {
+                        start.iter().copied().collect::<BTreeSet<_>>()
+                            == finish.iter().copied().collect::<BTreeSet<_>>()
+                    }),
+            "{} auxiliary pool replaced a backend during the measured phase: flush {:?} -> {:?}, retained {:?} -> {:?}",
+            self.phase,
+            self.flush_auxiliary_backend_pids_at_start,
+            self.flush_auxiliary_backend_pids_at_finish,
+            self.retained_auxiliary_backend_pids_at_start,
+            self.retained_auxiliary_backend_pids_at_finish,
+        );
+        anyhow::ensure!(
+            self.importer_fence_backend_pids_at_start
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .is_disjoint(
+                    &self
+                        .importer_workload_backend_pids_at_start
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                ),
+            "{} importer fence/workload backends overlapped at phase start",
+            self.phase,
+        );
+        anyhow::ensure!(
+            self.importer_fence_backend_pids_at_finish
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .is_disjoint(
+                    &self
+                        .importer_workload_backend_pids_at_finish
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                ),
+            "{} importer fence/workload backends overlapped at phase finish",
+            self.phase,
+        );
+        anyhow::ensure!(
+            self.database_delta.xact_rollback == 0,
+            "{} produced {} rolled-back transactions",
+            self.phase,
+            self.database_delta.xact_rollback,
+        );
+        anyhow::ensure!(
+            self.database_delta.temp_files == 0 && self.database_delta.temp_bytes == 0,
+            "{} produced {} temporary files / {} temporary bytes",
+            self.phase,
+            self.database_delta.temp_files,
+            self.database_delta.temp_bytes,
+        );
+        anyhow::ensure!(
+            self.database_delta.deadlocks == 0,
+            "{} produced {} deadlocks",
+            self.phase,
+            self.database_delta.deadlocks,
+        );
+        anyhow::ensure!(
+            self.activity.idle_in_transaction == 0,
+            "{} left {} sessions idle in transaction",
+            self.phase,
+            self.activity.idle_in_transaction,
+        );
+        anyhow::ensure!(
+            self.activity.client_active_over_five_seconds == 0,
+            "{} left {} client sessions active for more than five seconds",
+            self.phase,
+            self.activity.client_active_over_five_seconds,
+        );
+        anyhow::ensure!(
+            self.activity.unknown_active_over_five_seconds == 0,
+            "{} left {} unclassified non-autovacuum sessions active for more than five seconds",
+            self.phase,
+            self.activity.unknown_active_over_five_seconds,
+        );
+        let statement_temp_read = self.statements["summary"]["temp_blks_read"]
+            .as_i64()
+            .ok_or_else(|| {
+                anyhow::anyhow!("{} statement temp-read evidence is missing", self.phase)
+            })?;
+        let statement_temp_written = self.statements["summary"]["temp_blks_written"]
+            .as_i64()
+            .ok_or_else(|| {
+                anyhow::anyhow!("{} statement temp-write evidence is missing", self.phase)
+            })?;
+        anyhow::ensure!(
+            statement_temp_read == 0 && statement_temp_written == 0,
+            "{} pg_stat_statements recorded {} temp blocks read / {} written",
+            self.phase,
+            statement_temp_read,
+            statement_temp_written,
+        );
+        Ok(())
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "schema": "vpsman-postgres-measured-phase-attribution/v2",
+            "phase": &self.phase,
+            "importer_application_name": &self.importer_application_name,
+            "importer_backend_pids": {
+                "fence_start": &self.importer_fence_backend_pids_at_start,
+                "fence_finish": &self.importer_fence_backend_pids_at_finish,
+                "workload_start": &self.importer_workload_backend_pids_at_start,
+                "workload_finish": &self.importer_workload_backend_pids_at_finish,
+            },
+            "pool_fence_connections": self.importer_fence_backend_pids_at_start.len(),
+            "pool_workload_connections": self.importer_workload_backend_pids_at_start.len(),
+            "auxiliary_backend_pids": {
+                "flush_start": &self.flush_auxiliary_backend_pids_at_start,
+                "flush_finish": &self.flush_auxiliary_backend_pids_at_finish,
+                "retained_start": &self.retained_auxiliary_backend_pids_at_start,
+                "retained_finish": &self.retained_auxiliary_backend_pids_at_finish,
+            },
+            "pg_stat_database": {
+                "baseline": self.database_baseline.to_json(),
+                "post": self.database_post.to_json(),
+                "delta": self.database_delta.to_json(),
+                "stats_reset_unchanged": self.database_baseline.stats_reset_at
+                    == self.database_post.stats_reset_at,
+            },
+            "pg_stat_statements": {
+                "reset_at": &self.statements_reset_at,
+                "captured_reset_at": &self.statements_captured_reset_at,
+                "reset_unchanged": self.statements_reset_at
+                    == self.statements_captured_reset_at,
+                "evidence": &self.statements,
+            },
+            "activity": self.activity.to_json(),
+        })
+    }
+}
+
+async fn hold_every_postgres_pool_connection(
+    pool: &PgPool,
+    expected_connections: u32,
+) -> anyhow::Result<(Vec<PoolConnection<Postgres>>, Vec<i32>)> {
+    anyhow::ensure!(expected_connections > 0, "pool fence size must be positive");
+    let mut connections = Vec::with_capacity(usize::try_from(expected_connections)?);
+    for _ in 0..expected_connections {
+        connections.push(
+            tokio::time::timeout(Duration::from_secs(30), pool.acquire())
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out acquiring every pool connection"))??,
+        );
+    }
+    let backend_pids = read_postgres_backend_pids(&mut connections).await?;
+    let unique_backend_pids = backend_pids.iter().copied().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        unique_backend_pids.len() == usize::try_from(expected_connections)?,
+        "expected {expected_connections} unique pool backends, observed {backend_pids:?}",
+    );
+    Ok((connections, backend_pids))
+}
+
+async fn read_postgres_backend_pids(
+    connections: &mut [PoolConnection<Postgres>],
+) -> anyhow::Result<Vec<i32>> {
+    let mut backend_pids = Vec::with_capacity(connections.len());
+    for connection in connections {
+        backend_pids.push(
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut **connection)
+                .await?,
+        );
+    }
+    Ok(backend_pids)
+}
+
+async fn force_postgres_backend_stats_flush(
+    connections: &mut [PoolConnection<Postgres>],
+) -> anyhow::Result<()> {
+    for connection in connections {
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&mut **connection)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn disable_parallel_workers(
+    connections: &mut [PoolConnection<Postgres>],
+) -> anyhow::Result<()> {
+    for connection in connections {
+        sqlx::query("SET max_parallel_workers_per_gather = 0")
+            .execute(&mut **connection)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn retag_postgres_backends(
+    connections: &mut [PoolConnection<Postgres>],
+    application_name: &str,
+) -> anyhow::Result<()> {
+    for connection in connections {
+        let observed =
+            sqlx::query_scalar::<_, String>("SELECT set_config('application_name', $1, false)")
+                .bind(application_name)
+                .fetch_one(&mut **connection)
+                .await?;
+        anyhow::ensure!(observed == application_name);
+    }
+    Ok(())
+}
+
+/// SQLx returns a `PoolConnection` asynchronously from `Drop`, which can let
+/// its ping/requeue race the next phase boundary.  Await the hidden but stable
+/// 0.8.x return hook explicitly whenever a measured connection is released.
+async fn return_postgres_pool_connections(connections: &mut [PoolConnection<Postgres>]) {
+    for connection in connections {
+        connection.return_to_pool().await;
+    }
+}
+
+async fn hold_and_flush_auxiliary_postgres_pools(
+    auxiliary_pools: &[(&PgPool, u32)],
+) -> anyhow::Result<(Vec<Vec<PoolConnection<Postgres>>>, Vec<Vec<i32>>)> {
+    let mut held = Vec::with_capacity(auxiliary_pools.len());
+    let mut backend_pids = Vec::with_capacity(auxiliary_pools.len());
+    for (pool, expected_connections) in auxiliary_pools {
+        let (mut connections, pids) =
+            hold_every_postgres_pool_connection(pool, *expected_connections).await?;
+        disable_parallel_workers(&mut connections).await?;
+        force_postgres_backend_stats_flush(&mut connections).await?;
+        held.push(connections);
+        backend_pids.push(pids);
+    }
+    Ok((held, backend_pids))
+}
+
+async fn force_control_backend_stats_flush(
+    control: &mut PoolConnection<Postgres>,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&mut **control)
+        .await?;
+    Ok(())
+}
+
+async fn read_postgres_database_counters(
+    control: &mut PoolConnection<Postgres>,
+) -> anyhow::Result<PostgresDatabaseCounters> {
+    sqlx::query("SET stats_fetch_consistency = 'none'")
+        .execute(&mut **control)
+        .await?;
+    sqlx::query("SELECT pg_stat_clear_snapshot()")
+        .execute(&mut **control)
+        .await?;
+    let row: (String, Option<String>, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            clock_timestamp()::text,
+            stats_reset::text,
+            xact_commit,
+            xact_rollback,
+            temp_files,
+            temp_bytes,
+            deadlocks
+        FROM pg_stat_database
+        WHERE datname = current_database()
+        "#,
+    )
+    .fetch_one(&mut **control)
+    .await?;
+    Ok(PostgresDatabaseCounters {
+        captured_at: row.0,
+        stats_reset_at: row.1,
+        xact_commit: row.2,
+        xact_rollback: row.3,
+        temp_files: row.4,
+        temp_bytes: row.5,
+        deadlocks: row.6,
+    })
+}
+
+async fn reset_current_database_statement_stats(
+    control: &mut PoolConnection<Postgres>,
+) -> anyhow::Result<String> {
+    sqlx::query(
+        r#"
+        SELECT pg_stat_statements_reset(
+            0::oid,
+            (SELECT oid FROM pg_database WHERE datname = current_database()),
+            0::bigint
+        )
+        "#,
+    )
+    .execute(&mut **control)
+    .await?;
+    force_control_backend_stats_flush(control).await?;
+    Ok(
+        sqlx::query_scalar::<_, String>("SELECT stats_reset::text FROM pg_stat_statements_info")
+            .fetch_one(&mut **control)
+            .await?,
+    )
+}
+
+async fn capture_current_database_statement_stats(
+    control: &mut PoolConnection<Postgres>,
+) -> anyhow::Result<(String, Value)> {
+    sqlx::query("SELECT pg_stat_clear_snapshot()")
+        .execute(&mut **control)
+        .await?;
+    let reset_at =
+        sqlx::query_scalar::<_, String>("SELECT stats_reset::text FROM pg_stat_statements_info")
+            .fetch_one(&mut **control)
+            .await?;
+    let SqlJson(evidence): SqlJson<Value> = sqlx::query_scalar(
+        r#"
+        WITH statements AS MATERIALIZED (
+            SELECT
+                queryid::text AS query_id,
+                calls,
+                rows,
+                total_plan_time,
+                total_exec_time,
+                max_exec_time,
+                shared_blks_read,
+                shared_blks_hit,
+                temp_blks_read,
+                temp_blks_written,
+                regexp_replace(btrim(query), '[[:space:]]+', ' ', 'g') AS normalized_query
+            FROM pg_stat_statements
+            WHERE dbid = (
+                SELECT oid FROM pg_database WHERE datname = current_database()
+            )
+        ), top_statements AS (
+            SELECT *
+            FROM statements
+            ORDER BY temp_blks_written DESC, total_exec_time DESC, calls DESC, query_id
+            LIMIT 100
+        )
+        SELECT jsonb_build_object(
+            'schema', 'vpsman-pg-stat-statements-phase/v1',
+            'captured_at', clock_timestamp(),
+            'summary', jsonb_build_object(
+                'statements', (SELECT count(*) FROM statements),
+                'calls', (SELECT coalesce(sum(calls), 0) FROM statements),
+                'rows', (SELECT coalesce(sum(rows), 0) FROM statements),
+                'total_plan_time_ms',
+                    (SELECT coalesce(sum(total_plan_time), 0) FROM statements),
+                'total_exec_time_ms',
+                    (SELECT coalesce(sum(total_exec_time), 0) FROM statements),
+                'max_exec_time_ms',
+                    (SELECT coalesce(max(max_exec_time), 0) FROM statements),
+                'shared_blks_read',
+                    (SELECT coalesce(sum(shared_blks_read), 0) FROM statements),
+                'shared_blks_hit',
+                    (SELECT coalesce(sum(shared_blks_hit), 0) FROM statements),
+                'temp_blks_read',
+                    (SELECT coalesce(sum(temp_blks_read), 0) FROM statements),
+                'temp_blks_written',
+                    (SELECT coalesce(sum(temp_blks_written), 0) FROM statements)
+            ),
+            'top_statements', coalesce(
+                (SELECT jsonb_agg(to_jsonb(top_statements)) FROM top_statements),
+                '[]'::jsonb
+            )
+        )
+        "#,
+    )
+    .fetch_one(&mut **control)
+    .await?;
+    Ok((reset_at, evidence))
+}
+
+async fn begin_postgres_measured_phase(
+    importer_pool: &PgPool,
+    importer_connections: u32,
+    flush_auxiliary_pools: &[(&PgPool, u32)],
+    retained_auxiliary_pools: &[(&PgPool, u32)],
+    control_pool: &PgPool,
+    phase: &str,
+    importer_application_name: &str,
+) -> anyhow::Result<PostgresMeasuredPhaseStart> {
+    let (mut importer_fence_connections, importer_fence_backend_pids) =
+        hold_every_postgres_pool_connection(importer_pool, importer_connections).await?;
+    disable_parallel_workers(&mut importer_fence_connections).await?;
+    let (mut retained_auxiliary_connections, retained_auxiliary_backend_pids) =
+        hold_and_flush_auxiliary_postgres_pools(retained_auxiliary_pools).await?;
+    let (mut flush_auxiliary_connections, flush_auxiliary_backend_pids) =
+        hold_and_flush_auxiliary_postgres_pools(flush_auxiliary_pools).await?;
+    force_postgres_backend_stats_flush(&mut importer_fence_connections).await?;
+    retag_postgres_backends(&mut importer_fence_connections, importer_application_name).await?;
+    force_postgres_backend_stats_flush(&mut importer_fence_connections).await?;
+
+    // The fence occupies N of the 2N exact pool slots. Briefly acquire the
+    // remaining N slots to tag every backend, then release those workload
+    // leases so the Repository can use the same pool during the phase.
+    let (mut importer_workload_connections, importer_workload_backend_pids) =
+        hold_every_postgres_pool_connection(importer_pool, importer_connections).await?;
+    disable_parallel_workers(&mut importer_workload_connections).await?;
+    retag_postgres_backends(
+        &mut importer_workload_connections,
+        importer_application_name,
+    )
+    .await?;
+    force_postgres_backend_stats_flush(&mut importer_workload_connections).await?;
+    for connections in &mut retained_auxiliary_connections {
+        force_postgres_backend_stats_flush(connections).await?;
+    }
+    for connections in &mut flush_auxiliary_connections {
+        force_postgres_backend_stats_flush(connections).await?;
+    }
+    return_postgres_pool_connections(&mut importer_workload_connections).await;
+    for connections in &mut flush_auxiliary_connections {
+        return_postgres_pool_connections(connections).await;
+    }
+
+    let mut control = control_pool.acquire().await?;
+    sqlx::query("SET max_parallel_workers_per_gather = 0")
+        .execute(&mut *control)
+        .await?;
+    force_control_backend_stats_flush(&mut control).await?;
+    let statements_reset_at = reset_current_database_statement_stats(&mut control).await?;
+    let database_baseline = read_postgres_database_counters(&mut control).await?;
+    control.return_to_pool().await;
+    Ok(PostgresMeasuredPhaseStart {
+        phase: phase.to_string(),
+        importer_application_name: importer_application_name.to_string(),
+        importer_fence_connections,
+        retained_auxiliary_connections,
+        importer_fence_backend_pids,
+        importer_workload_backend_pids,
+        flush_auxiliary_backend_pids,
+        retained_auxiliary_backend_pids,
+        statements_reset_at,
+        database_baseline,
+    })
+}
+
+async fn finish_postgres_measured_phase(
+    importer_pool: &PgPool,
+    importer_connections: u32,
+    flush_auxiliary_pools: &[(&PgPool, u32)],
+    control_pool: &PgPool,
+    start: PostgresMeasuredPhaseStart,
+    next_importer_application_name: &str,
+) -> anyhow::Result<PostgresMeasuredPhaseAttribution> {
+    let PostgresMeasuredPhaseStart {
+        phase,
+        importer_application_name,
+        mut importer_fence_connections,
+        mut retained_auxiliary_connections,
+        importer_fence_backend_pids,
+        importer_workload_backend_pids,
+        flush_auxiliary_backend_pids: flush_auxiliary_backend_pids_at_start,
+        retained_auxiliary_backend_pids: retained_auxiliary_backend_pids_at_start,
+        statements_reset_at,
+        database_baseline,
+    } = start;
+    let (mut flush_auxiliary_connections, flush_auxiliary_backend_pids_at_finish) =
+        hold_and_flush_auxiliary_postgres_pools(flush_auxiliary_pools).await?;
+    let (mut importer_workload_connections, importer_workload_backend_pids_at_finish) =
+        hold_every_postgres_pool_connection(importer_pool, importer_connections).await?;
+    disable_parallel_workers(&mut importer_workload_connections).await?;
+    // Probe all retained backends before the final flush.  The probes are
+    // deliberately outside the control snapshot so the post-phase evidence
+    // cannot be changed by a late backend_pid() query.
+    let importer_fence_backend_pids_at_finish =
+        read_postgres_backend_pids(&mut importer_fence_connections).await?;
+    let retained_auxiliary_backend_pids_at_finish = {
+        let mut pids = Vec::with_capacity(retained_auxiliary_connections.len());
+        for connections in &mut retained_auxiliary_connections {
+            pids.push(read_postgres_backend_pids(connections).await?);
+        }
+        pids
+    };
+    force_postgres_backend_stats_flush(&mut importer_workload_connections).await?;
+    force_postgres_backend_stats_flush(&mut importer_fence_connections).await?;
+    for connections in &mut retained_auxiliary_connections {
+        force_postgres_backend_stats_flush(connections).await?;
+    }
+    for connections in &mut flush_auxiliary_connections {
+        force_postgres_backend_stats_flush(connections).await?;
+    }
+
+    let mut control = control_pool.acquire().await?;
+    sqlx::query("SET max_parallel_workers_per_gather = 0")
+        .execute(&mut *control)
+        .await?;
+    force_control_backend_stats_flush(&mut control).await?;
+    let database_post = read_postgres_database_counters(&mut control).await?;
+    let (statements_captured_reset_at, statements) =
+        capture_current_database_statement_stats(&mut control).await?;
+    let activity_row: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        WITH activity AS MATERIALIZED (
+            SELECT *
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+        ), classified AS (
+            SELECT
+                candidate.*,
+                CASE
+                    WHEN candidate.backend_type = 'autovacuum worker'
+                      OR (
+                        candidate.backend_type = 'parallel worker'
+                        AND leader.backend_type = 'autovacuum worker'
+                      )
+                    THEN 'autovacuum'
+                    WHEN candidate.backend_type = 'client backend'
+                      OR (
+                        candidate.backend_type = 'parallel worker'
+                        AND leader.backend_type = 'client backend'
+                      )
+                    THEN 'client'
+                    ELSE 'unknown'
+                END AS activity_class
+            FROM activity candidate
+            LEFT JOIN activity leader ON leader.pid = candidate.leader_pid
+        )
+        SELECT
+            count(*) FILTER (
+                WHERE pid <> pg_backend_pid()
+                  AND state = 'active'
+                  AND query_start < statement_timestamp() - interval '5 seconds'
+                  AND activity_class = 'client'
+            )::bigint,
+            count(*) FILTER (
+                WHERE pid <> pg_backend_pid()
+                  AND state = 'active'
+                  AND query_start < statement_timestamp() - interval '5 seconds'
+                  AND activity_class = 'autovacuum'
+            )::bigint,
+            count(*) FILTER (
+                WHERE pid <> pg_backend_pid()
+                  AND state = 'active'
+                  AND query_start < statement_timestamp() - interval '5 seconds'
+                  AND activity_class = 'unknown'
+            )::bigint,
+            count(*) FILTER (WHERE state LIKE 'idle in transaction%')::bigint
+        FROM classified
+        "#,
+    )
+    .fetch_one(&mut *control)
+    .await?;
+    let activity = PostgresMeasuredPhaseActivity {
+        client_active_over_five_seconds: activity_row.0,
+        autovacuum_active_over_five_seconds: activity_row.1,
+        unknown_active_over_five_seconds: activity_row.2,
+        idle_in_transaction: activity_row.3,
+    };
+
+    let database_delta = PostgresDatabaseCounterDelta::between(&database_baseline, &database_post)?;
+    // The measured snapshot is complete.  Retag both halves of the exact
+    // importer pool only after capture so the next validation/import phase
+    // gets its own application attribution.  Flush those session changes
+    // before releasing the workload half; they are intentionally outside the
+    // measured evidence window.
+    retag_postgres_backends(
+        &mut importer_fence_connections,
+        next_importer_application_name,
+    )
+    .await?;
+    retag_postgres_backends(
+        &mut importer_workload_connections,
+        next_importer_application_name,
+    )
+    .await?;
+    force_postgres_backend_stats_flush(&mut importer_fence_connections).await?;
+    force_postgres_backend_stats_flush(&mut importer_workload_connections).await?;
+    // Preserve the fence/workload role ordering in SQLx's idle queue for the
+    // next phase: the fence half is released first, then the workload half.
+    // This keeps prepared-plan continuity meaningful across adjacent phases.
+    return_postgres_pool_connections(&mut importer_fence_connections).await;
+    return_postgres_pool_connections(&mut importer_workload_connections).await;
+    for connections in &mut flush_auxiliary_connections {
+        return_postgres_pool_connections(connections).await;
+    }
+    for connections in &mut retained_auxiliary_connections {
+        return_postgres_pool_connections(connections).await;
+    }
+    control.return_to_pool().await;
+
+    Ok(PostgresMeasuredPhaseAttribution {
+        phase,
+        importer_application_name,
+        importer_fence_backend_pids_at_start: importer_fence_backend_pids,
+        importer_fence_backend_pids_at_finish,
+        importer_workload_backend_pids_at_start: importer_workload_backend_pids,
+        importer_workload_backend_pids_at_finish,
+        flush_auxiliary_backend_pids_at_start,
+        flush_auxiliary_backend_pids_at_finish,
+        retained_auxiliary_backend_pids_at_start,
+        retained_auxiliary_backend_pids_at_finish,
+        statements_reset_at,
+        statements_captured_reset_at,
+        database_baseline,
+        database_post,
+        database_delta,
+        activity,
+        statements,
+    })
+}
+
+fn persist_postgres_phase_attribution(
+    report_path: &Path,
+    attribution: &PostgresMeasuredPhaseAttribution,
+) -> anyhow::Result<PathBuf> {
+    let report_stem = report_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("pressure report path has no UTF-8 file stem"))?;
+    let parent = report_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("pressure report path has no parent"))?;
+    let artifact_path = parent.join(format!(
+        "{report_stem}.{}.phase-attribution.json",
+        attribution.phase
+    ));
+    let temporary_path = artifact_path.with_extension("json.tmp");
+    fs::write(
+        &temporary_path,
+        serde_json::to_vec_pretty(&attribution.to_json())?,
+    )?;
+    fs::rename(temporary_path, &artifact_path)?;
+    Ok(artifact_path)
+}
+
+async fn fetch_pressure_rows_with_local_work_mem(
+    pool: &PgPool,
+    sql: &str,
+) -> anyhow::Result<Vec<PgRow>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL work_mem = '16MB'")
+        .execute(&mut *tx)
+        .await?;
+    let rows = sqlx::query(sql).fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
+async fn fetch_pressure_hourly_parity_with_local_work_mem(
+    pool: &PgPool,
+    sql: &str,
+) -> anyhow::Result<(i64, i64, i64, i64, i64)> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL work_mem = '16MB'")
+        .execute(&mut *tx)
+        .await?;
+    let parity = sqlx::query_as(sql).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(parity)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExactVnstatReimportProbe {
+    OneClient,
+    FourConcurrentClients,
+}
+
+// PostgreSQL can take several seconds to finish a graceful client shutdown
+// after a concurrent probe's final statements and checkpoint have completed.
+// Keep teardown non-destructive, but give that server-side drain a bounded
+// grace period before treating a backend as leaked.
+const EXACT_PROBE_BACKEND_DRAIN_POLLS: usize = 600; // 30 s at 50 ms/poll
+
+impl ExactVnstatReimportProbe {
+    fn client_count(self) -> u32 {
+        match self {
+            Self::OneClient => 1,
+            Self::FourConcurrentClients => 4,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::OneClient => "one-client",
+            Self::FourConcurrentClients => "four-concurrent-clients",
+        }
+    }
+
+    fn proves_concurrency(self) -> bool {
+        matches!(self, Self::FourConcurrentClients)
+    }
+}
+
+#[derive(Clone)]
+struct ExactVnstatReimportSpec {
+    client_id: String,
+    initial_job_id: Uuid,
+    reimport_job_id: Uuid,
+    buckets: Vec<NetworkTrafficImportBucket>,
+    result: NetworkTrafficImportResult,
+    expected_rx: u64,
+    expected_tx: u64,
+}
+
+struct ExactVnstatReimportTestDb {
+    repo: Repository,
+    importer_pool: PgPool,
+    setup_pool: PgPool,
+    verifier_pool: PgPool,
+    control_pool: PgPool,
+    admin_pool: PgPool,
+    db_name: String,
+    setup_connections: u32,
+}
+
+impl ExactVnstatReimportTestDb {
+    async fn new(base_url: &str, probe: ExactVnstatReimportProbe) -> anyhow::Result<Self> {
+        let base_options = PgConnectOptions::from_str(base_url)?;
+        let admin_pool = PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(
+                base_options
+                    .clone()
+                    .database("postgres")
+                    .application_name("vpsman-exact-reimport-admin"),
+            )
+            .await?;
+        let db_name = format!("vpsman_exact_reimport_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE {}", quote_ident(&db_name)))
+            .execute(&admin_pool)
+            .await?;
+
+        let setup_connections = probe.client_count();
+        let measured_pool_connections = setup_connections
+            .checked_mul(2)
+            .ok_or_else(|| anyhow::anyhow!("exact probe pool size overflow"))?;
+        let database_options = base_options.database(&db_name);
+        let setup_pool = PgPoolOptions::new()
+            .min_connections(setup_connections)
+            .max_connections(setup_connections)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(
+                database_options
+                    .clone()
+                    .application_name("vpsman-exact-reimport-setup"),
+            )
+            .await?;
+        let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir()).await?;
+        migrator.run(&setup_pool).await?;
+        let pg_stat_statements_preloaded: bool = sqlx::query_scalar(
+            "SELECT position('pg_stat_statements' in current_setting('shared_preload_libraries')) > 0",
+        )
+        .fetch_one(&setup_pool)
+        .await?;
+        anyhow::ensure!(
+            pg_stat_statements_preloaded,
+            "exact reimport probes require pg_stat_statements in shared_preload_libraries",
+        );
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+            .execute(&setup_pool)
+            .await?;
+
+        let importer_pool = PgPoolOptions::new()
+            .min_connections(measured_pool_connections)
+            .max_connections(measured_pool_connections)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(
+                database_options
+                    .clone()
+                    .application_name("vpsman-exact-reimport-unmeasured"),
+            )
+            .await?;
+        let verifier_pool = PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(
+                database_options
+                    .clone()
+                    .application_name("vpsman-exact-reimport-verifier"),
+            )
+            .await?;
+        let control_pool = PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(database_options.application_name("vpsman-exact-reimport-stats-control"))
+            .await?;
+        for setting in [
+            "SET statement_timeout = '60s'",
+            "SET work_mem = '32MB'",
+            "SET max_parallel_workers_per_gather = 0",
+        ] {
+            sqlx::query(setting).execute(&verifier_pool).await?;
+        }
+        let repo = Repository::Postgres(importer_pool.clone());
+        Ok(Self {
+            repo,
+            importer_pool,
+            setup_pool,
+            verifier_pool,
+            control_pool,
+            admin_pool,
+            db_name,
+            setup_connections,
+        })
+    }
+
+    async fn cleanup(self) -> anyhow::Result<()> {
+        let Self {
+            repo,
+            importer_pool,
+            setup_pool,
+            verifier_pool,
+            control_pool,
+            admin_pool,
+            db_name,
+            ..
+        } = self;
+        drop(repo);
+        importer_pool.close().await;
+        setup_pool.close().await;
+        verifier_pool.close().await;
+        control_pool.close().await;
+        // Pool close awaits checked-out connections, but the server can still
+        // expose a just-closed backend briefly.  Let that normal shutdown
+        // finish instead of forcing it with pg_terminate_backend, whose FATAL
+        // record would contaminate the exact probe's strict PostgreSQL window.
+        let mut remaining_backends = i64::MAX;
+        for _ in 0..EXACT_PROBE_BACKEND_DRAIN_POLLS {
+            remaining_backends = sqlx::query_scalar(
+                "SELECT count(*)::bigint FROM pg_stat_activity WHERE datname = $1",
+            )
+            .bind(&db_name)
+            .fetch_one(&admin_pool)
+            .await?;
+            if remaining_backends == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        anyhow::ensure!(
+            remaining_backends == 0,
+            "disposable exact-probe database still has {remaining_backends} backend(s) after pool close"
+        );
+        sqlx::query(&format!(
+            "DROP DATABASE IF EXISTS {}",
+            quote_ident(&db_name)
+        ))
+        .execute(&admin_pool)
+        .await?;
+        let database_remains: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+                .bind(&db_name)
+                .fetch_one(&admin_pool)
+                .await?;
+        anyhow::ensure!(
+            !database_remains,
+            "disposable exact-probe database survived cleanup"
+        );
+        admin_pool.close().await;
+        Ok(())
+    }
+}
+
+async fn prepare_exact_vnstat_probe_job(
+    pool: &PgPool,
+    spec: &ExactVnstatReimportSpec,
+    job_id: Uuid,
+    start_unix: i64,
+    phase: &str,
+) -> anyhow::Result<()> {
+    let request_fingerprint = format!("exact-reimport:{phase}:{}:{job_id}", spec.client_id);
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, status, target_count, payload_hash, operation,
+            request_fingerprint, max_timeout_secs
+        ) VALUES (
+            $1, 'network_traffic_import_vnstat', 'running', 1, $2, $3, $4, 60
+        )
+        "#,
+    )
+    .bind(job_id)
+    .bind(payload_hash(request_fingerprint.as_bytes()))
+    .bind(SqlJson(JobCommand::NetworkTrafficImportVnstat {
+        interfaces: vec!["eth0".to_string()],
+        start_unix: u64::try_from(start_unix)?,
+    }))
+    .bind(&request_fingerprint)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO job_targets (
+            job_id, client_id, status, started_at, dispatch_attempts,
+            delivered_at, acked_at
+        ) VALUES (
+            $1, $2, 'running', clock_timestamp(), 1,
+            clock_timestamp(), clock_timestamp()
+        )
+        "#,
+    )
+    .bind(job_id)
+    .bind(&spec.client_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn complete_exact_vnstat_probe_job(
+    pool: &PgPool,
+    spec: &ExactVnstatReimportSpec,
+    job_id: Uuid,
+) -> anyhow::Result<()> {
+    let batch_data = serde_json::to_vec(&json!({
+        "type": "network_traffic_import_vnstat_batch",
+        "batch_index": 0,
+        "buckets": &spec.buckets,
+    }))?;
+    let result_data = serde_json::to_vec(&spec.result)?;
+    let mut tx = pool.begin().await?;
+    for (seq, data, exit_code, done) in [
+        (0_i32, &batch_data, None, false),
+        (1_i32, &result_data, Some(0_i32), true),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO job_outputs (
+                job_id, client_id, seq, stream, data, storage,
+                data_sha256_hex, data_size_bytes, exit_code, done, received_at
+            ) VALUES (
+                $1, $2, $3, 'status', $4, 'inline', $5, $6, $7, $8,
+                clock_timestamp()
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(&spec.client_id)
+        .bind(seq)
+        .bind(data)
+        .bind(payload_hash(data))
+        .bind(i64::try_from(data.len())?)
+        .bind(exit_code)
+        .bind(done)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE job_targets
+        SET status = 'completed', exit_code = 0,
+            message = 'exact five-year vnStat reimport probe',
+            completed_at = clock_timestamp(), result_received_at = clock_timestamp()
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(job_id)
+    .bind(&spec.client_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE jobs SET status = 'completed', completed_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn run_exact_vnstat_import_calls(
+    db: &ExactVnstatReimportTestDb,
+    probe: ExactVnstatReimportProbe,
+    specs: &[ExactVnstatReimportSpec],
+    start_unix: i64,
+    live_unix: i64,
+    reimport: bool,
+    importer_application_name: &str,
+) -> anyhow::Result<u32> {
+    if !probe.proves_concurrency() {
+        let spec = specs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("one-client exact probe has no import spec"))?;
+        let job_id = if reimport {
+            spec.reimport_job_id
+        } else {
+            spec.initial_job_id
+        };
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            db.repo.import_vnstat_traffic_history(
+                job_id,
+                &spec.client_id,
+                &["eth0".to_string()],
+                u64::try_from(start_unix)?,
+                &spec.result,
+                &spec.buckets,
+                u64::try_from(live_unix + 60)?,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("one-client exact import exceeded 60 seconds"))??;
+        return Ok(1);
+    }
+
+    let mut blockers = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let mut tx = db.setup_pool.begin().await?;
+        sqlx::query("SELECT id FROM clients WHERE id = $1 FOR UPDATE")
+            .bind(&spec.client_id)
+            .execute(&mut *tx)
+            .await?;
+        blockers.push(tx);
+    }
+    let barrier = Arc::new(Barrier::new(specs.len() + 1));
+    let mut tasks = Vec::with_capacity(specs.len());
+    for spec in specs.iter().cloned() {
+        let repo = db.repo.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            let job_id = if reimport {
+                spec.reimport_job_id
+            } else {
+                spec.initial_job_id
+            };
+            barrier.wait().await;
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                repo.import_vnstat_traffic_history(
+                    job_id,
+                    &spec.client_id,
+                    &["eth0".to_string()],
+                    u64::try_from(start_unix)?,
+                    &spec.result,
+                    &spec.buckets,
+                    u64::try_from(live_unix + 60)?,
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("four-client exact import exceeded 60 seconds"))??;
+            Ok::<(), anyhow::Error>(())
+        }));
+    }
+    barrier.wait().await;
+    let concurrency_observation = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting_backends: i64 = sqlx::query_scalar(
+                r#"
+                SELECT count(DISTINCT pid)::bigint
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND application_name = $1
+                  AND state = 'active'
+                  AND wait_event_type = 'Lock'
+                "#,
+            )
+            .bind(importer_application_name)
+            .fetch_one(&db.control_pool)
+            .await?;
+            if waiting_backends == 4 {
+                return Ok::<u32, anyhow::Error>(4);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("four importer backends were not concurrently lock-waiting"));
+    let mut blocker_error: Option<sqlx::Error> = None;
+    for blocker in blockers {
+        if let Err(error) = blocker.commit().await {
+            blocker_error.get_or_insert(error);
+        }
+    }
+    let mut task_error: Option<anyhow::Error> = None;
+    for task in tasks {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                task_error.get_or_insert(error);
+            }
+            Err(error) => {
+                task_error.get_or_insert(anyhow::anyhow!(
+                    "exact concurrent importer task failed to join: {error}"
+                ));
+            }
+        }
+    }
+    if let Some(error) = blocker_error {
+        return Err(error.into());
+    }
+    if let Some(error) = task_error {
+        return Err(error);
+    }
+    let observed_concurrency = concurrency_observation??;
+    Ok(observed_concurrency)
+}
+
+async fn exact_vnstat_probe_logical_fingerprint(
+    pool: &PgPool,
+    client_id: &str,
+) -> anyhow::Result<String> {
+    let state: String = sqlx::query_scalar(
+        r#"
+        WITH hourly AS (
+            SELECT coalesce(md5(string_agg(concat_ws(E'\x1f',
+                extract(epoch FROM bucket_start)::bigint::text,
+                rx_bytes::text, tx_bytes::text,
+                rx_reset_count::text, tx_reset_count::text, sample_count::text,
+                extract(epoch FROM first_observed_at)::bigint::text,
+                extract(epoch FROM latest_observed_at)::bigint::text
+            ), E'\n' ORDER BY bucket_start)), md5('')) AS hash
+            FROM traffic_counter_hourly_usage
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        ), live AS (
+            SELECT coalesce(md5(string_agg(concat_ws(E'\x1f',
+                extract(epoch FROM observed_at)::bigint::text,
+                rx_bytes::text, tx_bytes::text,
+                rx_counter_epoch::text, tx_counter_epoch::text, sample_source
+            ), E'\n' ORDER BY observed_at)), md5('')) AS hash
+            FROM traffic_counter_samples
+            WHERE client_id = $1
+              AND source_kind = 'host'
+              AND interface = 'eth0'
+              AND sample_source NOT LIKE 'vnstat_import:%'
+        )
+        SELECT concat_ws(':', hourly.hash, live.hash) FROM hourly CROSS JOIN live
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(payload_hash(state.as_bytes()))
+}
+
+async fn verify_exact_vnstat_probe_client(
+    db: &ExactVnstatReimportTestDb,
+    spec: &ExactVnstatReimportSpec,
+    job_id: Uuid,
+    live_unix: i64,
+    previous_job_id: Option<Uuid>,
+) -> anyhow::Result<(String, i64)> {
+    let raw: (i64, i64, i64, String, i64, i64) = sqlx::query_as(
+        r#"
+        WITH sequenced AS (
+            SELECT
+                sample_source,
+                inbound_promoted,
+                rx_bytes,
+                tx_bytes,
+                lag(rx_bytes) OVER (ORDER BY observed_at) AS previous_rx_bytes,
+                lag(tx_bytes) OVER (ORDER BY observed_at) AS previous_tx_bytes
+            FROM traffic_counter_samples
+            WHERE client_id = $1
+              AND source_kind = 'host'
+              AND interface = 'eth0'
+              AND sample_source LIKE 'vnstat_import:%'
+        )
+        SELECT
+            count(*)::bigint,
+            count(*) FILTER (WHERE inbound_promoted)::bigint,
+            count(DISTINCT sample_source)::bigint,
+            min(sample_source),
+            coalesce(sum(rx_bytes - previous_rx_bytes)
+                FILTER (WHERE previous_rx_bytes IS NOT NULL), 0)::bigint,
+            coalesce(sum(tx_bytes - previous_tx_bytes)
+                FILTER (WHERE previous_tx_bytes IS NOT NULL), 0)::bigint
+        FROM sequenced
+        "#,
+    )
+    .bind(&spec.client_id)
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!((1..=47_520).contains(&raw.0));
+    anyhow::ensure!(raw.1 == 1 && raw.2 == 1);
+    anyhow::ensure!(raw.3 == format!("vnstat_import:{job_id}"));
+
+    let rollup: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*)::bigint,
+            count(DISTINCT bucket_secs)::bigint,
+            coalesce(sum(rx_bytes), 0)::bigint,
+            coalesce(sum(tx_bytes), 0)::bigint
+        FROM traffic_counter_rollups
+        WHERE client_id = $1
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND origin_kind = 'vnstat_import'
+        "#,
+    )
+    .bind(&spec.client_id)
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!((1..5_000).contains(&rollup.0));
+    anyhow::ensure!(rollup.1 == 4);
+    anyhow::ensure!(u64::try_from(raw.4 + rollup.2)? == spec.expected_rx);
+    anyhow::ensure!(u64::try_from(raw.5 + rollup.3)? == spec.expected_tx);
+
+    let live_boundary: (i64, i64, i64, i64, i64, i64, String) = sqlx::query_as(
+        r#"
+        WITH sequenced AS (
+            SELECT
+                observed_at,
+                rx_bytes,
+                tx_bytes,
+                rx_counter_epoch,
+                tx_counter_epoch,
+                sample_source,
+                lag(rx_counter_epoch) OVER (ORDER BY observed_at) AS previous_rx_epoch,
+                lag(tx_counter_epoch) OVER (ORDER BY observed_at) AS previous_tx_epoch,
+                lag(sample_source) OVER (ORDER BY observed_at) AS previous_source
+            FROM traffic_counter_samples
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        )
+        SELECT
+            extract(epoch FROM observed_at)::bigint,
+            rx_bytes,
+            tx_bytes,
+            rx_counter_epoch - previous_rx_epoch,
+            tx_counter_epoch - previous_tx_epoch,
+            count(*) OVER ()::bigint,
+            previous_source
+        FROM sequenced
+        WHERE sample_source = 'interface_counters'
+        "#,
+    )
+    .bind(&spec.client_id)
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!(live_boundary.0 == live_unix);
+    anyhow::ensure!(live_boundary.1 == 10 && live_boundary.2 == 20);
+    anyhow::ensure!(live_boundary.3 == 1 && live_boundary.4 == 1);
+    anyhow::ensure!(live_boundary.5 == 1 && live_boundary.6.starts_with("vnstat_import:"));
+
+    let hourly_parity: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        WITH sequenced AS (
+            SELECT
+                observed_at,
+                rx_bytes,
+                tx_bytes,
+                rx_counter_epoch,
+                tx_counter_epoch,
+                sample_source,
+                lag(rx_bytes) OVER (ORDER BY observed_at) AS previous_rx_bytes,
+                lag(tx_bytes) OVER (ORDER BY observed_at) AS previous_tx_bytes,
+                lag(rx_counter_epoch) OVER (ORDER BY observed_at) AS previous_rx_epoch,
+                lag(tx_counter_epoch) OVER (ORDER BY observed_at) AS previous_tx_epoch,
+                lag(sample_source) OVER (ORDER BY observed_at) AS previous_source
+            FROM traffic_counter_samples
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        ), raw_oracle AS (
+            SELECT
+                date_bin(
+                    interval '1 hour', observed_at,
+                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                ) AS bucket_start,
+                coalesce(sum(CASE WHEN rx_counter_epoch = previous_rx_epoch
+                    AND rx_bytes >= previous_rx_bytes
+                    THEN rx_bytes - previous_rx_bytes ELSE 0 END), 0)::bigint AS rx_bytes,
+                coalesce(sum(CASE WHEN tx_counter_epoch = previous_tx_epoch
+                    AND tx_bytes >= previous_tx_bytes
+                    THEN tx_bytes - previous_tx_bytes ELSE 0 END), 0)::bigint AS tx_bytes,
+                count(*) FILTER (WHERE previous_rx_epoch IS NOT NULL
+                    AND rx_counter_epoch <> previous_rx_epoch
+                    AND NOT (previous_source LIKE 'vnstat_import:%'
+                        AND sample_source NOT LIKE 'vnstat_import:%'))::integer AS rx_resets,
+                count(*) FILTER (WHERE previous_tx_epoch IS NOT NULL
+                    AND tx_counter_epoch <> previous_tx_epoch
+                    AND NOT (previous_source LIKE 'vnstat_import:%'
+                        AND sample_source NOT LIKE 'vnstat_import:%'))::integer AS tx_resets,
+                count(*)::integer AS samples,
+                min(observed_at) AS first_observed_at,
+                max(observed_at) AS latest_observed_at
+            FROM sequenced
+            GROUP BY date_bin(
+                interval '1 hour', observed_at,
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            )
+        ), materialized AS (
+            SELECT *
+            FROM traffic_counter_hourly_usage
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        ), mismatches AS (
+            SELECT coalesce(raw.bucket_start, materialized.bucket_start) AS bucket_start
+            FROM raw_oracle raw
+            FULL JOIN materialized USING (bucket_start)
+            WHERE raw.rx_bytes IS DISTINCT FROM materialized.rx_bytes
+               OR raw.tx_bytes IS DISTINCT FROM materialized.tx_bytes
+               OR raw.rx_resets IS DISTINCT FROM materialized.rx_reset_count
+               OR raw.tx_resets IS DISTINCT FROM materialized.tx_reset_count
+               OR raw.samples IS DISTINCT FROM materialized.sample_count
+               OR raw.first_observed_at IS DISTINCT FROM materialized.first_observed_at
+               OR raw.latest_observed_at IS DISTINCT FROM materialized.latest_observed_at
+        )
+        SELECT
+            (SELECT count(*) FROM raw_oracle)::bigint,
+            (SELECT count(*) FROM materialized)::bigint,
+            (SELECT count(*) FROM mismatches)::bigint
+        "#,
+    )
+    .bind(&spec.client_id)
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!(hourly_parity.0 == hourly_parity.1 && hourly_parity.2 == 0);
+
+    let revision: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT source_revision, materialized_revision
+        FROM traffic_counter_hourly_usage_streams
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(&spec.client_id)
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!(revision.0 > 0 && revision.0 == revision.1);
+
+    let provenance: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*)::bigint FROM jobs
+             WHERE id = $1 AND status = 'completed'),
+            (SELECT count(*)::bigint FROM job_targets
+             WHERE job_id = $1 AND client_id = $2 AND status = 'completed'),
+            (SELECT count(*)::bigint FROM job_outputs
+             WHERE job_id = $1 AND client_id = $2),
+            (SELECT count(*)::bigint FROM jobs
+             WHERE id = $1 AND operation->>'type'
+                IS DISTINCT FROM 'network_traffic_import_vnstat')
+        "#,
+    )
+    .bind(job_id)
+    .bind(&spec.client_id)
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!(provenance == (1, 1, 2, 0));
+
+    if let Some(previous_job_id) = previous_job_id {
+        let previous_rows: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)::bigint
+            FROM traffic_counter_samples
+            WHERE client_id = $1 AND sample_source = $2
+            "#,
+        )
+        .bind(&spec.client_id)
+        .bind(format!("vnstat_import:{previous_job_id}"))
+        .fetch_one(&db.verifier_pool)
+        .await?;
+        anyhow::ensure!(
+            previous_rows == 0,
+            "old import source rows survived reimport"
+        );
+    }
+    Ok((
+        exact_vnstat_probe_logical_fingerprint(&db.verifier_pool, &spec.client_id).await?,
+        revision.0,
+    ))
+}
+
+async fn exact_vnstat_probe_fault_injection(
+    db: &ExactVnstatReimportTestDb,
+    spec: &ExactVnstatReimportSpec,
+    start_unix: i64,
+    live_unix: i64,
+    expected_fingerprint: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.vpsman_exact_reimport_failure()
+        RETURNS trigger LANGUAGE plpgsql AS $function$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM new_traffic_counter_samples
+                WHERE client_id LIKE 'exact-reimport-%'
+                  AND sample_source LIKE 'vnstat_import:%'
+            ) THEN
+                RAISE EXCEPTION 'vpsman_exact_reimport_intentional_failure';
+            END IF;
+            RETURN NULL;
+        END
+        $function$
+        "#,
+    )
+    .execute(&db.setup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER vpsman_exact_reimport_failure
+        AFTER UPDATE ON traffic_counter_samples
+        REFERENCING NEW TABLE AS new_traffic_counter_samples
+        FOR EACH STATEMENT EXECUTE FUNCTION public.vpsman_exact_reimport_failure()
+        "#,
+    )
+    .execute(&db.setup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.vpsman_exact_reimport_insert_failure()
+        RETURNS trigger LANGUAGE plpgsql AS $function$
+        BEGIN
+            IF NEW.client_id LIKE 'exact-reimport-%'
+               AND NEW.sample_source LIKE 'vnstat_import:%' THEN
+                RAISE EXCEPTION 'vpsman_exact_reimport_intentional_failure';
+            END IF;
+            RETURN NEW;
+        END
+        $function$
+        "#,
+    )
+    .execute(&db.setup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER vpsman_exact_reimport_insert_failure
+        BEFORE INSERT ON traffic_counter_samples
+        FOR EACH ROW EXECUTE FUNCTION public.vpsman_exact_reimport_insert_failure()
+        "#,
+    )
+    .execute(&db.setup_pool)
+    .await?;
+    let failure_job_id = Uuid::new_v4();
+    let failure = tokio::time::timeout(
+        Duration::from_secs(60),
+        db.repo.import_vnstat_traffic_history(
+            failure_job_id,
+            &spec.client_id,
+            &["eth0".to_string()],
+            u64::try_from(start_unix)?,
+            &spec.result,
+            &spec.buckets,
+            u64::try_from(live_unix + 60)?,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("fault-injected exact reimport exceeded 60 seconds"))?;
+    sqlx::query("DROP TRIGGER vpsman_exact_reimport_failure ON traffic_counter_samples")
+        .execute(&db.setup_pool)
+        .await?;
+    sqlx::query("DROP TRIGGER vpsman_exact_reimport_insert_failure ON traffic_counter_samples")
+        .execute(&db.setup_pool)
+        .await?;
+    sqlx::query("DROP FUNCTION public.vpsman_exact_reimport_failure()")
+        .execute(&db.setup_pool)
+        .await?;
+    sqlx::query("DROP FUNCTION public.vpsman_exact_reimport_insert_failure()")
+        .execute(&db.setup_pool)
+        .await?;
+    let failure = match failure {
+        Ok(_) => {
+            return Err(anyhow::anyhow!(
+                "fault-injection trigger accepted exact reimport"
+            ))
+        }
+        Err(failure) => failure,
+    };
+    anyhow::ensure!(format!("{failure:#}").contains("vpsman_exact_reimport_intentional_failure"));
+    let fingerprint =
+        exact_vnstat_probe_logical_fingerprint(&db.verifier_pool, &spec.client_id).await?;
+    anyhow::ensure!(fingerprint == expected_fingerprint);
+    let idle_in_transaction: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state LIKE 'idle in transaction%'
+        "#,
+    )
+    .fetch_one(&db.verifier_pool)
+    .await?;
+    anyhow::ensure!(idle_in_transaction == 0);
+    let failed_source_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM traffic_counter_samples WHERE sample_source = $1")
+            .bind(format!("vnstat_import:{failure_job_id}"))
+            .fetch_one(&db.verifier_pool)
+            .await?;
+    anyhow::ensure!(failed_source_rows == 0);
+    Ok(())
+}
+
+async fn run_exact_five_year_vnstat_reimport_probe(
+    base_url: &str,
+    probe: ExactVnstatReimportProbe,
+) -> anyhow::Result<()> {
+    let db = ExactVnstatReimportTestDb::new(base_url, probe).await?;
+    let body_result = run_exact_five_year_vnstat_reimport_probe_body(&db, probe).await;
+    let cleanup_result = db.cleanup().await;
+    match (body_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(body_error), Ok(())) => Err(body_error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(body_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+            "exact probe failed: {body_error:#}; cleanup also failed: {cleanup_error:#}"
+        )),
+    }
+}
+
+async fn run_exact_five_year_vnstat_reimport_probe_body(
+    db: &ExactVnstatReimportTestDb,
+    probe: ExactVnstatReimportProbe,
+) -> anyhow::Result<()> {
+    let live_unix = Utc::now().timestamp().div_euclid(60) * 60;
+    let year_secs = 365_i64 * 86_400;
+    let start_unix = live_unix - 5 * year_secs;
+    let minutes_per_year = u64::try_from(year_secs / 60)?;
+    let start_unix_u64 = u64::try_from(start_unix)?;
+    let year_secs_u64 = u64::try_from(year_secs)?;
+    let year_duration_secs = u32::try_from(year_secs)?;
+    let mut specs = Vec::with_capacity(usize::try_from(probe.client_count())?);
+    for ordinal in 1..=probe.client_count() {
+        let client_id = format!("exact-reimport-{ordinal:02}");
+        sqlx::query(
+            "INSERT INTO clients (id, display_name, public_key, status) VALUES ($1, $1, $2, 'online')",
+        )
+        .bind(&client_id)
+        .bind(vec![u8::try_from(ordinal)?; 32])
+        .execute(&db.setup_pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO traffic_counter_samples (
+                client_id, source_kind, interface, observed_at,
+                rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+            ) VALUES (
+                $1, 'host', 'eth0', to_timestamp($2::double precision),
+                10, 20, 0, 0, 'interface_counters'
+            )
+            "#,
+        )
+        .bind(&client_id)
+        .bind(live_unix as f64)
+        .execute(&db.setup_pool)
+        .await?;
+        let ordinal = u64::from(ordinal);
+        let buckets = (0_u64..5)
+            .map(|year| NetworkTrafficImportBucket {
+                interface: "eth0".to_string(),
+                start_unix: start_unix_u64 + year * year_secs_u64,
+                duration_secs: year_duration_secs,
+                rx_bytes: (ordinal * 10 + year + 1) * minutes_per_year,
+                tx_bytes: (ordinal * 20 + year + 2) * minutes_per_year,
+            })
+            .collect::<Vec<_>>();
+        let expected_rx = buckets.iter().map(|bucket| bucket.rx_bytes).sum::<u64>();
+        let expected_tx = buckets.iter().map(|bucket| bucket.tx_bytes).sum::<u64>();
+        specs.push(ExactVnstatReimportSpec {
+            client_id,
+            initial_job_id: Uuid::new_v4(),
+            reimport_job_id: Uuid::new_v4(),
+            result: NetworkTrafficImportResult {
+                r#type: "network_traffic_import_vnstat".to_string(),
+                status: "collected".to_string(),
+                requested_start_unix: u64::try_from(start_unix)?,
+                collected_until_unix: u64::try_from(live_unix)?,
+                interfaces: vec!["eth0".to_string()],
+                sources: vec![NetworkTrafficImportSource {
+                    interface: "eth0".to_string(),
+                    database_created_unix: Some(u64::try_from(start_unix)?),
+                    retained_start_unix: u64::try_from(start_unix)?,
+                    source_updated_unix: Some(u64::try_from(live_unix)?),
+                }],
+                batch_count: 1,
+                bucket_count: 5,
+                message: "exact five-year reimport probe".to_string(),
+            },
+            buckets,
+            expected_rx,
+            expected_tx,
+        });
+    }
+
+    for spec in &specs {
+        prepare_exact_vnstat_probe_job(
+            &db.setup_pool,
+            spec,
+            spec.initial_job_id,
+            start_unix,
+            "initial",
+        )
+        .await?;
+    }
+    // The setup pool is used for row-lock blockers during the measured import,
+    // so it must remain available as a flush-only workload pool.  The verifier
+    // does no work until after the phase and can be retained as a true fence.
+    let flush_auxiliary_pools = [(&db.setup_pool, db.setup_connections)];
+    let retained_auxiliary_pools = [(&db.verifier_pool, 1)];
+    let initial_application_name = format!("vpsman-exact-{}-initial", probe.label());
+    let initial_start = begin_postgres_measured_phase(
+        &db.importer_pool,
+        probe.client_count(),
+        &flush_auxiliary_pools,
+        &retained_auxiliary_pools,
+        &db.control_pool,
+        "initial-import",
+        &initial_application_name,
+    )
+    .await?;
+    let initial_concurrency = run_exact_vnstat_import_calls(
+        db,
+        probe,
+        &specs,
+        start_unix,
+        live_unix,
+        false,
+        &initial_application_name,
+    )
+    .await?;
+    let initial_attribution = finish_postgres_measured_phase(
+        &db.importer_pool,
+        probe.client_count(),
+        &flush_auxiliary_pools,
+        &db.control_pool,
+        initial_start,
+        "vpsman-exact-validation",
+    )
+    .await?;
+    initial_attribution.assert_clean()?;
+    anyhow::ensure!(initial_concurrency == probe.client_count());
+    for spec in &specs {
+        complete_exact_vnstat_probe_job(&db.setup_pool, spec, spec.initial_job_id).await?;
+    }
+    let mut initial_state = BTreeMap::new();
+    for spec in &specs {
+        initial_state.insert(
+            spec.client_id.clone(),
+            verify_exact_vnstat_probe_client(db, spec, spec.initial_job_id, live_unix, None)
+                .await?,
+        );
+    }
+
+    for spec in &specs {
+        prepare_exact_vnstat_probe_job(
+            &db.setup_pool,
+            spec,
+            spec.reimport_job_id,
+            start_unix,
+            "reimport",
+        )
+        .await?;
+    }
+    let reimport_application_name = format!("vpsman-exact-{}-reimport", probe.label());
+    let reimport_start = begin_postgres_measured_phase(
+        &db.importer_pool,
+        probe.client_count(),
+        &flush_auxiliary_pools,
+        &retained_auxiliary_pools,
+        &db.control_pool,
+        "normal-reimport",
+        &reimport_application_name,
+    )
+    .await?;
+    anyhow::ensure!(
+        initial_attribution
+            .importer_workload_backend_pids_at_finish
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            == reimport_start
+                .importer_workload_backend_pids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+        "exact probe importer pool did not preserve its backends/prepared caches between phases",
+    );
+    let reimport_concurrency = run_exact_vnstat_import_calls(
+        db,
+        probe,
+        &specs,
+        start_unix,
+        live_unix,
+        true,
+        &reimport_application_name,
+    )
+    .await?;
+    let reimport_attribution = finish_postgres_measured_phase(
+        &db.importer_pool,
+        probe.client_count(),
+        &flush_auxiliary_pools,
+        &db.control_pool,
+        reimport_start,
+        "vpsman-exact-validation",
+    )
+    .await?;
+    reimport_attribution.assert_clean()?;
+    anyhow::ensure!(reimport_concurrency == probe.client_count());
+    for spec in &specs {
+        complete_exact_vnstat_probe_job(&db.setup_pool, spec, spec.reimport_job_id).await?;
+    }
+    for spec in &specs {
+        let (reimport_fingerprint, reimport_revision) = verify_exact_vnstat_probe_client(
+            db,
+            spec,
+            spec.reimport_job_id,
+            live_unix,
+            Some(spec.initial_job_id),
+        )
+        .await?;
+        let (initial_fingerprint, initial_revision) = initial_state
+            .get(&spec.client_id)
+            .ok_or_else(|| anyhow::anyhow!("missing initial exact-probe state"))?;
+        anyhow::ensure!(&reimport_fingerprint == initial_fingerprint);
+        anyhow::ensure!(reimport_revision > *initial_revision);
+    }
+
+    if matches!(probe, ExactVnstatReimportProbe::OneClient) {
+        let spec = specs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("one-client exact probe has no import spec"))?;
+        let fingerprint = &initial_state
+            .get(&spec.client_id)
+            .ok_or_else(|| anyhow::anyhow!("missing one-client exact-probe state"))?
+            .0;
+        exact_vnstat_probe_fault_injection(db, spec, start_unix, live_unix, fingerprint).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit exact one-client five-year vnStat import/reimport spill proof"]
+async fn postgres_exact_one_client_five_year_vnstat_reimport_is_atomic_and_spill_free() {
+    let Ok(base_url) = std::env::var("VPSMAN_TEST_POSTGRES_URL") else {
+        eprintln!("skipping exact reimport probe: VPSMAN_TEST_POSTGRES_URL is unset");
+        return;
+    };
+    run_exact_five_year_vnstat_reimport_probe(&base_url, ExactVnstatReimportProbe::OneClient)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit exact four-client concurrent five-year vnStat import/reimport spill proof"]
+async fn postgres_exact_four_concurrent_five_year_vnstat_reimport_is_spill_free() {
+    let Ok(base_url) = std::env::var("VPSMAN_TEST_POSTGRES_URL") else {
+        eprintln!("skipping exact reimport probe: VPSMAN_TEST_POSTGRES_URL is unset");
+        return;
+    };
+    run_exact_five_year_vnstat_reimport_probe(
+        &base_url,
+        ExactVnstatReimportProbe::FourConcurrentClients,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit storage-backed 120-VPS vnStat/browser pressure proof"]
+async fn postgres_benchmark_120_vps_five_year_vnstat_import_is_exact_and_bounded() {
+    assert_eq!(
+        std::env::var("VPSMAN_VNSTAT_BROWSER_PRESSURE").as_deref(),
+        Ok("1"),
+        "benchmark helper requires VPSMAN_VNSTAT_BROWSER_PRESSURE=1",
+    );
+    let database_url = std::env::var("VPSMAN_VNSTAT_BROWSER_PRESSURE_DATABASE_URL")
+        .expect("benchmark database URL is required");
+    let report_path = PathBuf::from(
+        std::env::var("VPSMAN_VNSTAT_BROWSER_PRESSURE_REPORT")
+            .expect("benchmark report path is required"),
+    );
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let output_root = workspace_root.join("output/playwright");
+    assert!(report_path.is_absolute());
+    assert!(report_path.starts_with(&output_root));
+    assert!(!report_path
+        .components()
+        .any(|component| component == Component::ParentDir));
+    assert!(report_path.parent().is_some_and(Path::is_dir));
+
+    let options = PgConnectOptions::from_str(&database_url)
+        .unwrap()
+        .application_name("vpsman-pressure-setup");
+    let pool = PgPoolOptions::new()
+        .min_connections(8)
+        .max_connections(8)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options.clone())
+        .await
+        .unwrap();
+    let control_pool = PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options.application_name("vpsman-pressure-stats-control"))
+        .await
+        .unwrap();
+    let repo = Repository::Postgres(pool.clone());
+
+    async fn pressure_import_fingerprints(pool: &PgPool, client_id: &str) -> (String, String) {
+        let (full_state, logical_state): (String, String) = sqlx::query_as(
+            r#"
+            WITH imported AS (
+                SELECT
+                    coalesce(md5(string_agg(concat_ws(E'\x1f',
+                        extract(epoch FROM observed_at)::bigint::text,
+                        rx_bytes::text, tx_bytes::text,
+                        rx_counter_epoch::text, tx_counter_epoch::text,
+                        inbound_promoted::text, sample_source
+                    ), E'\n' ORDER BY observed_at)), md5('')) AS full_hash
+                FROM traffic_counter_samples
+                WHERE client_id = $1
+                  AND source_kind = 'host'
+                  AND interface = 'eth0'
+                  AND sample_source LIKE 'vnstat_import:%'
+            ), rollups AS (
+                SELECT coalesce(md5(string_agg(concat_ws(E'\x1f',
+                    bucket_secs::text,
+                    extract(epoch FROM bucket_start)::bigint::text,
+                    rx_bytes::text, tx_bytes::text,
+                    rx_valid_count::text, tx_valid_count::text, any_valid_count::text,
+                    rx_reset_count::text, tx_reset_count::text, any_reset_count::text,
+                    extract(epoch FROM first_observed_at)::bigint::text,
+                    extract(epoch FROM latest_observed_at)::bigint::text
+                ), E'\n' ORDER BY bucket_secs, bucket_start)), md5('')) AS hash
+                FROM traffic_counter_rollups
+                WHERE client_id = $1
+                  AND source_kind = 'host'
+                  AND interface = 'eth0'
+                  AND origin_kind = 'vnstat_import'
+            ), hourly AS (
+                SELECT coalesce(md5(string_agg(concat_ws(E'\x1f',
+                    extract(epoch FROM bucket_start)::bigint::text,
+                    rx_bytes::text, tx_bytes::text,
+                    rx_reset_count::text, tx_reset_count::text, sample_count::text,
+                    extract(epoch FROM first_observed_at)::bigint::text,
+                    extract(epoch FROM latest_observed_at)::bigint::text
+                ), E'\n' ORDER BY bucket_start)), md5('')) AS hash
+                FROM traffic_counter_hourly_usage
+                WHERE client_id = $1
+                  AND source_kind = 'host'
+                  AND interface = 'eth0'
+            ), live AS (
+                SELECT coalesce(md5(string_agg(concat_ws(E'\x1f',
+                    extract(epoch FROM observed_at)::bigint::text,
+                    rx_bytes::text, tx_bytes::text,
+                    rx_counter_epoch::text, tx_counter_epoch::text, sample_source
+                ), E'\n' ORDER BY observed_at)), md5('')) AS hash
+                FROM traffic_counter_samples
+                WHERE client_id = $1
+                  AND source_kind = 'host'
+                  AND interface = 'eth0'
+                  AND sample_source NOT LIKE 'vnstat_import:%'
+            ), stream AS (
+                SELECT concat_ws(E'\x1f', source_revision::text, materialized_revision::text)
+                    AS revision
+                FROM traffic_counter_hourly_usage_streams
+                WHERE client_id = $1
+                  AND source_kind = 'host'
+                  AND interface = 'eth0'
+            )
+            SELECT
+                concat_ws(':', imported.full_hash, rollups.hash, hourly.hash, live.hash,
+                    coalesce(stream.revision, 'missing')),
+                concat_ws(':', hourly.hash, live.hash)
+            FROM imported
+            CROSS JOIN rollups
+            CROSS JOIN hourly
+            CROSS JOIN live
+            LEFT JOIN stream ON TRUE
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (
+            payload_hash(full_state.as_bytes()),
+            payload_hash(logical_state.as_bytes()),
+        )
+    }
+
+    async fn pressure_raw_cutoff_unix(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            r#"
+            SELECT extract(epoch FROM (
+                date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                - interval '32 days'
+            ))::bigint
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    let client_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM clients WHERE id LIKE 'pressure-%' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let expected_ids = (1..=120)
+        .map(|ordinal| format!("pressure-{ordinal:03}"))
+        .collect::<Vec<_>>();
+    assert_eq!(client_ids, expected_ids);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM clients")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        128,
+        "benchmark must run only on the isolated 128-client fixture",
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM traffic_counter_samples
+            WHERE client_id LIKE 'pressure-%'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "pressure fixture must use import-only mode",
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM traffic_counter_rollups
+            WHERE client_id LIKE 'pressure-%'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "benchmark refuses a database with prior pressure-client rollups",
+    );
+
+    let live_unix = Utc::now().timestamp().div_euclid(60) * 60;
+    let raw_cutoff_unix = pressure_raw_cutoff_unix(&pool).await;
+    let utc_day_start_unix = raw_cutoff_unix + 32 * 86_400;
+    let seconds_until_next_utc_day = utc_day_start_unix + 86_400 - live_unix;
+    assert!(
+        seconds_until_next_utc_day >= 2_700,
+        "pressure proof requires 45 minutes of UTC-day headroom so every client uses one retention cutoff",
+    );
+    let expected_raw_rows_per_client = (live_unix - raw_cutoff_unix).div_euclid(60) + 1;
+    assert!(
+        (1..=47_520).contains(&expected_raw_rows_per_client),
+        "pressure fixture expected raw-row count is outside the production retention bound",
+    );
+    let expected_raw_rows_total = expected_raw_rows_per_client * 120;
+    let year_secs = 365_i64 * 86_400;
+    let start_unix = live_unix - 5 * year_secs;
+    let minutes_per_year = u64::try_from(year_secs / 60).unwrap();
+    let import_specs = client_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, client_id)| {
+            let ordinal = u64::try_from(index + 1).unwrap();
+            let job_id = Uuid::from_u128(
+                0x7600_0000_0000_4000_8000_0000_0000_0000_u128 + u128::from(ordinal),
+            );
+            let buckets = (0_u64..5)
+                .map(|year| NetworkTrafficImportBucket {
+                    interface: "eth0".to_string(),
+                    start_unix: u64::try_from(start_unix).unwrap()
+                        + year * u64::try_from(year_secs).unwrap(),
+                    duration_secs: u32::try_from(year_secs).unwrap(),
+                    rx_bytes: (ordinal * 10 + year + 1) * minutes_per_year,
+                    tx_bytes: (ordinal * 20 + year + 2) * minutes_per_year,
+                })
+                .collect::<Vec<_>>();
+            let expected_rx = buckets.iter().map(|bucket| bucket.rx_bytes).sum::<u64>();
+            let expected_tx = buckets.iter().map(|bucket| bucket.tx_bytes).sum::<u64>();
+            let result = NetworkTrafficImportResult {
+                r#type: "network_traffic_import_vnstat".to_string(),
+                status: "collected".to_string(),
+                requested_start_unix: u64::try_from(start_unix).unwrap(),
+                collected_until_unix: u64::try_from(live_unix).unwrap(),
+                interfaces: vec!["eth0".to_string()],
+                sources: vec![NetworkTrafficImportSource {
+                    interface: "eth0".to_string(),
+                    database_created_unix: Some(u64::try_from(start_unix).unwrap()),
+                    retained_start_unix: u64::try_from(start_unix).unwrap(),
+                    source_updated_unix: Some(u64::try_from(live_unix).unwrap()),
+                }],
+                batch_count: 1,
+                bucket_count: u32::try_from(buckets.len()).unwrap(),
+                message: "vnStat history collected; API import is pending".to_string(),
+            };
+            (client_id, job_id, buckets, result, expected_rx, expected_tx)
+        })
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        )
+        SELECT
+            client.id,
+            'host',
+            'eth0',
+            to_timestamp($1::double precision),
+            10,
+            20,
+            0,
+            0,
+            'interface_counters'
+        FROM clients client
+        WHERE client.id LIKE 'pressure-%'
+        ORDER BY client.id
+        "#,
+    )
+    .bind(live_unix as f64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut lineage_tx = pool.begin().await.unwrap();
+    for (client_id, job_id, _, _, _, _) in &import_specs {
+        sqlx::query(
+            r#"
+            INSERT INTO jobs (
+                id, command_type, status, target_count, payload_hash, operation,
+                request_fingerprint, max_timeout_secs
+            ) VALUES (
+                $1, 'network_traffic_import_vnstat', 'running', 1, $2, $3, $4, 60
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(payload_hash(format!("vnstat-pressure:{job_id}").as_bytes()))
+        .bind(SqlJson(JobCommand::NetworkTrafficImportVnstat {
+            interfaces: vec!["eth0".to_string()],
+            start_unix: u64::try_from(start_unix).unwrap(),
+        }))
+        .bind(format!("vnstat-pressure:{job_id}"))
+        .execute(&mut *lineage_tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO job_targets (
+                job_id, client_id, status, started_at, dispatch_attempts,
+                delivered_at, acked_at
+            ) VALUES (
+                $1, $2, 'running', clock_timestamp(), 1,
+                clock_timestamp(), clock_timestamp()
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .execute(&mut *lineage_tx)
+        .await
+        .unwrap();
+    }
+    lineage_tx.commit().await.unwrap();
+
+    let import_phase_start = begin_postgres_measured_phase(
+        &pool,
+        4,
+        &[],
+        &[],
+        &control_pool,
+        "initial-import",
+        "vpsman-pressure-initial-import",
+    )
+    .await
+    .unwrap();
+    let import_started_at = Utc::now();
+    let benchmark_started = std::time::Instant::now();
+    let imports = stream::iter(import_specs.clone().into_iter())
+        .map(|(client_id, job_id, buckets, result, expected_rx, expected_tx)| {
+            let repo = repo.clone();
+            let pool = pool.clone();
+            async move {
+                let import_started = std::time::Instant::now();
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    repo.import_vnstat_traffic_history(
+                        job_id,
+                        &client_id,
+                        &["eth0".to_string()],
+                        u64::try_from(start_unix).unwrap(),
+                        &result,
+                        &buckets,
+                        u64::try_from(live_unix + 60).unwrap(),
+                    ),
+                )
+                .await
+                .expect("a pressure-client import exceeded 60 seconds")
+                .unwrap();
+                let import_elapsed_ms = import_started.elapsed().as_millis();
+                let batch_data = serde_json::to_vec(&json!({
+                    "type": "network_traffic_import_vnstat_batch",
+                    "batch_index": 0,
+                    "buckets": &buckets,
+                }))
+                .unwrap();
+                let result_data = serde_json::to_vec(&result).unwrap();
+                let summary = format!(
+                    "vnStat history imported: 1 interface(s), {} synthetic minute samples, {} RX bytes, {} TX bytes; live agent counters continue at the existing boundary",
+                    5 * minutes_per_year,
+                    expected_rx,
+                    expected_tx,
+                );
+                let mut completion_tx = pool.begin().await.unwrap();
+                for (seq, data, exit_code, done) in [
+                    (0_i32, &batch_data, None, false),
+                    (1_i32, &result_data, Some(0_i32), true),
+                ] {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO job_outputs (
+                            job_id, client_id, seq, stream, data, storage,
+                            data_sha256_hex, data_size_bytes, exit_code, done,
+                            received_at
+                        ) VALUES (
+                            $1, $2, $3, 'status', $4, 'inline', $5, $6, $7, $8,
+                            clock_timestamp()
+                        )
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(&client_id)
+                    .bind(seq)
+                    .bind(data)
+                    .bind(payload_hash(data))
+                    .bind(i64::try_from(data.len()).unwrap())
+                    .bind(exit_code)
+                    .bind(done)
+                    .execute(&mut *completion_tx)
+                    .await
+                    .unwrap();
+                }
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'completed', message = $3, exit_code = 0,
+                        completed_at = clock_timestamp(),
+                        result_received_at = clock_timestamp()
+                    WHERE job_id = $1 AND client_id = $2
+                    "#,
+                )
+                .bind(job_id)
+                .bind(&client_id)
+                .bind(summary)
+                .execute(&mut *completion_tx)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "UPDATE jobs SET status = 'completed', completed_at = clock_timestamp() WHERE id = $1",
+                )
+                .bind(job_id)
+                .execute(&mut *completion_tx)
+                .await
+                .unwrap();
+                completion_tx.commit().await.unwrap();
+                (
+                    client_id,
+                    job_id,
+                    expected_rx,
+                    expected_tx,
+                    import_elapsed_ms,
+                )
+            }
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    let import_elapsed_ms = benchmark_started.elapsed().as_millis();
+    let import_finished_at = Utc::now();
+    let import_phase_attribution = finish_postgres_measured_phase(
+        &pool,
+        4,
+        &[],
+        &control_pool,
+        import_phase_start,
+        "vpsman-pressure-validation",
+    )
+    .await
+    .unwrap();
+    let import_phase_attribution_path =
+        persist_postgres_phase_attribution(&report_path, &import_phase_attribution).unwrap();
+    import_phase_attribution.assert_clean().unwrap();
+    assert_eq!(imports.len(), 120);
+    let expected = imports
+        .iter()
+        .map(|(client_id, job_id, rx, tx, elapsed_ms)| {
+            (client_id.clone(), (*job_id, *rx, *tx, *elapsed_ms))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let pressure_shape_sql = r#"
+        WITH imported_sequenced AS NOT MATERIALIZED (
+            SELECT
+                sample.client_id,
+                sample.sample_source,
+                sample.inbound_promoted,
+                sample.rx_bytes,
+                sample.tx_bytes,
+                lag(sample.rx_bytes) OVER (
+                    PARTITION BY sample.client_id
+                    ORDER BY sample.observed_at
+                ) AS previous_rx_bytes,
+                lag(sample.tx_bytes) OVER (
+                    PARTITION BY sample.client_id
+                    ORDER BY sample.observed_at
+                ) AS previous_tx_bytes
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id LIKE 'pressure-%'
+              AND sample.source_kind = 'host'
+              AND sample.interface = 'eth0'
+              AND sample.sample_source LIKE 'vnstat_import:%'
+        ), imported_raw AS (
+            SELECT
+                client_id,
+                count(*)::bigint AS raw_rows,
+                count(*) FILTER (WHERE inbound_promoted)::bigint AS promoted_rows,
+                count(DISTINCT sample_source)::bigint AS import_sources,
+                min(sample_source) AS import_source,
+                coalesce(sum(rx_bytes - previous_rx_bytes)
+                    FILTER (WHERE previous_rx_bytes IS NOT NULL), 0)::bigint AS rx_bytes,
+                coalesce(sum(tx_bytes - previous_tx_bytes)
+                    FILTER (WHERE previous_tx_bytes IS NOT NULL), 0)::bigint AS tx_bytes
+            FROM imported_sequenced
+            GROUP BY client_id
+        ), imported_rollups AS (
+            SELECT
+                rollup.client_id,
+                count(*)::bigint AS rollup_rows,
+                (
+                    bool_or(rollup.bucket_secs = 3600)::integer
+                    + bool_or(rollup.bucket_secs = 10800)::integer
+                    + bool_or(rollup.bucket_secs = 21600)::integer
+                    + bool_or(rollup.bucket_secs = 86400)::integer
+                )::bigint AS rollup_tiers,
+                coalesce(sum(rollup.rx_bytes), 0)::bigint AS rx_bytes,
+                coalesce(sum(rollup.tx_bytes), 0)::bigint AS tx_bytes
+            FROM traffic_counter_rollups rollup
+            WHERE rollup.client_id LIKE 'pressure-%'
+              AND rollup.source_kind = 'host'
+              AND rollup.interface = 'eth0'
+              AND rollup.origin_kind = 'vnstat_import'
+            GROUP BY rollup.client_id
+        )
+        SELECT
+            client.id AS client_id,
+            coalesce(raw.raw_rows, 0)::bigint AS raw_rows,
+            coalesce(raw.promoted_rows, 0)::bigint AS promoted_rows,
+            coalesce(raw.import_sources, 0)::bigint AS import_sources,
+            raw.import_source,
+            coalesce(raw.rx_bytes, 0)::bigint AS raw_rx_bytes,
+            coalesce(raw.tx_bytes, 0)::bigint AS raw_tx_bytes,
+            coalesce(rollup.rollup_rows, 0)::bigint AS rollup_rows,
+            coalesce(rollup.rollup_tiers, 0)::bigint AS rollup_tiers,
+            coalesce(rollup.rx_bytes, 0)::bigint AS rollup_rx_bytes,
+            coalesce(rollup.tx_bytes, 0)::bigint AS rollup_tx_bytes,
+            stream.source_revision,
+            stream.materialized_revision
+        FROM clients client
+        LEFT JOIN imported_raw raw ON raw.client_id = client.id
+        LEFT JOIN imported_rollups rollup ON rollup.client_id = client.id
+        LEFT JOIN traffic_counter_hourly_usage_streams stream
+          ON stream.client_id = client.id
+         AND stream.source_kind = 'host'
+         AND stream.interface = 'eth0'
+        WHERE client.id LIKE 'pressure-%'
+        ORDER BY client.id
+        "#;
+    let rows = fetch_pressure_rows_with_local_work_mem(&pool, pressure_shape_sql)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 120);
+    let mut raw_rows_total = 0_i64;
+    let mut rollup_rows_total = 0_i64;
+    let mut raw_rows_min = i64::MAX;
+    let mut raw_rows_max = 0_i64;
+    let mut rollup_rows_max = 0_i64;
+    let mut expected_rx_total = 0_u64;
+    let mut expected_tx_total = 0_u64;
+    let mut observed_rx_total = 0_u64;
+    let mut observed_tx_total = 0_u64;
+    for row in rows {
+        let client_id = row.try_get::<String, _>("client_id").unwrap();
+        let raw_rows = row.try_get::<i64, _>("raw_rows").unwrap();
+        let promoted_rows = row.try_get::<i64, _>("promoted_rows").unwrap();
+        let import_sources = row.try_get::<i64, _>("import_sources").unwrap();
+        let import_source = row.try_get::<String, _>("import_source").unwrap();
+        let raw_rx = row.try_get::<i64, _>("raw_rx_bytes").unwrap();
+        let raw_tx = row.try_get::<i64, _>("raw_tx_bytes").unwrap();
+        let rollup_rows = row.try_get::<i64, _>("rollup_rows").unwrap();
+        let rollup_tiers = row.try_get::<i64, _>("rollup_tiers").unwrap();
+        let rollup_rx = row.try_get::<i64, _>("rollup_rx_bytes").unwrap();
+        let rollup_tx = row.try_get::<i64, _>("rollup_tx_bytes").unwrap();
+        let source_revision = row.try_get::<i64, _>("source_revision").unwrap();
+        let materialized_revision = row.try_get::<i64, _>("materialized_revision").unwrap();
+        assert_eq!(raw_rows, expected_raw_rows_per_client);
+        assert_eq!(promoted_rows, 1);
+        assert_eq!(import_sources, 1);
+        assert!((1..5_000).contains(&rollup_rows));
+        assert_eq!(rollup_tiers, 4);
+        assert!(source_revision > 0);
+        assert_eq!(source_revision, materialized_revision);
+        let (job_id, expected_rx, expected_tx, _) = expected.get(&client_id).unwrap();
+        assert_eq!(import_source, format!("vnstat_import:{job_id}"));
+        let observed_rx = u64::try_from(raw_rx + rollup_rx).unwrap();
+        let observed_tx = u64::try_from(raw_tx + rollup_tx).unwrap();
+        assert_eq!(observed_rx, *expected_rx);
+        assert_eq!(observed_tx, *expected_tx);
+        raw_rows_total += raw_rows;
+        rollup_rows_total += rollup_rows;
+        raw_rows_min = raw_rows_min.min(raw_rows);
+        raw_rows_max = raw_rows_max.max(raw_rows);
+        rollup_rows_max = rollup_rows_max.max(rollup_rows);
+        expected_rx_total += *expected_rx;
+        expected_tx_total += *expected_tx;
+        observed_rx_total += observed_rx;
+        observed_tx_total += observed_tx;
+    }
+    assert_eq!(observed_rx_total, expected_rx_total);
+    assert_eq!(observed_tx_total, expected_tx_total);
+    assert_eq!(raw_rows_min, expected_raw_rows_per_client);
+    assert_eq!(raw_rows_max, expected_raw_rows_per_client);
+    assert_eq!(raw_rows_total, expected_raw_rows_total);
+    let job_ids = imports
+        .iter()
+        .map(|(_, job_id, _, _, _)| *job_id)
+        .collect::<Vec<_>>();
+    let imported_client_ids = imports
+        .iter()
+        .map(|(client_id, _, _, _, _)| client_id.clone())
+        .collect::<Vec<_>>();
+    let pressure_lineage_sql = r#"
+        WITH expected AS MATERIALIZED (
+            SELECT *
+            FROM unnest($1::uuid[], $2::text[]) expected(job_id, client_id)
+        ), lineage AS (
+            SELECT
+                expected.job_id,
+                expected.client_id,
+                job.id AS actual_job_id,
+                job.command_type,
+                job.status AS job_status,
+                job.completed_at AS job_completed_at,
+                job.operation,
+                target.job_id AS actual_target_job_id,
+                target.status AS target_status,
+                target.completed_at AS target_completed_at,
+                target.result_received_at AS target_result_received_at,
+                target.message AS target_message,
+                output.output_count,
+                output.final_count,
+                output.minimum_seq,
+                output.maximum_seq,
+                output.storage_valid,
+                output.batch_valid,
+                output.final_valid
+            FROM expected
+            LEFT JOIN jobs job ON job.id = expected.job_id
+            LEFT JOIN job_targets target
+              ON target.job_id = expected.job_id
+             AND target.client_id = expected.client_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    count(*)::bigint AS output_count,
+                    count(*) FILTER (WHERE done)::bigint AS final_count,
+                    min(seq) AS minimum_seq,
+                    max(seq) AS maximum_seq,
+                    bool_and(
+                        stream = 'status'
+                        AND storage = 'inline'
+                        AND object_key IS NULL
+                        AND data_size_bytes = octet_length(data)::bigint
+                        AND data_sha256_hex = encode(sha256(data), 'hex')
+                    ) AS storage_valid,
+                    bool_or(
+                        seq = 0 AND NOT done AND exit_code IS NULL
+                        AND convert_from(data, 'UTF8')::jsonb->>'type'
+                            = 'network_traffic_import_vnstat_batch'
+                        AND convert_from(data, 'UTF8')::jsonb->>'batch_index' = '0'
+                    ) AS batch_valid,
+                    bool_or(
+                        seq = 1 AND done AND exit_code = 0
+                        AND convert_from(data, 'UTF8')::jsonb->>'type'
+                            = 'network_traffic_import_vnstat'
+                        AND convert_from(data, 'UTF8')::jsonb->>'status' = 'collected'
+                    ) AS final_valid
+                FROM job_outputs output
+                WHERE output.job_id = expected.job_id
+                  AND output.client_id = expected.client_id
+            ) output ON TRUE
+        )
+        SELECT
+            count(*) FILTER (WHERE actual_job_id IS NOT NULL)::bigint,
+            count(*) FILTER (WHERE actual_target_job_id IS NOT NULL)::bigint,
+            coalesce(sum(output_count), 0)::bigint,
+            count(*) FILTER (WHERE
+                actual_job_id IS NULL
+                OR command_type IS DISTINCT FROM 'network_traffic_import_vnstat'
+                OR job_status IS DISTINCT FROM 'completed'
+                OR job_completed_at IS NULL
+                OR operation->>'type' IS DISTINCT FROM 'network_traffic_import_vnstat'
+                OR operation->'interfaces' IS DISTINCT FROM '["eth0"]'::jsonb
+                OR operation->>'start_unix' IS DISTINCT FROM $3::text
+                OR actual_target_job_id IS NULL
+                OR target_status IS DISTINCT FROM 'completed'
+                OR target_completed_at IS NULL
+                OR target_result_received_at IS NULL
+                OR target_message IS NULL
+                OR target_message !~ '[0-9]+ RX bytes, [0-9]+ TX bytes'
+                OR output_count IS DISTINCT FROM 2
+                OR final_count IS DISTINCT FROM 1
+                OR minimum_seq IS DISTINCT FROM 0
+                OR maximum_seq IS DISTINCT FROM 1
+                OR storage_valid IS DISTINCT FROM TRUE
+                OR batch_valid IS DISTINCT FROM TRUE
+                OR final_valid IS DISTINCT FROM TRUE
+            )::bigint
+        FROM lineage
+        "#;
+    let lineage: (i64, i64, i64, i64) = sqlx::query_as(pressure_lineage_sql)
+        .bind(&job_ids)
+        .bind(&imported_client_ids)
+        .bind(start_unix)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lineage, (120, 120, 240, 0));
+
+    let pressure_live_boundaries_sql = r#"
+        WITH sequenced AS (
+            SELECT
+                sample.*,
+                lag(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+                lag(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+                lag(sample_source) OVER stream AS previous_sample_source
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id LIKE 'pressure-%'
+              AND sample.source_kind = 'host'
+              AND sample.interface = 'eth0'
+            WINDOW stream AS (
+                PARTITION BY sample.client_id, sample.source_kind, sample.interface
+                ORDER BY sample.observed_at
+            )
+        )
+        SELECT
+            count(*)::bigint,
+            count(*) FILTER (
+                WHERE observed_at = to_timestamp($1::double precision)
+            )::bigint,
+            count(*) FILTER (WHERE rx_bytes = 10 AND tx_bytes = 20)::bigint,
+            count(*) FILTER (
+                WHERE previous_sample_source LIKE 'vnstat_import:%'
+                  AND rx_counter_epoch = previous_rx_counter_epoch + 1
+                  AND tx_counter_epoch = previous_tx_counter_epoch + 1
+            )::bigint
+        FROM sequenced
+        WHERE sample_source = 'interface_counters'
+        "#;
+    let live_boundaries: (i64, i64, i64, i64) = sqlx::query_as(pressure_live_boundaries_sql)
+        .bind(live_unix as f64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        live_boundaries,
+        (120, 120, 120, 120),
+        "every live boundary must preserve timestamp/counters and advance one epoch past import",
+    );
+
+    let pressure_hourly_parity_sql = r#"
+        WITH sequenced AS NOT MATERIALIZED (
+            SELECT
+                sample.client_id,
+                sample.observed_at,
+                sample.rx_bytes,
+                sample.tx_bytes,
+                sample.rx_counter_epoch,
+                sample.tx_counter_epoch,
+                sample.sample_source,
+                lag(sample.rx_bytes) OVER ordered_stream AS previous_rx_bytes,
+                lag(sample.tx_bytes) OVER ordered_stream AS previous_tx_bytes,
+                lag(sample.rx_counter_epoch) OVER ordered_stream AS previous_rx_counter_epoch,
+                lag(sample.tx_counter_epoch) OVER ordered_stream AS previous_tx_counter_epoch,
+                lag(sample.sample_source) OVER ordered_stream AS previous_sample_source
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id LIKE 'pressure-%'
+              AND sample.source_kind = 'host'
+              AND sample.interface = 'eth0'
+            WINDOW ordered_stream AS (
+                PARTITION BY sample.client_id
+                ORDER BY sample.observed_at
+            )
+        ), raw_oracle AS NOT MATERIALIZED (
+            SELECT
+                client_id,
+                date_bin(
+                    interval '1 hour', observed_at,
+                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                ) AS bucket_start,
+                coalesce(sum(CASE
+                    WHEN rx_counter_epoch = previous_rx_counter_epoch
+                     AND rx_bytes >= previous_rx_bytes
+                    THEN rx_bytes - previous_rx_bytes ELSE 0 END
+                ), 0)::bigint AS rx_bytes,
+                coalesce(sum(CASE
+                    WHEN tx_counter_epoch = previous_tx_counter_epoch
+                     AND tx_bytes >= previous_tx_bytes
+                    THEN tx_bytes - previous_tx_bytes ELSE 0 END
+                ), 0)::bigint AS tx_bytes,
+                count(*) FILTER (
+                    WHERE previous_rx_counter_epoch IS NOT NULL
+                      AND rx_counter_epoch <> previous_rx_counter_epoch
+                      AND NOT (
+                          previous_sample_source LIKE 'vnstat_import:%'
+                          AND sample_source NOT LIKE 'vnstat_import:%'
+                      )
+                )::integer AS rx_reset_count,
+                count(*) FILTER (
+                    WHERE previous_tx_counter_epoch IS NOT NULL
+                      AND tx_counter_epoch <> previous_tx_counter_epoch
+                      AND NOT (
+                          previous_sample_source LIKE 'vnstat_import:%'
+                          AND sample_source NOT LIKE 'vnstat_import:%'
+                      )
+                )::integer AS tx_reset_count,
+                count(*)::integer AS sample_count,
+                min(observed_at) AS first_observed_at,
+                max(observed_at) AS latest_observed_at
+            FROM sequenced
+            GROUP BY
+                client_id,
+                date_bin(
+                    interval '1 hour', observed_at,
+                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                )
+        ), compared AS NOT MATERIALIZED (
+            SELECT
+                coalesce(raw.client_id, usage.client_id) AS client_id,
+                raw.bucket_start AS raw_bucket_start,
+                usage.bucket_start AS materialized_bucket_start,
+                raw.client_id IS NULL
+                    OR usage.client_id IS NULL
+                    OR raw.rx_bytes IS DISTINCT FROM usage.rx_bytes
+                    OR raw.tx_bytes IS DISTINCT FROM usage.tx_bytes
+                    OR raw.rx_reset_count IS DISTINCT FROM usage.rx_reset_count
+                    OR raw.tx_reset_count IS DISTINCT FROM usage.tx_reset_count
+                    OR raw.sample_count IS DISTINCT FROM usage.sample_count
+                    OR raw.first_observed_at IS DISTINCT FROM usage.first_observed_at
+                    OR raw.latest_observed_at IS DISTINCT FROM usage.latest_observed_at
+                    AS mismatched
+            FROM raw_oracle raw
+            FULL JOIN (
+                SELECT
+                    hourly.client_id,
+                    hourly.bucket_start,
+                    hourly.rx_bytes,
+                    hourly.tx_bytes,
+                    hourly.rx_reset_count,
+                    hourly.tx_reset_count,
+                    hourly.sample_count,
+                    hourly.first_observed_at,
+                    hourly.latest_observed_at
+                FROM traffic_counter_hourly_usage hourly
+                WHERE hourly.client_id LIKE 'pressure-%'
+                  AND hourly.source_kind = 'host'
+                  AND hourly.interface = 'eth0'
+            ) usage USING (client_id, bucket_start)
+        ), stream_parity AS (
+            SELECT
+                stream.client_id,
+                count(compared.raw_bucket_start)::bigint AS raw_rows,
+                count(compared.materialized_bucket_start)::bigint AS materialized_rows,
+                count(*) FILTER (WHERE compared.mismatched)::bigint AS mismatch_rows,
+                stream.source_revision = stream.materialized_revision
+                    AND stream.source_revision > 0 AS revision_clean
+            FROM traffic_counter_hourly_usage_streams stream
+            LEFT JOIN compared
+              ON compared.client_id = stream.client_id
+            WHERE stream.client_id LIKE 'pressure-%'
+              AND stream.source_kind = 'host'
+              AND stream.interface = 'eth0'
+            GROUP BY
+                stream.client_id,
+                stream.source_revision,
+                stream.materialized_revision
+        )
+        SELECT
+            coalesce(sum(raw_rows), 0)::bigint,
+            coalesce(sum(materialized_rows), 0)::bigint,
+            coalesce(sum(mismatch_rows), 0)::bigint,
+            count(*) FILTER (WHERE revision_clean AND mismatch_rows = 0)::bigint,
+            count(*)::bigint
+        FROM stream_parity
+        "#;
+    let hourly_parity: (i64, i64, i64, i64, i64) = tokio::time::timeout(
+        Duration::from_secs(180),
+        fetch_pressure_hourly_parity_with_local_work_mem(&pool, pressure_hourly_parity_sql),
+    )
+    .await
+    .expect("full hourly-ledger parity validation exceeded 180 seconds")
+    .unwrap();
+    assert_eq!(hourly_parity.0, hourly_parity.1);
+    assert_eq!(hourly_parity.2, 0);
+    assert_eq!(hourly_parity.3, 120);
+    assert_eq!(hourly_parity.4, 120);
+
+    let pressure_epoch_reset_sql = r#"
+        SELECT
+            (SELECT count(*)::bigint
+             FROM traffic_counter_samples
+             WHERE client_id LIKE 'pressure-%'
+               AND source_kind = 'host'
+               AND interface = 'eth0'
+               AND sample_source LIKE 'vnstat_import:%'),
+            (SELECT count(*)::bigint
+             FROM traffic_counter_samples
+             WHERE client_id LIKE 'pressure-%'
+               AND source_kind = 'host'
+               AND interface = 'eth0'
+               AND sample_source LIKE 'vnstat_import:%'
+               AND rx_counter_epoch = 0
+               AND tx_counter_epoch = 0),
+            (SELECT coalesce(sum(rx_reset_count), 0)::bigint
+             FROM traffic_counter_hourly_usage
+             WHERE client_id LIKE 'pressure-%'
+               AND source_kind = 'host'
+               AND interface = 'eth0'),
+            (SELECT coalesce(sum(tx_reset_count), 0)::bigint
+             FROM traffic_counter_hourly_usage
+             WHERE client_id LIKE 'pressure-%'
+               AND source_kind = 'host'
+               AND interface = 'eth0')
+        "#;
+    let epoch_reset_semantics: (i64, i64, i64, i64) = sqlx::query_as(pressure_epoch_reset_sql)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(epoch_reset_semantics.0 > 0);
+    assert_eq!(epoch_reset_semantics.0, epoch_reset_semantics.1);
+    assert_eq!(epoch_reset_semantics.2, 0);
+    assert_eq!(epoch_reset_semantics.3, 0);
+
+    let (pre_failure_fingerprint, initial_logical_fingerprint) =
+        pressure_import_fingerprints(&pool, "pressure-001").await;
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.vpsman_pressure_reimport_failure()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM new_traffic_counter_samples
+                WHERE client_id = 'pressure-001'
+                  AND sample_source LIKE 'vnstat_import:%'
+            ) THEN
+                RAISE EXCEPTION 'vpsman_pressure_intentional_reimport_failure';
+            END IF;
+            RETURN NULL;
+        END
+        $function$
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER vpsman_pressure_reimport_failure
+        AFTER UPDATE ON traffic_counter_samples
+        REFERENCING NEW TABLE AS new_traffic_counter_samples
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION public.vpsman_pressure_reimport_failure()
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.vpsman_pressure_reimport_insert_failure()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function$
+        BEGIN
+            IF NEW.client_id = 'pressure-001'
+               AND NEW.sample_source LIKE 'vnstat_import:%' THEN
+                RAISE EXCEPTION 'vpsman_pressure_intentional_reimport_failure';
+            END IF;
+            RETURN NEW;
+        END
+        $function$
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER vpsman_pressure_reimport_insert_failure
+        BEFORE INSERT ON traffic_counter_samples
+        FOR EACH ROW
+        EXECUTE FUNCTION public.vpsman_pressure_reimport_insert_failure()
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, _, failure_buckets, failure_result, _, _) = &import_specs[0];
+    let failure = tokio::time::timeout(
+        Duration::from_secs(60),
+        repo.import_vnstat_traffic_history(
+            Uuid::from_u128(0x7800_0000_0000_4000_8000_0000_0000_0001),
+            "pressure-001",
+            &["eth0".to_string()],
+            u64::try_from(start_unix).unwrap(),
+            failure_result,
+            failure_buckets,
+            u64::try_from(live_unix + 60).unwrap(),
+        ),
+    )
+    .await
+    .expect("intentional reimport failure path exceeded 60 seconds")
+    .expect_err("intentional reimport trigger must reject the replacement insert");
+    assert!(
+        format!("{failure:#}").contains("vpsman_pressure_intentional_reimport_failure"),
+        "unexpected deterministic reimport failure: {failure:#}",
+    );
+    sqlx::query("DROP TRIGGER vpsman_pressure_reimport_failure ON traffic_counter_samples")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER vpsman_pressure_reimport_insert_failure ON traffic_counter_samples")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION public.vpsman_pressure_reimport_failure()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION public.vpsman_pressure_reimport_insert_failure()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (post_failure_fingerprint, post_failure_logical_fingerprint) =
+        pressure_import_fingerprints(&pool, "pressure-001").await;
+    assert_eq!(post_failure_fingerprint, pre_failure_fingerprint);
+    assert_eq!(
+        post_failure_logical_fingerprint,
+        initial_logical_fingerprint
+    );
+    let post_failure_idle_in_transaction: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state LIKE 'idle in transaction%'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(post_failure_idle_in_transaction, 0);
+
+    let reimport_specs = import_specs
+        .iter()
+        .enumerate()
+        .map(
+            |(index, (client_id, _, buckets, result, expected_rx, expected_tx))| {
+                let ordinal = u64::try_from(index + 1).unwrap();
+                (
+                    client_id.clone(),
+                    Uuid::from_u128(
+                        0x7700_0000_0000_4000_8000_0000_0000_0000_u128 + u128::from(ordinal),
+                    ),
+                    buckets.clone(),
+                    result.clone(),
+                    *expected_rx,
+                    *expected_tx,
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut reimport_lineage_tx = pool.begin().await.unwrap();
+    for (client_id, job_id, _, _, _, _) in &reimport_specs {
+        sqlx::query(
+            r#"
+            INSERT INTO jobs (
+                id, command_type, status, target_count, payload_hash, operation,
+                request_fingerprint, max_timeout_secs
+            ) VALUES (
+                $1, 'network_traffic_import_vnstat', 'running', 1, $2, $3, $4, 60
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(payload_hash(
+            format!("vnstat-pressure-reimport:{job_id}").as_bytes(),
+        ))
+        .bind(SqlJson(JobCommand::NetworkTrafficImportVnstat {
+            interfaces: vec!["eth0".to_string()],
+            start_unix: u64::try_from(start_unix).unwrap(),
+        }))
+        .bind(format!("vnstat-pressure-reimport:{job_id}"))
+        .execute(&mut *reimport_lineage_tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO job_targets (
+                job_id, client_id, status, started_at, dispatch_attempts,
+                delivered_at, acked_at
+            ) VALUES (
+                $1, $2, 'running', clock_timestamp(), 1,
+                clock_timestamp(), clock_timestamp()
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .execute(&mut *reimport_lineage_tx)
+        .await
+        .unwrap();
+    }
+    reimport_lineage_tx.commit().await.unwrap();
+
+    let reimport_phase_start = begin_postgres_measured_phase(
+        &pool,
+        4,
+        &[],
+        &[],
+        &control_pool,
+        "normal-reimport",
+        "vpsman-pressure-normal-reimport",
+    )
+    .await
+    .unwrap();
+    let reimport_started_at = Utc::now();
+    let reimport_benchmark_started = std::time::Instant::now();
+    let reimports = stream::iter(reimport_specs.into_iter())
+        .map(|(client_id, job_id, buckets, result, expected_rx, expected_tx)| {
+            let repo = repo.clone();
+            let pool = pool.clone();
+            async move {
+                let reimport_started = std::time::Instant::now();
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    repo.import_vnstat_traffic_history(
+                        job_id,
+                        &client_id,
+                        &["eth0".to_string()],
+                        u64::try_from(start_unix).unwrap(),
+                        &result,
+                        &buckets,
+                        u64::try_from(live_unix + 60).unwrap(),
+                    ),
+                )
+                .await
+                .expect("a pressure-client reimport exceeded 60 seconds")
+                .unwrap();
+                let reimport_elapsed_ms = reimport_started.elapsed().as_millis();
+                let batch_data = serde_json::to_vec(&json!({
+                    "type": "network_traffic_import_vnstat_batch",
+                    "batch_index": 0,
+                    "buckets": &buckets,
+                }))
+                .unwrap();
+                let result_data = serde_json::to_vec(&result).unwrap();
+                let summary = format!(
+                    "vnStat history imported: 1 interface(s), {} synthetic minute samples, {} RX bytes, {} TX bytes; live agent counters continue at the existing boundary",
+                    5 * minutes_per_year,
+                    expected_rx,
+                    expected_tx,
+                );
+                let mut completion_tx = pool.begin().await.unwrap();
+                for (seq, data, exit_code, done) in [
+                    (0_i32, &batch_data, None, false),
+                    (1_i32, &result_data, Some(0_i32), true),
+                ] {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO job_outputs (
+                            job_id, client_id, seq, stream, data, storage,
+                            data_sha256_hex, data_size_bytes, exit_code, done,
+                            received_at
+                        ) VALUES (
+                            $1, $2, $3, 'status', $4, 'inline', $5, $6, $7, $8,
+                            clock_timestamp()
+                        )
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(&client_id)
+                    .bind(seq)
+                    .bind(data)
+                    .bind(payload_hash(data))
+                    .bind(i64::try_from(data.len()).unwrap())
+                    .bind(exit_code)
+                    .bind(done)
+                    .execute(&mut *completion_tx)
+                    .await
+                    .unwrap();
+                }
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'completed', message = $3, exit_code = 0,
+                        completed_at = clock_timestamp(),
+                        result_received_at = clock_timestamp()
+                    WHERE job_id = $1 AND client_id = $2
+                    "#,
+                )
+                .bind(job_id)
+                .bind(&client_id)
+                .bind(summary)
+                .execute(&mut *completion_tx)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "UPDATE jobs SET status = 'completed', completed_at = clock_timestamp() WHERE id = $1",
+                )
+                .bind(job_id)
+                .execute(&mut *completion_tx)
+                .await
+                .unwrap();
+                completion_tx.commit().await.unwrap();
+                (
+                    client_id,
+                    job_id,
+                    expected_rx,
+                    expected_tx,
+                    reimport_elapsed_ms,
+                )
+            }
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    let reimport_elapsed_ms = reimport_benchmark_started.elapsed().as_millis();
+    let reimport_finished_at = Utc::now();
+    let reimport_phase_attribution = finish_postgres_measured_phase(
+        &pool,
+        4,
+        &[],
+        &control_pool,
+        reimport_phase_start,
+        "vpsman-pressure-validation",
+    )
+    .await
+    .unwrap();
+    let reimport_phase_attribution_path =
+        persist_postgres_phase_attribution(&report_path, &reimport_phase_attribution).unwrap();
+    reimport_phase_attribution.assert_clean().unwrap();
+    assert_eq!(reimports.len(), 120);
+
+    let reimport_expected = reimports
+        .iter()
+        .map(|(client_id, job_id, rx, tx, elapsed_ms)| {
+            (client_id.clone(), (*job_id, *rx, *tx, *elapsed_ms))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let reimport_rows = fetch_pressure_rows_with_local_work_mem(&pool, pressure_shape_sql)
+        .await
+        .unwrap();
+    assert_eq!(reimport_rows.len(), 120);
+    let mut reimport_raw_rows_total = 0_i64;
+    let mut reimport_rollup_rows_total = 0_i64;
+    let mut reimport_raw_rows_min = i64::MAX;
+    let mut reimport_raw_rows_max = 0_i64;
+    let mut reimport_rollup_rows_max = 0_i64;
+    let mut reimport_expected_rx_total = 0_u64;
+    let mut reimport_expected_tx_total = 0_u64;
+    let mut reimport_observed_rx_total = 0_u64;
+    let mut reimport_observed_tx_total = 0_u64;
+    for row in reimport_rows {
+        let client_id = row.try_get::<String, _>("client_id").unwrap();
+        let raw_rows = row.try_get::<i64, _>("raw_rows").unwrap();
+        let promoted_rows = row.try_get::<i64, _>("promoted_rows").unwrap();
+        let import_sources = row.try_get::<i64, _>("import_sources").unwrap();
+        let import_source = row.try_get::<String, _>("import_source").unwrap();
+        let raw_rx = row.try_get::<i64, _>("raw_rx_bytes").unwrap();
+        let raw_tx = row.try_get::<i64, _>("raw_tx_bytes").unwrap();
+        let rollup_rows = row.try_get::<i64, _>("rollup_rows").unwrap();
+        let rollup_tiers = row.try_get::<i64, _>("rollup_tiers").unwrap();
+        let rollup_rx = row.try_get::<i64, _>("rollup_rx_bytes").unwrap();
+        let rollup_tx = row.try_get::<i64, _>("rollup_tx_bytes").unwrap();
+        let source_revision = row.try_get::<i64, _>("source_revision").unwrap();
+        let materialized_revision = row.try_get::<i64, _>("materialized_revision").unwrap();
+        assert_eq!(raw_rows, expected_raw_rows_per_client);
+        assert_eq!(promoted_rows, 1);
+        assert_eq!(import_sources, 1);
+        assert!((1..5_000).contains(&rollup_rows));
+        assert_eq!(rollup_tiers, 4);
+        assert!(source_revision > 0);
+        assert_eq!(source_revision, materialized_revision);
+        let (job_id, expected_rx, expected_tx, _) = reimport_expected.get(&client_id).unwrap();
+        assert_eq!(import_source, format!("vnstat_import:{job_id}"));
+        let observed_rx = u64::try_from(raw_rx + rollup_rx).unwrap();
+        let observed_tx = u64::try_from(raw_tx + rollup_tx).unwrap();
+        assert_eq!(observed_rx, *expected_rx);
+        assert_eq!(observed_tx, *expected_tx);
+        reimport_raw_rows_total += raw_rows;
+        reimport_rollup_rows_total += rollup_rows;
+        reimport_raw_rows_min = reimport_raw_rows_min.min(raw_rows);
+        reimport_raw_rows_max = reimport_raw_rows_max.max(raw_rows);
+        reimport_rollup_rows_max = reimport_rollup_rows_max.max(rollup_rows);
+        reimport_expected_rx_total += *expected_rx;
+        reimport_expected_tx_total += *expected_tx;
+        reimport_observed_rx_total += observed_rx;
+        reimport_observed_tx_total += observed_tx;
+    }
+    assert_eq!(reimport_observed_rx_total, reimport_expected_rx_total);
+    assert_eq!(reimport_observed_tx_total, reimport_expected_tx_total);
+    assert_eq!(reimport_expected_rx_total, expected_rx_total);
+    assert_eq!(reimport_expected_tx_total, expected_tx_total);
+    assert_eq!(reimport_raw_rows_min, expected_raw_rows_per_client);
+    assert_eq!(reimport_raw_rows_max, expected_raw_rows_per_client);
+    assert_eq!(reimport_raw_rows_total, expected_raw_rows_total);
+
+    let reimport_job_ids = reimports
+        .iter()
+        .map(|(_, job_id, _, _, _)| *job_id)
+        .collect::<Vec<_>>();
+    let reimported_client_ids = reimports
+        .iter()
+        .map(|(client_id, _, _, _, _)| client_id.clone())
+        .collect::<Vec<_>>();
+    let reimport_lineage: (i64, i64, i64, i64) = sqlx::query_as(pressure_lineage_sql)
+        .bind(&reimport_job_ids)
+        .bind(&reimported_client_ids)
+        .bind(start_unix)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reimport_lineage, (120, 120, 240, 0));
+
+    let reimport_live_boundaries: (i64, i64, i64, i64) =
+        sqlx::query_as(pressure_live_boundaries_sql)
+            .bind(live_unix as f64)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reimport_live_boundaries, (120, 120, 120, 120));
+    assert_eq!(reimport_live_boundaries, live_boundaries);
+    let reimport_hourly_parity: (i64, i64, i64, i64, i64) = tokio::time::timeout(
+        Duration::from_secs(180),
+        fetch_pressure_hourly_parity_with_local_work_mem(&pool, pressure_hourly_parity_sql),
+    )
+    .await
+    .expect("full reimport hourly-ledger parity validation exceeded 180 seconds")
+    .unwrap();
+    assert_eq!(reimport_hourly_parity.0, reimport_hourly_parity.1);
+    assert_eq!(reimport_hourly_parity.2, 0);
+    assert_eq!(reimport_hourly_parity.3, 120);
+    assert_eq!(reimport_hourly_parity.4, 120);
+    let reimport_epoch_reset_semantics: (i64, i64, i64, i64) =
+        sqlx::query_as(pressure_epoch_reset_sql)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(reimport_epoch_reset_semantics.0 > 0);
+    assert_eq!(
+        reimport_epoch_reset_semantics.0,
+        reimport_epoch_reset_semantics.1
+    );
+    assert_eq!(reimport_epoch_reset_semantics.2, 0);
+    assert_eq!(reimport_epoch_reset_semantics.3, 0);
+    let previous_import_sources = job_ids
+        .iter()
+        .map(|job_id| format!("vnstat_import:{job_id}"))
+        .collect::<Vec<_>>();
+    let previous_import_rows_remaining: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint
+        FROM traffic_counter_samples
+        WHERE client_id LIKE 'pressure-%'
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND sample_source = ANY($1::text[])
+        "#,
+    )
+    .bind(&previous_import_sources)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(previous_import_rows_remaining, 0);
+    let (_, reimport_logical_fingerprint) =
+        pressure_import_fingerprints(&pool, "pressure-001").await;
+    assert_eq!(reimport_logical_fingerprint, initial_logical_fingerprint);
+
+    assert_eq!(
+        pressure_raw_cutoff_unix(&pool).await,
+        raw_cutoff_unix,
+        "UTC raw-retention boundary changed during the measured pressure proof",
+    );
+
+    let relation_bytes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT
+            pg_total_relation_size('traffic_counter_samples')
+            + pg_total_relation_size('traffic_counter_rollups')
+            + pg_total_relation_size('traffic_counter_hourly_usage')
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let max_client_elapsed_ms = imports
+        .iter()
+        .map(|(_, _, _, _, elapsed_ms)| *elapsed_ms)
+        .max()
+        .unwrap();
+    let max_client_reimport_elapsed_ms = reimports
+        .iter()
+        .map(|(_, _, _, _, elapsed_ms)| *elapsed_ms)
+        .max()
+        .unwrap();
+    let import_rows_per_second = (raw_rows_total as f64) * 1000.0
+        / f64::from(u32::try_from(import_elapsed_ms.max(1)).unwrap());
+    let reimport_rows_per_second = (reimport_raw_rows_total as f64) * 1000.0
+        / f64::from(u32::try_from(reimport_elapsed_ms.max(1)).unwrap());
+    let production_importer_attempts_report = json!({
+        "successful_attempts": 240,
+        "injected_failed_attempts": 1,
+        "total_attempts": 241,
+        "clients_with_two_total_attempts": 119,
+        "clients_with_three_total_attempts": 1,
+        "successful_attempts_with_job_lineage": 240,
+        "failed_attempts_with_job_lineage": 0
+    });
+    let raw_rows_report = json!({
+        "total": raw_rows_total,
+        "expected_total": expected_raw_rows_total,
+        "expected_per_client": expected_raw_rows_per_client,
+        "min_per_client": raw_rows_min,
+        "max_per_client": raw_rows_max,
+        "hard_max_per_client": 47520
+    });
+    let rollup_rows_report = json!({
+        "total": rollup_rows_total,
+        "max_per_client": rollup_rows_max,
+        "tiers_per_client": 4,
+        "hard_max_per_client": 4999
+    });
+    let provenance_report = json!({
+        "jobs": lineage.0,
+        "completed_targets": lineage.1,
+        "outputs": lineage.2,
+        "invalid_lineages": lineage.3
+    });
+    let hourly_usage_parity_report = json!({
+        "raw_oracle_rows": hourly_parity.0,
+        "materialized_rows": hourly_parity.1,
+        "mismatch_rows": hourly_parity.2,
+        "clean_streams": hourly_parity.3,
+        "total_streams": hourly_parity.4
+    });
+    let epoch_reset_semantics_report = json!({
+        "imported_rows": epoch_reset_semantics.0,
+        "imported_rows_at_epoch_zero": epoch_reset_semantics.1,
+        "hourly_rx_resets": epoch_reset_semantics.2,
+        "hourly_tx_resets": epoch_reset_semantics.3
+    });
+    let live_successor_boundaries_report = json!({
+        "total": live_boundaries.0,
+        "timestamp_preserved": live_boundaries.1,
+        "counter_values_preserved": live_boundaries.2,
+        "epoch_advanced_once": live_boundaries.3
+    });
+    let import_postgres_report = json!({
+        "commits": import_phase_attribution.database_delta.xact_commit,
+        "rollbacks": import_phase_attribution.database_delta.xact_rollback,
+        "temporary_files": import_phase_attribution.database_delta.temp_files,
+        "temporary_bytes": import_phase_attribution.database_delta.temp_bytes,
+        "deadlocks": import_phase_attribution.database_delta.deadlocks,
+        "activity": import_phase_attribution.activity.to_json(),
+        "phase_attribution_artifact": import_phase_attribution_path
+            .file_name().unwrap().to_string_lossy(),
+        "phase_attribution": import_phase_attribution.to_json(),
+    });
+
+    let reimport_raw_rows_report = json!({
+        "total": reimport_raw_rows_total,
+        "expected_total": expected_raw_rows_total,
+        "expected_per_client": expected_raw_rows_per_client,
+        "min_per_client": reimport_raw_rows_min,
+        "max_per_client": reimport_raw_rows_max,
+        "hard_max_per_client": 47520
+    });
+    let reimport_rollup_rows_report = json!({
+        "total": reimport_rollup_rows_total,
+        "max_per_client": reimport_rollup_rows_max,
+        "tiers_per_client": 4,
+        "hard_max_per_client": 4999
+    });
+    let reimport_provenance_report = json!({
+        "jobs": reimport_lineage.0,
+        "completed_targets": reimport_lineage.1,
+        "outputs": reimport_lineage.2,
+        "invalid_lineages": reimport_lineage.3
+    });
+    let reimport_hourly_usage_parity_report = json!({
+        "raw_oracle_rows": reimport_hourly_parity.0,
+        "materialized_rows": reimport_hourly_parity.1,
+        "mismatch_rows": reimport_hourly_parity.2,
+        "clean_streams": reimport_hourly_parity.3,
+        "total_streams": reimport_hourly_parity.4
+    });
+    let reimport_epoch_reset_semantics_report = json!({
+        "imported_rows": reimport_epoch_reset_semantics.0,
+        "imported_rows_at_epoch_zero": reimport_epoch_reset_semantics.1,
+        "hourly_rx_resets": reimport_epoch_reset_semantics.2,
+        "hourly_tx_resets": reimport_epoch_reset_semantics.3
+    });
+    let reimport_live_successor_boundaries_report = json!({
+        "total": reimport_live_boundaries.0,
+        "timestamp_preserved": reimport_live_boundaries.1,
+        "counter_values_preserved": reimport_live_boundaries.2,
+        "epoch_advanced_once": reimport_live_boundaries.3
+    });
+    let reimport_postgres_report = json!({
+        "commits": reimport_phase_attribution.database_delta.xact_commit,
+        "rollbacks": reimport_phase_attribution.database_delta.xact_rollback,
+        "temporary_files": reimport_phase_attribution.database_delta.temp_files,
+        "temporary_bytes": reimport_phase_attribution.database_delta.temp_bytes,
+        "deadlocks": reimport_phase_attribution.database_delta.deadlocks,
+        "activity": reimport_phase_attribution.activity.to_json(),
+        "phase_attribution_artifact": reimport_phase_attribution_path
+            .file_name().unwrap().to_string_lossy(),
+        "phase_attribution": reimport_phase_attribution.to_json(),
+    });
+    let reimport_report = Value::Object(
+        [
+            (
+                "method".to_string(),
+                json!("Repository::import_vnstat_traffic_history"),
+            ),
+            ("normal_rerun_on_existing_database".to_string(), json!(true)),
+            ("manual_delete_before_rerun".to_string(), json!(false)),
+            (
+                "started_at".to_string(),
+                json!(reimport_started_at.to_rfc3339()),
+            ),
+            (
+                "finished_at".to_string(),
+                json!(reimport_finished_at.to_rfc3339()),
+            ),
+            (
+                "started_unix_ms".to_string(),
+                json!(reimport_started_at.timestamp_millis()),
+            ),
+            (
+                "finished_unix_ms".to_string(),
+                json!(reimport_finished_at.timestamp_millis()),
+            ),
+            ("client_count".to_string(), json!(120)),
+            ("interface_count".to_string(), json!(120)),
+            ("import_concurrency".to_string(), json!(4)),
+            ("per_client_timeout_secs".to_string(), json!(60)),
+            (
+                "elapsed_ms".to_string(),
+                json!(u64::try_from(reimport_elapsed_ms).unwrap()),
+            ),
+            (
+                "max_client_elapsed_ms".to_string(),
+                json!(u64::try_from(max_client_reimport_elapsed_ms).unwrap()),
+            ),
+            (
+                "performance".to_string(),
+                json!({
+                    "scope": "repository_import_plus_job_completion_persistence",
+                    "rows_per_second": reimport_rows_per_second,
+                    "clients_per_second": 120_000.0
+                        / f64::from(u32::try_from(reimport_elapsed_ms.max(1)).unwrap()),
+                }),
+            ),
+            ("raw_rows".to_string(), reimport_raw_rows_report),
+            ("rollup_rows".to_string(), reimport_rollup_rows_report),
+            (
+                "expected_bytes".to_string(),
+                json!({"rx": reimport_expected_rx_total, "tx": reimport_expected_tx_total}),
+            ),
+            (
+                "observed_bytes".to_string(),
+                json!({"rx": reimport_observed_rx_total, "tx": reimport_observed_tx_total}),
+            ),
+            ("provenance".to_string(), reimport_provenance_report),
+            (
+                "hourly_usage_parity".to_string(),
+                reimport_hourly_usage_parity_report,
+            ),
+            (
+                "clean_ledger_streams".to_string(),
+                json!(reimport_hourly_parity.3),
+            ),
+            (
+                "epoch_reset_semantics".to_string(),
+                reimport_epoch_reset_semantics_report,
+            ),
+            (
+                "live_successor_boundaries".to_string(),
+                reimport_live_successor_boundaries_report,
+            ),
+            ("postgres".to_string(), reimport_postgres_report),
+            ("failed_clients".to_string(), json!(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let atomic_imported_only_replacement_report = json!({
+        "intentional_insert_failure_observed": true,
+        "failure_fingerprint_unchanged": post_failure_fingerprint == pre_failure_fingerprint,
+        "failure_left_idle_in_transaction": post_failure_idle_in_transaction,
+        "previous_import_rows_remaining": previous_import_rows_remaining,
+        "logical_fingerprint_preserved_after_successful_rerun":
+            reimport_logical_fingerprint == initial_logical_fingerprint,
+        "initial_jobs_retained_for_audit": lineage.0,
+        "reimport_jobs_retained_for_audit": reimport_lineage.0,
+        "total_completed_job_history": lineage.0 + reimport_lineage.0
+    });
+    let report = Value::Object(
+        [
+            (
+                "schema".to_string(),
+                json!("vpsman-vnstat-browser-pressure-import/v1"),
+            ),
+            ("generated_at".to_string(), json!(Utc::now().to_rfc3339())),
+            (
+                "method".to_string(),
+                json!("Repository::import_vnstat_traffic_history"),
+            ),
+            (
+                "import_started_at".to_string(),
+                json!(import_started_at.to_rfc3339()),
+            ),
+            (
+                "import_finished_at".to_string(),
+                json!(import_finished_at.to_rfc3339()),
+            ),
+            (
+                "import_started_unix_ms".to_string(),
+                json!(import_started_at.timestamp_millis()),
+            ),
+            (
+                "import_finished_unix_ms".to_string(),
+                json!(import_finished_at.timestamp_millis()),
+            ),
+            ("client_count".to_string(), json!(120)),
+            ("interface_count".to_string(), json!(120)),
+            ("history_days_per_client".to_string(), json!(1825)),
+            ("source_buckets_per_client".to_string(), json!(5)),
+            ("import_concurrency".to_string(), json!(4)),
+            ("successful_imports_per_client".to_string(), json!(2)),
+            (
+                "production_importer_attempts".to_string(),
+                production_importer_attempts_report,
+            ),
+            ("per_client_timeout_secs".to_string(), json!(60)),
+            (
+                "elapsed_ms".to_string(),
+                json!(u64::try_from(import_elapsed_ms).unwrap()),
+            ),
+            (
+                "max_client_elapsed_ms".to_string(),
+                json!(u64::try_from(max_client_elapsed_ms).unwrap()),
+            ),
+            (
+                "performance".to_string(),
+                json!({
+                    "scope": "repository_import_plus_job_completion_persistence",
+                    "rows_per_second": import_rows_per_second,
+                    "clients_per_second": 120_000.0
+                        / f64::from(u32::try_from(import_elapsed_ms.max(1)).unwrap()),
+                }),
+            ),
+            ("raw_rows".to_string(), raw_rows_report),
+            ("rollup_rows".to_string(), rollup_rows_report),
+            (
+                "expected_bytes".to_string(),
+                json!({"rx": expected_rx_total, "tx": expected_tx_total}),
+            ),
+            (
+                "observed_bytes".to_string(),
+                json!({"rx": observed_rx_total, "tx": observed_tx_total}),
+            ),
+            ("provenance".to_string(), provenance_report),
+            (
+                "hourly_usage_parity".to_string(),
+                hourly_usage_parity_report,
+            ),
+            ("clean_ledger_streams".to_string(), json!(hourly_parity.3)),
+            (
+                "epoch_reset_semantics".to_string(),
+                epoch_reset_semantics_report,
+            ),
+            (
+                "live_successor_boundaries".to_string(),
+                live_successor_boundaries_report,
+            ),
+            ("import_postgres".to_string(), import_postgres_report),
+            ("reimport".to_string(), reimport_report),
+            (
+                "atomic_imported_only_replacement".to_string(),
+                atomic_imported_only_replacement_report,
+            ),
+            ("failed_clients".to_string(), json!(0)),
+            ("traffic_relation_bytes".to_string(), json!(relation_bytes)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let report_tmp = report_path.with_extension("json.tmp");
+    fs::write(&report_tmp, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    fs::rename(report_tmp, report_path).unwrap();
+    pool.close().await;
+    control_pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_vnstat_import_locks_client_before_traffic_advisory() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-import-client-lock-order";
+    let live_unix = Utc::now().timestamp().div_euclid(60) * 60;
+    let start_unix = live_unix - 600;
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        ) VALUES (
+            $1, 'host', 'eth0', to_timestamp($2::double precision),
+            10, 20, 0, 0, 'interface_counters'
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(live_unix as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let result = NetworkTrafficImportResult {
+        r#type: "network_traffic_import_vnstat".to_string(),
+        status: "collected".to_string(),
+        requested_start_unix: u64::try_from(start_unix).unwrap(),
+        collected_until_unix: u64::try_from(live_unix).unwrap(),
+        interfaces: vec!["eth0".to_string()],
+        sources: vec![NetworkTrafficImportSource {
+            interface: "eth0".to_string(),
+            database_created_unix: Some(u64::try_from(start_unix).unwrap()),
+            retained_start_unix: u64::try_from(start_unix).unwrap(),
+            source_updated_unix: Some(u64::try_from(live_unix).unwrap()),
+        }],
+        batch_count: 1,
+        bucket_count: 1,
+        message: String::new(),
+    };
+    let buckets = vec![NetworkTrafficImportBucket {
+        interface: "eth0".to_string(),
+        start_unix: u64::try_from(start_unix).unwrap(),
+        duration_secs: 600,
+        rx_bytes: 100,
+        tx_bytes: 50,
+    }];
+
+    let mut row_first = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM clients WHERE id = $1 FOR UPDATE")
+        .bind(client_id)
+        .execute(&mut *row_first)
+        .await
+        .unwrap();
+    let import_repo = db.repo.clone();
+    let import_task = tokio::spawn(async move {
+        import_repo
+            .import_vnstat_traffic_history(
+                Uuid::new_v4(),
+                client_id,
+                &["eth0".to_string()],
+                u64::try_from(start_unix).unwrap(),
+                &result,
+                &buckets,
+                u64::try_from(live_unix + 60).unwrap(),
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query = 'SELECT id FROM clients WHERE id = $1 FOR UPDATE'
+                )
+                "#,
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("vnStat import did not wait on the canonical client row first");
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("traffic-counters:{client_id}"))
+            .execute(&mut *row_first),
+    )
+    .await
+    .expect("vnStat import acquired the advisory before its client row")
+    .unwrap();
+    row_first.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), import_task)
+        .await
+        .expect("ordered import did not resume after the row-first writer committed")
+        .unwrap()
+        .unwrap();
 
     db.cleanup().await;
 }
@@ -12073,6 +17958,74 @@ async fn exact_v044_migration_test_db() -> Option<(PgReliabilityTestDb, std::pat
     Some((db, baseline_dir))
 }
 
+fn migration_test_directory_through_0015() -> std::path::PathBuf {
+    let source = workspace_migrations_dir();
+    let destination = std::env::temp_dir().join(format!(
+        "vpsman-through-0015-migrations-{}",
+        Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&destination).unwrap();
+    let mut copied = 0;
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let name = name.to_str().unwrap();
+        if name.ends_with(".sql") && name <= "0015_latest_network_rate_effective_index.sql" {
+            fs::copy(entry.path(), destination.join(name)).unwrap();
+            copied += 1;
+        }
+    }
+    assert_eq!(copied, 15);
+    destination
+}
+
+async fn traffic_hourly_ledger_snapshot(
+    pool: &PgPool,
+    client_id: &str,
+) -> (String, String, String) {
+    sqlx::query_as(
+        r#"
+        SELECT
+            (
+                SELECT coalesce(
+                    jsonb_agg(to_jsonb(sample) ORDER BY
+                        sample.client_id, sample.source_kind, sample.interface,
+                        sample.observed_at
+                    )::text,
+                    '[]'
+                )
+                FROM traffic_counter_samples sample
+                WHERE sample.client_id = $1
+            ),
+            (
+                SELECT coalesce(
+                    jsonb_agg(to_jsonb(usage) ORDER BY
+                        usage.client_id, usage.source_kind, usage.interface,
+                        usage.bucket_start
+                    )::text,
+                    '[]'
+                )
+                FROM traffic_counter_hourly_usage usage
+                WHERE usage.client_id = $1
+            ),
+            (
+                SELECT coalesce(
+                    jsonb_agg(to_jsonb(stream) ORDER BY
+                        stream.client_id, stream.source_kind, stream.interface
+                    )::text,
+                    '[]'
+                )
+                FROM traffic_counter_hourly_usage_streams stream
+                WHERE stream.client_id = $1
+            )
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn postgres_exact_v044_upgrade_backfills_hourly_traffic_coverage() {
     let Some((db, baseline_dir)) = exact_v044_migration_test_db().await else {
@@ -12101,12 +18054,74 @@ async fn postgres_exact_v044_upgrade_backfills_hourly_traffic_coverage() {
     .await
     .unwrap();
 
+    let through_0015_dir = migration_test_directory_through_0015();
+    sqlx::migrate::Migrator::new(through_0015_dir.as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0010 through 0015 must backfill exact traffic usage");
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        15
+    );
+    let ledger_before_0016 = traffic_hourly_ledger_snapshot(&db.pool, client_id).await;
+    let function_before_0016: String = sqlx::query_scalar(
+        r#"
+        SELECT pg_get_functiondef(
+            'refresh_traffic_counter_hourly_usage(text[],text[],text[],timestamp with time zone[],boolean)'::regprocedure
+        )
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(function_before_0016.contains("sequenced AS MATERIALIZED"));
+
     sqlx::migrate::Migrator::new(workspace_migrations_dir().as_path())
         .await
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0014 must backfill exact traffic usage");
+        .expect("0016 through 0020 must apply without rewriting the hourly ledger");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        20
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.traffic_cycle_usage')::text"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        None,
+        "migration 0020 must retire the unused traffic cycle prototype"
+    );
+    assert_eq!(
+        traffic_hourly_ledger_snapshot(&db.pool, client_id).await,
+        ledger_before_0016,
+        "0016 must replace function code without rewriting retained ledger rows"
+    );
+    let function_after_0016: String = sqlx::query_scalar(
+        r#"
+        SELECT pg_get_functiondef(
+            'refresh_traffic_counter_hourly_usage(text[],text[],text[],timestamp with time zone[],boolean)'::regprocedure
+        )
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(!function_after_0016.contains("sequenced AS MATERIALIZED"));
+    assert!(function_after_0016.contains("CROSS JOIN LATERAL"));
     assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(
@@ -12136,6 +18151,314 @@ async fn postgres_exact_v044_upgrade_backfills_hourly_traffic_coverage() {
 
     db.cleanup().await;
     fs::remove_dir_all(&baseline_dir).unwrap();
+    fs::remove_dir_all(&through_0015_dir).unwrap();
+}
+
+#[tokio::test]
+async fn postgres_migration_contract_repairs_0018_crash_states_and_rejects_wrong_index() {
+    async fn import_class_index_state(pool: &PgPool) -> Option<(String, bool, bool, bool)> {
+        sqlx::query_as(
+            r#"
+            SELECT
+                pg_get_indexdef(index.indexrelid),
+                index.indisvalid,
+                index.indisready,
+                index.indislive
+            FROM pg_catalog.pg_index index
+            JOIN pg_catalog.pg_class relation
+              ON relation.oid = index.indexrelid
+            JOIN pg_catalog.pg_namespace namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND relation.relname =
+                    'traffic_counter_samples_import_class_stream_idx'
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn leave_exact_canceled_build_artifact(pool: &PgPool, exact_definition: &str) {
+        const CREATE_INDEX_SQL: &str = r#"
+            CREATE INDEX CONCURRENTLY
+                traffic_counter_samples_import_class_stream_idx
+            ON public.traffic_counter_samples (
+                client_id,
+                source_kind,
+                interface,
+                (sample_source LIKE 'vnstat_import:%'),
+                observed_at
+            )
+        "#;
+
+        sqlx::raw_sql(
+            "DROP INDEX CONCURRENTLY IF EXISTS public.traffic_counter_samples_import_class_stream_idx",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // This pre-existing writer-compatible lock lets the concurrent build
+        // commit its catalog entry, then holds it before the first heap scan.
+        // Canceling in that stable phase reproduces PostgreSQL's real
+        // exact-definition, indisvalid=false, indisready=false crash residue.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE public.traffic_counter_samples IN ROW EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let mut builder = pool.acquire().await.unwrap();
+        let builder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *builder)
+            .await
+            .unwrap();
+        let build =
+            tokio::spawn(async move { builder.execute(CREATE_INDEX_SQL).await.map(|_| ()) });
+
+        let building_state = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(state) = import_class_index_state(pool).await {
+                    if !state.1 && !state.2 {
+                        break state;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("concurrent build did not expose its invalid/unready catalog phase");
+        assert_eq!(
+            building_state,
+            (exact_definition.to_string(), false, false, true),
+            "the cancellation point must be an exact live but invalid/unready index"
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
+                .bind(builder_pid)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            "the concurrent index builder must still be cancellable"
+        );
+        let build_error = build
+            .await
+            .unwrap()
+            .expect_err("the concurrent index build must be canceled");
+        assert!(
+            build_error.to_string().contains("canceling statement"),
+            "unexpected concurrent-build failure: {build_error}"
+        );
+        blocker.rollback().await.unwrap();
+        assert_eq!(
+            import_class_index_state(pool).await,
+            Some((exact_definition.to_string(), false, false, true)),
+            "PostgreSQL must retain the exact invalid/unready artifact"
+        );
+    }
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let migrations = workspace_migrations_dir();
+    let exact_definition = "CREATE INDEX traffic_counter_samples_import_class_stream_idx ON public.traffic_counter_samples USING btree (client_id, source_kind, interface, ((sample_source ~~ 'vnstat_import:%'::text)), observed_at)";
+
+    sqlx::raw_sql("DROP INDEX CONCURRENTLY public.traffic_counter_samples_import_class_stream_idx")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (first_repair, second_repair) = tokio::join!(
+        vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path()),
+        vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path())
+    );
+    first_repair.unwrap();
+    second_repair.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT pg_get_indexdef('public.traffic_counter_samples_import_class_stream_idx'::regclass)",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        exact_definition
+    );
+
+    sqlx::query("DELETE FROM public._sqlx_migrations WHERE version = 18")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path())
+        .await
+        .expect("a valid index left before ledger insertion must converge");
+    assert_eq!(
+        sqlx::query_as::<_, (bool, String)>(
+            "SELECT success, description FROM public._sqlx_migrations WHERE version = 18",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            true,
+            "traffic counter import class stream index".to_string()
+        )
+    );
+
+    let fixture_client_id = "traffic-import-index-crash-fixture";
+    insert_client(&db.pool, fixture_client_id, None).await;
+    let mut fixture_tx = db.pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE public.traffic_counter_samples DISABLE TRIGGER USER")
+        .execute(&mut *fixture_tx)
+        .await
+        .unwrap();
+    let inserted_fixture_rows = sqlx::query(
+        r#"
+        INSERT INTO public.traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'crash-state',
+            TIMESTAMPTZ '2020-01-01 00:00:00+00'
+                + generated.point * interval '1 minute',
+            generated.point,
+            generated.point * 2,
+            0,
+            0,
+            CASE WHEN generated.point % 2 = 0
+                 THEN 'vnstat_import:crash-fixture'
+                 ELSE 'interface_counters'
+            END
+        FROM generate_series(1, 100000::bigint) AS generated(point)
+        "#,
+    )
+    .bind(fixture_client_id)
+    .execute(&mut *fixture_tx)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(inserted_fixture_rows, 100_000);
+    sqlx::query("ALTER TABLE public.traffic_counter_samples ENABLE TRIGGER USER")
+        .execute(&mut *fixture_tx)
+        .await
+        .unwrap();
+    fixture_tx.commit().await.unwrap();
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM public._sqlx_migrations WHERE version = 18",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1,
+        "the first canceled artifact must retain the successful v18 ledger row"
+    );
+    leave_exact_canceled_build_artifact(&db.pool, exact_definition).await;
+    vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path())
+        .await
+        .expect("an exact canceled build with a v18 ledger must be repaired");
+    assert_eq!(
+        import_class_index_state(&db.pool).await,
+        Some((exact_definition.to_string(), true, true, true))
+    );
+
+    sqlx::query("DELETE FROM public._sqlx_migrations WHERE version = 18")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    leave_exact_canceled_build_artifact(&db.pool, exact_definition).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM public._sqlx_migrations WHERE version = 18",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "the second canceled artifact must precede the v18 ledger row"
+    );
+    vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path())
+        .await
+        .expect("an exact canceled build before v18 ledgering must converge");
+    assert_eq!(
+        import_class_index_state(&db.pool).await,
+        Some((exact_definition.to_string(), true, true, true))
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, String)>(
+            "SELECT success, description FROM public._sqlx_migrations WHERE version = 18",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            true,
+            "traffic counter import class stream index".to_string()
+        )
+    );
+
+    let mut fixture_tx = db.pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE public.traffic_counter_samples DISABLE TRIGGER USER")
+        .execute(&mut *fixture_tx)
+        .await
+        .unwrap();
+    let deleted_fixture_rows =
+        sqlx::query("DELETE FROM public.traffic_counter_samples WHERE client_id = $1")
+            .bind(fixture_client_id)
+            .execute(&mut *fixture_tx)
+            .await
+            .unwrap()
+            .rows_affected();
+    assert_eq!(deleted_fixture_rows, 100_000);
+    sqlx::query("ALTER TABLE public.traffic_counter_samples ENABLE TRIGGER USER")
+        .execute(&mut *fixture_tx)
+        .await
+        .unwrap();
+    fixture_tx.commit().await.unwrap();
+
+    sqlx::raw_sql("DROP INDEX CONCURRENTLY public.traffic_counter_samples_import_class_stream_idx")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE INDEX traffic_counter_samples_import_class_stream_idx ON public.traffic_counter_samples (client_id)",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let wrong_definition =
+        vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path())
+            .await
+            .expect_err("a wrong same-name index must fail closed");
+    assert!(
+        wrong_definition
+            .to_string()
+            .contains("unexpected definition"),
+        "unexpected error: {wrong_definition:#}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT pg_get_indexdef('public.traffic_counter_samples_import_class_stream_idx'::regclass)",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "CREATE INDEX traffic_counter_samples_import_class_stream_idx ON public.traffic_counter_samples USING btree (client_id)",
+        "the fail-closed check must not replace an unknown same-name object"
+    );
+
+    sqlx::raw_sql("DROP INDEX CONCURRENTLY public.traffic_counter_samples_import_class_stream_idx")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    vpsman_server_core::run_postgres_migrations(&db.pool, migrations.as_path())
+        .await
+        .expect("the exact index must be restorable after operator cleanup");
+
+    db.cleanup().await;
 }
 
 #[tokio::test]
@@ -12182,7 +18505,7 @@ async fn postgres_exact_v044_upgrade_keeps_legacy_disk_numerics_inert() {
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0014 must preserve legacy disk numerics as inert evidence");
+        .expect("0010 through 0020 must preserve legacy disk numerics as inert evidence");
 
     for table in ["telemetry_rollups", "telemetry_resource_latest"] {
         let query = format!(
@@ -12899,13 +19222,13 @@ async fn postgres_exact_v044_operational_lifecycle_backfill_is_quiet_and_idempot
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0014 must apply to exact v0.4.4");
+        .expect("0010 through 0020 must apply to exact v0.4.4");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        14
+        20
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fleet_alert_states WHERE revision = 1",)
@@ -14037,13 +20360,13 @@ async fn postgres_exact_v044_resource_policy_upgrade_preserves_operator_intent()
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0014 must apply after exact v0.4.4 migration checksums");
+        .expect("0010 through 0020 must apply after exact v0.4.4 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        14
+        20
     );
     assert_eq!(
         sqlx::query_scalar::<_, Value>(
@@ -14256,13 +20579,13 @@ async fn postgres_exact_v044_policy_upgrade_resets_only_saturation_state_and_kee
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0014 must apply to exact v0.4.4");
+        .expect("0010 through 0020 must apply to exact v0.4.4");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        14
+        20
     );
 
     let affected_after = sqlx::query_as::<_, (i32, String, String, String, String, Option<Value>)>(
@@ -14684,13 +21007,13 @@ async fn postgres_exact_v035_baseline_applies_supported_migrations_in_place() {
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0009 through 0014 must apply after exact v0.3.5 migration checksums");
+        .expect("0009 through 0020 must apply after exact v0.3.5 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        14
+        20
     );
     assert_eq!(
         sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool)>(
@@ -16124,9 +22447,101 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
         updated_at: created_unix.to_string(),
     };
     db.repo
-        .create_monitoring_share(share, &operator)
+        .create_monitoring_share(share.clone(), &operator)
         .await
         .unwrap();
+    let expected_share = db
+        .repo
+        .monitoring_share_record(share_id)
+        .await
+        .unwrap()
+        .unwrap();
+    db.repo
+        .record_monitoring_share_visitor(
+            &expected_share,
+            Some(Uuid::new_v4()),
+            "198.51.100.40",
+            Some("definition-edit-browser"),
+        )
+        .await
+        .unwrap();
+    let mut next_visibility = expected_share.visibility.clone();
+    next_visibility.identity_context = true;
+    next_visibility.traffic = false;
+    let edited = db
+        .repo
+        .update_monitoring_share_definition(
+            crate::model_monitoring::MonitoringShareDefinitionUpdate {
+                expected_share: expected_share.clone(),
+                next_name: "Edited mutation snapshot share".to_string(),
+                next_selector_expression: expected_share.selector_expression.clone(),
+                next_client_ids: expected_share.target_client_ids(),
+                next_visibility: next_visibility.clone(),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let persisted_edit: (String, String, String, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT
+            name,
+            token_secret,
+            updated_at::text,
+            show_identity_context,
+            show_traffic
+        FROM monitoring_share_links
+        WHERE id = $1
+        "#,
+    )
+    .bind(share_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let persisted_public_key: String = sqlx::query_scalar(
+        "SELECT public_client_key FROM monitoring_share_targets WHERE share_id = $1 AND client_id = $2",
+    )
+    .bind(share_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(edited.name, "Edited mutation snapshot share");
+    assert_eq!(edited.visitor_count, 1);
+    assert_eq!(edited.visibility, next_visibility);
+    assert_eq!(edited.updated_at, persisted_edit.2);
+    assert_eq!(persisted_edit.0, edited.name);
+    assert_eq!(persisted_edit.1, share.token_secret);
+    assert!(persisted_edit.3);
+    assert!(!persisted_edit.4);
+    assert_eq!(persisted_public_key, share.targets[0].public_client_key);
+    assert_ne!(edited.updated_at, expected_share.updated_at);
+    let edit_audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action = 'monitoring_share.definition_updated' AND target = $1",
+    )
+    .bind(format!("monitoring_share:{share_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(edit_audit_count, 1);
+    let stale_edit = db
+        .repo
+        .update_monitoring_share_definition(
+            crate::model_monitoring::MonitoringShareDefinitionUpdate {
+                expected_share: expected_share.clone(),
+                next_name: "Must not overwrite".to_string(),
+                next_selector_expression: expected_share.selector_expression.clone(),
+                next_client_ids: expected_share.target_client_ids(),
+                next_visibility: expected_share.visibility.clone(),
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale_edit
+        .to_string()
+        .contains("monitoring_share_preview_stale"));
+
     let extended = db
         .repo
         .extend_monitoring_shares(&[share_id], 60, &operator)

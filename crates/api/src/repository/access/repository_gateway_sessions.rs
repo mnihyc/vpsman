@@ -154,6 +154,11 @@ impl Repository {
                 .await
                 {
                     let metadata = gateway_status_metadata(event, "online");
+                    let reason = if from_status == "suspended" {
+                        "agent_online_auto_unsuspend"
+                    } else {
+                        "gateway_session_started"
+                    };
                     memory.audits.write().await.push(AuditLogView {
                         id: uuid::Uuid::new_v4(),
                         actor_id: None,
@@ -167,7 +172,7 @@ impl Repository {
                         &event.client_id,
                         Some(&from_status),
                         "online",
-                        "gateway_session_started",
+                        reason,
                         metadata,
                     )
                     .await?;
@@ -263,7 +268,11 @@ impl Repository {
                         status = CASE WHEN status = 'stale' THEN status ELSE 'online' END,
                         registration_ip = COALESCE(registration_ip, $2::inet),
                         last_ip = COALESCE($2::inet, last_ip),
-                        last_seen_at = now()
+                        last_seen_at = now(),
+                        suspended_at = NULL,
+                        suspended_by = NULL,
+                        suspended_reason = NULL,
+                        suspended_from_status = NULL
                     WHERE id = $1 AND hidden_at IS NULL
                     "#,
                 )
@@ -272,12 +281,17 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 if prior_status != "stale" && prior_status != "online" {
+                    let reason = if prior_status == "suspended" {
+                        "agent_online_auto_unsuspend"
+                    } else {
+                        "gateway_session_started"
+                    };
                     crate::repository_ingest::record_client_status_transition_in_tx(
                         &mut tx,
                         &event.client_id,
                         Some(&prior_status),
                         "online",
-                        "gateway_session_started",
+                        reason,
                         gateway_status_metadata(event, "online"),
                         "gateway_ingest",
                         "gateway-session-lifecycle",
@@ -401,7 +415,7 @@ impl Repository {
                         last_seen_at = now()
                     WHERE id = $1
                       AND hidden_at IS NULL
-                      AND status <> 'revoked'
+                      AND status NOT IN ('suspended', 'revoked')
                       AND $3
                       AND NOT EXISTS (
                         SELECT 1
@@ -593,14 +607,13 @@ async fn set_memory_agent_status(
         return None;
     }
     let mut changed_from = None;
-    if let Some(agent) = memory
-        .agents
-        .write()
-        .await
-        .iter_mut()
-        .find(|agent| agent.id == client_id)
     {
+        let mut agents = memory.agents.write().await;
+        let agent = agents.iter_mut().find(|agent| agent.id == client_id)?;
         if matches!(agent.status.as_str(), "revoked" | "deleted") {
+            return None;
+        }
+        if agent.status == "suspended" && status != "online" {
             return None;
         }
         if (override_stale || agent.status != "stale") && agent.status != status {
@@ -614,6 +627,9 @@ async fn set_memory_agent_status(
             agent.last_ip = Some(remote_ip.to_string());
         }
         agent.last_seen_at = Some(unix_now().to_string());
+    }
+    if changed_from.as_deref() == Some("suspended") && status == "online" {
+        memory.agent_suspensions.write().await.remove(client_id);
     }
     changed_from
 }

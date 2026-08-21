@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
-use sqlx::{types::Json as SqlJson, Row};
+use sqlx::{types::Json as SqlJson, Executor, PgConnection, Postgres, Row};
 use std::collections::HashSet;
 use tracing::warn;
 use uuid::Uuid;
@@ -14,6 +14,7 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
 };
+use vpsman_server_core::ClientPolicySuppressionSharedGuard;
 
 use crate::{
     model::{AuditLogView, AuthContext},
@@ -39,6 +40,35 @@ const MAX_TARGET_BYTES: usize = 512;
 const MAX_NOTES_BYTES: usize = 1024;
 const DELIVERY_KIND_WEBHOOK: &str = "webhook";
 const FLEET_ALERT_NOTIFICATION_DISPATCH_CHANNEL_LIMIT: i64 = 1_000;
+
+pub(crate) struct FleetAlertNotificationSendGuard {
+    client_suppression: Option<ClientPolicySuppressionSharedGuard>,
+    channel_enabled: bool,
+    deliverable: bool,
+}
+
+impl FleetAlertNotificationSendGuard {
+    pub(crate) fn channel_enabled(&self) -> bool {
+        self.channel_enabled
+    }
+
+    pub(crate) fn is_deliverable(&self) -> bool {
+        self.deliverable
+    }
+
+    fn postgres_connection(&mut self) -> Option<&mut PgConnection> {
+        self.client_suppression
+            .as_mut()
+            .map(ClientPolicySuppressionSharedGuard::connection)
+    }
+
+    pub(crate) async fn release(self) -> Result<()> {
+        if let Some(guard) = self.client_suppression {
+            guard.release().await?;
+        }
+        Ok(())
+    }
+}
 
 impl Repository {
     pub(crate) async fn list_fleet_alert_notification_channels(
@@ -863,19 +893,92 @@ impl Repository {
                 .await
                 .iter()
                 .any(|channel| channel.id == channel_id && channel.enabled)),
+            Self::Postgres(pool) => Ok(sqlx::query_scalar::<_, bool>(
+                "SELECT enabled FROM fleet_alert_notification_channels WHERE id=$1",
+            )
+            .bind(channel_id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(false)),
+        }
+    }
+
+    pub(crate) async fn begin_fleet_alert_notification_send(
+        &self,
+        delivery_id: Uuid,
+        channel_id: Uuid,
+        alert_id: &str,
+        lease_id: Uuid,
+    ) -> Result<FleetAlertNotificationSendGuard> {
+        match self {
+            Self::Memory(memory) => {
+                let channel_enabled = memory
+                    .fleet_alert_notification_channels
+                    .read()
+                    .await
+                    .iter()
+                    .any(|channel| channel.id == channel_id && channel.enabled);
+                let claimed = memory
+                    .fleet_alert_notification_deliveries
+                    .read()
+                    .await
+                    .iter()
+                    .any(|delivery| {
+                        delivery.id == delivery_id
+                            && delivery.alert_id == alert_id
+                            && delivery.status
+                                == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS
+                    });
+                Ok(FleetAlertNotificationSendGuard {
+                    client_suppression: None,
+                    channel_enabled,
+                    deliverable: channel_enabled && claimed,
+                })
+            }
             Self::Postgres(pool) => {
-                let enabled = sqlx::query_scalar::<_, bool>(
-                    r#"
-                    SELECT enabled
-                    FROM fleet_alert_notification_channels
-                    WHERE id = $1
-                    "#,
+                // Episode ownership is immutable after its public ID is minted.
+                // The guarded recheck still compares this value and fails
+                // closed if storage is changed outside that invariant.
+                let subject_client_id = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT client_id FROM alert_episodes WHERE public_id=$1",
                 )
-                .bind(channel_id)
+                .bind(alert_id)
                 .fetch_optional(pool)
                 .await?
-                .unwrap_or(false);
-                Ok(enabled)
+                .flatten();
+                let (client_suppression, channel_enabled, deliverable) =
+                    if let Some(client_id) = subject_client_id.as_deref() {
+                        let mut guard =
+                            ClientPolicySuppressionSharedGuard::acquire(pool, client_id).await?;
+                        let (channel_enabled, deliverable) =
+                            postgres_fleet_alert_notification_send_state(
+                                guard.connection(),
+                                delivery_id,
+                                channel_id,
+                                alert_id,
+                                lease_id,
+                                subject_client_id.as_deref(),
+                            )
+                            .await?;
+                        (Some(guard), channel_enabled, deliverable)
+                    } else {
+                        let (channel_enabled, deliverable) =
+                            postgres_fleet_alert_notification_send_state(
+                                pool,
+                                delivery_id,
+                                channel_id,
+                                alert_id,
+                                lease_id,
+                                None,
+                            )
+                            .await?;
+                        (None, channel_enabled, deliverable)
+                    };
+                Ok(FleetAlertNotificationSendGuard {
+                    client_suppression,
+                    channel_enabled,
+                    deliverable,
+                })
             }
         }
     }
@@ -887,6 +990,7 @@ impl Repository {
         status: &str,
         error: Option<&str>,
         next_attempt_after_secs: Option<i64>,
+        send_guard: Option<&mut FleetAlertNotificationSendGuard>,
     ) -> Result<FleetAlertNotificationDeliveryView> {
         let status = normalize_delivery_attempt_status(status)?;
         let error = error
@@ -901,6 +1005,9 @@ impl Repository {
                     .iter_mut()
                     .find(|delivery| delivery.id == delivery_id)
                     .context("fleet alert notification delivery not found")?;
+                if delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED {
+                    return Ok(delivery.clone());
+                }
                 anyhow::ensure!(
                     delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
                     "fleet alert notification delivery is not claimed"
@@ -917,55 +1024,30 @@ impl Repository {
                 Ok(delivery.clone())
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    UPDATE fleet_alert_notification_deliveries
-                    SET
-                        status = $2,
-                        error = $3,
-                        attempt_count = attempt_count + 1,
-                        delivery_lease_id = NULL,
-                        delivery_lease_until = NULL,
-                        next_attempt_at = CASE
-                            WHEN $5::bigint IS NULL THEN NULL
-                            ELSE now() + ($5::bigint * interval '1 second')
-                        END,
-                        last_attempt_at = now(),
-                        delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END
-                    WHERE id = $1
-                      AND status = 'in_progress'
-                      AND delivery_lease_id = $4
-                    RETURNING
-                        id,
-                        channel_id,
-                        channel_name,
-                        alert_id,
-                        alert_severity,
-                        alert_category,
-                        status,
-                        delivery_kind,
-                        target,
-                        dedupe_key,
-                        payload,
-                        error,
-                        attempt_count,
-                        next_attempt_at::text AS next_attempt_at,
-                        last_attempt_at::text AS last_attempt_at,
-                        cooldown_until_unix,
-                        actor_id,
-                        created_at::text AS created_at,
-                        delivered_at::text AS delivered_at
-                    "#,
-                )
-                .bind(delivery_id)
-                .bind(status)
-                .bind(error.as_deref())
-                .bind(lease_id)
-                .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
-                .fetch_optional(pool)
-                .await?
-                .context("fleet alert notification delivery not found or not claimed")?;
-                delivery_from_row(row)
+                match send_guard.and_then(FleetAlertNotificationSendGuard::postgres_connection) {
+                    Some(connection) => {
+                        postgres_complete_fleet_alert_notification_delivery_attempt(
+                            connection,
+                            delivery_id,
+                            lease_id,
+                            status,
+                            error.as_deref(),
+                            next_attempt_after_secs,
+                        )
+                        .await
+                    }
+                    None => {
+                        postgres_complete_fleet_alert_notification_delivery_attempt(
+                            pool,
+                            delivery_id,
+                            lease_id,
+                            status,
+                            error.as_deref(),
+                            next_attempt_after_secs,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }
@@ -975,6 +1057,7 @@ impl Repository {
         delivery_id: Uuid,
         lease_id: Uuid,
         error: &str,
+        send_guard: Option<&mut FleetAlertNotificationSendGuard>,
     ) -> Result<FleetAlertNotificationDeliveryView> {
         let error = error
             .trim()
@@ -988,6 +1071,9 @@ impl Repository {
                     .iter_mut()
                     .find(|delivery| delivery.id == delivery_id)
                     .context("fleet alert notification delivery not found")?;
+                if delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED {
+                    return Ok(delivery.clone());
+                }
                 anyhow::ensure!(
                     delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
                     "fleet alert notification delivery is not claimed"
@@ -1000,48 +1086,26 @@ impl Repository {
                 Ok(delivery.clone())
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    UPDATE fleet_alert_notification_deliveries
-                    SET
-                        status = 'canceled_disabled',
-                        error = $3,
-                        delivery_lease_id = NULL,
-                        delivery_lease_until = NULL,
-                        next_attempt_at = NULL,
-                        delivered_at = NULL
-                    WHERE id = $1
-                      AND status = 'in_progress'
-                      AND delivery_lease_id = $2
-                    RETURNING
-                        id,
-                        channel_id,
-                        channel_name,
-                        alert_id,
-                        alert_severity,
-                        alert_category,
-                        status,
-                        delivery_kind,
-                        target,
-                        dedupe_key,
-                        payload,
-                        error,
-                        attempt_count,
-                        next_attempt_at::text AS next_attempt_at,
-                        last_attempt_at::text AS last_attempt_at,
-                        cooldown_until_unix,
-                        actor_id,
-                        created_at::text AS created_at,
-                        delivered_at::text AS delivered_at
-                    "#,
-                )
-                .bind(delivery_id)
-                .bind(lease_id)
-                .bind(&error)
-                .fetch_optional(pool)
-                .await?
-                .context("fleet alert notification delivery not found or not claimed")?;
-                delivery_from_row(row)
+                match send_guard.and_then(FleetAlertNotificationSendGuard::postgres_connection) {
+                    Some(connection) => {
+                        postgres_cancel_claimed_fleet_alert_notification_delivery(
+                            connection,
+                            delivery_id,
+                            lease_id,
+                            &error,
+                        )
+                        .await
+                    }
+                    None => {
+                        postgres_cancel_claimed_fleet_alert_notification_delivery(
+                            pool,
+                            delivery_id,
+                            lease_id,
+                            &error,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }
@@ -1084,6 +1148,189 @@ impl Repository {
             }
         }
     }
+}
+
+async fn postgres_complete_fleet_alert_notification_delivery_attempt<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    status: &str,
+    error: Option<&str>,
+    next_attempt_after_secs: Option<i64>,
+) -> Result<FleetAlertNotificationDeliveryView>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query(
+        r#"
+        UPDATE fleet_alert_notification_deliveries
+        SET
+            status = $2,
+            error = $3,
+            attempt_count = attempt_count + 1,
+            delivery_lease_id = NULL,
+            delivery_lease_until = NULL,
+            next_attempt_at = CASE
+                WHEN $5::bigint IS NULL THEN NULL
+                ELSE now() + ($5::bigint * interval '1 second')
+            END,
+            last_attempt_at = now(),
+            delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND delivery_lease_id = $4
+        RETURNING
+            id,
+            channel_id,
+            channel_name,
+            alert_id,
+            alert_severity,
+            alert_category,
+            status,
+            delivery_kind,
+            target,
+            dedupe_key,
+            payload,
+            error,
+            attempt_count,
+            next_attempt_at::text AS next_attempt_at,
+            last_attempt_at::text AS last_attempt_at,
+            cooldown_until_unix,
+            actor_id,
+            created_at::text AS created_at,
+            delivered_at::text AS delivered_at
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(status)
+    .bind(error)
+    .bind(lease_id)
+    .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
+    .fetch_optional(executor)
+    .await?
+    .context("fleet alert notification delivery not found or not claimed")?;
+    delivery_from_row(row)
+}
+
+async fn postgres_cancel_claimed_fleet_alert_notification_delivery<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    error: &str,
+) -> Result<FleetAlertNotificationDeliveryView>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query(
+        r#"
+        WITH updated AS (
+            UPDATE fleet_alert_notification_deliveries
+            SET
+                status = 'canceled_disabled',
+                error = $3,
+                delivery_lease_id = NULL,
+                delivery_lease_until = NULL,
+                next_attempt_at = NULL,
+                delivered_at = NULL
+            WHERE id = $1
+              AND status = 'in_progress'
+              AND delivery_lease_id = $2
+            RETURNING
+                id, channel_id, channel_name, alert_id, alert_severity,
+                alert_category, status, delivery_kind, target, dedupe_key,
+                payload, error, attempt_count,
+                next_attempt_at::text AS next_attempt_at,
+                last_attempt_at::text AS last_attempt_at,
+                cooldown_until_unix, actor_id,
+                created_at::text AS created_at,
+                delivered_at::text AS delivered_at
+        )
+        SELECT * FROM updated
+        UNION ALL
+        SELECT
+            id, channel_id, channel_name, alert_id, alert_severity,
+            alert_category, status, delivery_kind, target, dedupe_key,
+            payload, error, attempt_count,
+            next_attempt_at::text AS next_attempt_at,
+            last_attempt_at::text AS last_attempt_at,
+            cooldown_until_unix, actor_id,
+            created_at::text AS created_at,
+            delivered_at::text AS delivered_at
+        FROM fleet_alert_notification_deliveries
+        WHERE id=$1 AND status='canceled_disabled'
+          AND NOT EXISTS (SELECT 1 FROM updated)
+        LIMIT 1
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(lease_id)
+    .bind(error)
+    .fetch_optional(executor)
+    .await?
+    .context("fleet alert notification delivery not found or not claimed")?;
+    delivery_from_row(row)
+}
+
+async fn postgres_fleet_alert_notification_send_state<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    channel_id: Uuid,
+    alert_id: &str,
+    lease_id: Uuid,
+    expected_client_id: Option<&str>,
+) -> Result<(bool, bool)>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let state = sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM fleet_alert_notification_channels channel
+                WHERE channel.id=$2 AND channel.enabled
+            ) AS channel_enabled,
+            (
+                EXISTS (
+                    SELECT 1
+                    FROM fleet_alert_notification_deliveries delivery
+                    WHERE delivery.id=$1
+                      AND delivery.channel_id=$2
+                      AND delivery.alert_id=$3
+                      AND delivery.status='in_progress'
+                      AND delivery.delivery_lease_id=$4
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM fleet_alert_notification_channels channel
+                    WHERE channel.id=$2 AND channel.enabled
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM alert_episodes episode
+                    LEFT JOIN clients subject ON subject.id=episode.client_id
+                    WHERE episode.public_id=$3
+                      AND episode.client_id IS NOT DISTINCT FROM $5::text
+                      AND episode.resolved_at IS NULL
+                      AND (
+                            episode.client_id IS NULL
+                            OR (
+                                subject.id IS NOT NULL
+                                AND subject.status <> 'suspended'
+                            )
+                      )
+                )
+            ) AS deliverable
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(channel_id)
+    .bind(alert_id)
+    .bind(lease_id)
+    .bind(expected_client_id)
+    .fetch_one(executor)
+    .await?;
+    Ok(state)
 }
 
 pub(crate) fn notification_status_for_kind(_delivery_kind: &str) -> &'static str {

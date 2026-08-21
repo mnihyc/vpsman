@@ -57,6 +57,7 @@ async fn fleet_summary_accounts_for_every_visible_connection_state() {
         agent("disconnected", "disconnected", Some("2026-07-12T11:59:00Z")),
         agent("never", "never", None),
         agent("stale", "stale", Some("2026-07-11T12:00:00Z")),
+        agent("suspended", "suspended", None),
     ]);
     let job = |status: &str| JobHistoryView {
         id: Uuid::new_v4(),
@@ -81,16 +82,22 @@ async fn fleet_summary_accounts_for_every_visible_connection_state() {
     ]);
 
     let summary = repo.fleet_summary().await.unwrap();
-    assert_eq!(summary.total, 5);
+    assert_eq!(summary.total, 6);
     assert_eq!(summary.online, 1);
     assert_eq!(summary.offline, 1);
     assert_eq!(summary.never, 1);
     assert_eq!(summary.stale, 1);
+    assert_eq!(summary.suspended, 1);
     assert_eq!(summary.unknown, 1);
     assert_eq!(summary.warnings, 4);
     assert_eq!(summary.running_jobs, 2);
     assert_eq!(
-        summary.online + summary.offline + summary.never + summary.stale + summary.unknown,
+        summary.online
+            + summary.offline
+            + summary.never
+            + summary.stale
+            + summary.suspended
+            + summary.unknown,
         summary.total
     );
 }
@@ -764,6 +771,77 @@ async fn stale_agent_clears_only_after_changed_internal_build_hello() {
         .collect::<Vec<_>>();
     assert!(audit_actions.contains(&"agent.status_stale".to_string()));
     assert!(audit_actions.contains(&"agent.status_online".to_string()));
+}
+
+#[tokio::test]
+async fn authenticated_hello_auto_clears_committed_suspension() {
+    let repo = Repository::Memory(MemoryState::default());
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("client-a".to_string()),
+            client_public_key_hex: "22".repeat(32),
+            display_name: None,
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &test_operator(),
+    )
+    .await
+    .unwrap();
+    let hello = || GatewayAgentHelloIngest {
+        gateway_id: "gateway-a".to_string(),
+        gateway_session_id: Uuid::new_v4(),
+        noise_public_key_hex: "22".repeat(32),
+        remote_ip: Some("203.0.113.22".to_string()),
+        hello: AgentHello {
+            client_id: "client-a".to_string(),
+            process_incarnation_id: Uuid::new_v4(),
+            agent_version: "test".to_string(),
+            internal_build_number: 1,
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_model: None,
+            kernel_release: None,
+            virtualization: None,
+            update_heartbeat: None,
+            capabilities: Default::default(),
+        },
+    };
+    repo.upsert_agent_hello(&hello()).await.unwrap();
+    repo.mark_agent_stale(
+        "client-a",
+        "test_stale_before_suspension",
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    repo.suspend_agent("client-a", Some("planned maintenance"), &test_operator())
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.agent_by_id("client-a").await.unwrap().status,
+        "suspended"
+    );
+
+    assert!(repo.upsert_agent_hello(&hello()).await.unwrap());
+    assert_eq!(repo.agent_by_id("client-a").await.unwrap().status, "online");
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    assert!(memory.agent_suspensions.read().await.is_empty());
+    assert!(memory
+        .client_status_history
+        .read()
+        .await
+        .iter()
+        .any(|transition| {
+            transition.client_id == "client-a"
+                && transition.from_status.as_deref() == Some("suspended")
+                && transition.to_status == "online"
+                && transition.reason == "agent_online_auto_unsuspend"
+        }));
 }
 
 #[tokio::test]
@@ -2717,6 +2795,154 @@ async fn memory_dispatch_claim_promotes_parent_job_to_running() {
     let targets = repo.list_job_targets(job_id).await.unwrap();
     assert_eq!(job.status, "running");
     assert_eq!(targets[0].status, "dispatching");
+}
+
+#[tokio::test]
+async fn memory_suspension_neutralizes_claimed_target_before_gateway_send() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let process_incarnation_id = Uuid::new_v4();
+    let mut agents = memory.agents.write().await;
+    agents[0].status = "stale".to_string();
+    agents[0].process_incarnation_id = Some(process_incarnation_id);
+    drop(agents);
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "suspend_claim_first",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    let claimed = repo.claim_due_job_targets(1, 30, 0).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, job_id);
+    assert_eq!(
+        repo.list_job_targets(job_id).await.unwrap()[0].status,
+        "dispatching"
+    );
+
+    let mutation = repo
+        .suspend_agent("client-a", None, &operator)
+        .await
+        .unwrap();
+    assert_eq!(mutation.skipped_unstarted_job_ids, vec![job_id]);
+    let target = &repo.list_job_targets(job_id).await.unwrap()[0];
+    assert_eq!(target.status, TARGET_STATUS_SKIPPED);
+    assert_eq!(
+        target.message.as_deref(),
+        Some("target_suspended: target skipped because VPS is suspended")
+    );
+    let output = memory
+        .job_outputs
+        .read()
+        .await
+        .iter()
+        .find(|output| output.job_id == job_id && output.client_id == "client-a")
+        .cloned()
+        .unwrap();
+    let output_payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(output.data_base64)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(output_payload["type"], "target_suspended");
+    assert_eq!(output_payload["reason"], "target_suspended");
+    assert!(!repo
+        .claimed_job_target_dispatchable(&claimed[0])
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn memory_suspension_preserves_gateway_enqueue_that_won_the_fence() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut agents = memory.agents.write().await;
+    agents[0].status = "stale".to_string();
+    agents[0].process_incarnation_id = Some(Uuid::new_v4());
+    drop(agents);
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "enqueue_won_suspension_fence",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo.claim_due_job_targets(1, 30, 0).await.unwrap().len(), 1);
+
+    let mutation = repo
+        .suspend_agent_with_protected_dispatches("client-a", None, &operator, &[job_id])
+        .await
+        .unwrap();
+    assert!(mutation.skipped_unstarted_job_ids.is_empty());
+    assert_eq!(
+        repo.list_job_targets(job_id).await.unwrap()[0].status,
+        TARGET_STATUS_DISPATCHING
+    );
+}
+
+#[tokio::test]
+async fn memory_suspension_before_claim_neutrally_precompletes_target() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut agents = memory.agents.write().await;
+    agents[0].status = "offline".to_string();
+    agents[0].process_incarnation_id = Some(Uuid::new_v4());
+    drop(agents);
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "suspend_before_claim",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+
+    repo.suspend_agent("client-a", None, &operator)
+        .await
+        .unwrap();
+    assert!(repo
+        .claim_due_job_targets(1, 30, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repo.list_job_targets(job_id).await.unwrap()[0].status,
+        TARGET_STATUS_SKIPPED
+    );
 }
 
 #[tokio::test]

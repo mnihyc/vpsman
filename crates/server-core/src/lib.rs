@@ -4,9 +4,17 @@ use vpsman_common::{
     MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
+#[path = "runtime/client_suppression.rs"]
+mod client_suppression;
+#[path = "runtime/postgres_migrations.rs"]
+mod postgres_migrations;
 #[path = "runtime/webhook_target.rs"]
 mod webhook_target;
 
+pub use client_suppression::{
+    client_policy_suppression_lock_key, ClientPolicySuppressionSharedGuard,
+};
+pub use postgres_migrations::run_postgres_migrations;
 pub use webhook_target::{
     prepare_webhook_target, validate_webhook_target, PreparedWebhookTarget,
     DEVELOPMENT_LOOPBACK_WEBHOOKS_ENV,

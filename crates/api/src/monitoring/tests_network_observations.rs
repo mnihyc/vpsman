@@ -1466,6 +1466,206 @@ async fn operational_evidence_hides_deleted_plans_but_history_retains_it() {
 }
 
 #[tokio::test]
+async fn network_monitoring_hides_every_record_with_a_suspended_endpoint() {
+    let repo = Repository::Memory(MemoryState::default());
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
+    let operator = topology_test_operator();
+    let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    let saved = repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        job_id,
+        "left-a",
+        &[CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "tunnel_reachability",
+                "plan": saved.name,
+                "interface": saved.plan.interface_name,
+                "peer_client_id": saved.right_client_id,
+                "target": "10.255.0.1",
+                "healthy": true,
+                "latency_avg_ms": 2.0,
+                "packet_loss_ratio": 0.0,
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory
+        .agents
+        .write()
+        .await
+        .iter_mut()
+        .find(|agent| agent.id == "right-b")
+        .unwrap()
+        .status = "suspended".to_string();
+
+    assert!(repo
+        .list_network_observations(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_network_observation_trends(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repo.list_network_observations(10, false)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "retained history remains queryable outside monitoring views"
+    );
+    assert!(repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap()
+        .edges
+        .is_empty());
+    assert!(repo
+        .list_network_ospf_recommendations(10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_network_ospf_update_plans(10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .network_ospf_update_plan_by_id(saved.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn topology_and_recommendations_preserve_deleted_or_unknown_endpoint_evidence() {
+    let repo = Repository::Memory(MemoryState::default());
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
+    let operator = topology_test_operator();
+    let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    let saved = repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        job_id,
+        "left-a",
+        &[CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "tunnel_reachability",
+                "plan": saved.name,
+                "interface": saved.plan.interface_name,
+                "peer_client_id": saved.right_client_id,
+                "target": "10.255.0.1",
+                "healthy": true,
+                "latency_avg_ms": 2.0,
+                "packet_loss_ratio": 0.0,
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.hidden_clients.write().await.insert("right-b".into());
+    memory
+        .agents
+        .write()
+        .await
+        .iter_mut()
+        .find(|agent| agent.id == "right-b")
+        .unwrap()
+        .status = "deleted".to_string();
+
+    let deleted_endpoint_graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
+    assert_eq!(deleted_endpoint_graph.edges.len(), 1);
+    assert_eq!(deleted_endpoint_graph.edges[0].sample_count, 1);
+    assert!(deleted_endpoint_graph
+        .nodes
+        .iter()
+        .any(|node| node.client_id == "right-b" && node.status == "unknown"));
+    assert_eq!(
+        repo.list_network_ospf_recommendations(10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_network_ospf_update_plans(10).await.unwrap().len(),
+        1
+    );
+    assert!(repo
+        .network_ospf_update_plan_by_id(saved.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    memory
+        .agents
+        .write()
+        .await
+        .retain(|agent| agent.id != "right-b");
+    let unknown_endpoint_graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
+    assert_eq!(unknown_endpoint_graph.edges.len(), 1);
+    assert_eq!(unknown_endpoint_graph.edges[0].sample_count, 1);
+    assert!(unknown_endpoint_graph
+        .nodes
+        .iter()
+        .any(|node| node.client_id == "right-b" && node.status == "unknown"));
+    assert_eq!(
+        repo.list_network_ospf_recommendations(10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_network_ospf_update_plans(10).await.unwrap().len(),
+        1
+    );
+    assert!(repo
+        .network_ospf_update_plan_by_id(saved.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
 async fn confirmed_bulk_clear_removes_only_selected_plan_evidence_and_audits_counts() {
     let repo = Repository::Memory(MemoryState::default());
     crate::tests_network::seed_online_agent(&repo, "left-a").await;

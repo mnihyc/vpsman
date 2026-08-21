@@ -13,6 +13,7 @@ use crate::model::*;
 use crate::repository::Repository;
 use crate::repository_jobs::{
     finish_jobs_in_tx_and_reconcile_event_sources, mark_active_targets_agent_lost_for_client_in_tx,
+    skip_suspended_undelivered_targets_for_client_except_in_tx,
     skip_unstarted_queued_targets_for_client_in_tx,
 };
 use crate::repository_key_lifecycle::{
@@ -101,20 +102,30 @@ impl Repository {
     pub(crate) async fn fleet_summary(&self) -> Result<FleetSummary> {
         match self {
             Self::Memory(memory) => {
-                let (total, online, offline, never, revoked, stale, unknown) = {
+                let (total, online, offline, never, suspended, revoked, stale, unknown) = {
                     let agents = memory.agents.read().await;
                     let hidden = memory.hidden_clients.read().await;
                     let visible_agents = agents
                         .iter()
                         .filter(|agent| !hidden.contains(&agent.id))
                         .collect::<Vec<_>>();
-                    let (mut online, mut offline, mut never, mut revoked, mut stale, mut unknown) =
-                        (0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+                    let (
+                        mut online,
+                        mut offline,
+                        mut never,
+                        mut suspended,
+                        mut revoked,
+                        mut stale,
+                        mut unknown,
+                    ) = (
+                        0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize,
+                    );
                     for agent in &visible_agents {
                         match agent.status.as_str() {
                             "online" if agent.last_seen_at.is_some() => online += 1,
                             "offline" | "disconnected" => offline += 1,
                             "never" => never += 1,
+                            "suspended" => suspended += 1,
                             "revoked" => revoked += 1,
                             "stale" => stale += 1,
                             _ => unknown += 1,
@@ -125,6 +136,7 @@ impl Repository {
                         online,
                         offline,
                         never,
+                        suspended,
                         revoked,
                         stale,
                         unknown,
@@ -142,6 +154,7 @@ impl Repository {
                     online,
                     offline,
                     never,
+                    suspended,
                     revoked,
                     unknown,
                     stale,
@@ -157,13 +170,17 @@ impl Repository {
                         count(*) FILTER (WHERE status = 'online' AND last_seen_at IS NOT NULL) AS online,
                         count(*) FILTER (WHERE status IN ('offline', 'disconnected')) AS offline,
                         count(*) FILTER (WHERE status = 'never') AS never,
+                        count(*) FILTER (WHERE status = 'suspended') AS suspended,
                         count(*) FILTER (WHERE status = 'revoked') AS revoked,
                         count(*) FILTER (WHERE status = 'stale') AS stale,
                         count(*) FILTER (WHERE (
                             (status = 'online' AND last_seen_at IS NULL)
-                            OR status NOT IN ('online', 'offline', 'disconnected', 'never', 'revoked', 'stale')
+                            OR status NOT IN ('online', 'offline', 'disconnected', 'never', 'suspended', 'revoked', 'stale')
                         )) AS unknown,
-                        count(*) FILTER (WHERE NOT (status = 'online' AND last_seen_at IS NOT NULL)) AS warnings,
+                        count(*) FILTER (
+                            WHERE status <> 'suspended'
+                              AND NOT (status = 'online' AND last_seen_at IS NOT NULL)
+                        ) AS warnings,
                         (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')) AS running_jobs
                     FROM visible_clients
                     "#,
@@ -175,6 +192,7 @@ impl Repository {
                     online: row.try_get::<i64, _>("online")? as usize,
                     offline: row.try_get::<i64, _>("offline")? as usize,
                     never: row.try_get::<i64, _>("never")? as usize,
+                    suspended: row.try_get::<i64, _>("suspended")? as usize,
                     revoked: row.try_get::<i64, _>("revoked")? as usize,
                     unknown: row.try_get::<i64, _>("unknown")? as usize,
                     stale: row.try_get::<i64, _>("stale")? as usize,
@@ -1287,6 +1305,529 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn suspend_agent(
+        &self,
+        client_id: &str,
+        reason: Option<&str>,
+        operator: &AuthContext,
+    ) -> Result<AgentSuspensionMutationResult> {
+        self.suspend_agent_with_protected_dispatches(client_id, reason, operator, &[])
+            .await
+    }
+
+    pub(crate) async fn suspend_agent_with_protected_dispatches(
+        &self,
+        client_id: &str,
+        reason: Option<&str>,
+        operator: &AuthContext,
+        protected_enqueued_job_ids: &[Uuid],
+    ) -> Result<AgentSuspensionMutationResult> {
+        let reason = reason
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        anyhow::ensure!(
+            reason
+                .as_ref()
+                .is_none_or(|value| value.chars().count() <= 240),
+            "agent_suspend_reason_invalid"
+        );
+        match self {
+            Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
+                    .await?;
+                let prior_status = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == client_id)
+                    .map(|agent| agent.status.clone())
+                    .context("agent_not_found")?;
+                match prior_status.as_str() {
+                    "never" | "disconnected" | "offline" | "stale" => {}
+                    "suspended" => anyhow::bail!("agent_already_suspended"),
+                    "online" => anyhow::bail!("agent_suspend_online"),
+                    _ => anyhow::bail!("agent_suspend_ineligible"),
+                }
+                let suspended_at = unix_now().to_string();
+                let record = AgentSuspensionRecord {
+                    suspended_at: suspended_at.clone(),
+                    suspended_by: Some(operator.operator.id),
+                    suspended_reason: reason.clone(),
+                    suspended_from_status: prior_status.clone(),
+                };
+                {
+                    let mut agents = memory.agents.write().await;
+                    let agent = agents
+                        .iter_mut()
+                        .find(|agent| agent.id == client_id)
+                        .context("agent_not_found")?;
+                    agent.status = "suspended".to_string();
+                }
+                memory
+                    .agent_suspensions
+                    .write()
+                    .await
+                    .insert(client_id.to_string(), record.clone());
+                let skipped_job_ids = self
+                    .skip_suspended_undelivered_targets_for_client_except(
+                        client_id,
+                        "target_suspended",
+                        "target_suspended: target skipped because VPS is suspended",
+                        protected_enqueued_job_ids,
+                    )
+                    .await?;
+                memory
+                    .client_status_history
+                    .write()
+                    .await
+                    .push(ClientStatusHistoryView {
+                        id: Uuid::new_v4(),
+                        client_id: client_id.to_string(),
+                        from_status: Some(prior_status.clone()),
+                        to_status: "suspended".to_string(),
+                        reason: "operator_suspended".to_string(),
+                        metadata: json!({
+                            "reason": &reason,
+                            "operator_id": operator.operator.id,
+                            "origin_kind": "operator_request",
+                            "component": "inventory-controller",
+                        }),
+                        created_at: suspended_at.clone(),
+                    });
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(operator.operator.id),
+                    action: "agent.suspended".to_string(),
+                    target: format!("client:{client_id}"),
+                    command_hash: None,
+                    metadata: json!({
+                        "client_id": client_id,
+                        "from_status": prior_status,
+                        "to_status": "suspended",
+                        "reason": &reason,
+                        "skipped_unstarted_job_ids": &skipped_job_ids,
+                        "resolved_alert_count": 0,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
+                    }),
+                    created_at: suspended_at.clone(),
+                });
+                self.record_client_status_webhook_event(
+                    client_id,
+                    Some(&record.suspended_from_status),
+                    "suspended",
+                    "operator_suspended",
+                    json!({
+                        "reason": &reason,
+                        "operator_id": operator.operator.id,
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
+                    }),
+                )
+                .await?;
+                Ok(AgentSuspensionMutationResult {
+                    record: Some(record),
+                    skipped_unstarted_job_ids: skipped_job_ids,
+                    resolved_alert_count: 0,
+                })
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                // The API installs a 60-second gateway lease before entering
+                // this transaction. Server-side budgets ensure a canceled API
+                // future cannot leave PostgreSQL waiting past that lease.
+                sqlx::query("SELECT set_config('lock_timeout', '10s', true)")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("SELECT set_config('statement_timeout', '25s', true)")
+                    .execute(&mut *tx)
+                    .await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                crate::repository_policy_lifecycle::lock_client_policy_suppression_in_tx(
+                    &mut tx, client_id,
+                )
+                .await?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT status
+                    FROM clients
+                    WHERE id=$1 AND hidden_at IS NULL
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .context("agent_not_found")?;
+                let prior_status: String = row.try_get("status")?;
+                match prior_status.as_str() {
+                    "never" | "disconnected" | "offline" | "stale" => {}
+                    "suspended" => anyhow::bail!("agent_already_suspended"),
+                    "online" => anyhow::bail!("agent_suspend_online"),
+                    _ => anyhow::bail!("agent_suspend_ineligible"),
+                }
+                let row = sqlx::query(
+                    r#"
+                    UPDATE clients
+                    SET status='suspended',
+                        suspended_at=clock_timestamp(), suspended_by=$2,
+                        suspended_reason=$3, suspended_from_status=$4
+                    WHERE id=$1 AND hidden_at IS NULL
+                    RETURNING suspended_at::text AS suspended_at, suspended_by,
+                              suspended_reason, suspended_from_status
+                    "#,
+                )
+                .bind(client_id)
+                .bind(operator.operator.id)
+                .bind(&reason)
+                .bind(&prior_status)
+                .fetch_one(&mut *tx)
+                .await?;
+                let record = AgentSuspensionRecord {
+                    suspended_at: row.try_get("suspended_at")?,
+                    suspended_by: row.try_get("suspended_by")?,
+                    suspended_reason: row.try_get("suspended_reason")?,
+                    suspended_from_status: row.try_get("suspended_from_status")?,
+                };
+                let skipped_job_ids = skip_suspended_undelivered_targets_for_client_except_in_tx(
+                    &mut tx,
+                    client_id,
+                    "target_suspended",
+                    "target_suspended: target skipped because VPS is suspended",
+                    protected_enqueued_job_ids,
+                )
+                .await?;
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &skipped_job_ids).await?;
+                crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                )
+                .await?;
+                let resolved_alert_count =
+                    crate::repository_policy_lifecycle::suppress_client_policy_alerts_in_tx(
+                        &mut tx, client_id,
+                    )
+                    .await?;
+                sqlx::query(
+                    r#"
+                    UPDATE fleet_alert_notification_deliveries delivery
+                    SET status='canceled_disabled', error='client_suspended',
+                        delivery_lease_id=NULL, delivery_lease_until=NULL,
+                        next_attempt_at=NULL, delivered_at=NULL
+                    FROM alert_episodes episode
+                    WHERE episode.public_id=delivery.alert_id
+                      AND episode.client_id=$1
+                      AND delivery.status IN ('queued','failed','in_progress')
+                    "#,
+                )
+                .bind(client_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    UPDATE webhook_rule_deliveries delivery
+                    SET status='canceled_disabled', error='client_suspended',
+                        delivery_lease_id=NULL, delivery_lease_until=NULL,
+                        next_attempt_at=NULL, delivered_at=NULL
+                    WHERE delivery.event_kind='alert.triggered'
+                      AND delivery.status IN ('queued','failed','in_progress')
+                      AND EXISTS (
+                            SELECT 1
+                            FROM jsonb_array_elements(delivery.matched_vps) matched
+                            WHERE matched->>'id'=$1
+                      )
+                    "#,
+                )
+                .bind(client_id)
+                .execute(&mut *tx)
+                .await?;
+                // Legacy/manual alert lifecycle rows may predate the canonical
+                // episode outbox. If such an event is still unprocessed at the
+                // suspension boundary, consume it neutrally so a later
+                // unsuspend cannot resurrect its pre-suspension trigger.
+                sqlx::query(
+                    r#"
+                    UPDATE webhook_events
+                    SET processed_at=COALESCE(processed_at,clock_timestamp())
+                    WHERE kind='alert.triggered'
+                      AND processed_at IS NULL
+                      AND $1=ANY(subject_client_ids)
+                    "#,
+                )
+                .bind(client_id)
+                .execute(&mut *tx)
+                .await?;
+                let transition_metadata = json!({
+                    "reason": &reason,
+                    "operator_id": operator.operator.id,
+                    "result": "suspended",
+                    "origin_kind": "operator_request",
+                    "component": "inventory-controller",
+                });
+                sqlx::query(
+                    r#"
+                    INSERT INTO client_status_history (
+                        id, client_id, from_status, to_status, reason, metadata
+                    ) VALUES ($1,$2,$3,'suspended','operator_suspended',$4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(client_id)
+                .bind(&prior_status)
+                .bind(&transition_metadata)
+                .execute(&mut *tx)
+                .await?;
+                crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                    &mut tx,
+                    client_id,
+                    Some(&prior_status),
+                    "suspended",
+                    "operator_suspended",
+                    transition_metadata.clone(),
+                )
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    VALUES ($1,$2,'agent.suspended',$3,NULL,$4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind(format!("client:{client_id}"))
+                .bind(sqlx::types::Json(json!({
+                    "client_id": client_id,
+                    "from_status": prior_status,
+                    "to_status": "suspended",
+                    "reason": &reason,
+                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    "resolved_alert_count": resolved_alert_count,
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "inventory-controller",
+                })))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(AgentSuspensionMutationResult {
+                    record: Some(record),
+                    skipped_unstarted_job_ids: skipped_job_ids,
+                    resolved_alert_count,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn unsuspend_agent(
+        &self,
+        client_id: &str,
+        operator: &AuthContext,
+    ) -> Result<AgentSuspensionMutationResult> {
+        match self {
+            Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
+                    .await?;
+                let record = memory
+                    .agent_suspensions
+                    .read()
+                    .await
+                    .get(client_id)
+                    .cloned()
+                    .context("agent_not_suspended")?;
+                {
+                    let mut agents = memory.agents.write().await;
+                    let agent = agents
+                        .iter_mut()
+                        .find(|agent| agent.id == client_id)
+                        .context("agent_not_found")?;
+                    anyhow::ensure!(agent.status == "suspended", "agent_not_suspended");
+                    agent.status = record.suspended_from_status.clone();
+                }
+                memory.agent_suspensions.write().await.remove(client_id);
+                let changed_at = unix_now().to_string();
+                memory
+                    .client_status_history
+                    .write()
+                    .await
+                    .push(ClientStatusHistoryView {
+                        id: Uuid::new_v4(),
+                        client_id: client_id.to_string(),
+                        from_status: Some("suspended".to_string()),
+                        to_status: record.suspended_from_status.clone(),
+                        reason: "operator_unsuspended".to_string(),
+                        metadata: json!({
+                            "operator_id": operator.operator.id,
+                            "origin_kind": "operator_request",
+                            "component": "inventory-controller",
+                        }),
+                        created_at: changed_at.clone(),
+                    });
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(operator.operator.id),
+                    action: "agent.unsuspended".to_string(),
+                    target: format!("client:{client_id}"),
+                    command_hash: None,
+                    metadata: json!({
+                        "client_id": client_id,
+                        "from_status": "suspended",
+                        "to_status": &record.suspended_from_status,
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
+                    }),
+                    created_at: changed_at.clone(),
+                });
+                self.record_client_status_webhook_event(
+                    client_id,
+                    Some("suspended"),
+                    &record.suspended_from_status,
+                    "operator_unsuspended",
+                    json!({
+                        "operator_id": operator.operator.id,
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
+                    }),
+                )
+                .await?;
+                self.mark_memory_tunnel_alerts_unknown_for_clients(
+                    &[client_id.to_string()],
+                    &changed_at,
+                )
+                .await?;
+                Ok(AgentSuspensionMutationResult {
+                    record: None,
+                    skipped_unstarted_job_ids: Vec::new(),
+                    resolved_alert_count: 0,
+                })
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT status, suspended_from_status
+                    FROM clients
+                    WHERE id=$1 AND hidden_at IS NULL
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .context("agent_not_found")?;
+                let status: String = row.try_get("status")?;
+                anyhow::ensure!(status == "suspended", "agent_not_suspended");
+                let restored_status: String = row
+                    .try_get::<Option<String>, _>("suspended_from_status")?
+                    .context("agent_suspension_metadata_invalid")?;
+                sqlx::query(
+                    r#"
+                    UPDATE clients
+                    SET status=$2, suspended_at=NULL, suspended_by=NULL,
+                        suspended_reason=NULL, suspended_from_status=NULL
+                    WHERE id=$1 AND status='suspended' AND hidden_at IS NULL
+                    "#,
+                )
+                .bind(client_id)
+                .bind(&restored_status)
+                .execute(&mut *tx)
+                .await?;
+                let transition_metadata = json!({
+                    "operator_id": operator.operator.id,
+                    "result": &restored_status,
+                    "origin_kind": "operator_request",
+                    "component": "inventory-controller",
+                });
+                sqlx::query(
+                    r#"
+                    INSERT INTO client_status_history (
+                        id, client_id, from_status, to_status, reason, metadata
+                    ) VALUES ($1,$2,'suspended',$3,'operator_unsuspended',$4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(client_id)
+                .bind(&restored_status)
+                .bind(&transition_metadata)
+                .execute(&mut *tx)
+                .await?;
+                crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
+                    &mut tx,
+                    client_id,
+                    &restored_status,
+                )
+                .await?;
+                crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                )
+                .await?;
+                crate::repository_operational_alerts::mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                )
+                .await?;
+                crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                    &mut tx,
+                    client_id,
+                    Some("suspended"),
+                    &restored_status,
+                    "operator_unsuspended",
+                    transition_metadata,
+                )
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    VALUES ($1,$2,'agent.unsuspended',$3,NULL,$4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind(format!("client:{client_id}"))
+                .bind(sqlx::types::Json(json!({
+                    "client_id": client_id,
+                    "from_status": "suspended",
+                    "to_status": &restored_status,
+                    "result": "succeeded",
+                    "operator_id": operator.operator.id,
+                    "operator_username": &operator.operator.username,
+                    "operator_role": &operator.operator.role,
+                    "operator_session_id": operator.audit_session_id(),
+                    "origin_kind": "operator_request",
+                    "component": "inventory-controller",
+                })))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(AgentSuspensionMutationResult {
+                    record: None,
+                    skipped_unstarted_job_ids: Vec::new(),
+                    resolved_alert_count: 0,
+                })
+            }
+        }
+    }
+
     pub(crate) async fn delete_agent(
         &self,
         client_id: &str,
@@ -1338,6 +1879,7 @@ impl Repository {
                     };
                 drop(agents);
                 anyhow::ensure!(found, "agent_not_found");
+                memory.agent_suspensions.write().await.remove(client_id);
                 if prior_status.as_deref() != Some("deleted") {
                     memory
                         .client_status_history
@@ -1552,7 +2094,11 @@ impl Repository {
                         hidden_reason = COALESCE($3, hidden_reason),
                         public_key = ''::bytea,
                         status = 'deleted',
-                        process_incarnation_id = NULL
+                        process_incarnation_id = NULL,
+                        suspended_at = NULL,
+                        suspended_by = NULL,
+                        suspended_reason = NULL,
+                        suspended_from_status = NULL
                     WHERE id = $1
                     RETURNING id, hidden_at::text AS deleted_at
                     "#,

@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
+use std::sync::atomic::{AtomicI64, Ordering};
 use vpsman_common::{
     DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT, DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
     DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS, DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
@@ -14,12 +15,67 @@ use vpsman_common::{
 
 const TELEMETRY_PROMOTION_GROUP_LIMIT: i64 = 3_000;
 const TELEMETRY_PROMOTION_SOURCE_ROW_LIMIT: i64 = 20_000;
+static PING_PROMOTION_SERIES_CURSOR: AtomicI64 = AtomicI64::new(0);
+
+// Promotion seeds only the immediate predecessor tier so its first range scan
+// stays index-bounded. Because tiers run from coarse to fine, an old fine-tier
+// backlog advances one configured tier per scheduled run and converges without
+// ever reopening an unbounded scan across every lower tier.
 
 #[derive(Clone, Copy, Debug, Default)]
 struct PromotionResult {
     promoted: u64,
     conflicts: u64,
     source_rows: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PromotionLimits {
+    group_limit: i64,
+    group_source_limit: i64,
+    seed_row_limit: i64,
+    seed_rows_per_group: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PingPromotionResult {
+    promotion: PromotionResult,
+    next_series_cursor: Option<i64>,
+}
+
+fn promotion_limits(
+    destination_secs: i32,
+    source_bucket_secs: i32,
+    source_row_limit: i64,
+) -> Option<PromotionLimits> {
+    let minimum_bucket_secs = i64::from(TELEMETRY_HISTORY_TIERS[0].bucket_secs);
+    let destination_secs = i64::from(destination_secs);
+    let source_bucket_secs = i64::from(source_bucket_secs);
+    if source_row_limit <= 0
+        || source_bucket_secs < minimum_bucket_secs
+        || destination_secs <= source_bucket_secs
+        || destination_secs % source_bucket_secs != 0
+        || destination_secs % minimum_bucket_secs != 0
+    {
+        return None;
+    }
+    // One extra row proves that a destination group cannot be a valid,
+    // non-overlapping sequence of minimum-width source buckets. Dividing the
+    // global budget by this per-key cap bounds expansion before grouping/locks.
+    let group_source_limit = destination_secs / minimum_bucket_secs + 1;
+    let group_limit = TELEMETRY_PROMOTION_GROUP_LIMIT
+        .min(source_row_limit / group_source_limit)
+        .max(0);
+    if group_limit == 0 {
+        return None;
+    }
+    let seed_rows_per_group = destination_secs / source_bucket_secs;
+    Some(PromotionLimits {
+        group_limit,
+        group_source_limit,
+        seed_row_limit: group_limit.saturating_mul(seed_rows_per_group),
+        seed_rows_per_group,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -144,10 +200,17 @@ async fn promote_resource_rollups(pool: &PgPool) -> Result<PromotionResult> {
         if remaining <= 0 {
             break;
         }
+        let source_tier = TELEMETRY_HISTORY_TIERS[destination_index - 1];
+        let source_bucket_secs = TELEMETRY_HISTORY_TIERS[..destination_index]
+            .iter()
+            .map(|tier| tier.bucket_secs)
+            .collect::<Vec<_>>();
         let pass = promote_resource_tier(
             pool,
             TELEMETRY_HISTORY_TIERS[destination_index].bucket_secs,
-            TELEMETRY_HISTORY_TIERS[destination_index - 1].retain_days,
+            source_tier.bucket_secs,
+            source_tier.retain_days,
+            &source_bucket_secs,
             remaining,
         )
         .await?;
@@ -161,75 +224,104 @@ async fn promote_resource_rollups(pool: &PgPool) -> Result<PromotionResult> {
 async fn promote_resource_tier(
     pool: &PgPool,
     destination_secs: i32,
+    source_bucket_secs: i32,
     source_days: i32,
+    lower_bucket_secs: &[i32],
     source_row_limit: i64,
 ) -> Result<PromotionResult> {
+    let Some(limits) = promotion_limits(destination_secs, source_bucket_secs, source_row_limit)
+    else {
+        return Ok(PromotionResult::default());
+    };
     let result = sqlx::query(
         r#"
-        WITH candidate_groups_unbudgeted AS MATERIALIZED (
-            SELECT client_id,
-                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1)
-                    AS destination_start,
-                count(*)::bigint AS source_rows
+        WITH seed_rows AS MATERIALIZED (
+            SELECT client_id, bucket_start
             FROM telemetry_rollups
-            WHERE bucket_secs < $1
-              AND to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1)
-                    + make_interval(secs => $1) <= now() - make_interval(days => $2)
-            GROUP BY client_id, destination_start
+            WHERE bucket_secs = $2
+              AND bucket_start < to_timestamp(floor(extract(epoch FROM (
+                    now() - make_interval(days => $3))) / $1) * $1)
+            ORDER BY bucket_start, client_id DESC
+            LIMIT $5
+        ), candidate_keys AS MATERIALIZED (
+            SELECT DISTINCT client_id,
+                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1)
+                    AS destination_start
+            FROM seed_rows
             ORDER BY destination_start, client_id
-            LIMIT $3
-        ), candidate_groups AS MATERIALIZED (
-            SELECT client_id, destination_start, source_rows
-            FROM (
-                SELECT candidate.*,
-                    sum(source_rows) OVER (ORDER BY destination_start, client_id)
-                        AS running_source_rows
-                FROM candidate_groups_unbudgeted candidate
-            ) budgeted
-            WHERE running_source_rows <= $4
-        ), locked_rows AS MATERIALIZED (
-            SELECT row.ctid AS source_ctid, row.*
-            FROM telemetry_rollups row
-            JOIN candidate_groups group_row
-              ON group_row.client_id = row.client_id
-             AND row.bucket_start >= group_row.destination_start
-             AND row.bucket_start < group_row.destination_start + make_interval(secs => $1)
-            WHERE row.bucket_secs < $1
-            FOR UPDATE OF row SKIP LOCKED
-        ), ordered_rows AS (
+            LIMIT $4
+        ), expanded_rows AS MATERIALIZED (
+            SELECT source.*
+            FROM candidate_keys candidate
+            CROSS JOIN LATERAL (
+                SELECT tier_source.*, candidate.destination_start
+                FROM unnest($7::integer[]) tier(bucket_secs)
+                CROSS JOIN LATERAL (
+                    SELECT row.ctid AS source_ctid, row.*
+                    FROM telemetry_rollups row
+                    WHERE row.client_id = candidate.client_id
+                      AND row.bucket_secs = tier.bucket_secs
+                      AND row.bucket_start >= candidate.destination_start
+                      AND row.bucket_start < candidate.destination_start
+                            + make_interval(secs => $1)
+                ) tier_source
+                LIMIT $6
+            ) source
+        ), ordered_rows AS MATERIALIZED (
             SELECT row.*,
                 lag(row.bucket_start + make_interval(secs => row.bucket_secs)) OVER (
-                    PARTITION BY row.client_id,
-                        to_timestamp(floor(extract(epoch FROM row.bucket_start) / $1) * $1)
+                    PARTITION BY row.client_id, row.destination_start
                     ORDER BY row.bucket_start, row.bucket_secs
                 ) AS previous_end
-            FROM locked_rows row
+            FROM expanded_rows row
+        ), group_state AS MATERIALIZED (
+            SELECT row.client_id, row.destination_start,
+                count(*)::bigint AS source_rows,
+                bool_and(
+                    (row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
+                    AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                        <= row.destination_start + make_interval(secs => $1)
+                ) AS non_overlapping
+            FROM ordered_rows row
+            GROUP BY row.client_id, row.destination_start
+        ), overlap_conflicts AS MATERIALIZED (
+            SELECT client_id, destination_start
+            FROM group_state
+            WHERE source_rows >= $6 OR NOT non_overlapping
+        ), eligible_groups AS MATERIALIZED (
+            SELECT client_id, destination_start, source_rows
+            FROM group_state
+            WHERE source_rows < $6 AND non_overlapping
+        ), lockable_groups AS MATERIALIZED (
+            SELECT eligible.*
+            FROM eligible_groups eligible
+            WHERE NOT EXISTS (
+                SELECT 1 FROM telemetry_rollups destination
+                WHERE destination.client_id = eligible.client_id
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+        ), locked_rows AS MATERIALIZED (
+            SELECT expanded.*
+            FROM telemetry_rollups row
+            JOIN expanded_rows expanded ON expanded.source_ctid = row.ctid
+            JOIN lockable_groups group_row
+              ON group_row.client_id = expanded.client_id
+             AND group_row.destination_start = expanded.destination_start
+            ORDER BY expanded.destination_start, expanded.client_id,
+                expanded.bucket_start, expanded.bucket_secs
+            FOR UPDATE OF row SKIP LOCKED
         ), complete_groups AS (
             SELECT group_row.client_id, group_row.destination_start
-            FROM candidate_groups group_row
-            JOIN ordered_rows row ON row.client_id = group_row.client_id
-              AND row.bucket_start >= group_row.destination_start
-              AND row.bucket_start < group_row.destination_start + make_interval(secs => $1)
+            FROM lockable_groups group_row
+            JOIN locked_rows row ON row.client_id = group_row.client_id
+              AND row.destination_start = group_row.destination_start
             GROUP BY group_row.client_id, group_row.destination_start, group_row.source_rows
             HAVING count(*) = group_row.source_rows
-               AND bool_and(row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
-        ), conflicts AS MATERIALIZED (
-            SELECT group_row.client_id, group_row.destination_start
-            FROM complete_groups group_row
-            JOIN telemetry_rollups destination
-              ON destination.client_id = group_row.client_id
-             AND destination.bucket_secs = $1
-             AND destination.bucket_start = group_row.destination_start
         ), source AS (
-            SELECT row.*, group_row.destination_start
+            SELECT row.*
             FROM locked_rows row JOIN complete_groups group_row USING (client_id)
-            WHERE row.bucket_start >= group_row.destination_start
-              AND row.bucket_start < group_row.destination_start + make_interval(secs => $1)
-              AND NOT EXISTS (
-                  SELECT 1 FROM conflicts conflict
-                  WHERE conflict.client_id = group_row.client_id
-                    AND conflict.destination_start = group_row.destination_start
-              )
+            WHERE row.destination_start = group_row.destination_start
         ), inserted AS (
             INSERT INTO telemetry_rollups (
                 client_id, bucket_start, bucket_secs, sample_count,
@@ -313,24 +405,47 @@ async fn promote_resource_tier(
               AND inserted.client_id = source.client_id
               AND inserted.bucket_start = source.destination_start
             RETURNING row.ctid
+        ), destination_conflicts AS MATERIALIZED (
+            SELECT eligible.client_id, eligible.destination_start
+            FROM eligible_groups eligible
+            WHERE EXISTS (
+                SELECT 1 FROM telemetry_rollups destination
+                WHERE destination.client_id = eligible.client_id
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+            UNION
+            SELECT complete.client_id, complete.destination_start
+            FROM complete_groups complete
+            WHERE NOT EXISTS (
+                SELECT 1 FROM inserted
+                WHERE inserted.client_id = complete.client_id
+                  AND inserted.bucket_start = complete.destination_start
+            )
+        ), conflicts AS MATERIALIZED (
+            SELECT client_id, destination_start FROM overlap_conflicts
+            UNION
+            SELECT client_id, destination_start FROM destination_conflicts
         )
         SELECT
             (SELECT count(*)::bigint FROM inserted) AS promoted,
-            (SELECT count(*)::bigint FROM candidate_groups)
-                - (SELECT count(*)::bigint FROM inserted) AS conflicts,
-            COALESCE((SELECT sum(source_rows)::bigint FROM candidate_groups), 0) AS source_rows
+            (SELECT count(*)::bigint FROM conflicts) AS conflicts,
+            (SELECT count(*)::bigint FROM deleted) AS source_rows
         "#,
     )
     .bind(destination_secs)
+    .bind(source_bucket_secs)
     .bind(source_days)
-    .bind(TELEMETRY_PROMOTION_GROUP_LIMIT)
-    .bind(source_row_limit)
+    .bind(limits.group_limit)
+    .bind(limits.seed_row_limit)
+    .bind(limits.group_source_limit)
+    .bind(lower_bucket_secs)
     .fetch_one(pool)
     .await?;
     let promoted = result.try_get::<i64, _>("promoted")?.max(0) as u64;
     warn_promotion_conflicts(
         "telemetry_rollups",
-        0,
+        source_bucket_secs,
         destination_secs,
         result.try_get("conflicts")?,
     );
@@ -348,10 +463,17 @@ async fn promote_network_rate_rollups(pool: &PgPool) -> Result<PromotionResult> 
         if remaining <= 0 {
             break;
         }
+        let source_tier = TELEMETRY_HISTORY_TIERS[destination_index - 1];
+        let source_bucket_secs = TELEMETRY_HISTORY_TIERS[..destination_index]
+            .iter()
+            .map(|tier| tier.bucket_secs)
+            .collect::<Vec<_>>();
         let pass = promote_network_rate_tier(
             pool,
             TELEMETRY_HISTORY_TIERS[destination_index].bucket_secs,
-            TELEMETRY_HISTORY_TIERS[destination_index - 1].retain_days,
+            source_tier.bucket_secs,
+            source_tier.retain_days,
+            &source_bucket_secs,
             remaining,
         )
         .await?;
@@ -365,63 +487,107 @@ async fn promote_network_rate_rollups(pool: &PgPool) -> Result<PromotionResult> 
 async fn promote_network_rate_tier(
     pool: &PgPool,
     destination_secs: i32,
+    source_bucket_secs: i32,
     source_days: i32,
+    lower_bucket_secs: &[i32],
     source_row_limit: i64,
 ) -> Result<PromotionResult> {
+    let Some(limits) = promotion_limits(destination_secs, source_bucket_secs, source_row_limit)
+    else {
+        return Ok(PromotionResult::default());
+    };
     let result = sqlx::query(
         r#"
-        WITH unbudgeted_groups AS MATERIALIZED (
-            SELECT client_id, interface,
-                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1) destination_start,
-                count(*)::bigint AS source_rows
+        WITH seed_rows AS MATERIALIZED (
+            SELECT client_id, interface, bucket_start
             FROM telemetry_network_rates
-            WHERE bucket_secs < $1
-              AND to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1)
-                    + make_interval(secs => $1) <= now() - make_interval(days => $2)
-            GROUP BY client_id, interface, destination_start
-            ORDER BY destination_start, client_id, interface LIMIT $3
-        ), groups AS MATERIALIZED (
-            SELECT client_id, interface, destination_start, source_rows
-            FROM (
-                SELECT candidate.*,
-                    sum(source_rows) OVER (ORDER BY destination_start, client_id, interface)
-                        AS running_source_rows
-                FROM unbudgeted_groups candidate
-            ) budgeted
-            WHERE running_source_rows <= $4
-        ), locked_source AS MATERIALIZED (
-            SELECT row.ctid AS source_ctid, row.*, groups.destination_start
-            FROM telemetry_network_rates row JOIN groups USING (client_id, interface)
-            WHERE row.bucket_secs < $1
-              AND row.bucket_start >= groups.destination_start
-              AND row.bucket_start < groups.destination_start + make_interval(secs => $1)
-            FOR UPDATE OF row SKIP LOCKED
-        ), ordered_source AS (
+            WHERE bucket_secs = $2
+              AND bucket_start < to_timestamp(floor(extract(epoch FROM (
+                    now() - make_interval(days => $3))) / $1) * $1)
+            ORDER BY bucket_start, client_id DESC, interface DESC
+            LIMIT $5
+        ), candidate_keys AS MATERIALIZED (
+            SELECT DISTINCT client_id, interface,
+                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1) destination_start
+            FROM seed_rows
+            ORDER BY destination_start, client_id, interface LIMIT $4
+        ), expanded_rows AS MATERIALIZED (
+            SELECT source.*
+            FROM candidate_keys candidate
+            CROSS JOIN LATERAL (
+                SELECT tier_source.*, candidate.destination_start
+                FROM unnest($7::integer[]) tier(bucket_secs)
+                CROSS JOIN LATERAL (
+                    SELECT row.ctid AS source_ctid, row.*
+                    FROM telemetry_network_rates row
+                    WHERE row.client_id = candidate.client_id
+                      AND row.interface = candidate.interface
+                      AND row.bucket_secs = tier.bucket_secs
+                      AND row.bucket_start >= candidate.destination_start
+                      AND row.bucket_start < candidate.destination_start
+                            + make_interval(secs => $1)
+                ) tier_source
+                LIMIT $6
+            ) source
+        ), ordered_source AS MATERIALIZED (
             SELECT row.*,
                 lag(row.bucket_start + make_interval(secs => row.bucket_secs)) OVER (
                     PARTITION BY row.client_id, row.interface, row.destination_start
                     ORDER BY row.bucket_start, row.bucket_secs
                 ) AS previous_end
-            FROM locked_source row
+            FROM expanded_rows row
+        ), group_state AS MATERIALIZED (
+            SELECT row.client_id, row.interface, row.destination_start,
+                count(*)::bigint AS source_rows,
+                bool_and(
+                    (row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
+                    AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                        <= row.destination_start + make_interval(secs => $1)
+                ) AS non_overlapping
+            FROM ordered_source row
+            GROUP BY row.client_id, row.interface, row.destination_start
+        ), overlap_conflicts AS MATERIALIZED (
+            SELECT client_id, interface, destination_start
+            FROM group_state
+            WHERE source_rows >= $6 OR NOT non_overlapping
+        ), eligible_groups AS MATERIALIZED (
+            SELECT client_id, interface, destination_start, source_rows
+            FROM group_state
+            WHERE source_rows < $6 AND non_overlapping
+        ), lockable_groups AS MATERIALIZED (
+            SELECT eligible.*
+            FROM eligible_groups eligible
+            WHERE NOT EXISTS (
+                SELECT 1 FROM telemetry_network_rates destination
+                WHERE destination.client_id = eligible.client_id
+                  AND destination.interface = eligible.interface
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+        ), locked_source AS MATERIALIZED (
+            SELECT expanded.*
+            FROM telemetry_network_rates row
+            JOIN expanded_rows expanded ON expanded.source_ctid = row.ctid
+            JOIN lockable_groups groups
+              ON groups.client_id = expanded.client_id
+             AND groups.interface = expanded.interface
+             AND groups.destination_start = expanded.destination_start
+            ORDER BY expanded.destination_start, expanded.client_id, expanded.interface,
+                expanded.bucket_start, expanded.bucket_secs
+            FOR UPDATE OF row SKIP LOCKED
         ), complete_groups AS (
             SELECT groups.client_id, groups.interface, groups.destination_start
-            FROM groups JOIN ordered_source row USING (client_id, interface)
-            WHERE row.bucket_start >= groups.destination_start
-              AND row.bucket_start < groups.destination_start + make_interval(secs => $1)
+            FROM lockable_groups groups
+            JOIN locked_source row
+              ON row.client_id = groups.client_id
+             AND row.interface = groups.interface
+             AND row.destination_start = groups.destination_start
             GROUP BY groups.client_id, groups.interface, groups.destination_start,
                 groups.source_rows
             HAVING count(*) = groups.source_rows
-               AND bool_and(row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
         ), source AS MATERIALIZED (
             SELECT row.* FROM locked_source row
             JOIN complete_groups groups USING (client_id, interface, destination_start)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM telemetry_network_rates destination
-                WHERE destination.client_id = groups.client_id
-                  AND destination.interface = groups.interface
-                  AND destination.bucket_secs = $1
-                  AND destination.bucket_start = groups.destination_start
-            )
         ), inserted AS (
             INSERT INTO telemetry_network_rates (
                 client_id, interface, bucket_start, bucket_secs, sample_count,
@@ -446,23 +612,48 @@ async fn promote_network_rate_tier(
             WHERE row.ctid = source.source_ctid AND inserted.client_id = source.client_id
               AND inserted.interface = source.interface
               AND inserted.bucket_start = source.destination_start RETURNING row.ctid
+        ), destination_conflicts AS MATERIALIZED (
+            SELECT eligible.client_id, eligible.interface, eligible.destination_start
+            FROM eligible_groups eligible
+            WHERE EXISTS (
+                SELECT 1 FROM telemetry_network_rates destination
+                WHERE destination.client_id = eligible.client_id
+                  AND destination.interface = eligible.interface
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+            UNION
+            SELECT complete.client_id, complete.interface, complete.destination_start
+            FROM complete_groups complete
+            WHERE NOT EXISTS (
+                SELECT 1 FROM inserted
+                WHERE inserted.client_id = complete.client_id
+                  AND inserted.interface = complete.interface
+                  AND inserted.bucket_start = complete.destination_start
+            )
+        ), conflicts AS MATERIALIZED (
+            SELECT client_id, interface, destination_start FROM overlap_conflicts
+            UNION
+            SELECT client_id, interface, destination_start FROM destination_conflicts
         ) SELECT
             (SELECT count(*)::bigint FROM inserted) AS promoted,
-            (SELECT count(*)::bigint FROM groups)
-                - (SELECT count(*)::bigint FROM inserted) AS conflicts,
-            COALESCE((SELECT sum(source_rows)::bigint FROM groups), 0) AS source_rows
+            (SELECT count(*)::bigint FROM conflicts) AS conflicts,
+            (SELECT count(*)::bigint FROM deleted) AS source_rows
     "#,
     )
     .bind(destination_secs)
+    .bind(source_bucket_secs)
     .bind(source_days)
-    .bind(TELEMETRY_PROMOTION_GROUP_LIMIT)
-    .bind(source_row_limit)
+    .bind(limits.group_limit)
+    .bind(limits.seed_row_limit)
+    .bind(limits.group_source_limit)
+    .bind(lower_bucket_secs)
     .fetch_one(pool)
     .await?;
     let promoted = result.try_get::<i64, _>("promoted")?.max(0) as u64;
     warn_promotion_conflicts(
         "telemetry_network_rates",
-        0,
+        source_bucket_secs,
         destination_secs,
         result.try_get("conflicts")?,
     );
@@ -475,21 +666,37 @@ async fn promote_network_rate_tier(
 
 async fn promote_ping_rollups(pool: &PgPool) -> Result<PromotionResult> {
     let mut result = PromotionResult::default();
+    let mut series_cursor = PING_PROMOTION_SERIES_CURSOR.load(Ordering::Relaxed).max(0);
     for destination_index in (1..TELEMETRY_HISTORY_TIERS.len()).rev() {
         let remaining = TELEMETRY_PROMOTION_SOURCE_ROW_LIMIT - result.source_rows as i64;
         if remaining <= 0 {
             break;
         }
+        let source_tier = TELEMETRY_HISTORY_TIERS[destination_index - 1];
+        let source_bucket_secs = TELEMETRY_HISTORY_TIERS[..destination_index]
+            .iter()
+            .map(|tier| tier.bucket_secs)
+            .collect::<Vec<_>>();
         let pass = promote_ping_tier(
             pool,
             TELEMETRY_HISTORY_TIERS[destination_index].bucket_secs,
-            TELEMETRY_HISTORY_TIERS[destination_index - 1].retain_days,
+            source_tier.bucket_secs,
+            source_tier.retain_days,
+            &source_bucket_secs,
             remaining,
+            series_cursor,
         )
         .await?;
-        result.promoted += pass.promoted;
-        result.conflicts += pass.conflicts;
-        result.source_rows += pass.source_rows;
+        if let Some(next_cursor) = pass.next_series_cursor {
+            series_cursor = next_cursor;
+            // This cursor only distributes bounded parent probes over successive
+            // runs. Every selected group remains independently atomic, so
+            // restart/cursor loss affects scheduling, never data correctness.
+            PING_PROMOTION_SERIES_CURSOR.store(series_cursor, Ordering::Relaxed);
+        }
+        result.promoted += pass.promotion.promoted;
+        result.conflicts += pass.promotion.conflicts;
+        result.source_rows += pass.promotion.source_rows;
     }
     Ok(result)
 }
@@ -497,59 +704,131 @@ async fn promote_ping_rollups(pool: &PgPool) -> Result<PromotionResult> {
 async fn promote_ping_tier(
     pool: &PgPool,
     destination_secs: i32,
+    source_bucket_secs: i32,
     source_days: i32,
+    lower_bucket_secs: &[i32],
     source_row_limit: i64,
-) -> Result<PromotionResult> {
+    series_cursor: i64,
+) -> Result<PingPromotionResult> {
+    let Some(limits) = promotion_limits(destination_secs, source_bucket_secs, source_row_limit)
+    else {
+        return Ok(PingPromotionResult::default());
+    };
     let result = sqlx::query(
         r#"
-        WITH unbudgeted_groups AS MATERIALIZED (
-            SELECT series_id,
-                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1) destination_start,
-                count(*)::bigint AS source_rows
-            FROM telemetry_ping_rollups WHERE bucket_secs < $1
-              AND to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1)
-                    + make_interval(secs => $1) <= now() - make_interval(days => $2)
-            GROUP BY series_id, destination_start
-            ORDER BY destination_start, series_id LIMIT $3
-        ), groups AS MATERIALIZED (
-            SELECT series_id, destination_start, source_rows
+        WITH candidate_series AS MATERIALIZED (
+            SELECT id, pass
             FROM (
-                SELECT candidate.*,
-                    sum(source_rows) OVER (ORDER BY destination_start, series_id)
-                        AS running_source_rows
-                FROM unbudgeted_groups candidate
-            ) budgeted
-            WHERE running_source_rows <= $4
-        ), locked_source AS MATERIALIZED (
-            SELECT row.ctid AS source_ctid, row.*, groups.destination_start
-            FROM telemetry_ping_rollups row JOIN groups USING (series_id)
-            WHERE row.bucket_secs < $1 AND row.bucket_start >= groups.destination_start
-              AND row.bucket_start < groups.destination_start + make_interval(secs => $1)
-            FOR UPDATE OF row SKIP LOCKED
-        ), ordered_source AS (
+                (SELECT id, 0::integer AS pass
+                 FROM telemetry_ping_series
+                 WHERE id > $8
+                 ORDER BY id
+                 LIMIT $4)
+                UNION ALL
+                (SELECT id, 1::integer AS pass
+                 FROM telemetry_ping_series
+                 WHERE id <= $8
+                 ORDER BY id
+                 LIMIT $4)
+            ) candidate
+            ORDER BY pass, id
+            LIMIT $4
+        ), locked_candidate_series AS MATERIALIZED (
+            SELECT series.id, candidate.pass
+            FROM candidate_series candidate
+            JOIN telemetry_ping_series series ON series.id = candidate.id
+            ORDER BY candidate.pass, series.id
+            FOR NO KEY UPDATE OF series SKIP LOCKED
+        ), seed_rows AS MATERIALIZED (
+            SELECT series.id AS series_id, seed.bucket_start
+            FROM locked_candidate_series series
+            CROSS JOIN LATERAL (
+                SELECT row.bucket_start
+                FROM telemetry_ping_rollups row
+                WHERE row.series_id = series.id
+                  AND row.bucket_secs = $2
+                  AND row.bucket_start < to_timestamp(floor(extract(epoch FROM (
+                        now() - make_interval(days => $3))) / $1) * $1)
+                ORDER BY row.bucket_start
+                LIMIT $5
+            ) seed
+        ), candidate_keys AS MATERIALIZED (
+            SELECT DISTINCT series_id,
+                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1) destination_start
+            FROM seed_rows
+            ORDER BY destination_start, series_id LIMIT $4
+        ), expanded_rows AS MATERIALIZED (
+            SELECT source.*
+            FROM candidate_keys candidate
+            CROSS JOIN LATERAL (
+                SELECT tier_source.*, candidate.destination_start
+                FROM unnest($7::integer[]) tier(bucket_secs)
+                CROSS JOIN LATERAL (
+                    SELECT row.ctid AS source_ctid, row.*
+                    FROM telemetry_ping_rollups row
+                    WHERE row.series_id = candidate.series_id
+                      AND row.bucket_secs = tier.bucket_secs
+                      AND row.bucket_start >= candidate.destination_start
+                      AND row.bucket_start < candidate.destination_start
+                            + make_interval(secs => $1)
+                ) tier_source
+                LIMIT $6
+            ) source
+        ), ordered_source AS MATERIALIZED (
             SELECT row.*,
                 lag(row.bucket_start + make_interval(secs => row.bucket_secs)) OVER (
                     PARTITION BY row.series_id, row.destination_start
                     ORDER BY row.bucket_start, row.bucket_secs
                 ) AS previous_end
-            FROM locked_source row
+            FROM expanded_rows row
+        ), group_state AS MATERIALIZED (
+            SELECT row.series_id, row.destination_start,
+                count(*)::bigint AS source_rows,
+                bool_and(
+                    (row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
+                    AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                        <= row.destination_start + make_interval(secs => $1)
+                ) AS non_overlapping
+            FROM ordered_source row
+            GROUP BY row.series_id, row.destination_start
+        ), overlap_conflicts AS MATERIALIZED (
+            SELECT series_id, destination_start
+            FROM group_state
+            WHERE source_rows >= $6 OR NOT non_overlapping
+        ), eligible_groups AS MATERIALIZED (
+            SELECT series_id, destination_start, source_rows
+            FROM group_state
+            WHERE source_rows < $6 AND non_overlapping
+        ), lockable_groups AS MATERIALIZED (
+            SELECT eligible.*
+            FROM eligible_groups eligible
+            WHERE NOT EXISTS (
+                SELECT 1 FROM telemetry_ping_rollups destination
+                WHERE destination.series_id = eligible.series_id
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+        ), locked_source AS MATERIALIZED (
+            SELECT expanded.*
+            FROM telemetry_ping_rollups row
+            JOIN expanded_rows expanded ON expanded.source_ctid = row.ctid
+            JOIN lockable_groups groups
+              ON groups.series_id = expanded.series_id
+             AND groups.destination_start = expanded.destination_start
+            ORDER BY expanded.destination_start, expanded.series_id,
+                expanded.bucket_start, expanded.bucket_secs
+            FOR UPDATE OF row SKIP LOCKED
         ), complete_groups AS (
             SELECT groups.series_id, groups.destination_start
-            FROM groups JOIN ordered_source row USING (series_id)
-            WHERE row.bucket_start >= groups.destination_start
-              AND row.bucket_start < groups.destination_start + make_interval(secs => $1)
+            FROM lockable_groups groups
+            JOIN locked_source row
+              ON row.series_id = groups.series_id
+             AND row.destination_start = groups.destination_start
             GROUP BY groups.series_id, groups.destination_start, groups.source_rows
             HAVING count(*) = groups.source_rows
-               AND bool_and(row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
         ), source AS MATERIALIZED (
             SELECT row.* FROM locked_source row
             JOIN complete_groups groups USING (series_id, destination_start)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM telemetry_ping_rollups destination
-                WHERE destination.series_id = groups.series_id
-                  AND destination.bucket_secs = $1
-                  AND destination.bucket_start = groups.destination_start
-            )
         ), inserted AS (
             INSERT INTO telemetry_ping_rollups (
                 series_id, bucket_start, bucket_secs, sample_count, success_count,
@@ -572,30 +851,59 @@ async fn promote_ping_tier(
             DELETE FROM telemetry_ping_rollups row USING source, inserted
             WHERE row.ctid = source.source_ctid AND inserted.series_id = source.series_id
               AND inserted.bucket_start = source.destination_start RETURNING row.ctid
+        ), destination_conflicts AS MATERIALIZED (
+            SELECT eligible.series_id, eligible.destination_start
+            FROM eligible_groups eligible
+            WHERE EXISTS (
+                SELECT 1 FROM telemetry_ping_rollups destination
+                WHERE destination.series_id = eligible.series_id
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+            UNION
+            SELECT complete.series_id, complete.destination_start
+            FROM complete_groups complete
+            WHERE NOT EXISTS (
+                SELECT 1 FROM inserted
+                WHERE inserted.series_id = complete.series_id
+                  AND inserted.bucket_start = complete.destination_start
+            )
+        ), conflicts AS MATERIALIZED (
+            SELECT series_id, destination_start FROM overlap_conflicts
+            UNION
+            SELECT series_id, destination_start FROM destination_conflicts
         ) SELECT
             (SELECT count(*)::bigint FROM inserted) AS promoted,
-            (SELECT count(*)::bigint FROM groups)
-                - (SELECT count(*)::bigint FROM inserted) AS conflicts,
-            COALESCE((SELECT sum(source_rows)::bigint FROM groups), 0) AS source_rows
+            (SELECT count(*)::bigint FROM conflicts) AS conflicts,
+            (SELECT count(*)::bigint FROM deleted) AS source_rows,
+            (SELECT id FROM candidate_series ORDER BY pass DESC, id DESC LIMIT 1)
+                AS next_series_cursor
     "#,
     )
     .bind(destination_secs)
+    .bind(source_bucket_secs)
     .bind(source_days)
-    .bind(TELEMETRY_PROMOTION_GROUP_LIMIT)
-    .bind(source_row_limit)
+    .bind(limits.group_limit)
+    .bind(limits.seed_rows_per_group)
+    .bind(limits.group_source_limit)
+    .bind(lower_bucket_secs)
+    .bind(series_cursor)
     .fetch_one(pool)
     .await?;
     let promoted = result.try_get::<i64, _>("promoted")?.max(0) as u64;
     warn_promotion_conflicts(
         "telemetry_ping_rollups",
-        0,
+        source_bucket_secs,
         destination_secs,
         result.try_get("conflicts")?,
     );
-    Ok(PromotionResult {
-        promoted,
-        conflicts: result.try_get::<i64, _>("conflicts")?.max(0) as u64,
-        source_rows: result.try_get::<i64, _>("source_rows")?.max(0) as u64,
+    Ok(PingPromotionResult {
+        promotion: PromotionResult {
+            promoted,
+            conflicts: result.try_get::<i64, _>("conflicts")?.max(0) as u64,
+            source_rows: result.try_get::<i64, _>("source_rows")?.max(0) as u64,
+        },
+        next_series_cursor: result.try_get("next_series_cursor")?,
     })
 }
 
@@ -606,10 +914,17 @@ async fn promote_system_metric_rollups(pool: &PgPool) -> Result<PromotionResult>
         if remaining <= 0 {
             break;
         }
+        let source_tier = TELEMETRY_HISTORY_TIERS[destination_index - 1];
+        let source_bucket_secs = TELEMETRY_HISTORY_TIERS[..destination_index]
+            .iter()
+            .map(|tier| tier.bucket_secs)
+            .collect::<Vec<_>>();
         let pass = promote_system_metric_tier(
             pool,
             TELEMETRY_HISTORY_TIERS[destination_index].bucket_secs,
-            TELEMETRY_HISTORY_TIERS[destination_index - 1].retain_days,
+            source_tier.bucket_secs,
+            source_tier.retain_days,
+            &source_bucket_secs,
             remaining,
         )
         .await?;
@@ -623,58 +938,102 @@ async fn promote_system_metric_rollups(pool: &PgPool) -> Result<PromotionResult>
 async fn promote_system_metric_tier(
     pool: &PgPool,
     destination_secs: i32,
+    source_bucket_secs: i32,
     source_days: i32,
+    lower_bucket_secs: &[i32],
     source_row_limit: i64,
 ) -> Result<PromotionResult> {
+    let Some(limits) = promotion_limits(destination_secs, source_bucket_secs, source_row_limit)
+    else {
+        return Ok(PromotionResult::default());
+    };
     let result = sqlx::query(
         r#"
-        WITH unbudgeted_groups AS MATERIALIZED (
-            SELECT metric,
-                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1) destination_start,
-                count(*)::bigint AS source_rows
-            FROM system_metric_rollups WHERE bucket_secs < $1
-              AND to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1)
-                    + make_interval(secs => $1) <= now() - make_interval(days => $2)
-            GROUP BY metric, destination_start ORDER BY destination_start, metric LIMIT $3
-        ), groups AS MATERIALIZED (
-            SELECT metric, destination_start, source_rows
-            FROM (
-                SELECT candidate.*,
-                    sum(source_rows) OVER (ORDER BY destination_start, metric)
-                        AS running_source_rows
-                FROM unbudgeted_groups candidate
-            ) budgeted
-            WHERE running_source_rows <= $4
-        ), locked_source AS MATERIALIZED (
-            SELECT row.ctid AS source_ctid, row.*, groups.destination_start
-            FROM system_metric_rollups row JOIN groups USING (metric)
-            WHERE row.bucket_secs < $1 AND row.bucket_start >= groups.destination_start
-              AND row.bucket_start < groups.destination_start + make_interval(secs => $1)
-            FOR UPDATE OF row SKIP LOCKED
-        ), ordered_source AS (
+        WITH seed_rows AS MATERIALIZED (
+            SELECT metric, bucket_start
+            FROM system_metric_rollups
+            WHERE bucket_secs = $2
+              AND bucket_start < to_timestamp(floor(extract(epoch FROM (
+                    now() - make_interval(days => $3))) / $1) * $1)
+            ORDER BY bucket_start, metric DESC
+            LIMIT $5
+        ), candidate_keys AS MATERIALIZED (
+            SELECT DISTINCT metric,
+                to_timestamp(floor(extract(epoch FROM bucket_start) / $1) * $1) destination_start
+            FROM seed_rows
+            ORDER BY destination_start, metric LIMIT $4
+        ), expanded_rows AS MATERIALIZED (
+            SELECT source.*
+            FROM candidate_keys candidate
+            CROSS JOIN LATERAL (
+                SELECT tier_source.*, candidate.destination_start
+                FROM unnest($7::integer[]) tier(bucket_secs)
+                CROSS JOIN LATERAL (
+                    SELECT row.ctid AS source_ctid, row.*
+                    FROM system_metric_rollups row
+                    WHERE row.metric = candidate.metric
+                      AND row.bucket_secs = tier.bucket_secs
+                      AND row.bucket_start >= candidate.destination_start
+                      AND row.bucket_start < candidate.destination_start
+                            + make_interval(secs => $1)
+                ) tier_source
+                LIMIT $6
+            ) source
+        ), ordered_source AS MATERIALIZED (
             SELECT row.*,
                 lag(row.bucket_start + make_interval(secs => row.bucket_secs)) OVER (
                     PARTITION BY row.metric, row.destination_start
                     ORDER BY row.bucket_start, row.bucket_secs
                 ) AS previous_end
-            FROM locked_source row
+            FROM expanded_rows row
+        ), group_state AS MATERIALIZED (
+            SELECT row.metric, row.destination_start,
+                count(*)::bigint AS source_rows,
+                bool_and(
+                    (row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
+                    AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                        <= row.destination_start + make_interval(secs => $1)
+                ) AS non_overlapping
+            FROM ordered_source row
+            GROUP BY row.metric, row.destination_start
+        ), overlap_conflicts AS MATERIALIZED (
+            SELECT metric, destination_start
+            FROM group_state
+            WHERE source_rows >= $6 OR NOT non_overlapping
+        ), eligible_groups AS MATERIALIZED (
+            SELECT metric, destination_start, source_rows
+            FROM group_state
+            WHERE source_rows < $6 AND non_overlapping
+        ), lockable_groups AS MATERIALIZED (
+            SELECT eligible.*
+            FROM eligible_groups eligible
+            WHERE NOT EXISTS (
+                SELECT 1 FROM system_metric_rollups destination
+                WHERE destination.metric = eligible.metric
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+        ), locked_source AS MATERIALIZED (
+            SELECT expanded.*
+            FROM system_metric_rollups row
+            JOIN expanded_rows expanded ON expanded.source_ctid = row.ctid
+            JOIN lockable_groups groups
+              ON groups.metric = expanded.metric
+             AND groups.destination_start = expanded.destination_start
+            ORDER BY expanded.destination_start, expanded.metric,
+                expanded.bucket_start, expanded.bucket_secs
+            FOR UPDATE OF row SKIP LOCKED
         ), complete_groups AS (
             SELECT groups.metric, groups.destination_start
-            FROM groups JOIN ordered_source row USING (metric)
-            WHERE row.bucket_start >= groups.destination_start
-              AND row.bucket_start < groups.destination_start + make_interval(secs => $1)
+            FROM lockable_groups groups
+            JOIN locked_source row
+              ON row.metric = groups.metric
+             AND row.destination_start = groups.destination_start
             GROUP BY groups.metric, groups.destination_start, groups.source_rows
             HAVING count(*) = groups.source_rows
-               AND bool_and(row.previous_end IS NULL OR row.previous_end <= row.bucket_start)
         ), source AS MATERIALIZED (
             SELECT row.* FROM locked_source row
             JOIN complete_groups groups USING (metric, destination_start)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM system_metric_rollups destination
-                WHERE destination.metric = groups.metric
-                  AND destination.bucket_secs = $1
-                  AND destination.bucket_start = groups.destination_start
-            )
         ), inserted AS (
             INSERT INTO system_metric_rollups (
                 metric, bucket_start, bucket_secs, sample_count, value_sum,
@@ -691,23 +1050,46 @@ async fn promote_system_metric_tier(
             DELETE FROM system_metric_rollups row USING source, inserted
             WHERE row.ctid = source.source_ctid AND inserted.metric = source.metric
               AND inserted.bucket_start = source.destination_start RETURNING row.ctid
+        ), destination_conflicts AS MATERIALIZED (
+            SELECT eligible.metric, eligible.destination_start
+            FROM eligible_groups eligible
+            WHERE EXISTS (
+                SELECT 1 FROM system_metric_rollups destination
+                WHERE destination.metric = eligible.metric
+                  AND destination.bucket_secs = $1
+                  AND destination.bucket_start = eligible.destination_start
+            )
+            UNION
+            SELECT complete.metric, complete.destination_start
+            FROM complete_groups complete
+            WHERE NOT EXISTS (
+                SELECT 1 FROM inserted
+                WHERE inserted.metric = complete.metric
+                  AND inserted.bucket_start = complete.destination_start
+            )
+        ), conflicts AS MATERIALIZED (
+            SELECT metric, destination_start FROM overlap_conflicts
+            UNION
+            SELECT metric, destination_start FROM destination_conflicts
         ) SELECT
             (SELECT count(*)::bigint FROM inserted) AS promoted,
-            (SELECT count(*)::bigint FROM groups)
-                - (SELECT count(*)::bigint FROM inserted) AS conflicts,
-            COALESCE((SELECT sum(source_rows)::bigint FROM groups), 0) AS source_rows
+            (SELECT count(*)::bigint FROM conflicts) AS conflicts,
+            (SELECT count(*)::bigint FROM deleted) AS source_rows
     "#,
     )
     .bind(destination_secs)
+    .bind(source_bucket_secs)
     .bind(source_days)
-    .bind(TELEMETRY_PROMOTION_GROUP_LIMIT)
-    .bind(source_row_limit)
+    .bind(limits.group_limit)
+    .bind(limits.seed_row_limit)
+    .bind(limits.group_source_limit)
+    .bind(lower_bucket_secs)
     .fetch_one(pool)
     .await?;
     let promoted = result.try_get::<i64, _>("promoted")?.max(0) as u64;
     warn_promotion_conflicts(
         "system_metric_rollups",
-        0,
+        source_bucket_secs,
         destination_secs,
         result.try_get("conflicts")?,
     );
@@ -730,7 +1112,7 @@ fn warn_promotion_conflicts(
             source_bucket_secs,
             destination_bucket_secs,
             conflicts,
-            "history tier promotion retained sources because destination rows already exist"
+            "history tier promotion retained sources because destination or overlap conflicts exist"
         );
     }
 }
@@ -951,6 +1333,9 @@ fn traffic_counter_prune_query() -> String {
     .to_string()
 }
 
+#[cfg(test)]
+#[path = "tests_pressure_proof.rs"]
+mod pressure_proof;
 #[cfg(test)]
 #[path = "tests_history_retention.rs"]
 mod tests;

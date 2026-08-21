@@ -3,6 +3,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
@@ -276,18 +277,51 @@ impl AppState {
                             delivery.id,
                             lease_id,
                             "webhook rule disabled",
+                            None,
                         )
                         .await?,
                 );
                 continue;
             }
-            let result = if self
+            let actor_authorized = self
                 .webhook_delivery_actor_authorized(delivery.actor_id)
-                .await?
-            {
-                deliver_webhook_rule(&delivery).await
+                .await?;
+            let (result, mut send_guard) = if actor_authorized {
+                let mut send_guard = self
+                    .repo
+                    .begin_webhook_rule_alert_send(delivery.id, lease_id)
+                    .await?;
+                if !send_guard.is_deliverable() {
+                    let cancellation_reason = send_guard.cancellation_reason();
+                    let canceled = if let Some(reason) = cancellation_reason {
+                        Some(
+                            self.repo
+                                .cancel_claimed_webhook_rule_delivery(
+                                    delivery.id,
+                                    lease_id,
+                                    reason,
+                                    Some(&mut send_guard),
+                                )
+                                .await,
+                        )
+                    } else {
+                        None
+                    };
+                    if let Err(error) = send_guard.release().await {
+                        warn!(
+                            delivery_id = %delivery.id,
+                            error = %error,
+                            "failed to release webhook alert suspension fence"
+                        );
+                    }
+                    if let Some(canceled) = canceled {
+                        processed.push(canceled?);
+                    }
+                    continue;
+                }
+                (deliver_webhook_rule(&delivery).await, Some(send_guard))
             } else {
-                Err(anyhow::anyhow!("actor_authority_revoked"))
+                (Err(anyhow::anyhow!("actor_authority_revoked")), None)
             };
             let (status, error) = match result {
                 Ok(()) => (WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, None),
@@ -313,17 +347,27 @@ impl AppState {
             } else {
                 None
             };
-            processed.push(
-                self.repo
-                    .complete_webhook_rule_delivery_attempt(
-                        delivery.id,
-                        lease_id,
-                        status,
-                        error.as_deref(),
-                        next_attempt_after_secs,
-                    )
-                    .await?,
-            );
+            let completion = self
+                .repo
+                .complete_webhook_rule_delivery_attempt(
+                    delivery.id,
+                    lease_id,
+                    status,
+                    error.as_deref(),
+                    next_attempt_after_secs,
+                    send_guard.as_mut(),
+                )
+                .await;
+            if let Some(send_guard) = send_guard {
+                if let Err(error) = send_guard.release().await {
+                    warn!(
+                        delivery_id = %delivery.id,
+                        error = %error,
+                        "failed to release webhook alert suspension fence"
+                    );
+                }
+            }
+            processed.push(completion?);
         }
         if !dry_run && !processed.is_empty() {
             self.repo

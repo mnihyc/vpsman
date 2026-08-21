@@ -64,6 +64,15 @@ pub(crate) struct MonitoringShareTargetReplacement {
     pub(crate) next_client_ids: Vec<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct MonitoringShareDefinitionUpdate {
+    pub(crate) expected_share: MonitoringShareRecord,
+    pub(crate) next_name: String,
+    pub(crate) next_selector_expression: String,
+    pub(crate) next_client_ids: Vec<String>,
+    pub(crate) next_visibility: MonitoringShareVisibilityView,
+}
+
 impl MonitoringShareRecord {
     pub(crate) fn target_client_ids(&self) -> Vec<String> {
         self.targets
@@ -703,11 +712,63 @@ pub(crate) struct MonitoringShareTargetChangeView {
     pub(crate) unchanged_count: usize,
 }
 
+/// Authoritative revision returned after a frozen-target mutation.
+///
+/// This contains the fields needed to safely construct a later CAS edit
+/// without exposing bearer secrets or depending on a second list request.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MonitoringShareRevisionView {
+    pub(crate) share_id: Uuid,
+    pub(crate) updated_at: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) target_count: usize,
+    pub(crate) target_update_available: bool,
+    pub(crate) target_update_evidence_available: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct BulkUpdateMonitoringShareTargetsResponse {
     pub(crate) preview_hash: String,
     pub(crate) applied: bool,
     pub(crate) changes: Vec<MonitoringShareTargetChangeView>,
+    pub(crate) revisions: Vec<MonitoringShareRevisionView>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateMonitoringShareRequest {
+    pub(crate) name: String,
+    pub(crate) selector_expression: String,
+    #[serde(default)]
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) visibility: MonitoringShareVisibilityRequest,
+    pub(crate) expected_updated_at: String,
+    #[serde(default)]
+    pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MonitoringShareDefinitionChangeView {
+    pub(crate) share_id: Uuid,
+    pub(crate) previous_name: String,
+    pub(crate) name: String,
+    pub(crate) previous_selector_expression: String,
+    pub(crate) selector_expression: String,
+    pub(crate) added_client_ids: Vec<String>,
+    pub(crate) removed_client_ids: Vec<String>,
+    pub(crate) unchanged_count: usize,
+    pub(crate) previous_visibility: MonitoringShareVisibilityView,
+    pub(crate) visibility: MonitoringShareVisibilityView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct UpdateMonitoringShareResponse {
+    pub(crate) preview_hash: String,
+    pub(crate) applied: bool,
+    pub(crate) change: MonitoringShareDefinitionChangeView,
+    pub(crate) share: Option<MonitoringShareView>,
 }
 
 #[derive(Clone, Debug, Serialize)]

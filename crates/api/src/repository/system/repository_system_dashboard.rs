@@ -25,8 +25,9 @@ selected AS (
         row.metric,
         to_timestamp(
             floor(
-                extract(epoch FROM row.bucket_start) / $3::double precision
-            ) * $3::double precision
+                extract(epoch FROM row.bucket_start)::double precision
+                    / $3::double precision
+            )::bigint * $3::bigint
         ) AS chart_bucket_start,
         GREATEST(row.bucket_secs, $3)::integer AS chart_bucket_secs,
         row.sample_count,

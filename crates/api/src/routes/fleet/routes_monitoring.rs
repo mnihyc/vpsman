@@ -22,20 +22,22 @@ use crate::{
         CreateMonitoringShareRequest, CreateMonitoringShareResponse, CurrentPingView,
         DeletePingTargetRequest, DeletePingTargetResponse, ExtendMonitoringSharesRequest,
         MakePrimaryPingTargetRequest, MonitoringCardView, MonitoringCardsPageView,
-        MonitoringRangeView, MonitoringResolutionView, MonitoringShareListQuery,
-        MonitoringShareRecord, MonitoringShareTargetChangeView, MonitoringShareTargetRecord,
+        MonitoringRangeView, MonitoringResolutionView, MonitoringShareDefinitionChangeView,
+        MonitoringShareDefinitionUpdate, MonitoringShareListQuery, MonitoringShareRecord,
+        MonitoringShareRevisionView, MonitoringShareTargetChangeView, MonitoringShareTargetRecord,
         MonitoringShareTargetReplacement, MonitoringShareUrlResponse, MonitoringShareView,
-        MonitoringShareVisibilityView, MonitoringSharesMutationResponse, PingRollupView,
-        PingTargetAssignmentChangeView, PingTargetAssignmentReplacement, PingTargetDetailView,
-        PingTargetMutationRequest, PingTargetMutationResponse, PingTargetRecord,
-        PingTargetRuntimeSyncView, PingTargetView, PortSpeedView, PublicBillingPlanView,
-        PublicMonitoringCardView, PublicMonitoringDataView, PublicMonitoringDetailView,
-        PublicMonitoringRangeView, PublicMonitoringShareBootstrapView, PublicMonitoringShareView,
-        PublicNetworkMetricView, PublicNetworkPointView, PublicPingMetricView, PublicPingPointView,
-        PublicPortSpeedView, PublicResourceMetricView, PublicSystemInformationView,
-        PublicTrafficHistoryPointView, PublicTrafficMetricView, RevokeMonitoringSharesRequest,
-        RuntimeConfigApplyStateRecord, SystemInformationView, TelemetryNetworkRateView,
-        TelemetryRollupView,
+        MonitoringShareVisibilityRequest, MonitoringShareVisibilityView,
+        MonitoringSharesMutationResponse, PingRollupView, PingTargetAssignmentChangeView,
+        PingTargetAssignmentReplacement, PingTargetDetailView, PingTargetMutationRequest,
+        PingTargetMutationResponse, PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView,
+        PortSpeedView, PublicBillingPlanView, PublicMonitoringCardView, PublicMonitoringDataView,
+        PublicMonitoringDetailView, PublicMonitoringRangeView, PublicMonitoringShareBootstrapView,
+        PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
+        PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
+        PublicSystemInformationView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
+        RevokeMonitoringSharesRequest, RuntimeConfigApplyStateRecord, SystemInformationView,
+        TelemetryNetworkRateView, TelemetryRollupView, UpdateMonitoringShareRequest,
+        UpdateMonitoringShareResponse,
     },
     model_alert_policies::TrafficAccountingRecord,
     model_alert_policies::{
@@ -176,12 +178,30 @@ pub(crate) async fn get_client_monitoring(
     Path(client_id): Path<String>,
     Query(query): Query<ClientMonitoringQuery>,
 ) -> Result<Json<ClientMonitoringView>, ApiError> {
-    state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(
-        client_monitoring_view(&state, &client_id, &query).await?,
-    ))
+    let key = serde_json::json!({
+        "endpoint": "client_monitoring",
+        "auth": crate::state::read_singleflight_auth_key(
+            operator.operator.id,
+            &operator.operator.scopes,
+        ),
+        "client_id": &client_id,
+        "window": query.window.as_deref(),
+        "start_unix": query.start_unix,
+        "end_unix": query.end_unix,
+        "points": query.points,
+    })
+    .to_string();
+    let events = state.events.clone();
+    let response = events
+        .singleflight_client_monitoring(key, move || async move {
+            let _admission = state.events.acquire_heavy_read_permit().await?;
+            client_monitoring_view(&state, &client_id, &query).await
+        })
+        .await?;
+    Ok(Json(response))
 }
 
 pub(crate) async fn list_ping_targets(
@@ -679,27 +699,7 @@ pub(crate) async fn create_monitoring_share(
     if resolved != submitted {
         return Err(ApiError::conflict("monitoring_share_resolution_stale"));
     }
-    let visibility = MonitoringShareVisibilityView {
-        identity_context: request.visibility.identity_context,
-        billing: request.visibility.billing,
-        system_information: request.visibility.system_information,
-        resources: request.visibility.resources,
-        network: request.visibility.network,
-        traffic: request.visibility.traffic,
-        ping: request.visibility.ping,
-        detail_history: request.visibility.detail_history,
-    };
-    if visibility.detail_history
-        && !(visibility.system_information
-            || visibility.resources
-            || visibility.network
-            || visibility.traffic
-            || visibility.ping)
-    {
-        return Err(ApiError::bad_request(
-            "monitoring_share_detail_requires_visible_metrics",
-        ));
-    }
+    let visibility = normalized_monitoring_share_visibility(&request.visibility)?;
     let secret = generate_token();
     let now = crate::unix_now();
     let id = Uuid::new_v4();
@@ -742,6 +742,121 @@ pub(crate) async fn create_monitoring_share(
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+pub(crate) async fn update_monitoring_share(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(share_id): Path<Uuid>,
+    Json(request): Json<UpdateMonitoringShareRequest>,
+) -> Result<Json<UpdateMonitoringShareResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_SHARING_WRITE)
+        .await?;
+    let expected_updated_at = request.expected_updated_at.trim();
+    if expected_updated_at.is_empty() {
+        return Err(ApiError::bad_request(
+            "monitoring_share_expected_revision_required",
+        ));
+    }
+    let current = state
+        .repo
+        .monitoring_share_record(share_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_unavailable",
+            "The shared monitoring view could not be loaded.",
+        ))?
+        .ok_or_else(|| ApiError::not_found("monitoring_share_not_found"))?;
+    if monitoring_share_status(&current, crate::unix_now()) != "active" {
+        return Err(ApiError::conflict("monitoring_share_not_active"));
+    }
+    if current.updated_at != expected_updated_at {
+        return Err(ApiError::conflict("monitoring_share_preview_stale"));
+    }
+
+    let name = request.name.trim().to_string();
+    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad_request("monitoring_share_name_invalid"));
+    }
+    let selector_expression = request.selector_expression.trim().to_string();
+    validate_monitoring_selector(&selector_expression, MAX_SHARE_SELECTOR_BYTES)?;
+    require_monitoring_selector_scope(&operator.operator.scopes, &selector_expression)?;
+    let resolved = resolve_selector(&state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
+    if resolved.len() > MAX_SHARE_TARGETS {
+        return Err(ApiError::bad_request(
+            "monitoring_share_target_count_too_large",
+        ));
+    }
+    let submitted = request
+        .target_client_ids
+        .iter()
+        .map(|client_id| client_id.trim())
+        .filter(|client_id| !client_id.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if resolved != submitted {
+        return Err(ApiError::conflict("monitoring_share_resolution_stale"));
+    }
+    let visibility = normalized_monitoring_share_visibility(&request.visibility)?;
+    let current_targets = current
+        .target_client_ids()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let next_targets = resolved.iter().cloned().collect::<BTreeSet<_>>();
+    let change = MonitoringShareDefinitionChangeView {
+        share_id,
+        previous_name: current.name.clone(),
+        name: name.clone(),
+        previous_selector_expression: current.selector_expression.clone(),
+        selector_expression: selector_expression.clone(),
+        added_client_ids: next_targets.difference(&current_targets).cloned().collect(),
+        removed_client_ids: current_targets.difference(&next_targets).cloned().collect(),
+        unchanged_count: current_targets.intersection(&next_targets).count(),
+        previous_visibility: current.visibility.clone(),
+        visibility: visibility.clone(),
+    };
+    let preview_hash = monitoring_share_definition_preview_hash(&change, &current.updated_at)?;
+    if !request.confirmed {
+        return Ok(Json(UpdateMonitoringShareResponse {
+            preview_hash,
+            applied: false,
+            change,
+            share: None,
+        }));
+    }
+    if request.preview_hash.as_deref() != Some(preview_hash.as_str()) {
+        return Err(ApiError::conflict("monitoring_share_preview_stale"));
+    }
+
+    let mut share = state
+        .repo
+        .update_monitoring_share_definition(
+            MonitoringShareDefinitionUpdate {
+                expected_share: current,
+                next_name: name,
+                next_selector_expression: selector_expression,
+                next_client_ids: resolved,
+                next_visibility: visibility,
+            },
+            &operator,
+        )
+        .await
+        .map_err(share_repository_error)?;
+    enrich_monitoring_share_target_evidence(
+        &state,
+        std::slice::from_mut(&mut share),
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
+    Ok(Json(UpdateMonitoringShareResponse {
+        preview_hash,
+        applied: true,
+        change,
+        share: Some(share),
+    }))
 }
 
 pub(crate) async fn extend_monitoring_shares(
@@ -861,6 +976,7 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
             preview_hash,
             applied: false,
             changes,
+            revisions: Vec::new(),
         }));
     }
     if request.preview_hash.as_deref() != Some(preview_hash.as_str()) {
@@ -871,10 +987,45 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
         .replace_monitoring_share_targets_bulk(&replacements, &operator)
         .await
         .map_err(share_repository_error)?;
+    let mut revisions = Vec::with_capacity(share_ids.len());
+    for share_id in &share_ids {
+        let share = state
+            .repo
+            .monitoring_share_record(*share_id)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_share_unavailable",
+                "The updated shared monitoring view could not be loaded.",
+            ))?
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "monitoring_share_not_found_after_update",
+                    "The updated shared monitoring view could not be loaded.",
+                    anyhow::anyhow!("monitoring share disappeared after target update"),
+                )
+            })?;
+        let mut target_client_ids = share.target_client_ids();
+        target_client_ids.sort();
+        target_client_ids.dedup();
+        revisions.push(MonitoringShareRevisionView {
+            share_id: share.id,
+            updated_at: share.updated_at,
+            target_count: target_client_ids.len(),
+            target_client_ids,
+            // The selector was resolved successfully as part of this request,
+            // so the committed frozen target set is current and has usable
+            // refresh evidence. Inactive status is still safe to report as
+            // evidence-available because its retained frozen targets remain
+            // immutable evidence.
+            target_update_available: false,
+            target_update_evidence_available: true,
+        });
+    }
     Ok(Json(BulkUpdateMonitoringShareTargetsResponse {
         preview_hash,
         applied: true,
         changes,
+        revisions,
     }))
 }
 
@@ -934,7 +1085,9 @@ pub(crate) async fn public_monitoring_share_bootstrap(
             "monitoring_share_targets_unavailable",
             "Shared-view VPS targets could not be loaded.",
         ))?
-        .len();
+        .into_iter()
+        .filter(AgentView::is_monitoring_visible)
+        .count();
     let (visitor_id, _) = state
         .repo
         .record_monitoring_share_visitor(&share, proposed_visitor_id, &source_ip, user_agent)
@@ -1002,18 +1155,49 @@ pub(crate) async fn public_monitoring_share_data(
             "monitoring_share_targets_unavailable",
             "Shared-view VPS targets could not be loaded.",
         ))?;
+    agents.retain(AgentView::is_monitoring_visible);
     sort_monitoring_agents(&mut agents);
     let total = agents.len();
     let offset = query.offset.unwrap_or(0).min(total);
     let limit = query.limit.unwrap_or(1_000).clamp(1, 1_000);
-    let cards = monitoring_cards_for_agents(
-        &state,
-        agents.into_iter().skip(offset).take(limit).collect(),
-    )
-    .await?
-    .into_iter()
-    .map(|card| public_monitoring_card(card, &share))
-    .collect::<Result<Vec<_>, _>>()?;
+    let page_agents = agents
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let card_key = serde_json::json!({
+        "endpoint": "public_monitoring_cards",
+        "share_id": share.id,
+        "share_revision": &share.updated_at,
+        "client_ids": page_agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        "offset": offset,
+        "limit": limit,
+    })
+    .to_string();
+    let events = state.events.clone();
+    let card_state = state.clone();
+    let card_page = events
+        .singleflight_monitoring_cards(card_key, move || async move {
+            let _admission = card_state.events.acquire_heavy_read_permit().await?;
+            let items = monitoring_cards_for_agents(&card_state, page_agents).await?;
+            let consumed = offset.saturating_add(items.len());
+            Ok(MonitoringCardsPageView {
+                items,
+                offset,
+                limit,
+                total,
+                next_offset: (consumed < total).then_some(consumed),
+            })
+        })
+        .await?;
+    let cards = card_page
+        .items
+        .into_iter()
+        .map(|card| public_monitoring_card(card, &share))
+        .collect::<Result<Vec<_>, _>>()?;
     let consumed = offset.saturating_add(cards.len());
     let detail = match query.client_key.as_deref() {
         None => None,
@@ -1025,17 +1209,34 @@ pub(crate) async fn public_monitoring_share_data(
             }
             let client_id = share
                 .client_id_for_public_key(client_key)
-                .ok_or_else(|| ApiError::not_found("monitoring_share_client_not_found"))?;
+                .ok_or_else(|| ApiError::not_found("monitoring_share_client_not_found"))?
+                .to_string();
             let range_query = ClientMonitoringQuery {
                 window: query.window.clone(),
                 start_unix: query.start_unix,
                 end_unix: query.end_unix,
                 points: query.points,
             };
-            Some(public_monitoring_detail(
-                client_monitoring_view(&state, client_id, &range_query).await?,
-                &share,
-            )?)
+            let key = serde_json::json!({
+                "endpoint": "public_monitoring_detail",
+                "share_id": share.id,
+                "share_revision": &share.updated_at,
+                "client_id": &client_id,
+                "client_key": client_key,
+                "window": range_query.window.as_deref(),
+                "start_unix": range_query.start_unix,
+                "end_unix": range_query.end_unix,
+                "points": range_query.points,
+            })
+            .to_string();
+            let events = state.events.clone();
+            let detail_view = events
+                .singleflight_client_monitoring(key, move || async move {
+                    let _admission = state.events.acquire_heavy_read_permit().await?;
+                    client_monitoring_view(&state, &client_id, &range_query).await
+                })
+                .await?;
+            Some(public_monitoring_detail(detail_view, &share)?)
         }
     };
     let mut response = Json(PublicMonitoringDataView {
@@ -1057,29 +1258,32 @@ async fn monitoring_agents(
     state: &AppState,
     selector_expression: Option<&str>,
 ) -> Result<Vec<AgentView>, ApiError> {
-    let Some(selector_expression) = selector_expression
+    let selector_expression = selector_expression
         .map(str::trim)
-        .filter(|selector| !selector.is_empty())
-    else {
-        return state
+        .filter(|selector| !selector.is_empty());
+    let mut agents = if let Some(selector_expression) = selector_expression {
+        let client_ids =
+            resolve_selector(state, selector_expression, MAX_MONITORING_SELECTOR_BYTES).await?;
+        state
+            .repo
+            .list_agents_for_client_ids(&client_ids)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "vps_inventory_unavailable",
+                "The VPS inventory could not be loaded.",
+            ))?
+    } else {
+        state
             .repo
             .list_agents()
             .await
             .map_err(ApiError::internal_mapper(
                 "vps_inventory_unavailable",
                 "The VPS inventory could not be loaded.",
-            ));
+            ))?
     };
-    let client_ids =
-        resolve_selector(state, selector_expression, MAX_MONITORING_SELECTOR_BYTES).await?;
-    state
-        .repo
-        .list_agents_for_client_ids(&client_ids)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "vps_inventory_unavailable",
-            "The VPS inventory could not be loaded.",
-        ))
+    agents.retain(AgentView::is_monitoring_visible);
+    Ok(agents)
 }
 
 fn sort_monitoring_agents(agents: &mut [AgentView]) {
@@ -1100,9 +1304,10 @@ pub(crate) async fn monitoring_cards_for_agents(
 
 pub(crate) async fn monitoring_cards_for_agents_projection(
     state: &AppState,
-    agents: Vec<AgentView>,
+    mut agents: Vec<AgentView>,
     include_history: bool,
 ) -> Result<Vec<MonitoringCardView>, ApiError> {
+    agents.retain(AgentView::is_monitoring_visible);
     if agents.is_empty() {
         return Ok(Vec::new());
     }
@@ -1412,14 +1617,6 @@ async fn client_monitoring_view(
     query: &ClientMonitoringQuery,
 ) -> Result<ClientMonitoringView, ApiError> {
     let client_ids = vec![client_id.to_string()];
-    let network_rate_selection = state
-        .repo
-        .network_rate_interface_selection_for_clients(&client_ids)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "network_interface_selection_unavailable",
-            "Network-interface selection could not be loaded.",
-        ))?;
     let client = state
         .repo
         .list_agents_for_client_ids(&client_ids)
@@ -1431,6 +1628,17 @@ async fn client_monitoring_view(
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("monitoring_client_not_found"))?;
+    if !client.is_monitoring_visible() {
+        return Err(ApiError::not_found("monitoring_client_not_found"));
+    }
+    let network_rate_selection = state
+        .repo
+        .network_rate_interface_selection_for_clients(&client_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_interface_selection_unavailable",
+            "Network-interface selection could not be loaded.",
+        ))?;
     let product_name = state
         .repo
         .list_vps_rules_for_clients(&client_ids, &[VPS_RULE_KEY_PRODUCT_NAME])
@@ -2633,6 +2841,48 @@ fn monitoring_share_target_preview_hash(
                 anyhow::anyhow!(error),
             )
         })
+}
+
+fn monitoring_share_definition_preview_hash(
+    change: &MonitoringShareDefinitionChangeView,
+    expected_updated_at: &str,
+) -> Result<String, ApiError> {
+    serde_json::to_vec(&(expected_updated_at, change))
+        .map(|payload| payload_hash(&payload))
+        .map_err(|error| {
+            ApiError::internal(
+                "monitoring_share_preview_failed",
+                "The shared-view edit preview could not be prepared.",
+                anyhow::anyhow!(error),
+            )
+        })
+}
+
+fn normalized_monitoring_share_visibility(
+    visibility: &MonitoringShareVisibilityRequest,
+) -> Result<MonitoringShareVisibilityView, ApiError> {
+    let visibility = MonitoringShareVisibilityView {
+        identity_context: visibility.identity_context,
+        billing: visibility.billing,
+        system_information: visibility.system_information,
+        resources: visibility.resources,
+        network: visibility.network,
+        traffic: visibility.traffic,
+        ping: visibility.ping,
+        detail_history: visibility.detail_history,
+    };
+    if visibility.detail_history
+        && !(visibility.system_information
+            || visibility.resources
+            || visibility.network
+            || visibility.traffic
+            || visibility.ping)
+    {
+        return Err(ApiError::bad_request(
+            "monitoring_share_detail_requires_visible_metrics",
+        ));
+    }
+    Ok(visibility)
 }
 
 fn monitoring_repository_error(error: anyhow::Error) -> ApiError {

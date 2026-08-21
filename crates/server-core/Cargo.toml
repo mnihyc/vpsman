@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 reqwest.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 url.workspace = true
 vpsman-common = { path = "../common" }

@@ -7,7 +7,10 @@ use axum::{
 use vpsman_common::{AgentPingProbeKind, AgentPingTarget, AgentRuntimeConfig, PingTargetResult};
 
 use super::*;
-use crate::model_monitoring::MonitoringShareTargetReplacement;
+use crate::model_monitoring::{
+    BulkUpdateMonitoringShareTargetsRequest, MonitoringShareTargetReplacement,
+    UpdateMonitoringShareRequest,
+};
 use crate::repository_monitoring::monitoring_share_status;
 
 #[tokio::test]
@@ -949,6 +952,252 @@ async fn shared_view_target_refresh_preserves_existing_public_identity() {
         serde_json::json!([])
     );
     assert!(!audit.metadata.to_string().contains(&stored.token_secret));
+}
+
+#[tokio::test]
+async fn shared_view_target_refresh_returns_authoritative_revision_for_cas_edit() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = monitoring_test_state(repo.clone());
+    let (operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    seed_monitoring_agent(&repo, "v-1").await;
+    seed_monitoring_agent(&repo, "v-2").await;
+    let now = crate::unix_now();
+    let share = MonitoringShareRecord {
+        id: Uuid::new_v4(),
+        name: "Fleet status".to_string(),
+        token_secret: "a".repeat(64),
+        selector_expression: "*".to_string(),
+        targets: vec![MonitoringShareTargetRecord {
+            client_id: "v-1".to_string(),
+            public_client_key: "1".repeat(64),
+        }],
+        visibility: MonitoringShareVisibilityView {
+            identity_context: false,
+            billing: false,
+            system_information: false,
+            resources: true,
+            network: true,
+            traffic: true,
+            ping: true,
+            detail_history: true,
+        },
+        expires_at: now.saturating_add(3_600).to_string(),
+        revoked_at: None,
+        revoked_by: None,
+        created_by: Some(operator.operator.id),
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    };
+    repo.create_monitoring_share(share.clone(), &operator)
+        .await
+        .unwrap();
+
+    let Json(preview) = crate::routes_monitoring::bulk_update_monitoring_share_targets(
+        State(state.clone()),
+        headers.clone(),
+        Json(BulkUpdateMonitoringShareTargetsRequest {
+            share_ids: vec![share.id],
+            preview_hash: None,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!preview.applied);
+    assert!(preview.revisions.is_empty());
+    assert_eq!(preview.changes[0].added_client_ids, ["v-2"]);
+
+    let Json(applied) = crate::routes_monitoring::bulk_update_monitoring_share_targets(
+        State(state.clone()),
+        headers,
+        Json(BulkUpdateMonitoringShareTargetsRequest {
+            share_ids: vec![share.id],
+            preview_hash: Some(preview.preview_hash),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(applied.applied);
+    assert_eq!(applied.revisions.len(), 1);
+    let revision = &applied.revisions[0];
+    assert_eq!(revision.share_id, share.id);
+    assert_eq!(revision.target_client_ids, ["v-1", "v-2"]);
+    assert_eq!(revision.target_count, 2);
+    assert!(!revision.target_update_available);
+    assert!(revision.target_update_evidence_available);
+    assert_ne!(revision.updated_at, share.updated_at);
+
+    let stored = repo
+        .monitoring_share_record(share.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.updated_at, stored.updated_at);
+}
+
+#[tokio::test]
+async fn shared_view_definition_edit_is_reviewed_atomic_and_identity_preserving() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = monitoring_test_state(repo.clone());
+    let (operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    seed_monitoring_agent(&repo, "v-1").await;
+    seed_monitoring_agent(&repo, "v-2").await;
+    let now = crate::unix_now();
+    let share = MonitoringShareRecord {
+        id: Uuid::new_v4(),
+        name: "Fleet status".to_string(),
+        token_secret: "a".repeat(64),
+        selector_expression: "id:v-1".to_string(),
+        targets: vec![MonitoringShareTargetRecord {
+            client_id: "v-1".to_string(),
+            public_client_key: "1".repeat(64),
+        }],
+        visibility: MonitoringShareVisibilityView {
+            identity_context: false,
+            billing: false,
+            system_information: false,
+            resources: true,
+            network: true,
+            traffic: true,
+            ping: true,
+            detail_history: true,
+        },
+        expires_at: now.saturating_add(3_600).to_string(),
+        revoked_at: None,
+        revoked_by: None,
+        created_by: Some(operator.operator.id),
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    };
+    repo.create_monitoring_share(share.clone(), &operator)
+        .await
+        .unwrap();
+    let visitor_id = Uuid::new_v4();
+    repo.record_monitoring_share_visitor(
+        &share,
+        Some(visitor_id),
+        "198.51.100.20",
+        Some("browser-a"),
+    )
+    .await
+    .unwrap();
+
+    let request = UpdateMonitoringShareRequest {
+        name: "Customer status".to_string(),
+        selector_expression: "*".to_string(),
+        target_client_ids: vec!["v-1".to_string(), "v-2".to_string()],
+        visibility: MonitoringShareVisibilityRequest {
+            identity_context: true,
+            billing: false,
+            system_information: true,
+            resources: true,
+            network: false,
+            traffic: false,
+            ping: false,
+            detail_history: true,
+        },
+        expected_updated_at: share.updated_at.clone(),
+        preview_hash: None,
+        confirmed: false,
+    };
+    let Json(preview) = crate::routes_monitoring::update_monitoring_share(
+        State(state.clone()),
+        headers.clone(),
+        Path(share.id),
+        Json(request.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(!preview.applied);
+    assert!(preview.share.is_none());
+    assert_eq!(preview.change.previous_name, "Fleet status");
+    assert_eq!(preview.change.name, "Customer status");
+    assert_eq!(preview.change.added_client_ids, ["v-2"]);
+    assert!(preview.change.removed_client_ids.is_empty());
+    assert_eq!(preview.change.unchanged_count, 1);
+    assert!(!preview.change.previous_visibility.identity_context);
+    assert!(preview.change.visibility.identity_context);
+
+    let Json(applied) = crate::routes_monitoring::update_monitoring_share(
+        State(state.clone()),
+        headers.clone(),
+        Path(share.id),
+        Json(UpdateMonitoringShareRequest {
+            confirmed: true,
+            preview_hash: Some(preview.preview_hash.clone()),
+            ..request.clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(applied.applied);
+    let updated_view = applied.share.expect("applied edit returns current view");
+    assert_eq!(updated_view.name, "Customer status");
+    assert_eq!(updated_view.selector_expression, "*");
+    assert_eq!(updated_view.target_client_ids, ["v-1", "v-2"]);
+    assert_eq!(updated_view.visitor_count, 1);
+    assert!(updated_view.visibility.system_information);
+    assert!(!updated_view.visibility.network);
+
+    let stored = repo
+        .monitoring_share_record(share.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.token_secret, share.token_secret);
+    assert_eq!(stored.expires_at, share.expires_at);
+    assert_eq!(
+        stored.public_client_key("v-1"),
+        Some(share.targets[0].public_client_key.as_str())
+    );
+    assert_eq!(stored.public_client_key("v-2").unwrap().len(), 64);
+    assert_ne!(stored.updated_at, share.updated_at);
+    let visitors = repo.list_monitoring_shares(None, 100, 0).await.unwrap();
+    assert_eq!(visitors[0].visitor_count, 1);
+
+    let audit = repo
+        .list_audit_logs(20)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| audit.action == "monitoring_share.definition_updated")
+        .expect("definition edit audit");
+    assert_eq!(audit.metadata["before"]["name"], "Fleet status");
+    assert_eq!(audit.metadata["after"]["name"], "Customer status");
+    assert_eq!(
+        audit.metadata["added_client_ids"],
+        serde_json::json!(["v-2"])
+    );
+    assert!(!audit.metadata.to_string().contains(&share.token_secret));
+
+    let stale = crate::routes_monitoring::update_monitoring_share(
+        State(state.clone()),
+        headers.clone(),
+        Path(share.id),
+        Json(request.clone()),
+    )
+    .await
+    .expect_err("an edit based on the previous updated_at must conflict");
+    assert_eq!(stale.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(stale.code, "monitoring_share_preview_stale");
+
+    repo.revoke_monitoring_shares(&[share.id], &operator)
+        .await
+        .unwrap();
+    let inactive = crate::routes_monitoring::update_monitoring_share(
+        State(state),
+        headers,
+        Path(share.id),
+        Json(UpdateMonitoringShareRequest {
+            expected_updated_at: stored.updated_at,
+            ..request
+        }),
+    )
+    .await
+    .expect_err("revoked definitions remain retained, read-only evidence");
+    assert_eq!(inactive.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(inactive.code, "monitoring_share_not_active");
 }
 
 #[tokio::test]

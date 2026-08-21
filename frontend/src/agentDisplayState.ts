@@ -34,6 +34,8 @@ export function agentStatusPresentation(
     case "offline":
     case "disconnected":
       return { label: "Offline", tone: "neutral" };
+    case "suspended":
+      return { label: "Suspended", tone: "neutral" };
     case "never":
       return { label: "Never connected", tone: "warning" };
     case "revoked":
@@ -58,7 +60,8 @@ export function agentDisplayState(agent: AgentView): AgentDisplayState {
   if (status === "online") {
     if (!lastSeen) {
       return {
-        detail: "Registered as online, but no last contact has been reported by the gateway.",
+        detail:
+          "Registered as online, but no last contact has been reported by the gateway.",
         label: "Contact unknown",
         tone: "warning",
       };
@@ -88,7 +91,15 @@ export function agentDisplayState(agent: AgentView): AgentDisplayState {
   }
   if (status === "never") {
     return {
-      detail: "Registered, but the agent has never established a gateway session.",
+      detail:
+        "Registered, but the agent has never established a gateway session.",
+      ...presentation,
+    };
+  }
+  if (status === "suspended") {
+    return {
+      detail:
+        "This offline period is expected. Monitoring, alerts, and new dispatches are paused until manual Unsuspend or authenticated reconnect.",
       ...presentation,
     };
   }
@@ -99,7 +110,9 @@ export function agentDisplayState(agent: AgentView): AgentDisplayState {
     };
   }
   return {
-    detail: lastSeen ? `Last contact ${formatTime(lastSeen)}` : "Contact evidence is not reported.",
+    detail: lastSeen
+      ? `Last contact ${formatTime(lastSeen)}`
+      : "Contact evidence is not reported.",
     ...presentation,
   };
 }
@@ -108,7 +121,9 @@ function capitalizeWords(value: string): string {
   return value.replace(/(^|\s)\S/g, (character) => character.toUpperCase());
 }
 
-function normalizeAgentTimestamp(value: string | null | undefined): string | null {
+function normalizeAgentTimestamp(
+  value: string | null | undefined,
+): string | null {
   const trimmed = value?.trim();
   if (!trimmed) {
     return null;

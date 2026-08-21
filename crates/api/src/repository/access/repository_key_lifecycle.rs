@@ -359,7 +359,9 @@ impl Repository {
                             agent.display_name = display_name.clone();
                         }
                         if request.replace_existing_key {
-                            agent.status = "offline".to_string();
+                            if agent.status != "suspended" {
+                                agent.status = "offline".to_string();
+                            }
                             agent.process_incarnation_id = None;
                             agent.stale_since = None;
                             agent.stale_reason = None;
@@ -402,6 +404,12 @@ impl Repository {
                         }
                     }
                 };
+                if request.replace_existing_key && prior_status.as_deref() == Some("suspended") {
+                    if let Some(record) = memory.agent_suspensions.write().await.get_mut(&client_id)
+                    {
+                        record.suspended_from_status = "offline".to_string();
+                    }
+                }
                 sort_agent_tags_by_order(&mut view.tags, &memory_tag_order);
                 if creating_identity {
                     self.reconcile_memory_agent_alert_transition(
@@ -584,11 +592,18 @@ impl Repository {
                         UPDATE clients
                         SET display_name = CASE WHEN $2::text IS NULL THEN display_name ELSE $2 END,
                             public_key = $3,
-                            status = CASE WHEN $4 THEN 'offline' ELSE status END,
+                            status = CASE
+                                WHEN $4 AND status <> 'suspended' THEN 'offline'
+                                ELSE status
+                            END,
                             process_incarnation_id = CASE WHEN $4 THEN NULL ELSE process_incarnation_id END,
                             stale_since = NULL,
                             stale_reason = NULL,
-                            stale_build_number = NULL
+                            stale_build_number = NULL,
+                            suspended_from_status = CASE
+                                WHEN $4 AND status = 'suspended' THEN 'offline'
+                                ELSE suspended_from_status
+                            END
                         WHERE id = $1 AND hidden_at IS NULL
                         "#,
                     )
@@ -1460,6 +1475,7 @@ async fn mark_memory_agent_revoked(
             session.end_reason = Some("client_key_revoked".to_string());
         }
     }
+    memory.agent_suspensions.write().await.remove(client_id);
     prior_status
 }
 
@@ -1477,7 +1493,11 @@ async fn mark_postgres_agent_revoked(
             process_incarnation_id = NULL,
             stale_since = NULL,
             stale_reason = NULL,
-            stale_build_number = NULL
+            stale_build_number = NULL,
+            suspended_at = NULL,
+            suspended_by = NULL,
+            suspended_reason = NULL,
+            suspended_from_status = NULL
         WHERE id = $1 AND hidden_at IS NULL
         "#,
     )
@@ -1664,7 +1684,7 @@ fn replacement_transition_prior_status(
     replace_existing_key
         .then_some(prior_status)
         .flatten()
-        .filter(|status| *status != "offline")
+        .filter(|status| !matches!(*status, "offline" | "suspended"))
 }
 
 fn decode_public_key_hex(value: &str) -> Result<Vec<u8>> {

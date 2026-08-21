@@ -13,7 +13,13 @@ import {
   unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
-import type { ActiveView } from "../src/types";
+import type {
+  ActiveView,
+  AgentView,
+  MonitoringCardView,
+  TelemetryRollupRecord,
+  TrafficAccountingRecord,
+} from "../src/types";
 
 const releaseTopLevel = [
   "Home",
@@ -50,6 +56,7 @@ const customMockTests = new Set([
   "home shows a useful empty state when no VPS agents are loaded",
   "fleet monitor keeps unsettled evidence neutral while cards load",
   "fleet monitor keeps an intentionally empty rate selection out of partial telemetry",
+  "fleet monitor metric sorts are value-only with ordinary missing evidence",
   "fleet monitor sorts warning ties by name and client ID",
   "fleet monitor cards remain readable for 0 generated VPS fixtures",
   "fleet monitor cards remain readable for 1 generated VPS fixtures",
@@ -2525,8 +2532,8 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     .click();
   await expect(monitor).toHaveAttribute("data-density", "compact");
 
-  await page.getByLabel("VPS cards sort").selectOption("traffic");
-  await expect(monitor).toHaveAttribute("data-sort", "traffic");
+  await page.getByLabel("VPS cards sort").selectOption("traffic_raw");
+  await expect(monitor).toHaveAttribute("data-sort", "traffic_raw");
   await edgeCard.locator(".vpsMonitorTraffic").click();
   await expect(page).toHaveURL(/#\/fleet\/instance-detail\//);
   await expect(
@@ -2535,7 +2542,7 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
 
   await page.goBack();
   await expect(monitor).toHaveAttribute("data-density", "compact");
-  await expect(monitor).toHaveAttribute("data-sort", "traffic");
+  await expect(monitor).toHaveAttribute("data-sort", "traffic_raw");
   await edgeCard.focus();
   await expect(edgeCard).toBeFocused();
   await page.keyboard.press("Enter");
@@ -2591,6 +2598,167 @@ test("fleet monitor sorts warning ties by name and client ID", async ({
     "Zulu offline",
   ]);
   await expect(monitor).toHaveAttribute("data-sort", "name");
+});
+
+test("fleet monitor metric sorts are value-only with ordinary missing evidence", async ({
+  page,
+}) => {
+  const now = new Date().toISOString();
+  const agents = makeMonitorAgentFixtures(4).map((agent, index) => ({
+    ...agent,
+    display_name: [
+      "A No traffic online",
+      "B Unlimited stale",
+      "C Ratio leader",
+      "D Raw leader",
+    ][index],
+    id: ["sort-a", "sort-b", "sort-c", "sort-d"][index],
+    last_seen_at: now,
+    stale_reason: index === 1 ? "fixture stale warning" : null,
+    stale_since: index === 1 ? now : null,
+    status: index === 1 ? "stale" : "online",
+  })) as AgentView[];
+  const cards: MonitoringCardView[] = [
+    metricSortMonitoringCard(agents[0], now, {
+      connections: 0,
+      cores: 1,
+      cpu: 0,
+      diskRatio: 0,
+      diskTotal: 100,
+      load: 0,
+      memoryRatio: 0,
+      memoryTotal: 100,
+      network: 0,
+      trafficConfigured: false,
+      trafficRatio: null,
+      trafficRaw: 0,
+      unlimitedTraffic: false,
+    }),
+    metricSortMonitoringCard(agents[1], now, {
+      connections: 2,
+      cores: 2,
+      cpu: 0.1,
+      diskRatio: 0.05,
+      diskTotal: 200,
+      load: 0.1,
+      memoryRatio: 0.05,
+      memoryTotal: 200,
+      network: 10,
+      trafficConfigured: true,
+      trafficRatio: null,
+      trafficRaw: 900,
+      unlimitedTraffic: true,
+    }),
+    metricSortMonitoringCard(agents[2], now, {
+      connections: 10,
+      cores: 4,
+      cpu: 0.9,
+      diskRatio: 0.2,
+      diskTotal: 10_000,
+      load: 2,
+      memoryRatio: 0.4,
+      memoryTotal: 1_000,
+      network: 100,
+      trafficConfigured: true,
+      trafficRatio: 90,
+      trafficRaw: 100,
+      unlimitedTraffic: false,
+    }),
+    metricSortMonitoringCard(agents[3], now, {
+      connections: 50,
+      cores: 1,
+      cpu: 0.5,
+      diskRatio: 0.8,
+      diskTotal: 1_000,
+      load: 1.5,
+      memoryRatio: 0.1,
+      memoryTotal: 10_000,
+      network: 500,
+      trafficConfigured: true,
+      trafficRatio: 50,
+      trafficRaw: 500,
+      unlimitedTraffic: false,
+    }),
+  ];
+  await installConsoleApiMock(page, {
+    agentListOverride: agents,
+    monitoringCardsOverride: cards,
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  const sort = page.getByLabel("VPS cards sort");
+  await expect(sort.locator("option")).toHaveText([
+    "Warnings first",
+    "Name",
+    "Traffic (raw)",
+    "Traffic (ratio)",
+    "Realtime speed",
+    "Connections",
+    "CPU",
+    "RAM (raw)",
+    "RAM (ratio)",
+    "Disk (raw)",
+    "Disk (ratio)",
+    "Load (raw)",
+    "Load (ratio)",
+    "Region",
+    "Provider",
+  ]);
+  const names = page
+    .getByLabel("VPS monitor cards")
+    .locator(".vpsMonitorCardNameText");
+  const expectOrder = async (mode: string, expected: string[]) => {
+    await sort.selectOption(mode);
+    await expect(names).toHaveText(expected);
+  };
+  const missingLast = [
+    "D Raw leader",
+    "C Ratio leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ];
+  await expectOrder("traffic_raw", [
+    "B Unlimited stale",
+    "D Raw leader",
+    "C Ratio leader",
+    "A No traffic online",
+  ]);
+  await expectOrder("traffic_ratio", [
+    "C Ratio leader",
+    "D Raw leader",
+    "A No traffic online",
+    "B Unlimited stale",
+  ]);
+  await expectOrder("realtime", missingLast);
+  await expectOrder("connections", missingLast);
+  await expectOrder("cpu", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("memory_raw", missingLast);
+  await expectOrder("memory_ratio", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("disk_raw", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("disk_ratio", missingLast);
+  await expectOrder("load_raw", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("load_ratio", missingLast);
 });
 
 for (const fixtureCount of [0, 1, 8, 20, 100, 1_000]) {
@@ -4006,7 +4174,8 @@ test("fleet instance row actions expose release VPS workflows", async ({
     .locator(".consoleMenu:visible")
     .getByRole("menuitem")
     .allTextContents();
-  expect(actionLabels.slice(-3).map((label) => label.trim())).toEqual([
+  expect(actionLabels.slice(-4).map((label) => label.trim())).toEqual([
+    "Suspend VPS",
     "Stop agent",
     "Restart agent",
     "Review VPS deletion",
@@ -9624,6 +9793,132 @@ async function expectShorterElement(shorter: Locator, taller: Locator) {
       return tallerBox.height - shorterBox.height;
     })
     .toBeGreaterThanOrEqual(8);
+}
+
+type MetricSortCardValues = {
+  connections: number;
+  cores: number;
+  cpu: number;
+  diskRatio: number;
+  diskTotal: number;
+  load: number;
+  memoryRatio: number;
+  memoryTotal: number;
+  network: number;
+  trafficConfigured: boolean;
+  trafficRatio: number | null;
+  trafficRaw: number;
+  unlimitedTraffic: boolean;
+};
+
+function metricSortMonitoringCard(
+  agent: AgentView,
+  observedAt: string,
+  values: MetricSortCardValues,
+): MonitoringCardView {
+  const resources: TelemetryRollupRecord = {
+    bucket_secs: 60,
+    bucket_start: observedAt,
+    client_id: agent.id,
+    connections_observed_at: observedAt,
+    connections_sample_count: 1,
+    cpu_cores_max: values.cores,
+    cpu_load_1_avg: values.load,
+    cpu_load_1_max: values.load,
+    cpu_load_5_avg: values.load,
+    cpu_load_5_max: values.load,
+    cpu_load_15_avg: values.load,
+    cpu_load_15_max: values.load,
+    cpu_usage_avg: values.cpu,
+    cpu_usage_sample_count: 1,
+    disk_available_bytes_avg: values.diskTotal * (1 - values.diskRatio),
+    disk_available_bytes_min: values.diskTotal * (1 - values.diskRatio),
+    disk_sample_count: 1,
+    disk_total_bytes_max: values.diskTotal,
+    disk_used_ratio_avg: values.diskRatio,
+    disk_used_ratio_max: values.diskRatio,
+    latest_observed_at: observedAt,
+    memory_available_bytes_avg:
+      values.memoryTotal * (1 - values.memoryRatio),
+    memory_available_bytes_min:
+      values.memoryTotal * (1 - values.memoryRatio),
+    memory_total_bytes_max: values.memoryTotal,
+    memory_used_ratio_avg: values.memoryRatio,
+    memory_used_ratio_max: values.memoryRatio,
+    network_rx_bytes_max: 0,
+    network_tx_bytes_max: 0,
+    sample_count: 1,
+    swap_available_bytes_avg: null,
+    swap_available_bytes_min: null,
+    swap_sample_count: 0,
+    swap_total_bytes_max: null,
+    swap_used_ratio_avg: null,
+    swap_used_ratio_max: null,
+    tcp_sockets_latest: Math.max(0, values.connections - 1),
+    udp_sockets_latest: Math.min(1, values.connections),
+    updated_at: observedAt,
+  };
+  const traffic: TrafficAccountingRecord = {
+    client_id: agent.id,
+    counter_epochs_seen: values.trafficConfigured ? 1 : 0,
+    cycle_end: values.trafficConfigured ? observedAt : null,
+    cycle_percent: values.trafficRatio,
+    cycle_start: values.trafficConfigured ? observedAt : null,
+    diagnostic_rx_bytes: Math.floor(values.trafficRaw / 2),
+    diagnostic_total_bytes: values.trafficRaw,
+    diagnostic_tx_bytes: Math.ceil(values.trafficRaw / 2),
+    incomplete_reasons: [],
+    last_sample_at: values.trafficConfigured ? observedAt : null,
+    latest_rx_bytes: Math.floor(values.trafficRaw / 2),
+    latest_total_bytes: values.trafficRaw,
+    latest_tx_bytes: Math.ceil(values.trafficRaw / 2),
+    quota_rx_bytes: null,
+    quota_total_bytes: values.trafficConfigured
+      ? values.unlimitedTraffic
+        ? -1
+        : 1_000
+      : null,
+    quota_tx_bytes: null,
+    reset_day: values.trafficConfigured ? 14 : null,
+    rx_bytes: Math.floor(values.trafficRaw / 2),
+    selector_breakdown: [],
+    selector_hash: values.trafficConfigured ? "fixture-selector" : "",
+    selectors: values.trafficConfigured ? ["eth0"] : [],
+    state: values.trafficConfigured ? "ok" : "unconfigured",
+    total_bytes: values.trafficRaw,
+    tx_bytes: Math.ceil(values.trafficRaw / 2),
+    updated_at: observedAt,
+  };
+  return {
+    billing: null,
+    client: agent,
+    network: [
+      {
+        bucket_secs: 60,
+        bucket_start: observedAt,
+        client_id: agent.id,
+        interface: "eth0",
+        rx_bps_avg: values.network / 2,
+        rx_bytes_avg: 0,
+        rx_bytes_delta: 0,
+        sample_count: 1,
+        tx_bps_avg: values.network / 2,
+        tx_bytes_avg: 0,
+        tx_bytes_delta: 0,
+        updated_at: observedAt,
+      },
+    ],
+    network_history: [],
+    network_rate_expected: true,
+    port_speed: null,
+    primary_ping: null,
+    primary_ping_history: [],
+    product_name: null,
+    resource_history: [],
+    resources,
+    system_information: null,
+    traffic,
+  };
 }
 
 function makeMonitorAgentFixtures(count: number) {

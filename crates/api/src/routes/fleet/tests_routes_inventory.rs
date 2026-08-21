@@ -1,11 +1,15 @@
 use super::{
     peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
     validate_legacy_tag_name_for_cleanup, validate_persisted_tag_name,
-    validate_telemetry_network_rate_query, validate_telemetry_rollup_query,
+    validate_suspend_agent_status, validate_telemetry_network_rate_query,
+    validate_telemetry_rollup_query,
 };
 use crate::{
     gateway_client::GatewayDispatchClient,
-    model::{OperatorPreferences, OperatorRecord, TelemetryNetworkRateQuery, TelemetryRollupQuery},
+    model::{
+        AgentView, JobHistoryView, JobTargetView, OperatorPreferences, OperatorRecord,
+        TelemetryNetworkRateQuery, TelemetryRollupQuery,
+    },
     repository::{MemoryState, Repository},
     security::SCOPE_FLEET_READ,
     state::{AppState, DispatcherRuntimeConfig},
@@ -110,6 +114,143 @@ fn deleting_agent_collects_each_declared_tunnel_peer_once() {
         ],
     );
     assert_eq!(peers.into_iter().collect::<Vec<_>>(), ["edge-b", "edge-c"]);
+}
+
+#[test]
+fn suspension_status_eligibility_is_exact() {
+    for status in ["never", "disconnected", "offline", "stale"] {
+        validate_suspend_agent_status(status).unwrap();
+    }
+    for status in ["online", "suspended", "revoked", "deleted"] {
+        assert!(validate_suspend_agent_status(status).is_err(), "{status}");
+    }
+}
+
+#[tokio::test]
+async fn suspension_routes_skip_unstarted_targets_and_restore_never_status() {
+    let (state, memory) = tag_order_route_test_state();
+    memory.agents.write().await.push(AgentView {
+        id: "never-suspend".to_string(),
+        display_name: "Never Suspend".to_string(),
+        status: "never".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    });
+    memory.agents.write().await.push(AgentView {
+        id: "online-rejected".to_string(),
+        display_name: "Online Rejected".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(crate::unix_now().to_string()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: Some(Uuid::new_v4()),
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    });
+    let job_id = Uuid::new_v4();
+    memory.jobs.write().await.push(JobHistoryView {
+        id: job_id,
+        actor_id: None,
+        command_type: "run_script".to_string(),
+        source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
+        privileged: false,
+        status: "queued".to_string(),
+        target_count: 1,
+        payload_hash: "suspension-test".to_string(),
+        max_timeout_secs: 60,
+        created_at: crate::unix_now().to_string(),
+        completed_at: None,
+    });
+    memory.job_targets.write().await.push(JobTargetView {
+        job_id,
+        client_id: "never-suspend".to_string(),
+        status: "queued".to_string(),
+        message: None,
+        exit_code: None,
+        started_at: None,
+        deadline_at: None,
+        completed_at: None,
+        process_incarnation_id: None,
+    });
+    let token = issue_tag_order_token(&state, &memory, "operator", &["inventory:write"]).await;
+    let router = crate::routes::build_router(state);
+
+    let unconfirmed = router
+        .clone()
+        .oneshot(agent_suspension_request(
+            "/api/v1/agents/never-suspend/suspend",
+            &token,
+            serde_json::json!({"confirmed": false}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unconfirmed.status(), StatusCode::CONFLICT);
+
+    let suspended = router
+        .clone()
+        .oneshot(agent_suspension_request(
+            "/api/v1/agents/never-suspend/suspend",
+            &token,
+            serde_json::json!({"confirmed": true, "reason": "planned maintenance"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(suspended.status(), StatusCode::OK);
+    let suspended_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(suspended.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(suspended_json["agent"]["status"], "suspended");
+    assert_eq!(suspended_json["suspended_from_status"], "never");
+    assert_eq!(
+        suspended_json["skipped_unstarted_job_ids"],
+        serde_json::json!([job_id])
+    );
+    let target = memory.job_targets.read().await[0].clone();
+    assert_eq!(target.status, "skipped");
+    assert_eq!(
+        target.message.as_deref(),
+        Some("target_suspended: target skipped because VPS is suspended")
+    );
+
+    let online = router
+        .clone()
+        .oneshot(agent_suspension_request(
+            "/api/v1/agents/online-rejected/suspend",
+            &token,
+            serde_json::json!({"confirmed": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(online.status(), StatusCode::CONFLICT);
+
+    let unsuspended = router
+        .oneshot(agent_suspension_request(
+            "/api/v1/agents/never-suspend/unsuspend",
+            &token,
+            serde_json::json!({"confirmed": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unsuspended.status(), StatusCode::OK);
+    let unsuspended_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(unsuspended.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(unsuspended_json["agent"]["status"], "never");
+    assert!(memory.agent_suspensions.read().await.is_empty());
 }
 
 #[tokio::test]
@@ -293,5 +434,15 @@ fn tag_order_request(method: &str, token: &str, body: Option<serde_json::Value>)
     }
     request
         .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+        .unwrap()
+}
+
+fn agent_suspension_request(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
         .unwrap()
 }

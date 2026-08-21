@@ -914,7 +914,7 @@ test("renders an operational cloud-console fleet workspace", async ({
   ).toBeVisible();
   const fleetInstancesHeader = page.locator(".fleetInstancesHeader");
   await expect(fleetInstancesHeader).toContainText(
-    "0 live / 0 access revoked / 2 no contact / 3 total",
+    "0 live / 0 suspended / 0 access revoked / 2 no contact / 3 total",
   );
   await expect(fleetInstancesHeader).not.toContainText("2 online / 3 total");
   if (testInfo.project.name.includes("desktop")) {
@@ -1049,7 +1049,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     page
       .locator(".consoleHeader")
       .getByText(
-        "0 live / 0 offline / 1 stale / 0 access revoked / 2 no contact / 3 total",
+        "0 live / 0 offline / 1 stale / 0 suspended / 0 access revoked / 2 no contact / 3 total",
       ),
   ).toBeVisible();
   await expect(page.getByText("VPS instances")).toBeVisible();
@@ -1187,7 +1187,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     page
       .locator(".consoleHeader")
       .getByText(
-        "0 live / 0 offline / 0 stale / 0 access revoked / 2 no contact / 2 total",
+        "0 live / 0 offline / 0 stale / 0 suspended / 0 access revoked / 2 no contact / 2 total",
       ),
   ).toBeVisible();
   await expect(
@@ -1216,7 +1216,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     page
       .locator(".consoleHeader")
       .getByText(
-        "0 live / 0 offline / 0 stale / 0 access revoked / 2 no contact / 2 total",
+        "0 live / 0 offline / 0 stale / 0 suspended / 0 access revoked / 2 no contact / 2 total",
       ),
   ).toBeVisible();
 
@@ -1366,6 +1366,169 @@ test("reviews and tracks bulk agent stop and restart jobs", async ({
     target_client_ids: ["agent-fra-02", "agent-sfo-01"],
   });
   expectPrivilegeAssertion(lifecycleRequest);
+});
+
+test("reviews suspend and unsuspend as expected offline lifecycle actions", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "Fleet suspension row actions are covered in the desktop data grid",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  await fleetGrid
+    .getByLabel("Select VPS instance records row agent-nyc-03")
+    .check();
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Suspend VPS" }).click();
+
+  const suspendPrompt = page.locator(
+    ".fleetInstancesPanel > .confirmationPrompt",
+  );
+  await expect(suspendPrompt.getByText("Suspend selected VPSs")).toBeVisible();
+  await expect(suspendPrompt).toContainText(
+    "unstarted work is skipped, client-scoped alerts are resolved and suppressed",
+  );
+  await suspendPrompt
+    .getByLabel("Suspension reason")
+    .fill("Planned cold storage until the next project phase");
+  await activate(suspendPrompt.getByRole("button", { name: "Suspend VPSs" }));
+
+  await expect(
+    fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
+  ).toContainText("Suspended");
+  await expect(
+    page.locator(".fleetInstancesPanel > .localActionFeedback"),
+  ).toContainText(
+    "1 unstarted job target was skipped and 1 active alert was resolved",
+  );
+  await expect(page.locator(".fleetInstancesHeader")).toContainText(
+    "1 suspended",
+  );
+
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+  await expect(page.getByLabel(/backup-nyc-03 .* monitor card/)).toHaveCount(0);
+  await expect(
+    page.locator(".consoleHeader").getByText(/\b1 suspended\b/),
+  ).toHaveCount(0);
+
+  await page
+    .getByRole("navigation", { name: "Primary console navigation" })
+    .getByRole("button", { name: "Home", exact: true })
+    .first()
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Home fleet scan")
+      .getByLabel(/backup-nyc-03 .* monitor card/),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".consoleHeader").getByText(/\b1 suspended\b/),
+  ).toHaveCount(0);
+
+  // Feed a suspended tunnel endpoint through the fixture independently of the
+  // suspendability control so Network Metrics proves its denylist boundary.
+  const networkSuspensionSnapshot = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/agents/agent-fra-02/suspend", {
+      body: JSON.stringify({ confirmed: true, reason: "network metric fence" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!response.ok)
+      throw new Error(`fixture suspension failed: ${response.status}`);
+    const [summaryResponse, agentsResponse] = await Promise.all([
+      fetch("/api/v1/fleet/summary"),
+      fetch("/api/v1/agents"),
+    ]);
+    return {
+      agents: await agentsResponse.json(),
+      summary: await summaryResponse.json(),
+    };
+  });
+  await page.evaluate((snapshot) => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "fleet_snapshot", ...snapshot }),
+      }),
+    );
+  }, networkSuspensionSnapshot);
+  await openConsoleSubpage(page, "Observability", "Network metrics");
+  const networkMetrics = page.locator(".observabilityNetworkMetricsPanel");
+  await expect(
+    networkMetrics.getByLabel("Network metrics tunnel grouping"),
+  ).not.toContainText("sfo-fra-gre");
+  await expect(
+    networkMetrics.getByLabel("Network metrics VPS endpoint"),
+  ).not.toContainText("core-fra-02");
+
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  await fleetGrid
+    .getByLabel("Select VPS instance records row agent-nyc-03")
+    .check();
+
+  let suspensionRequests = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { agentSuspensions: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.agentSuspensions;
+  });
+  expect(suspensionRequests).toContainEqual(
+    expect.objectContaining({
+      action: "suspend",
+      client_id: "agent-nyc-03",
+      confirmed: true,
+      reason: "Planned cold storage until the next project phase",
+    }),
+  );
+
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Unsuspend VPS" }).click();
+  const unsuspendPrompt = page.locator(
+    ".fleetInstancesPanel > .confirmationPrompt",
+  );
+  await expect(
+    unsuspendPrompt.getByText("Unsuspend selected VPSs"),
+  ).toBeVisible();
+  await expect(unsuspendPrompt).toContainText("no parked job is resurrected");
+  await activate(
+    unsuspendPrompt.getByRole("button", { name: "Unsuspend VPSs" }),
+  );
+  await expect(
+    fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
+  ).toContainText("Stale");
+
+  suspensionRequests = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { agentSuspensions: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.agentSuspensions;
+  });
+  expect(suspensionRequests.at(-1)).toMatchObject({
+    action: "unsuspend",
+    client_id: "agent-nyc-03",
+    confirmed: true,
+  });
 });
 
 test(

@@ -53,12 +53,13 @@ privilege/audit boundary; Ping assignments and monitoring shares each use their
 own transactional preview hash. An exact empty resolution is explicit and may
 be frozen after review.
 
-Monitoring shares resolve and freeze their exact VPS list at creation. Their
-saved selector remains audit context; **Update targets** deliberately
-re-resolves it for one or many active shares, previews exact additions and
-removals, and transactionally replaces only the frozen target list. Existing
-public target keys are preserved. Visibility remains immutable evidence.
-Approval records are likewise immutable evidence.
+Monitoring shares resolve and freeze their exact VPS list at creation. A
+reviewed **Edit** can change one active share's name, selector, frozen IDs, and
+visibility, with exact target and disclosure deltas. **Update targets** is the
+narrower one-or-many action that re-resolves each saved selector and replaces
+only its frozen target list. Both paths preserve unchanged public target keys;
+the bearer identity and expiry are unchanged. Every approval and revision is
+retained as immutable audit evidence.
 
 In the console, selector matches are previewed locally as the expression is
 edited. That preview is for orientation only. Direct VPS choices and selector
@@ -66,8 +67,8 @@ matches contribute to one deduplicated union, and the nearby count/list must
 show that complete local union. **Review** asks the backend to resolve the
 request again and freezes the exact IDs used by the confirmation and mutation.
 An invalid expression cannot be reviewed. Creation workflows that require at
-least one target also reject an empty union; explicit **Update targets**
-maintenance may freeze an exact empty resolution after review.
+least one target also reject an empty union; reviewed **Edit** or **Update
+targets** maintenance may freeze an exact empty resolution after review.
 
 ## Fixed Target Snapshots
 

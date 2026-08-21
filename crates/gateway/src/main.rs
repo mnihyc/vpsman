@@ -201,6 +201,7 @@ async fn main() -> Result<()> {
         state.clone(),
         api_client.clone(),
     );
+    spawn_gateway_command_enqueue_cleanup(state.clone());
     let critical_failure_state = state.clone();
     api_client.set_critical_failure_handler(move |client_id, reason| {
         let state = critical_failure_state.clone();
@@ -430,6 +431,25 @@ fn spawn_gateway_runtime_config_reloader(
                     %error,
                     "failed to hot-reload gateway runtime suite config; keeping current runtime config"
                 ),
+            }
+        }
+    });
+}
+
+fn spawn_gateway_command_enqueue_cleanup(state: GatewayState) {
+    tokio::spawn(async move {
+        let mut ticker = time::interval(Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        // `interval`'s first tick is immediate; cleanup cadence starts after a
+        // full interval so startup does not perform a redundant empty scan.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let removed = state
+                .prune_expired_command_enqueues(std::time::Instant::now())
+                .await;
+            if removed > 0 {
+                debug!(removed, "pruned expired gateway command enqueue markers");
             }
         }
     });

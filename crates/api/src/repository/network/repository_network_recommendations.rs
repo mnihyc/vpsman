@@ -41,7 +41,13 @@ impl Repository {
         &self,
         limit: i64,
     ) -> Result<Vec<NetworkOspfRecommendationView>> {
-        let plans = self.list_tunnel_plans().await?;
+        let suspended_clients = self.suspended_network_client_ids().await?;
+        let plans = self
+            .list_tunnel_plans()
+            .await?
+            .into_iter()
+            .filter(|plan| tunnel_plan_has_no_suspended_endpoint(plan, &suspended_clients))
+            .collect::<Vec<_>>();
         let mut recommendations = self
             .list_network_ospf_recommendations_for_plans(&plans)
             .await?;
@@ -122,6 +128,7 @@ impl Repository {
         plan_ids: &[Uuid],
     ) -> Result<AutomaticOspfUpdatePlanBatch> {
         let mut failures = Vec::new();
+        let suspended_clients = self.suspended_network_client_ids().await?;
         let plans = self
             .tunnel_plan_record_attempts(plan_ids)
             .await?
@@ -129,6 +136,7 @@ impl Repository {
             .filter_map(|attempt| match attempt.plan {
                 Ok(plan)
                     if plan.enabled
+                        && tunnel_plan_has_no_suspended_endpoint(&plan, &suspended_clients)
                         && plan
                             .plan
                             .ospf
@@ -190,7 +198,13 @@ impl Repository {
         &self,
         limit: i64,
     ) -> Result<Vec<NetworkOspfUpdatePlanView>> {
-        let plans = self.list_tunnel_plans().await?;
+        let suspended_clients = self.suspended_network_client_ids().await?;
+        let plans = self
+            .list_tunnel_plans()
+            .await?
+            .into_iter()
+            .filter(|plan| tunnel_plan_has_no_suspended_endpoint(plan, &suspended_clients))
+            .collect::<Vec<_>>();
         let eligible_plans = plans
             .iter()
             .filter(|plan| plan.enabled && plan.plan.ospf.is_some())
@@ -240,7 +254,11 @@ impl Repository {
         let Some(plan) = self.get_tunnel_plan(plan_id).await? else {
             return Ok(None);
         };
-        if !plan.enabled || plan.plan.ospf.is_none() {
+        let suspended_clients = self.suspended_network_client_ids().await?;
+        if !plan.enabled
+            || plan.plan.ospf.is_none()
+            || !tunnel_plan_has_no_suspended_endpoint(&plan, &suspended_clients)
+        {
             return Ok(None);
         }
         let observations_by_plan = self.recent_ospf_observations_for_plans(&[plan_id]).await?;
@@ -265,6 +283,16 @@ impl Repository {
             &fallback_sources,
         )
         .map(Some)
+    }
+
+    async fn suspended_network_client_ids(&self) -> Result<HashSet<String>> {
+        Ok(self
+            .list_agents()
+            .await?
+            .into_iter()
+            .filter(|agent| agent.status == "suspended")
+            .map(|agent| agent.id)
+            .collect())
     }
 
     async fn recent_ospf_observations_for_plans(
@@ -309,6 +337,14 @@ impl Repository {
             },
         ))
     }
+}
+
+fn tunnel_plan_has_no_suspended_endpoint(
+    plan: &TunnelPlanView,
+    suspended_client_ids: &HashSet<String>,
+) -> bool {
+    !suspended_client_ids.contains(&plan.left_client_id)
+        && !suspended_client_ids.contains(&plan.right_client_id)
 }
 
 fn recommend_plan_ospf_cost(

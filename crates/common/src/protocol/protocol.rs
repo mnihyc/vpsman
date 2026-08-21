@@ -1177,6 +1177,41 @@ pub struct GatewaySessionDisconnectResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFencePrepare {
+    pub client_id: String,
+    pub token: Uuid,
+    pub lease_secs: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFencePromote {
+    pub client_id: String,
+    pub token: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFenceClear {
+    pub client_id: String,
+    /// Compensation supplies the prepare token so it cannot clear an older
+    /// persistent fence. A committed manual/online lifecycle transition uses
+    /// `None` to clear the authoritative fence for the client.
+    pub expected_token: Option<Uuid>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFenceResult {
+    pub client_id: String,
+    pub accepted: bool,
+    pub fenced: bool,
+    pub message: String,
+    /// Jobs whose command enqueue linearized before fence installation. The
+    /// API must not relabel these as never dispatched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enqueued_job_ids: Vec<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSessionDisconnect {
     pub reason: String,
 }

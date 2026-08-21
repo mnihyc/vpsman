@@ -543,16 +543,71 @@ pub(crate) const MONTHLY_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
 "#;
 
 // Long-term rows are a non-overlapping ledger of valid counter transitions.
-// Exact retained rows cover the recent tail; promoted rows cover older time.
-// Intentional vnStat-to-live boundaries contribute neither bytes nor resets.
+// Healthy hourly coverage bounds the retained raw scan to the as-of hour;
+// promoted rows cover older time. Dirty coverage falls back to the complete
+// raw-LAG oracle, and intentional vnStat-to-live boundaries contribute neither
+// bytes nor resets.
 pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
-    WITH requested AS (
+    WITH requested AS MATERIALIZED (
         SELECT client_id, source_kind, interface
         FROM UNNEST(
             $1::text[],
             $2::text[],
             $3::text[]
         ) AS request(client_id, source_kind, interface)
+    ),
+    coverage AS MATERIALIZED (
+        SELECT
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            NOT EXISTS (
+                SELECT 1
+                FROM traffic_counter_samples sample
+                WHERE sample.client_id = requested.client_id
+                  AND sample.source_kind = requested.source_kind
+                  AND sample.interface = requested.interface
+                  AND sample.observed_at <= to_timestamp($4)
+            ) OR (
+                streams.client_id IS NOT NULL
+                AND streams.source_revision = streams.materialized_revision
+                AND NOT EXISTS (
+                    -- The hourly ledger deliberately has no promoted-row
+                    -- dimension. Normal retention leaves one predecessor
+                    -- boundary with no older raw row. Fail closed for this
+                    -- stream if a promoted row has an exact predecessor.
+                    SELECT 1
+                    FROM traffic_counter_samples promoted
+                    WHERE promoted.client_id = requested.client_id
+                      AND promoted.source_kind = requested.source_kind
+                      AND promoted.interface = requested.interface
+                      AND promoted.inbound_promoted
+                      AND promoted.observed_at <= to_timestamp($4)
+                      AND EXISTS (
+                          SELECT 1
+                          FROM traffic_counter_samples predecessor
+                          WHERE predecessor.client_id = promoted.client_id
+                            AND predecessor.source_kind = promoted.source_kind
+                            AND predecessor.interface = promoted.interface
+                            AND predecessor.observed_at < promoted.observed_at
+                            AND predecessor.observed_at <= to_timestamp($4)
+                      )
+                )
+            ) AS valid
+        FROM requested
+        LEFT JOIN traffic_counter_hourly_usage_streams streams
+          ON streams.client_id = requested.client_id
+         AND streams.source_kind = requested.source_kind
+         AND streams.interface = requested.interface
+    ),
+    fast_requested AS MATERIALIZED (
+        SELECT requested.*
+        FROM requested
+        JOIN coverage
+          ON coverage.client_id = requested.client_id
+         AND coverage.source_kind = requested.source_kind
+         AND coverage.interface = requested.interface
+        WHERE coverage.valid
     ),
     latest AS (
         SELECT
@@ -577,11 +632,35 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
             LIMIT 1
         ) sample ON TRUE
     ),
-    raw_selected AS (
+    fast_completed_usage AS (
         SELECT
-            sample.client_id,
-            sample.source_kind,
-            sample.interface,
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            COALESCE(SUM(usage.rx_bytes), 0)::bigint AS cycle_rx,
+            COALESCE(SUM(usage.tx_bytes), 0)::bigint AS cycle_tx,
+            COALESCE(SUM(usage.rx_reset_count), 0)::bigint AS rx_resets,
+            COALESCE(SUM(usage.tx_reset_count), 0)::bigint AS tx_resets
+        FROM fast_requested requested
+        JOIN traffic_counter_hourly_usage usage
+          ON usage.client_id = requested.client_id
+         AND usage.source_kind = requested.source_kind
+         AND usage.interface = requested.interface
+         AND usage.bucket_start < date_bin(
+                interval '1 hour',
+                to_timestamp($4),
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+             )
+        GROUP BY
+            requested.client_id,
+            requested.source_kind,
+            requested.interface
+    ),
+    fast_tail_samples AS (
+        SELECT
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
             sample.observed_at,
             sample.rx_bytes,
             sample.tx_bytes,
@@ -589,28 +668,67 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
             sample.tx_counter_epoch,
             sample.sample_source,
             sample.inbound_promoted
-        FROM traffic_counter_samples sample
-        JOIN requested
-          ON requested.client_id = sample.client_id
-         AND requested.source_kind = sample.source_kind
-         AND requested.interface = sample.interface
-        WHERE sample.observed_at <= to_timestamp($4)
-    ),
-    raw_sequenced AS (
+        FROM fast_requested requested
+        JOIN traffic_counter_samples sample
+          ON sample.client_id = requested.client_id
+         AND sample.source_kind = requested.source_kind
+         AND sample.interface = requested.interface
+         AND sample.observed_at >= date_bin(
+                interval '1 hour',
+                to_timestamp($4),
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+             )
+         AND sample.observed_at <= to_timestamp($4)
+        UNION ALL
         SELECT
-            raw_selected.*,
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            sample.observed_at,
+            sample.rx_bytes,
+            sample.tx_bytes,
+            sample.rx_counter_epoch,
+            sample.tx_counter_epoch,
+            sample.sample_source,
+            sample.inbound_promoted
+        FROM fast_requested requested
+        JOIN LATERAL (
+            SELECT
+                sample.observed_at,
+                sample.rx_bytes,
+                sample.tx_bytes,
+                sample.rx_counter_epoch,
+                sample.tx_counter_epoch,
+                sample.sample_source,
+                sample.inbound_promoted
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = requested.client_id
+              AND sample.source_kind = requested.source_kind
+              AND sample.interface = requested.interface
+              AND sample.observed_at < date_bin(
+                    interval '1 hour',
+                    to_timestamp($4),
+                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                  )
+            ORDER BY sample.observed_at DESC
+            LIMIT 1
+        ) sample ON TRUE
+    ),
+    fast_tail_sequenced AS (
+        SELECT
+            fast_tail_samples.*,
             LAG(rx_bytes) OVER stream AS previous_rx_bytes,
             LAG(tx_bytes) OVER stream AS previous_tx_bytes,
             LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
             LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
             LAG(sample_source) OVER stream AS previous_sample_source
-        FROM raw_selected
+        FROM fast_tail_samples
         WINDOW stream AS (
             PARTITION BY client_id, source_kind, interface
             ORDER BY observed_at
         )
     ),
-    raw_usage AS (
+    fast_tail_usage AS (
         SELECT
             client_id,
             source_kind,
@@ -641,9 +759,166 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
                       AND sample_source NOT LIKE 'vnstat_import:%'
                   )
             )::bigint AS tx_resets
-        FROM raw_sequenced
+        FROM fast_tail_sequenced
         WHERE NOT inbound_promoted
         GROUP BY client_id, source_kind, interface
+    ),
+    fast_raw_usage AS (
+        SELECT
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            COALESCE(completed.cycle_rx, 0)
+                + COALESCE(tail.cycle_rx, 0) AS cycle_rx,
+            COALESCE(completed.cycle_tx, 0)
+                + COALESCE(tail.cycle_tx, 0) AS cycle_tx,
+            COALESCE(completed.rx_resets, 0)
+                + COALESCE(tail.rx_resets, 0) AS rx_resets,
+            COALESCE(completed.tx_resets, 0)
+                + COALESCE(tail.tx_resets, 0) AS tx_resets
+        FROM fast_requested requested
+        LEFT JOIN fast_completed_usage completed
+          ON completed.client_id = requested.client_id
+         AND completed.source_kind = requested.source_kind
+         AND completed.interface = requested.interface
+        LEFT JOIN fast_tail_usage tail
+          ON tail.client_id = requested.client_id
+         AND tail.source_kind = requested.source_kind
+         AND tail.interface = requested.interface
+    ),
+    fallback_requested AS MATERIALIZED (
+        SELECT requested.*
+        FROM requested
+        JOIN coverage
+          ON coverage.client_id = requested.client_id
+         AND coverage.source_kind = requested.source_kind
+         AND coverage.interface = requested.interface
+        WHERE NOT coverage.valid
+    ),
+    fallback_raw_selected AS (
+        SELECT
+            sample.client_id,
+            sample.source_kind,
+            sample.interface,
+            sample.observed_at,
+            sample.rx_bytes,
+            sample.tx_bytes,
+            sample.rx_counter_epoch,
+            sample.tx_counter_epoch,
+            sample.sample_source,
+            sample.inbound_promoted
+        FROM traffic_counter_samples sample
+        JOIN fallback_requested requested
+          ON requested.client_id = sample.client_id
+         AND requested.source_kind = sample.source_kind
+         AND requested.interface = sample.interface
+        WHERE sample.observed_at <= to_timestamp($4)
+    ),
+    fallback_raw_sequenced AS (
+        SELECT
+            fallback_raw_selected.*,
+            LAG(rx_bytes) OVER stream AS previous_rx_bytes,
+            LAG(tx_bytes) OVER stream AS previous_tx_bytes,
+            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+            LAG(sample_source) OVER stream AS previous_sample_source
+        FROM fallback_raw_selected
+        WINDOW stream AS (
+            PARTITION BY client_id, source_kind, interface
+            ORDER BY observed_at
+        )
+    ),
+    fallback_raw_usage AS (
+        SELECT
+            client_id,
+            source_kind,
+            interface,
+            COALESCE(SUM(
+                CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
+                           AND rx_bytes >= previous_rx_bytes
+                     THEN rx_bytes - previous_rx_bytes ELSE 0 END
+            ), 0)::bigint AS cycle_rx,
+            COALESCE(SUM(
+                CASE WHEN tx_counter_epoch = previous_tx_counter_epoch
+                           AND tx_bytes >= previous_tx_bytes
+                     THEN tx_bytes - previous_tx_bytes ELSE 0 END
+            ), 0)::bigint AS cycle_tx,
+            COUNT(*) FILTER (
+                WHERE previous_rx_counter_epoch IS NOT NULL
+                  AND rx_counter_epoch <> previous_rx_counter_epoch
+                  AND NOT (
+                      previous_sample_source LIKE 'vnstat_import:%'
+                      AND sample_source NOT LIKE 'vnstat_import:%'
+                  )
+            )::bigint AS rx_resets,
+            COUNT(*) FILTER (
+                WHERE previous_tx_counter_epoch IS NOT NULL
+                  AND tx_counter_epoch <> previous_tx_counter_epoch
+                  AND NOT (
+                      previous_sample_source LIKE 'vnstat_import:%'
+                      AND sample_source NOT LIKE 'vnstat_import:%'
+                  )
+            )::bigint AS tx_resets
+        FROM fallback_raw_sequenced
+        WHERE NOT inbound_promoted
+        GROUP BY client_id, source_kind, interface
+    ),
+    raw_usage AS (
+        SELECT * FROM fast_raw_usage
+        UNION ALL
+        SELECT * FROM fallback_raw_usage
+    ),
+    raw_bounds AS MATERIALIZED (
+        SELECT
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            earliest.observed_at AS first_exact_at,
+            latest.observed_at AS last_exact_at
+        FROM requested
+        LEFT JOIN LATERAL (
+            SELECT sample.observed_at
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = requested.client_id
+              AND sample.source_kind = requested.source_kind
+              AND sample.interface = requested.interface
+              AND NOT sample.inbound_promoted
+            ORDER BY sample.observed_at ASC
+            LIMIT 1
+        ) earliest ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT sample.observed_at
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = requested.client_id
+              AND sample.source_kind = requested.source_kind
+              AND sample.interface = requested.interface
+              AND NOT sample.inbound_promoted
+            ORDER BY sample.observed_at DESC
+            LIMIT 1
+        ) latest ON TRUE
+    ),
+    finer_ranges AS MATERIALIZED (
+        SELECT
+            rollup.client_id,
+            rollup.source_kind,
+            rollup.interface,
+            rollup.origin_kind,
+            rollup.bucket_secs,
+            MIN(rollup.bucket_start) AS first_bucket_start,
+            MAX(rollup.bucket_start + make_interval(secs => rollup.bucket_secs))
+                AS last_bucket_end
+        FROM traffic_counter_rollups rollup
+        JOIN requested
+          ON requested.client_id = rollup.client_id
+         AND requested.source_kind = rollup.source_kind
+         AND requested.interface = rollup.interface
+        WHERE rollup.bucket_secs < 86400
+        GROUP BY
+            rollup.client_id,
+            rollup.source_kind,
+            rollup.interface,
+            rollup.origin_kind,
+            rollup.bucket_secs
     ),
     retained_usage AS (
         SELECT
@@ -659,33 +934,52 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
           ON requested.client_id = rollup.client_id
          AND requested.source_kind = rollup.source_kind
          AND requested.interface = rollup.interface
+        JOIN raw_bounds
+          ON raw_bounds.client_id = rollup.client_id
+         AND raw_bounds.source_kind = rollup.source_kind
+         AND raw_bounds.interface = rollup.interface
         WHERE rollup.bucket_start <= to_timestamp($4)
           AND NOT EXISTS (
                 SELECT 1
-                FROM traffic_counter_rollups finer
-                WHERE finer.client_id = rollup.client_id
-                  AND finer.source_kind = rollup.source_kind
-                  AND finer.interface = rollup.interface
-                  AND finer.origin_kind = rollup.origin_kind
-                  AND finer.bucket_secs < rollup.bucket_secs
-                  AND finer.bucket_start < rollup.bucket_start
+                FROM finer_ranges range
+                JOIN traffic_counter_rollups finer
+                  ON finer.client_id = range.client_id
+                 AND finer.source_kind = range.source_kind
+                 AND finer.interface = range.interface
+                 AND finer.origin_kind = range.origin_kind
+                 AND finer.bucket_secs = range.bucket_secs
+                 AND finer.bucket_start < rollup.bucket_start
                         + make_interval(secs => rollup.bucket_secs)
-                  AND finer.bucket_start
+                 AND finer.bucket_start
                         + make_interval(secs => finer.bucket_secs)
                         > rollup.bucket_start
-          )
-          AND NOT EXISTS (
-                SELECT 1
-                FROM traffic_counter_samples exact
-                WHERE exact.client_id = rollup.client_id
-                  AND exact.source_kind = rollup.source_kind
-                  AND exact.interface = rollup.interface
-                  AND NOT exact.inbound_promoted
-                  AND (CASE WHEN exact.sample_source LIKE 'vnstat_import:%'
-                            THEN 'vnstat_import' ELSE 'live' END) = rollup.origin_kind
-                  AND exact.observed_at >= rollup.bucket_start
-                  AND exact.observed_at < rollup.bucket_start
+                WHERE range.client_id = rollup.client_id
+                  AND range.source_kind = rollup.source_kind
+                  AND range.interface = rollup.interface
+                  AND range.origin_kind = rollup.origin_kind
+                  AND range.bucket_secs < rollup.bucket_secs
+                  AND range.first_bucket_start < rollup.bucket_start
                         + make_interval(secs => rollup.bucket_secs)
+                  AND range.last_bucket_end > rollup.bucket_start
+          )
+          AND (
+                raw_bounds.first_exact_at IS NULL
+                OR rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
+                    <= raw_bounds.first_exact_at
+                OR rollup.bucket_start > raw_bounds.last_exact_at
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM traffic_counter_samples exact
+                    WHERE exact.client_id = rollup.client_id
+                      AND exact.source_kind = rollup.source_kind
+                      AND exact.interface = rollup.interface
+                      AND NOT exact.inbound_promoted
+                      AND (CASE WHEN exact.sample_source LIKE 'vnstat_import:%'
+                                THEN 'vnstat_import' ELSE 'live' END) = rollup.origin_kind
+                      AND exact.observed_at >= rollup.bucket_start
+                      AND exact.observed_at < rollup.bucket_start
+                            + make_interval(secs => rollup.bucket_secs)
+                )
           )
         GROUP BY rollup.client_id, rollup.source_kind, rollup.interface
     )
@@ -1373,16 +1667,14 @@ impl Repository {
         &self,
         client_id: &str,
     ) -> Result<TrafficAccountingRecord> {
-        self.list_traffic_accounting(&TrafficAccountingQuery {
-            selector_expression: None,
-            client_id: Some(client_id.to_string()),
-            state: None,
-            limit: Some(1),
-        })
-        .await?
-        .into_iter()
-        .next()
-        .context("traffic_accounting_not_found")
+        let client_ids = vec![client_id.to_string()];
+        let agents = self.list_agents_for_client_ids(&client_ids).await?;
+        let rules = self.list_all_vps_rules_for_clients(&client_ids).await?;
+        self.traffic_accounting_for_selected_agents_with_rules(&agents, &rules, Utc::now())
+            .await?
+            .into_iter()
+            .next()
+            .context("traffic_accounting_not_found")
     }
 
     pub(crate) async fn traffic_history_start_unix(&self, client_id: &str) -> Result<Option<u64>> {
@@ -1602,8 +1894,10 @@ impl Repository {
                             )
                         ), raw_deltas AS (
                             SELECT
-                                floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
-                                    * $7::numeric AS bucket_epoch,
+                                floor(
+                                    extract(epoch FROM observed_at)::double precision
+                                        / $7::double precision
+                                )::bigint * $7::bigint AS bucket_epoch,
                                 direction_mask,
                                 rx_bytes,
                                 tx_bytes,
@@ -1696,8 +1990,10 @@ impl Repository {
                             )
                         ), import_deltas AS (
                             SELECT
-                                floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
-                                    * $7::numeric AS bucket_epoch,
+                                floor(
+                                    extract(epoch FROM observed_at)::double precision
+                                        / $7::double precision
+                                )::bigint * $7::bigint AS bucket_epoch,
                                 direction_mask,
                                 rx_bytes,
                                 tx_bytes,
@@ -1858,8 +2154,9 @@ impl Repository {
                             )
                         ), raw_native AS (
                             SELECT
-                                floor(extract(epoch FROM observed_at)::numeric / 60::numeric)
-                                    * 60::numeric AS bucket_epoch,
+                                floor(
+                                    extract(epoch FROM observed_at)::double precision / 60.0
+                                )::bigint * 60::bigint AS bucket_epoch,
                                 60::integer AS native_secs,
                                 direction_mask,
                                 CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
@@ -1902,8 +2199,9 @@ impl Repository {
                               AND previous_rx_bytes IS NOT NULL
                         ), retained_native AS (
                             SELECT
-                                extract(epoch FROM rollup.bucket_start)::numeric
-                                    AS bucket_epoch,
+                                floor(
+                                    extract(epoch FROM rollup.bucket_start)::double precision
+                                )::bigint AS bucket_epoch,
                                 rollup.bucket_secs AS native_secs,
                                 requested.direction_mask,
                                 rollup.rx_bytes,
@@ -1970,9 +2268,9 @@ impl Repository {
                         ), output AS (
                             SELECT
                                 floor(
-                                    bucket_epoch
-                                    / GREATEST($7::integer, native_secs)::numeric
-                                ) * GREATEST($7::integer, native_secs)::numeric
+                                    bucket_epoch::double precision
+                                        / GREATEST($7::integer, native_secs)::double precision
+                                )::bigint * GREATEST($7::integer, native_secs)::bigint
                                     AS output_epoch,
                                 GREATEST($7::integer, native_secs) AS output_secs,
                                 direction_mask,
@@ -3441,13 +3739,30 @@ impl Repository {
                         .iter()
                         .map(|request| request.interface.clone())
                         .collect::<Vec<_>>();
+                    // This statement is deliberately plan-sensitive: the request arrays are
+                    // small for a detail read but can contain the whole fleet for a snapshot.
+                    // A cached generic plan estimates UNNEST at ten rows and can choose a
+                    // multi-million-row nested-loop/raw scan.  JIT compilation is also much
+                    // more expensive than the one-shot read on the API path.  Keep both
+                    // mitigations transaction-local and use an unnamed statement so callers
+                    // cannot inherit either setting and small/fleet requests remain
+                    // cardinality-aware.
+                    let mut tx = pool.begin().await?;
+                    sqlx::query(
+                        r#"SELECT set_config('jit', 'off', true),
+                                  set_config('plan_cache_mode', 'force_custom_plan', true)"#,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
                     let rows = sqlx::query(NO_RESET_TRAFFIC_COUNTER_USAGE_SQL)
+                        .persistent(false)
                         .bind(client_ids)
                         .bind(source_kinds)
                         .bind(interfaces)
                         .bind(now_unix)
-                        .fetch_all(pool)
+                        .fetch_all(&mut *tx)
                         .await?;
+                    tx.commit().await?;
                     usages.extend(
                         rows.into_iter()
                             .map(traffic_counter_stream_usage_from_row)

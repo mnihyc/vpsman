@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -11,15 +14,15 @@ use crate::{
     job_request::{fixed_target_selection, normalized_target_client_ids},
     lifecycle_outcome::{gateway_disconnect_outcome, terminal_reconciliation_outcome},
     model::{
-        AgentView, AssignTagRequest, BulkResolveRequest, BulkResolveResponse,
-        BulkTagMutationRequest, CreateTagRequest, DeleteAgentRequest, DeleteAgentResponse,
-        DeleteRuntimeConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary,
-        GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
+        AgentSuspensionMutationResponse, AgentView, AssignTagRequest, BulkResolveRequest,
+        BulkResolveResponse, BulkTagMutationRequest, CreateTagRequest, DeleteAgentRequest,
+        DeleteAgentResponse, DeleteRuntimeConfigPatchGeneratorRequest, DeleteTagRequest,
+        FleetSummary, GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
         RuntimeConfigApplyStateView, RuntimeConfigPatchGeneratorRenderView,
-        RuntimeConfigPatchGeneratorView, TagMutationResponse, TagOrderState, TagView,
-        TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        RuntimeConfigPatchGeneratorView, SuspendAgentRequest, TagMutationResponse, TagOrderState,
+        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
         TelemetryRollupView, TelemetrySampleQuery, TelemetrySampleView, TelemetryTunnelQuery,
-        TelemetryTunnelView, UpdateAgentAliasRequest, UpdateTagOrderRequest,
+        TelemetryTunnelView, UnsuspendAgentRequest, UpdateAgentAliasRequest, UpdateTagOrderRequest,
         UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
@@ -32,6 +35,16 @@ use crate::{
     util::limit_or_default,
 };
 use vpsman_common::MAX_RUNTIME_CONFIG_FIELD_BYTES;
+
+const AGENT_SUSPENSION_FENCE_LEASE_SECS: u64 = 60;
+const AGENT_SUSPENSION_DB_BUDGET_SECS: u64 = 30;
+const AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS: u64 = 5;
+
+#[derive(Clone, Debug)]
+struct PreparedAgentSuspensionFence {
+    token: uuid::Uuid,
+    enqueued_job_ids: Vec<uuid::Uuid>,
+}
 
 const MAX_PATCH_GENERATOR_BODY_BYTES: usize = 16 * 1024;
 const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
@@ -139,6 +152,271 @@ pub(crate) async fn delete_agent(
         post_commit: vec![gateway_disconnect, terminal_reconciliation],
         runtime_sync,
     }))
+}
+
+pub(crate) async fn suspend_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<SuspendAgentRequest>,
+) -> Result<Json<AgentSuspensionMutationResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_client_id(&client_id)?;
+    validate_suspend_agent_request(&request)?;
+    let preflight = state
+        .repo
+        .agent_by_id(&client_id)
+        .await
+        .map_err(agent_mutation_error)?;
+    validate_suspend_agent_status(&preflight.status)?;
+    let fence_token = prepare_agent_suspension_fence(&state, &client_id).await?;
+    let mutation = tokio::time::timeout(
+        Duration::from_secs(AGENT_SUSPENSION_DB_BUDGET_SECS),
+        state.repo.suspend_agent_with_protected_dispatches(
+            &client_id,
+            request.reason.as_deref(),
+            &operator,
+            fence_token
+                .as_ref()
+                .map(|fence| fence.enqueued_job_ids.as_slice())
+                .unwrap_or(&[]),
+        ),
+    )
+    .await;
+    let result = match mutation {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            compensate_agent_suspension_fence(&state, &client_id, fence_token).await;
+            return Err(agent_mutation_error(error));
+        }
+        Err(error) => {
+            compensate_agent_suspension_fence(&state, &client_id, fence_token).await;
+            return Err(ApiError::internal(
+                "agent_suspend_timeout",
+                "The VPS suspension did not commit within its dispatch-fence budget.",
+                error.into(),
+            ));
+        }
+    };
+    promote_agent_suspension_fence(&state, &client_id, fence_token).await;
+    let agent = state
+        .repo
+        .agent_by_id(&client_id)
+        .await
+        .map_err(agent_mutation_error)?;
+    state.publish(WsEvent::AgentUpdated {
+        client_id,
+        gateway_id: "inventory_suspend".to_string(),
+    });
+    let (suspended_at, suspended_by, suspended_reason, suspended_from_status) = result
+        .record
+        .map(|record| {
+            (
+                Some(record.suspended_at),
+                record.suspended_by,
+                record.suspended_reason,
+                Some(record.suspended_from_status),
+            )
+        })
+        .unwrap_or((None, None, None, None));
+    Ok(Json(AgentSuspensionMutationResponse {
+        agent,
+        suspended_at,
+        suspended_by,
+        suspended_reason,
+        suspended_from_status,
+        skipped_unstarted_job_ids: result.skipped_unstarted_job_ids,
+        resolved_alert_count: result.resolved_alert_count,
+    }))
+}
+
+pub(crate) async fn unsuspend_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<UnsuspendAgentRequest>,
+) -> Result<Json<AgentSuspensionMutationResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_client_id(&client_id)?;
+    if !request.confirmed {
+        return Err(ApiError::conflict("agent_unsuspend_confirmation_required"));
+    }
+    let result = state
+        .repo
+        .unsuspend_agent(&client_id, &operator)
+        .await
+        .map_err(agent_mutation_error)?;
+    clear_committed_agent_suspension_fence(&state, &client_id, "operator_unsuspended").await;
+    let agent = state
+        .repo
+        .agent_by_id(&client_id)
+        .await
+        .map_err(agent_mutation_error)?;
+    state.publish(WsEvent::AgentUpdated {
+        client_id,
+        gateway_id: "inventory_unsuspend".to_string(),
+    });
+    Ok(Json(AgentSuspensionMutationResponse {
+        agent,
+        suspended_at: None,
+        suspended_by: None,
+        suspended_reason: None,
+        suspended_from_status: None,
+        skipped_unstarted_job_ids: result.skipped_unstarted_job_ids,
+        resolved_alert_count: result.resolved_alert_count,
+    }))
+}
+
+async fn prepare_agent_suspension_fence(
+    state: &AppState,
+    client_id: &str,
+) -> Result<Option<PreparedAgentSuspensionFence>, ApiError> {
+    if !state.gateway.configured() {
+        return Ok(None);
+    }
+    let token = uuid::Uuid::new_v4();
+    let result = tokio::time::timeout(
+        Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
+        state.gateway.prepare_client_suspension_fence(
+            client_id,
+            token,
+            AGENT_SUSPENSION_FENCE_LEASE_SECS,
+        ),
+    )
+    .await
+    .map_err(|error| {
+        ApiError::internal(
+            "agent_suspend_gateway_fence_timeout",
+            "The gateway dispatch fence could not be prepared within its lease budget.",
+            error.into(),
+        )
+    })?
+    .map_err(ApiError::internal_mapper(
+        "agent_suspend_gateway_fence_unavailable",
+        "The gateway dispatch fence could not be prepared.",
+    ))?;
+    if !result.accepted || !result.fenced {
+        return Err(ApiError::conflict("agent_suspend_gateway_fence_conflict"));
+    }
+    Ok(Some(PreparedAgentSuspensionFence {
+        token,
+        enqueued_job_ids: result.enqueued_job_ids,
+    }))
+}
+
+async fn compensate_agent_suspension_fence(
+    state: &AppState,
+    client_id: &str,
+    fence: Option<PreparedAgentSuspensionFence>,
+) {
+    let Some(fence) = fence else {
+        return;
+    };
+    match state
+        .gateway
+        .clear_client_suspension_fence(client_id, Some(fence.token), "suspension_not_committed")
+        .await
+    {
+        Ok(result) if result.accepted && !result.fenced => {}
+        Ok(result) => tracing::warn!(
+            client_id,
+            message = %result.message,
+            "temporary suspension fence compensation was rejected; recovery is deferred to lease expiry"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            client_id,
+            "temporary suspension fence compensation deferred to lease expiry"
+        ),
+    }
+}
+
+async fn promote_agent_suspension_fence(
+    state: &AppState,
+    client_id: &str,
+    fence: Option<PreparedAgentSuspensionFence>,
+) {
+    let Some(fence) = fence else {
+        return;
+    };
+    for attempt in 1..=3 {
+        match tokio::time::timeout(
+            Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
+            state
+                .gateway
+                .promote_client_suspension_fence(client_id, fence.token),
+        )
+        .await
+        {
+            Ok(Ok(result)) if result.accepted && result.fenced => return,
+            Ok(Ok(result)) if attempt == 3 => {
+                tracing::error!(
+                    client_id,
+                    message = %result.message,
+                    "committed suspension fence was not promoted; durable dispatch rechecks remain active"
+                );
+            }
+            Ok(Err(error)) if attempt == 3 => {
+                tracing::error!(
+                    %error,
+                    client_id,
+                    "committed suspension fence promotion failed; durable dispatch rechecks remain active"
+                );
+            }
+            Err(error) if attempt == 3 => tracing::error!(
+                %error,
+                client_id,
+                "committed suspension fence promotion timed out; durable dispatch rechecks remain active"
+            ),
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+}
+
+pub(crate) async fn clear_committed_agent_suspension_fence(
+    state: &AppState,
+    client_id: &str,
+    reason: &str,
+) {
+    if !state.gateway.configured() {
+        return;
+    }
+    for attempt in 1..=3 {
+        match tokio::time::timeout(
+            Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
+            state
+                .gateway
+                .clear_client_suspension_fence(client_id, None, reason),
+        )
+        .await
+        {
+            Ok(Ok(result)) if result.accepted && !result.fenced => return,
+            Ok(Ok(result)) if attempt == 3 => {
+                tracing::warn!(
+                    client_id,
+                    message = %result.message,
+                    "committed agent-online transition could not clear the gateway suspension fence"
+                );
+            }
+            Ok(Err(error)) if attempt == 3 => {
+                tracing::warn!(
+                    %error,
+                    client_id,
+                    "committed agent-online transition could not reach the gateway suspension fence"
+                );
+            }
+            Err(error) if attempt == 3 => tracing::warn!(
+                %error,
+                client_id,
+                "committed agent-online transition timed out while clearing the gateway suspension fence"
+            ),
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
 }
 
 pub(crate) async fn list_gateway_sessions(
@@ -891,6 +1169,27 @@ fn validate_delete_agent_request(request: &DeleteAgentRequest) -> Result<(), Api
     Ok(())
 }
 
+fn validate_suspend_agent_request(request: &SuspendAgentRequest) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::conflict("agent_suspend_confirmation_required"));
+    }
+    if request.reason.as_deref().is_some_and(|reason| {
+        reason.trim().chars().count() > 240 || reason.chars().any(char::is_control)
+    }) {
+        return Err(ApiError::bad_request("agent_suspend_reason_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_suspend_agent_status(status: &str) -> Result<(), ApiError> {
+    match status {
+        "never" | "disconnected" | "offline" | "stale" => Ok(()),
+        "suspended" => Err(ApiError::conflict("agent_already_suspended")),
+        "online" => Err(ApiError::conflict("agent_suspend_online")),
+        _ => Err(ApiError::conflict("agent_suspend_ineligible")),
+    }
+}
+
 fn peer_client_ids_for_deleted_agent(
     client_id: &str,
     endpoint_pairs: impl IntoIterator<Item = (String, String)>,
@@ -910,6 +1209,16 @@ fn agent_mutation_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("agent_not_found") {
         ApiError::not_found("agent_not_found")
+    } else if message.contains("agent_already_suspended") {
+        ApiError::conflict("agent_already_suspended")
+    } else if message.contains("agent_not_suspended") {
+        ApiError::conflict("agent_not_suspended")
+    } else if message.contains("agent_suspend_online") {
+        ApiError::conflict("agent_suspend_online")
+    } else if message.contains("agent_suspend_ineligible") {
+        ApiError::conflict("agent_suspend_ineligible")
+    } else if message.contains("agent_suspend_reason_invalid") {
+        ApiError::bad_request("agent_suspend_reason_invalid")
     } else if message.contains("agent_port_forwarding_cleanup_required") {
         ApiError::conflict("agent_port_forwarding_cleanup_required")
     } else if message.contains("display_name_already_exists")

@@ -30,7 +30,10 @@ import {
   MonitorFact,
   MonitorMetric,
   VpsMonitorCardSurface,
+  compareMonitorMetricValues,
   formatTrafficReset,
+  monitorSortOptions,
+  type FleetMonitorSort,
 } from "./panels/FleetMonitorPanel";
 import type {
   PublicMonitoringCardView as PublicMonitoringCard,
@@ -73,31 +76,13 @@ type PublicMonitoringSharePageProps = {
 
 type Density = MonitorCardDensity;
 type CardStatusFilter = "all" | "online" | "warning" | "offline";
-type PublicMonitorSort =
-  | "warning"
-  | "name"
-  | "traffic"
-  | "cpu"
-  | "memory"
-  | "region"
-  | "provider";
+type PublicMonitorSort = FleetMonitorSort;
 type CustomBounds = {
   startUnix: number;
   endUnix: number;
 };
 
-const publicMonitorSortOptions: Array<{
-  label: string;
-  value: PublicMonitorSort;
-}> = [
-  { label: "Warnings first", value: "warning" },
-  { label: "Name", value: "name" },
-  { label: "Traffic use", value: "traffic" },
-  { label: "CPU use", value: "cpu" },
-  { label: "Memory", value: "memory" },
-  { label: "Region", value: "region" },
-  { label: "Provider", value: "provider" },
-];
+const publicMonitorSortOptions = monitorSortOptions;
 
 // React StrictMode remounts effects in development. Sharing only an in-flight
 // bootstrap avoids recording that remount as a second visitor. The secret is
@@ -3099,54 +3084,105 @@ function comparePublicMonitoringCards(
       name()
     );
   }
-  const statusRank = (card: PublicMonitoringCard) => {
-    switch (publicCardStatusGroup(card, visibility)) {
-      case "offline":
-        return 3;
-      case "warning":
-        return 2;
-      default:
-        return 0;
-    }
-  };
-  const statusDelta = statusRank(right) - statusRank(left);
   if (mode === "name") return name();
-  if (mode === "warning") return statusDelta || name();
-  const trafficUse = (card: PublicMonitoringCard) => {
-    if (!card.traffic?.configured) return -1;
-    return (
-      trafficLimitingQuota(card.traffic)?.percent ??
-      finiteNumber(card.traffic.cycle_percent) ??
-      -1
-    );
-  };
-  const leftTraffic = trafficUse(left);
-  const rightTraffic = trafficUse(right);
-  if (mode === "traffic" && rightTraffic !== leftTraffic) {
-    return rightTraffic - leftTraffic;
+  if (mode === "warning") {
+    const statusRank = (card: PublicMonitoringCard) => {
+      switch (publicCardStatusGroup(card, visibility)) {
+        case "offline":
+          return 3;
+        case "warning":
+          return 2;
+        default:
+          return 0;
+      }
+    };
+    return statusRank(right) - statusRank(left) || name();
   }
-  const cpuUse = (card: PublicMonitoringCard) =>
-    finiteNumber(card.resources?.cpu_usage_avg) ?? -1;
-  const leftCpu = cpuUse(left);
-  const rightCpu = cpuUse(right);
-  if (mode === "cpu" && rightCpu !== leftCpu) return rightCpu - leftCpu;
-  const memoryUse = (card: PublicMonitoringCard) =>
-    card.resources && card.resources.memory_total_bytes > 0
-      ? (ratioToPercent(card.resources.memory_used_ratio_avg) ?? -1)
-      : -1;
-  const leftMemory = memoryUse(left);
-  const rightMemory = memoryUse(right);
-  if (mode === "memory" && rightMemory !== leftMemory) {
-    return rightMemory - leftMemory;
+  return compareMonitorMetricValues(
+    publicMonitorMetricSortValue(left, mode),
+    publicMonitorMetricSortValue(right, mode),
+    name(),
+  );
+}
+
+function publicMonitorMetricSortValue(
+  card: PublicMonitoringCard,
+  mode: PublicMonitorSort,
+): number | null {
+  const resource = card.resources;
+  switch (mode) {
+    case "traffic_raw":
+      return card.traffic?.configured
+        ? finiteNonNegativeNumber(card.traffic.total_bytes)
+        : null;
+    case "traffic_ratio":
+      return card.traffic?.configured
+        ? finiteNonNegativeNumber(card.traffic.cycle_percent)
+        : null;
+    case "realtime": {
+      const rx = finiteNonNegativeNumber(card.network?.rx_bps);
+      const tx = finiteNonNegativeNumber(card.network?.tx_bps);
+      return rx === null || tx === null ? null : rx + tx;
+    }
+    case "connections": {
+      const tcp = finiteNonNegativeNumber(resource?.tcp_sockets);
+      const udp = finiteNonNegativeNumber(resource?.udp_sockets);
+      return tcp === null || udp === null ? null : tcp + udp;
+    }
+    case "cpu":
+      return finiteRatioValue(resource?.cpu_usage_avg);
+    case "memory_raw": {
+      const total = finitePositiveNumber(resource?.memory_total_bytes);
+      const ratio = finiteRatioValue(resource?.memory_used_ratio_avg);
+      return total === null || ratio === null ? null : total * ratio;
+    }
+    case "memory_ratio":
+      return finitePositiveNumber(resource?.memory_total_bytes) === null
+        ? null
+        : finiteRatioValue(resource?.memory_used_ratio_avg);
+    case "disk_raw": {
+      const total = publicDiskTotal(resource);
+      const ratio = publicDiskUsedRatio(resource);
+      return total === null || ratio === null ? null : total * ratio;
+    }
+    case "disk_ratio":
+      return publicDiskUsedRatio(resource);
+    case "load_raw":
+      return finiteNonNegativeNumber(resource?.load_1);
+    case "load_ratio": {
+      const load = finiteNonNegativeNumber(resource?.load_1);
+      const cores = finitePositiveNumber(resource?.cpu_cores);
+      return load === null || cores === null ? null : load / cores;
+    }
+    default:
+      return null;
   }
-  if (statusDelta !== 0) return statusDelta;
-  const networkUse = (card: PublicMonitoringCard) =>
-    Math.max(0, finiteNumber(card.network?.rx_bps) ?? 0) +
-    Math.max(0, finiteNumber(card.network?.tx_bps) ?? 0);
-  const networkDelta = networkUse(right) - networkUse(left);
-  if (networkDelta !== 0) return networkDelta;
-  if (rightCpu !== leftCpu) return rightCpu - leftCpu;
-  return name();
+}
+
+function publicDiskTotal(resource: PublicResourceMetric | undefined) {
+  if (!resource || (resource.disk_sample_count ?? 0) <= 0) return null;
+  return finitePositiveNumber(resource.disk_total_bytes);
+}
+
+function publicDiskUsedRatio(resource: PublicResourceMetric | undefined) {
+  return publicDiskTotal(resource) === null
+    ? null
+    : finiteRatioValue(resource?.disk_used_ratio_avg);
+}
+
+function finiteNonNegativeNumber(value: number | null | undefined) {
+  const finite = finiteNumber(value);
+  return finite !== null && finite >= 0 ? finite : null;
+}
+
+function finitePositiveNumber(value: number | null | undefined) {
+  const finite = finiteNumber(value);
+  return finite !== null && finite > 0 ? finite : null;
+}
+
+function finiteRatioValue(value: number | null | undefined) {
+  const finite = finiteNumber(value);
+  return finite !== null && finite >= 0 && finite <= 1 ? finite : null;
 }
 
 function formatPublicLocationSummary(locations: string[], unspecified: number) {

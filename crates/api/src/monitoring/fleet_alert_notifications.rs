@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::time::Duration;
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     is_fleet_alert_notification_delivery_process_status, payload_hash,
@@ -179,18 +180,53 @@ impl AppState {
                             delivery.id,
                             lease_id,
                             "fleet alert notification channel disabled",
+                            None,
                         )
                         .await?,
                 );
                 continue;
             }
-            let result = if self
+            let actor_authorized = self
                 .fleet_alert_delivery_actor_authorized(delivery.actor_id)
-                .await?
-            {
-                deliver_notification(&delivery).await
+                .await?;
+            let (result, mut send_guard) = if actor_authorized {
+                let mut send_guard = self
+                    .repo
+                    .begin_fleet_alert_notification_send(
+                        delivery.id,
+                        delivery.channel_id,
+                        &delivery.alert_id,
+                        lease_id,
+                    )
+                    .await?;
+                if !send_guard.is_deliverable() {
+                    let cancellation_reason = if send_guard.channel_enabled() {
+                        "fleet alert resolved or client suspended"
+                    } else {
+                        "fleet alert notification channel disabled"
+                    };
+                    let canceled = self
+                        .repo
+                        .cancel_claimed_fleet_alert_notification_delivery(
+                            delivery.id,
+                            lease_id,
+                            cancellation_reason,
+                            Some(&mut send_guard),
+                        )
+                        .await;
+                    if let Err(error) = send_guard.release().await {
+                        warn!(
+                            delivery_id = %delivery.id,
+                            error = %error,
+                            "failed to release fleet alert notification suspension fence"
+                        );
+                    }
+                    processed.push(canceled?);
+                    continue;
+                }
+                (deliver_notification(&delivery).await, Some(send_guard))
             } else {
-                Err(anyhow::anyhow!("actor_authority_revoked"))
+                (Err(anyhow::anyhow!("actor_authority_revoked")), None)
             };
             let (status, error, next_attempt_after_secs) = match result {
                 Ok(()) => (
@@ -217,17 +253,27 @@ impl AppState {
                     )
                 }
             };
-            processed.push(
-                self.repo
-                    .complete_fleet_alert_notification_delivery_attempt(
-                        delivery.id,
-                        lease_id,
-                        status,
-                        error.as_deref(),
-                        next_attempt_after_secs,
-                    )
-                    .await?,
-            );
+            let completion = self
+                .repo
+                .complete_fleet_alert_notification_delivery_attempt(
+                    delivery.id,
+                    lease_id,
+                    status,
+                    error.as_deref(),
+                    next_attempt_after_secs,
+                    send_guard.as_mut(),
+                )
+                .await;
+            if let Some(send_guard) = send_guard {
+                if let Err(error) = send_guard.release().await {
+                    warn!(
+                        delivery_id = %delivery.id,
+                        error = %error,
+                        "failed to release fleet alert notification suspension fence"
+                    );
+                }
+            }
+            processed.push(completion?);
         }
         if !dry_run && !processed.is_empty() {
             self.repo

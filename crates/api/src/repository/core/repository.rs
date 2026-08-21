@@ -62,6 +62,7 @@ pub(crate) struct MemoryTagOrderState {
 #[derive(Clone, Default)]
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
+    pub(crate) agent_suspensions: Arc<RwLock<HashMap<String, AgentSuspensionRecord>>>,
     pub(crate) client_system_facts:
         Arc<RwLock<HashMap<String, crate::model::ClientSystemFactsRecord>>>,
     pub(crate) hidden_clients: Arc<RwLock<HashSet<String>>>,
@@ -186,18 +187,7 @@ impl Repository {
             .connect(postgres_url)
             .await
             .context("failed to connect to PostgreSQL")?;
-        let migrator = sqlx::migrate::Migrator::new(migrations_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load migrations from {}",
-                    migrations_dir.display()
-                )
-            })?;
-        migrator
-            .run(&pool)
-            .await
-            .context("failed to run PostgreSQL migrations")?;
+        vpsman_server_core::run_postgres_migrations(&pool, migrations_dir).await?;
         let repository = Self::Postgres(pool);
         repository
             .initialize_system_configuration_presets()

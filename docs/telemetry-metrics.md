@@ -467,8 +467,8 @@ bandwidth as evidence, not as automatic discovery of link capacity.
   they fall outside the current freshness window.
 - CSV export contains only the visible series and selected retained range.
 
-Shared monitoring views reuse these definitions but expose only the immutable
-metric visibility groups selected when the share was created. Billing and
+Shared monitoring views reuse these definitions but expose only the share's
+current reviewed metric visibility groups. Billing and
 normalized system information are separate, opt-in groups. A group that was
 not shared is absent. A shared current fact remains in its established place
 and renders `-` when no evidence was reported; explicit states such as

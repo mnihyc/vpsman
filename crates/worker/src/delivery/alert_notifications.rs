@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use sqlx::{types::Json as SqlJson, PgPool, Row};
+use sqlx::{types::Json as SqlJson, Executor, PgConnection, PgPool, Postgres, Row};
 use tokio::time::Duration;
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED,
@@ -9,7 +10,7 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
-use vpsman_server_core::prepare_webhook_target;
+use vpsman_server_core::{prepare_webhook_target, ClientPolicySuppressionSharedGuard};
 
 use crate::actor_authority::actor_authorized;
 
@@ -93,6 +94,27 @@ struct PrunedDelivery {
     created_at: String,
 }
 
+struct AlertNotificationSendGuard {
+    client_suppression: Option<ClientPolicySuppressionSharedGuard>,
+    channel_enabled: bool,
+    deliverable: bool,
+}
+
+impl AlertNotificationSendGuard {
+    fn postgres_connection(&mut self) -> Option<&mut PgConnection> {
+        self.client_suppression
+            .as_mut()
+            .map(ClientPolicySuppressionSharedGuard::connection)
+    }
+
+    async fn release(self) -> Result<()> {
+        if let Some(guard) = self.client_suppression {
+            guard.release().await?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) async fn process_alert_notifications(
     pool: &PgPool,
     config: AlertNotificationWorkerConfig,
@@ -122,6 +144,16 @@ async fn process_queued_deliveries(
               ON channel.id = delivery.channel_id
              AND channel.enabled = TRUE
             WHERE delivery.delivery_kind = 'webhook'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM alert_episodes episode
+                    LEFT JOIN clients subject ON subject.id=episode.client_id
+                    WHERE episode.public_id=delivery.alert_id
+                      AND (
+                            episode.resolved_at IS NOT NULL
+                            OR subject.status='suspended'
+                      )
+              )
               AND (
                 delivery.status = 'queued'
                 OR (
@@ -171,31 +203,13 @@ async fn process_queued_deliveries(
     for row in rows {
         let delivery = delivery_from_row(row)?;
         if !alert_notification_channel_enabled(pool, delivery.channel_id).await? {
-            let updated = sqlx::query(
-                r#"
-                UPDATE fleet_alert_notification_deliveries
-                SET
-                    status = 'canceled_disabled',
-                    error = $3,
-                    delivery_lease_id = NULL,
-                    delivery_lease_until = NULL,
-                    next_attempt_at = NULL,
-                    delivered_at = NULL
-                WHERE id = $1
-                  AND status = 'in_progress'
-                  AND delivery_lease_id = $2
-                RETURNING attempt_count
-                "#,
-            )
-            .bind(delivery.id)
-            .bind(lease_id)
-            .bind("fleet alert notification channel disabled")
-            .fetch_optional(pool)
-            .await?;
-            let Some(updated) = updated else {
+            let cancellation_reason = "fleet alert notification channel disabled";
+            let Some(recorded_attempt_count) =
+                cancel_claimed_alert_notification(pool, delivery.id, lease_id, cancellation_reason)
+                    .await?
+            else {
                 continue;
             };
-            let recorded_attempt_count: i32 = updated.try_get("attempt_count")?;
             outcomes.push(DeliveryOutcome {
                 id: delivery.id,
                 channel_id: delivery.channel_id,
@@ -203,18 +217,75 @@ async fn process_queued_deliveries(
                 status: FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
                 delivery_kind: delivery.delivery_kind,
                 attempt_count: recorded_attempt_count,
-                error: Some("fleet alert notification channel disabled".to_string()),
+                error: Some(cancellation_reason.to_string()),
             });
             continue;
         }
-        let result =
-            if actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"])
-                .await?
-            {
-                deliver_notification(&delivery, config.webhook_timeout_secs).await
-            } else {
-                Err(anyhow::anyhow!("actor_authority_revoked"))
-            };
+        let actor_authorized =
+            actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"]).await?;
+        let (result, mut send_guard) = if actor_authorized {
+            let mut send_guard = begin_alert_notification_send(
+                pool,
+                delivery.id,
+                delivery.channel_id,
+                &delivery.alert_id,
+                lease_id,
+            )
+            .await?;
+            if !send_guard.deliverable {
+                let cancellation_reason = if send_guard.channel_enabled {
+                    "fleet alert resolved or client suspended"
+                } else {
+                    "fleet alert notification channel disabled"
+                };
+                let updated = match send_guard.postgres_connection() {
+                    Some(connection) => {
+                        cancel_claimed_alert_notification(
+                            connection,
+                            delivery.id,
+                            lease_id,
+                            cancellation_reason,
+                        )
+                        .await
+                    }
+                    None => {
+                        cancel_claimed_alert_notification(
+                            pool,
+                            delivery.id,
+                            lease_id,
+                            cancellation_reason,
+                        )
+                        .await
+                    }
+                };
+                if let Err(error) = send_guard.release().await {
+                    warn!(
+                        delivery_id = %delivery.id,
+                        error = %error,
+                        "failed to release fleet alert notification suspension fence"
+                    );
+                }
+                let Some(recorded_attempt_count) = updated? else {
+                    continue;
+                };
+                outcomes.push(DeliveryOutcome {
+                    id: delivery.id,
+                    channel_id: delivery.channel_id,
+                    alert_id: delivery.alert_id,
+                    status: FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
+                    delivery_kind: delivery.delivery_kind,
+                    attempt_count: recorded_attempt_count,
+                    error: Some(cancellation_reason.to_string()),
+                });
+                continue;
+            }
+            (
+                deliver_notification(&delivery, config.webhook_timeout_secs).await,
+                Some(send_guard),
+            )
+        } else {
+            (Err(anyhow::anyhow!("actor_authority_revoked")), None)
+        };
         let (status, error, next_attempt_after_secs) = match result {
             Ok(()) => (
                 FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
@@ -239,38 +310,47 @@ async fn process_queued_deliveries(
                 )
             }
         };
-        let updated = sqlx::query(
-            r#"
-            UPDATE fleet_alert_notification_deliveries
-            SET
-                status = $2,
-                error = $3,
-                attempt_count = attempt_count + 1,
-                next_attempt_at = CASE
-                    WHEN $5::bigint IS NULL THEN NULL
-                    ELSE now() + ($5::bigint * interval '1 second')
-                END,
-                last_attempt_at = now(),
-                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END,
-                delivery_lease_id = NULL,
-                delivery_lease_until = NULL
-            WHERE id = $1
-              AND status = 'in_progress'
-              AND delivery_lease_id = $4
-            RETURNING attempt_count
-            "#,
-        )
-        .bind(delivery.id)
-        .bind(status)
-        .bind(error.as_deref())
-        .bind(lease_id)
-        .bind(next_attempt_after_secs)
-        .fetch_optional(pool)
-        .await?;
+        let updated = match send_guard
+            .as_mut()
+            .and_then(|guard| guard.postgres_connection())
+        {
+            Some(connection) => {
+                complete_claimed_alert_notification(
+                    connection,
+                    delivery.id,
+                    lease_id,
+                    status,
+                    error.as_deref(),
+                    next_attempt_after_secs,
+                )
+                .await
+            }
+            None => {
+                complete_claimed_alert_notification(
+                    pool,
+                    delivery.id,
+                    lease_id,
+                    status,
+                    error.as_deref(),
+                    next_attempt_after_secs,
+                )
+                .await
+            }
+        };
+        if let Some(send_guard) = send_guard {
+            if let Err(error) = send_guard.release().await {
+                warn!(
+                    delivery_id = %delivery.id,
+                    error = %error,
+                    "failed to release fleet alert notification suspension fence"
+                );
+            }
+        }
+        let updated = updated?;
         let Some(updated) = updated else {
             continue;
         };
-        let recorded_attempt_count: i32 = updated.try_get("attempt_count")?;
+        let recorded_attempt_count = updated;
         outcomes.push(DeliveryOutcome {
             id: delivery.id,
             channel_id: delivery.channel_id,
@@ -306,18 +386,191 @@ fn delivery_lease_secs(limit: i64, webhook_timeout_secs: u64) -> i32 {
 }
 
 async fn alert_notification_channel_enabled(pool: &PgPool, channel_id: Uuid) -> Result<bool> {
-    let enabled = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT enabled
-        FROM fleet_alert_notification_channels
-        WHERE id = $1
-        "#,
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT enabled FROM fleet_alert_notification_channels WHERE id=$1",
     )
     .bind(channel_id)
     .fetch_optional(pool)
     .await?
-    .unwrap_or(false);
-    Ok(enabled)
+    .unwrap_or(false))
+}
+
+async fn cancel_claimed_alert_notification<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    reason: &str,
+) -> Result<Option<i32>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    Ok(sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE fleet_alert_notification_deliveries
+        SET
+            status = 'canceled_disabled',
+            error = $3,
+            delivery_lease_id = NULL,
+            delivery_lease_until = NULL,
+            next_attempt_at = NULL,
+            delivered_at = NULL
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND delivery_lease_id = $2
+        RETURNING attempt_count
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(lease_id)
+    .bind(reason)
+    .fetch_optional(executor)
+    .await?)
+}
+
+async fn complete_claimed_alert_notification<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    status: &str,
+    error: Option<&str>,
+    next_attempt_after_secs: Option<i64>,
+) -> Result<Option<i32>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    Ok(sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE fleet_alert_notification_deliveries
+        SET
+            status = $2,
+            error = $3,
+            attempt_count = attempt_count + 1,
+            next_attempt_at = CASE
+                WHEN $5::bigint IS NULL THEN NULL
+                ELSE now() + ($5::bigint * interval '1 second')
+            END,
+            last_attempt_at = now(),
+            delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END,
+            delivery_lease_id = NULL,
+            delivery_lease_until = NULL
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND delivery_lease_id = $4
+        RETURNING attempt_count
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(status)
+    .bind(error)
+    .bind(lease_id)
+    .bind(next_attempt_after_secs)
+    .fetch_optional(executor)
+    .await?)
+}
+
+async fn begin_alert_notification_send(
+    pool: &PgPool,
+    delivery_id: Uuid,
+    channel_id: Uuid,
+    alert_id: &str,
+    lease_id: Uuid,
+) -> Result<AlertNotificationSendGuard> {
+    // Episode ownership is immutable after its public ID is minted. The
+    // guarded recheck still compares this value and fails closed if storage is
+    // changed outside that invariant.
+    let subject_client_id = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT client_id FROM alert_episodes WHERE public_id=$1",
+    )
+    .bind(alert_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    let (client_suppression, channel_enabled, deliverable) = if let Some(client_id) =
+        subject_client_id.as_deref()
+    {
+        let mut guard = ClientPolicySuppressionSharedGuard::acquire(pool, client_id).await?;
+        let (channel_enabled, deliverable) = alert_notification_send_state(
+            guard.connection(),
+            delivery_id,
+            channel_id,
+            alert_id,
+            lease_id,
+            subject_client_id.as_deref(),
+        )
+        .await?;
+        (Some(guard), channel_enabled, deliverable)
+    } else {
+        let (channel_enabled, deliverable) =
+            alert_notification_send_state(pool, delivery_id, channel_id, alert_id, lease_id, None)
+                .await?;
+        (None, channel_enabled, deliverable)
+    };
+    Ok(AlertNotificationSendGuard {
+        client_suppression,
+        channel_enabled,
+        deliverable,
+    })
+}
+
+async fn alert_notification_send_state<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    channel_id: Uuid,
+    alert_id: &str,
+    lease_id: Uuid,
+    expected_client_id: Option<&str>,
+) -> Result<(bool, bool)>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    Ok(sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM fleet_alert_notification_channels channel
+                WHERE channel.id=$2 AND channel.enabled
+            ) AS channel_enabled,
+            (
+                EXISTS (
+                    SELECT 1
+                    FROM fleet_alert_notification_deliveries delivery
+                    WHERE delivery.id=$1
+                      AND delivery.channel_id=$2
+                      AND delivery.alert_id=$3
+                      AND delivery.status='in_progress'
+                      AND delivery.delivery_lease_id=$4
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM fleet_alert_notification_channels channel
+                    WHERE channel.id=$2 AND channel.enabled
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM alert_episodes episode
+                    LEFT JOIN clients subject ON subject.id=episode.client_id
+                    WHERE episode.public_id=$3
+                      AND episode.client_id IS NOT DISTINCT FROM $5::text
+                      AND episode.resolved_at IS NULL
+                      AND (
+                            episode.client_id IS NULL
+                            OR (
+                                subject.id IS NOT NULL
+                                AND subject.status <> 'suspended'
+                            )
+                      )
+                )
+            ) AS deliverable
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(channel_id)
+    .bind(alert_id)
+    .bind(lease_id)
+    .bind(expected_client_id)
+    .fetch_one(executor)
+    .await?)
 }
 
 async fn deliver_notification(delivery: &DeliveryRow, webhook_timeout_secs: u64) -> Result<()> {

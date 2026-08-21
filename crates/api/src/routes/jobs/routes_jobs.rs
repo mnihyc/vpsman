@@ -464,6 +464,11 @@ struct FixedTargetUnavailableSkip {
     client_id: String,
 }
 
+#[derive(Clone, Debug)]
+struct SuspendedTargetSkip {
+    client_id: String,
+}
+
 async fn create_job_inner(
     state: &AppState,
     operator: &AuthContext,
@@ -549,6 +554,20 @@ async fn create_job_inner(
         .iter()
         .map(|skip| skip.client_id.clone())
         .collect::<HashSet<_>>();
+    let suspended_target_skips = resolved_targets
+        .iter()
+        .filter(|client_id| {
+            resolved_agents
+                .iter()
+                .any(|agent| agent.id == client_id.as_str() && agent.status == "suspended")
+        })
+        .cloned()
+        .map(|client_id| SuspendedTargetSkip { client_id })
+        .collect::<Vec<_>>();
+    let suspended_target_skip_set = suspended_target_skips
+        .iter()
+        .map(|skip| skip.client_id.clone())
+        .collect::<HashSet<_>>();
     let never_connected_skips = never_connected_target_skips(&resolved_targets, &resolved_agents);
     let never_connected_skip_set = never_connected_skips
         .iter()
@@ -557,7 +576,8 @@ async fn create_job_inner(
     let claimable_targets = resolved_targets
         .iter()
         .filter(|client_id| {
-            !never_connected_skip_set.contains(client_id.as_str())
+            !suspended_target_skip_set.contains(client_id.as_str())
+                && !never_connected_skip_set.contains(client_id.as_str())
                 && !fixed_target_unavailable_skip_set.contains(client_id.as_str())
         })
         .cloned()
@@ -714,6 +734,7 @@ async fn create_job_inner(
     let precompleted_targets = precompleted_target_outcomes(
         job_id,
         &job_command,
+        suspended_target_skips,
         never_connected_skips,
         fixed_target_unavailable_skips,
         capability_skips,
@@ -1118,7 +1139,7 @@ fn never_connected_target_skips(
 }
 
 fn target_has_never_connected(agent: &AgentView) -> bool {
-    !matches!(agent.status.as_str(), "revoked" | "deleted")
+    !matches!(agent.status.as_str(), "suspended" | "revoked" | "deleted")
         && (agent.process_incarnation_id.is_none() || agent.status == "never")
 }
 
@@ -1498,6 +1519,7 @@ async fn agent_update_release_policy_allows(
 fn precompleted_target_outcomes(
     job_id: Uuid,
     job_command: &JobCommand,
+    suspended_target_skips: Vec<SuspendedTargetSkip>,
     never_connected_skips: Vec<NeverConnectedSkip>,
     fixed_target_unavailable_skips: Vec<FixedTargetUnavailableSkip>,
     capability_skips: Vec<CapabilitySkip>,
@@ -1505,12 +1527,20 @@ fn precompleted_target_outcomes(
     peer_skips: Vec<NetworkSpeedPeerSkip>,
 ) -> Result<Vec<PrecompletedJobTarget>, ApiError> {
     let mut targets = Vec::with_capacity(
-        never_connected_skips.len()
+        suspended_target_skips.len()
+            + never_connected_skips.len()
             + fixed_target_unavailable_skips.len()
             + capability_skips.len()
             + busy_skips.len()
             + peer_skips.len(),
     );
+    for skip in suspended_target_skips {
+        let outcome = suspended_target_skip_outcome(job_id, &skip, job_command)?;
+        targets.push(PrecompletedJobTarget {
+            client_id: skip.client_id,
+            outcome,
+        });
+    }
     for skip in never_connected_skips {
         let outcome = never_connected_skip_outcome(job_id, &skip, job_command)?;
         targets.push(PrecompletedJobTarget {
@@ -1744,6 +1774,39 @@ fn never_connected_skip_outcome(
         command_version: None,
         accepted: false,
         message: "target_never_connected: target has never connected; job skipped".to_string(),
+        received_at: None,
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: encode_job_status(&status)?,
+            exit_code: Some(0),
+            done: true,
+        }],
+    })
+}
+
+fn suspended_target_skip_outcome(
+    job_id: Uuid,
+    skip: &SuspendedTargetSkip,
+    command: &JobCommand,
+) -> Result<TargetDispatchOutcome, ApiError> {
+    let message = "target_suspended: target skipped because VPS is suspended";
+    let status = serde_json::json!({
+        "type": "target_suspended",
+        "status": TARGET_STATUS_SKIPPED,
+        "client_id": skip.client_id,
+        "command_type": crate::job_request::job_command_type_label(command),
+        "reason": "target_suspended",
+        "hint": "manually unsuspend the VPS or wait for an authenticated online event before dispatch",
+        "message": message,
+    });
+    Ok(TargetDispatchOutcome {
+        status: TARGET_STATUS_SKIPPED.to_string(),
+        exit_code: Some(0),
+        #[cfg(test)]
+        command_version: None,
+        accepted: false,
+        message: message.to_string(),
         received_at: None,
         outputs: vec![CommandOutput {
             job_id,

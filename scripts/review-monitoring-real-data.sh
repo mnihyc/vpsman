@@ -18,6 +18,9 @@ api_port="0"
 frontend_port="0"
 postgres_password=""
 postgres_url=""
+postgres_data_dir=""
+cargo_target_dir=""
+api_binary_sha256=""
 api_url=""
 frontend_url=""
 api_pid="0"
@@ -54,8 +57,12 @@ validate_port() {
 }
 
 validate_run_identity() {
+  local database_application_name
   [[ "$run_id" =~ ^review-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] \
     || die "stored run label is invalid"
+  database_application_name="vpsman-review-api-$run_id"
+  ((${#database_application_name} <= 63)) \
+    || die "stored run label is too long for exact PostgreSQL backend identity"
   [[ "$container_name" == "vpsman-monitoring-${run_id}-postgres" ]] \
     || die "stored Postgres container name is outside the review harness scope"
   validate_port "$postgres_port"
@@ -68,6 +75,25 @@ validate_run_identity() {
   artifact_dir="$ROOT_DIR/$artifact_dir_relative"
   [[ "$(readlink -m "$artifact_dir")" == "$ROOT_DIR/output/playwright/monitoring-real-data-${run_id}" ]] \
     || die "resolved artifact path is outside the review harness scope"
+  if [[ -n "$postgres_data_dir" ]]; then
+    [[ "$postgres_data_dir" == /mnt/storage/vpsman-tmp/* ]] \
+      || die "stored PostgreSQL data path is outside /mnt/storage/vpsman-tmp"
+    [[ "$(basename "$postgres_data_dir")" == "postgres" \
+      && "$(basename "$(dirname "$postgres_data_dir")")" == "$run_id" ]] \
+      || die "stored PostgreSQL data path does not belong to run $run_id"
+    [[ "$(readlink -m "$postgres_data_dir")" == "$postgres_data_dir" ]] \
+      || die "stored PostgreSQL data path is not canonical"
+  fi
+  if [[ -n "$cargo_target_dir" ]]; then
+    [[ "$cargo_target_dir" == /mnt/storage/vpsman-tmp/* ]] \
+      || die "stored Cargo target path is outside /mnt/storage/vpsman-tmp"
+    [[ "$(readlink -m "$cargo_target_dir")" == "$cargo_target_dir" ]] \
+      || die "stored Cargo target path is not canonical"
+  fi
+  if [[ -n "$api_binary_sha256" ]]; then
+    [[ "$api_binary_sha256" =~ ^[0-9a-f]{64}$ ]] \
+      || die "stored API binary SHA-256 is invalid"
+  fi
 }
 
 load_state() {
@@ -84,6 +110,9 @@ load_state() {
   frontend_port="$(jq -er '.frontend_port' "$STATE_FILE")"
   postgres_password="$(jq -er '.postgres_password' "$STATE_FILE")"
   postgres_url="$(jq -er '.postgres_url' "$STATE_FILE")"
+  postgres_data_dir="$(jq -er '.postgres_data_dir // ""' "$STATE_FILE")"
+  cargo_target_dir="$(jq -er '.cargo_target_dir // ""' "$STATE_FILE")"
+  api_binary_sha256="$(jq -er '.api_binary_sha256 // ""' "$STATE_FILE")"
   api_url="$(jq -er '.api_url' "$STATE_FILE")"
   frontend_url="$(jq -er '.frontend_url' "$STATE_FILE")"
   api_pid="$(jq -er '.api_pid' "$STATE_FILE")"
@@ -111,6 +140,9 @@ write_state() {
     --argjson frontend_port "$frontend_port" \
     --arg postgres_password "$postgres_password" \
     --arg postgres_url "$postgres_url" \
+    --arg postgres_data_dir "$postgres_data_dir" \
+    --arg cargo_target_dir "$cargo_target_dir" \
+    --arg api_binary_sha256 "$api_binary_sha256" \
     --arg api_url "$api_url" \
     --arg frontend_url "$frontend_url" \
     --argjson api_pid "$api_pid" \
@@ -133,6 +165,9 @@ write_state() {
       frontend_port: $frontend_port,
       postgres_password: $postgres_password,
       postgres_url: $postgres_url,
+      postgres_data_dir: (if $postgres_data_dir == "" then null else $postgres_data_dir end),
+      cargo_target_dir: (if $cargo_target_dir == "" then null else $cargo_target_dir end),
+      api_binary_sha256: (if $api_binary_sha256 == "" then null else $api_binary_sha256 end),
       api_url: $api_url,
       frontend_url: $frontend_url,
       api_pid: $api_pid,
@@ -164,6 +199,110 @@ process_matches_run() {
     | grep -Fqx "VPSMAN_REVIEW_RUN_ID=$run_id"
 }
 
+recorded_api_binary_path() {
+  if [[ -n "$cargo_target_dir" ]]; then
+    printf '%s/debug/vpsman-api\n' "$cargo_target_dir"
+  else
+    printf '%s/target/debug/vpsman-api\n' "$ROOT_DIR"
+  fi
+}
+
+require_recorded_api_binary() {
+  local api_binary
+  local current_sha256
+  local resolved_api_binary
+  api_binary="$(recorded_api_binary_path)"
+  [[ -f "$api_binary" && -x "$api_binary" ]] \
+    || die "recorded API binary is missing or not executable: $api_binary"
+  resolved_api_binary="$(readlink -e "$api_binary")" \
+    || die "recorded API binary cannot be resolved: $api_binary"
+  [[ "$resolved_api_binary" == "$api_binary" ]] \
+    || die "recorded API binary path is not canonical: $api_binary"
+  if [[ -n "$api_binary_sha256" ]]; then
+    current_sha256="$(sha256sum "$api_binary" | awk '{print $1}')"
+    [[ "$current_sha256" == "$api_binary_sha256" ]] \
+      || die "recorded API binary bytes changed after the run was frozen"
+  fi
+  printf '%s\n' "$api_binary"
+}
+
+api_application_name() {
+  printf 'vpsman-review-api-%s\n' "$run_id"
+}
+
+api_postgres_url() {
+  local separator='?'
+  [[ "$postgres_url" == *\?* ]] && separator='&'
+  printf '%s%sapplication_name=%s\n' \
+    "$postgres_url" "$separator" "$(api_application_name)"
+}
+
+process_environment_has() {
+  local pid="$1"
+  local expected="$2"
+  [[ -r "/proc/$pid/environ" ]] || return 1
+  local environment
+  environment="$(
+    {
+      tr '\0' '\n' <"/proc/$pid/environ"
+    } 2>/dev/null
+  )" || return 1
+  grep -Fqx "$expected" <<<"$environment"
+}
+
+api_process_matches_run() {
+  local expected_binary_sha256
+  local pid="$1"
+  local expected_binary
+  local process_binary
+  local process_binary_sha256
+  process_matches_run "$pid" || return 1
+  expected_binary="$(recorded_api_binary_path)"
+  [[ -x "$expected_binary" ]] || return 1
+  expected_binary="$(readlink -e "$expected_binary")" || return 1
+  process_binary="$(readlink -e "/proc/$pid/exe")" || return 1
+  [[ "$process_binary" == "$expected_binary" ]] || return 1
+  expected_binary_sha256="$(sha256sum "$expected_binary" | awk '{print $1}')" || return 1
+  process_binary_sha256="$(sha256sum "/proc/$pid/exe" | awk '{print $1}')" || return 1
+  [[ "$process_binary_sha256" == "$expected_binary_sha256" ]] || return 1
+  if [[ -n "$api_binary_sha256" ]]; then
+    [[ "$process_binary_sha256" == "$api_binary_sha256" ]] || return 1
+  fi
+  process_environment_has "$pid" "VPSMAN_API_BIND=127.0.0.1:$api_port" || return 1
+  if [[ -n "$api_binary_sha256" ]]; then
+    process_environment_has "$pid" "VPSMAN_POSTGRES_URL=$(api_postgres_url)"
+  else
+    process_environment_has "$pid" "VPSMAN_POSTGRES_URL=$postgres_url"
+  fi
+}
+
+process_group_exists() {
+  local pid="$1"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 -- "-$pid" >/dev/null 2>&1
+}
+
+process_is_group_leader() {
+  local pid="$1"
+  local process_group
+  process_group="$(ps -o pgid= -p "$pid" | tr -d '[:space:]')"
+  [[ "$process_group" == "$pid" ]]
+}
+
+api_processes_for_run() {
+  local environ_path
+  local pid
+  for environ_path in /proc/[1-9][0-9]*/environ; do
+    [[ -r "$environ_path" ]] || continue
+    pid="${environ_path#/proc/}"
+    pid="${pid%/environ}"
+    process_environment_has "$pid" "VPSMAN_REVIEW_RUN_ID=$run_id" || continue
+    process_environment_has "$pid" "VPSMAN_API_BIND=127.0.0.1:$api_port" || continue
+    printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 container_matches_run() {
   local stored_label
   docker inspect "$container_name" >/dev/null 2>&1 || return 1
@@ -177,18 +316,26 @@ stop_process_group() {
   local pid="$1"
   local attempt
   if ! kill -0 "$pid" >/dev/null 2>&1; then
+    if process_group_exists "$pid"; then
+      die "refusing to stop process group $pid because its recorded leader is absent"
+    fi
     return
   fi
   process_matches_run "$pid" \
     || die "refusing to stop PID $pid because it no longer belongs to run $run_id"
+  process_is_group_leader "$pid" \
+    || die "refusing to stop PID $pid because it is not its process-group leader"
   kill -TERM -- "-$pid" >/dev/null 2>&1 || true
-  for ((attempt = 0; attempt < 50; attempt += 1)); do
-    kill -0 "$pid" >/dev/null 2>&1 || return 0
+  for ((attempt = 0; attempt < 100; attempt += 1)); do
+    process_group_exists "$pid" || return 0
     sleep 0.1
   done
-  if process_matches_run "$pid"; then
-    kill -KILL -- "-$pid" >/dev/null 2>&1 || true
-  fi
+  kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+  for ((attempt = 0; attempt < 50; attempt += 1)); do
+    process_group_exists "$pid" || return 0
+    sleep 0.1
+  done
+  die "process group $pid survived SIGTERM and SIGKILL"
 }
 
 cleanup_failed_start() {
@@ -249,8 +396,92 @@ wait_for_http() {
   done
 }
 
+require_live_postgres_container() {
+  container_matches_run \
+    || die "PostgreSQL container is absent or has the wrong run label"
+  [[ "$(docker inspect --format '{{.State.Running}}' "$container_name")" == "true" ]] \
+    || die "PostgreSQL container is not running"
+}
+
+api_backend_count() {
+  psql_review \
+    -qAt \
+    -v "api_application_name=$(api_application_name)" <<'SQL'
+SELECT count(*) FROM pg_stat_activity
+ WHERE datname = current_database()
+   AND backend_type = 'client backend'
+   AND application_name = :'api_application_name'
+SQL
+}
+
+wait_for_no_api_backends() {
+  local backend_count
+  local deadline=$((SECONDS + 15))
+  while true; do
+    backend_count="$(api_backend_count)"
+    [[ "$backend_count" == "0" ]] && return 0
+    ((SECONDS < deadline)) \
+      || die "API process stopped but $backend_count tagged PostgreSQL backend(s) survived"
+    sleep 0.1
+  done
+}
+
+wait_for_api_backend() {
+  local backend_count
+  local deadline=$((SECONDS + 15))
+  while true; do
+    backend_count="$(api_backend_count)"
+    [[ "$backend_count" =~ ^[1-9][0-9]*$ ]] && return 0
+    ((SECONDS < deadline)) \
+      || die "API health is up but no run-tagged PostgreSQL backend appeared"
+    sleep 0.1
+  done
+}
+
+launch_api_process() {
+  local api_binary
+  local api_log="$STATE_DIR/api.log"
+  local database_url
+  api_binary="$(require_recorded_api_binary)"
+  database_url="$(api_postgres_url)"
+  setsid env \
+    "VPSMAN_REVIEW_RUN_ID=$run_id" \
+    "VPSMAN_API_BIND=127.0.0.1:$api_port" \
+    "VPSMAN_POSTGRES_URL=$database_url" \
+    "VPSMAN_MIGRATIONS_DIR=$ROOT_DIR/migrations" \
+    "VPSMAN_INTERNAL_TOKEN=$internal_token" \
+    "VPSMAN_BACKUP_OBJECT_STORE_DIR=$STATE_DIR/object-store/backups" \
+    "VPSMAN_SUITE_CONFIG=$STATE_DIR/no-suite.toml" \
+    RUST_LOG=vpsman_api=warn \
+    "$api_binary" >>"$api_log" 2>&1 </dev/null &
+  api_pid="$!"
+}
+
+cleanup_failed_api_resume() {
+  set +e
+  if [[ "$api_pid" =~ ^[1-9][0-9]*$ ]] \
+    && kill -0 "$api_pid" >/dev/null 2>&1 \
+    && process_environment_has "$api_pid" "VPSMAN_REVIEW_RUN_ID=$run_id" \
+    && process_environment_has "$api_pid" "VPSMAN_API_BIND=127.0.0.1:$api_port" \
+    && process_is_group_leader "$api_pid"; then
+    # The binary hash check is intentionally bypassed only on this failed
+    # launch cleanup path: the PID and run-scoped environment still prove
+    # ownership, while refusing cleanup here would leak the just-launched
+    # process if it failed identity validation.
+    kill -TERM -- "-$api_pid" >/dev/null 2>&1 || true
+    for ((attempt = 0; attempt < 100; attempt += 1)); do
+      process_group_exists "$api_pid" || break
+      sleep 0.1
+    done
+    if process_group_exists "$api_pid"; then
+      kill -KILL -- "-$api_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+  api_pid=0
+}
+
 psql_review() {
-  PGPASSWORD="$postgres_password" psql \
+  PGAPPNAME=vpsman-pressure-control PGPASSWORD="$postgres_password" psql \
     -X \
     -v ON_ERROR_STOP=1 \
     -h 127.0.0.1 \
@@ -305,11 +536,13 @@ verify_stack() {
   local hidden_secret
   local hidden_data
 
-  process_matches_run "$api_pid" || die "API process is not running as $run_id"
+  [[ "$api_pid" != "0" ]] \
+    || die "API is quiesced; run '$0 resume-api' before status or capture"
+  [[ "$api_pid" =~ ^[1-9][0-9]*$ ]] || die "stored API PID is invalid"
+  api_process_matches_run "$api_pid" \
+    || die "API process is not the exact recorded binary for $run_id"
   process_matches_run "$frontend_pid" || die "frontend process is not running as $run_id"
-  container_matches_run || die "PostgreSQL container is absent or has the wrong run label"
-  [[ "$(docker inspect --format '{{.State.Running}}' "$container_name")" == "true" ]] \
-    || die "PostgreSQL container is not running"
+  require_live_postgres_container
   curl -fsS "$api_url/health" >/dev/null
   curl -fsS "$frontend_url/" >/dev/null
   psql_review -qAt -c 'SELECT 1' | grep -qx '1' \
@@ -448,6 +681,8 @@ write_manifest() {
     --arg worktree_hash "$worktree_hash" \
     --arg postgres_container "$container_name" \
     --arg postgres_endpoint "127.0.0.1:$postgres_port" \
+    --arg postgres_data_dir "$postgres_data_dir" \
+    --arg cargo_target_dir "$cargo_target_dir" \
     --arg api_url "$api_url" \
     --arg frontend_url "$frontend_url" \
     --arg artifact_dir "$artifact_dir_relative" \
@@ -468,6 +703,8 @@ write_manifest() {
       services: {
         postgres_container: $postgres_container,
         postgres_endpoint: $postgres_endpoint,
+        postgres_data_dir: (if $postgres_data_dir == "" then null else $postgres_data_dir end),
+        cargo_target_dir: (if $cargo_target_dir == "" then null else $cargo_target_dir end),
         api_url: $api_url,
         frontend_url: $frontend_url
       },
@@ -521,6 +758,8 @@ status_run() {
     --arg started_at "$started_at" \
     --arg postgres_container "$container_name" \
     --arg postgres_endpoint "127.0.0.1:$postgres_port" \
+    --arg postgres_data_dir "$postgres_data_dir" \
+    --arg cargo_target_dir "$cargo_target_dir" \
     --arg api_url "$api_url" \
     --arg frontend_url "$frontend_url" \
     --arg artifact_dir "$artifact_dir_relative" \
@@ -540,8 +779,10 @@ status_run() {
       started_at: $started_at,
       postgres: {
         container: $postgres_container,
-        endpoint: $postgres_endpoint
+        endpoint: $postgres_endpoint,
+        data_dir: (if $postgres_data_dir == "" then null else $postgres_data_dir end)
       },
+      cargo_target_dir: (if $cargo_target_dir == "" then null else $cargo_target_dir end),
       api: {url: $api_url, pid: $api_pid},
       frontend: {url: $frontend_url, pid: $frontend_pid},
       database_counts: $database_counts,
@@ -634,6 +875,11 @@ start_run() {
   local hidden_response
   local api_log
   local frontend_log
+  local postgres_data_root
+  local configured_cargo_target_dir
+  local api_binary
+  local -a postgres_mount_args=()
+  local -a postgres_command_args=()
 
   [[ ! -e "$STATE_DIR" ]] \
     || die "a current review stack already exists; inspect it with '$0 status' or remove it with '$0 stop'"
@@ -641,14 +887,29 @@ start_run() {
     || die "review harness fixtures or Playwright spec are missing"
   assert_no_playwright_interception
 
+  configured_cargo_target_dir="${VPSMAN_MONITORING_REVIEW_CARGO_TARGET_DIR:-}"
+  if [[ -n "$configured_cargo_target_dir" ]]; then
+    cargo_target_dir="$(readlink -m "$configured_cargo_target_dir")"
+    [[ "$cargo_target_dir" == /mnt/storage/vpsman-tmp/* ]] \
+      || die "VPSMAN_MONITORING_REVIEW_CARGO_TARGET_DIR must be below /mnt/storage/vpsman-tmp"
+    [[ -d "$cargo_target_dir" && -w "$cargo_target_dir" ]] \
+      || die "VPSMAN_MONITORING_REVIEW_CARGO_TARGET_DIR must be an existing writable directory"
+  fi
+
   if [[ "${VPSMAN_MONITORING_REVIEW_SKIP_BUILD:-0}" != "1" ]]; then
-    GITHUB_ACTIONS=true cargo build -p vpsman-api
+    if [[ -n "$cargo_target_dir" ]]; then
+      CARGO_TARGET_DIR="$cargo_target_dir" GITHUB_ACTIONS=true cargo build -p vpsman-api
+    else
+      GITHUB_ACTIONS=true cargo build -p vpsman-api
+    fi
     (
       cd "$ROOT_DIR/frontend"
       ./node_modules/.bin/tsc --noEmit
       ./node_modules/.bin/vite build
     )
   fi
+  api_binary="$(require_recorded_api_binary)"
+  api_binary_sha256="$(sha256sum "$api_binary" | awk '{print $1}')"
 
   run_id="review-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   container_name="vpsman-monitoring-${run_id}-postgres"
@@ -659,11 +920,35 @@ start_run() {
   internal_token="review-internal-${run_id}"
   artifact_dir_relative="output/playwright/monitoring-real-data-${run_id}"
   artifact_dir="$ROOT_DIR/$artifact_dir_relative"
+  postgres_data_root="${VPSMAN_MONITORING_REVIEW_PGDATA_ROOT:-}"
+  if [[ -n "$postgres_data_root" ]]; then
+    postgres_data_root="$(readlink -m "$postgres_data_root")"
+    [[ "$postgres_data_root" == /mnt/storage/vpsman-tmp/* ]] \
+      || die "VPSMAN_MONITORING_REVIEW_PGDATA_ROOT must be below /mnt/storage/vpsman-tmp"
+    [[ -d "$postgres_data_root" && -w "$postgres_data_root" ]] \
+      || die "VPSMAN_MONITORING_REVIEW_PGDATA_ROOT must be an existing writable directory"
+    postgres_data_dir="$postgres_data_root/$run_id/postgres"
+    mkdir -p "$postgres_data_dir"
+    [[ "$(readlink -m "$postgres_data_dir")" == "$postgres_data_dir" ]] \
+      || die "resolved PostgreSQL data path is not canonical"
+    postgres_mount_args=(
+      --mount "type=bind,src=$postgres_data_dir,dst=/var/lib/postgresql/data"
+    )
+  fi
   allocate_ports
   postgres_url="postgres://vpsman:${postgres_password}@127.0.0.1:${postgres_port}/vpsman"
   api_url="http://127.0.0.1:$api_port"
   frontend_url="http://127.0.0.1:$frontend_port"
   validate_run_identity
+
+  if [[ "${VPSMAN_MONITORING_REVIEW_PG_STAT_STATEMENTS:-0}" == "1" ]]; then
+    postgres_command_args=(
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.track_utility=on
+    )
+  fi
 
   mkdir -p "$STATE_ROOT"
   mkdir "$STATE_DIR"
@@ -681,24 +966,17 @@ start_run() {
     -e POSTGRES_DB=vpsman \
     -e "POSTGRES_PASSWORD=$postgres_password" \
     -e POSTGRES_USER=vpsman \
+    "${postgres_mount_args[@]}" \
     -p "127.0.0.1:$postgres_port:5432" \
-    postgres:16-alpine >/dev/null
+    postgres:16-alpine "${postgres_command_args[@]}" >/dev/null
   wait_for_postgres
 
   api_log="$STATE_DIR/api.log"
-  setsid env \
-    "VPSMAN_REVIEW_RUN_ID=$run_id" \
-    "VPSMAN_API_BIND=127.0.0.1:$api_port" \
-    "VPSMAN_POSTGRES_URL=$postgres_url" \
-    "VPSMAN_MIGRATIONS_DIR=$ROOT_DIR/migrations" \
-    "VPSMAN_INTERNAL_TOKEN=$internal_token" \
-    "VPSMAN_BACKUP_OBJECT_STORE_DIR=$STATE_DIR/object-store/backups" \
-    "VPSMAN_SUITE_CONFIG=$STATE_DIR/no-suite.toml" \
-    RUST_LOG=vpsman_api=warn \
-    "$ROOT_DIR/target/debug/vpsman-api" >"$api_log" 2>&1 </dev/null &
-  api_pid="$!"
+  launch_api_process
   write_state
   wait_for_http "$api_url/health" "$api_pid" "$api_log"
+  api_process_matches_run "$api_pid" \
+    || die "started API process does not match the exact recorded binary and run identity"
 
   auth_json="$(curl -fsS \
     -H 'Content-Type: application/json' \
@@ -777,18 +1055,117 @@ capture_run() {
   status_run
 }
 
+quiesce_api_run() {
+  local recorded_pid
+  local run_api_processes
+  load_state
+  [[ "$api_pid" != "0" ]] || die "API is already quiesced for $run_id"
+  [[ "$api_pid" =~ ^[1-9][0-9]*$ ]] || die "stored API PID is invalid"
+  [[ -n "$api_binary_sha256" ]] \
+    || die "recorded run predates API quiesce identity; stop it and start a new run"
+  require_live_postgres_container
+  require_recorded_api_binary >/dev/null
+  api_process_matches_run "$api_pid" \
+    || die "refusing to quiesce API PID $api_pid because its binary or run identity differs"
+  process_is_group_leader "$api_pid" \
+    || die "refusing to quiesce API PID $api_pid because it is not its process-group leader"
+  run_api_processes="$(api_processes_for_run)"
+  [[ "$run_api_processes" == "$api_pid" ]] \
+    || die "refusing to quiesce because the recorded run does not have exactly one API process"
+
+  recorded_pid="$api_pid"
+  stop_process_group "$recorded_pid"
+  run_api_processes="$(api_processes_for_run)"
+  [[ -z "$run_api_processes" ]] \
+    || die "API process identity survived quiesce: $run_api_processes"
+  if curl -fsS --max-time 1 "$api_url/health" >/dev/null 2>&1; then
+    die "API health endpoint still responds after quiesce"
+  fi
+  wait_for_no_api_backends
+  api_pid=0
+  write_state
+
+  jq -n \
+    --arg status "api_quiesced" \
+    --arg run_id "$run_id" \
+    --arg api_url "$api_url" \
+    --argjson stopped_pid "$recorded_pid" \
+    '{
+      status: $status,
+      run_id: $run_id,
+      api: {url: $api_url, pid: 0, stopped_pid: $stopped_pid},
+      postgres_backends: 0
+    }'
+}
+
+resume_api_run() {
+  local api_log="$STATE_DIR/api.log"
+  local run_api_processes
+  load_state
+  [[ "$api_pid" == "0" ]] \
+    || die "API is already recorded as running with PID $api_pid"
+  [[ -n "$api_binary_sha256" ]] \
+    || die "recorded run predates API resume identity; stop it and start a new run"
+  require_live_postgres_container
+  require_recorded_api_binary >/dev/null
+  run_api_processes="$(api_processes_for_run)"
+  [[ -z "$run_api_processes" ]] \
+    || die "refusing to resume because an unrecorded API process survives: $run_api_processes"
+  wait_for_no_api_backends
+  if curl -fsS --max-time 1 "$api_url/health" >/dev/null 2>&1; then
+    die "refusing to resume because the API health endpoint already responds"
+  fi
+
+  trap cleanup_failed_api_resume EXIT
+  trap 'exit 130' INT TERM
+  launch_api_process
+  wait_for_http "$api_url/health" "$api_pid" "$api_log"
+  api_process_matches_run "$api_pid" \
+    || die "resumed API process does not match the exact recorded binary and run identity"
+  process_is_group_leader "$api_pid" \
+    || die "resumed API process is not its process-group leader"
+  wait_for_api_backend
+  write_state
+  trap - EXIT INT TERM
+
+  jq -n \
+    --arg status "api_resumed" \
+    --arg run_id "$run_id" \
+    --arg api_url "$api_url" \
+    --argjson api_pid "$api_pid" \
+    --argjson postgres_backends "$(api_backend_count)" \
+    '{
+      status: $status,
+      run_id: $run_id,
+      api: {url: $api_url, pid: $api_pid},
+      postgres_backends: $postgres_backends
+    }'
+}
+
 stop_run() {
   local artifact_to_keep
+  local postgres_data_to_keep
+  local run_api_processes
   if [[ ! -e "$STATE_DIR" ]]; then
     jq -n '{status: "absent", message: "No monitoring review stack is recorded."}'
     return
   fi
   load_state
   artifact_to_keep="$artifact_dir_relative"
+  postgres_data_to_keep="$postgres_data_dir"
 
-  if kill -0 "$api_pid" >/dev/null 2>&1; then
-    process_matches_run "$api_pid" \
-      || die "refusing cleanup because API PID $api_pid has been reused"
+  if [[ "$api_pid" != "0" ]]; then
+    if kill -0 "$api_pid" >/dev/null 2>&1; then
+      api_process_matches_run "$api_pid" \
+        || die "refusing cleanup because API PID $api_pid has been reused or changed identity"
+    fi
+    run_api_processes="$(api_processes_for_run | awk -v recorded_pid="$api_pid" '$0 != recorded_pid')"
+    [[ -z "$run_api_processes" ]] \
+      || die "refusing cleanup because API descendants survive recorded PID $api_pid: $run_api_processes"
+  else
+    run_api_processes="$(api_processes_for_run)"
+    [[ -z "$run_api_processes" ]] \
+      || die "refusing cleanup because API is recorded quiesced but process survives: $run_api_processes"
   fi
   if kill -0 "$frontend_pid" >/dev/null 2>&1; then
     process_matches_run "$frontend_pid" \
@@ -800,7 +1177,9 @@ stop_run() {
   fi
 
   stop_process_group "$frontend_pid"
-  stop_process_group "$api_pid"
+  if [[ "$api_pid" != "0" ]]; then
+    stop_process_group "$api_pid"
+  fi
   if docker inspect "$container_name" >/dev/null 2>&1; then
     docker rm -f "$container_name" >/dev/null
   fi
@@ -812,28 +1191,39 @@ stop_run() {
   jq -n \
     --arg run_id "$run_id" \
     --arg artifacts "$artifact_to_keep" \
+    --arg postgres_data "$postgres_data_to_keep" \
     '{
       status: "stopped",
       run_id: $run_id,
       retained_artifacts: $artifacts,
+      retained_postgres_data: (if $postgres_data == "" then null else $postgres_data end),
       recoverability: "The isolated PostgreSQL container and live processes were removed; screenshots remain."
     }'
 }
 
 usage() {
   cat >&2 <<'EOF'
-Usage: ./scripts/review-monitoring-real-data.sh start|capture|status|stop
+Usage: ./scripts/review-monitoring-real-data.sh start|capture|status|quiesce-api|resume-api|stop
 
-  start    Build and start an isolated PostgreSQL/API/frontend review stack.
-  capture  Refresh relative evidence and capture real-data Playwright screenshots.
-  status   Verify every live layer and print IDs, paths, and content hashes.
-  stop     Stop only the exact recorded run; retained screenshots are not deleted.
+  start        Build and start an isolated PostgreSQL/API/frontend review stack.
+  capture      Refresh relative evidence and capture real-data Playwright screenshots.
+  status       Verify every live layer and print IDs, paths, and content hashes.
+  quiesce-api  Gracefully stop only the exact API and verify its DB sessions are gone.
+  resume-api   Restart that API from its recorded prebuilt binary and append its log.
+  stop         Stop only the exact recorded run; retained screenshots are not deleted.
+
+Optional benchmark storage:
+  VPSMAN_MONITORING_REVIEW_PGDATA_ROOT=/mnt/storage/vpsman-tmp/<scope>
+  binds a run-owned PostgreSQL data directory below that existing writable root.
+  The directory is retained by stop and is never removed by this harness.
+  VPSMAN_MONITORING_REVIEW_CARGO_TARGET_DIR=/mnt/storage/vpsman-tmp/<target>
+  uses that existing writable directory for the API build and executable.
 EOF
 }
 
 main() {
   require_tools awk bash cargo curl docker git grep jq npm psql python3 readlink \
-    rg sed setsid sha256sum sort tr xargs
+    ps rg sed setsid sha256sum sort tr xargs
   cd "$ROOT_DIR"
   case "${1:-}" in
     start)
@@ -848,6 +1238,14 @@ main() {
       [[ "$#" == "1" ]] || die "status accepts no extra arguments"
       load_state
       status_run
+      ;;
+    quiesce-api)
+      [[ "$#" == "1" ]] || die "quiesce-api accepts no extra arguments"
+      quiesce_api_run
+      ;;
+    resume-api)
+      [[ "$#" == "1" ]] || die "resume-api accepts no extra arguments"
+      resume_api_run
       ;;
     stop)
       [[ "$#" == "1" ]] || die "stop accepts no extra arguments"

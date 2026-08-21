@@ -74,8 +74,9 @@ use crate::{
         list_agents, list_gateway_sessions, list_runtime_config_apply_states,
         list_runtime_config_patch_generators, list_tags, list_telemetry_network_rates,
         list_telemetry_rollups, list_telemetry_samples, list_telemetry_tunnels,
-        render_runtime_config_patch_generator, resolve_bulk_targets, update_agent_alias,
-        update_tag_order, upsert_runtime_config_patch_generator,
+        render_runtime_config_patch_generator, resolve_bulk_targets, suspend_agent,
+        unsuspend_agent, update_agent_alias, update_tag_order,
+        upsert_runtime_config_patch_generator,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
@@ -102,7 +103,7 @@ use crate::{
         get_client_monitoring, get_monitoring_share_url, get_ping_target, list_monitoring_cards,
         list_monitoring_shares, list_ping_targets, make_primary_ping_target,
         public_monitoring_share_bootstrap, public_monitoring_share_data, revoke_monitoring_shares,
-        update_ping_target,
+        update_monitoring_share, update_ping_target,
     },
     routes_network::{
         allocate_tunnel_endpoints, clear_tunnel_plan_evidence, create_tunnel_plan,
@@ -334,6 +335,11 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(rotate_webhook_delivery_history),
         )
         .route("/api/v1/agents", get(list_agents))
+        .route("/api/v1/agents/{client_id}/suspend", post(suspend_agent))
+        .route(
+            "/api/v1/agents/{client_id}/unsuspend",
+            post(unsuspend_agent),
+        )
         .route("/api/v1/agents/{client_id}/delete", post(delete_agent))
         .route("/api/v1/gateway-sessions", get(list_gateway_sessions))
         .route("/api/v1/telemetry/rollups", get(list_telemetry_rollups))
@@ -391,6 +397,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/monitoring-shares/{share_id}/url",
             get(get_monitoring_share_url),
+        )
+        .route(
+            "/api/v1/monitoring-shares/{share_id}",
+            put(update_monitoring_share),
         )
         .route(
             "/api/v1/public/monitoring-shares/{share_id}/bootstrap",

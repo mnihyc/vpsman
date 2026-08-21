@@ -24,9 +24,11 @@ import {
   MapPin,
   Network,
   Pencil,
+  PlayCircle,
   Plus,
   Power,
   PowerOff,
+  PauseCircle,
   RefreshCw,
   Server,
   Tags,
@@ -157,6 +159,9 @@ import {
 } from "../jobDispatchPreset";
 import type {
   ActiveView,
+  AgentSuspensionAction,
+  AgentSuspensionBatchOutcome,
+  AgentSuspensionBatchTarget,
   AgentView,
   AlertPolicyCorrelationMode,
   AlertPolicyMetaCondition,
@@ -244,6 +249,18 @@ type AgentLifecycleConfirmationSnapshot = {
   selectorExpression: string;
   privilegeAssertion: PrivilegeAssertion;
 };
+
+type AgentSuspensionConfirmationSnapshot = {
+  action: AgentSuspensionAction;
+  targets: FleetMutationTargetSnapshot[];
+};
+
+const AGENT_SUSPENDABLE_STATUSES = new Set([
+  "never",
+  "disconnected",
+  "offline",
+  "stale",
+]);
 
 type AliasConfirmationSnapshot = {
   clientId: string;
@@ -350,6 +367,7 @@ export function FleetWorkspace({
   onDryRunFleetAlertPolicy,
   onDryRunWebhookRule,
   onDeleteAgents,
+  onMutateAgentSuspensions,
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
@@ -436,6 +454,9 @@ export function FleetWorkspace({
   onDeleteAgents: (
     targets: DeleteAgentBatchTarget[],
   ) => Promise<DeleteAgentBatchOutcome[]>;
+  onMutateAgentSuspensions: (
+    targets: AgentSuspensionBatchTarget[],
+  ) => Promise<AgentSuspensionBatchOutcome[]>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
@@ -544,6 +565,17 @@ export function FleetWorkspace({
   const lifecycleSnapshotRef =
     useRef<AgentLifecycleConfirmationSnapshot | null>(null);
   const lifecycleReviewPendingRef = useRef(false);
+  const [suspensionSnapshot, setSuspensionSnapshot] =
+    useState<AgentSuspensionConfirmationSnapshot | null>(null);
+  const [suspensionReason, setSuspensionReason] = useState("");
+  const [suspensionPending, setSuspensionPending] = useState(false);
+  const [suspensionError, setSuspensionError] = useState<string | null>(null);
+  const [suspensionFeedback, setSuspensionFeedback] = useState<{
+    message: string;
+    tone: ActionFeedbackTone;
+  } | null>(null);
+  const suspensionSnapshotRef =
+    useRef<AgentSuspensionConfirmationSnapshot | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -653,6 +685,11 @@ export function FleetWorkspace({
     setLifecycleSnapshot(null);
     setLifecycleReviewPending(false);
   }, [invalidateReviewGeneration]);
+  const clearSuspensionReview = useCallback(() => {
+    invalidateReviewGeneration();
+    setSuspensionSnapshot(null);
+    setSuspensionReason("");
+  }, [invalidateReviewGeneration]);
   const clearFleetMutationReviews = useCallback(() => {
     deleteReviewTargetRef.current = null;
     lifecycleReviewTargetRef.current = null;
@@ -661,6 +698,8 @@ export function FleetWorkspace({
     setDeleteReviewPending(false);
     setLifecycleSnapshot(null);
     setLifecycleReviewPending(false);
+    setSuspensionSnapshot(null);
+    setSuspensionReason("");
   }, [invalidateReviewGeneration]);
   const ignoreRequestedFleetDetailTab = useCallback(() => {}, []);
 
@@ -679,6 +718,10 @@ export function FleetWorkspace({
   useEffect(() => {
     lifecycleReviewPendingRef.current = lifecycleReviewPending;
   }, [lifecycleReviewPending]);
+
+  useEffect(() => {
+    suspensionSnapshotRef.current = suspensionSnapshot;
+  }, [suspensionSnapshot]);
 
   useEffect(() => {
     clearFleetMutationReviews();
@@ -707,8 +750,17 @@ export function FleetWorkspace({
       ) {
         clearLifecycleReview();
       }
+      const reviewedSuspensionSignature = suspensionSnapshotRef.current
+        ? fleetTargetSignature(suspensionSnapshotRef.current.targets)
+        : null;
+      if (
+        reviewedSuspensionSignature &&
+        currentSignature !== reviewedSuspensionSignature
+      ) {
+        clearSuspensionReview();
+      }
     },
-    [clearDeleteReview, clearLifecycleReview],
+    [clearDeleteReview, clearLifecycleReview, clearSuspensionReview],
   );
   const fleetColumns = useMemo<ConsoleDataGridColumn<AgentView>[]>(
     () => [
@@ -1241,6 +1293,8 @@ export function FleetWorkspace({
   async function requestDeleteAgent(rows: AgentView[]) {
     clearFleetMutationReviews();
     setLifecycleError(null);
+    setSuspensionError(null);
+    setSuspensionFeedback(null);
     setDeleteError(null);
     setDeleteFeedback(null);
     if (rows.length === 0) {
@@ -1295,6 +1349,8 @@ export function FleetWorkspace({
     clearFleetMutationReviews();
     setDeleteError(null);
     setDeleteFeedback(null);
+    setSuspensionError(null);
+    setSuspensionFeedback(null);
     setLifecycleError(null);
     setLifecycleProgress(null);
     setLifecycleResultAction(null);
@@ -1390,6 +1446,91 @@ export function FleetWorkspace({
         onLoadOutputs: onLoadJobOutputs,
       });
       setLifecycleProgress(result.progress);
+    });
+  }
+
+  function requestAgentSuspension(
+    rows: AgentView[],
+    action: AgentSuspensionAction,
+  ) {
+    clearFleetMutationReviews();
+    setDeleteError(null);
+    setDeleteFeedback(null);
+    setLifecycleError(null);
+    setSuspensionError(null);
+    setSuspensionFeedback(null);
+    if (rows.length === 0) {
+      return;
+    }
+    const eligible =
+      action === "suspend"
+        ? rows.every((agent) => AGENT_SUSPENDABLE_STATUSES.has(agent.status))
+        : rows.every((agent) => agent.status === "suspended");
+    if (!eligible) {
+      setSuspensionError(
+        action === "suspend"
+          ? "Suspend is available only for never-connected, disconnected, offline, or stale VPSs."
+          : "Unsuspend requires every selected VPS to be suspended.",
+      );
+      return;
+    }
+    setSuspensionSnapshot({
+      action,
+      targets: fleetMutationTargets(rows, vpsNameDisplayMode),
+    });
+  }
+
+  async function confirmAgentSuspension() {
+    if (!suspensionSnapshot) {
+      return;
+    }
+    const snapshot = suspensionSnapshot;
+    const reason = suspensionReason.trim();
+    await runPanelAction(setSuspensionPending, setSuspensionError, async () => {
+      const outcomes = await onMutateAgentSuspensions(
+        snapshot.targets.map((target) => ({
+          action: snapshot.action,
+          client_id: target.clientId,
+          reason: snapshot.action === "suspend" && reason ? reason : null,
+        })),
+      );
+      const completed = outcomes.filter((outcome) => outcome.response !== null);
+      const failed = outcomes.filter((outcome) => outcome.response === null);
+      const skippedJobs = completed.reduce(
+        (total, outcome) =>
+          total + (outcome.response?.skipped_unstarted_job_ids.length ?? 0),
+        0,
+      );
+      const resolvedAlerts = completed.reduce(
+        (total, outcome) =>
+          total + (outcome.response?.resolved_alert_count ?? 0),
+        0,
+      );
+      const verb = snapshot.action === "suspend" ? "Suspended" : "Unsuspended";
+      const failedDetails = failed
+        .map(
+          (outcome) =>
+            `${fleetTargetLabel(snapshot.targets, outcome.client_id)}: ${outcome.error ?? "the API did not confirm the change"}`,
+        )
+        .join(" ");
+      setSuspensionFeedback({
+        message: [
+          `${verb} ${completed.length} of ${outcomes.length} selected VPS${outcomes.length === 1 ? "" : "s"}.`,
+          snapshot.action === "suspend"
+            ? `${skippedJobs} unstarted job target${skippedJobs === 1 ? " was" : "s were"} skipped and ${resolvedAlerts} active alert${resolvedAlerts === 1 ? " was" : "s were"} resolved.`
+            : "Monitoring and future dispatch eligibility now follow the restored state; an authenticated online event can also restore a suspended VPS automatically.",
+          failedDetails,
+        ]
+          .filter(Boolean)
+          .join(" "),
+        tone:
+          completed.length === 0
+            ? "danger"
+            : failed.length > 0
+              ? "warning"
+              : "success",
+      });
+      clearSuspensionReview();
     });
   }
 
@@ -1494,7 +1635,8 @@ export function FleetWorkspace({
     deletePending ||
     deleteReviewPending ||
     lifecyclePending ||
-    lifecycleReviewPending;
+    lifecycleReviewPending ||
+    suspensionPending;
   const fleetInstanceActions: ConsoleDataGridAction<AgentView>[] = [
     {
       label: "Open detail",
@@ -1584,20 +1726,46 @@ export function FleetWorkspace({
         ),
     },
     {
+      label: "Suspend VPS",
+      description: (rows) =>
+        `Mark ${rows.length} selected offline VPS${rows.length === 1 ? "" : "s"} as intentionally unavailable, suppress alerts, hide monitoring, and skip unstarted work.`,
+      disabled: (rows) =>
+        fleetMutationPending ||
+        !rows.every((agent) => AGENT_SUSPENDABLE_STATUSES.has(agent.status)),
+      hidden: (rows) => rows.every((agent) => agent.status === "suspended"),
+      icon: <PauseCircle size={15} />,
+      onSelect: (rows) => requestAgentSuspension(rows, "suspend"),
+      separatorBefore: true,
+    },
+    {
+      label: "Unsuspend VPS",
+      description: (rows) =>
+        `Restore ${rows.length} selected VPS${rows.length === 1 ? "" : "s"} to the state held before suspension.`,
+      disabled: (rows) =>
+        fleetMutationPending ||
+        !rows.every((agent) => agent.status === "suspended"),
+      hidden: (rows) => !rows.every((agent) => agent.status === "suspended"),
+      icon: <PlayCircle size={15} />,
+      onSelect: (rows) => requestAgentSuspension(rows, "unsuspend"),
+    },
+    {
       label: "Stop agent",
       description: (rows) =>
         `Stop ${rows.length} selected agent${rows.length === 1 ? "" : "s"}. External service start is required afterward.`,
-      disabled: () => fleetMutationPending,
+      disabled: (rows) =>
+        fleetMutationPending ||
+        rows.some((agent) => agent.status === "suspended"),
       icon: <PowerOff size={15} />,
       onSelect: (rows) => void requestAgentLifecycle(rows, "stop"),
-      separatorBefore: true,
       tone: "danger",
     },
     {
       label: "Restart agent",
       description: (rows) =>
         `Restart ${rows.length} selected agent${rows.length === 1 ? "" : "s"} through each agent's configured lifecycle mode.`,
-      disabled: () => fleetMutationPending,
+      disabled: (rows) =>
+        fleetMutationPending ||
+        rows.some((agent) => agent.status === "suspended"),
       icon: <RefreshCw size={15} />,
       onSelect: (rows) => void requestAgentLifecycle(rows, "restart"),
     },
@@ -1646,6 +1814,11 @@ export function FleetWorkspace({
           lifecycleProgress={lifecycleProgress}
           lifecycleResultAction={lifecycleResultAction}
           lifecycleSnapshot={lifecycleSnapshot}
+          suspensionError={suspensionError}
+          suspensionFeedback={suspensionFeedback}
+          suspensionPending={suspensionPending}
+          suspensionReason={suspensionReason}
+          suspensionSnapshot={suspensionSnapshot}
           onCancelDelete={() => {
             setDeleteError(null);
             clearDeleteReview();
@@ -1654,6 +1827,10 @@ export function FleetWorkspace({
             setLifecycleError(null);
             clearLifecycleReview();
           }}
+          onCancelSuspension={() => {
+            setSuspensionError(null);
+            clearSuspensionReview();
+          }}
           onClearLifecycleResult={() => {
             setLifecycleError(null);
             setLifecycleProgress(null);
@@ -1661,6 +1838,7 @@ export function FleetWorkspace({
           }}
           onConfirmDelete={() => void confirmDeleteAgent()}
           onConfirmLifecycle={() => void confirmAgentLifecycle()}
+          onConfirmSuspension={() => void confirmAgentSuspension()}
           onOpenJobDetails={onOpenJobDetails}
           onOpenMonitor={
             onNavigatePanel
@@ -1669,6 +1847,7 @@ export function FleetWorkspace({
           }
           onRegisterVps={onRegisterVps}
           onSelectionChange={handleFleetSelectionChange}
+          onSuspensionReasonChange={setSuspensionReason}
           renderSelectionPanel={(rows) => (
             <FleetSelectionPanel
               agents={rows}
@@ -1932,16 +2111,24 @@ function FleetInstancesPanel({
   lifecycleProgress,
   lifecycleResultAction,
   lifecycleSnapshot,
+  suspensionError,
+  suspensionFeedback,
+  suspensionPending,
+  suspensionReason,
+  suspensionSnapshot,
   onCancelDelete,
   onCancelLifecycle,
+  onCancelSuspension,
   onClearLifecycleResult,
   onConfirmDelete,
   onConfirmLifecycle,
+  onConfirmSuspension,
   onOpenJobDetails,
   onOpenMonitor,
   onRegisterVps,
   pageResetKey,
   onSelectionChange,
+  onSuspensionReasonChange,
   renderExpandedRow,
   renderSelectionPanel,
   scopeActive,
@@ -1963,16 +2150,24 @@ function FleetInstancesPanel({
   lifecycleProgress: BulkJobProgress | null;
   lifecycleResultAction: AgentLifecycleAction | null;
   lifecycleSnapshot: AgentLifecycleConfirmationSnapshot | null;
+  suspensionError: string | null;
+  suspensionFeedback: { message: string; tone: ActionFeedbackTone } | null;
+  suspensionPending: boolean;
+  suspensionReason: string;
+  suspensionSnapshot: AgentSuspensionConfirmationSnapshot | null;
   onCancelDelete: () => void;
   onCancelLifecycle: () => void;
+  onCancelSuspension: () => void;
   onClearLifecycleResult: () => void;
   onConfirmDelete: () => void;
   onConfirmLifecycle: () => void;
+  onConfirmSuspension: () => void;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenMonitor?: () => void;
   onRegisterVps?: () => void;
   pageResetKey: string;
   onSelectionChange: (rows: AgentView[]) => void;
+  onSuspensionReasonChange: (reason: string) => void;
   renderExpandedRow: (row: AgentView) => ReactNode;
   renderSelectionPanel: (rows: AgentView[]) => ReactNode;
   scopeActive: boolean;
@@ -1983,9 +2178,16 @@ function FleetInstancesPanel({
   const deleteOutcomeRef = useRef<HTMLDivElement | null>(null);
   const previousDeleteOutcomeRef = useRef<string | null>(null);
   const mutationOutcomeMessage =
-    lifecycleError ?? deleteError ?? deleteFeedback?.message ?? null;
+    suspensionError ??
+    lifecycleError ??
+    deleteError ??
+    suspensionFeedback?.message ??
+    deleteFeedback?.message ??
+    null;
   const mutationOutcomeTone =
-    lifecycleError || deleteError ? "danger" : (deleteFeedback?.tone ?? "info");
+    suspensionError || lifecycleError || deleteError
+      ? "danger"
+      : (suspensionFeedback?.tone ?? deleteFeedback?.tone ?? "info");
   const stableAgents = useMemo(
     () =>
       [...agents].sort(
@@ -2025,7 +2227,7 @@ function FleetInstancesPanel({
         </div>
         <span className="sectionContext">
           {fleetCoreEvidenceAvailable
-            ? `${summary.online} live / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`
+            ? `${summary.online} live / ${summary.suspended} suspended / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`
             : "Fleet inventory unavailable"}{" "}
           · {formatConsoleStreamState(wsState)}
         </span>
@@ -2149,6 +2351,53 @@ function FleetInstancesPanel({
           )}
         </ExecutionResultPanel>
       ) : null}
+      <ConfirmationPrompt
+        confirmDisabled={
+          suspensionSnapshot?.action === "suspend" &&
+          /[\u0000-\u001f\u007f]/.test(suspensionReason)
+        }
+        confirmLabel={
+          suspensionSnapshot?.action === "suspend"
+            ? "Suspend VPSs"
+            : "Unsuspend VPSs"
+        }
+        detail={
+          suspensionSnapshot?.action === "suspend"
+            ? "Suspension records this offline period as expected: unstarted work is skipped, client-scoped alerts are resolved and suppressed, and the VPS disappears from every monitor and public shared view. Fleet inventory, history, and audit evidence remain. An authenticated online event or manual Unsuspend clears suspension."
+            : "Unsuspend restores each VPS to the exact non-online state held before suspension. Monitoring and dispatch eligibility follow that restored state; no parked job is resurrected."
+        }
+        error={suspensionError}
+        items={
+          suspensionSnapshot
+            ? fleetMutationConfirmationItems(suspensionSnapshot.targets)
+            : []
+        }
+        onCancel={onCancelSuspension}
+        onConfirm={onConfirmSuspension}
+        open={Boolean(suspensionSnapshot)}
+        pending={suspensionPending}
+        title={
+          suspensionSnapshot?.action === "suspend"
+            ? "Suspend selected VPSs"
+            : "Unsuspend selected VPSs"
+        }
+        tone={suspensionSnapshot?.action === "suspend" ? "warning" : "normal"}
+      >
+        {suspensionSnapshot?.action === "suspend" ? (
+          <label className="confirmationTypedInput">
+            <span>Optional suspension reason</span>
+            <textarea
+              aria-label="Suspension reason"
+              autoFocus
+              maxLength={240}
+              onChange={(event) => onSuspensionReasonChange(event.target.value)}
+              placeholder="For example: powered down until the next project phase"
+              rows={3}
+              value={suspensionReason}
+            />
+          </label>
+        ) : null}
+      </ConfirmationPrompt>
       <ConfirmationPrompt
         confirmLabel={
           lifecycleSnapshot?.action === "stop"
@@ -2803,7 +3052,7 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Gauge size={18} />}
               label="Fleet position"
-              value={`${summary.online} live / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`}
+              value={`${summary.online} live / ${summary.suspended} suspended / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`}
             />
           </>
         )}

@@ -86,6 +86,7 @@ export type FleetSummary = {
   online: number;
   offline: number;
   never: number;
+  suspended: number;
   revoked: number;
   unknown: number;
   stale: number;
@@ -816,6 +817,31 @@ export type DeleteAgentResponse = {
   runtime_sync: RuntimeConfigDispatchRecord[];
 };
 
+export type AgentSuspensionAction = "suspend" | "unsuspend";
+
+export type AgentSuspensionMutationResponse = {
+  agent: AgentView;
+  suspended_at: string | null;
+  suspended_by: string | null;
+  suspended_reason: string | null;
+  suspended_from_status: string | null;
+  skipped_unstarted_job_ids: string[];
+  resolved_alert_count: number;
+};
+
+export type AgentSuspensionBatchTarget = {
+  action: AgentSuspensionAction;
+  client_id: string;
+  reason?: string | null;
+};
+
+export type AgentSuspensionBatchOutcome = {
+  action: AgentSuspensionAction;
+  client_id: string;
+  response: AgentSuspensionMutationResponse | null;
+  error: string | null;
+};
+
 export type DeleteAgentBatchTarget = {
   client_id: string;
   request: DeleteAgentRequest;
@@ -1540,10 +1566,50 @@ export type MonitoringShareTargetChangeView = {
   unchanged_count: number;
 };
 
+export type MonitoringShareRevisionView = {
+  share_id: string;
+  updated_at: string;
+  target_client_ids: string[];
+  target_count: number;
+  target_update_available: boolean;
+  target_update_evidence_available: boolean;
+};
+
 export type BulkUpdateMonitoringShareTargetsResponse = {
   preview_hash: string;
   applied: boolean;
   changes: MonitoringShareTargetChangeView[];
+  revisions: MonitoringShareRevisionView[];
+};
+
+export type UpdateMonitoringShareRequest = {
+  name: string;
+  selector_expression: string;
+  target_client_ids: string[];
+  visibility: MonitoringShareVisibilityRequest;
+  expected_updated_at: string;
+  preview_hash?: string;
+  confirmed?: boolean;
+};
+
+export type MonitoringShareDefinitionChangeView = {
+  share_id: string;
+  previous_name: string;
+  name: string;
+  previous_selector_expression: string;
+  selector_expression: string;
+  added_client_ids: string[];
+  removed_client_ids: string[];
+  unchanged_count: number;
+  previous_visibility: MonitoringShareVisibilityView;
+  visibility: MonitoringShareVisibilityView;
+};
+
+export type UpdateMonitoringShareResponse = {
+  preview_hash: string;
+  applied: boolean;
+  change: MonitoringShareDefinitionChangeView;
+  share: MonitoringShareView | null;
 };
 
 export type MonitoringSharesMutationResponse = {

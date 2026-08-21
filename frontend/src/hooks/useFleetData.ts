@@ -10,6 +10,9 @@ import {
 import { emptySummary } from "../constants";
 import type { SnapshotSource } from "../homeSnapshot";
 import type {
+  AgentSuspensionBatchOutcome,
+  AgentSuspensionBatchTarget,
+  AgentSuspensionMutationResponse,
   AgentView,
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
@@ -834,6 +837,68 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, loadFleet],
   );
 
+  const mutateAgentSuspensions = useCallback(
+    async (
+      targets: AgentSuspensionBatchTarget[],
+    ): Promise<AgentSuspensionBatchOutcome[]> => {
+      const outcomes: AgentSuspensionBatchOutcome[] = [];
+      for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index];
+        try {
+          const response = await apiPost<AgentSuspensionMutationResponse>(
+            `/api/v1/agents/${encodeURIComponent(target.client_id)}/${target.action}`,
+            apiToken,
+            target.action === "suspend"
+              ? { confirmed: true, reason: target.reason ?? null }
+              : { confirmed: true },
+          );
+          outcomes.push({
+            action: target.action,
+            client_id: target.client_id,
+            response,
+            error: null,
+          });
+          if (apiTokenRef.current === apiToken) {
+            setAgents((current) =>
+              current.map((agent) =>
+                agent.id === response.agent.id ? response.agent : agent,
+              ),
+            );
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          outcomes.push({
+            action: target.action,
+            client_id: target.client_id,
+            response: null,
+            error: message,
+          });
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            for (const skipped of targets.slice(index + 1)) {
+              outcomes.push({
+                action: skipped.action,
+                client_id: skipped.client_id,
+                response: null,
+                error: "Not attempted because the operator session expired.",
+              });
+            }
+            break;
+          }
+        }
+      }
+      if (
+        apiTokenRef.current === apiToken &&
+        outcomes.some((outcome) => outcome.response !== null)
+      ) {
+        await loadFleet(true);
+      }
+      return outcomes;
+    },
+    [apiToken, loadFleet, onUnauthorized],
+  );
+
   const deleteAgents = useCallback(
     async (
       targets: DeleteAgentBatchTarget[],
@@ -1494,6 +1559,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     refreshFleetAlertEvents,
     loadFleetTelemetry,
     fleetCoreEvidenceAvailable,
+    mutateAgentSuspensions,
     replaceFleetSnapshot,
     updateAgentAlias,
     resolveFleetAlert,

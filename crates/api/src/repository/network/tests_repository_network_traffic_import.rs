@@ -541,3 +541,679 @@ fn rerun_boundaries_prepare_the_same_replacement_as_full_import_history() {
         from_boundaries[0].imported_tx_bytes
     );
 }
+
+fn prepared_import_for_test(
+    start_unix: u64,
+    end_unix: u64,
+    initial_rx_bytes: i64,
+    initial_tx_bytes: i64,
+    include_baseline: bool,
+    segments: Vec<MinuteAssignmentSegment>,
+) -> PreparedInterfaceImport {
+    let (total_rx_bytes, total_tx_bytes) =
+        assignment_totals_in_range(&segments, start_unix, end_unix).unwrap();
+    PreparedInterfaceImport {
+        interface: "eth0".to_string(),
+        start_unix,
+        end_unix,
+        initial_rx_bytes,
+        initial_tx_bytes,
+        initial_rx_counter_epoch: 0,
+        initial_tx_counter_epoch: 0,
+        include_baseline,
+        import_source: "vnstat_import:55555555-5555-4555-8555-555555555555".to_string(),
+        traffic: ExpandedMinuteTraffic {
+            segments,
+            minute_count: (end_unix - start_unix) / 60,
+            total_rx_bytes,
+            total_tx_bytes,
+        },
+        imported_rx_bytes: total_rx_bytes,
+        imported_tx_bytes: total_tx_bytes,
+    }
+}
+
+#[test]
+fn memory_import_rollups_replace_only_import_owned_rows() {
+    let utc_day_start_unix = 1_767_312_000; // 2026-01-01T00:00:00Z
+    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let start_unix = raw_cutoff_unix - 3_600;
+    let end_unix = start_unix + 1_800;
+    let prepared = prepared_import_for_test(
+        start_unix,
+        end_unix,
+        10,
+        20,
+        true,
+        vec![MinuteAssignmentSegment {
+            start_unix,
+            end_unix,
+            rx_bytes: 3,
+            tx_bytes: 2,
+        }],
+    );
+
+    let rows = prepare_memory_import_rollups(
+        "client-a",
+        std::slice::from_ref(&prepared),
+        utc_day_start_unix,
+        raw_cutoff_unix,
+    )
+    .unwrap();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| {
+        row.client_id == "client-a"
+            && row.source_kind == "host"
+            && row.interface == "eth0"
+            && row.origin_kind == "vnstat_import"
+    }));
+    assert_eq!(
+        rows.iter().map(|row| row.rx_bytes).sum::<i64>(),
+        3 * i64::try_from((end_unix - start_unix) / 60).unwrap()
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.tx_bytes).sum::<i64>(),
+        2 * i64::try_from((end_unix - start_unix) / 60).unwrap()
+    );
+
+    let mut existing = vec![
+        TrafficCounterRollupRecord {
+            client_id: "client-a".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            origin_kind: "live".to_string(),
+            bucket_start: "2026-01-01T00:00:00+00:00".to_string(),
+            bucket_start_unix: utc_day_start_unix as i64,
+            bucket_secs: 3_600,
+            rx_bytes: 7,
+            tx_bytes: 11,
+            rx_valid_count: 1,
+            tx_valid_count: 1,
+            any_valid_count: 1,
+            rx_reset_count: 0,
+            tx_reset_count: 0,
+            any_reset_count: 0,
+            first_observed_unix: utc_day_start_unix as i64,
+            latest_observed_unix: utc_day_start_unix as i64,
+        },
+        TrafficCounterRollupRecord {
+            client_id: "client-a".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            origin_kind: "vnstat_import".to_string(),
+            bucket_start: "2025-11-30T00:00:00+00:00".to_string(),
+            bucket_start_unix: raw_cutoff_unix as i64,
+            bucket_secs: 3_600,
+            rx_bytes: 99,
+            tx_bytes: 99,
+            rx_valid_count: 1,
+            tx_valid_count: 1,
+            any_valid_count: 1,
+            rx_reset_count: 0,
+            tx_reset_count: 0,
+            any_reset_count: 0,
+            first_observed_unix: raw_cutoff_unix as i64,
+            latest_observed_unix: raw_cutoff_unix as i64,
+        },
+    ];
+    existing.retain(|row| {
+        row.client_id != "client-a"
+            || row.source_kind != "host"
+            || row.interface != "eth0"
+            || row.origin_kind != "vnstat_import"
+    });
+    existing.extend(rows);
+    assert_eq!(
+        existing
+            .iter()
+            .filter(|row| row.origin_kind == "live")
+            .count(),
+        1
+    );
+    assert!(existing
+        .iter()
+        .filter(|row| row.origin_kind == "vnstat_import")
+        .all(|row| row.rx_bytes != 99));
+}
+
+fn expanded_minute_rollup_oracle(
+    prepared: &PreparedInterfaceImport,
+    utc_day_start_unix: u64,
+    raw_cutoff_unix: u64,
+) -> Vec<PreparedImportRollup> {
+    let mut rollups = std::collections::BTreeMap::new();
+    let mut previous = (!prepared.include_baseline)
+        .then_some((prepared.initial_rx_bytes, prepared.initial_tx_bytes));
+    for sample in prepared.samples("agent-a") {
+        let sample = sample.unwrap();
+        let observed_unix = u64::try_from(sample.observed_unix).unwrap();
+        if observed_unix >= raw_cutoff_unix {
+            break;
+        }
+        let bucket_secs = if observed_unix >= utc_day_start_unix - 91 * 86_400 {
+            3_600
+        } else if observed_unix >= utc_day_start_unix - 181 * 86_400 {
+            10_800
+        } else if observed_unix >= utc_day_start_unix - 366 * 86_400 {
+            21_600
+        } else {
+            86_400
+        };
+        let bucket_secs_u64 = u64::try_from(bucket_secs).unwrap();
+        let bucket_start_unix = observed_unix - observed_unix % bucket_secs_u64;
+        let (rx_bytes, tx_bytes, rx_valid_count, tx_valid_count, any_valid_count) = previous
+            .map_or((0, 0, 0, 0, 0), |(previous_rx, previous_tx)| {
+                let rx_bytes = sample.rx_bytes.checked_sub(previous_rx);
+                let tx_bytes = sample.tx_bytes.checked_sub(previous_tx);
+                (
+                    rx_bytes
+                        .and_then(|value| u64::try_from(value).ok())
+                        .unwrap_or(0),
+                    tx_bytes
+                        .and_then(|value| u64::try_from(value).ok())
+                        .unwrap_or(0),
+                    u32::from(rx_bytes.is_some_and(|value| value >= 0)),
+                    u32::from(tx_bytes.is_some_and(|value| value >= 0)),
+                    u32::from(
+                        rx_bytes.is_some_and(|value| value >= 0)
+                            || tx_bytes.is_some_and(|value| value >= 0),
+                    ),
+                )
+            });
+        let entry = rollups
+            .entry((bucket_secs, bucket_start_unix))
+            .or_insert_with(|| PreparedImportRollup {
+                interface: prepared.interface.clone(),
+                bucket_secs,
+                bucket_start_unix,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                rx_valid_count: 0,
+                tx_valid_count: 0,
+                any_valid_count: 0,
+                first_observed_unix: observed_unix,
+                latest_observed_unix: observed_unix,
+            });
+        entry.rx_bytes += rx_bytes;
+        entry.tx_bytes += tx_bytes;
+        entry.rx_valid_count += rx_valid_count;
+        entry.tx_valid_count += tx_valid_count;
+        entry.any_valid_count += any_valid_count;
+        entry.first_observed_unix = entry.first_observed_unix.min(observed_unix);
+        entry.latest_observed_unix = entry.latest_observed_unix.max(observed_unix);
+        previous = Some((sample.rx_bytes, sample.tx_bytes));
+    }
+    rollups.into_values().collect()
+}
+
+#[test]
+fn five_year_import_materializes_exact_bounded_rollups_and_raw_tail() {
+    let start_unix = u64::try_from(
+        Utc.with_ymd_and_hms(2021, 3, 1, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp(),
+    )
+    .unwrap();
+    let utc_day_start_unix = u64::try_from(
+        Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp(),
+    )
+    .unwrap();
+    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let prepared = prepared_import_for_test(
+        start_unix,
+        utc_day_start_unix,
+        0,
+        0,
+        true,
+        vec![MinuteAssignmentSegment {
+            start_unix,
+            end_unix: utc_day_start_unix,
+            rx_bytes: 3,
+            tx_bytes: 2,
+        }],
+    );
+
+    let rollups = prepare_import_rollups(&prepared, utc_day_start_unix, raw_cutoff_unix).unwrap();
+    let old_minutes = (raw_cutoff_unix - start_unix) / 60;
+    assert_eq!(
+        rollups.iter().map(|rollup| rollup.rx_bytes).sum::<u64>(),
+        old_minutes * 3
+    );
+    assert_eq!(
+        rollups.iter().map(|rollup| rollup.tx_bytes).sum::<u64>(),
+        old_minutes * 2
+    );
+    assert_eq!(
+        rollups
+            .iter()
+            .map(|rollup| u64::from(rollup.any_valid_count))
+            .sum::<u64>(),
+        old_minutes
+    );
+    assert!(rollups.len() < 5_000);
+    for tier in [3_600, 10_800, 21_600, 86_400] {
+        assert!(rollups.iter().any(|rollup| rollup.bucket_secs == tier));
+    }
+
+    let mut retained = prepared
+        .samples_from("agent-a", raw_cutoff_unix - 60)
+        .unwrap();
+    let first = retained.next().unwrap().unwrap();
+    let mut last = first.clone();
+    let mut retained_count = 1_u64;
+    for sample in retained {
+        last = sample.unwrap();
+        retained_count += 1;
+    }
+    assert_eq!(
+        first.observed_unix,
+        i64::try_from(raw_cutoff_unix - 60).unwrap()
+    );
+    assert_eq!(
+        last.observed_unix,
+        i64::try_from(utc_day_start_unix - 60).unwrap()
+    );
+    assert_eq!(retained_count, 32 * 24 * 60 + 1);
+    assert_eq!(
+        (first.rx_bytes, first.tx_bytes),
+        (
+            i64::try_from((raw_cutoff_unix - start_unix) / 60 * 3).unwrap(),
+            i64::try_from((raw_cutoff_unix - start_unix) / 60 * 2).unwrap(),
+        )
+    );
+    assert_eq!(
+        (last.rx_bytes, last.tx_bytes),
+        (
+            i64::try_from((utc_day_start_unix - start_unix) / 60 * 3).unwrap(),
+            i64::try_from((utc_day_start_unix - start_unix) / 60 * 2).unwrap(),
+        )
+    );
+}
+
+#[test]
+fn direct_rollups_match_expanded_oracle_at_all_boundaries() {
+    let utc_day_start_unix = 1_772_323_200; // 2026-03-01T00:00:00Z
+    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let tier_boundaries = [
+        utc_day_start_unix - 366 * 86_400,
+        utc_day_start_unix - 181 * 86_400,
+        utc_day_start_unix - 91 * 86_400,
+        raw_cutoff_unix,
+    ];
+
+    for (index, boundary) in tier_boundaries.into_iter().enumerate() {
+        let start_unix = boundary - 7_080;
+        let end_unix = boundary + 7_320;
+        let middle = boundary + 120;
+        let include_baseline = index % 2 == 0;
+        let prepared = prepared_import_for_test(
+            start_unix,
+            end_unix,
+            700,
+            900,
+            include_baseline,
+            vec![
+                MinuteAssignmentSegment {
+                    start_unix,
+                    end_unix: middle,
+                    rx_bytes: 3,
+                    tx_bytes: 1,
+                },
+                MinuteAssignmentSegment {
+                    start_unix: middle,
+                    end_unix,
+                    rx_bytes: 2,
+                    tx_bytes: 5,
+                },
+            ],
+        );
+
+        assert_eq!(
+            prepare_import_rollups(&prepared, utc_day_start_unix, raw_cutoff_unix).unwrap(),
+            expanded_minute_rollup_oracle(&prepared, utc_day_start_unix, raw_cutoff_unix,),
+            "direct aggregation diverged at boundary {boundary}",
+        );
+    }
+}
+
+#[test]
+fn compact_raw_preparation_matches_sample_iterator_for_every_slice_path() {
+    let start_unix = 1_772_323_200 - 20 * 86_400;
+    let end_unix = start_unix + 20 * 86_400;
+    let middle = start_unix + 7 * 86_400;
+    let raw_cutoff_unix = end_unix - 8 * 86_400;
+    for include_baseline in [false, true] {
+        let prepared = prepared_import_for_test(
+            start_unix,
+            end_unix,
+            700,
+            900,
+            include_baseline,
+            vec![
+                MinuteAssignmentSegment {
+                    start_unix,
+                    end_unix: middle,
+                    rx_bytes: 3,
+                    tx_bytes: 1,
+                },
+                MinuteAssignmentSegment {
+                    start_unix: middle,
+                    end_unix,
+                    rx_bytes: 2,
+                    tx_bytes: 5,
+                },
+            ],
+        );
+        let natural_start = if include_baseline {
+            start_unix - 60
+        } else {
+            start_unix
+        };
+        for minimum_unix in [
+            natural_start,
+            start_unix,
+            raw_cutoff_unix - 60,
+            raw_cutoff_unix,
+            end_unix,
+        ] {
+            let expected = prepared
+                .samples_from("agent-a", minimum_unix)
+                .unwrap()
+                .map(|sample| {
+                    let sample = sample.unwrap();
+                    (
+                        sample.observed_unix,
+                        sample.rx_bytes,
+                        sample.tx_bytes,
+                        sample.observed_unix < i64::try_from(raw_cutoff_unix).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let actual = prepare_import_raw_rows(&prepared, minimum_unix, raw_cutoff_unix).unwrap();
+            assert_eq!(
+                expected,
+                actual
+                    .observed_unix
+                    .iter()
+                    .copied()
+                    .zip(actual.rx_bytes.iter().copied())
+                    .zip(actual.tx_bytes.iter().copied())
+                    .zip(actual.inbound_promoted.iter().copied())
+                    .map(
+                        |(((observed_unix, rx_bytes), tx_bytes), inbound_promoted)| {
+                            (observed_unix, rx_bytes, tx_bytes, inbound_promoted)
+                        }
+                    )
+                    .collect::<Vec<_>>(),
+                "compact raw preparation diverged at {minimum_unix} (baseline={include_baseline})",
+            );
+        }
+
+        let superset_minimum =
+            postgres_import_raw_superset_minimum(&prepared, raw_cutoff_unix).unwrap();
+        let superset =
+            prepare_import_raw_rows(&prepared, superset_minimum, raw_cutoff_unix).unwrap();
+        for plan_minimum in [superset_minimum, raw_cutoff_unix, end_unix] {
+            let expected = prepared
+                .samples_from("agent-a", plan_minimum)
+                .unwrap()
+                .map(|sample| {
+                    let sample = sample.unwrap();
+                    (sample.observed_unix, sample.rx_bytes, sample.tx_bytes)
+                })
+                .collect::<Vec<_>>();
+            let plan_minimum = i64::try_from(plan_minimum).unwrap();
+            let start_index = superset
+                .observed_unix
+                .partition_point(|observed_unix| *observed_unix < plan_minimum);
+            assert_eq!(
+                expected,
+                superset.observed_unix[start_index..]
+                    .iter()
+                    .copied()
+                    .zip(superset.rx_bytes[start_index..].iter().copied())
+                    .zip(superset.tx_bytes[start_index..].iter().copied())
+                    .map(|((observed_unix, rx_bytes), tx_bytes)| {
+                        (observed_unix, rx_bytes, tx_bytes)
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn same_shape_raw_update_requires_an_exact_dense_locked_keyset() {
+    let prepared = prepared_import_for_test(
+        1_772_323_200,
+        1_772_323_200 + 6 * 60,
+        0,
+        0,
+        true,
+        vec![MinuteAssignmentSegment {
+            start_unix: 1_772_323_200,
+            end_unix: 1_772_323_200 + 6 * 60,
+            rx_bytes: 3,
+            tx_bytes: 2,
+        }],
+    );
+    let raw = prepare_import_raw_rows(&prepared, 1_772_323_140, 1_772_323_200 + 60).unwrap();
+    let plan = PostgresImportRawPlan {
+        minimum_unix: 1_772_323_140,
+        rx_counter_epoch: 0,
+        tx_counter_epoch: 0,
+        delete_inbound_predecessor_unix: None,
+        successor_adjustment: None,
+    };
+    let exact = PostgresImportOwnedRawStats {
+        interface: "eth0".to_string(),
+        count: i64::try_from(raw.observed_unix.len()).unwrap(),
+        first_observed_unix: raw.observed_unix.first().copied(),
+        last_observed_unix: raw.observed_unix.last().copied(),
+    };
+    assert!(postgres_import_can_update_same_shape(&exact, &raw, &plan).unwrap());
+
+    let mut shifted = exact.clone();
+    shifted.first_observed_unix = shifted.first_observed_unix.map(|value| value + 60);
+    assert!(!postgres_import_can_update_same_shape(&shifted, &raw, &plan).unwrap());
+
+    let mut missing = exact.clone();
+    missing.count -= 1;
+    assert!(!postgres_import_can_update_same_shape(&missing, &raw, &plan).unwrap());
+
+    let mut sparse = raw.clone();
+    sparse.observed_unix[2] += 60;
+    assert!(postgres_import_can_update_same_shape(&exact, &sparse, &plan).is_err());
+
+    let mut empty_plan = plan;
+    empty_plan.minimum_unix = 1_772_323_200 + 6 * 60;
+    let empty_raw =
+        prepare_import_raw_rows(&prepared, empty_plan.minimum_unix, 1_772_323_200 + 6 * 60)
+            .unwrap();
+    let empty_stats = PostgresImportOwnedRawStats {
+        interface: "eth0".to_string(),
+        count: 0,
+        first_observed_unix: None,
+        last_observed_unix: None,
+    };
+    assert!(postgres_import_can_update_same_shape(&empty_stats, &empty_raw, &empty_plan).unwrap());
+    assert!(!postgres_import_can_update_same_shape(&exact, &empty_raw, &empty_plan).unwrap());
+}
+
+#[test]
+fn compact_rollup_arrays_preserve_direct_rollup_values() {
+    let utc_day_start_unix = 1_772_323_200;
+    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let start_unix = utc_day_start_unix - 400 * 86_400;
+    let prepared = prepared_import_for_test(
+        start_unix,
+        utc_day_start_unix,
+        0,
+        0,
+        true,
+        vec![MinuteAssignmentSegment {
+            start_unix,
+            end_unix: utc_day_start_unix,
+            rx_bytes: 3,
+            tx_bytes: 2,
+        }],
+    );
+    let rollups = prepare_import_rollups(&prepared, utc_day_start_unix, raw_cutoff_unix).unwrap();
+    let rows = prepare_import_rollup_rows(&prepared.interface, rollups.clone()).unwrap();
+
+    assert_eq!(
+        rows.bucket_secs,
+        rollups
+            .iter()
+            .map(|rollup| rollup.bucket_secs)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows.bucket_start_unix,
+        rollups
+            .iter()
+            .map(|rollup| i64::try_from(rollup.bucket_start_unix).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows.rx_bytes,
+        rollups
+            .iter()
+            .map(|rollup| i64::try_from(rollup.rx_bytes).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows.latest_observed_unix,
+        rollups
+            .iter()
+            .map(|rollup| i64::try_from(rollup.latest_observed_unix).unwrap())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn postgres_preflight_revalidation_detects_every_mutable_descriptor_group() {
+    let boundary = sample_record(
+        "agent-a",
+        "eth0",
+        1_772_323_200,
+        100,
+        200,
+        "interface_counters",
+    )
+    .unwrap();
+    let snapshot = PostgresImportSnapshot {
+        utc_day_start_unix: 1_772_323_200,
+        raw_cutoff_unix: 1_772_323_200 - 32 * 86_400,
+        boundary_samples: vec![boundary],
+        imported_raw_stats: vec![PostgresImportOwnedRawStats {
+            interface: "eth0".to_string(),
+            count: 1,
+            first_observed_unix: Some(1_772_323_140),
+            last_observed_unix: Some(1_772_323_140),
+        }],
+    };
+    assert!(postgres_import_snapshots_match(
+        &snapshot,
+        &snapshot.clone()
+    ));
+
+    let mut changed_retention = snapshot.clone();
+    changed_retention.raw_cutoff_unix += 86_400;
+    assert!(!postgres_import_snapshots_match(
+        &snapshot,
+        &changed_retention
+    ));
+    let mut changed_boundary = snapshot.clone();
+    changed_boundary.boundary_samples[0].rx_bytes += 1;
+    assert!(!postgres_import_snapshots_match(
+        &snapshot,
+        &changed_boundary
+    ));
+    let mut changed_owned_rows = snapshot.clone();
+    changed_owned_rows.imported_raw_stats[0].count += 1;
+    assert!(!postgres_import_snapshots_match(
+        &snapshot,
+        &changed_owned_rows
+    ));
+
+    // The repeatable-read preflight deliberately carries no owned-row stats;
+    // the locked snapshot remains the authoritative bound/shape check.
+    let mut shape_only_preflight = snapshot.clone();
+    shape_only_preflight.imported_raw_stats.clear();
+    assert!(postgres_import_snapshots_match(
+        &shape_only_preflight,
+        &changed_owned_rows
+    ));
+}
+
+#[test]
+fn imported_raw_recovery_guard_accepts_exact_canonical_maximum_only() {
+    assert_eq!(
+        POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE,
+        (usize::try_from(MIN_TRAFFIC_COUNTER_RETENTION_DAYS).unwrap() + 1) * 24 * 60
+    );
+    assert_eq!(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE, 47_520);
+    let mut snapshot = PostgresImportSnapshot {
+        utc_day_start_unix: 1_772_323_200,
+        raw_cutoff_unix: 1_772_323_200 - 32 * 86_400,
+        boundary_samples: Vec::new(),
+        imported_raw_stats: vec![PostgresImportOwnedRawStats {
+            interface: "eth0".to_string(),
+            count: i64::try_from(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE).unwrap(),
+            first_observed_unix: Some(1_772_323_200 - 47_520 * 60),
+            last_observed_unix: Some(1_772_323_200 - 60),
+        }],
+    };
+    ensure_postgres_import_owned_raw_is_bounded(&snapshot).unwrap();
+
+    snapshot.imported_raw_stats[0].count += 1;
+    let error = ensure_postgres_import_owned_raw_is_bounded(&snapshot)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("network_traffic_import_recovery_required"));
+    assert!(error.contains("max_47520"));
+}
+
+#[test]
+fn five_year_raw_superset_is_bounded_at_maximum_for_all_sixteen_interfaces() {
+    assert_eq!(NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES, 16);
+    let utc_day_start_unix = 1_772_323_200;
+    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let start_unix = utc_day_start_unix - 5 * 365 * 86_400;
+    let end_unix = utc_day_start_unix + 86_400 - 60;
+    let base = prepared_import_for_test(
+        start_unix,
+        end_unix,
+        0,
+        0,
+        true,
+        vec![MinuteAssignmentSegment {
+            start_unix,
+            end_unix,
+            rx_bytes: 3,
+            tx_bytes: 2,
+        }],
+    );
+    let mut total_rows = 0_usize;
+    for index in 0..NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES {
+        let mut prepared = base.clone();
+        prepared.interface = format!("eth{index}");
+        let minimum = postgres_import_raw_superset_minimum(&prepared, raw_cutoff_unix).unwrap();
+        assert_eq!(minimum, raw_cutoff_unix - 60);
+        let rows = prepare_import_raw_rows(&prepared, minimum, raw_cutoff_unix).unwrap();
+        assert_eq!(
+            rows.observed_unix.len(),
+            POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE
+        );
+        total_rows += rows.observed_unix.len();
+    }
+    assert_eq!(
+        total_rows,
+        NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES * POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE
+    );
+}

@@ -35,6 +35,17 @@ use vpsman_server_core::{
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
 const TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS: u64 = 60;
+const OFFLINE_BATCH: usize = 100;
+const OFFLINE_CANDIDATE_SQL: &str = r#"
+    SELECT id
+    FROM clients
+    WHERE hidden_at IS NULL
+      AND status = 'online'
+      AND last_seen_at < now() - make_interval(secs => $1)
+    ORDER BY last_seen_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+"#;
 const SCHEDULE_CRON_INVALID: &str = "schedule_cron_invalid";
 const SCHEDULE_CRON_NO_FUTURE_OCCURRENCE: &str = "schedule_cron_no_future_occurrence";
 const SCHEDULE_OPERATION_INVALID: &str = "schedule_operation_invalid";
@@ -78,6 +89,7 @@ use backup_policy_retention::{
 use history_retention::{process_telemetry_history_retention, TelemetryHistoryRetentionRun};
 use operational_alerts::{
     reconcile_agent_status_transition_in_tx, reconcile_scheduled_job_event_sources_in_tx,
+    try_lock_lifecycle,
 };
 use webhook_rules::{
     ensure_event_partitions, insert_webhook_event_in_tx,
@@ -1073,21 +1085,37 @@ async fn main() -> Result<()> {
 }
 
 async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Result<u64> {
-    let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
-        r#"
-        UPDATE clients
-        SET status = 'offline'
-        WHERE status = 'online'
-          AND last_seen_at < now() - make_interval(secs => $1)
-        RETURNING id
-        "#,
-    )
-    .bind(offline_timeout_secs as f64)
-    .fetch_all(&mut *tx)
-    .await?;
-    for row in &rows {
-        let client_id: String = row.try_get("id")?;
+    let mut transitioned = 0_u64;
+    for _ in 0..OFFLINE_BATCH {
+        let mut tx = pool.begin().await?;
+        let client_id = sqlx::query_scalar::<_, String>(OFFLINE_CANDIDATE_SQL)
+            .bind(offline_timeout_secs as f64)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(client_id) = client_id else {
+            tx.rollback().await?;
+            break;
+        };
+        if !try_lock_lifecycle(&mut tx).await? {
+            tx.rollback().await?;
+            break;
+        }
+        sqlx::query_scalar::<_, String>(
+            r#"
+            UPDATE clients
+            SET status = 'offline'
+            WHERE id = $1
+              AND hidden_at IS NULL
+              AND status = 'online'
+              AND last_seen_at < now() - make_interval(secs => $2)
+            RETURNING id
+            "#,
+        )
+        .bind(&client_id)
+        .bind(offline_timeout_secs as f64)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("locked offline candidate was no longer eligible")?;
         let metadata = serde_json::json!({
             "from_status": "online",
             "to_status": "offline",
@@ -1152,9 +1180,10 @@ async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Resu
             }),
         )
         .await?;
+        tx.commit().await?;
+        transitioned += 1;
     }
-    tx.commit().await?;
-    Ok(rows.len() as u64)
+    Ok(transitioned)
 }
 
 async fn expire_stale_gateway_sessions(pool: &PgPool, offline_timeout_secs: i64) -> Result<u64> {
@@ -1194,18 +1223,7 @@ async fn connect_postgres(
         .connect(postgres_url)
         .await
         .context("failed to connect to PostgreSQL")?;
-    let migrator = sqlx::migrate::Migrator::new(migrations_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load migrations from {}",
-                migrations_dir.display()
-            )
-        })?;
-    migrator
-        .run(&pool)
-        .await
-        .context("failed to run PostgreSQL migrations")?;
+    vpsman_server_core::run_postgres_migrations(&pool, migrations_dir).await?;
     Ok(pool)
 }
 
@@ -2216,6 +2234,7 @@ struct ScheduleDueWebhookEvent<'a> {
 #[derive(Clone, Debug)]
 struct ScheduleTargetAvailability {
     capabilities: Vec<TargetCapability>,
+    suspended_targets: Vec<String>,
     unavailable_targets: Vec<String>,
     never_connected_targets: Vec<String>,
     missing_targets: Vec<String>,
@@ -2298,6 +2317,12 @@ async fn materialize_due_schedule(
     {
         bail!("registered agent update release missing");
     }
+    let suspended_skips = target_availability
+        .suspended_targets
+        .iter()
+        .cloned()
+        .map(suspended_schedule_target_skip)
+        .collect::<Vec<_>>();
     let unavailable_skips = target_availability
         .unavailable_targets
         .iter()
@@ -2317,8 +2342,9 @@ async fn materialize_due_schedule(
         .map(missing_schedule_target_skip)
         .collect::<Vec<_>>();
     let busy_update_target_skips = busy_update_skips.clone();
-    let schedule_target_skips = unavailable_skips
+    let schedule_target_skips = suspended_skips
         .iter()
+        .chain(unavailable_skips.iter())
         .chain(never_connected_skips.iter())
         .chain(missing_target_skips.iter())
         .chain(busy_update_target_skips.iter())
@@ -2486,6 +2512,7 @@ async fn materialize_due_schedule(
         "rendered_operation_hash": schedule.materialization.rendered_operation_hash.as_deref().unwrap_or(&command_hash),
         "fixed_targets": &targets,
         "materialized_targets": &materialized_targets,
+        "suspended_fixed_targets": &target_availability.suspended_targets,
         "unavailable_fixed_targets": &target_availability.unavailable_targets,
         "never_connected_fixed_targets": &target_availability.never_connected_targets,
         "missing_fixed_targets": &target_availability.missing_targets,
@@ -2578,6 +2605,7 @@ async fn load_schedule_target_capabilities(
     if targets.is_empty() {
         return Ok(ScheduleTargetAvailability {
             capabilities: Vec::new(),
+            suspended_targets: Vec::new(),
             unavailable_targets: Vec::new(),
             never_connected_targets: Vec::new(),
             missing_targets: Vec::new(),
@@ -2603,6 +2631,7 @@ async fn load_schedule_target_capabilities(
     .await?;
     let mut present_targets = HashSet::with_capacity(rows.len());
     let mut capabilities = Vec::new();
+    let mut suspended_targets = Vec::new();
     let mut unavailable_targets = Vec::new();
     let mut never_connected_targets = Vec::new();
     for row in rows {
@@ -2613,6 +2642,8 @@ async fn load_schedule_target_capabilities(
         present_targets.insert(client_id.clone());
         if hidden || matches!(status.as_str(), "deleted" | "revoked") {
             unavailable_targets.push(client_id);
+        } else if status == "suspended" {
+            suspended_targets.push(client_id);
         } else if status == "never" || process_incarnation_id.is_none() {
             never_connected_targets.push(client_id);
         } else {
@@ -2631,6 +2662,7 @@ async fn load_schedule_target_capabilities(
         .collect();
     Ok(ScheduleTargetAvailability {
         capabilities,
+        suspended_targets,
         unavailable_targets,
         never_connected_targets,
         missing_targets,
@@ -2707,6 +2739,18 @@ fn is_update_lifecycle_command(command: &JobCommand) -> bool {
             | JobCommand::AgentUpdateRollback { .. }
             | JobCommand::AgentUpdateCheck { .. }
     )
+}
+
+fn suspended_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
+    ScheduleTargetSkip {
+        client_id,
+        output_type: "target_suspended",
+        reason: "target_suspended",
+        hint:
+            "manually unsuspend the VPS or wait for an authenticated online event before dispatch",
+        message: "target_suspended: target skipped because VPS is suspended",
+        accepted: false,
+    }
 }
 
 fn unavailable_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {

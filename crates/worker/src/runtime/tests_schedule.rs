@@ -537,6 +537,78 @@ async fn postgres_due_schedule_skips_unavailable_fixed_targets() {
 }
 
 #[tokio::test]
+async fn postgres_due_schedule_neutrally_skips_suspended_fixed_targets() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    insert_worker_client(&db.pool, "edge-a", "online", false).await;
+    insert_worker_client(&db.pool, "edge-b", "offline", false).await;
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET status='suspended', suspended_at=clock_timestamp(),
+            suspended_from_status='offline'
+        WHERE id='edge-b'
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let schedule_id = insert_worker_schedule(
+        &db.pool,
+        "suspended-target-schedule",
+        serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+        &["edge-a", "edge-b"],
+    )
+    .await;
+
+    let processed = process_due_schedule(
+        &db.pool,
+        schedule_id,
+        &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(processed, 1);
+    let (job_id, status, failure_count, last_error) = schedule_result(&db.pool, schedule_id).await;
+    assert_eq!(status.as_deref(), Some(JOB_STATUS_QUEUED));
+    assert_eq!(failure_count, 0);
+    assert_eq!(last_error, None);
+    let targets = job_targets(&db.pool, job_id).await;
+    assert_eq!(
+        targets,
+        vec![
+            ("edge-a".to_string(), TARGET_STATUS_QUEUED.to_string(), None),
+            (
+                "edge-b".to_string(),
+                TARGET_STATUS_SKIPPED.to_string(),
+                Some("target_suspended: target skipped because VPS is suspended".to_string())
+            ),
+        ]
+    );
+    let output = job_status_output(&db.pool, job_id, "edge-b").await;
+    assert_eq!(output["type"], "target_suspended");
+    assert_eq!(output["reason"], "target_suspended");
+    let audit_suspended_targets: serde_json::Value = sqlx::query_scalar(
+        r#"
+        SELECT metadata->'suspended_fixed_targets'
+        FROM audit_logs
+        WHERE action='schedule.due_materialized'
+          AND target=$1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(format!("schedule:{schedule_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_suspended_targets, serde_json::json!(["edge-b"]));
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_due_schedule_skips_never_connected_fixed_targets() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;

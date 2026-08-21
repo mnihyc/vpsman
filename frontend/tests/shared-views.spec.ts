@@ -8,6 +8,7 @@ import type {
   PublicMonitoringDataView,
   PublicMonitoringDetailView,
   PublicMonitoringShareView,
+  UpdateMonitoringShareRequest,
 } from "../src/types";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
@@ -224,6 +225,47 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
     .filter({ hasText: "Frozen VPS count" });
   await expect(frozenTargetCount.locator(":scope > span")).toHaveText("2");
 
+  await activeRow.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+  const editDrawer = page.getByRole("complementary", {
+    name: "Edit shared view",
+  });
+  await expect(editDrawer).toBeVisible();
+  await editDrawer
+    .getByLabel("Edit shared view display name")
+    .fill("Customer status live");
+  await editDrawer
+    .getByLabel("Edit shared view target selector")
+    .fill("id:agent-sfo-01");
+  const editVisibilityCheckbox = (label: string) =>
+    editDrawer
+      .locator(".consoleField")
+      .filter({ hasText: label })
+      .getByRole("checkbox");
+  await editVisibilityCheckbox("Identity context").check();
+  await editVisibilityCheckbox("Traffic").uncheck();
+  await editDrawer.getByRole("button", { name: "Review changes" }).click();
+  const editConfirmation = editDrawer
+    .locator(".confirmationPrompt")
+    .filter({ hasText: "Confirm shared-view edit" });
+  await expect(editConfirmation).toContainText("agent-fra-02");
+  await expect(editConfirmation).toContainText("Visible data before");
+  await expect(editConfirmation).toContainText("Visible data after");
+  await expect(editConfirmation).toContainText(
+    "Public URL · expiry · visitor history · unchanged VPS keys",
+  );
+  await editConfirmation
+    .getByRole("button", { name: "Apply shared-view changes" })
+    .click();
+  await expect(grid.getByText("Customer status live", { exact: true })).toBeVisible();
+  await expect(page.getByText(/existing public URL.*were preserved/i)).toBeVisible();
+
+  await activeRow.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy URL", exact: true }).click();
+  await expect(sharedViewUrl.locator("pre")).toContainText(
+    `#/share/${activeShareId}/customer-status-secret`,
+  );
+
   await grid
     .getByLabel(`Select Active shared views row ${activeShareId}`)
     .check();
@@ -233,7 +275,7 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await grid.getByRole("button", { name: "Actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Extend", exact: true }).click();
   await expect(
-    page.getByText("5 total frozen target references"),
+    page.getByText("4 total frozen target references"),
   ).toBeVisible();
   await page.getByRole("button", { name: "Extend views" }).click();
   await expect(page.getByText("Extended 2 shared views.")).toBeVisible();
@@ -245,11 +287,65 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await page.getByRole("tab", { name: /^Revoked · 3/ }).click();
   const revokedGrid = page.getByLabel("Revoked shared views data grid");
   await expect(
-    revokedGrid.getByText("Customer status", { exact: true }),
+    revokedGrid.getByText("Customer status live", { exact: true }),
   ).toBeVisible();
   await expect(
     revokedGrid.getByText("Regional customer view", { exact: true }),
   ).toBeVisible();
+});
+
+test("target refresh keeps Edit gated across a delayed failed reload", async ({
+  page,
+}) => {
+  await page.setExtraHTTPHeaders({
+    "x-test-target-refresh-reload": "fail",
+  });
+
+  await page.goto("/?target-refresh-reload=fail");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Observability", "Shared views");
+  const grid = page.getByLabel("Active shared views data grid");
+  const activeRow = grid
+    .locator(".gridBody [role=row], .gridMobileCard")
+    .filter({ hasText: "Customer status" })
+    .first();
+  await activeRow.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Update targets", exact: true }).click();
+  await page
+    .getByRole("region", { name: "Confirm shared-view target update" })
+    .getByRole("button", { name: "Update targets", exact: true })
+    .click();
+
+  // The GET is intentionally held open; the authoritative revision response
+  // must not let a stale row become editable while reconciliation is pending.
+  await activeRow.click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toHaveAttribute("aria-disabled", "true");
+  await page.keyboard.press("Escape");
+
+  await expect(
+    page.getByText(/lifecycle evidence could not be refreshed/i),
+  ).toBeVisible();
+  await activeRow.click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).toHaveAttribute("aria-disabled", "true");
+  await page.keyboard.press("Escape");
+
+  const refreshButton = grid.getByRole("button", {
+    name: "Refresh",
+    exact: true,
+  });
+  await expect(refreshButton).toBeEnabled();
+  await refreshButton.click();
+  await expect(
+    page.getByText(/lifecycle evidence could not be refreshed/i),
+  ).toHaveCount(0);
+  await activeRow.click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Edit", exact: true }),
+  ).not.toHaveAttribute("aria-disabled", "true");
 });
 
 test("shared views expose unavailable target-refresh evidence without making frozen targets actionable", async ({
@@ -1443,9 +1539,17 @@ test("public monitoring mirrors fleet tag, provider, and sort controls when iden
   await expect(sort.locator("option")).toHaveText([
     "Warnings first",
     "Name",
-    "Traffic use",
-    "CPU use",
-    "Memory",
+    "Traffic (raw)",
+    "Traffic (ratio)",
+    "Realtime speed",
+    "Connections",
+    "CPU",
+    "RAM (raw)",
+    "RAM (ratio)",
+    "Disk (raw)",
+    "Disk (ratio)",
+    "Load (raw)",
+    "Load (ratio)",
     "Region",
     "Provider",
   ]);
@@ -1489,6 +1593,74 @@ test("public monitoring mirrors fleet tag, provider, and sort controls when iden
   await expect(grid.getByRole("link").first()).toHaveAccessibleName(
     /Toronto transit · Online shared monitoring card/,
   );
+});
+
+test("public monitoring metric sorts are value-only with ordinary missing evidence", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, {
+    cardCount: 4,
+    edgeCases: true,
+    identityContext: true,
+    metricSortContract: true,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const sort = page.getByLabel("Shared VPS sort");
+  const names = page
+    .getByLabel("Shared VPS cards")
+    .locator(".vpsMonitorCardNameText");
+  const expectOrder = async (mode: string, expected: string[]) => {
+    await sort.selectOption(mode);
+    await expect(names).toHaveText(expected);
+  };
+  const missingLast = [
+    "D Raw leader",
+    "C Ratio leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ];
+  await expectOrder("traffic_raw", [
+    "B Unlimited stale",
+    "D Raw leader",
+    "C Ratio leader",
+    "A No traffic online",
+  ]);
+  await expectOrder("traffic_ratio", [
+    "C Ratio leader",
+    "D Raw leader",
+    "A No traffic online",
+    "B Unlimited stale",
+  ]);
+  await expectOrder("realtime", missingLast);
+  await expectOrder("connections", missingLast);
+  await expectOrder("cpu", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("memory_raw", missingLast);
+  await expectOrder("memory_ratio", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("disk_raw", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("disk_ratio", missingLast);
+  await expectOrder("load_raw", [
+    "C Ratio leader",
+    "D Raw leader",
+    "B Unlimited stale",
+    "A No traffic online",
+  ]);
+  await expectOrder("load_ratio", missingLast);
 });
 
 test("public monitoring warning sort uses client key as the stable name tie-breaker", async ({
@@ -1647,6 +1819,8 @@ test("public monitoring grid and detail have complete screenshot coverage", asyn
 
 async function installSharedViewApiMock(page: Page) {
   const now = Date.now();
+  let targetUpdateApplied = false;
+  let targetRefreshReloadFailures = 0;
   let shares: MonitoringShareView[] = [
     shareFixture({
       createdAt: new Date(now - 2 * 60 * 60 * 1_000).toISOString(),
@@ -1685,6 +1859,17 @@ async function installSharedViewApiMock(page: Page) {
       const url = new URL(request.url());
       const method = request.method();
       if (url.pathname === "/api/v1/monitoring-shares" && method === "GET") {
+        if (
+          (request.headers()["x-test-target-refresh-reload"] === "fail" ||
+            page.url().includes("target-refresh-reload=fail")) &&
+          targetUpdateApplied &&
+          targetRefreshReloadFailures < 4
+        ) {
+          targetRefreshReloadFailures += 1;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          await route.abort("failed");
+          return;
+        }
         const limit = Number(url.searchParams.get("limit") ?? "100");
         const offset = Number(url.searchParams.get("offset") ?? "0");
         await json(route, shares.slice(offset, offset + limit));
@@ -1719,6 +1904,104 @@ async function installSharedViewApiMock(page: Page) {
         await json(route, {
           fragment_path: `#/share/${createdShareId}/public-url-secret`,
           share: created,
+        });
+        return;
+      }
+      const editMatch = url.pathname.match(
+        /^\/api\/v1\/monitoring-shares\/([^/]+)$/,
+      );
+      if (editMatch && method === "PUT") {
+        const shareId = decodeURIComponent(editMatch[1]);
+        const body = request.postDataJSON() as UpdateMonitoringShareRequest;
+        const existing = shares.find((share) => share.id === shareId);
+        if (!existing) {
+          await route.fulfill({
+            body: JSON.stringify({ error: "monitoring_share_not_found" }),
+            contentType: "application/json",
+            status: 404,
+          });
+          return;
+        }
+        if (
+          existing.status !== "active" ||
+          existing.revoked_at ||
+          body.expected_updated_at !== existing.updated_at
+        ) {
+          await route.fulfill({
+            body: JSON.stringify({ error: "monitoring_share_preview_stale" }),
+            contentType: "application/json",
+            status: 409,
+          });
+          return;
+        }
+        const currentTargets = new Set(existing.target_client_ids);
+        const nextTargetIds = [...new Set(body.target_client_ids)].sort();
+        const nextTargets = new Set(nextTargetIds);
+        const visibility = {
+          billing: Boolean(body.visibility.billing),
+          detail_history: Boolean(body.visibility.detail_history),
+          identity_context: Boolean(body.visibility.identity_context),
+          network: Boolean(body.visibility.network),
+          ping: Boolean(body.visibility.ping),
+          resources: Boolean(body.visibility.resources),
+          system_information: Boolean(body.visibility.system_information),
+          traffic: Boolean(body.visibility.traffic),
+        };
+        const change = {
+          added_client_ids: nextTargetIds.filter(
+            (clientId) => !currentTargets.has(clientId),
+          ),
+          name: body.name.trim(),
+          previous_name: existing.name,
+          previous_selector_expression: existing.selector_expression,
+          previous_visibility: existing.visibility,
+          removed_client_ids: existing.target_client_ids.filter(
+            (clientId) => !nextTargets.has(clientId),
+          ),
+          selector_expression: body.selector_expression.trim(),
+          share_id: shareId,
+          unchanged_count: existing.target_client_ids.filter((clientId) =>
+            nextTargets.has(clientId),
+          ).length,
+          visibility,
+        };
+        const previewHash = `shared-view-definition-preview-${shareId}`;
+        if (!body.confirmed) {
+          await json(route, {
+            applied: false,
+            change,
+            preview_hash: previewHash,
+            share: null,
+          });
+          return;
+        }
+        if (body.preview_hash !== previewHash) {
+          await route.fulfill({
+            body: JSON.stringify({ error: "monitoring_share_preview_stale" }),
+            contentType: "application/json",
+            status: 409,
+          });
+          return;
+        }
+        const updated = {
+          ...existing,
+          name: change.name,
+          selector_expression: change.selector_expression,
+          target_client_ids: nextTargetIds,
+          target_count: nextTargetIds.length,
+          target_update_available: false,
+          target_update_evidence_available: true,
+          updated_at: new Date().toISOString(),
+          visibility,
+        };
+        shares = shares.map((share) =>
+          share.id === updated.id ? updated : share,
+        );
+        await json(route, {
+          applied: true,
+          change,
+          preview_hash: previewHash,
+          share: updated,
         });
         return;
       }
@@ -1758,6 +2041,7 @@ async function installSharedViewApiMock(page: Page) {
             applied: false,
             changes,
             preview_hash: previewHash,
+            revisions: [],
           });
           return;
         }
@@ -1781,10 +2065,22 @@ async function installSharedViewApiMock(page: Page) {
               }
             : share,
         );
+        targetUpdateApplied = true;
         await json(route, {
           applied: true,
           changes,
           preview_hash: previewHash,
+          revisions: shares
+            .filter((share) => selected.has(share.id))
+            .map((share) => ({
+              share_id: share.id,
+              target_client_ids: share.target_client_ids,
+              target_count: share.target_count,
+              target_update_available: share.target_update_available,
+              target_update_evidence_available:
+                share.target_update_evidence_available,
+              updated_at: share.updated_at,
+            })),
         });
         return;
       }
@@ -1865,6 +2161,7 @@ async function installPublicMonitoringApiMock(
     duplicateSortNames = false,
     edgeCases = false,
     identityContext = false,
+    metricSortContract = false,
     mixedTrafficQuotas = false,
     nearQuota = false,
     networkRateExpected = true,
@@ -1887,6 +2184,7 @@ async function installPublicMonitoringApiMock(
     duplicateSortNames?: boolean;
     edgeCases?: boolean;
     identityContext?: boolean;
+    metricSortContract?: boolean;
     mixedTrafficQuotas?: boolean;
     nearQuota?: boolean;
     networkRateExpected?: boolean;
@@ -2407,6 +2705,125 @@ async function installPublicMonitoringApiMock(
   if (duplicateSortNames && cards.length >= 3) {
     cards[1] = { ...cards[1], display_name: "Duplicate node" };
     cards[2] = { ...cards[2], display_name: "Duplicate node" };
+  }
+  if (metricSortContract && cards.length >= 4) {
+    const profiles = [
+      {
+        connections: 0,
+        cores: 1,
+        cpu: 0,
+        diskRatio: 0,
+        diskTotal: 100,
+        load: 0,
+        memoryRatio: 0,
+        memoryTotal: 100,
+        network: 0,
+        trafficConfigured: false,
+        trafficRatio: null,
+        trafficRaw: 0,
+        unlimitedTraffic: false,
+      },
+      {
+        connections: 2,
+        cores: 2,
+        cpu: 0.1,
+        diskRatio: 0.05,
+        diskTotal: 200,
+        load: 0.1,
+        memoryRatio: 0.05,
+        memoryTotal: 200,
+        network: 10,
+        trafficConfigured: true,
+        trafficRatio: null,
+        trafficRaw: 900,
+        unlimitedTraffic: true,
+      },
+      {
+        connections: 10,
+        cores: 4,
+        cpu: 0.9,
+        diskRatio: 0.2,
+        diskTotal: 10_000,
+        load: 2,
+        memoryRatio: 0.4,
+        memoryTotal: 1_000,
+        network: 100,
+        trafficConfigured: true,
+        trafficRatio: 90,
+        trafficRaw: 100,
+        unlimitedTraffic: false,
+      },
+      {
+        connections: 50,
+        cores: 1,
+        cpu: 0.5,
+        diskRatio: 0.8,
+        diskTotal: 1_000,
+        load: 1.5,
+        memoryRatio: 0.1,
+        memoryTotal: 10_000,
+        network: 500,
+        trafficConfigured: true,
+        trafficRatio: 50,
+        trafficRaw: 500,
+        unlimitedTraffic: false,
+      },
+    ] as const;
+    const names = [
+      "A No traffic online",
+      "B Unlimited stale",
+      "C Ratio leader",
+      "D Raw leader",
+    ];
+    for (let index = 0; index < profiles.length; index += 1) {
+      const profile = profiles[index];
+      const existing = cards[index];
+      if (!existing) continue;
+      const resource = card.resources!;
+      cards[index] = {
+        ...existing,
+        display_name: names[index],
+        network: {
+          observed_at: observedAt,
+          rate_expected: true,
+          rx_bps: profile.network / 2,
+          tx_bps: profile.network / 2,
+        },
+        primary_ping: undefined,
+        resources: {
+          ...resource,
+          connections_observed_at: observedAt,
+          cpu_cores: profile.cores,
+          cpu_usage_avg: profile.cpu,
+          disk_available_bytes:
+            profile.diskTotal * (1 - profile.diskRatio),
+          disk_sample_count: 1,
+          disk_total_bytes: profile.diskTotal,
+          disk_used_ratio_avg: profile.diskRatio,
+          load_1: profile.load,
+          memory_available_bytes:
+            profile.memoryTotal * (1 - profile.memoryRatio),
+          memory_total_bytes: profile.memoryTotal,
+          memory_used_ratio_avg: profile.memoryRatio,
+          observed_at: observedAt,
+          tcp_sockets: Math.max(0, profile.connections - 1),
+          udp_sockets: Math.min(1, profile.connections),
+        },
+        status: index === 1 ? "stale" : "online",
+        traffic: profile.trafficConfigured
+          ? {
+              configured: true,
+              cycle_percent: profile.trafficRatio ?? undefined,
+              quota_total_bytes: profile.unlimitedTraffic ? -1 : 1_000,
+              reset_day: 14,
+              rx_bytes: Math.floor(profile.trafficRaw / 2),
+              state: "ok",
+              total_bytes: profile.trafficRaw,
+              tx_bytes: Math.ceil(profile.trafficRaw / 2),
+            }
+          : { configured: false, state: "unconfigured" },
+      };
+    }
   }
 
   await page.route(

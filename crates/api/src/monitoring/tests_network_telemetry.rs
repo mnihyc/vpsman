@@ -75,6 +75,104 @@ async fn declared_tunnel_telemetry_keeps_exact_plan_and_endpoint_identity() {
 }
 
 #[tokio::test]
+async fn declared_tunnel_telemetry_hides_suspended_peer_endpoint() {
+    let repo = Repository::Memory(MemoryState::default());
+    let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::ExternalObserved).await;
+    seed_tunnel_telemetry(
+        &repo,
+        "edge-a",
+        RuntimeTunnelStat {
+            interface: "wg0".to_string(),
+            kind: "wireguard".to_string(),
+            ownership_mode: "external_observed".to_string(),
+            mutation_policy: "observe_only_saved_plan".to_string(),
+            source: "approved_runtime_status_telemetry".to_string(),
+            plan_id: Some(plan_id.to_string()),
+            plan_name: Some("edge-a-edge-b".to_string()),
+            plan_runtime_manager: Some("external_observed".to_string()),
+            endpoint_side: Some("left".to_string()),
+            peer_client_id: Some("edge-b".to_string()),
+            ..RuntimeTunnelStat::default()
+        },
+    )
+    .await;
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory
+        .agents
+        .write()
+        .await
+        .iter_mut()
+        .find(|agent| agent.id == "edge-b")
+        .unwrap()
+        .status = "suspended".to_string();
+
+    assert!(repo
+        .list_telemetry_tunnels(10, Some("edge-a"), Some("wg0"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn declared_tunnel_telemetry_preserves_deleted_or_unknown_peer_evidence() {
+    let repo = Repository::Memory(MemoryState::default());
+    let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::ExternalObserved).await;
+    seed_tunnel_telemetry(
+        &repo,
+        "edge-a",
+        RuntimeTunnelStat {
+            interface: "wg0".to_string(),
+            kind: "wireguard".to_string(),
+            ownership_mode: "external_observed".to_string(),
+            mutation_policy: "observe_only_saved_plan".to_string(),
+            source: "approved_runtime_status_telemetry".to_string(),
+            plan_id: Some(plan_id.to_string()),
+            plan_name: Some("edge-a-edge-b".to_string()),
+            plan_runtime_manager: Some("external_observed".to_string()),
+            endpoint_side: Some("left".to_string()),
+            peer_client_id: Some("edge-b".to_string()),
+            ..RuntimeTunnelStat::default()
+        },
+    )
+    .await;
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.hidden_clients.write().await.insert("edge-b".into());
+    memory
+        .agents
+        .write()
+        .await
+        .iter_mut()
+        .find(|agent| agent.id == "edge-b")
+        .unwrap()
+        .status = "deleted".to_string();
+
+    assert_eq!(
+        repo.list_telemetry_tunnels(10, Some("edge-a"), Some("wg0"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    memory
+        .agents
+        .write()
+        .await
+        .retain(|agent| agent.id != "edge-b");
+    assert_eq!(
+        repo.list_telemetry_tunnels(10, Some("edge-a"), Some("wg0"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn reconnecting_tunnel_telemetry_does_not_revive_memory_alert_lifecycle() {
     let repo = Repository::Memory(MemoryState::default());
     let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::CustomAdapter).await;

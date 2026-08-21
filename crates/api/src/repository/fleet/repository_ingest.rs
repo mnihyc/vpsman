@@ -575,6 +575,11 @@ impl Repository {
                         event.remote_ip.as_deref(),
                     )
                     .await;
+                    memory
+                        .agent_suspensions
+                        .write()
+                        .await
+                        .remove(&event.hello.client_id);
                     memory.client_system_facts.write().await.insert(
                         event.hello.client_id.clone(),
                         crate::model::ClientSystemFactsRecord {
@@ -609,7 +614,9 @@ impl Repository {
                             .map(|agent| agent.status.clone())
                             .unwrap_or(prior_status.clone());
                         if prior_status != resulting_status {
-                            let reason = if prior_status == "never" {
+                            let reason = if prior_status == "suspended" {
+                                "agent_online_auto_unsuspend"
+                            } else if prior_status == "never" {
                                 "agent_first_connection"
                             } else if prior_status == "stale" {
                                 "agent_reconnected_with_changed_internal_build"
@@ -818,7 +825,11 @@ impl Repository {
                              AND EXCLUDED.internal_build_number = COALESCE(clients.stale_build_number, clients.internal_build_number)
                                 THEN clients.stale_build_number
                             ELSE NULL
-                        END
+                        END,
+                        suspended_at = NULL,
+                        suspended_by = NULL,
+                        suspended_reason = NULL,
+                        suspended_from_status = NULL
                     WHERE clients.hidden_at IS NULL
                     "#,
                 )
@@ -902,6 +913,7 @@ impl Repository {
                 };
                 if accepted_hello && prior_status.as_deref() != Some(resulting_status) {
                     let reason = match prior_status.as_deref() {
+                        Some("suspended") => "agent_online_auto_unsuspend",
                         Some("never") => "agent_first_connection",
                         Some("stale") => "agent_reconnected_with_changed_internal_build",
                         _ => "agent_reconnected",
@@ -1091,8 +1103,58 @@ impl Repository {
                     )
                 }));
                 drop(tunnels);
-                if let Some((status, status_changed)) = telemetry_agent_status {
+                if let Some((status, status_changed, prior_status)) = telemetry_agent_status {
                     let observed_at = Utc::now().to_rfc3339();
+                    if prior_status == "suspended" {
+                        memory
+                            .agent_suspensions
+                            .write()
+                            .await
+                            .remove(&event.telemetry.client_id);
+                        let metadata = serde_json::json!({
+                            "from_status": "suspended",
+                            "to_status": "online",
+                            "reason": "agent_online_auto_unsuspend",
+                            "gateway_id": &event.gateway_id,
+                            "result": "online",
+                            "origin_kind": "gateway_ingest",
+                            "component": "agent-ingest",
+                        });
+                        memory
+                            .client_status_history
+                            .write()
+                            .await
+                            .push(ClientStatusHistoryView {
+                                id: Uuid::new_v4(),
+                                client_id: event.telemetry.client_id.clone(),
+                                from_status: Some("suspended".to_string()),
+                                to_status: "online".to_string(),
+                                reason: "agent_online_auto_unsuspend".to_string(),
+                                metadata: metadata.clone(),
+                                created_at: observed_at.clone(),
+                            });
+                        memory
+                            .audits
+                            .write()
+                            .await
+                            .push(crate::model::AuditLogView {
+                                id: Uuid::new_v4(),
+                                actor_id: None,
+                                action: "agent.status_online".to_string(),
+                                target: format!("client:{}", event.telemetry.client_id),
+                                command_hash: None,
+                                metadata: metadata.clone(),
+                                created_at: observed_at.clone(),
+                            });
+                        self.record_client_status_webhook_event(
+                            &event.telemetry.client_id,
+                            Some("suspended"),
+                            "online",
+                            "agent_online_auto_unsuspend",
+                            metadata,
+                        )
+                        .await?;
+                    }
                     if status_changed {
                         self.reconcile_memory_client_status_alert_transition(
                             &event.telemetry.client_id,
@@ -1117,9 +1179,9 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let visible_client = sqlx::query_scalar::<_, String>(
+                let visible_client = sqlx::query(
                     r#"
-                    SELECT client.id
+                    SELECT client.id, client.status
                     FROM clients client
                     JOIN gateway_sessions session
                       ON session.client_id = client.id
@@ -1139,10 +1201,11 @@ impl Repository {
                 .bind(event.gateway_session_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                if visible_client.is_none() {
+                let Some(visible_client) = visible_client else {
                     tx.commit().await?;
                     return Ok(TelemetryRecordOutcome::GatewaySessionNotActive);
-                }
+                };
+                let prior_client_status: String = visible_client.try_get("status")?;
                 match claim_postgres_telemetry_sequence(&mut tx, event).await? {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
@@ -1236,7 +1299,11 @@ impl Repository {
                         status = CASE WHEN status = 'stale' THEN status ELSE 'online' END,
                         registration_ip = COALESCE(registration_ip, $2::inet),
                         last_ip = COALESCE($2::inet, last_ip),
-                        last_seen_at = now()
+                        last_seen_at = now(),
+                        suspended_at = NULL,
+                        suspended_by = NULL,
+                        suspended_reason = NULL,
+                        suspended_from_status = NULL
                     WHERE id = $1 AND hidden_at IS NULL
                       AND status <> 'revoked'
                     RETURNING status
@@ -1246,12 +1313,26 @@ impl Repository {
                 .bind(event.remote_ip.as_deref())
                 .fetch_one(&mut *tx)
                 .await?;
-                reconcile_postgres_agent_alert_transition_in_tx(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    &resulting_status,
-                )
-                .await?;
+                if prior_client_status == "suspended" && resulting_status == "online" {
+                    record_client_status_transition_in_tx(
+                        &mut tx,
+                        &event.telemetry.client_id,
+                        Some("suspended"),
+                        "online",
+                        "agent_online_auto_unsuspend",
+                        serde_json::json!({"gateway_id": &event.gateway_id}),
+                        "gateway_ingest",
+                        "agent-ingest",
+                    )
+                    .await?;
+                } else {
+                    reconcile_postgres_agent_alert_transition_in_tx(
+                        &mut tx,
+                        &event.telemetry.client_id,
+                        &resulting_status,
+                    )
+                    .await?;
+                }
                 reconcile_postgres_tunnel_alerts_for_clients_in_tx(
                     &mut tx,
                     std::slice::from_ref(&event.telemetry.client_id),
@@ -1399,7 +1480,7 @@ impl Repository {
             Self::Memory(memory) => {
                 let mut agents = memory.agents.write().await;
                 if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
-                    if matches!(agent.status.as_str(), "revoked" | "deleted") {
+                    if matches!(agent.status.as_str(), "suspended" | "revoked" | "deleted") {
                         return Ok(());
                     }
                     if agent.status != "stale" {
@@ -1453,7 +1534,7 @@ impl Repository {
                     r#"
                     SELECT status, internal_build_number
                     FROM visible_clients
-                    WHERE id = $1 AND status <> 'revoked'
+                    WHERE id = $1 AND status NOT IN ('suspended', 'revoked')
                     FOR UPDATE
                     "#,
                 )
@@ -1475,7 +1556,7 @@ impl Repository {
                         stale_since = COALESCE(stale_since, now()),
                         stale_reason = $2,
                         stale_build_number = COALESCE(stale_build_number, internal_build_number)
-                    WHERE id = $1 AND hidden_at IS NULL
+                    WHERE id = $1 AND hidden_at IS NULL AND status <> 'suspended'
                     "#,
                 )
                 .bind(client_id)
@@ -3664,7 +3745,7 @@ async fn touch_memory_agent_from_telemetry(
     agents: &Arc<RwLock<Vec<AgentView>>>,
     client_id: &str,
     remote_ip: Option<&str>,
-) -> Option<(String, bool)> {
+) -> Option<(String, bool, String)> {
     let mut agents = agents.write().await;
     let agent = agents.iter_mut().find(|agent| agent.id == client_id)?;
     let previous_status = agent.status.clone();
@@ -3680,7 +3761,11 @@ async fn touch_memory_agent_from_telemetry(
         agent.last_ip = Some(remote_ip.to_string());
     }
     agent.last_seen_at = Some(crate::unix_now().to_string());
-    Some((agent.status.clone(), agent.status != previous_status))
+    Some((
+        agent.status.clone(),
+        agent.status != previous_status,
+        previous_status,
+    ))
 }
 
 #[cfg(test)]

@@ -261,6 +261,12 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         let outcome = dispatch_rejected_outcome(claimed.job_id, "actor_authority_revoked");
         return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
+    if !state.repo.claimed_job_target_dispatchable(&claimed).await? {
+        state
+            .process_job_terminal_events_or_publish_refresh(500, claimed.job_id, None)
+            .await?;
+        return Ok(());
+    }
 
     let command_version =
         crate::job_request::job_command_dispatch_protocol_version(&claimed.operation);

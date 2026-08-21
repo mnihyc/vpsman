@@ -213,6 +213,48 @@ async fn identical_singleflight_callers_share_one_zero_ttl_computation() {
 }
 
 #[tokio::test]
+async fn completed_singleflight_result_is_reused_only_within_bounded_ttl() {
+    let singleflight = super::Singleflight::<usize>::with_ttl(std::time::Duration::from_millis(30));
+    let computations = Arc::new(AtomicUsize::new(0));
+
+    let first_computations = Arc::clone(&computations);
+    assert_eq!(
+        singleflight
+            .run("ttl".to_string(), "panic", "panic", move || async move {
+                Ok(first_computations.fetch_add(1, Ordering::SeqCst) + 1)
+            })
+            .await
+            .unwrap(),
+        1
+    );
+    let cached_computations = Arc::clone(&computations);
+    assert_eq!(
+        singleflight
+            .run("ttl".to_string(), "panic", "panic", move || async move {
+                Ok(cached_computations.fetch_add(1, Ordering::SeqCst) + 1)
+            })
+            .await
+            .unwrap(),
+        1,
+        "a completed read should serve the short post-completion cache window"
+    );
+    assert_eq!(computations.load(Ordering::SeqCst), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(45)).await;
+    let expired_computations = Arc::clone(&computations);
+    assert_eq!(
+        singleflight
+            .run("ttl".to_string(), "panic", "panic", move || async move {
+                Ok(expired_computations.fetch_add(1, Ordering::SeqCst) + 1)
+            })
+            .await
+            .unwrap(),
+        2,
+        "the cache must not turn a telemetry snapshot into a persistent value"
+    );
+}
+
+#[tokio::test]
 async fn cancelled_leader_does_not_cancel_or_strand_singleflight_work() {
     let singleflight = super::Singleflight::<usize>::default();
     let computations = Arc::new(AtomicUsize::new(0));

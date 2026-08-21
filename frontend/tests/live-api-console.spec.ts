@@ -55,7 +55,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     page
       .locator(".consoleHeader")
       .getByText(
-        "2 live / 0 offline / 0 stale / 0 access revoked / 0 no contact / 2 total",
+        "2 live / 0 offline / 0 stale / 0 suspended / 0 access revoked / 0 no contact / 2 total",
       ),
   ).toBeVisible();
 
@@ -71,7 +71,9 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
   await expect(composer).toBeVisible();
-  await composer.getByLabel("Tunnel plan name", { exact: true }).fill("live-gre-a-b");
+  await composer
+    .getByLabel("Tunnel plan name", { exact: true })
+    .fill("live-gre-a-b");
   await composer.getByLabel("Tunnel interface", { exact: true }).fill("gre42");
   await composer.getByLabel("Tunnel kind", { exact: true }).selectOption("gre");
   await composer.getByLabel("Tunnel bandwidth", { exact: true }).fill("1000");
@@ -107,7 +109,9 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     hasText: "Confirm tunnel plan creation",
   });
   await expect(savePrompt).toBeVisible();
-  await savePrompt.getByRole("button", { name: "Save plan", exact: true }).click();
+  await savePrompt
+    .getByRole("button", { name: "Save plan", exact: true })
+    .click();
   await expect(savePrompt).toBeHidden();
   await expect(composer).toBeHidden();
 

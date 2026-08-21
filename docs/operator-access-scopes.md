@@ -63,10 +63,12 @@ Existing write scopes remain separate from read scopes. Examples include
 `jobs:write`, `inventory:write`, `schedules:write`, `backups:write`,
 `network:write`, `config:write`, `integrations:write`, `templates:write`,
 `history:write`, and `sharing:write`. `sharing:write` permits an operator to
-create, update frozen targets, extend, or revoke monitoring shares and recover
-an active bearer URL with **Copy URL**. The same scope already authorizes share
-creation and its returned bearer URL; `sharing:read` remains the separate scope
-for listing management records and target evidence.
+create a monitoring share; review and edit an active share's name, selector,
+frozen targets, and visible-data scope; run the saved-selector-only target
+update; extend or revoke it; and recover an active bearer URL with **Copy URL**.
+The same scope already authorizes share creation and its returned bearer URL;
+`sharing:read` remains the separate scope for listing management records and
+target evidence.
 
 Config > Rules writes require `config:write`. Alert Policy mutations require
 `integrations:write`, `fleet:read`, and `backups:read`, because one policy can
@@ -106,6 +108,35 @@ system rollups, accepted high-resolution telemetry, long-term resource,
 network, and Ping history, authoritative traffic counters, client lifecycle,
 and gateway session retention require `inventory:write`.
 
+## Suspended VPS Boundary
+
+An operator with `inventory:write` may suspend an inventory row whose current
+state is `never`, `disconnected`, `offline`, or `stale`; this deliberately
+includes a never-connected agent. The Fleet table exposes the action beside
+**Restart agent** and **Stop agent**. The API equivalents are
+`POST /api/v1/agents/{client_id}/suspend` with
+`{"confirmed":true,"reason":"optional operator reason"}` and
+`POST /api/v1/agents/{client_id}/unsuspend` with `{"confirmed":true}`. The
+optional reason is trimmed and limited to 240 characters. An online agent is
+not eligible for manual suspension.
+
+Suspension is an expected-offline operational state, not deletion. The VPS and
+its retained telemetry, traffic, job, alert, lifecycle, and audit history stay
+visible in Fleet inventory and history surfaces. It is omitted from private
+and public monitoring cards, summaries, detail routes, dashboards, topology,
+and Network Metrics endpoint evidence. It contributes no warning or offline
+alert. New and still-unstarted job targets are not dispatched; a neutral
+`target_suspended` outcome records each skipped target. Current policy alerts
+are resolved/suppressed, and pending client-scoped fleet notifications and
+generic `alert.triggered` webhook deliveries are canceled or fenced before
+external send. Historical alert and audit evidence is retained.
+
+Manual **Unsuspend** clears suspension provenance and restores the saved
+pre-suspension state. A later authenticated agent hello/online transition also
+clears suspension and sets the VPS online. Either path allows only newly
+eligible work and fresh alert episodes; it does not resurrect skipped jobs or
+pre-suspension alert deliveries.
+
 Server artifact cleanup requires explicit cleanup domains. `job_output` and
 `file_transfer` cleanup require `jobs:write`; `backup_artifact` cleanup requires
 `backups:write`. The preview hash binds the reviewed domains and matched
@@ -115,11 +146,15 @@ artifacts.
 
 Creating a shared view resolves and freezes an exact VPS list, visible metric
 groups, detail-history permission, and expiry. The default expiry is 24 hours;
-the accepted range is one minute through 365 days. An active share's frozen
-targets change only through a reviewed **Update targets** action against its
-saved selector; visibility cannot change after creation. Active links can be
-extended, capped at 365 days from extension time, or revoked immediately and
-irreversibly. Expired and revoked links cannot be reactivated.
+the accepted range is one minute through 365 days. A reviewed **Edit** can
+change an active share's name, selector, exact frozen targets, and visible-data
+scope. It previews exact target and disclosure deltas, preserves the bearer
+identity, visitor history, and unchanged per-VPS keys, and rejects a stale
+revision. **Update targets** remains the narrower shortcut that re-resolves the
+saved selector without changing other definition fields. **Extend** alone
+changes expiry, capped at 365 days from extension time. Active links may be
+revoked immediately and irreversibly; expired and revoked links cannot be
+reactivated.
 
 The returned URL carries a high-entropy secret in its browser fragment. The
 control plane stores the recoverable high-entropy token so authenticated
@@ -133,7 +168,7 @@ and visibility. Subsequent polling updates last-accessed evidence without
 creating another audit event for that visitor.
 
 Public projections always include display name and health. Depending on
-the immutable visibility selection, they may also include allowlisted
+the share's current reviewed visibility selection, they may also include allowlisted
 provider/region/country tags whose values are not IP literals, the optional
 configured product name, resources, network rate, authoritative traffic,
 billing display, normalized system information, general Ping, and detail history.

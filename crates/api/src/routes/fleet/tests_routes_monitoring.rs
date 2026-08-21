@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use super::{
     aligned_timeline_point_count, build_monitoring_cards_page, client_monitoring_view,
-    enrich_monitoring_share_target_evidence, monitoring_cards_for_agents, monitoring_range,
-    network_rate_is_current, public_billing_plan, public_monitoring_card, public_network_metric,
-    public_traffic_metric, retained_resolution_for_age, retained_traffic_resolution_for_age,
-    tier_aligned_step_secs, traffic_uses_exact_source, ClientMonitoringQuery,
+    enrich_monitoring_share_target_evidence, monitoring_agents, monitoring_cards_for_agents,
+    monitoring_range, network_rate_is_current, public_billing_plan, public_monitoring_card,
+    public_network_metric, public_traffic_metric, retained_resolution_for_age,
+    retained_traffic_resolution_for_age, tier_aligned_step_secs, traffic_uses_exact_source,
+    ClientMonitoringQuery,
 };
 use axum::{
     body::Body,
@@ -46,6 +47,50 @@ fn router_test_state() -> AppState {
         suite_config_path: "config/vpsman.toml".into(),
         dispatcher_config: DispatcherRuntimeConfig::default(),
     }
+}
+
+#[tokio::test]
+async fn suspended_agent_is_absent_from_monitoring_cards_and_detail() {
+    let state = router_test_state();
+    let agent = AgentView {
+        id: "suspended-a".to_string(),
+        display_name: "Suspended VPS".to_string(),
+        status: "suspended".to_string(),
+        tags: vec!["provider:test".to_string()],
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(crate::unix_now().to_string()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: Some(uuid::Uuid::new_v4()),
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    };
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(agent.clone());
+
+    assert!(monitoring_agents(&state, None).await.unwrap().is_empty());
+    assert!(monitoring_cards_for_agents(&state, vec![agent])
+        .await
+        .unwrap()
+        .is_empty());
+    let error = client_monitoring_view(
+        &state,
+        "suspended-a",
+        &ClientMonitoringQuery {
+            window: None,
+            start_unix: None,
+            end_unix: None,
+            points: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+    assert_eq!(error.code, "monitoring_client_not_found");
 }
 
 #[tokio::test]
@@ -421,6 +466,13 @@ async fn monitoring_share_routes_are_registered_at_their_public_and_operator_pat
             Body::from(r#"{"share_ids":[]}"#),
         ),
         (
+            "PUT",
+            "/api/v1/monitoring-shares/00000000-0000-4000-8000-000000000001",
+            Body::from(
+                r#"{"name":"Status","selector_expression":"*","target_client_ids":[],"visibility":{},"expected_updated_at":"1"}"#,
+            ),
+        ),
+        (
             "POST",
             "/api/v1/monitoring-shares/revoke",
             Body::from(r#"{"share_ids":[]}"#),
@@ -449,6 +501,23 @@ async fn monitoring_share_routes_are_registered_at_their_public_and_operator_pat
             "{method} {uri}"
         );
     }
+
+    let viewer_only = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/monitoring-shares/00000000-0000-4000-8000-000000000001")
+                .header("content-type", "application/json")
+                .header("x-vpsman-share-token", "viewer-bearer-is-read-only")
+                .body(Body::from(
+                    r#"{"name":"Status","selector_expression":"*","target_client_ids":[],"visibility":{},"expected_updated_at":"1"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(viewer_only.status(), StatusCode::UNAUTHORIZED);
 
     let mut public_request = Request::builder()
         .method("GET")

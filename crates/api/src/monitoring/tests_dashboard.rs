@@ -1063,7 +1063,9 @@ async fn latest_telemetry_snapshots_return_one_current_row_per_resource_key() {
         .unwrap();
     assert_eq!(mixed_eth0.bucket_start, "250");
     assert_eq!(mixed_eth0.bucket_secs, 300);
-    assert_eq!(mixed_eth0.rx_bytes_delta, 10_000);
+    // The effective-time predecessor crosses retained tiers: the fine row at
+    // 200 is newer than the older coarse row at 150.
+    assert_eq!(mixed_eth0.rx_bytes_delta, 5_000);
 
     let scoped_rates = repo
         .list_latest_telemetry_network_rates_for_clients(&["edge-b".to_string()])

@@ -162,6 +162,135 @@ fn coarse_network_overlap_returns_one_whole_physical_bucket() {
 }
 
 #[tokio::test]
+async fn latest_network_rate_uses_effective_time_and_preserves_bucket_parity() {
+    let repo = Repository::Memory(crate::repository::MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    let mut previous_coarse = network_rate_with_counter("v-1", "eth0", 0, 300, 10_000, 20_000);
+    previous_coarse.latest_observed_at = "240".to_string();
+    let mut overlapping_fine = network_rate_with_counter("v-1", "eth0", 420, 60, 4_000, 8_000);
+    overlapping_fine.latest_observed_at = "420".to_string();
+    let mut latest_coarse = network_rate_with_counter("v-1", "eth0", 360, 300, 25_000, 50_000);
+    latest_coarse.latest_observed_at = "600".to_string();
+    memory.telemetry_network_rates.write().await.extend([
+        previous_coarse,
+        overlapping_fine,
+        latest_coarse,
+    ]);
+
+    let mixed = repo
+        .list_latest_telemetry_network_rates(10, Some("v-1"), Some("eth0"), None)
+        .await
+        .unwrap();
+    assert_eq!(mixed.len(), 1);
+    assert_eq!(mixed[0].bucket_start, "360");
+    assert_eq!(mixed[0].latest_observed_at, "600");
+    assert_eq!(mixed[0].rx_bytes_delta, 21_000);
+    assert_eq!(mixed[0].tx_bytes_delta, 42_000);
+
+    let coarse = repo
+        .list_latest_telemetry_network_rates(10, Some("v-1"), Some("eth0"), Some(300))
+        .await
+        .unwrap();
+    assert_eq!(coarse.len(), 1);
+    assert_eq!(coarse[0].bucket_start, "360");
+    assert_eq!(coarse[0].rx_bytes_delta, 15_000);
+    assert_eq!(coarse[0].tx_bytes_delta, 30_000);
+}
+
+#[tokio::test]
+async fn suspended_telemetry_is_hidden_from_monitoring_but_retained_in_history() {
+    let repo = Repository::Memory(crate::repository::MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    memory.agents.write().await.push(crate::model::AgentView {
+        id: "suspended-vps".to_string(),
+        display_name: "suspended-vps".to_string(),
+        status: "suspended".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    });
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .push(raw_sample("suspended-vps", 120));
+    memory
+        .telemetry_rollups
+        .write()
+        .await
+        .push(rollup("suspended-vps", 120));
+    memory.telemetry_network_rates.write().await.extend([
+        network_rate_with_counter("suspended-vps", "eth0", 60, 60, 1_000, 2_000),
+        network_rate_with_counter("suspended-vps", "eth0", 120, 60, 1_100, 2_200),
+    ]);
+
+    assert!(repo
+        .list_telemetry_samples(10, Some("suspended-vps"), None, None, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_telemetry_rollups(10, Some("suspended-vps"), Some(60), true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_latest_telemetry_rollups(10, Some("suspended-vps"), Some(60))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_telemetry_network_rates(10, Some("suspended-vps"), Some("eth0"), Some(60), true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_latest_telemetry_network_rates(10, Some("suspended-vps"), Some("eth0"), Some(60),)
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(
+        repo.list_telemetry_samples(10, Some("suspended-vps"), None, None, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_telemetry_rollups(10, Some("suspended-vps"), Some(60), false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_telemetry_network_rates(
+            10,
+            Some("suspended-vps"),
+            Some("eth0"),
+            Some(60),
+            false,
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn aggregate_rate_selection_filters_interfaces_and_keeps_both_directions() {
     let repo = Repository::Memory(crate::repository::MemoryState::default());
     let Repository::Memory(memory) = &repo else {

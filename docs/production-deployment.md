@@ -295,13 +295,21 @@ docker compose ps
 ```
 
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
+An exact v0.4.6 database already contains `0001`–`0014`; the v0.4.7 bundle
+applies only `0015`–`0020` after all old writers have stopped.
 The exact v0.4.4 `0001`–`0009` migration files and checksums may apply
 `0010_disabled_resource_alert_policies.sql`,
 `0011_operational_alert_lifecycle.sql`,
 `0012_policy_owned_alerts_event_schedules.sql`, and then
 `0013_revisioned_fleet_alert_state_bulk.sql` and
-`0014_disk_telemetry_presence.sql` in place. The exact v0.3.5
-`0001`–`0008` baseline may apply `0009` through `0014`. Keep any
+`0014_disk_telemetry_presence.sql` and
+`0015_latest_network_rate_effective_index.sql` and
+`0016_streaming_traffic_hourly_refresh.sql` and
+`0017_agent_suspension.sql` and
+`0018_traffic_counter_import_class_stream_index.sql` and
+`0019_traffic_import_same_shape_update.sql` and
+`0020_retire_unused_traffic_cycle_usage.sql` in place. The exact v0.3.5
+`0001`–`0008` baseline may apply `0009` through `0020`. Keep any
 earlier or different database with its matching application release, or move
 reviewed data through a separate export/import procedure into a fresh database.
 `0013` deterministically backfills one exact hourly transition ledger from the
@@ -312,6 +320,34 @@ and never start an old writer against the new trigger-maintained schema.
 `0014` adds disk-presence metadata without rewriting retained rollup rows;
 unversioned disk numerics remain stored but are unavailable to current charts
 and policy evaluation until a versioned agent sample supplies new evidence.
+`0015` builds an effective-observation index over retained network-rate rows.
+Keep writers stopped for the migration, and budget temporary disk, WAL, and
+execution time for one ordered index build over `telemetry_network_rates`.
+`0016` replaces only the hourly traffic-ledger refresh function with a narrow,
+per-stream whole-ledger repair; it does not rewrite retained traffic rows.
+`0017` adds nullable suspension provenance, validated state constraints, and
+the matching inventory view fields. It does not rewrite retained telemetry,
+traffic, jobs, or alert history. `0018` is the only no-transaction migration in
+this range: it performs one `CREATE INDEX CONCURRENTLY IF NOT EXISTS` over
+`traffic_counter_samples`. `0019` is transactional trigger code; applying it
+does not rewrite retained rows. Its import fast path is only selected after the
+API proves an exact dense keyset under the client/stream locks, and the trigger
+independently checks primary keys, accounting fields, import class, and clean
+hourly revision markers. Any mismatch falls through to the existing exact
+hourly refresh. `0020` removes the unused `traffic_cycle_usage` prototype
+without `CASCADE`; an external dependency aborts the upgrade. Keep old writers
+stopped through `0020`, and take a verified backup before applying it.
+
+Current API and worker startup share a session advisory lock around migration
+handling. They require the embedded `0018` source and its successful exact
+ledger row, then inspect the schema-qualified index definition and its
+valid/ready/live flags before allowing the migration runner to continue
+through `0020`. A missing index or an exact migration-owned invalid
+index left by an interrupted concurrent build is rebuilt once. A same-name
+object with any other relation kind or definition is never dropped
+automatically; startup fails closed for operator inspection. Follow
+[Traffic-ledger audit and recovery](traffic-ledger-recovery.md) rather than
+editing `_sqlx_migrations` or improvising a replacement.
 
 ## Upgrade and Rollback
 

@@ -781,8 +781,13 @@ fn target_skipped_status_output_value(
     reason_code: &str,
     message: &str,
 ) -> serde_json::Value {
+    let output_type = if reason_code == "target_suspended" {
+        "target_suspended"
+    } else {
+        "target_skipped"
+    };
     json!({
-        "type": "target_skipped",
+        "type": output_type,
         "status": TARGET_STATUS_SKIPPED,
         "code": reason_code,
         "reason": reason_code,
@@ -1102,20 +1107,78 @@ pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
     reason_code: &str,
     message: &str,
 ) -> Result<Vec<Uuid>> {
+    skip_undelivered_targets_for_client_in_tx(tx, client_id, reason_code, message, false, &[]).await
+}
+
+pub(crate) async fn skip_suspended_undelivered_targets_for_client_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    reason_code: &str,
+    message: &str,
+) -> Result<Vec<Uuid>> {
+    skip_suspended_undelivered_targets_for_client_except_in_tx(
+        tx,
+        client_id,
+        reason_code,
+        message,
+        &[],
+    )
+    .await
+}
+
+pub(crate) async fn skip_suspended_undelivered_targets_for_client_except_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    reason_code: &str,
+    message: &str,
+    protected_enqueued_job_ids: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    skip_undelivered_targets_for_client_in_tx(
+        tx,
+        client_id,
+        reason_code,
+        message,
+        true,
+        protected_enqueued_job_ids,
+    )
+    .await
+}
+
+async fn skip_undelivered_targets_for_client_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    reason_code: &str,
+    message: &str,
+    include_claimed_dispatching: bool,
+    protected_enqueued_job_ids: &[Uuid],
+) -> Result<Vec<Uuid>> {
     let rows = sqlx::query(
         r#"
         SELECT job_id, client_id
         FROM job_targets
         WHERE client_id = $1
           AND completed_at IS NULL
-          AND status = 'queued'
-          AND started_at IS NULL
-          AND process_incarnation_id IS NULL
+          AND NOT (job_id = ANY($3::uuid[]))
+          AND (
+                (
+                    status = 'queued'
+                    AND started_at IS NULL
+                    AND process_incarnation_id IS NULL
+                )
+                OR (
+                    $2
+                    AND status = 'dispatching'
+                    AND started_at IS NOT NULL
+                    AND process_incarnation_id IS NOT NULL
+                )
+          )
         ORDER BY job_id
         FOR UPDATE
         "#,
     )
     .bind(client_id)
+    .bind(include_claimed_dispatching)
+    .bind(protected_enqueued_job_ids)
     .fetch_all(&mut **tx)
     .await?;
     let mut job_ids = Vec::new();
@@ -1140,18 +1203,32 @@ pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
                 started_at = COALESCE(started_at, now()),
                 completed_at = now(),
                 dispatch_lease_until = NULL,
+                deadline_at = NULL,
                 last_dispatch_error = NULL
             WHERE job_id = $1
               AND client_id = $2
               AND completed_at IS NULL
-              AND status = 'queued'
-              AND started_at IS NULL
-              AND process_incarnation_id IS NULL
+              AND NOT (job_id = ANY($5::uuid[]))
+              AND (
+                    (
+                        status = 'queued'
+                        AND started_at IS NULL
+                        AND process_incarnation_id IS NULL
+                    )
+                    OR (
+                        $4
+                        AND status = 'dispatching'
+                        AND started_at IS NOT NULL
+                        AND process_incarnation_id IS NOT NULL
+                    )
+              )
             "#,
         )
         .bind(job_id)
         .bind(&target_client_id)
         .bind(message)
+        .bind(include_claimed_dispatching)
+        .bind(protected_enqueued_job_ids)
         .execute(&mut **tx)
         .await?;
         if updated.rows_affected() > 0 {
@@ -3288,7 +3365,10 @@ impl Repository {
                         .iter()
                         .all(|client_id| agents.iter().any(|agent| {
                             agent.id == *client_id
-                                && !matches!(agent.status.as_str(), "revoked" | "deleted")
+                                && !matches!(
+                                    agent.status.as_str(),
+                                    "suspended" | "revoked" | "deleted"
+                                )
                         })),
                     "job_target_no_longer_available"
                 );
@@ -3513,7 +3593,7 @@ impl Repository {
                         SELECT 1
                         FROM visible_clients
                         WHERE id = ANY($1::text[])
-                          AND status IN ('revoked', 'deleted')
+                          AND status IN ('suspended', 'revoked', 'deleted')
                     )
                     "#,
                 )
@@ -3759,7 +3839,10 @@ impl Repository {
                         .iter()
                         .filter(|agent| {
                             !hidden.contains(&agent.id)
-                                && !matches!(agent.status.as_str(), "revoked" | "deleted")
+                                && !matches!(
+                                    agent.status.as_str(),
+                                    "suspended" | "revoked" | "deleted"
+                                )
                         })
                         .map(|agent| agent.id.clone())
                         .collect::<HashSet<_>>()
@@ -4090,7 +4173,7 @@ impl Repository {
                                 )
                               )
                               AND clients.hidden_at IS NULL
-                              AND clients.status NOT IN ('revoked', 'deleted')
+                              AND clients.status NOT IN ('suspended', 'revoked', 'deleted')
                               AND clients.process_incarnation_id IS NOT NULL
                               AND (
                                 (
@@ -4437,6 +4520,106 @@ impl Repository {
         }
     }
 
+    /// Final durable check immediately before the gateway enqueue. Claim and
+    /// client suspension share the identity lifecycle lock, but a claim is
+    /// returned after that transaction commits; this check closes the gap
+    /// between claim return and the central gateway's suspension fence.
+    pub(crate) async fn claimed_job_target_dispatchable(
+        &self,
+        claimed: &ClaimedJobTarget,
+    ) -> Result<bool> {
+        const SUSPENSION_REASON: &str = "target_suspended";
+        const SUSPENSION_MESSAGE: &str =
+            "target_suspended: target skipped because VPS is suspended";
+        match self {
+            Self::Memory(memory) => {
+                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let suspended = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == claimed.client_id)
+                    .is_some_and(|agent| agent.status == "suspended");
+                if suspended {
+                    self.skip_suspended_undelivered_targets_for_client(
+                        &claimed.client_id,
+                        SUSPENSION_REASON,
+                        SUSPENSION_MESSAGE,
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+                Ok(memory.job_targets.read().await.iter().any(|target| {
+                    target.job_id == claimed.job_id
+                        && target.client_id == claimed.client_id
+                        && target.status == TARGET_STATUS_DISPATCHING
+                        && target.completed_at.is_none()
+                        && target
+                            .process_incarnation_id
+                            .is_none_or(|process_incarnation_id| {
+                                process_incarnation_id == claimed.process_incarnation_id
+                            })
+                }))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT client.status AS client_status,
+                           client.hidden_at IS NOT NULL AS client_hidden,
+                           client.process_incarnation_id AS client_process_incarnation_id,
+                           target.status AS target_status,
+                           target.completed_at,
+                           target.process_incarnation_id AS target_process_incarnation_id
+                    FROM job_targets target
+                    LEFT JOIN clients client ON client.id=target.client_id
+                    WHERE target.job_id=$1 AND target.client_id=$2
+                    FOR UPDATE OF target
+                    "#,
+                )
+                .bind(claimed.job_id)
+                .bind(&claimed.client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    tx.commit().await?;
+                    return Ok(false);
+                };
+                let client_status: Option<String> = row.try_get("client_status")?;
+                if client_status.as_deref() == Some("suspended") {
+                    let job_ids = skip_suspended_undelivered_targets_for_client_in_tx(
+                        &mut tx,
+                        &claimed.client_id,
+                        SUSPENSION_REASON,
+                        SUSPENSION_MESSAGE,
+                    )
+                    .await?;
+                    finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &job_ids).await?;
+                    tx.commit().await?;
+                    return Ok(false);
+                }
+                let dispatchable = !row
+                    .try_get::<Option<bool>, _>("client_hidden")?
+                    .unwrap_or(true)
+                    && client_status.as_deref().is_some_and(|status| {
+                        !matches!(status, "suspended" | "revoked" | "deleted")
+                    })
+                    && row.try_get::<Option<Uuid>, _>("client_process_incarnation_id")?
+                        == Some(claimed.process_incarnation_id)
+                    && row.try_get::<String, _>("target_status")? == TARGET_STATUS_DISPATCHING
+                    && row
+                        .try_get::<Option<chrono::DateTime<Utc>>, _>("completed_at")?
+                        .is_none()
+                    && row.try_get::<Option<Uuid>, _>("target_process_incarnation_id")?
+                        == Some(claimed.process_incarnation_id);
+                tx.commit().await?;
+                Ok(dispatchable)
+            }
+        }
+    }
+
     pub(crate) async fn refresh_job_status_from_targets(
         &self,
         job_id: Uuid,
@@ -4469,6 +4652,50 @@ impl Repository {
         reason_code: &str,
         message: &str,
     ) -> Result<Vec<Uuid>> {
+        self.skip_undelivered_targets_for_client(client_id, reason_code, message, false, &[])
+            .await
+    }
+
+    pub(crate) async fn skip_suspended_undelivered_targets_for_client(
+        &self,
+        client_id: &str,
+        reason_code: &str,
+        message: &str,
+    ) -> Result<Vec<Uuid>> {
+        self.skip_suspended_undelivered_targets_for_client_except(
+            client_id,
+            reason_code,
+            message,
+            &[],
+        )
+        .await
+    }
+
+    pub(crate) async fn skip_suspended_undelivered_targets_for_client_except(
+        &self,
+        client_id: &str,
+        reason_code: &str,
+        message: &str,
+        protected_enqueued_job_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        self.skip_undelivered_targets_for_client(
+            client_id,
+            reason_code,
+            message,
+            true,
+            protected_enqueued_job_ids,
+        )
+        .await
+    }
+
+    async fn skip_undelivered_targets_for_client(
+        &self,
+        client_id: &str,
+        reason_code: &str,
+        message: &str,
+        include_claimed_dispatching: bool,
+        protected_enqueued_job_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
         let job_ids = match self {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
@@ -4477,16 +4704,21 @@ impl Repository {
                     let mut targets = memory.job_targets.write().await;
                     for target in targets.iter_mut().filter(|target| {
                         target.client_id == client_id
+                            && !protected_enqueued_job_ids.contains(&target.job_id)
                             && target.completed_at.is_none()
-                            && target.status == TARGET_STATUS_QUEUED
-                            && target.started_at.is_none()
-                            && target.process_incarnation_id.is_none()
+                            && ((target.status == TARGET_STATUS_QUEUED
+                                && target.started_at.is_none()
+                                && target.process_incarnation_id.is_none())
+                                || (include_claimed_dispatching
+                                    && target.status == TARGET_STATUS_DISPATCHING
+                                    && target.started_at.is_some()))
                     }) {
                         target.status = TARGET_STATUS_SKIPPED.to_string();
                         target.message = Some(message.to_string());
                         target.exit_code = Some(0);
                         target.started_at = Some(now.clone());
                         target.completed_at = Some(now.clone());
+                        target.deadline_at = None;
                         changed.push((target.job_id, target.client_id.clone()));
                     }
                 }
@@ -4560,11 +4792,13 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                let job_ids = skip_undelivered_targets_for_client_in_tx(
                     &mut tx,
                     client_id,
                     reason_code,
                     message,
+                    include_claimed_dispatching,
+                    protected_enqueued_job_ids,
                 )
                 .await?;
                 finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &job_ids).await?;

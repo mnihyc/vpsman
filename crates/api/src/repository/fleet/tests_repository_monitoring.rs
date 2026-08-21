@@ -152,6 +152,11 @@ async fn latest_telemetry_uptimes_use_only_each_visible_clients_newest_raw_sampl
         uptime_test_agent("newest-missing"),
         uptime_test_agent("same-timestamp"),
         uptime_test_agent("hidden-deleted"),
+        {
+            let mut agent = uptime_test_agent("suspended");
+            agent.status = "suspended".to_string();
+            agent
+        },
     ]);
     memory
         .hidden_clients
@@ -209,6 +214,12 @@ async fn latest_telemetry_uptimes_use_only_each_visible_clients_newest_raw_sampl
             serde_json::json!({"uptime_secs": 300}),
         ),
         sample(8, "orphan", "400", serde_json::json!({"uptime_secs": 400})),
+        sample(
+            9,
+            "suspended",
+            "500",
+            serde_json::json!({"uptime_secs": 500}),
+        ),
     ]);
 
     let uptimes = repo.list_latest_telemetry_uptimes().await.unwrap();

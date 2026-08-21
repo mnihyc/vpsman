@@ -1,5 +1,8 @@
 use super::*;
-use crate::state::{GatewaySession, GatewaySessionCloseRequest, SESSION_COMMAND_QUEUE_CAPACITY};
+use crate::state::{
+    GatewayCommandEnqueueMarker, GatewaySession, GatewaySessionCloseRequest,
+    SESSION_COMMAND_QUEUE_CAPACITY,
+};
 use vpsman_common::{JobCommand, JobRequest};
 
 #[test]
@@ -69,6 +72,7 @@ async fn full_session_command_queue_returns_busy_error() {
     .to_string();
 
     assert!(error.contains("agent_session_command_queue_full:client-a"));
+    assert!(state.command_enqueues.read().await.is_empty());
 }
 
 #[tokio::test]
@@ -115,6 +119,342 @@ async fn disconnect_bypasses_full_session_command_queue() {
         Some(&GatewaySessionCloseRequest::Graceful(
             "client_key_revoked".to_string()
         ))
+    );
+}
+
+#[tokio::test]
+async fn command_enqueue_before_suspension_fence_is_reported_as_protected() {
+    let state = GatewayState::default();
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    let job_id = uuid::Uuid::new_v4();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let (close_tx, _close_rx) = tokio::sync::watch::channel(None);
+    state.sessions.write().await.insert(
+        "client-a".to_string(),
+        GatewaySession {
+            session_id: uuid::Uuid::new_v4(),
+            process_incarnation_id,
+            sender,
+            close_tx,
+        },
+    );
+    let dispatch_state = state.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_gateway_command(
+            &dispatch_state,
+            GatewayCommandDispatch {
+                client_id: "client-a".to_string(),
+                request: JobRequest {
+                    job_id,
+                    ..test_job_request()
+                },
+                expected_process_incarnation_id: process_incarnation_id,
+                payload_hash: "test-payload-hash".to_string(),
+            },
+        )
+        .await
+    });
+    let message = receiver.recv().await.unwrap();
+    let GatewaySessionMessage::Command(command) = message else {
+        panic!("expected command enqueue");
+    };
+    let fence = prepare_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFencePrepare {
+            client_id: "client-a".to_string(),
+            token: uuid::Uuid::new_v4(),
+            lease_secs: 60,
+        },
+    )
+    .await;
+    assert!(fence.accepted);
+    assert_eq!(fence.enqueued_job_ids, vec![job_id]);
+    command
+        .response
+        .send(GatewayCommandDispatchResult {
+            client_id: "client-a".to_string(),
+            job_id,
+            command_version: 1,
+            accepted: true,
+            message: "accepted".to_string(),
+            outputs: Vec::new(),
+        })
+        .unwrap();
+    assert!(dispatch.await.unwrap().unwrap().accepted);
+}
+
+#[tokio::test]
+async fn suspension_fence_before_enqueue_rejects_even_a_new_session() {
+    let state = GatewayState::default();
+    let token = uuid::Uuid::new_v4();
+    let fence = prepare_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFencePrepare {
+            client_id: "client-a".to_string(),
+            token,
+            lease_secs: 60,
+        },
+    )
+    .await;
+    assert!(fence.accepted);
+    assert!(fence.enqueued_job_ids.is_empty());
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let (close_tx, _close_rx) = tokio::sync::watch::channel(None);
+    state.sessions.write().await.insert(
+        "client-a".to_string(),
+        GatewaySession {
+            session_id: uuid::Uuid::new_v4(),
+            process_incarnation_id,
+            sender,
+            close_tx,
+        },
+    );
+
+    let error = dispatch_gateway_command(
+        &state,
+        GatewayCommandDispatch {
+            client_id: "client-a".to_string(),
+            request: test_job_request(),
+            expected_process_incarnation_id: process_incarnation_id,
+            payload_hash: "test-payload-hash".to_string(),
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "agent_suspended:client-a");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn prepared_fence_expires_or_compensates_but_promoted_fence_requires_committed_clear() {
+    let state = GatewayState::default();
+    let token = uuid::Uuid::new_v4();
+    assert!(
+        prepare_gateway_client_suspension_fence(
+            &state,
+            GatewayClientSuspensionFencePrepare {
+                client_id: "client-a".to_string(),
+                token,
+                lease_secs: 60,
+            },
+        )
+        .await
+        .accepted
+    );
+    assert!(
+        clear_gateway_client_suspension_fence(
+            &state,
+            GatewayClientSuspensionFenceClear {
+                client_id: "client-a".to_string(),
+                expected_token: Some(token),
+                reason: "db_failed".to_string(),
+            },
+        )
+        .await
+        .accepted
+    );
+
+    let promoted_token = uuid::Uuid::new_v4();
+    prepare_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFencePrepare {
+            client_id: "client-a".to_string(),
+            token: promoted_token,
+            lease_secs: 60,
+        },
+    )
+    .await;
+    assert!(
+        promote_gateway_client_suspension_fence(
+            &state,
+            GatewayClientSuspensionFencePromote {
+                client_id: "client-a".to_string(),
+                token: promoted_token,
+            },
+        )
+        .await
+        .accepted
+    );
+    assert!(state.client_suspension_fences.read().await["client-a"]
+        .expires_at
+        .is_none());
+    let mismatched_compensation = clear_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFenceClear {
+            client_id: "client-a".to_string(),
+            expected_token: Some(uuid::Uuid::new_v4()),
+            reason: "stale_compensation".to_string(),
+        },
+    )
+    .await;
+    assert!(!mismatched_compensation.accepted);
+    assert!(mismatched_compensation.fenced);
+    let committed_clear = clear_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFenceClear {
+            client_id: "client-a".to_string(),
+            expected_token: None,
+            reason: "operator_unsuspended".to_string(),
+        },
+    )
+    .await;
+    assert!(committed_clear.accepted);
+    assert!(!committed_clear.fenced);
+
+    let expiring_token = uuid::Uuid::new_v4();
+    prepare_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFencePrepare {
+            client_id: "client-b".to_string(),
+            token: expiring_token,
+            lease_secs: 60,
+        },
+    )
+    .await;
+    state
+        .client_suspension_fences
+        .write()
+        .await
+        .get_mut("client-b")
+        .unwrap()
+        .expires_at = Some(Instant::now() - Duration::from_secs(1));
+    assert!(!state.client_suspension_fences.read().await["client-b"].active_at(Instant::now()));
+
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let (close_tx, _close_rx) = tokio::sync::watch::channel(None);
+    state.sessions.write().await.insert(
+        "client-b".to_string(),
+        GatewaySession {
+            session_id: uuid::Uuid::new_v4(),
+            process_incarnation_id,
+            sender,
+            close_tx,
+        },
+    );
+    let dispatch_state = state.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_gateway_command(
+            &dispatch_state,
+            GatewayCommandDispatch {
+                client_id: "client-b".to_string(),
+                request: test_job_request(),
+                expected_process_incarnation_id: process_incarnation_id,
+                payload_hash: "test-payload-hash".to_string(),
+            },
+        )
+        .await
+    });
+    let GatewaySessionMessage::Command(command) = receiver.recv().await.unwrap() else {
+        panic!("expected command after prepared fence lease expiry");
+    };
+    let job_id = command.request.job_id;
+    command
+        .response
+        .send(GatewayCommandDispatchResult {
+            client_id: "client-b".to_string(),
+            job_id,
+            command_version: 1,
+            accepted: true,
+            message: "accepted".to_string(),
+            outputs: Vec::new(),
+        })
+        .unwrap();
+    assert!(dispatch.await.unwrap().unwrap().accepted);
+}
+
+#[tokio::test]
+async fn repeated_prepare_keeps_enqueue_protection_and_expired_markers_are_pruned() {
+    let state = GatewayState::default();
+    let token = uuid::Uuid::new_v4();
+    let protected_job_id = uuid::Uuid::new_v4();
+    let expired_job_id = uuid::Uuid::new_v4();
+    state.command_enqueues.write().await.insert(
+        ("client-a".to_string(), protected_job_id),
+        GatewayCommandEnqueueMarker {
+            generation: uuid::Uuid::new_v4(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        },
+    );
+    state.command_enqueues.write().await.insert(
+        ("client-b".to_string(), expired_job_id),
+        GatewayCommandEnqueueMarker {
+            generation: uuid::Uuid::new_v4(),
+            expires_at: Instant::now() - Duration::from_secs(1),
+        },
+    );
+
+    let first = prepare_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFencePrepare {
+            client_id: "client-a".to_string(),
+            token,
+            lease_secs: 60,
+        },
+    )
+    .await;
+    let retry = prepare_gateway_client_suspension_fence(
+        &state,
+        GatewayClientSuspensionFencePrepare {
+            client_id: "client-a".to_string(),
+            token,
+            lease_secs: 60,
+        },
+    )
+    .await;
+    assert_eq!(first.enqueued_job_ids, vec![protected_job_id]);
+    assert_eq!(retry.enqueued_job_ids, vec![protected_job_id]);
+    assert!(retry.accepted && retry.fenced);
+
+    assert_eq!(
+        state.prune_expired_command_enqueues(Instant::now()).await,
+        0,
+        "prepare already pruned the globally expired marker"
+    );
+    assert_eq!(state.command_enqueues.read().await.len(), 1);
+}
+
+#[tokio::test]
+async fn failed_same_key_enqueue_cannot_erase_a_later_dispatch_marker() {
+    let state = GatewayState::default();
+    let key = ("client-a".to_string(), uuid::Uuid::new_v4());
+    let first_marker = GatewayCommandEnqueueMarker {
+        generation: uuid::Uuid::new_v4(),
+        expires_at: Instant::now() + Duration::from_secs(60),
+    };
+    let second_marker = GatewayCommandEnqueueMarker {
+        generation: uuid::Uuid::new_v4(),
+        // Equal expiry proves rollback ownership is the unique generation,
+        // not clock resolution or a timestamp comparison.
+        expires_at: first_marker.expires_at,
+    };
+    assert!(state
+        .command_enqueues
+        .write()
+        .await
+        .insert(key.clone(), first_marker)
+        .is_none());
+    let second_prior = state
+        .command_enqueues
+        .write()
+        .await
+        .insert(key.clone(), second_marker);
+
+    rollback_failed_command_enqueue(&state, key.clone(), first_marker, None).await;
+    assert_eq!(
+        state.command_enqueues.read().await.get(&key),
+        Some(&second_marker)
+    );
+
+    rollback_failed_command_enqueue(&state, key.clone(), second_marker, second_prior).await;
+    assert_eq!(
+        state.command_enqueues.read().await.get(&key),
+        Some(&first_marker)
     );
 }
 

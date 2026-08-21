@@ -53,6 +53,7 @@ enum PolicyAlertSource {
 pub(crate) fn build_agent_alert_scopes(agents: &[AgentView]) -> HashMap<String, AgentAlertScope> {
     agents
         .iter()
+        .filter(|agent| agent.is_monitoring_visible())
         .map(|agent| {
             (
                 agent.id.clone(),
@@ -215,6 +216,7 @@ impl AppState {
         };
         let visible_client_ids = visible_agents
             .iter()
+            .filter(|agent| agent.is_monitoring_visible())
             .map(|agent| agent.id.clone())
             .collect::<HashSet<_>>();
         let allowed_client_ids = selector

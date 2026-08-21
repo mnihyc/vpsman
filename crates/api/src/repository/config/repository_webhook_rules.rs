@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
+use sqlx::{types::Json as SqlJson, Executor, PgConnection, Postgres, Row, Transaction};
 use std::collections::{HashMap, HashSet};
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 use vpsman_common::{
     rewrite_retired_alert_event_aliases, rewrite_template_retired_alert_event_aliases,
@@ -12,6 +13,7 @@ use vpsman_common::{
     WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
+use vpsman_server_core::ClientPolicySuppressionSharedGuard;
 
 use crate::{
     model::{AgentView, AuditLogView, AuthContext},
@@ -34,6 +36,53 @@ const MAX_TEMPLATE_BYTES: usize = 4096;
 const MAX_NOTES_BYTES: usize = 1024;
 const MAX_SIGNING_SECRET_BYTES: usize = 1024;
 const WEBHOOK_ROTATION_SCAN_BATCH_SIZE: i64 = 1_000;
+
+pub(crate) struct WebhookRuleAlertSendGuard {
+    postgres_suppression: Option<ClientPolicySuppressionSharedGuard>,
+    memory_lifecycle: Option<OwnedMutexGuard<()>>,
+    eligibility: WebhookRuleAlertSendEligibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookRuleAlertSendEligibility {
+    Deliverable,
+    ClientSuspended,
+    RuleDisabled,
+    InvalidClientScope,
+    LeaseLost,
+}
+
+impl WebhookRuleAlertSendGuard {
+    pub(crate) fn is_deliverable(&self) -> bool {
+        self.eligibility == WebhookRuleAlertSendEligibility::Deliverable
+    }
+
+    pub(crate) fn cancellation_reason(&self) -> Option<&'static str> {
+        match self.eligibility {
+            WebhookRuleAlertSendEligibility::ClientSuspended => Some("client_suspended"),
+            WebhookRuleAlertSendEligibility::RuleDisabled => Some("webhook rule disabled"),
+            WebhookRuleAlertSendEligibility::InvalidClientScope => {
+                Some("client_alert_scope_invalid")
+            }
+            WebhookRuleAlertSendEligibility::Deliverable
+            | WebhookRuleAlertSendEligibility::LeaseLost => None,
+        }
+    }
+
+    fn postgres_connection(&mut self) -> Option<&mut PgConnection> {
+        self.postgres_suppression
+            .as_mut()
+            .map(ClientPolicySuppressionSharedGuard::connection)
+    }
+
+    pub(crate) async fn release(self) -> Result<()> {
+        if let Some(guard) = self.postgres_suppression {
+            guard.release().await?;
+        }
+        drop(self.memory_lifecycle);
+        Ok(())
+    }
+}
 
 impl Repository {
     /// Performs the single guarded 0012 canonicalization pass before any
@@ -881,6 +930,14 @@ impl Repository {
                     .filter(|rule| rule.enabled)
                     .map(|rule| (rule.id, rule.signing_secret.clone()))
                     .collect::<HashMap<_, _>>();
+                let suspended_client_ids = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| agent.status == "suspended")
+                    .map(|agent| agent.id.clone())
+                    .collect::<HashSet<_>>();
                 let mut deliveries = memory.webhook_rule_deliveries.write().await;
                 let mut claimed = Vec::new();
                 for delivery in deliveries.iter_mut() {
@@ -891,6 +948,11 @@ impl Repository {
                             WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
                                 | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
                         )
+                        || (delivery.event_kind == "alert.triggered"
+                            && delivery
+                                .matched_vps
+                                .iter()
+                                .any(|agent| suspended_client_ids.contains(&agent.id)))
                     {
                         continue;
                     }
@@ -919,6 +981,15 @@ impl Repository {
                           ON rule.id = delivery.rule_id
                          AND rule.enabled = TRUE
                         WHERE delivery.status IN ('queued', 'failed')
+                          AND NOT (
+                              delivery.event_kind='alert.triggered'
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM jsonb_array_elements(delivery.matched_vps) matched
+                                  JOIN clients subject ON subject.id=matched->>'id'
+                                  WHERE subject.status='suspended'
+                              )
+                          )
                         ORDER BY delivery.created_at ASC, delivery.id ASC
                         FOR UPDATE OF delivery SKIP LOCKED
                     )
@@ -989,6 +1060,146 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn begin_webhook_rule_alert_send(
+        &self,
+        delivery_id: Uuid,
+        lease_id: Uuid,
+    ) -> Result<WebhookRuleAlertSendGuard> {
+        match self {
+            Self::Memory(memory) => {
+                let initial = memory
+                    .webhook_rule_deliveries
+                    .read()
+                    .await
+                    .iter()
+                    .find(|delivery| delivery.id == delivery_id)
+                    .cloned()
+                    .context("webhook rule delivery not found")?;
+                if initial.event_kind != "alert.triggered" || initial.matched_vps.is_empty() {
+                    return Ok(WebhookRuleAlertSendGuard {
+                        postgres_suppression: None,
+                        memory_lifecycle: None,
+                        eligibility: if initial.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS {
+                            WebhookRuleAlertSendEligibility::Deliverable
+                        } else {
+                            WebhookRuleAlertSendEligibility::LeaseLost
+                        },
+                    });
+                }
+                let lifecycle = memory.agent_key_lifecycle.clone().lock_owned().await;
+                let delivery = memory
+                    .webhook_rule_deliveries
+                    .read()
+                    .await
+                    .iter()
+                    .find(|delivery| delivery.id == delivery_id)
+                    .cloned()
+                    .context("webhook rule delivery not found")?;
+                let mut client_ids = delivery
+                    .matched_vps
+                    .iter()
+                    .map(|agent| agent.id.clone())
+                    .collect::<Vec<_>>();
+                client_ids.sort();
+                client_ids.dedup();
+                let enabled = memory
+                    .webhook_rules
+                    .read()
+                    .await
+                    .iter()
+                    .any(|rule| rule.id == delivery.rule_id && rule.enabled);
+                let agents = memory.agents.read().await;
+                let subject_count = agents
+                    .iter()
+                    .filter(|agent| client_ids.contains(&agent.id))
+                    .count();
+                let subject_suspended = agents
+                    .iter()
+                    .any(|agent| client_ids.contains(&agent.id) && agent.status == "suspended");
+                let eligibility = if delivery.status != WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS {
+                    WebhookRuleAlertSendEligibility::LeaseLost
+                } else if !enabled {
+                    WebhookRuleAlertSendEligibility::RuleDisabled
+                } else if client_ids.is_empty()
+                    || client_ids.len() != delivery.matched_vps.len()
+                    || subject_count != client_ids.len()
+                {
+                    WebhookRuleAlertSendEligibility::InvalidClientScope
+                } else if subject_suspended {
+                    WebhookRuleAlertSendEligibility::ClientSuspended
+                } else {
+                    WebhookRuleAlertSendEligibility::Deliverable
+                };
+                Ok(WebhookRuleAlertSendGuard {
+                    postgres_suppression: None,
+                    memory_lifecycle: Some(lifecycle),
+                    eligibility,
+                })
+            }
+            Self::Postgres(pool) => {
+                let Some((event_kind, matched_count, mut client_ids)) =
+                    sqlx::query_as::<_, (String, i32, Vec<String>)>(
+                        r#"
+                        SELECT event_kind, jsonb_array_length(matched_vps),
+                               ARRAY(
+                                   SELECT matched->>'id'
+                                   FROM jsonb_array_elements(matched_vps) matched
+                                   WHERE jsonb_typeof(matched)='object'
+                                     AND NULLIF(btrim(matched->>'id'),'') IS NOT NULL
+                                   ORDER BY matched->>'id'
+                               )
+                        FROM webhook_rule_deliveries
+                        WHERE id=$1
+                        "#,
+                    )
+                    .bind(delivery_id)
+                    .fetch_optional(pool)
+                    .await?
+                else {
+                    return Ok(WebhookRuleAlertSendGuard {
+                        postgres_suppression: None,
+                        memory_lifecycle: None,
+                        eligibility: WebhookRuleAlertSendEligibility::LeaseLost,
+                    });
+                };
+                if event_kind != "alert.triggered" || matched_count == 0 {
+                    return Ok(WebhookRuleAlertSendGuard {
+                        postgres_suppression: None,
+                        memory_lifecycle: None,
+                        eligibility: WebhookRuleAlertSendEligibility::Deliverable,
+                    });
+                }
+                client_ids.sort();
+                client_ids.dedup();
+                if client_ids.is_empty() {
+                    return Ok(WebhookRuleAlertSendGuard {
+                        postgres_suppression: None,
+                        memory_lifecycle: None,
+                        eligibility: WebhookRuleAlertSendEligibility::InvalidClientScope,
+                    });
+                }
+                let mut guard = ClientPolicySuppressionSharedGuard::acquire_many(
+                    pool,
+                    client_ids.iter().map(String::as_str),
+                )
+                .await?;
+                let eligibility = postgres_webhook_rule_alert_send_eligibility(
+                    guard.connection(),
+                    delivery_id,
+                    lease_id,
+                    &client_ids,
+                    matched_count,
+                )
+                .await?;
+                Ok(WebhookRuleAlertSendGuard {
+                    postgres_suppression: Some(guard),
+                    memory_lifecycle: None,
+                    eligibility,
+                })
+            }
+        }
+    }
+
     pub(crate) async fn complete_webhook_rule_delivery_attempt(
         &self,
         delivery_id: Uuid,
@@ -996,6 +1207,7 @@ impl Repository {
         status: &str,
         error: Option<&str>,
         next_attempt_after_secs: Option<i64>,
+        send_guard: Option<&mut WebhookRuleAlertSendGuard>,
     ) -> Result<WebhookRuleDeliveryView> {
         let status = normalize_delivery_attempt_status(status)?;
         let error = error
@@ -1010,6 +1222,9 @@ impl Repository {
                     .iter_mut()
                     .find(|delivery| delivery.id == delivery_id)
                     .context("webhook rule delivery not found")?;
+                if delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED {
+                    return Ok(delivery.clone());
+                }
                 anyhow::ensure!(
                     delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
                     "webhook rule delivery is not claimed"
@@ -1026,55 +1241,30 @@ impl Repository {
                 Ok(delivery.clone())
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    UPDATE webhook_rule_deliveries
-                    SET
-                        status = $2,
-                        error = $3,
-                        attempt_count = attempt_count + 1,
-                        delivery_lease_id = NULL,
-                        delivery_lease_until = NULL,
-                        next_attempt_at = CASE
-                            WHEN $5::bigint IS NULL THEN NULL
-                            ELSE now() + ($5::bigint * interval '1 second')
-                        END,
-                        last_attempt_at = now(),
-                        delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END
-                    WHERE id = $1
-                      AND status = 'in_progress'
-                      AND delivery_lease_id = $4
-                    RETURNING
-                        id,
-                        rule_id,
-                        rule_name,
-                        event_kind,
-                        event_id,
-                        status,
-                        target,
-                        dedupe_key,
-                        payload,
-                        matched_vps,
-                        message,
-                        error,
-                        cooldown_until_unix,
-                        attempt_count,
-                        next_attempt_at::text AS next_attempt_at,
-                        last_attempt_at::text AS last_attempt_at,
-                        actor_id,
-                        created_at::text AS created_at,
-                        delivered_at::text AS delivered_at
-                    "#,
-                )
-                .bind(delivery_id)
-                .bind(status)
-                .bind(error.as_deref())
-                .bind(lease_id)
-                .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
-                .fetch_optional(pool)
-                .await?
-                .context("webhook rule delivery not found or not claimed")?;
-                webhook_delivery_from_row(row)
+                match send_guard.and_then(WebhookRuleAlertSendGuard::postgres_connection) {
+                    Some(connection) => {
+                        postgres_complete_webhook_rule_delivery_attempt(
+                            connection,
+                            delivery_id,
+                            lease_id,
+                            status,
+                            error.as_deref(),
+                            next_attempt_after_secs,
+                        )
+                        .await
+                    }
+                    None => {
+                        postgres_complete_webhook_rule_delivery_attempt(
+                            pool,
+                            delivery_id,
+                            lease_id,
+                            status,
+                            error.as_deref(),
+                            next_attempt_after_secs,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }
@@ -1084,6 +1274,7 @@ impl Repository {
         delivery_id: Uuid,
         lease_id: Uuid,
         error: &str,
+        send_guard: Option<&mut WebhookRuleAlertSendGuard>,
     ) -> Result<WebhookRuleDeliveryView> {
         let error = error
             .trim()
@@ -1097,6 +1288,9 @@ impl Repository {
                     .iter_mut()
                     .find(|delivery| delivery.id == delivery_id)
                     .context("webhook rule delivery not found")?;
+                if delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED {
+                    return Ok(delivery.clone());
+                }
                 anyhow::ensure!(
                     delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
                     "webhook rule delivery is not claimed"
@@ -1108,48 +1302,26 @@ impl Repository {
                 Ok(delivery.clone())
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    UPDATE webhook_rule_deliveries
-                    SET
-                        status = 'canceled_disabled',
-                        error = $3,
-                        delivery_lease_id = NULL,
-                        delivery_lease_until = NULL,
-                        next_attempt_at = NULL,
-                        delivered_at = NULL
-                    WHERE id = $1
-                      AND status = 'in_progress'
-                      AND delivery_lease_id = $2
-                    RETURNING
-                        id,
-                        rule_id,
-                        rule_name,
-                        event_kind,
-                        event_id,
-                        status,
-                        target,
-                        dedupe_key,
-                        payload,
-                        matched_vps,
-                        message,
-                        error,
-                        cooldown_until_unix,
-                        attempt_count,
-                        next_attempt_at::text AS next_attempt_at,
-                        last_attempt_at::text AS last_attempt_at,
-                        actor_id,
-                        created_at::text AS created_at,
-                        delivered_at::text AS delivered_at
-                    "#,
-                )
-                .bind(delivery_id)
-                .bind(lease_id)
-                .bind(&error)
-                .fetch_optional(pool)
-                .await?
-                .context("webhook rule delivery not found or not claimed")?;
-                webhook_delivery_from_row(row)
+                match send_guard.and_then(WebhookRuleAlertSendGuard::postgres_connection) {
+                    Some(connection) => {
+                        postgres_cancel_claimed_webhook_rule_delivery(
+                            connection,
+                            delivery_id,
+                            lease_id,
+                            &error,
+                        )
+                        .await
+                    }
+                    None => {
+                        postgres_cancel_claimed_webhook_rule_delivery(
+                            pool,
+                            delivery_id,
+                            lease_id,
+                            &error,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }
@@ -1948,6 +2120,181 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
             Ok(value.to_string())
         })
         .transpose()
+}
+
+async fn postgres_webhook_rule_alert_send_eligibility<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    expected_client_ids: &[String],
+    expected_matched_count: i32,
+) -> Result<WebhookRuleAlertSendEligibility>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT
+            delivery.status='in_progress'
+                AND delivery.delivery_lease_id=$2 AS lease_owned,
+            rule.enabled AS rule_enabled,
+            delivery.event_kind='alert.triggered'
+                AND jsonb_array_length(delivery.matched_vps)=$4
+                AND cardinality($3::text[])=$4
+                AND ARRAY(
+                    SELECT client.id
+                    FROM (
+                        SELECT DISTINCT matched->>'id' AS id
+                        FROM jsonb_array_elements(delivery.matched_vps) matched
+                        WHERE jsonb_typeof(matched)='object'
+                          AND NULLIF(btrim(matched->>'id'),'') IS NOT NULL
+                    ) client
+                    ORDER BY client.id
+                ) = $3::text[]
+                AND (
+                    SELECT count(*) FROM clients subject
+                    WHERE subject.id=ANY($3::text[])
+                ) = cardinality($3::text[]) AS scope_exact,
+            EXISTS (
+                SELECT 1 FROM clients subject
+                WHERE subject.id=ANY($3::text[])
+                  AND subject.status='suspended'
+            ) AS subject_suspended,
+            EXISTS (
+                SELECT 1
+                FROM alert_lifecycle_events lifecycle
+                JOIN alert_episodes episode
+                  ON episode.id=lifecycle.episode_id
+                 AND episode.trigger_generation=lifecycle.trigger_generation
+                WHERE lifecycle.edge_kind='alert.triggered'
+                  AND lifecycle.event_id=delivery.event_id
+                  AND episode.evidence#>>'{_vpsman_client_suspension,client_id}'
+                        = ANY($3::text[])
+            ) AS source_suppressed
+        FROM webhook_rule_deliveries delivery
+        JOIN webhook_rules rule ON rule.id=delivery.rule_id
+        WHERE delivery.id=$1
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(lease_id)
+    .bind(expected_client_ids)
+    .bind(expected_matched_count)
+    .fetch_optional(executor)
+    .await?
+    else {
+        return Ok(WebhookRuleAlertSendEligibility::LeaseLost);
+    };
+    if !row.try_get::<bool, _>("lease_owned")? {
+        return Ok(WebhookRuleAlertSendEligibility::LeaseLost);
+    }
+    if !row.try_get::<bool, _>("rule_enabled")? {
+        return Ok(WebhookRuleAlertSendEligibility::RuleDisabled);
+    }
+    if !row.try_get::<bool, _>("scope_exact")? {
+        return Ok(WebhookRuleAlertSendEligibility::InvalidClientScope);
+    }
+    if row.try_get::<bool, _>("subject_suspended")?
+        || row.try_get::<bool, _>("source_suppressed")?
+    {
+        return Ok(WebhookRuleAlertSendEligibility::ClientSuspended);
+    }
+    Ok(WebhookRuleAlertSendEligibility::Deliverable)
+}
+
+async fn postgres_complete_webhook_rule_delivery_attempt<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    status: &str,
+    error: Option<&str>,
+    next_attempt_after_secs: Option<i64>,
+) -> Result<WebhookRuleDeliveryView>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query(
+        r#"
+        UPDATE webhook_rule_deliveries
+        SET status=$2, error=$3, attempt_count=attempt_count+1,
+            delivery_lease_id=NULL, delivery_lease_until=NULL,
+            next_attempt_at=CASE
+                WHEN $5::bigint IS NULL THEN NULL
+                ELSE now() + ($5::bigint * interval '1 second')
+            END,
+            last_attempt_at=now(),
+            delivered_at=CASE WHEN $2='delivered' THEN now() ELSE NULL END
+        WHERE id=$1 AND status='in_progress' AND delivery_lease_id=$4
+        RETURNING
+            id, rule_id, rule_name, event_kind, event_id, status, target,
+            dedupe_key, payload, matched_vps, message, error,
+            cooldown_until_unix, attempt_count,
+            next_attempt_at::text AS next_attempt_at,
+            last_attempt_at::text AS last_attempt_at, actor_id,
+            created_at::text AS created_at,
+            delivered_at::text AS delivered_at
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(status)
+    .bind(error)
+    .bind(lease_id)
+    .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
+    .fetch_optional(executor)
+    .await?
+    .context("webhook rule delivery not found or not claimed")?;
+    webhook_delivery_from_row(row)
+}
+
+async fn postgres_cancel_claimed_webhook_rule_delivery<'e, E>(
+    executor: E,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    error: &str,
+) -> Result<WebhookRuleDeliveryView>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query(
+        r#"
+        WITH updated AS (
+            UPDATE webhook_rule_deliveries
+            SET status='canceled_disabled', error=$3,
+                delivery_lease_id=NULL, delivery_lease_until=NULL,
+                next_attempt_at=NULL, delivered_at=NULL
+            WHERE id=$1 AND status='in_progress' AND delivery_lease_id=$2
+            RETURNING
+                id, rule_id, rule_name, event_kind, event_id, status, target,
+                dedupe_key, payload, matched_vps, message, error,
+                cooldown_until_unix, attempt_count,
+                next_attempt_at::text AS next_attempt_at,
+                last_attempt_at::text AS last_attempt_at, actor_id,
+                created_at::text AS created_at,
+                delivered_at::text AS delivered_at
+        )
+        SELECT * FROM updated
+        UNION ALL
+        SELECT
+            id, rule_id, rule_name, event_kind, event_id, status, target,
+            dedupe_key, payload, matched_vps, message, error,
+            cooldown_until_unix, attempt_count,
+            next_attempt_at::text AS next_attempt_at,
+            last_attempt_at::text AS last_attempt_at, actor_id,
+            created_at::text AS created_at,
+            delivered_at::text AS delivered_at
+        FROM webhook_rule_deliveries
+        WHERE id=$1 AND status='canceled_disabled'
+          AND NOT EXISTS (SELECT 1 FROM updated)
+        LIMIT 1
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(lease_id)
+    .bind(error)
+    .fetch_optional(executor)
+    .await?
+    .context("webhook rule delivery not found or not claimed")?;
+    webhook_delivery_from_row(row)
 }
 
 fn normalize_delivery_attempt_status(status: &str) -> Result<&'static str> {

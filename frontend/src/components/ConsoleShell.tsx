@@ -183,7 +183,7 @@ export function ConsoleShell({
   const unavailableCount =
     summary.offline + summary.stale + summary.revoked + noContactCount;
   const fleetStatusTitle = fleetCoreEvidenceAvailable
-    ? `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${summary.revoked} access revoked; ${noContactCount} no contact; ${summary.running_jobs} running jobs`
+    ? `${summaryScopeLabel}: ${summary.total} VPS; ${summary.online} online; ${summary.offline} offline; ${summary.stale} stale; ${summary.suspended} suspended; ${summary.revoked} access revoked; ${noContactCount} no contact; ${summary.running_jobs} running jobs`
     : `${summaryScopeLabel}: fleet status evidence unavailable`;
   const fleetStatusText = fleetCoreEvidenceAvailable
     ? [
@@ -191,6 +191,7 @@ export function ConsoleShell({
         `${summary.online} online`,
         summary.offline > 0 ? `${summary.offline} offline` : null,
         summary.stale > 0 ? `${summary.stale} stale` : null,
+        summary.suspended > 0 ? `${summary.suspended} suspended` : null,
         summary.revoked > 0 ? `${summary.revoked} access revoked` : null,
         noContactCount > 0 ? `${noContactCount} no contact` : null,
         `${summary.running_jobs} running job${summary.running_jobs === 1 ? "" : "s"}`,

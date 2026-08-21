@@ -1132,6 +1132,71 @@ export function App() {
     [dashboard.operator?.preferences],
   );
   const visibleAgents = fleetViews.filteredAgents;
+  const monitorVisibleAgents = useMemo(
+    () => visibleAgents.filter((agent) => agent.status !== "suspended"),
+    [visibleAgents],
+  );
+  const monitorAllAgents = useMemo(
+    () => dashboard.agents.filter((agent) => agent.status !== "suspended"),
+    [dashboard.agents],
+  );
+  const suspendedClientIds = useMemo(
+    () =>
+      new Set(
+        dashboard.agents
+          .filter((agent) => agent.status === "suspended")
+          .map((agent) => agent.id),
+      ),
+    [dashboard.agents],
+  );
+  const monitorNetworkObservations = useMemo(
+    () =>
+      dashboard.networkObservations.filter(
+        (observation) =>
+          !suspendedClientIds.has(observation.client_id) &&
+          (observation.peer_client_id === null ||
+            !suspendedClientIds.has(observation.peer_client_id)),
+      ),
+    [dashboard.networkObservations, suspendedClientIds],
+  );
+  const monitorNetworkTrends = useMemo(
+    () =>
+      dashboard.networkTrends.filter(
+        (trend) =>
+          !suspendedClientIds.has(trend.client_id) &&
+          (trend.peer_client_id === null ||
+            !suspendedClientIds.has(trend.peer_client_id)),
+      ),
+    [dashboard.networkTrends, suspendedClientIds],
+  );
+  const monitorOspfRecommendations = useMemo(
+    () =>
+      dashboard.ospfRecommendations.filter(
+        (recommendation) =>
+          !suspendedClientIds.has(recommendation.left_client_id) &&
+          !suspendedClientIds.has(recommendation.right_client_id),
+      ),
+    [dashboard.ospfRecommendations, suspendedClientIds],
+  );
+  const monitorTelemetryTunnels = useMemo(
+    () =>
+      dashboard.telemetryTunnels.filter(
+        (tunnel) =>
+          !suspendedClientIds.has(tunnel.client_id) &&
+          (tunnel.peer_client_id === null ||
+            !suspendedClientIds.has(tunnel.peer_client_id)),
+      ),
+    [dashboard.telemetryTunnels, suspendedClientIds],
+  );
+  const monitorTunnelPlans = useMemo(
+    () =>
+      dashboard.tunnelPlans.filter(
+        (plan) =>
+          !suspendedClientIds.has(plan.left_client_id) &&
+          !suspendedClientIds.has(plan.right_client_id),
+      ),
+    [dashboard.tunnelPlans, suspendedClientIds],
+  );
   const activeSubpage = normalizeSubpage(
     activeView,
     activeSubpages[activeView],
@@ -1186,6 +1251,19 @@ export function App() {
       displaySummaryForAgents(visibleAgents, dashboard.summary.running_jobs),
     [dashboard.summary.running_jobs, visibleAgents],
   );
+  const monitorVisibleSummary = useMemo(
+    () =>
+      displaySummaryForAgents(
+        monitorVisibleAgents,
+        dashboard.summary.running_jobs,
+      ),
+    [dashboard.summary.running_jobs, monitorVisibleAgents],
+  );
+  const monitorAllSummary = useMemo(
+    () =>
+      displaySummaryForAgents(monitorAllAgents, dashboard.summary.running_jobs),
+    [dashboard.summary.running_jobs, monitorAllAgents],
+  );
   const pageTitle = getScopedPageTitle(activeView, activeSubpage);
   const hasFleetScope =
     fleetViews.fleetQuery.trim().length > 0 ||
@@ -1234,9 +1312,18 @@ export function App() {
     schedules: dashboard.schedulesTruncated,
   };
   const shellSummary =
-    hasFleetScope || activeView === "Home" || activeView === "Fleet"
-      ? visibleSummary
-      : dashboard.summary;
+    activeView === "Home"
+      ? monitorVisibleSummary
+      : activeView === "Observability" &&
+          (activeSubpage === "fleet_metrics" ||
+            activeSubpage === "network_metrics" ||
+            activeSubpage === "dashboards")
+        ? hasFleetScope
+          ? monitorVisibleSummary
+          : monitorAllSummary
+        : hasFleetScope || activeView === "Fleet"
+          ? visibleSummary
+          : dashboard.summary;
   const summaryScopeLabel = hasFleetScope ? "Current scope" : "Entire fleet";
   const shellAlertCounts = useMemo(() => {
     const scopedClientIds = new Set(visibleAgents.map((agent) => agent.id));
@@ -1320,13 +1407,15 @@ export function App() {
     shellSummary.total,
   ]);
   const pageDescription =
-    activeView === "Fleet" && !dashboard.fleetCoreEvidenceAvailable
-      ? "Fleet inventory evidence unavailable; retry before assuming the fleet is empty"
-      : activeView === "Fleet" && hasFleetScope
-        ? `${visibleSummary.online} visible live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
-        : activeView === "Fleet"
-          ? `${visibleSummary.online} live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
-          : getScopedPageDescription(activeView, activeSubpage);
+    activeView === "Fleet" && activeSubpage === "monitor"
+      ? getScopedPageDescription(activeView, activeSubpage)
+      : activeView === "Fleet" && !dashboard.fleetCoreEvidenceAvailable
+        ? "Fleet inventory evidence unavailable; retry before assuming the fleet is empty"
+        : activeView === "Fleet" && hasFleetScope
+          ? `${visibleSummary.online} visible live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.suspended} suspended / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
+          : activeView === "Fleet"
+            ? `${visibleSummary.online} live / ${visibleSummary.offline} offline / ${visibleSummary.stale} stale / ${visibleSummary.suspended} suspended / ${visibleSummary.revoked} access revoked / ${visibleSummary.never + visibleSummary.unknown} no contact / ${visibleSummary.total} total`
+            : getScopedPageDescription(activeView, activeSubpage);
 
   useEffect(() => {
     setPreferredTimeZone(operatorPreferences.timezone);
@@ -1807,7 +1896,7 @@ export function App() {
   function renderHomePanel() {
     return (
       <HomePanel
-        agents={visibleAgents}
+        agents={monitorVisibleAgents}
         allAgents={dashboard.agents}
         apiToken={dashboard.apiToken}
         auditLogs={dashboard.audits}
@@ -1856,7 +1945,7 @@ export function App() {
         schedules={homeScopedRecords.schedules}
         showCountryFlags={operatorPreferences.show_country_flags}
         scopeFiltered={hasFleetScope}
-        summary={visibleSummary}
+        summary={monitorVisibleSummary}
         systemDashboard={dashboard.systemDashboard}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryError={dashboard.dashboardOverviewError}
@@ -1922,6 +2011,7 @@ export function App() {
         onCreateJob={dashboard.createJob}
         onBulkMutateTags={dashboard.bulkMutateTags}
         onDeleteAgents={dashboard.deleteAgents}
+        onMutateAgentSuspensions={dashboard.mutateAgentSuspensions}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
         onNavigatePanel={selectReleaseDestination}
@@ -2389,7 +2479,7 @@ export function App() {
   function renderFleetMetricsPanel() {
     return (
       <FleetMetricsPanel
-        agents={visibleAgents}
+        agents={monitorVisibleAgents}
         error={dashboard.dashboardOverviewError}
         loading={dashboard.dashboardOverviewLoading}
         onPreferencesChange={dashboard.updateDashboardPreferences}
@@ -2406,18 +2496,18 @@ export function App() {
   function renderNetworkMetricsPanel() {
     return (
       <NetworkMetricsPanel
-        agents={dashboard.agents}
+        agents={monitorAllAgents}
         error={dashboard.topologyError}
-        networkObservations={dashboard.networkObservations}
-        networkTrends={dashboard.networkTrends}
+        networkObservations={monitorNetworkObservations}
+        networkTrends={monitorNetworkTrends}
         onLoadNetworkObservations={dashboard.loadNetworkObservations}
         onLoadNetworkTrends={dashboard.loadNetworkTrends}
         onOpenEvidence={() => selectView("Network", "evidence")}
         onOpenOspf={() => selectView("Network", "ospf")}
         onOpenTests={() => selectView("Network", "tests")}
-        ospfRecommendations={dashboard.ospfRecommendations}
-        telemetryTunnels={dashboard.telemetryTunnels}
-        tunnelPlans={dashboard.tunnelPlans}
+        ospfRecommendations={monitorOspfRecommendations}
+        telemetryTunnels={monitorTelemetryTunnels}
+        tunnelPlans={monitorTunnelPlans}
       />
     );
   }
@@ -2913,7 +3003,7 @@ export function App() {
       if (activeSubpage === "monitor") {
         return (
           <FleetMonitorPanel
-            agents={visibleAgents}
+            agents={monitorVisibleAgents}
             apiToken={dashboard.apiToken}
             apiError={dashboard.apiError}
             backups={dashboard.backups}
@@ -3433,14 +3523,19 @@ function displaySummaryForAgents(
     (state) => state.label === "Never connected",
   ).length;
   const stale = states.filter((state) => state.label === "Stale").length;
+  const suspended = states.filter(
+    (state) => state.label === "Suspended",
+  ).length;
   const revoked = states.filter(
     (state) => state.label === "Access revoked",
   ).length;
-  const unknown = agents.length - online - offline - never - revoked - stale;
+  const unknown =
+    agents.length - online - offline - never - suspended - revoked - stale;
   return {
     never,
     offline,
     online,
+    suspended,
     revoked,
     running_jobs: runningJobs,
     stale,

@@ -126,6 +126,30 @@ fn gateway_failed_plain_status_output_preserves_agent_reason() {
 }
 
 #[test]
+fn suspended_target_precompletion_is_neutral_and_canonical() {
+    let job_id = Uuid::new_v4();
+    let outcome = suspended_target_skip_outcome(
+        job_id,
+        &SuspendedTargetSkip {
+            client_id: "suspended-a".to_string(),
+        },
+        &JobCommand::ConfigRead,
+    )
+    .unwrap();
+    assert_eq!(outcome.status, TARGET_STATUS_SKIPPED);
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(!outcome.accepted);
+    assert_eq!(
+        outcome.message,
+        "target_suspended: target skipped because VPS is suspended"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&outcome.outputs[0].data).unwrap();
+    assert_eq!(payload["type"], "target_suspended");
+    assert_eq!(payload["reason"], "target_suspended");
+    assert_eq!(payload["status"], TARGET_STATUS_SKIPPED);
+}
+
+#[test]
 fn busy_update_skip_uses_shared_reason_code() {
     let job_id = Uuid::new_v4();
     let outcome = busy_update_skip_outcome(

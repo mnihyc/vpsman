@@ -54,6 +54,11 @@ for file in "${files[@]}"; do
           break
         fi
       done
+    elif [[ "$file" == "0020_retire_unused_traffic_cycle_usage.sql" &&
+      "${#destructive_lines[@]}" -eq 1 ]]; then
+      reviewed_destructive=1
+      [[ "${destructive_lines[0]}" == "DROP TABLE IF EXISTS public.traffic_cycle_usage;" ]] ||
+        reviewed_destructive=0
     fi
     [[ "$reviewed_destructive" -eq 1 ]] ||
       fail "destructive DDL requires an explicit clean-baseline decision: $file"

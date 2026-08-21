@@ -21,6 +21,7 @@ import type {
   HostServiceInventoryRecord,
   HostStorageInventoryRecord,
   JobRolloutRecord,
+  MonitoringCardView,
   NetworkAdapterDefinitionRecord,
   OperatorAuthEventRecord,
   ScheduleRecord,
@@ -68,6 +69,7 @@ const summary = {
   never: 0,
   offline: 0,
   online: 0,
+  suspended: 0,
   revoked: 0,
   running_jobs: 3,
   stale: 1,
@@ -4126,6 +4128,7 @@ export async function installConsoleApiMock(
     jobRolloutsOverride?: JobRolloutRecord[];
     jobTargetDelayMs?: number;
     monitoringCardsDelayMs?: number;
+    monitoringCardsOverride?: MonitoringCardView[];
     monitoringNetworkRateExpectedOverride?: boolean;
     monitoringPingStateCoverage?: boolean;
     monitoringRangeOverride?: Partial<{
@@ -4286,6 +4289,7 @@ export async function installConsoleApiMock(
       jobRolloutsFixture,
       jobTargetDelayMsFixture,
       monitoringCardsDelayMsFixture,
+      monitoringCardsOverrideFixture,
       monitoringNetworkRateExpectedOverrideFixture,
       monitoringPingStateCoverageFixture,
       monitoringRangeOverrideFixture,
@@ -4620,6 +4624,7 @@ export async function installConsoleApiMock(
         backupPolicyUpdates: [] as unknown[],
         backupPolicyPrunes: [] as unknown[],
         agentDeletes: [] as unknown[],
+        agentSuspensions: [] as unknown[],
         artifactCleanupJobs: [] as unknown[],
         artifactCleanupPreviews: [] as unknown[],
         bulkTagMutations: [] as unknown[],
@@ -6636,16 +6641,26 @@ export async function installConsoleApiMock(
           const stale = currentAgents.filter(
             (agent) => agent.status === "stale",
           ).length;
+          const suspended = currentAgents.filter(
+            (agent) => agent.status === "suspended",
+          ).length;
           const revoked = currentAgents.filter(
             (agent) => agent.status === "revoked",
           ).length;
           const unknown =
-            currentAgents.length - online - offline - never - revoked - stale;
+            currentAgents.length -
+            online -
+            offline -
+            never -
+            suspended -
+            revoked -
+            stale;
           return jsonResponse({
             ...summaryFixture,
             never,
             offline,
             online,
+            suspended,
             revoked,
             stale,
             total: currentAgents.length,
@@ -7366,6 +7381,15 @@ export async function installConsoleApiMock(
                 (row) => row.client_id === client.id,
               ) ?? null,
           }));
+          if (monitoringCardsOverrideFixture) {
+            items.splice(
+              0,
+              items.length,
+              ...monitoringCardsOverrideFixture.filter((card) =>
+                cardAgents.some((client) => client.id === card.client.id),
+              ),
+            );
+          }
           const page = items.slice(offset, offset + limit);
           const nextOffset = offset + page.length;
           return jsonResponse({
@@ -7711,6 +7735,46 @@ export async function installConsoleApiMock(
         const deleteAgentMatch = pathname.match(
           /^\/api\/v1\/agents\/([^/]+)\/delete$/,
         );
+        const suspensionMatch = pathname.match(
+          /^\/api\/v1\/agents\/([^/]+)\/(suspend|unsuspend)$/,
+        );
+        if (suspensionMatch && method === "POST") {
+          const clientId = decodeURIComponent(suspensionMatch[1]);
+          const action = suspensionMatch[2] as "suspend" | "unsuspend";
+          const body = (await readJsonBody(input, init)) as Record<
+            string,
+            unknown
+          > | null;
+          requests.agentSuspensions.push({
+            action,
+            client_id: clientId,
+            ...(body ?? {}),
+          });
+          const agent = agentsFixture.find(
+            (candidate) => candidate.id === clientId,
+          );
+          if (!agent) {
+            return jsonResponse({ error: "agent_not_found" }, 404);
+          }
+          const fromStatus = agent.status;
+          agent.status = action === "suspend" ? "suspended" : "stale";
+          return jsonResponse({
+            agent,
+            resolved_alert_count: action === "suspend" ? 1 : 0,
+            skipped_unstarted_job_ids:
+              action === "suspend"
+                ? ["91919191-9191-4191-8191-919191919191"]
+                : [],
+            suspended_at: action === "suspend" ? "2026-06-05T20:45:00Z" : null,
+            suspended_by:
+              action === "suspend"
+                ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                : null,
+            suspended_from_status: action === "suspend" ? fromStatus : null,
+            suspended_reason:
+              action === "suspend" ? (body?.reason ?? null) : null,
+          });
+        }
         if (deleteAgentMatch && method === "POST") {
           if (agentDeleteDelayMsFixture > 0) {
             await new Promise((resolve) =>
@@ -12139,6 +12203,7 @@ export async function installConsoleApiMock(
       jobRolloutsFixture: options.jobRolloutsOverride ?? jobRollouts,
       jobTargetDelayMsFixture: options.jobTargetDelayMs ?? 0,
       monitoringCardsDelayMsFixture: options.monitoringCardsDelayMs ?? 0,
+      monitoringCardsOverrideFixture: options.monitoringCardsOverride ?? null,
       monitoringNetworkRateExpectedOverrideFixture:
         options.monitoringNetworkRateExpectedOverride,
       monitoringPingStateCoverageFixture:

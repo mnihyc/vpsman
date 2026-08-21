@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::PgWorkerTestDb;
+use tokio::sync::oneshot;
 
 #[test]
 fn webhook_rule_worker_config_clamps_operational_bounds_and_validates_retention() {
@@ -447,6 +448,408 @@ async fn postgres_subjectless_generic_alert_edges_do_not_borrow_fleet_subjects()
         .iter()
         .all(|delivery| delivery.2 .0.as_array().is_some_and(Vec::is_empty)));
 
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_suspended_client_alert_trigger_materializes_neutral_cancellation() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = format!("suspended-alert-{}", Uuid::new_v4().simple());
+    insert_webhook_test_client(&db.pool, &client_id, "offline", false).await;
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET status='suspended', suspended_at=now(),
+            suspended_reason='test', suspended_from_status='offline'
+        WHERE id=$1
+        "#,
+    )
+    .bind(&client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    insert_webhook_test_rule(&db.pool, "suspended-alert-trigger", "alert.triggered").await;
+    let event_id = format!("fleet-alert:{client_id}:triggered");
+    assert!(insert_webhook_event(
+        &db.pool,
+        "alert.triggered",
+        &event_id,
+        &["alert.triggered", "alert.category:agent_status"],
+        std::slice::from_ref(&client_id),
+        json!({
+            "event": {"kind": "alert.triggered", "id": &event_id},
+            "alert": {
+                "id": format!("agent_status:agent:{client_id}"),
+                "record_kind": "condition",
+                "lifecycle_state": "triggered",
+                "category": "agent_status",
+                "client_id": &client_id,
+            },
+        }),
+    )
+    .await
+    .unwrap());
+
+    assert_eq!(
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+            .await
+            .unwrap(),
+        (1, 0)
+    );
+    let delivery = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, error FROM webhook_rule_deliveries",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        delivery,
+        (
+            WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
+            Some("client_suspended".to_string())
+        )
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_unsuspend_never_resurrects_a_pre_suspension_alert_trigger() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = format!("pending-alert-{}", Uuid::new_v4().simple());
+    insert_webhook_test_client(&db.pool, &client_id, "offline", false).await;
+    insert_webhook_test_rule(&db.pool, "pending-alert-trigger", "alert.triggered").await;
+    let (episode_id, event_id, event_seq, payload) =
+        insert_pending_client_alert_lifecycle_source(&db.pool, &client_id).await;
+
+    // Model the durable part of suspend_agent followed by manual unsuspend.
+    // The client is eligible again, but the old immutable episode generation
+    // remains marked as suppressed and cannot be revived.
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET status='suspended', suspended_at=now(),
+            suspended_reason='test', suspended_from_status='offline'
+        WHERE id=$1
+        "#,
+    )
+    .bind(&client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE alert_episodes
+        SET lifecycle_state='resolved', resolved_at=now(),
+            resolution_reason='source_scope_exited',
+            evidence=evidence || jsonb_build_object(
+                '_vpsman_client_suspension',
+                jsonb_build_object('client_id',$2::text,'suppressed_at',now())
+            ),
+            updated_at=now()
+        WHERE id=$1
+        "#,
+    )
+    .bind(episode_id)
+    .bind(&client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, action, target, metadata)
+        VALUES (
+            $1,'agent.suspended',$2,
+            '{"result":"succeeded","origin_kind":"operator_request","component":"inventory-controller"}'::jsonb
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("client:{client_id}"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET status='offline', suspended_at=NULL, suspended_by=NULL,
+            suspended_reason=NULL, suspended_from_status=NULL
+        WHERE id=$1
+        "#,
+    )
+    .bind(&client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // Projection happens only after unsuspend. The immutable episode marker,
+    // rather than the client's current status, rejects this old generation.
+    let webhook_event_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_events (
+            id, kind, event_id, event_predicates, subject_client_ids,
+            payload, occurred_at, alert_lifecycle_event_seq
+        ) VALUES (
+            $1,'alert.triggered',$2,
+            ARRAY['alert.triggered','alert.category:agent_status','alert.severity:warning'],
+            ARRAY[$3]::text[],$4,now(),$5
+        )
+        "#,
+    )
+    .bind(webhook_event_id)
+    .bind(&event_id)
+    .bind(&client_id)
+    .bind(SqlJson(payload))
+    .bind(event_seq)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+            .await
+            .unwrap(),
+        (1, 0)
+    );
+    let delivery = sqlx::query_as::<_, (String, Option<String>, i32, Option<DateTime<Utc>>)>(
+        r#"
+        SELECT status, error, attempt_count, delivered_at
+        FROM webhook_rule_deliveries WHERE event_id=$1
+        "#,
+    )
+    .bind(&event_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(delivery.0, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED);
+    assert_eq!(delivery.1.as_deref(), Some("client_suspended"));
+    assert_eq!(delivery.2, 0);
+    assert!(delivery.3.is_none());
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT processed_at IS NOT NULL FROM webhook_events WHERE id=$1",
+    )
+    .bind(webhook_event_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    let retained = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT lifecycle_state,
+               evidence#>>'{_vpsman_client_suspension,client_id}'
+        FROM alert_episodes WHERE id=$1
+        "#,
+    )
+    .bind(episode_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained, ("resolved".to_string(), client_id.clone()));
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM audit_logs WHERE target=$1 AND action='agent.suspended')",
+    )
+    .bind(format!("client:{client_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_client_alert_webhook_send_fence_linearizes_suspension() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = format!("webhook-alert-fence-{}", Uuid::new_v4().simple());
+    insert_webhook_test_client(&db.pool, &client_id, "offline", false).await;
+    let rule_id =
+        insert_webhook_test_rule(&db.pool, "webhook-alert-fence", "alert.triggered").await;
+    let delivery_id = Uuid::new_v4();
+    let lease_id = Uuid::new_v4();
+    insert_claimed_client_alert_webhook_delivery(
+        &db.pool,
+        rule_id,
+        delivery_id,
+        lease_id,
+        &client_id,
+    )
+    .await;
+    let delivery = DeliveryRow {
+        id: delivery_id,
+        rule_id,
+        actor_id: None,
+        rule_name: "webhook-alert-fence".to_string(),
+        event_kind: "alert.triggered".to_string(),
+        event_id: format!("fleet-alert:{client_id}:triggered"),
+        target: "https://hooks.example.invalid/vpsman".to_string(),
+        signing_secret: None,
+        payload: json!({}),
+        attempt_count: 0,
+    };
+    let mut send_guard = begin_client_alert_webhook_send(&db.pool, delivery_id, lease_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        send_guard.eligibility,
+        ClientAlertWebhookSendEligibility::Deliverable
+    );
+
+    let suspension_pool = db.pool.clone();
+    let suspension_client_id = client_id.clone();
+    let (attempting_tx, attempted_rx) = oneshot::channel();
+    let mut suspension = tokio::spawn(async move {
+        let mut tx = suspension_pool.begin().await.unwrap();
+        attempting_tx.send(()).unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(vpsman_server_core::client_policy_suppression_lock_key(
+                &suspension_client_id,
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE clients
+            SET status='suspended', suspended_at=now(),
+                suspended_reason='test', suspended_from_status='offline'
+            WHERE id=$1
+            "#,
+        )
+        .bind(&suspension_client_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE webhook_rule_deliveries delivery
+            SET status='canceled_disabled', error='client_suspended',
+                delivery_lease_id=NULL, delivery_lease_until=NULL
+            WHERE delivery.event_kind='alert.triggered'
+              AND delivery.status IN ('queued','failed','in_progress')
+              AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(delivery.matched_vps) matched
+                    WHERE matched->>'id'=$1
+              )
+            "#,
+        )
+        .bind(&suspension_client_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    });
+    attempted_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut suspension)
+            .await
+            .is_err(),
+        "suspension must wait for a client alert webhook send that won the fence"
+    );
+
+    let recorded = complete_webhook_rule_delivery_on_connection(
+        send_guard
+            .postgres_connection()
+            .expect("client alert webhook guard must own a connection"),
+        &delivery,
+        lease_id,
+        WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(recorded, Some(1));
+    send_guard.release().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), suspension)
+        .await
+        .expect("suspension did not resume after webhook outcome commit")
+        .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM webhook_rule_deliveries WHERE id=$1")
+            .bind(delivery_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED);
+
+    let blocked_delivery_id = Uuid::new_v4();
+    let blocked_lease_id = Uuid::new_v4();
+    insert_claimed_client_alert_webhook_delivery(
+        &db.pool,
+        rule_id,
+        blocked_delivery_id,
+        blocked_lease_id,
+        &client_id,
+    )
+    .await;
+    let blocked_guard =
+        begin_client_alert_webhook_send(&db.pool, blocked_delivery_id, blocked_lease_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        blocked_guard.eligibility,
+        ClientAlertWebhookSendEligibility::ClientSuspended
+    );
+    blocked_guard.release().await.unwrap();
+
+    for mutation in ["matched_vps || matched_vps", "matched_vps || '[{}]'::jsonb"] {
+        let invalid_delivery_id = Uuid::new_v4();
+        let invalid_lease_id = Uuid::new_v4();
+        insert_claimed_client_alert_webhook_delivery(
+            &db.pool,
+            rule_id,
+            invalid_delivery_id,
+            invalid_lease_id,
+            &client_id,
+        )
+        .await;
+        sqlx::query(&format!(
+            "UPDATE webhook_rule_deliveries SET matched_vps={mutation} WHERE id=$1"
+        ))
+        .bind(invalid_delivery_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let invalid =
+            begin_client_alert_webhook_send(&db.pool, invalid_delivery_id, invalid_lease_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            invalid.eligibility,
+            ClientAlertWebhookSendEligibility::InvalidClientScope,
+            "duplicate and malformed client snapshots must fail closed"
+        );
+        invalid.release().await.unwrap();
+    }
+
+    sqlx::query("UPDATE webhook_rules SET enabled=FALSE WHERE id=$1")
+        .bind(rule_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let disabled_delivery_id = Uuid::new_v4();
+    let disabled_lease_id = Uuid::new_v4();
+    insert_claimed_client_alert_webhook_delivery(
+        &db.pool,
+        rule_id,
+        disabled_delivery_id,
+        disabled_lease_id,
+        &client_id,
+    )
+    .await;
+    let disabled_guard =
+        begin_client_alert_webhook_send(&db.pool, disabled_delivery_id, disabled_lease_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        disabled_guard.eligibility,
+        ClientAlertWebhookSendEligibility::RuleDisabled,
+        "a concurrent rule disable retains its canonical cancellation reason"
+    );
+    disabled_guard.release().await.unwrap();
     db.cleanup().await;
 }
 
@@ -1138,6 +1541,116 @@ fn subjectless_generic_alert_edges_match_only_event_and_alert_context() {
             "VPS-dependent expression must fail closed: {expression}"
         );
     }
+}
+
+async fn insert_claimed_client_alert_webhook_delivery(
+    pool: &PgPool,
+    rule_id: Uuid,
+    delivery_id: Uuid,
+    lease_id: Uuid,
+    client_id: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_rule_deliveries (
+            id, rule_id, rule_name, event_kind, event_id, status,
+            target, dedupe_key, payload, matched_vps, message,
+            cooldown_until_unix, delivery_lease_id, delivery_lease_until
+        ) VALUES (
+            $1, $2, 'webhook-alert-fence', 'alert.triggered', $3,
+            'in_progress', 'https://hooks.example.invalid/vpsman', $4,
+            '{}'::jsonb, jsonb_build_array(jsonb_build_object('id',$5::text)),
+            'alert', 0, $6, now() + interval '60 seconds'
+        )
+        "#,
+    )
+    .bind(delivery_id)
+    .bind(rule_id)
+    .bind(format!("fleet-alert:{client_id}:{delivery_id}:triggered"))
+    .bind(format!("webhook-alert-fence:{delivery_id}"))
+    .bind(client_id)
+    .bind(lease_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_pending_client_alert_lifecycle_source(
+    pool: &PgPool,
+    client_id: &str,
+) -> (Uuid, String, i64, Value) {
+    let episode_id = Uuid::new_v4();
+    let public_id = format!("pending-alert:{episode_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO alert_episodes (
+            id, public_id, producer_kind, natural_key, record_kind,
+            trigger_generation, trigger_severity, trigger_category, severity,
+            category, target_kind, target_id, client_id, title, detail,
+            source_status, evidence, lifecycle_state, triggered_at,
+            last_confirmed_at, policy_group_id, policy_rule_id,
+            policy_rule_version, policy_rule_kind, policy_group_name,
+            policy_rule_name, policy_rule_system_seed_key
+        )
+        SELECT
+            $1, $2, rule.evidence_source, $3, 'condition', 1,
+            'warning', 'agent_status', 'warning', 'agent_status',
+            'agent', $3, $3, 'Pending client alert', 'test pending edge',
+            'offline', '{}'::jsonb, 'triggered', now(), now(),
+            rule.group_id, rule.id, rule.rule_version, rule.rule_kind,
+            policy.name, rule.name, rule.system_seed_key
+        FROM policy_rules rule
+        JOIN policy_groups policy ON policy.id=rule.group_id
+        WHERE rule.id='d1000000-0000-4000-8000-000000000003'
+        "#,
+    )
+    .bind(episode_id)
+    .bind(&public_id)
+    .bind(client_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let event_id = format!("fleet-alert:{episode_id}:triggered");
+    let event_seq: i64 = sqlx::query_scalar("SELECT nextval('alert_lifecycle_event_seq')")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let payload = json!({
+        "event": {"kind": "alert.triggered", "id": &event_id},
+        "alert": {
+            "id": &public_id,
+            "episode_id": episode_id,
+            "record_kind": "condition",
+            "lifecycle_state": "triggered",
+            "trigger_generation": 1,
+            "severity": "warning",
+            "category": "agent_status",
+            "client_id": client_id,
+        },
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO alert_lifecycle_events (
+            event_seq, id, episode_id, trigger_generation, edge_kind,
+            event_id, event_predicates, subject_client_ids, payload,
+            occurred_at
+        ) VALUES (
+            $1,$2,$3,1,'alert.triggered',$4,
+            ARRAY['alert.triggered','alert.category:agent_status','alert.severity:warning'],
+            ARRAY[$5]::text[],$6,now()
+        )
+        "#,
+    )
+    .bind(event_seq)
+    .bind(Uuid::new_v4())
+    .bind(episode_id)
+    .bind(&event_id)
+    .bind(client_id)
+    .bind(SqlJson(&payload))
+    .execute(pool)
+    .await
+    .unwrap();
+    (episode_id, event_id, event_seq, payload)
 }
 
 async fn insert_webhook_test_client(pool: &PgPool, client_id: &str, status: &str, hidden: bool) {

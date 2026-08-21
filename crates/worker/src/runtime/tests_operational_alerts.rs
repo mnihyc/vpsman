@@ -394,6 +394,433 @@ async fn postgres_offline_transition_records_neutral_policy_evidence() {
     db.cleanup().await;
 }
 
+#[tokio::test]
+async fn postgres_offline_sweep_skips_locked_oldest_and_records_each_transition_once() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let oldest_client_id = "offline-sweep-locked-oldest";
+    let peer_client_id = "offline-sweep-unlocked-peer";
+    insert_lifecycle_client(&db.pool, oldest_client_id, "online", true).await;
+    insert_lifecycle_client(&db.pool, peer_client_id, "online", true).await;
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET last_seen_at = CASE id
+            WHEN $1 THEN clock_timestamp() - interval '2 hours'
+            ELSE clock_timestamp() - interval '1 hour'
+        END
+        WHERE id = ANY($2::text[])
+        "#,
+    )
+    .bind(oldest_client_id)
+    .bind(vec![
+        oldest_client_id.to_string(),
+        peer_client_id.to_string(),
+    ])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let mut oldest_holder = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM clients WHERE id = $1 FOR UPDATE")
+        .bind(oldest_client_id)
+        .execute(&mut *oldest_holder)
+        .await
+        .unwrap();
+    let first_sweep = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        detect_offline_agents(&db.pool, 60),
+    )
+    .await
+    .expect("a locked oldest client blocked the offline sweep")
+    .unwrap();
+    assert_eq!(first_sweep, 1);
+    let first_statuses: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, status
+        FROM clients
+        WHERE id = ANY($1::text[])
+        ORDER BY id
+        "#,
+    )
+    .bind(vec![
+        oldest_client_id.to_string(),
+        peer_client_id.to_string(),
+    ])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        first_statuses,
+        vec![
+            (oldest_client_id.to_string(), "online".to_string()),
+            (peer_client_id.to_string(), "offline".to_string()),
+        ]
+    );
+
+    oldest_holder.rollback().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            detect_offline_agents(&db.pool, 60),
+        )
+        .await
+        .expect("released oldest client was not processed promptly")
+        .unwrap(),
+        1
+    );
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
+    for client_id in [oldest_client_id, peer_client_id] {
+        assert_eq!(
+            offline_side_effect_counts(&db.pool, client_id).await,
+            (1, 1, 1, 1, 1),
+            "offline transition side effects were not exactly once for {client_id}"
+        );
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_offline_sweep_does_not_pin_client_behind_reconcile_advisory() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "offline-sweep-advisory-held";
+    insert_lifecycle_client(&db.pool, client_id, "online", true).await;
+
+    let mut holder = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("vpsman:operational-alert-reconcile")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let skipped = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        detect_offline_agents(&db.pool, 60),
+    )
+    .await
+    .expect("offline sweep waited behind the reconcile advisory")
+    .unwrap();
+    assert_eq!(skipped, 0);
+    assert_eq!(
+        offline_side_effect_counts(&db.pool, client_id).await,
+        (0, 0, 0, 0, 0)
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query(
+            "UPDATE clients SET last_seen_at = clock_timestamp() - interval '2 hours' WHERE id = $1",
+        )
+        .bind(client_id)
+        .execute(&db.pool),
+    )
+    .await
+    .expect("offline sweep pinned the selected client row behind the advisory")
+    .unwrap();
+
+    holder.rollback().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            detect_offline_agents(&db.pool, 60),
+        )
+        .await
+        .expect("offline retry did not resume after the advisory was released")
+        .unwrap(),
+        1
+    );
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
+    assert_eq!(
+        offline_side_effect_counts(&db.pool, client_id).await,
+        (1, 1, 1, 1, 1)
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_offline_candidate_plan_is_index_bounded_with_equal_timestamps() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO clients (
+            id, display_name, public_key, status, last_seen_at, capabilities
+        )
+        SELECT
+            format('offline-plan-%s', lpad(client_number::text, 5, '0')),
+            format('offline-plan-%s', lpad(client_number::text, 5, '0')),
+            decode(md5(format('offline-plan-%s', client_number)), 'hex'),
+            'online',
+            date_trunc('minute', clock_timestamp() - interval '2 hours'),
+            '{}'::jsonb
+        FROM generate_series(1, 10000) client(client_number)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE clients")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let explain_sql = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {OFFLINE_CANDIDATE_SQL}");
+    let plan: Value = sqlx::query_scalar(&explain_sql)
+        .bind(60_f64)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let root = &plan[0]["Plan"];
+    assert!(
+        !plan_contains_node_type(root, "Sort"),
+        "equal timestamps introduced a candidate sort: {plan}"
+    );
+    assert!(
+        !relation_uses_node_type(root, "clients", "Seq Scan"),
+        "offline candidate used a clients sequential scan: {plan}"
+    );
+    assert!(
+        plan.to_string().contains("clients_visible_status_idx"),
+        "offline candidate did not use the visible status/last-seen index: {plan}"
+    );
+    let examined = relation_examined_rows(root, "clients");
+    assert!(
+        examined <= 4.0,
+        "offline candidate examined {examined} client rows: {plan}"
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_offline_sweep_stops_at_batch_and_resumes_remaining_client() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO clients (
+            id, display_name, public_key, status, last_seen_at, capabilities
+        )
+        SELECT
+            format('offline-batch-%s', lpad(client_number::text, 3, '0')),
+            format('offline-batch-%s', lpad(client_number::text, 3, '0')),
+            decode(md5(format('offline-batch-%s', client_number)), 'hex'),
+            'online', clock_timestamp() - interval '2 hours', '{}'::jsonb
+        FROM generate_series(1, 101) client(client_number)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 100);
+    let statuses: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*) FILTER (WHERE status = 'offline'),
+               count(*) FILTER (WHERE status = 'online')
+        FROM clients
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(statuses, (100, 1));
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 1);
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
+    let effects: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM client_status_history
+             WHERE from_status = 'online' AND to_status = 'offline'
+               AND reason = 'agent_offline_timeout'),
+            (SELECT count(*) FROM audit_logs WHERE action = 'agent.status_offline'),
+            (SELECT count(*) FROM webhook_events WHERE kind = 'vps.status_changed'),
+            (SELECT count(*) FROM alert_policy_evidence
+             WHERE source_kind = 'agent.status' AND source_status = 'offline'),
+            (SELECT count(*) FROM alert_policy_evidence
+             WHERE source_kind = 'agent.access' AND source_status = 'offline')
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(effects, (101, 101, 101, 101, 101));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_offline_sweep_rolls_back_mid_transition_failure_before_retry() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "offline-sweep-rollback";
+    insert_lifecycle_client(&db.pool, client_id, "online", true).await;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_offline_history_for_test() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.client_id = 'offline-sweep-rollback'
+               AND NEW.reason = 'agent_offline_timeout' THEN
+                RAISE EXCEPTION 'injected offline side-effect failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fail_offline_history_for_test
+        BEFORE INSERT ON client_status_history
+        FOR EACH ROW EXECUTE FUNCTION fail_offline_history_for_test()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let error = detect_offline_agents(&db.pool, 60)
+        .await
+        .expect_err("injected side-effect failure unexpectedly committed");
+    assert!(error
+        .to_string()
+        .contains("injected offline side-effect failure"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM clients WHERE id = $1")
+            .bind(client_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "online"
+    );
+    assert_eq!(
+        offline_side_effect_counts(&db.pool, client_id).await,
+        (0, 0, 0, 0, 0)
+    );
+
+    sqlx::query("DROP TRIGGER fail_offline_history_for_test ON client_status_history")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION fail_offline_history_for_test()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 1);
+    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
+    assert_eq!(
+        offline_side_effect_counts(&db.pool, client_id).await,
+        (1, 1, 1, 1, 1)
+    );
+
+    db.cleanup().await;
+}
+
+async fn offline_side_effect_counts(pool: &PgPool, client_id: &str) -> (i64, i64, i64, i64, i64) {
+    sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM client_status_history
+             WHERE client_id = $1
+               AND from_status = 'online' AND to_status = 'offline'
+               AND reason = 'agent_offline_timeout'),
+            (SELECT count(*) FROM audit_logs
+             WHERE action = 'agent.status_offline'
+               AND target = 'client:' || $1),
+            (SELECT count(*) FROM webhook_events
+             WHERE kind = 'vps.status_changed'
+               AND $1 = ANY(subject_client_ids)),
+            (SELECT count(*) FROM alert_policy_evidence
+             WHERE subject_client_id = $1
+               AND source_kind = 'agent.status'
+               AND source_status = 'offline'),
+            (SELECT count(*) FROM alert_policy_evidence
+             WHERE subject_client_id = $1
+               AND source_kind = 'agent.access'
+               AND source_status = 'offline')
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn plan_contains_node_type(plan: &Value, node_type: &str) -> bool {
+    plan.get("Node Type")
+        .and_then(Value::as_str)
+        .is_some_and(|candidate| candidate.contains(node_type))
+        || plan
+            .get("Plans")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| plan_contains_node_type(child, node_type))
+            })
+}
+
+fn relation_uses_node_type(plan: &Value, relation: &str, node_type: &str) -> bool {
+    (plan.get("Relation Name").and_then(Value::as_str) == Some(relation)
+        && plan
+            .get("Node Type")
+            .and_then(Value::as_str)
+            .is_some_and(|candidate| candidate.contains(node_type)))
+        || plan
+            .get("Plans")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| relation_uses_node_type(child, relation, node_type))
+            })
+}
+
+fn relation_examined_rows(plan: &Value, relation: &str) -> f64 {
+    let own = if plan.get("Relation Name").and_then(Value::as_str) == Some(relation) {
+        let loops = plan
+            .get("Actual Loops")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let actual = plan
+            .get("Actual Rows")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let filtered = plan
+            .get("Rows Removed by Filter")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let rechecked = plan
+            .get("Rows Removed by Index Recheck")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        (actual + filtered + rechecked) * loops
+    } else {
+        0.0
+    };
+    own + plan
+        .get("Plans")
+        .and_then(Value::as_array)
+        .map(|children| {
+            children
+                .iter()
+                .map(|child| relation_examined_rows(child, relation))
+                .sum::<f64>()
+        })
+        .unwrap_or_default()
+}
+
 async fn insert_lifecycle_client(pool: &PgPool, client_id: &str, status: &str, stale: bool) {
     let public_key = hex::decode(vpsman_common::payload_hash(client_id.as_bytes())).unwrap();
     sqlx::query(

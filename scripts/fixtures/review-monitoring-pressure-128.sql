@@ -1,10 +1,22 @@
 \set ON_ERROR_STOP on
 
+\if :{?pressure_skip_traffic}
+\else
+\set pressure_skip_traffic false
+\endif
+
 -- Supplemental load fixture for the isolated real-data monitoring review.
 -- The base fixture owns the eight review-* semantic cases. This fixture owns
 -- only pressure-* rows and may be reapplied without changing those cases.
 
 BEGIN ISOLATION LEVEL REPEATABLE READ;
+
+CREATE TEMP TABLE pressure_fixture_options (
+    skip_traffic BOOLEAN NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO pressure_fixture_options (skip_traffic)
+VALUES (:'pressure_skip_traffic'::boolean);
 
 -- Keep the ownership preflight valid until commit. Ordinary client writes take
 -- ROW EXCLUSIVE, which conflicts with this lock, while this transaction can
@@ -480,6 +492,8 @@ CROSS JOIN base_rates base;
 -- One statement deliberately exceeds the hourly trigger's large-import
 -- boundary. The trigger must rebuild each complete stream, advance its source
 -- revision, and mark the materialized revision clean in this transaction.
+\if :pressure_skip_traffic
+\else
 WITH pressure_clients AS (
     SELECT
         client.id AS client_id,
@@ -520,6 +534,7 @@ SELECT
     0,
     'pressure_fixture'
 FROM traffic_points point;
+\endif
 
 ANALYZE
     clients,
@@ -549,7 +564,10 @@ DECLARE
     pressure_hourly_sample_count BIGINT;
     pressure_hourly_rx_bytes NUMERIC;
     pressure_hourly_tx_bytes NUMERIC;
+    skip_traffic BOOLEAN;
 BEGIN
+    SELECT options.skip_traffic INTO skip_traffic
+    FROM pressure_fixture_options options;
     SELECT count(*) INTO pressure_client_count
     FROM clients client
     JOIN pressure_fixture_client_ids owned ON owned.client_id = client.id;
@@ -668,59 +686,74 @@ BEGIN
         RAISE EXCEPTION
             'pressure telemetry lost authoritative physical-disk semantics';
     END IF;
-    IF pressure_traffic_count <> 345720 OR EXISTS (
-        SELECT 1
-        FROM traffic_counter_samples sample
-        JOIN pressure_fixture_client_ids owned ON owned.client_id = sample.client_id
-        GROUP BY sample.client_id, sample.source_kind, sample.interface
-        HAVING count(*) <> 2881
-            OR max(sample.observed_at) - min(sample.observed_at)
-                <> interval '48 hours'
-            OR min(sample.rx_counter_epoch) <> 0
-            OR max(sample.rx_counter_epoch) <> 0
-            OR min(sample.tx_counter_epoch) <> 0
-            OR max(sample.tx_counter_epoch) <> 0
-    ) THEN
-        RAISE EXCEPTION
-            'pressure raw traffic coverage mismatch: % rows',
-            pressure_traffic_count;
-    END IF;
-    IF pressure_stream_count <> 120 OR EXISTS (
-        SELECT 1
-        FROM traffic_counter_hourly_usage_streams stream
-        JOIN pressure_fixture_client_ids owned ON owned.client_id = stream.client_id
-        WHERE (
-              stream.source_revision <> stream.materialized_revision
-              OR stream.source_revision <= 0
-          )
-    ) THEN
-        RAISE EXCEPTION
-            'pressure hourly stream coverage is absent or dirty: % streams',
-            pressure_stream_count;
-    END IF;
-    IF pressure_hourly_count <> 5880
-       OR pressure_hourly_sample_count <> 345720
-       OR pressure_hourly_rx_bytes <> 345600000000::numeric
-       OR pressure_hourly_tx_bytes <> 172800000000::numeric
-       OR EXISTS (
+    IF skip_traffic THEN
+        IF pressure_traffic_count <> 0
+           OR pressure_stream_count <> 0
+           OR pressure_hourly_count <> 0
+           OR pressure_hourly_sample_count <> 0
+           OR pressure_hourly_rx_bytes <> 0
+           OR pressure_hourly_tx_bytes <> 0 THEN
+            RAISE EXCEPTION
+                'pressure import-only seed unexpectedly contains traffic: raw %, streams %, hourly %',
+                pressure_traffic_count,
+                pressure_stream_count,
+                pressure_hourly_count;
+        END IF;
+    ELSE
+        IF pressure_traffic_count <> 345720 OR EXISTS (
             SELECT 1
-            FROM traffic_counter_hourly_usage usage
-            JOIN pressure_fixture_client_ids owned
-              ON owned.client_id = usage.client_id
-            GROUP BY usage.client_id, usage.source_kind, usage.interface
-            HAVING count(*) <> 49
-                OR sum(usage.sample_count) <> 2881
-                OR sum(usage.rx_bytes) <> 2880000000
-                OR sum(usage.tx_bytes) <> 1440000000
-                OR sum(usage.rx_reset_count) <> 0
-                OR sum(usage.tx_reset_count) <> 0
-       ) THEN
-        RAISE EXCEPTION
-            'pressure hourly ledger mismatch: rows %, samples %, rx %, tx %',
-            pressure_hourly_count,
-            pressure_hourly_sample_count,
-            pressure_hourly_rx_bytes,
-            pressure_hourly_tx_bytes;
+            FROM traffic_counter_samples sample
+            JOIN pressure_fixture_client_ids owned ON owned.client_id = sample.client_id
+            GROUP BY sample.client_id, sample.source_kind, sample.interface
+            HAVING count(*) <> 2881
+                OR max(sample.observed_at) - min(sample.observed_at)
+                    <> interval '48 hours'
+                OR min(sample.rx_counter_epoch) <> 0
+                OR max(sample.rx_counter_epoch) <> 0
+                OR min(sample.tx_counter_epoch) <> 0
+                OR max(sample.tx_counter_epoch) <> 0
+        ) THEN
+            RAISE EXCEPTION
+                'pressure raw traffic coverage mismatch: % rows',
+                pressure_traffic_count;
+        END IF;
+        IF pressure_stream_count <> 120 OR EXISTS (
+            SELECT 1
+            FROM traffic_counter_hourly_usage_streams stream
+            JOIN pressure_fixture_client_ids owned ON owned.client_id = stream.client_id
+            WHERE (
+                  stream.source_revision <> stream.materialized_revision
+                  OR stream.source_revision <= 0
+              )
+        ) THEN
+            RAISE EXCEPTION
+                'pressure hourly stream coverage is absent or dirty: % streams',
+                pressure_stream_count;
+        END IF;
+        IF pressure_hourly_count <> 5880
+           OR pressure_hourly_sample_count <> 345720
+           OR pressure_hourly_rx_bytes <> 345600000000::numeric
+           OR pressure_hourly_tx_bytes <> 172800000000::numeric
+           OR EXISTS (
+                SELECT 1
+                FROM traffic_counter_hourly_usage usage
+                JOIN pressure_fixture_client_ids owned
+                  ON owned.client_id = usage.client_id
+                GROUP BY usage.client_id, usage.source_kind, usage.interface
+                HAVING count(*) <> 49
+                    OR sum(usage.sample_count) <> 2881
+                    OR sum(usage.rx_bytes) <> 2880000000
+                    OR sum(usage.tx_bytes) <> 1440000000
+                    OR sum(usage.rx_reset_count) <> 0
+                    OR sum(usage.tx_reset_count) <> 0
+           ) THEN
+            RAISE EXCEPTION
+                'pressure hourly ledger mismatch: rows %, samples %, rx %, tx %',
+                pressure_hourly_count,
+                pressure_hourly_sample_count,
+                pressure_hourly_rx_bytes,
+                pressure_hourly_tx_bytes;
+        END IF;
     END IF;
 END;
 $$;

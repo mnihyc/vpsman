@@ -1,6 +1,9 @@
 use super::*;
 use crate::model::{OperatorPreferences, OperatorView};
 use crate::repository::MemoryState;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use std::{path::Path, str::FromStr};
+use tokio::sync::oneshot;
 
 fn operator() -> AuthContext {
     AuthContext {
@@ -49,6 +52,236 @@ fn webhook_rule_request_validates_expression_and_target() {
     assert!(webhook_rule_from_request(&request, &operator()).is_ok());
     request.expression = "status in []".to_string();
     assert!(webhook_rule_from_request(&request, &operator()).is_err());
+}
+
+#[tokio::test]
+async fn postgres_manual_alert_send_fence_linearizes_suspension() {
+    let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return,
+    };
+    let options = PgConnectOptions::from_str(&base_url).unwrap();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    let db_name = format!("vpsman_webhook_manual_fence_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options.database(&db_name))
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("migrations"),
+    )
+    .await
+    .unwrap()
+    .run(&pool)
+    .await
+    .unwrap();
+
+    let client_id = format!("manual-alert-fence-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO clients (id,display_name,public_key,status) VALUES ($1,$1,decode('', 'hex'),'offline')",
+    )
+    .bind(&client_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rule_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_rules (
+            id,name,enabled,expression,target,body_template,cooldown_secs
+        ) VALUES (
+            $1,'manual-alert-fence',TRUE,'alert.triggered',
+            'https://hooks.example.invalid/vpsman','',0
+        )
+        "#,
+    )
+    .bind(rule_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let insert_claimed = |delivery_id: Uuid, lease_id: Uuid| {
+        let pool = pool.clone();
+        let client_id = client_id.clone();
+        async move {
+            sqlx::query(
+                r#"
+                INSERT INTO webhook_rule_deliveries (
+                    id,rule_id,rule_name,event_kind,event_id,status,target,
+                    dedupe_key,payload,matched_vps,message,cooldown_until_unix,
+                    delivery_lease_id,delivery_lease_until
+                ) VALUES (
+                    $1,$2,'manual-alert-fence','alert.triggered',$3,'in_progress',
+                    'https://hooks.example.invalid/vpsman',$4,'{}'::jsonb,
+                    jsonb_build_array(jsonb_build_object(
+                        'id',$5::text,
+                        'display_name',$5::text,
+                        'status','offline',
+                        'tags','[]'::jsonb,
+                        'registration_ip',NULL,
+                        'last_ip',NULL,
+                        'last_seen_at',NULL,
+                        'arch',NULL,
+                        'internal_build_number',0,
+                        'process_incarnation_id',NULL,
+                        'stale_since',NULL,
+                        'stale_reason',NULL,
+                        'capabilities','{}'::jsonb
+                    )),
+                    'alert',0,$6,now()+interval '60 seconds'
+                )
+                "#,
+            )
+            .bind(delivery_id)
+            .bind(rule_id)
+            .bind(format!("fleet-alert:{client_id}:{delivery_id}:triggered"))
+            .bind(format!("manual-alert-fence:{delivery_id}"))
+            .bind(&client_id)
+            .bind(lease_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let repo = Repository::Postgres(pool.clone());
+    let delivery_id = Uuid::new_v4();
+    let lease_id = Uuid::new_v4();
+    insert_claimed(delivery_id, lease_id).await;
+    let mut guard = repo
+        .begin_webhook_rule_alert_send(delivery_id, lease_id)
+        .await
+        .unwrap();
+    assert!(guard.is_deliverable());
+
+    let suspension_pool = pool.clone();
+    let suspension_client_id = client_id.clone();
+    let (attempting_tx, attempted_rx) = oneshot::channel();
+    let mut suspension = tokio::spawn(async move {
+        let mut tx = suspension_pool.begin().await.unwrap();
+        attempting_tx.send(()).unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(vpsman_server_core::client_policy_suppression_lock_key(
+                &suspension_client_id,
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE clients
+            SET status='suspended', suspended_at=now(),
+                suspended_from_status='offline'
+            WHERE id=$1
+            "#,
+        )
+        .bind(&suspension_client_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE webhook_rule_deliveries
+            SET status='canceled_disabled',error='client_suspended',
+                delivery_lease_id=NULL,delivery_lease_until=NULL
+            WHERE id=$1 AND status IN ('queued','failed','in_progress')
+            "#,
+        )
+        .bind(delivery_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    });
+    attempted_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut suspension)
+            .await
+            .is_err(),
+        "suspension must wait for a manual alert webhook send that won the fence"
+    );
+    let completed = repo
+        .complete_webhook_rule_delivery_attempt(
+            delivery_id,
+            lease_id,
+            WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+            None,
+            None,
+            Some(&mut guard),
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED);
+    guard.release().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), suspension)
+        .await
+        .expect("suspension did not resume after the durable send outcome")
+        .unwrap();
+
+    let blocked_delivery_id = Uuid::new_v4();
+    let blocked_lease_id = Uuid::new_v4();
+    insert_claimed(blocked_delivery_id, blocked_lease_id).await;
+    let mut blocked = repo
+        .begin_webhook_rule_alert_send(blocked_delivery_id, blocked_lease_id)
+        .await
+        .unwrap();
+    assert!(!blocked.is_deliverable());
+    assert_eq!(blocked.cancellation_reason(), Some("client_suspended"));
+    let canceled = repo
+        .cancel_claimed_webhook_rule_delivery(
+            blocked_delivery_id,
+            blocked_lease_id,
+            "client_suspended",
+            Some(&mut blocked),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        canceled.status,
+        WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED
+    );
+    blocked.release().await.unwrap();
+
+    for mutation in ["matched_vps || matched_vps", "matched_vps || '[{}]'::jsonb"] {
+        let invalid_delivery_id = Uuid::new_v4();
+        let invalid_lease_id = Uuid::new_v4();
+        insert_claimed(invalid_delivery_id, invalid_lease_id).await;
+        sqlx::query(&format!(
+            "UPDATE webhook_rule_deliveries SET matched_vps={mutation} WHERE id=$1"
+        ))
+        .bind(invalid_delivery_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let invalid = repo
+            .begin_webhook_rule_alert_send(invalid_delivery_id, invalid_lease_id)
+            .await
+            .unwrap();
+        assert!(!invalid.is_deliverable());
+        assert_eq!(
+            invalid.cancellation_reason(),
+            Some("client_alert_scope_invalid"),
+            "duplicate and malformed client snapshots must fail closed"
+        );
+        invalid.release().await.unwrap();
+    }
+
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    admin_pool.close().await;
 }
 
 fn idless_webhook_request(target: &str) -> CreateWebhookRuleRequest {

@@ -5,7 +5,7 @@ use std::{
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -23,7 +23,7 @@ use crate::{
     client_ip::TrustedProxyConfig,
     error::ApiError,
     gateway_client::GatewayDispatchClient,
-    model::{AuthContext, WsEvent},
+    model::{AuthContext, ClientMonitoringView, WsEvent},
     model_dashboard::DashboardOverviewView,
     model_fleet_snapshot::FleetSnapshotResponse,
     model_home_snapshot::HomeSnapshotResponse,
@@ -47,6 +47,13 @@ const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 15 * 60;
 const HEAVY_READ_IN_FLIGHT: usize = 2;
 const HEAVY_READ_WAITING: usize = 4;
 const HEAVY_READ_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+// Telemetry snapshots are deliberately short-lived.  This is long enough for
+// a burst of browser tabs to reuse one completed read, but below the UI's
+// normal refresh cadence and far below any retention/ACL mutation window.
+// Invalidation also clears these entries whenever ingest publishes a fleet
+// telemetry change.
+const MONITORING_READ_CACHE_TTL: Duration = Duration::from_secs(1);
+const MAX_SINGLEFLIGHT_ENTRIES: usize = 512;
 static SUITE_CONFIG_LAST_KNOWN_GOOD: OnceLock<StdRwLock<HashMap<PathBuf, SuiteConfig>>> =
     OnceLock::new();
 
@@ -62,6 +69,7 @@ pub(crate) struct WsEventBus {
     invalidations: Weak<Mutex<PendingWsInvalidations>>,
     fleet_snapshot_singleflight: Singleflight<FleetSnapshotResponse>,
     monitoring_cards_singleflight: Singleflight<MonitoringCardsPageView>,
+    client_monitoring_singleflight: Singleflight<ClientMonitoringView>,
     dashboard_overview_singleflight: Singleflight<DashboardOverviewView>,
     home_snapshot_singleflight: Singleflight<HomeSnapshotResponse>,
     heavy_read_permits: Arc<Semaphore>,
@@ -80,10 +88,11 @@ impl WsEventBus {
             Self {
                 public_events,
                 invalidations: Arc::downgrade(&pending),
-                fleet_snapshot_singleflight: Singleflight::default(),
-                monitoring_cards_singleflight: Singleflight::default(),
-                dashboard_overview_singleflight: Singleflight::default(),
-                home_snapshot_singleflight: Singleflight::default(),
+                fleet_snapshot_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
+                monitoring_cards_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
+                client_monitoring_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
+                dashboard_overview_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
+                home_snapshot_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
                 heavy_read_permits: Arc::new(Semaphore::new(HEAVY_READ_IN_FLIGHT)),
                 heavy_read_waiters: Arc::new(Semaphore::new(HEAVY_READ_WAITING)),
             },
@@ -124,6 +133,25 @@ impl WsEventBus {
                 key,
                 "monitoring_cards_panicked",
                 "The VPS monitoring cards could not be prepared.",
+                load,
+            )
+            .await
+    }
+
+    pub(crate) async fn singleflight_client_monitoring<F, Fut>(
+        &self,
+        key: String,
+        load: F,
+    ) -> Result<ClientMonitoringView, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<ClientMonitoringView, ApiError>> + Send + 'static,
+    {
+        self.client_monitoring_singleflight
+            .run(
+                key,
+                "client_monitoring_panicked",
+                "The VPS monitoring detail could not be prepared.",
                 load,
             )
             .await
@@ -200,6 +228,11 @@ impl WsEventBus {
     }
 
     pub(crate) fn invalidate_fleet_telemetry(&self) {
+        self.fleet_snapshot_singleflight.clear();
+        self.monitoring_cards_singleflight.clear();
+        self.client_monitoring_singleflight.clear();
+        self.dashboard_overview_singleflight.clear();
+        self.home_snapshot_singleflight.clear();
         let Some(pending) = self.invalidations.upgrade() else {
             return;
         };
@@ -259,10 +292,15 @@ impl SharedApiError {
 }
 
 struct SingleflightEntry<T> {
-    result: AsyncMutex<Option<std::result::Result<T, SharedApiError>>>,
+    result: AsyncMutex<Option<CachedSingleflightResult<T>>>,
     ready: Notify,
     #[cfg(test)]
     participants: std::sync::atomic::AtomicUsize,
+}
+
+struct CachedSingleflightResult<T> {
+    value: std::result::Result<T, SharedApiError>,
+    expires_at: Option<Instant>,
 }
 
 impl<T> Default for SingleflightEntry<T> {
@@ -278,12 +316,14 @@ impl<T> Default for SingleflightEntry<T> {
 
 struct Singleflight<T> {
     entries: Arc<AsyncMutex<HashMap<String, Arc<SingleflightEntry<T>>>>>,
+    cache_ttl: Duration,
 }
 
 impl<T> Clone for Singleflight<T> {
     fn clone(&self) -> Self {
         Self {
             entries: Arc::clone(&self.entries),
+            cache_ttl: self.cache_ttl,
         }
     }
 }
@@ -292,6 +332,39 @@ impl<T> Default for Singleflight<T> {
     fn default() -> Self {
         Self {
             entries: Arc::new(AsyncMutex::new(HashMap::new())),
+            cache_ttl: Duration::ZERO,
+        }
+    }
+}
+
+impl<T: Send + 'static> Singleflight<T> {
+    fn with_ttl(cache_ttl: Duration) -> Self {
+        Self {
+            entries: Arc::new(AsyncMutex::new(HashMap::new())),
+            cache_ttl,
+        }
+    }
+
+    fn clear(&self) {
+        let entries = Arc::clone(&self.entries);
+        let cleared = {
+            match entries.try_lock() {
+                Ok(mut guard) => {
+                    guard.clear();
+                    true
+                }
+                Err(_) => false,
+            }
+        };
+        if !cleared {
+            // Invalidation is called from synchronous mutation paths.  Do not
+            // block them on a read that is completing; schedule the bounded
+            // clear and let the in-flight caller finish with its pre-mutation
+            // snapshot.  No post-mutation request can observe it after this
+            // task runs, and the one-second TTL is an additional backstop.
+            tokio::spawn(async move {
+                entries.lock().await.clear();
+            });
         }
     }
 }
@@ -311,15 +384,67 @@ where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = std::result::Result<T, ApiError>> + Send + 'static,
     {
-        let (entry, leader) = {
-            let mut entries = self.entries.lock().await;
-            if let Some(entry) = entries.get(&key) {
-                (Arc::clone(entry), false)
-            } else {
-                let entry = Arc::new(SingleflightEntry::default());
-                entries.insert(key.clone(), Arc::clone(&entry));
-                (entry, true)
+        let (entry, leader) = loop {
+            let existing = {
+                let entries = self.entries.lock().await;
+                entries.get(&key).cloned()
+            };
+            if let Some(entry) = existing {
+                let now = Instant::now();
+                let cached = entry.result.lock().await;
+                match cached.as_ref() {
+                    None => {
+                        drop(cached);
+                        break (entry, false);
+                    }
+                    Some(result) if result.expires_at.is_none_or(|expires_at| expires_at > now) => {
+                        return result.value.clone().map_err(SharedApiError::into_api_error);
+                    }
+                    Some(_) => {
+                        drop(cached);
+                        let mut entries = self.entries.lock().await;
+                        if entries
+                            .get(&key)
+                            .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                        {
+                            entries.remove(&key);
+                        }
+                        continue;
+                    }
+                }
             }
+
+            let mut entries = self.entries.lock().await;
+            // Opportunistically discard expired completed entries.  The map is
+            // otherwise unbounded when callers use many selectors/clients.
+            let now = Instant::now();
+            entries.retain(|_, candidate| {
+                candidate.result.try_lock().map_or(true, |cached| {
+                    cached.as_ref().is_none_or(|result| {
+                        result.expires_at.is_none_or(|expires_at| expires_at > now)
+                    })
+                })
+            });
+            if entries.len() >= MAX_SINGLEFLIGHT_ENTRIES {
+                if let Some(evict_key) = entries.iter().find_map(|(candidate_key, candidate)| {
+                    candidate.result.try_lock().ok().and_then(|cached| {
+                        cached
+                            .as_ref()
+                            .filter(|result| result.expires_at.is_some())
+                            .map(|_| candidate_key.clone())
+                    })
+                }) {
+                    entries.remove(&evict_key);
+                }
+            }
+            if let Some(entry) = entries.get(&key).cloned() {
+                drop(entries);
+                let _ = entry;
+                continue;
+            }
+            let entry = Arc::new(SingleflightEntry::default());
+            entries.insert(key.clone(), Arc::clone(&entry));
+            break (entry, true);
         };
         #[cfg(test)]
         entry
@@ -329,6 +454,7 @@ where
         if leader {
             let entries = Arc::clone(&self.entries);
             let task_entry = Arc::clone(&entry);
+            let cache_ttl = self.cache_ttl;
             tokio::spawn(async move {
                 let result = match std::panic::catch_unwind(AssertUnwindSafe(load)) {
                     Ok(future) => AssertUnwindSafe(future)
@@ -338,8 +464,20 @@ where
                         .and_then(|result| result.map_err(SharedApiError::from_api_error)),
                     Err(_) => Err(SharedApiError::panicked(panic_code, panic_public_message)),
                 };
-                *task_entry.result.lock().await = Some(result);
-                entries.lock().await.remove(&key);
+                let cache_result = result.is_ok() && !cache_ttl.is_zero();
+                *task_entry.result.lock().await = Some(CachedSingleflightResult {
+                    value: result,
+                    expires_at: cache_result.then(|| Instant::now() + cache_ttl),
+                });
+                if !cache_result {
+                    let mut entries = entries.lock().await;
+                    if entries
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &task_entry))
+                    {
+                        entries.remove(&key);
+                    }
+                }
                 task_entry.ready.notify_waiters();
             });
         }
@@ -348,8 +486,8 @@ where
             let ready = entry.ready.notified();
             tokio::pin!(ready);
             ready.as_mut().enable();
-            if let Some(result) = entry.result.lock().await.clone() {
-                return result.map_err(SharedApiError::into_api_error);
+            if let Some(result) = entry.result.lock().await.as_ref() {
+                return result.value.clone().map_err(SharedApiError::into_api_error);
             }
             ready.await;
         }

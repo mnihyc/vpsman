@@ -85,12 +85,20 @@ type FleetMonitorPanelProps = {
 };
 
 export type FleetMonitorDensity = MonitorCardDensity;
-type FleetMonitorSort =
+export type FleetMonitorSort =
   | "warning"
   | "name"
-  | "traffic"
+  | "traffic_raw"
+  | "traffic_ratio"
+  | "realtime"
+  | "connections"
   | "cpu"
-  | "memory"
+  | "memory_raw"
+  | "memory_ratio"
+  | "disk_raw"
+  | "disk_ratio"
+  | "load_raw"
+  | "load_ratio"
   | "region"
   | "provider";
 type FleetMonitorStatusFilter = "all" | "online" | "warning" | "offline";
@@ -100,12 +108,23 @@ type MonitorRecordBounds = {
   fileTransfers: boolean;
   fleetAlerts: boolean;
 };
-const monitorSortOptions: Array<{ label: string; value: FleetMonitorSort }> = [
+export const monitorSortOptions: Array<{
+  label: string;
+  value: FleetMonitorSort;
+}> = [
   { label: "Warnings first", value: "warning" },
   { label: "Name", value: "name" },
-  { label: "Traffic use", value: "traffic" },
-  { label: "CPU use", value: "cpu" },
-  { label: "Memory", value: "memory" },
+  { label: "Traffic (raw)", value: "traffic_raw" },
+  { label: "Traffic (ratio)", value: "traffic_ratio" },
+  { label: "Realtime speed", value: "realtime" },
+  { label: "Connections", value: "connections" },
+  { label: "CPU", value: "cpu" },
+  { label: "RAM (raw)", value: "memory_raw" },
+  { label: "RAM (ratio)", value: "memory_ratio" },
+  { label: "Disk (raw)", value: "disk_raw" },
+  { label: "Disk (ratio)", value: "disk_ratio" },
+  { label: "Load (raw)", value: "load_raw" },
+  { label: "Load (ratio)", value: "load_ratio" },
   { label: "Region", value: "region" },
   { label: "Provider", value: "provider" },
 ];
@@ -2238,58 +2257,115 @@ function compareMonitorAgents({
         displayNameOrUnnamed(right.display_name),
       ) || left.id.localeCompare(right.id);
     if (mode === "name") return nameDelta;
-    const warningDelta =
-      monitorWarningRank(
-        right,
-        signals,
-        rollups,
+    if (mode === "warning") {
+      const warningDelta =
+        monitorWarningRank(
+          right,
+          signals,
+          rollups,
+          rates,
+          traffic.get(right.id),
+          primaryPing.get(right.id),
+          networkRateExpected,
+          evidenceLoading,
+        ) -
+        monitorWarningRank(
+          left,
+          signals,
+          rollups,
+          rates,
+          traffic.get(left.id),
+          primaryPing.get(left.id),
+          networkRateExpected,
+          evidenceLoading,
+        );
+      return warningDelta || nameDelta;
+    }
+    return compareMonitorMetricValues(
+      monitorMetricSortValue(
+        mode,
+        left.id,
         rates,
-        traffic.get(right.id),
-        primaryPing.get(right.id),
-        networkRateExpected,
-        evidenceLoading,
-      ) -
-      monitorWarningRank(
-        left,
-        signals,
         rollups,
+        traffic,
+      ),
+      monitorMetricSortValue(
+        mode,
+        right.id,
         rates,
-        traffic.get(left.id),
-        primaryPing.get(left.id),
-        networkRateExpected,
-        evidenceLoading,
-      );
-    if (mode === "warning") return warningDelta || nameDelta;
-    const leftTraffic = trafficSortValue(traffic.get(left.id));
-    const rightTraffic = trafficSortValue(traffic.get(right.id));
-    if (mode === "traffic" && rightTraffic !== leftTraffic)
-      return rightTraffic - leftTraffic;
-    const leftNetwork = networkRateTotal(rates.get(left.id) ?? []);
-    const rightNetwork = networkRateTotal(rates.get(right.id) ?? []);
-    const leftRollup = rollups.get(left.id);
-    const rightRollup = rollups.get(right.id);
-    const leftCpu = finiteRatio(leftRollup?.cpu_usage_avg) ?? -1;
-    const rightCpu = finiteRatio(rightRollup?.cpu_usage_avg) ?? -1;
-    if (mode === "cpu" && rightCpu !== leftCpu) return rightCpu - leftCpu;
-    const leftMemory = memoryUsedRatio(leftRollup);
-    const rightMemory = memoryUsedRatio(rightRollup);
-    if (mode === "memory" && rightMemory !== leftMemory)
-      return rightMemory - leftMemory;
-    const statusDelta = monitorStatusRank(right) - monitorStatusRank(left);
-    if (statusDelta !== 0) return statusDelta;
-    if (warningDelta !== 0) return warningDelta;
-    if (rightNetwork !== leftNetwork) return rightNetwork - leftNetwork;
-    if (rightCpu !== leftCpu) return rightCpu - leftCpu;
-    return displayNameOrUnnamed(left.display_name).localeCompare(
-      displayNameOrUnnamed(right.display_name),
+        rollups,
+        traffic,
+      ),
+      nameDelta,
     );
   };
 }
 
-function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
-  return coherentNetworkRates(rates).reduce(
-    (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
-    0,
+function monitorMetricSortValue(
+  mode: FleetMonitorSort,
+  clientId: string,
+  rates: Map<string, TelemetryNetworkRateRecord[]>,
+  rollups: Map<string, TelemetryRollupRecord>,
+  traffic: Map<string, TrafficAccountingRecord>,
+): number | null {
+  const rollup = rollups.get(clientId);
+  switch (mode) {
+    case "traffic_raw":
+      return trafficRawSortValue(traffic.get(clientId));
+    case "traffic_ratio":
+      return trafficRatioSortValue(traffic.get(clientId));
+    case "realtime":
+      return networkRateTotal(rates.get(clientId) ?? []);
+    case "connections":
+      return connectionSortValue(rollup);
+    case "cpu":
+      return finiteRatio(rollup?.cpu_usage_avg);
+    case "memory_raw": {
+      const total = finitePositiveMetric(rollup?.memory_total_bytes_max);
+      const ratio = memoryUsedRatio(rollup);
+      return total === null || ratio === null ? null : total * ratio;
+    }
+    case "memory_ratio":
+      return memoryUsedRatio(rollup);
+    case "disk_raw": {
+      const total = diskTotal(rollup);
+      const ratio = diskUsedRatio(rollup);
+      return total === null || ratio === null ? null : total * ratio;
+    }
+    case "disk_ratio":
+      return diskUsedRatio(rollup);
+    case "load_raw":
+      return finiteMetric(rollup?.cpu_load_1_avg);
+    case "load_ratio": {
+      const load = finiteMetric(rollup?.cpu_load_1_avg);
+      const cores = finitePositiveMetric(rollup?.cpu_cores_max);
+      return load === null || cores === null ? null : load / cores;
+    }
+    default:
+      return null;
+  }
+}
+
+export function compareMonitorMetricValues(
+  left: number | null,
+  right: number | null,
+  nameDelta: number,
+): number {
+  if (left === null) return right === null ? nameDelta : 1;
+  if (right === null) return -1;
+  return right - left || nameDelta;
+}
+
+function networkRateTotal(
+  rates: TelemetryNetworkRateRecord[],
+): number | null {
+  const current = coherentNetworkRates(rates);
+  if (current.length === 0) return null;
+  return finiteMetric(
+    current.reduce(
+      (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
+      0,
+    ),
   );
 }
 
@@ -2311,9 +2387,27 @@ function coherentNetworkRates(rates: TelemetryNetworkRateRecord[]) {
 
 function memoryUsedRatio(rollup: TelemetryRollupRecord | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
-    return -1;
+    return null;
   }
-  return rollup.memory_used_ratio_avg;
+  return finiteRatio(rollup.memory_used_ratio_avg);
+}
+
+function diskTotal(rollup: TelemetryRollupRecord | undefined) {
+  if (!rollup || (rollup.disk_sample_count ?? 0) <= 0) return null;
+  return finitePositiveMetric(rollup.disk_total_bytes_max);
+}
+
+function diskUsedRatio(rollup: TelemetryRollupRecord | undefined) {
+  return diskTotal(rollup) === null
+    ? null
+    : finiteRatio(rollup?.disk_used_ratio_avg);
+}
+
+function connectionSortValue(rollup: TelemetryRollupRecord | undefined) {
+  if (!rollup || rollup.connections_sample_count <= 0) return null;
+  const tcp = finiteMetric(rollup.tcp_sockets_latest);
+  const udp = finiteMetric(rollup.udp_sockets_latest);
+  return tcp === null || udp === null ? null : tcp + udp;
 }
 
 function providerSortValue(agent: AgentView) {
@@ -2590,13 +2684,23 @@ function monitorTelemetryWarningRank(
   return summary.kind === "partial" ? 1 : 0;
 }
 
-function trafficSortValue(traffic: TrafficAccountingRecord | undefined) {
-  if (!traffic || traffic.selectors.length === 0 || traffic.reset_day === null)
-    return -1;
-  return (
-    finiteMetric(traffic.cycle_percent) ??
-    finiteMetric(traffic.total_bytes) ??
-    -1
+function trafficRawSortValue(traffic: TrafficAccountingRecord | undefined) {
+  return trafficSortConfigured(traffic)
+    ? finiteMetric(traffic.total_bytes)
+    : null;
+}
+
+function trafficRatioSortValue(traffic: TrafficAccountingRecord | undefined) {
+  return trafficSortConfigured(traffic)
+    ? finiteMetric(traffic.cycle_percent)
+    : null;
+}
+
+function trafficSortConfigured(
+  traffic: TrafficAccountingRecord | undefined,
+): traffic is TrafficAccountingRecord {
+  return Boolean(
+    traffic && traffic.selectors.length > 0 && traffic.reset_day !== null,
   );
 }
 
@@ -2628,6 +2732,11 @@ function finiteMetric(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : null;
+}
+
+function finitePositiveMetric(value: number | null | undefined) {
+  const metric = finiteMetric(value);
+  return metric !== null && metric > 0 ? metric : null;
 }
 
 function finiteRatio(value: number | null | undefined) {

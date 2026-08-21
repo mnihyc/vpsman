@@ -344,6 +344,14 @@ impl Repository {
         const MAX_FAIR_RESPONSE_ROWS: i64 = 250_000;
         match self {
             Self::Memory(memory) => {
+                let suspended_clients = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| agent.status == "suspended")
+                    .map(|agent| agent.id.clone())
+                    .collect::<HashSet<_>>();
                 let hidden = memory.hidden_clients.read().await;
                 let active_plan_ids = if filter.visible_only {
                     memory
@@ -351,7 +359,11 @@ impl Repository {
                         .read()
                         .await
                         .iter()
-                        .filter(|plan| plan.deleted_at.is_none())
+                        .filter(|plan| {
+                            plan.deleted_at.is_none()
+                                && !suspended_clients.contains(&plan.left_client_id)
+                                && !suspended_clients.contains(&plan.right_client_id)
+                        })
                         .map(|plan| plan.id)
                         .collect::<HashSet<_>>()
                 } else {
@@ -365,10 +377,10 @@ impl Repository {
                     .filter(|observation| {
                         (!filter.visible_only
                             || (!hidden.contains(&observation.client_id)
-                                && observation
-                                    .peer_client_id
-                                    .as_ref()
-                                    .is_none_or(|peer| !hidden.contains(peer))
+                                && !suspended_clients.contains(&observation.client_id)
+                                && observation.peer_client_id.as_ref().is_none_or(|peer| {
+                                    !hidden.contains(peer) && !suspended_clients.contains(peer)
+                                })
                                 && observation
                                     .plan_id
                                     .is_some_and(|plan_id| active_plan_ids.contains(&plan_id))))
@@ -422,15 +434,25 @@ impl Repository {
                           AND (
                             NOT $9
                             OR (
-                                EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id)
+                                EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id AND status <> 'suspended')
                                 AND (observation.peer_client_id IS NULL OR EXISTS (
-                                    SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id
+                                    SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id AND status <> 'suspended'
                                 ))
                                 AND EXISTS (
                                     SELECT 1
                                     FROM tunnel_plans plan
                                     WHERE plan.id = observation.plan_id
                                       AND plan.deleted_at IS NULL
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM visible_clients endpoint
+                                          WHERE endpoint.id=plan.left_client_id
+                                            AND endpoint.status = 'suspended'
+                                      )
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM visible_clients endpoint
+                                          WHERE endpoint.id=plan.right_client_id
+                                            AND endpoint.status = 'suspended'
+                                      )
                                 )
                             )
                           )
@@ -485,15 +507,25 @@ impl Repository {
                       AND (
                         NOT $9
                         OR (
-                            EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id)
+                            EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id AND status <> 'suspended')
                             AND (observation.peer_client_id IS NULL OR EXISTS (
-                                SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id
+                                SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id AND status <> 'suspended'
                             ))
                             AND EXISTS (
                                 SELECT 1
                                 FROM tunnel_plans plan
                                 WHERE plan.id = observation.plan_id
                                   AND plan.deleted_at IS NULL
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM visible_clients endpoint
+                                      WHERE endpoint.id=plan.left_client_id
+                                        AND endpoint.status = 'suspended'
+                                  )
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM visible_clients endpoint
+                                      WHERE endpoint.id=plan.right_client_id
+                                        AND endpoint.status = 'suspended'
+                                  )
                             )
                         )
                       )
@@ -541,6 +573,22 @@ impl Repository {
         let limit = sample_limit_per_plan_kind_endpoint.max(1);
         let mut rows = match self {
             Self::Memory(memory) => {
+                let suspended_clients = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| agent.status == "suspended")
+                    .map(|agent| agent.id.clone())
+                    .collect::<HashSet<_>>();
+                let eligible_plan_ids = plan_topologies
+                    .iter()
+                    .filter(|(_, _, left_client_id, right_client_id)| {
+                        !suspended_clients.contains(left_client_id)
+                            && !suspended_clients.contains(right_client_id)
+                    })
+                    .map(|(plan_id, _, _, _)| *plan_id)
+                    .collect::<HashSet<_>>();
                 let mut rows = memory
                     .network_observations
                     .read()
@@ -549,7 +597,7 @@ impl Repository {
                     .filter(|observation| {
                         observation
                             .plan_id
-                            .is_some_and(|plan_id| plan_ids.contains(&plan_id))
+                            .is_some_and(|plan_id| eligible_plan_ids.contains(&plan_id))
                             && observation_timestamp_unix(&observation.observed_at).is_some_and(
                                 |observed| observed >= start_unix && observed <= end_unix,
                             )
@@ -557,6 +605,11 @@ impl Repository {
                                 observation.kind.as_str(),
                                 "tunnel_reachability" | "network_speed_test" | "network_status"
                             )
+                            && !suspended_clients.contains(&observation.client_id)
+                            && observation
+                                .peer_client_id
+                                .as_ref()
+                                .is_none_or(|peer| !suspended_clients.contains(peer))
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -578,6 +631,26 @@ impl Repository {
                           AND observed_at <= to_timestamp($2)
                           AND plan_id = ANY($3::uuid[])
                           AND kind IN ('tunnel_reachability', 'network_speed_test', 'network_status')
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM visible_clients suspended_client
+                              WHERE suspended_client.status = 'suspended'
+                                AND (
+                                    suspended_client.id = network_observation_exact_evidence.client_id
+                                    OR suspended_client.id = network_observation_exact_evidence.peer_client_id
+                                )
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM tunnel_plans plan
+                              JOIN visible_clients suspended_endpoint
+                                ON suspended_endpoint.status = 'suspended'
+                               AND suspended_endpoint.id IN (
+                                   plan.left_client_id,
+                                   plan.right_client_id
+                               )
+                              WHERE plan.id = network_observation_exact_evidence.plan_id
+                          )
                     ) ranked
                     WHERE evidence_rank <= $4
                     ORDER BY observed_at DESC, id DESC
@@ -1012,11 +1085,21 @@ WITH raw_evidence AS (
       AND (
         NOT $9
         OR (
-            EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id)
-            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id)
+            EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id AND status <> 'suspended')
+            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id AND status <> 'suspended')
             AND EXISTS (
                 SELECT 1 FROM tunnel_plans plan
                 WHERE plan.id = observation.plan_id AND plan.deleted_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM visible_clients endpoint
+                      WHERE endpoint.id=plan.left_client_id
+                        AND endpoint.status = 'suspended'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM visible_clients endpoint
+                      WHERE endpoint.id=plan.right_client_id
+                        AND endpoint.status = 'suspended'
+                  )
             )
         )
       )
@@ -1049,11 +1132,21 @@ filtered_rollups AS (
       AND (
         NOT $9
         OR (
-            EXISTS (SELECT 1 FROM visible_clients WHERE id = series.client_id)
-            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = series.peer_client_id)
+            EXISTS (SELECT 1 FROM visible_clients WHERE id = series.client_id AND status <> 'suspended')
+            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = series.peer_client_id AND status <> 'suspended')
             AND EXISTS (
                 SELECT 1 FROM tunnel_plans plan
                 WHERE plan.id = series.plan_id AND plan.deleted_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM visible_clients endpoint
+                      WHERE endpoint.id=plan.left_client_id
+                        AND endpoint.status = 'suspended'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM visible_clients endpoint
+                      WHERE endpoint.id=plan.right_client_id
+                        AND endpoint.status = 'suspended'
+                  )
             )
         )
       )

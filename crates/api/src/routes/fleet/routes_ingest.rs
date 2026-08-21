@@ -122,6 +122,12 @@ pub(crate) async fn ingest_agent_hello(
             message: "agent hello ignored".to_string(),
         }));
     }
+    super::routes_inventory::clear_committed_agent_suspension_fence(
+        &state,
+        &event.hello.client_id,
+        "agent_online_auto_unsuspend",
+    )
+    .await;
     state.publish(WsEvent::AgentUpdated {
         client_id: event.hello.client_id,
         gateway_id: event.gateway_id,
@@ -204,6 +210,12 @@ pub(crate) async fn ingest_telemetry(
     validate_gateway_telemetry_event(&event)?;
     match state.repo.record_telemetry_outcome(&event).await? {
         TelemetryRecordOutcome::Recorded => {
+            super::routes_inventory::clear_committed_agent_suspension_fence(
+                &state,
+                &event.telemetry.client_id,
+                "agent_online_auto_unsuspend",
+            )
+            .await;
             state.invalidate_fleet_telemetry();
             Ok(Json(IngestResponse {
                 accepted: true,

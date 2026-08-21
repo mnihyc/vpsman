@@ -278,9 +278,11 @@ ordinary tags. Resolver-only selectors such as `id:<client_id>` and
 Jobs and schedules execute fixed, reviewed target snapshots. Selector text is
 kept as audit context, but the submitted API payload contains the concrete VPS
 IDs that were reviewed. **System > Maintenance > Stale selectors** consolidates
-deliberate target refresh for mutable Schedule and Ping snapshots. Shared-view
-targets are also mutable only through their dedicated reviewed **Update
-targets** action; visibility and approval evidence remain immutable.
+deliberate target refresh for mutable Schedule and Ping snapshots. Active
+shared-view definitions are mutable only through reviewed **Edit** or their
+saved-selector-only **Update targets** shortcut. Edit can change the name,
+selector, exact frozen targets, and visible-data scope; every revision retains
+immutable approval and audit evidence.
 
 Schedules have two explicit trigger modes. **Time · cron** retains the reviewed
 recurring workflow. **Alert event** listens only to policy-confirmed
@@ -291,6 +293,17 @@ Resolve hysteresis absorb flapping before automation runs.
 
 Read more in [docs/target-selectors.md](docs/target-selectors.md).
 
+### Expected-offline suspension
+
+Fleet inventory can mark any `never`, `disconnected`, `offline`, or `stale`
+VPS as **Suspended** from the row action beside agent Stop/Restart. Suspension
+keeps the VPS and all retained history in Fleet, but removes it from monitoring
+and Network Metrics, suppresses warnings and client-scoped alert delivery, and
+neutral-skips new/unstarted work as `target_suspended`. Manual unsuspend
+restores its saved prior state; an authenticated online event also clears
+suspension. See [Operator access scopes](docs/operator-access-scopes.md) for the
+exact API, authorization, and alert boundary.
+
 ### Monitoring and shared views
 
 **Fleet > Monitor** is the primary fleet overview and defaults to every matching
@@ -300,10 +313,17 @@ visual CPU, RAM, aggregate disk, load, network, configured traffic, and primary
 Ping evidence. When explicitly shared and available, the same compact surfaces
 also present billing-cycle, uptime, connection-count, swap, and normalized
 system-information evidence. Shared-but-unavailable current facts remain
-visible as `-`, while data groups outside the immutable share scope remain
+visible as `-`, while data groups outside the share's current reviewed scope remain
 absent. Selecting a card opens the canonical VPS detail with shared
 **15m**, **1h**, **8h**, **1d**, **7d**, **30d**, **90d**, **180d**, **1y**,
 **All**, and **Custom** ranges. 15m is the rolling realtime view.
+
+Private and shared VPS cards can sort by Traffic raw volume or quota ratio,
+Realtime speed, Connections, CPU utilization, and RAM, Disk, or Load in raw or
+ratio form. A metric sort compares only that selected value, highest first,
+then places missing values last and breaks ties by VPS name. Stale or warning
+state and unlimited traffic receive no implicit metric-sort rank; **Warnings
+first** remains the explicit status-aware choice.
 
 Accepted high-resolution samples default to 7 days. Authoritative resource,
 network, Ping, system, and reset-safe traffic history is promoted through
@@ -323,10 +343,11 @@ Alert lifecycle automation emits only the generic `alert.triggered` and
 schedules. Webhooks may also independently consume their documented raw event
 contexts.
 **Observability > Shared views** creates expiring public read-only projections,
-then retains the lifecycle needed to update frozen targets, copy the URL, extend
-active links, or revoke them. Each share freezes its VPS and visible-data scope
-at creation; only an explicit reviewed target update re-resolves its saved
-selector, while visibility remains immutable. Public projections use
+then retains the lifecycle needed to edit an active definition, update frozen
+targets from its saved selector, copy the URL, extend the link, or revoke it. A
+reviewed **Edit** can change the name, selector, frozen VPSs, and visible-data
+scope while preserving the bearer URL, visitor history, and unchanged VPS
+keys. **Extend** remains the only action that changes expiry. Public projections use
 persisted random share-specific VPS keys and never expose internal VPS IDs or
 network-address fields, raw host files, internal configuration, actions, jobs, terminals,
 files, backups, audit data, or operator identity. Operator-entered public labels
@@ -372,9 +393,21 @@ Compose deployments keep durable state under their `runtime/` directory:
 - active CLI payload: `runtime/cli/current`
 
 The current canonical database is intentionally fresh-first. Supported
-in-place steps are checksum-pinned: the exact v0.4.4 `0001`–`0009` baseline
-may apply `0010` through `0014`, while the exact v0.3.5 `0001`–`0008`
-baseline may apply `0009` through `0014`.
+in-place steps are checksum-pinned: an exact v0.4.6 database applies only
+`0015` through `0020`; the exact v0.4.4 `0001`–`0009` baseline
+may apply `0010` through `0020`, while the exact v0.3.5 `0001`–`0008`
+baseline may apply `0009` through `0020`. Migration `0016` replaces only the
+hourly traffic-ledger refresh function with a narrow per-stream implementation;
+`0017` adds suspension catalog state without rewriting telemetry; and the
+no-transaction `0018` builds one concurrent import-class stream index without
+rewriting retained traffic rows. Current API/worker startup verifies and
+restart-repairs only the exact migration-owned `0018` index, while a wrong
+same-name object fails closed. Migration `0019` replaces only the post-update
+hourly trigger with a fail-closed same-shape fast path; applying it does not
+rewrite retained rows, and any failed proof falls back to the existing exact
+refresh. Migration `0020` removes only the unused `traffic_cycle_usage`
+prototype table and intentionally fails if an external foreign-key dependency
+exists; back up any external consumer before upgrading.
 Drain all nonterminal webhook deliveries, then stop API/application and worker
 writers for the full migration sequence. Review
 [migration compatibility](docs/migration-compatibility.md) before updating any
@@ -522,6 +555,7 @@ project does not maintain a separate rolling changelog.
 - [Headless CLI/VTY](tutorials/09-headless-cli-vty.md)
 - [Deploy layout](deploy/README.md)
 - [Production deployment and recovery](docs/production-deployment.md)
+- [Traffic-ledger audit and recovery](docs/traffic-ledger-recovery.md)
 - [Direct gateway agent install](deploy/AGENT_GATEWAY_INSTALL.md)
 - [Target selectors](docs/target-selectors.md)
 - [Operator access scopes](docs/operator-access-scopes.md)

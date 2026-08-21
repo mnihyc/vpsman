@@ -432,7 +432,7 @@ async fn build_dashboard_overview(
     preferences: &OperatorPreferences,
 ) -> Result<DashboardOverviewView, ApiError> {
     let now = snapshot_unix;
-    let agents = state
+    let mut agents = state
         .repo
         .list_agents()
         .await
@@ -440,6 +440,7 @@ async fn build_dashboard_overview(
             "vps_inventory_unavailable",
             "The VPS inventory could not be loaded.",
         ))?;
+    agents.retain(AgentView::is_monitoring_visible);
     let available_filters = build_available_filters(&agents);
     let scoped_agents = agents
         .iter()

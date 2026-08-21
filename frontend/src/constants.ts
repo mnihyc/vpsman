@@ -493,6 +493,7 @@ export const emptySummary: FleetSummary = {
   never: 0,
   offline: 0,
   online: 0,
+  suspended: 0,
   revoked: 0,
   running_jobs: 0,
   stale: 0,

@@ -1,4 +1,12 @@
-import { Ban, Clock3, Copy, Link2, Plus, RefreshCw } from "lucide-react";
+import {
+  Ban,
+  Clock3,
+  Copy,
+  Link2,
+  Pencil,
+  Plus,
+  RefreshCw,
+} from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -23,7 +31,7 @@ import {
   ConsoleStatusBadge,
 } from "../../components/ConsoleLayout";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
-import { apiGet, apiPost } from "../../api";
+import { apiGet, apiPost, apiPut } from "../../api";
 import { useHistoryEntryState } from "../../historyEntryState";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
@@ -38,6 +46,7 @@ import type {
   AgentView,
   BulkUpdateMonitoringShareTargetsRequest,
   BulkUpdateMonitoringShareTargetsResponse,
+  MonitoringShareRevisionView,
   BulkResolveResponse,
   CreateMonitoringShareRequest,
   CreateMonitoringShareResponse,
@@ -47,6 +56,8 @@ import type {
   MonitoringShareView,
   MonitoringShareVisibilityRequest,
   RevokeMonitoringSharesRequest,
+  UpdateMonitoringShareRequest,
+  UpdateMonitoringShareResponse,
 } from "../../types";
 import {
   formatCompactTime,
@@ -78,6 +89,18 @@ type PendingLifecycleAction =
 type TargetUpdateReview = {
   response: BulkUpdateMonitoringShareTargetsResponse;
   shares: MonitoringShareView[];
+};
+
+type EditShareDraft = {
+  name: string;
+  selectorExpression: string;
+  visibility: Required<MonitoringShareVisibilityRequest>;
+};
+
+type EditShareReview = {
+  request: UpdateMonitoringShareRequest;
+  response: UpdateMonitoringShareResponse;
+  targets: AgentView[];
 };
 
 type SharedViewUrl = {
@@ -166,11 +189,22 @@ export function SharedViewsPanel({
     useState<PendingLifecycleAction>(null);
   const [targetUpdateReview, setTargetUpdateReview] =
     useState<TargetUpdateReview | null>(null);
+  const [editingShare, setEditingShare] =
+    useState<MonitoringShareView | null>(null);
+  const [editDraft, setEditDraft] = useState<EditShareDraft | null>(null);
+  const [editReview, setEditReview] = useState<EditShareReview | null>(null);
   const [extensionValue, setExtensionValue] = useState(24);
   const [extensionUnit, setExtensionUnit] = useState<DurationUnit>("hours");
   const [pending, setPending] = useState(false);
+  const [targetUpdateReconciliationPending, setTargetUpdateReconciliationPending] =
+    useState(false);
+  const [targetUpdateRefreshRequired, setTargetUpdateRefreshRequired] =
+    useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+  const authoritativeTargetRevisions = useRef(
+    new Map<string, MonitoringShareRevisionView>(),
+  );
   const initialSelectorSnapshot = useRef(initialSelectorExpression);
   const initialSelectorConsumed = useRef(onInitialSelectorConsumed);
   const feedbackRef = useRef<HTMLDivElement | null>(null);
@@ -182,13 +216,13 @@ export function SharedViewsPanel({
     initialSelectorConsumed.current?.();
   }, []);
 
-  const loadShares = useCallback(async () => {
+  const loadShares = useCallback(async (): Promise<boolean> => {
     const generation = ++loadGeneration.current;
     if (!apiToken) {
       setShares([]);
       setLoading(false);
       setLoadError(null);
-      return;
+      return true;
     }
     setLoading(true);
     setLoadError(null);
@@ -205,20 +239,51 @@ export function SharedViewsPanel({
         }
       }
       if (loadGeneration.current !== generation) {
-        return;
+        return false;
       }
-      setShares(deduplicateShares(loaded));
+      const loadedShares = deduplicateShares(loaded);
+      const loadedById = new Map(loadedShares.map((share) => [share.id, share]));
+      for (const [shareId, revision] of authoritativeTargetRevisions.current) {
+        const loadedShare = loadedById.get(shareId);
+        if (
+          loadedShare &&
+          (timestampMillis(loadedShare.updated_at) >
+            timestampMillis(revision.updated_at) ||
+            (timestampMillis(loadedShare.updated_at) ===
+              timestampMillis(revision.updated_at) &&
+              targetRevisionMatchesShare(loadedShare, revision)))
+        ) {
+          authoritativeTargetRevisions.current.delete(shareId);
+        }
+      }
+      setShares((current) =>
+        mergeTargetRevisions(
+          loadedShares,
+          [...authoritativeTargetRevisions.current.values()],
+        ),
+      );
+      return true;
     } catch (error) {
       if (loadGeneration.current !== generation) {
-        return;
+        return false;
       }
       setLoadError(actionErrorMessage(error));
+      return false;
     } finally {
       if (loadGeneration.current === generation) {
         setLoading(false);
       }
     }
   }, [apiToken]);
+
+  const refreshShares = useCallback(async (): Promise<boolean> => {
+    const loaded = await loadShares();
+    if (loaded) {
+      setTargetUpdateRefreshRequired(false);
+      setFeedback(null);
+    }
+    return loaded;
+  }, [loadShares]);
 
   useEffect(() => {
     void loadShares();
@@ -235,6 +300,7 @@ export function SharedViewsPanel({
       review !== null ||
       pendingAction !== null ||
       targetUpdateReview !== null ||
+      editingShare !== null ||
       createdUrlFocusShareIdRef.current !== null
     ) {
       return undefined;
@@ -253,6 +319,7 @@ export function SharedViewsPanel({
     drawerOpen,
     feedback?.message,
     feedback?.tone,
+    editingShare,
     loadError,
     pendingAction,
     review,
@@ -350,6 +417,46 @@ export function SharedViewsPanel({
     !selectorEvidenceUnavailable &&
     draftExpirySecs !== null &&
     (!draft.visibility.detail_history || visibleMetricCount > 0);
+  const editSelectorParse = useMemo(
+    () => parseSearchExpression(editDraft?.selectorExpression ?? ""),
+    [editDraft?.selectorExpression],
+  );
+  const editSelectorEvidenceUnavailable = editDraft
+    ? vpsRuleSearchUnavailable(editDraft.selectorExpression, vpsRuleSearch)
+    : false;
+  const editLocalTargets = useMemo(
+    () =>
+      editDraft?.selectorExpression.trim() &&
+      !editSelectorParse.error &&
+      !editSelectorEvidenceUnavailable
+        ? agentsMatchingExpression(
+            agents,
+            editDraft.selectorExpression,
+            vpsRuleSearch,
+          )
+        : [],
+    [
+      agents,
+      editDraft?.selectorExpression,
+      editSelectorEvidenceUnavailable,
+      editSelectorParse.error,
+      vpsRuleSearch,
+    ],
+  );
+  const editReady = Boolean(
+    editDraft &&
+      editDraft.name.trim().length > 0 &&
+      editDraft.name.trim().length <= 128 &&
+      editDraft.selectorExpression.trim().length > 0 &&
+      !editSelectorParse.error &&
+      !editSelectorEvidenceUnavailable &&
+      (!editDraft.visibility.detail_history ||
+        visibleMetricGroupCount(editDraft.visibility) > 0),
+  );
+  const shareMutationBlocked =
+    pending ||
+    targetUpdateReconciliationPending ||
+    targetUpdateRefreshRequired;
 
   function updateDraft(update: Partial<ShareDraft>) {
     setDraft((current) => ({ ...current, ...update }));
@@ -378,11 +485,14 @@ export function SharedViewsPanel({
   }
 
   function enterReviewWorkflow(
-    workflow: "create" | "targets" | "lifecycle" | "copy",
+    workflow: "create" | "edit" | "targets" | "lifecycle" | "copy",
   ) {
     setReview(null);
     setPendingAction(null);
     setTargetUpdateReview(null);
+    setEditingShare(null);
+    setEditDraft(null);
+    setEditReview(null);
     setActionError(null);
     setFeedback(null);
     if (workflow !== "create") {
@@ -401,6 +511,138 @@ export function SharedViewsPanel({
     setReview(null);
     setActionError(null);
     setDrawerOpen(false);
+  }
+
+  function openEdit(share: MonitoringShareView) {
+    if (targetUpdateReconciliationPending || targetUpdateRefreshRequired) {
+      setFeedback({
+        message:
+          "The shared-view target update is still being reconciled. Refresh the shared views before editing this definition.",
+        tone: "warning",
+      });
+      return;
+    }
+    enterReviewWorkflow("edit");
+    setEditingShare(share);
+    setEditDraft({
+      name: share.name,
+      selectorExpression: share.selector_expression,
+      visibility: { ...share.visibility },
+    });
+  }
+
+  function closeEdit() {
+    if (pending) return;
+    setActionError(null);
+    setEditReview(null);
+    setEditDraft(null);
+    setEditingShare(null);
+  }
+
+  function updateEditDraft(update: Partial<EditShareDraft>) {
+    setEditDraft((current) => (current ? { ...current, ...update } : current));
+    setEditReview(null);
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  function updateEditVisibility(
+    field: keyof MonitoringShareVisibilityRequest,
+    checked: boolean,
+  ) {
+    setEditDraft((current) => {
+      if (!current) return current;
+      const visibility = { ...current.visibility, [field]: checked };
+      if (
+        field !== "detail_history" &&
+        visibleMetricGroupCount(visibility) === 0
+      ) {
+        visibility.detail_history = false;
+      }
+      return { ...current, visibility };
+    });
+    setEditReview(null);
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  async function reviewEdit() {
+    if (!editingShare || !editDraft || !editReady) {
+      setActionError(
+        editDraft
+          ? shareDefinitionDraftError(editDraft, editSelectorParse.error)
+          : "Reload the active shared view before editing it.",
+      );
+      return;
+    }
+    setPending(true);
+    setActionError(null);
+    try {
+      const selectorExpression = editDraft.selectorExpression.trim();
+      const resolved = await onResolveTargets(selectorExpression);
+      const request: UpdateMonitoringShareRequest = {
+        confirmed: false,
+        expected_updated_at: editingShare.updated_at,
+        name: editDraft.name.trim(),
+        selector_expression: selectorExpression,
+        target_client_ids: resolved.targets.map((agent) => agent.id),
+        visibility: { ...editDraft.visibility },
+      };
+      const response = await apiPut<UpdateMonitoringShareResponse>(
+        `/api/v1/monitoring-shares/${encodeURIComponent(editingShare.id)}`,
+        apiToken,
+        request,
+      );
+      setEditReview({ request, response, targets: resolved.targets });
+    } catch (error) {
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function applyEdit() {
+    if (!editingShare || !editReview) return;
+    setPending(true);
+    setActionError(null);
+    try {
+      const response = await apiPut<UpdateMonitoringShareResponse>(
+        `/api/v1/monitoring-shares/${encodeURIComponent(editingShare.id)}`,
+        apiToken,
+        {
+          ...editReview.request,
+          confirmed: true,
+          preview_hash: editReview.response.preview_hash,
+        } satisfies UpdateMonitoringShareRequest,
+      );
+      if (!response.applied || !response.share) {
+        throw new Error(
+          "The server did not attest the shared-view edit. Refresh current state before retrying.",
+        );
+      }
+      const updatedShare = response.share;
+      setShares((current) => mergeShares(current, [updatedShare]));
+      setSharedViewUrl((current) =>
+        current?.shareId === updatedShare.id
+          ? { ...current, name: updatedShare.name }
+          : current,
+      );
+      setFeedback({
+        message: `Updated ${updatedShare.name}. Its existing public URL, visitor history, and unchanged VPS identities were preserved.`,
+        tone: "success",
+      });
+      setEditReview(null);
+      setEditDraft(null);
+      setEditingShare(null);
+    } catch (error) {
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
+    } finally {
+      setPending(false);
+    }
   }
 
   async function reviewCreate() {
@@ -593,18 +835,57 @@ export function SharedViewsPanel({
           share_ids: targetUpdateReview.shares.map((share) => share.id),
         } satisfies BulkUpdateMonitoringShareTargetsRequest,
       );
-      setShares((current) => applyTargetChanges(current, response.changes));
-      setFeedback({
-        message: `Updated frozen targets for ${response.changes.length} shared ${response.changes.length === 1 ? "view" : "views"}. Existing public client identities were preserved.`,
-        tone: "success",
-      });
+      const selectedShareIds = new Set(
+        targetUpdateReview.shares.map((share) => share.id),
+      );
+      const revisionIds = new Set(
+        response.revisions.map((revision) => revision.share_id),
+      );
+      if (
+        !response.applied ||
+        response.revisions.length !== selectedShareIds.size ||
+        revisionIds.size !== selectedShareIds.size ||
+        [...selectedShareIds].some((shareId) => !revisionIds.has(shareId))
+      ) {
+        throw new Error(
+          "The server did not return authoritative shared-view revisions. Refresh current state before retrying.",
+        );
+      }
+      const revisions = response.revisions;
+      for (const revision of revisions) {
+        authoritativeTargetRevisions.current.set(revision.share_id, revision);
+      }
+      setShares((current) => mergeTargetRevisions(current, revisions));
+      setTargetUpdateRefreshRequired(false);
+      setTargetUpdateReconciliationPending(true);
       setTargetUpdateReview(null);
-      void loadShares();
+      // The response revisions are authoritative for CAS edits. Await the
+      // lifecycle refresh for visitor/evidence fields, then re-apply them so
+      // a delayed or stale GET can never roll updated_at backwards.
+      const refreshed = await loadShares();
+      setShares((current) => mergeTargetRevisions(current, revisions));
+      if (!refreshed) {
+        // Keep the actionable reconciliation state visible instead of hiding
+        // it behind the transport-level GET error from loadShares().
+        setLoadError(null);
+        setTargetUpdateRefreshRequired(true);
+        setFeedback({
+          message:
+            "Frozen targets were updated, but lifecycle evidence could not be refreshed. Edit remains disabled until Refresh succeeds.",
+          tone: "warning",
+        });
+      } else {
+        setFeedback({
+          message: `Updated frozen targets for ${response.revisions.length} shared ${response.revisions.length === 1 ? "view" : "views"}. Existing public client identities were preserved.`,
+          tone: "success",
+        });
+      }
     } catch (error) {
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
     } finally {
+      setTargetUpdateReconciliationPending(false);
       setPending(false);
     }
   }
@@ -774,7 +1055,7 @@ export function SharedViewsPanel({
                 ? `Re-resolve the saved selector for ${rows.length} shared ${rows.length === 1 ? "view" : "views"}, then review exact additions and removals.`
                 : "The selected frozen targets already match their saved selectors.",
         disabled: (rows) =>
-          pending ||
+          shareMutationBlocked ||
           rows.length === 0 ||
           rows.some((share) => effectiveShareStatus(share) !== "active") ||
           rows.some((share) => !share.target_update_evidence_available) ||
@@ -789,7 +1070,7 @@ export function SharedViewsPanel({
             ? "Only active shared views can be extended. Expired or revoked links require a replacement."
             : `Extend ${rows.length} selected shared ${rows.length === 1 ? "view" : "views"}; each resulting expiry is capped at 365 days from now.`,
         disabled: (rows) =>
-          pending ||
+          shareMutationBlocked ||
           rows.length === 0 ||
           rows.some((share) => effectiveShareStatus(share) !== "active"),
         icon: <Clock3 size={14} />,
@@ -807,7 +1088,7 @@ export function SharedViewsPanel({
             ? "Only active shared views can be revoked. Expired and revoked rows are retained evidence."
             : `Immediately and irreversibly revoke ${rows.length} selected shared ${rows.length === 1 ? "view" : "views"}.`,
         disabled: (rows) =>
-          pending ||
+          shareMutationBlocked ||
           rows.length === 0 ||
           rows.some((share) => effectiveShareStatus(share) !== "active"),
         icon: <Ban size={14} />,
@@ -820,7 +1101,7 @@ export function SharedViewsPanel({
         tone: "danger",
       },
     ],
-    [pending],
+    [shareMutationBlocked],
   );
 
   const rowActions = useMemo<ConsoleDataGridAction<MonitoringShareView>[]>(
@@ -831,16 +1112,29 @@ export function SharedViewsPanel({
             ? `Copy the public URL for ${rows[0].name}.`
             : "Only one active shared view URL can be copied at a time.",
         disabled: (rows) =>
-          pending ||
+          shareMutationBlocked ||
           rows.length !== 1 ||
           effectiveShareStatus(rows[0]) !== "active",
         icon: <Copy size={14} />,
         label: "Copy URL",
         onSelect: (rows) => void copyShareUrl(rows[0]),
       },
+      {
+        description: (rows) =>
+          rows.length === 1 && effectiveShareStatus(rows[0]) === "active"
+            ? `Edit the name, frozen selector and targets, and public visibility for ${rows[0].name}.`
+            : "Only one active shared view can be edited at a time.",
+        disabled: (rows) =>
+          shareMutationBlocked ||
+          rows.length !== 1 ||
+          effectiveShareStatus(rows[0]) !== "active",
+        icon: <Pencil size={14} />,
+        label: "Edit",
+        onSelect: (rows) => openEdit(rows[0]),
+      },
       ...actions,
     ],
-    [actions, pending],
+    [actions, shareMutationBlocked],
   );
 
   const lifecycleItems = pendingAction
@@ -1001,10 +1295,10 @@ export function SharedViewsPanel({
               >
                 <button
                   className="secondaryAction compactAction"
-                  disabled={loading || pending}
-                  onClick={() => void loadShares()}
+                  disabled={loading || pending || targetUpdateReconciliationPending}
+                  onClick={() => void refreshShares()}
                   title={
-                    loading || pending
+                    loading || pending || targetUpdateReconciliationPending
                       ? "Wait for the current shared-view request to finish"
                       : "Refresh shared-view lifecycle, target, and access evidence"
                   }
@@ -1034,7 +1328,7 @@ export function SharedViewsPanel({
       </div>
 
       <ConsoleActionDrawer
-        description="The selector is resolved on the server at review time. Its frozen VPS list can later be explicitly refreshed; visible-data groups remain immutable."
+        description="The selector is resolved on the server at review time. An operator can later review and edit the active name, selector, frozen VPS list, and visible-data groups."
         onClose={closeCreate}
         open={drawerOpen}
         title="Create shared view"
@@ -1264,7 +1558,7 @@ export function SharedViewsPanel({
           <ConfirmationPrompt
             className="fieldFull"
             confirmLabel="Create shared view"
-            detail="Create one public URL for this exact target and visibility snapshot. Frozen targets change only through an explicit reviewed Update targets action."
+            detail="Create one public URL for this exact target and visibility snapshot. An explicit reviewed Edit can change the definition later; Update targets remains the saved-selector shortcut."
             error={actionError}
             items={
               review
@@ -1310,6 +1604,161 @@ export function SharedViewsPanel({
             ) : null}
           </ConfirmationPrompt>
         </form>
+      </ConsoleActionDrawer>
+
+      <ConsoleActionDrawer
+        description="Edit one active view's public definition. Expiry stays in Extend, revocation stays in Revoke, and the bearer URL is not rotated."
+        onClose={closeEdit}
+        open={editingShare !== null}
+        title="Edit shared view"
+      >
+        {editingShare && editDraft ? (
+          <form
+            className="consoleFormGrid"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void reviewEdit();
+            }}
+          >
+            <label className="consoleField fieldWide">
+              <span>Display name</span>
+              <input
+                aria-label="Edit shared view display name"
+                autoFocus
+                disabled={pending}
+                maxLength={128}
+                onChange={(event) =>
+                  updateEditDraft({ name: event.target.value })
+                }
+                value={editDraft.name}
+              />
+              <small>Shown to operators and public visitors.</small>
+            </label>
+
+            <div className="consoleField fieldFull">
+              <span>Frozen VPS scope</span>
+              <div className="targetSelector">
+                <div className="targetSelectorHeader">
+                  <strong>Target selector</strong>
+                  <span>
+                    {editSelectorParse.error
+                      ? "Fix the expression before review"
+                      : editSelectorEvidenceUnavailable
+                        ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                        : `${editLocalTargets.length}/${agents.length} VPSs in the local preview; review resolves the authoritative list`}
+                  </span>
+                </div>
+                <SearchExpressionInput
+                  agents={agents}
+                  ariaLabel="Edit shared view target selector"
+                  disabled={pending}
+                  onChange={(selectorExpression) =>
+                    updateEditDraft({ selectorExpression })
+                  }
+                  placeholder="* or provider:example && country:SG"
+                  showMatchCount
+                  value={editDraft.selectorExpression}
+                  verification={
+                    editSelectorParse.error || editSelectorEvidenceUnavailable
+                      ? "invalid"
+                      : editDraft.selectorExpression.trim()
+                        ? "valid"
+                        : "neutral"
+                  }
+                  verificationMessage={
+                    editSelectorParse.error ??
+                    (editSelectorEvidenceUnavailable
+                      ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                      : undefined)
+                  }
+                />
+                {!editSelectorEvidenceUnavailable ? (
+                  <LocalTargetPreview
+                    agents={editLocalTargets}
+                    ariaLabel="Edited shared view local VPS preview"
+                  />
+                ) : null}
+              </div>
+              <small>
+                Review re-resolves this selector and discloses every added and
+                removed frozen VPS before apply.
+              </small>
+            </div>
+
+            <div className="consoleField fieldFull">
+              <span>Visible data</span>
+              <small>
+                Display name and health remain always visible. Review shows the
+                complete before-and-after disclosure; operator actions,
+                configuration, addresses, jobs, files, backups, audit data, and
+                operator identity remain excluded.
+              </small>
+            </div>
+            {visibilityOptions(editDraft.visibility).map((option) => (
+              <div className="consoleField" key={option.field}>
+                <span>{option.label}</span>
+                <label className="checkLine borderedToggle">
+                  <input
+                    checked={option.checked}
+                    disabled={pending || option.disabled}
+                    onChange={(event) =>
+                      updateEditVisibility(option.field, event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>{option.detail}</span>
+                </label>
+              </div>
+            ))}
+
+            <ActionFeedback
+              className="localActionFeedback fieldFull"
+              message={actionError}
+              tone="danger"
+            />
+            <div className="consoleFormActions fieldFull">
+              <button
+                className="secondaryAction"
+                disabled={pending}
+                onClick={closeEdit}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="primaryAction"
+                disabled={pending || !editReady}
+                type="submit"
+              >
+                <Pencil size={16} />
+                {pending ? "Resolving targets" : "Review changes"}
+              </button>
+            </div>
+            <ConfirmationPrompt
+              className="fieldFull"
+              confirmLabel="Apply shared-view changes"
+              detail="Atomically replaces this active public definition after rechecking its revision. The existing URL, access history, expiry, and unchanged public VPS identities remain intact."
+              error={actionError}
+              items={sharedViewEditReviewItems(editReview, agents)}
+              onCancel={() => {
+                if (pending) return;
+                setActionError(null);
+                setEditReview(null);
+              }}
+              onConfirm={() => void applyEdit()}
+              open={editReview !== null}
+              pending={pending}
+              title="Confirm shared-view edit"
+            >
+              {editReview ? (
+                <LocalTargetPreview
+                  agents={editReview.targets}
+                  ariaLabel="Reviewed edited shared view targets"
+                />
+              ) : null}
+            </ConfirmationPrompt>
+          </form>
+        ) : null}
       </ConsoleActionDrawer>
 
       <ConfirmationPrompt
@@ -1509,9 +1958,9 @@ function ShareEvidence({ share }: { share: MonitoringShareView }) {
         </span>
       </div>
       <p className="observabilityMetricDefinition">
-        Frozen targets change only through a reviewed Update targets action;
-        visibility remains immutable. Extend changes only expiry, Revoke stops
-        access immediately, and Copy URL retrieves the active bearer link.
+        Active definitions change only through reviewed Edit or Update targets
+        actions. Extend changes only expiry, Revoke stops access immediately,
+        and Copy URL retrieves the unchanged active bearer link.
       </p>
     </div>
   );
@@ -1656,6 +2105,25 @@ function createDraftError(
   return "Review the highlighted fields before resolving targets.";
 }
 
+function shareDefinitionDraftError(
+  draft: EditShareDraft,
+  selectorError: string | null,
+): string {
+  if (!draft.name.trim()) return "Enter a display name for the shared view.";
+  if (draft.name.trim().length > 128)
+    return "Keep the shared view name within 128 characters.";
+  if (!draft.selectorExpression.trim())
+    return "Enter a VPS selector expression. Use * for all current VPSs.";
+  if (selectorError) return `Fix the VPS selector: ${selectorError}`;
+  if (
+    draft.visibility.detail_history &&
+    visibleMetricGroupCount(draft.visibility) === 0
+  ) {
+    return "Detail history requires at least one visible metric group.";
+  }
+  return "Review the highlighted fields before resolving targets.";
+}
+
 function effectiveShareStatus(share: MonitoringShareView): ShareStatus {
   if (share.revoked_at || share.status === "revoked") return "revoked";
   if (
@@ -1732,27 +2200,40 @@ function mergeShares(
   );
 }
 
-function applyTargetChanges(
+function mergeTargetRevisions(
   shares: MonitoringShareView[],
-  changes: BulkUpdateMonitoringShareTargetsResponse["changes"],
+  revisions: MonitoringShareRevisionView[],
 ): MonitoringShareView[] {
-  const byId = new Map(changes.map((change) => [change.share_id, change]));
+  const byId = new Map(revisions.map((revision) => [revision.share_id, revision]));
   return shares.map((share) => {
-    const change = byId.get(share.id);
-    if (!change) return share;
-    const removed = new Set(change.removed_client_ids);
-    const targetClientIds = [
-      ...share.target_client_ids.filter((clientId) => !removed.has(clientId)),
-      ...change.added_client_ids,
-    ].sort((left, right) => left.localeCompare(right));
+    const revision = byId.get(share.id);
+    if (!revision) return share;
     return {
       ...share,
-      target_client_ids: targetClientIds,
-      target_count: targetClientIds.length,
-      target_update_available: false,
-      target_update_evidence_available: true,
+      target_client_ids: [...revision.target_client_ids],
+      target_count: revision.target_count,
+      target_update_available: revision.target_update_available,
+      target_update_evidence_available:
+        revision.target_update_evidence_available,
+      updated_at: revision.updated_at,
     };
   });
+}
+
+function targetRevisionMatchesShare(
+  share: MonitoringShareView,
+  revision: MonitoringShareRevisionView,
+): boolean {
+  return (
+    share.target_count === revision.target_count &&
+    share.target_update_available === revision.target_update_available &&
+    share.target_update_evidence_available ===
+      revision.target_update_evidence_available &&
+    share.target_client_ids.length === revision.target_client_ids.length &&
+    share.target_client_ids.every(
+      (clientId, index) => clientId === revision.target_client_ids[index],
+    )
+  );
 }
 
 function shareTargetRefreshLabel(share: MonitoringShareView): string {
@@ -1821,6 +2302,62 @@ function sharedTargetUpdateReviewItems(
       value: String(change.unchanged_count),
     },
   ]);
+}
+
+function sharedViewEditReviewItems(
+  review: EditShareReview | null,
+  agents: AgentView[],
+): Array<{ label: string; title?: string; value: ReactNode }> {
+  if (!review) return [];
+  const change = review.response.change;
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  return [
+    {
+      label: "Display name",
+      value:
+        change.previous_name === change.name
+          ? change.name
+          : `${change.previous_name} → ${change.name}`,
+    },
+    {
+      label: "Selector",
+      value:
+        change.previous_selector_expression === change.selector_expression ? (
+          <code>{change.selector_expression}</code>
+        ) : (
+          <span>
+            <code>{change.previous_selector_expression}</code> →{" "}
+            <code>{change.selector_expression}</code>
+          </span>
+        ),
+    },
+    {
+      label: `Add frozen VPSs (${change.added_client_ids.length})`,
+      title: change.added_client_ids.join(", "),
+      value: exactSharedClientList(change.added_client_ids, agentsById),
+    },
+    {
+      label: `Remove frozen VPSs (${change.removed_client_ids.length})`,
+      title: change.removed_client_ids.join(", "),
+      value: exactSharedClientList(change.removed_client_ids, agentsById),
+    },
+    {
+      label: "Unchanged public VPS identities",
+      value: String(change.unchanged_count),
+    },
+    {
+      label: "Visible data before",
+      value: visibleDataVisibilityLabel(change.previous_visibility),
+    },
+    {
+      label: "Visible data after",
+      value: visibleDataVisibilityLabel(change.visibility),
+    },
+    {
+      label: "Preserved",
+      value: "Public URL · expiry · visitor history · unchanged VPS keys",
+    },
+  ];
 }
 
 function exactSharedClientList(

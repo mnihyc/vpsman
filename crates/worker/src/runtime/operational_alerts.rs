@@ -787,3 +787,12 @@ async fn lock_lifecycle(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
         .await?;
     Ok(())
 }
+
+pub(crate) async fn try_lock_lifecycle(tx: &mut Transaction<'_, Postgres>) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(OPERATIONAL_RECONCILE_LOCK)
+            .fetch_one(&mut **tx)
+            .await?,
+    )
+}

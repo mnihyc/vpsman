@@ -1,4 +1,5 @@
 use super::*;
+use crate::repository::{MemoryState, Repository};
 use vpsman_common::AgentCapabilitySnapshot;
 
 fn agent(id: &str, tags: &[&str]) -> AgentView {
@@ -126,4 +127,79 @@ fn process_lease_covers_every_serial_delivery_timeout() {
     assert_eq!(delivery_lease_secs(0), 60);
     assert_eq!(delivery_lease_secs(50), 310);
     assert_eq!(delivery_lease_secs(200), 1_060);
+}
+
+#[tokio::test]
+async fn manual_alert_delivery_processing_neutralizes_a_suspended_subject() {
+    let memory = MemoryState::default();
+    let mut subject = agent("edge-suspended", &["edge"]);
+    subject.status = "suspended".to_string();
+    memory.agents.write().await.push(subject.clone());
+    let rule_id = Uuid::new_v4();
+    memory.webhook_rules.write().await.push(WebhookRuleView {
+        id: rule_id,
+        name: "suspended-alert".to_string(),
+        enabled: true,
+        expression: "alert.triggered".to_string(),
+        target: "https://hooks.example.invalid/vpsman".to_string(),
+        body_template: "alert".to_string(),
+        cooldown_secs: 0,
+        signing_secret: None,
+        signing_secret_set: false,
+        notes: None,
+        actor_id: None,
+        created_at: "0".to_string(),
+        updated_at: "0".to_string(),
+    });
+    let delivery_id = Uuid::new_v4();
+    memory
+        .webhook_rule_deliveries
+        .write()
+        .await
+        .push(WebhookRuleDeliveryView {
+            id: delivery_id,
+            rule_id,
+            rule_name: "suspended-alert".to_string(),
+            event_kind: "alert.triggered".to_string(),
+            event_id: format!("fleet-alert:{}:triggered", Uuid::new_v4()),
+            status: vpsman_common::WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS.to_string(),
+            target: "https://hooks.example.invalid/vpsman".to_string(),
+            dedupe_key: format!("suspended-alert:{delivery_id}"),
+            payload: json!({}),
+            matched_vps: vec![subject],
+            message: "alert".to_string(),
+            signing_secret: None,
+            error: None,
+            cooldown_until_unix: 0,
+            attempt_count: 0,
+            next_attempt_at: None,
+            last_attempt_at: None,
+            actor_id: None,
+            created_at: "0".to_string(),
+            delivered_at: None,
+            review_preview_hash: None,
+        });
+    let repo = Repository::Memory(memory);
+    let lease_id = Uuid::new_v4();
+    let mut guard = repo
+        .begin_webhook_rule_alert_send(delivery_id, lease_id)
+        .await
+        .unwrap();
+    assert!(!guard.is_deliverable());
+    assert_eq!(guard.cancellation_reason(), Some("client_suspended"));
+    let canceled = repo
+        .cancel_claimed_webhook_rule_delivery(
+            delivery_id,
+            lease_id,
+            "client_suspended",
+            Some(&mut guard),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        canceled.status,
+        vpsman_common::WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED
+    );
+    assert_eq!(canceled.error.as_deref(), Some("client_suspended"));
+    guard.release().await.unwrap();
 }

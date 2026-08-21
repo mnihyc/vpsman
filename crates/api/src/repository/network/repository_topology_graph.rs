@@ -63,10 +63,23 @@ impl Repository {
             .list_agents()
             .await
             .context(TopologyGraphStageError::Agents)?;
+        let suspended_client_ids = agents
+            .iter()
+            .filter(|agent| agent.status == "suspended")
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        let agents = agents
+            .into_iter()
+            .filter(AgentView::is_monitoring_visible)
+            .collect::<Vec<_>>();
         let mut plans = self
             .list_tunnel_plans()
             .await
             .context(TopologyGraphStageError::Plans)?;
+        plans.retain(|plan| {
+            !suspended_client_ids.contains(&plan.left_client_id)
+                && !suspended_client_ids.contains(&plan.right_client_id)
+        });
         if !selected_plan_ids.is_empty() {
             let selected = selected_plan_ids.iter().copied().collect::<HashSet<_>>();
             plans.retain(|plan| selected.contains(&plan.id));
