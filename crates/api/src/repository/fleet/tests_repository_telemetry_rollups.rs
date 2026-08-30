@@ -1661,7 +1661,9 @@ fn bounded_network_history_preserves_canonical_stream_and_predecessor_semantics(
     ];
     let shadow_projected = [point(base, 60, 150, 0)];
 
-    let cases: [(&str, &[Point], &[Point], i64, i64, i64, usize); 8] = [
+    type HistoryCase<'a> = (&'a str, &'a [Point], &'a [Point], i64, i64, i64, usize);
+
+    let cases: [HistoryCase<'_>; 8] = [
         ("dense recent", &dense, &[], base, base + 900, 60, 16),
         ("sparse gaps", &sparse, &[], base, base + 900, 60, 16),
         ("mixed tier", &mixed, &[], base, base + 599, 300, 3),
