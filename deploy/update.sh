@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 REPO="${VPSMAN_RELEASE_REPO:-mnihyc/vpsman}"
 FRONTEND_ASSET="vpsman-frontend-dist.tar.gz"
-MIN_SUPPORTED_RELEASE="v0.2.0"
 HEALTH_TIMEOUT_SECS="${VPSMAN_UPDATE_HEALTH_TIMEOUT_SECS:-180}"
 
 log() {
@@ -34,11 +33,11 @@ Environment:
   VPSMAN_SUPER_PASSWORD      Required by first-start when compose secrets do not exist
   GITHUB_TOKEN               Optional token for GitHub release downloads
 
-The updater accepts only release v0.2.0 or newer. Before payload activation it
-verifies any existing migration history against the target release and saves a
-PostgreSQL archive under runtime/update-backups/. Updates and rollbacks stop
-application writers before taking that archive. The backup command creates an
-immediate validated PostgreSQL snapshot without stopping application services.
+Before payload activation the updater saves a PostgreSQL archive under
+runtime/update-backups/. Updates and rollbacks stop application writers before
+taking that archive. The API and worker apply the release's ordinary SQLx
+migrations when the new services start. The backup command creates an immediate
+validated PostgreSQL snapshot without stopping application services.
 A successful first-start prints the generated gateway public key for agent
 installation and the privilege salt that operators must save for browser and
 CLI privilege unlock.
@@ -320,8 +319,8 @@ try:
 except (OSError, UnicodeError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid release manifest JSON: {error}")
 
-if data.get("schema_version") not in (2, 3):
-    raise SystemExit("release manifest schema_version must be 2 or 3")
+if data.get("schema_version") != 3:
+    raise SystemExit("release manifest schema_version must be 3")
 if data.get("project") != "vpsman":
     raise SystemExit("release manifest project must be vpsman")
 tag = data.get("tag")
@@ -378,36 +377,6 @@ print("\t".join([tag, commit.lower(), *selected_urls]))
 PY
 }
 
-require_supported_release() {
-  python3 - "$1" "$MIN_SUPPORTED_RELEASE" <<'PY'
-import re
-import sys
-
-def parse(value):
-    match = re.fullmatch(
-        r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?",
-        value,
-    )
-    if not match:
-        raise SystemExit(f"unsupported release tag: {value}")
-    prerelease = match.group(4)
-    if prerelease and any(
-        len(part) > 1 and part.startswith("0") and part.isdigit()
-        for part in prerelease.split(".")
-    ):
-        raise SystemExit(f"unsupported release tag: {value}")
-    return tuple(map(int, match.group(1, 2, 3))), prerelease
-
-candidate, prerelease = parse(sys.argv[1])
-floor, _ = parse(sys.argv[2])
-if candidate < floor or (candidate == floor and prerelease is not None):
-    raise SystemExit(
-        f"release {sys.argv[1]} predates the supported updater boundary {sys.argv[2]}"
-    )
-PY
-}
-
 validate_archives() {
   python3 - "$1" "$2" <<'PY'
 import pathlib
@@ -453,115 +422,6 @@ wait_for_postgres() {
     sleep 1
   done
   return 1
-}
-
-database_migration_rows() {
-  local output="$1"
-  local failed
-  [[ "$(database_migration_ledger_status)" == "t" ]] ||
-    fail "database has no SQLx migration ledger; use first-start for a new deployment"
-  failed="$(
-    compose exec -T postgres sh -ceu \
-      'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) FROM _sqlx_migrations WHERE NOT success"' |
-      tr -d '\r'
-  )"
-  [[ "$failed" == "0" ]] ||
-    fail "database contains a failed SQLx migration; restore or repair it before updating"
-  compose exec -T postgres sh -ceu \
-    'exec psql -v ON_ERROR_STOP=1 -At -F " " -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT version, encode(checksum, '\''hex'\'') FROM _sqlx_migrations WHERE success ORDER BY version"' |
-    tr -d '\r' >"$output"
-}
-
-database_migration_ledger_status() {
-  local exists
-  exists="$(
-    compose exec -T postgres sh -ceu \
-      'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT to_regclass('\''public._sqlx_migrations'\'') IS NOT NULL"' |
-      tr -d '\r'
-  )"
-  case "$exists" in
-    t | f)
-      printf '%s\n' "$exists"
-      ;;
-    *)
-      fail "database returned an invalid SQLx migration-ledger status"
-      ;;
-  esac
-}
-
-verify_database_compatible_with() {
-  local migrations_dir="$1"
-  local rows_file="$2"
-  local version expected extra prefix
-  local -a matches
-
-  [[ -d "$migrations_dir" ]] ||
-    fail "release has no migrations directory: $migrations_dir"
-  database_migration_rows "$rows_file"
-  while read -r version expected extra; do
-    [[ -n "${version:-}" ]] || continue
-    [[ "$version" =~ ^[0-9]+$ && "$expected" =~ ^[0-9a-f]{96}$ && -z "${extra:-}" ]] ||
-      fail "database migration ledger returned an invalid row"
-    printf -v prefix '%04d_' "$version"
-    shopt -s nullglob
-    matches=("$migrations_dir"/"$prefix"*.sql)
-    shopt -u nullglob
-    [[ "${#matches[@]}" == "1" ]] ||
-      fail "target release does not contain exactly one migration for applied version $version"
-    actual="$(sha384sum "${matches[0]}" | awk '{print $1}')"
-    [[ "$actual" == "$expected" ]] ||
-      fail "database migration $version is incompatible with the target release; restore the matching release and follow docs/migration-compatibility.md"
-  done <"$rows_file"
-}
-
-database_relation_exists() {
-  local relation="$1"
-  local exists
-  [[ "$relation" =~ ^[a-z_][a-z0-9_]*$ ]] ||
-    fail "database relation preflight name is invalid"
-  exists="$(
-    compose exec -T postgres sh -ceu \
-      'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT to_regclass('\''public.$1'\'') IS NOT NULL"' \
-      sh "$relation" |
-      tr -d '\r'
-  )"
-  case "$exists" in
-    t | f)
-      printf '%s\n' "$exists"
-      ;;
-    *)
-      fail "database returned an invalid relation preflight status"
-      ;;
-  esac
-}
-
-require_alert_expression_cutover_ready() {
-  local migrations_dir="$1"
-  local completed pending
-
-  [[ -f "$migrations_dir/0012_policy_owned_alerts_event_schedules.sql" ]] || return 0
-  if [[ "$(database_relation_exists alert_expression_migration_meta)" == "t" ]]; then
-    completed="$(
-      compose exec -T postgres sh -ceu \
-        'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT completed_at IS NOT NULL FROM alert_expression_migration_meta WHERE singleton"' |
-        tr -d '\r'
-    )"
-    case "$completed" in
-      t) return 0 ;;
-      f) ;;
-      *) fail "database returned an invalid alert-expression migration status" ;;
-    esac
-  fi
-  [[ "$(database_relation_exists webhook_rule_deliveries)" == "t" ]] || return 0
-  pending="$(
-    compose exec -T postgres sh -ceu \
-      'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) FROM webhook_rule_deliveries WHERE status IN ('\''queued'\'', '\''in_progress'\'', '\''failed'\'')"' |
-      tr -d '\r'
-  )"
-  [[ "$pending" =~ ^(0|[1-9][0-9]*)$ ]] ||
-    fail "database returned an invalid nonterminal webhook-delivery count"
-  [[ "$pending" == "0" ]] ||
-    fail "0012 requires webhook deliveries to drain before upgrade; $pending queued, in-progress, or retryable failed deliveries remain. Keep the current worker running, repair the destination or retry policy, and rerun only after the migration-compatibility preflight returns zero"
 }
 
 database_backup_is_valid() {
@@ -766,12 +626,6 @@ current_payloads_match_staged() {
 write_active_release_tag() {
   local tag="$1"
   local marker="$script_dir/RELEASE_TAG"
-  if [[ -z "$tag" ]]; then
-    rm -f -- "$marker" "$marker.tmp" ||
-      fail "could not remove the legacy active-release marker; preserve $transaction for recovery"
-    log "removed the active-release marker because the rollback payload predates embedded release metadata"
-    return 0
-  fi
   valid_release_tag "$tag" ||
     fail "transaction release tag is invalid; preserve $transaction for manual recovery"
   printf '%s\n' "$tag" >"$marker.tmp" ||
@@ -802,7 +656,7 @@ finalize_transaction() {
   done
   transaction_mode="$(read_transaction_value "$transaction" mode)"
   release_tag="$(read_transaction_value "$transaction" tag)"
-  if [[ -z "$release_tag" && "$transaction_mode" != "rollback" ]]; then
+  if [[ -z "$release_tag" ]]; then
     fail "transaction release metadata is incomplete; preserve $transaction for manual recovery"
   fi
   write_active_release_tag "$release_tag"
@@ -1062,7 +916,6 @@ require_env
 require_tool docker
 require_tool flock
 require_tool python3
-require_tool sha384sum
 
 mkdir -p "$runtime_dir" "$transactions_dir" "$runtime_dir/update-backups"
 exec 9>"$runtime_dir/update.lock"
@@ -1091,7 +944,6 @@ if [[ "$target" == "backup" ]]; then
   active_release_tag="$(<"$script_dir/RELEASE_TAG")"
   valid_release_tag "$active_release_tag" ||
     fail "RELEASE_TAG is missing or invalid; reconcile the active release before backup"
-  require_supported_release "$active_release_tag"
   wait_for_postgres || fail "PostgreSQL did not become ready for backup"
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
   backup_name="manual-$timestamp-$active_release_tag.dump"
@@ -1110,22 +962,18 @@ if [[ "$target" == "rollback" ]]; then
   done
   wait_for_postgres || fail "PostgreSQL did not become ready for rollback preflight"
   create_transaction rollback
-  rollback_tag=""
-  if [[ -f "$runtime_dir/server/previous/.vpsman-release.json" ]]; then
-    IFS=$'\t' read -r rollback_tag _ < <(
-      read_validated_manifest "$runtime_dir/server/previous/.vpsman-release.json"
-    )
-    require_supported_release "$rollback_tag"
-  fi
+  [[ -f "$runtime_dir/server/previous/.vpsman-release.json" &&
+    ! -L "$runtime_dir/server/previous/.vpsman-release.json" ]] ||
+    fail "rollback payload has no valid release metadata"
+  IFS=$'\t' read -r rollback_tag _ < <(
+    read_validated_manifest "$runtime_dir/server/previous/.vpsman-release.json"
+  )
   write_transaction_value "$transaction" tag "$rollback_tag"
-  verify_database_compatible_with \
-    "$runtime_dir/server/previous/migrations" \
-    "$transaction/migration-rows.txt"
   write_transaction_value "$transaction" state stopping
   transaction_can_cleanup=0
   stop_application_services
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  backup_name="pre-update-$timestamp-${rollback_tag:-v0.0.0-rollback}.dump"
+  backup_name="pre-update-$timestamp-$rollback_tag.dump"
   write_transaction_value "$transaction" backup "$backup_name"
   backup_database "$runtime_dir/update-backups/$backup_name"
   write_transaction_value "$transaction" state backup_ready
@@ -1175,7 +1023,6 @@ IFS=$'\t' read -r \
     "$FRONTEND_ASSET" \
     "$CLI_ASSET"
 )
-require_supported_release "$resolved_tag"
 if [[ "$target" != "latest" && "$resolved_tag" != "$target" ]]; then
   fail "release manifest resolved $resolved_tag but exact target $target was requested"
 fi
@@ -1255,12 +1102,6 @@ if [[ "$mode" == "first-start" ]]; then
   operator_privilege_salt="$(read_operator_privilege_salt)"
   gateway_public_key_hex="$(read_gateway_public_key)"
   wait_for_postgres || fail "PostgreSQL did not become ready for first-start preflight"
-  if [[ "$(database_migration_ledger_status)" == "t" ]]; then
-    verify_database_compatible_with \
-      "$transaction/staged-server/migrations" \
-      "$transaction/migration-rows.txt"
-  fi
-  require_alert_expression_cutover_ready "$transaction/staged-server/migrations"
   mkdir -p "$runtime_dir/downloads"
   cp "$transaction/downloads/version.json" \
     "$runtime_dir/downloads/version-$resolved_tag.json"
@@ -1275,10 +1116,6 @@ if [[ "$mode" == "first-start" ]]; then
   write_transaction_value "$transaction" state backup_ready
 else
   wait_for_postgres || fail "PostgreSQL did not become ready for update preflight"
-  verify_database_compatible_with \
-    "$transaction/staged-server/migrations" \
-    "$transaction/migration-rows.txt"
-  require_alert_expression_cutover_ready "$transaction/staged-server/migrations"
   mkdir -p "$runtime_dir/downloads"
   cp "$transaction/downloads/version.json" \
     "$runtime_dir/downloads/version-$resolved_tag.json"

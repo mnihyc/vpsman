@@ -390,6 +390,23 @@ async fn postgres_offline_transition_records_neutral_policy_evidence() {
         0,
         "worker source transitions must not publish retired alert lifecycle aliases"
     );
+    let pending_ownership: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*), count(*) FILTER (WHERE evaluation_pending)
+        FROM alert_policy_evidence
+        WHERE source_kind IN (
+            'agent.status','agent.access','tunnel.adapter','tunnel.traffic'
+        )
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(pending_ownership.0 > 0);
+    assert_eq!(
+        pending_ownership.0, pending_ownership.1,
+        "every worker-owned state fact must durably own pending evaluation"
+    );
 
     db.cleanup().await;
 }
@@ -428,13 +445,15 @@ async fn postgres_offline_sweep_skips_locked_oldest_and_records_each_transition_
         .execute(&mut *oldest_holder)
         .await
         .unwrap();
-    let first_sweep = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        detect_offline_agents(&db.pool, 60),
-    )
-    .await
-    .expect("a locked oldest client blocked the offline sweep")
-    .unwrap();
+    // The correct SKIP LOCKED path never waits on the held client. Use one
+    // session with a database lock timeout so a missing skip fails on the
+    // forbidden lock wait itself, independently of suite-wide I/O pressure.
+    let sweep_pool = db.additional_pool(1).await.unwrap();
+    sqlx::query("SET lock_timeout = '250ms'")
+        .execute(&sweep_pool)
+        .await
+        .unwrap();
+    let first_sweep = detect_offline_agents(&sweep_pool, 60).await.unwrap();
     assert_eq!(first_sweep, 1);
     let first_statuses: Vec<(String, String)> = sqlx::query_as(
         r#"
@@ -460,17 +479,8 @@ async fn postgres_offline_sweep_skips_locked_oldest_and_records_each_transition_
     );
 
     oldest_holder.rollback().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            detect_offline_agents(&db.pool, 60),
-        )
-        .await
-        .expect("released oldest client was not processed promptly")
-        .unwrap(),
-        1
-    );
-    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
+    assert_eq!(detect_offline_agents(&sweep_pool, 60).await.unwrap(), 1);
+    assert_eq!(detect_offline_agents(&sweep_pool, 60).await.unwrap(), 0);
     for client_id in [oldest_client_id, peer_client_id] {
         assert_eq!(
             offline_side_effect_counts(&db.pool, client_id).await,
@@ -479,65 +489,7 @@ async fn postgres_offline_sweep_skips_locked_oldest_and_records_each_transition_
         );
     }
 
-    db.cleanup().await;
-}
-
-#[tokio::test]
-async fn postgres_offline_sweep_does_not_pin_client_behind_reconcile_advisory() {
-    let Some(db) = PgWorkerTestDb::maybe_new().await else {
-        return;
-    };
-    let client_id = "offline-sweep-advisory-held";
-    insert_lifecycle_client(&db.pool, client_id, "online", true).await;
-
-    let mut holder = db.pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind("vpsman:operational-alert-reconcile")
-        .execute(&mut *holder)
-        .await
-        .unwrap();
-    let skipped = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        detect_offline_agents(&db.pool, 60),
-    )
-    .await
-    .expect("offline sweep waited behind the reconcile advisory")
-    .unwrap();
-    assert_eq!(skipped, 0);
-    assert_eq!(
-        offline_side_effect_counts(&db.pool, client_id).await,
-        (0, 0, 0, 0, 0)
-    );
-
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        sqlx::query(
-            "UPDATE clients SET last_seen_at = clock_timestamp() - interval '2 hours' WHERE id = $1",
-        )
-        .bind(client_id)
-        .execute(&db.pool),
-    )
-    .await
-    .expect("offline sweep pinned the selected client row behind the advisory")
-    .unwrap();
-
-    holder.rollback().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            detect_offline_agents(&db.pool, 60),
-        )
-        .await
-        .expect("offline retry did not resume after the advisory was released")
-        .unwrap(),
-        1
-    );
-    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
-    assert_eq!(
-        offline_side_effect_counts(&db.pool, client_id).await,
-        (1, 1, 1, 1, 1)
-    );
-
+    sweep_pool.close().await;
     db.cleanup().await;
 }
 
@@ -598,7 +550,7 @@ async fn postgres_offline_candidate_plan_is_index_bounded_with_equal_timestamps(
 }
 
 #[tokio::test]
-async fn postgres_offline_sweep_stops_at_batch_and_resumes_remaining_client() {
+async fn postgres_offline_drain_continues_past_scheduler_page() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;
     };
@@ -619,7 +571,7 @@ async fn postgres_offline_sweep_stops_at_batch_and_resumes_remaining_client() {
     .await
     .unwrap();
 
-    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 100);
+    assert_eq!(drain_offline_agents(&db.pool, 60).await.unwrap(), 101);
     let statuses: (i64, i64) = sqlx::query_as(
         r#"
         SELECT count(*) FILTER (WHERE status = 'offline'),
@@ -630,9 +582,7 @@ async fn postgres_offline_sweep_stops_at_batch_and_resumes_remaining_client() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(statuses, (100, 1));
-    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 1);
-    assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 0);
+    assert_eq!(statuses, (101, 0));
     let effects: (i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT

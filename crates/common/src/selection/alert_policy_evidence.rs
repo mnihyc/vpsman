@@ -2,22 +2,8 @@ use serde_json::Value;
 
 use crate::payload_hash;
 
-/// Builds the cross-binary immutable identity for one state-source revision.
-///
-/// Fleet labels, selector metadata, and rendered presentation are deliberately
-/// excluded. They have their own monotonic scope-revision evidence and must not
-/// turn one unchanged authoritative state into multiple Count confirmations.
-pub fn alert_policy_state_source_event_id(
-    source_kind: &str,
-    natural_key: &str,
-    observed_at_unix_nanos: i64,
-    payload: &Value,
-) -> String {
-    // Hash only fields that the selected source schema exposes to policy
-    // expressions. API repair and worker transition adapters intentionally
-    // carry different presentation/scope envelopes; those must still name the
-    // same immutable source revision.
-    let identity = match source_kind {
+fn state_source_identity(source_kind: &str, payload: &Value) -> Value {
+    match source_kind {
         "agent.status" | "agent.access" => serde_json::json!({
             "status": payload.get("status").cloned().unwrap_or(Value::Null),
         }),
@@ -35,9 +21,44 @@ pub fn alert_policy_state_source_event_id(
             "status": payload.get("status").cloned().unwrap_or(Value::Null),
             "source_status": payload.get("source_status").cloned().unwrap_or(Value::Null),
         }),
-    };
+    }
+}
+
+/// Builds the cross-binary immutable identity for one state-source revision.
+///
+/// Fleet labels, selector metadata, and rendered presentation are deliberately
+/// excluded. They have their own monotonic scope-revision evidence and must not
+/// turn one unchanged authoritative state into multiple Count confirmations.
+pub fn alert_policy_state_source_event_id(
+    source_kind: &str,
+    natural_key: &str,
+    observed_at_unix_nanos: i64,
+    payload: &Value,
+) -> String {
+    // Hash only fields that the selected source schema exposes to policy
+    // expressions. API repair and worker transition adapters intentionally
+    // carry different presentation/scope envelopes; those must still name the
+    // same immutable source revision.
+    let identity = state_source_identity(source_kind, payload);
     format!(
         "{natural_key}:{observed_at_unix_nanos}:{}",
+        payload_hash(identity.to_string().as_bytes())
+    )
+}
+
+/// Builds a state-source identity from an authoritative source revision rather
+/// than its containing receipt time. The revision token is hashed and remains
+/// an internal deduplication detail; policy payload semantics stay unchanged.
+pub fn alert_policy_state_source_revision_event_id(
+    source_kind: &str,
+    natural_key: &str,
+    revision_token: &str,
+    payload: &Value,
+) -> String {
+    let identity = state_source_identity(source_kind, payload);
+    format!(
+        "{natural_key}:{}:{}",
+        payload_hash(revision_token.as_bytes()),
         payload_hash(identity.to_string().as_bytes())
     )
 }
@@ -101,6 +122,57 @@ mod tests {
         assert_eq!(
             alert_policy_state_source_event_id("agent.status", "vps-a", 7, &api),
             alert_policy_state_source_event_id("agent.status", "vps-a", 7, &worker)
+        );
+    }
+
+    #[test]
+    fn authoritative_revision_identity_dedupes_cache_and_separates_sources() {
+        let traffic = serde_json::json!({
+            "traffic": {"status": "ok"},
+            "interface": "wg0",
+            "reason": "healthy",
+        });
+        let cached = alert_policy_state_source_revision_event_id(
+            "tunnel.traffic",
+            "plan:left",
+            "traffic:checked=42:status-boundary=a:runtime-boundary=b",
+            &traffic,
+        );
+        assert_eq!(
+            cached,
+            alert_policy_state_source_revision_event_id(
+                "tunnel.traffic",
+                "plan:left",
+                "traffic:checked=42:status-boundary=a:runtime-boundary=b",
+                &traffic,
+            )
+        );
+        assert_ne!(
+            cached,
+            alert_policy_state_source_revision_event_id(
+                "tunnel.traffic",
+                "plan:left",
+                "traffic:checked=43:status-boundary=a:runtime-boundary=b",
+                &traffic,
+            )
+        );
+        assert_ne!(
+            cached,
+            alert_policy_state_source_revision_event_id(
+                "tunnel.traffic",
+                "plan:left",
+                "adapter:checked=42:status-boundary=a:runtime-boundary=b",
+                &traffic,
+            )
+        );
+        assert_ne!(
+            cached,
+            alert_policy_state_source_revision_event_id(
+                "tunnel.traffic",
+                "plan:left",
+                "traffic:checked=42:status-boundary=c:runtime-boundary=b",
+                &traffic,
+            )
         );
     }
 }

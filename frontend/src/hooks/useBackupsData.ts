@@ -1,5 +1,13 @@
 import { useCallback, useRef, useState } from "react";
-import { apiGet, apiGetBlob, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
+import {
+  apiGet,
+  apiGetBlob,
+  apiPost,
+  apiPut,
+  buildListPath,
+  isApiUnauthorized,
+  LatestReadConsumer,
+} from "../api";
 import { bytesToBase64, readFileSlice, sha256FileHex } from "../fileTransfer";
 import { FLEET_DETAIL_LIMIT, HISTORY_DETAIL_LIMIT } from "../constants";
 import {
@@ -62,111 +70,129 @@ export function useBackupsData(
   const [backupsEvidenceAvailable, setBackupsEvidenceAvailable] =
     useState(false);
   const backupsLoadGeneration = useRef(0);
+  const backupsLoadConsumer = useRef(new LatestReadConsumer());
 
-  const loadBackups = useCallback(async () => {
+  const loadBackups = useCallback((): Promise<void> => {
     if (apiTokenRef.current !== apiToken) {
-      return;
+      return Promise.resolve();
     }
     const generation = backupsLoadGeneration.current + 1;
     backupsLoadGeneration.current = generation;
     setBackupsLoading(true);
     setBackupsError(null);
-    try {
-      const results = await Promise.allSettled([
-        apiGet<BackupRequestRecord[]>(
-          buildListPath("/api/v1/backups", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }),
-          apiToken,
-        ),
-        apiGet<BackupPolicyRecord[]>(
-          `/api/v1/backup-policies?limit=${FLEET_DETAIL_LIMIT}`,
-          apiToken,
-        ),
-        apiGet<BackupArtifactRecord[]>(
-          buildListPath("/api/v1/backup-artifacts", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }),
-          apiToken,
-        ),
-        apiGet<RestorePlanRecord[]>(
-          buildListPath("/api/v1/restore-plans", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }),
-          apiToken,
-        ),
-        apiGet<MigrationLinkRecord[]>(
-          buildListPath("/api/v1/migration-links", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }),
-          apiToken,
-        ),
-      ]);
-      if (
-        apiTokenRef.current !== apiToken ||
-        backupsLoadGeneration.current !== generation
-      ) {
-        return;
-      }
-      const unauthorized = results.some(
-        (result) =>
-          result.status === "rejected" && isApiUnauthorized(result.reason),
-      );
-      if (unauthorized) {
-        onUnauthorized();
-        setBackupsEvidenceAvailable(false);
-        setBackups([]);
-        setBackupsTruncated(false);
-        setBackupPolicies([]);
-        setBackupPoliciesTruncated(false);
-        setBackupArtifacts([]);
-        setBackupArtifactsTruncated(false);
-        setRestorePlans([]);
-        setMigrationLinks([]);
-        setBackupsError("Operator login required");
-        return;
-      }
-      const [
-        backupResult,
-        policyResult,
-        artifactResult,
-        restoreResult,
-        migrationResult,
-      ] = results;
-      setBackupsEvidenceAvailable(
-        backupResult.status === "fulfilled" &&
-          artifactResult.status === "fulfilled",
-      );
-      if (backupResult.status === "fulfilled") {
-        setBackups(backupResult.value);
-        setBackupsTruncated(
-          backupResult.value.length >= HISTORY_DETAIL_LIMIT,
+    return backupsLoadConsumer.current.enqueue(async () => {
+      try {
+        const results = await Promise.allSettled([
+          apiGet<BackupRequestRecord[]>(
+            buildListPath("/api/v1/backups", {
+              limit: HISTORY_DETAIL_LIMIT,
+              sort: "created_at",
+              dir: "desc",
+            }),
+            apiToken,
+          ),
+          apiGet<BackupPolicyRecord[]>(
+            `/api/v1/backup-policies?limit=${FLEET_DETAIL_LIMIT}`,
+            apiToken,
+          ),
+          apiGet<BackupArtifactRecord[]>(
+            buildListPath("/api/v1/backup-artifacts", {
+              limit: HISTORY_DETAIL_LIMIT,
+              sort: "created_at",
+              dir: "desc",
+            }),
+            apiToken,
+          ),
+          apiGet<RestorePlanRecord[]>(
+            buildListPath("/api/v1/restore-plans", {
+              limit: HISTORY_DETAIL_LIMIT,
+              sort: "created_at",
+              dir: "desc",
+            }),
+            apiToken,
+          ),
+          apiGet<MigrationLinkRecord[]>(
+            buildListPath("/api/v1/migration-links", {
+              limit: HISTORY_DETAIL_LIMIT,
+              sort: "created_at",
+              dir: "desc",
+            }),
+            apiToken,
+          ),
+        ]);
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupsLoadGeneration.current !== generation
+        ) {
+          return;
+        }
+        const unauthorized = results.some(
+          (result) =>
+            result.status === "rejected" && isApiUnauthorized(result.reason),
         );
-      }
-      if (policyResult.status === "fulfilled") {
-        setBackupPolicies(policyResult.value);
-        setBackupPoliciesTruncated(
-          policyResult.value.length >= FLEET_DETAIL_LIMIT,
+        if (unauthorized) {
+          onUnauthorized();
+          setBackupsEvidenceAvailable(false);
+          setBackups([]);
+          setBackupsTruncated(false);
+          setBackupPolicies([]);
+          setBackupPoliciesTruncated(false);
+          setBackupArtifacts([]);
+          setBackupArtifactsTruncated(false);
+          setRestorePlans([]);
+          setMigrationLinks([]);
+          setBackupsError("Operator login required");
+          return;
+        }
+        const [
+          backupResult,
+          policyResult,
+          artifactResult,
+          restoreResult,
+          migrationResult,
+        ] = results;
+        setBackupsEvidenceAvailable(
+          backupResult.status === "fulfilled" &&
+            artifactResult.status === "fulfilled",
         );
+        if (backupResult.status === "fulfilled") {
+          setBackups(backupResult.value);
+          setBackupsTruncated(
+            backupResult.value.length >= HISTORY_DETAIL_LIMIT,
+          );
+        }
+        if (policyResult.status === "fulfilled") {
+          setBackupPolicies(policyResult.value);
+          setBackupPoliciesTruncated(
+            policyResult.value.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        if (artifactResult.status === "fulfilled") {
+          setBackupArtifacts(artifactResult.value);
+          setBackupArtifactsTruncated(
+            artifactResult.value.length >= HISTORY_DETAIL_LIMIT,
+          );
+        }
+        if (restoreResult.status === "fulfilled") {
+          setRestorePlans(restoreResult.value);
+        }
+        if (migrationResult.status === "fulfilled") {
+          setMigrationLinks(migrationResult.value);
+        }
+        const failures = [
+          settledSourceFailure("Backup requests", backupResult),
+          settledSourceFailure("Backup policies", policyResult),
+          settledSourceFailure("Backup artifacts", artifactResult),
+          settledSourceFailure("Restore plans", restoreResult),
+          settledSourceFailure("Migration links", migrationResult),
+        ].filter((message): message is string => message !== null);
+        setBackupsError(failures.length > 0 ? failures.join("; ") : null);
+      } finally {
+        if (backupsLoadGeneration.current === generation) {
+          setBackupsLoading(false);
+        }
       }
-      if (artifactResult.status === "fulfilled") {
-        setBackupArtifacts(artifactResult.value);
-        setBackupArtifactsTruncated(
-          artifactResult.value.length >= HISTORY_DETAIL_LIMIT,
-        );
-      }
-      if (restoreResult.status === "fulfilled") {
-        setRestorePlans(restoreResult.value);
-      }
-      if (migrationResult.status === "fulfilled") {
-        setMigrationLinks(migrationResult.value);
-      }
-      const failures = [
-        settledSourceFailure("Backup requests", backupResult),
-        settledSourceFailure("Backup policies", policyResult),
-        settledSourceFailure("Backup artifacts", artifactResult),
-        settledSourceFailure("Restore plans", restoreResult),
-        settledSourceFailure("Migration links", migrationResult),
-      ]
-        .filter((message): message is string => message !== null);
-      setBackupsError(failures.length > 0 ? failures.join("; ") : null);
-    } finally {
-      if (backupsLoadGeneration.current === generation) {
-        setBackupsLoading(false);
-      }
-    }
+    });
   }, [apiToken, onUnauthorized]);
 
   const beginHomeBackupsHydration = useCallback(
@@ -407,6 +433,7 @@ export function useBackupsData(
   const clearBackups = useCallback(() => {
     apiTokenRef.current = "";
     backupsLoadGeneration.current += 1;
+    backupsLoadConsumer.current.discardPending();
     setBackups([]);
     setBackupsTruncated(false);
     setBackupPolicies([]);

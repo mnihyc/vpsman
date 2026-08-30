@@ -1,11 +1,13 @@
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Notify;
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -23,6 +25,7 @@ const LEDGER_MAX_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub(crate) struct CommandLedger {
     root: PathBuf,
+    cleanup_ready: Arc<Notify>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -45,7 +48,10 @@ impl CommandLedger {
         ensure_private_dir_async(&root)
             .await
             .with_context(|| format!("failed to create command ledger {}", root.display()))?;
-        let ledger = Self { root };
+        let ledger = Self {
+            root,
+            cleanup_ready: Arc::new(Notify::new()),
+        };
         ledger.write_test().await?;
         ledger.cleanup().await?;
         Ok(ledger)
@@ -117,8 +123,18 @@ impl CommandLedger {
                 )
             })?;
         fsync_dir_best_effort(&self.root).await;
-        self.cleanup().await?;
+        // Persistence produces cleanup work but never scans the whole ledger.
+        // Notify coalesces simultaneous completions; the runtime-owned consumer
+        // is the sole global retention/size owner.
+        self.cleanup_ready.notify_one();
         Ok(())
+    }
+
+    pub(crate) async fn run_cleanup_consumer(&self) -> Result<()> {
+        loop {
+            self.cleanup_ready.notified().await;
+            self.cleanup().await?;
+        }
     }
 
     fn entry_path(&self, job_id: Uuid) -> PathBuf {

@@ -599,7 +599,7 @@ const systemDashboard = {
   effective_resolution_secs: 60,
   requested_step_secs: 60,
   capacity: {
-    agent_offline_secs: 300,
+    agent_offline_timeout_secs: 300,
     api_db_pool: 32,
     dispatch_ack_secs: 30,
     dispatcher_batch: 128,
@@ -608,7 +608,7 @@ const systemDashboard = {
     event_post_secs: 15,
     internal_http_read_secs: 15,
     worker_db_pool: 8,
-    worker_schedule_job_max_timeout_secs: 30,
+    schedule_job_max_timeout_secs: 30,
   },
   current: {
     cancellations: {
@@ -904,7 +904,6 @@ tunnel_ipv6_allocation_pool_cidr = ""
 
 [worker]
 tick_secs = 30
-worker_lease_secs = 60
 agent_offline_timeout_secs = 300
 schedule_job_max_timeout_secs = 30
 
@@ -922,7 +921,6 @@ backup_object_store_dir = "/var/lib/vpsman/objects/backups"
 dispatch_ack_secs = 30
 event_post_secs = 15
 internal_http_read_secs = 15
-agent_offline_secs = 300
 
 [secrets]
 internal_token_file = "/run/secrets/vpsman_internal_token"
@@ -974,19 +972,15 @@ const suiteConfigValidation = {
     "timeout.event_post_secs",
     "timeout.internal_http_read_secs",
     "gateway.reconnect_grace_secs",
-    "timeout.gateway_reconnect_grace_secs",
     "api.job_output_artifact_min_bytes",
     "api.require_registered_agent_updates",
     "worker.schedule_job_max_timeout_secs",
     "worker.tick_secs",
-    "worker.worker_lease_secs",
     "worker.agent_offline_timeout_secs",
     "worker.notification_*",
     "worker.webhook_rule_*",
     "worker.backup_policy_prune_*",
     "worker.require_registered_agent_updates",
-    "timeout.worker_schedule_job_max_timeout_secs",
-    "timeout.agent_offline_secs",
   ],
   restart_required_fields: [
     "api.bind",
@@ -1008,7 +1002,6 @@ const suiteConfigValidation = {
     "capacity.worker_db_pool",
     "capacity.gateway_telemetry_in_flight",
     "worker.once",
-    "worker.worker_id",
     "timeout.internal_http_connect_secs",
     "timeout.internal_http_write_secs",
   ],
@@ -1741,15 +1734,15 @@ const vpsRuleValues: VpsRuleValueRecord[] = [
   {
     client_id: "agent-sfo-01",
     key: "traffic.reset_day",
-    parsed_display: "14 UTC",
+    parsed_display: "14 05:00 UTC",
     source_id: null,
     source_kind: "operator",
     state: "ok",
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: "fixture-admin",
     validation_errors: [],
-    value_json: 14,
-    value_raw: "14",
+    value_json: { day: 14, hour: 5 },
+    value_raw: "14 05:00",
   },
   {
     client_id: "agent-sfo-01",
@@ -1775,6 +1768,7 @@ const vpsRuleValues: VpsRuleValueRecord[] = [
     updated_by: "fixture-admin",
     validation_errors: [],
     value_json: {
+      mode: "exact",
       selectors: [
         {
           canonical: "eth0+tx",
@@ -1813,6 +1807,7 @@ const trafficAccounting: TrafficAccountingRecord[] = [
     quota_total_bytes: 3000000000000,
     quota_tx_bytes: null,
     reset_day: 14,
+    reset_hour: 5,
     rx_bytes: 510000000000,
     selector_breakdown: [
       {
@@ -2211,7 +2206,7 @@ const historyRetentionPolicies = [
     export_enabled: true,
     metadata_only: false,
     notes: "fixture system metric retention",
-    prune_limit: 2000,
+    prune_limit: 10000,
     retention_days: 3650,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
@@ -2223,7 +2218,7 @@ const historyRetentionPolicies = [
     export_enabled: true,
     metadata_only: false,
     notes: "fixture telemetry rollup retention",
-    prune_limit: 2000,
+    prune_limit: 10000,
     retention_days: 3650,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
@@ -2235,7 +2230,7 @@ const historyRetentionPolicies = [
     export_enabled: true,
     metadata_only: false,
     notes: "fixture network-rate telemetry retention",
-    prune_limit: 2000,
+    prune_limit: 10000,
     retention_days: 3650,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
@@ -2247,19 +2242,31 @@ const historyRetentionPolicies = [
     export_enabled: true,
     metadata_only: false,
     notes: "fixture job output retention",
-    prune_limit: 500,
+    prune_limit: 5000,
     retention_days: 30,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
   },
   {
     built_in_default: true,
-    domain: "backup_artifacts",
+    domain: "telemetry_ping_rollups",
     enabled: true,
     export_enabled: true,
-    metadata_only: true,
-    notes: "fixture backup metadata retention",
-    prune_limit: 100,
+    metadata_only: false,
+    notes: "fixture Ping telemetry retention",
+    prune_limit: 10000,
+    retention_days: 3650,
+    updated_at: "2026-06-02T10:00:00Z",
+    updated_by: null,
+  },
+  {
+    built_in_default: true,
+    domain: "traffic_counter_rollups",
+    enabled: true,
+    export_enabled: true,
+    metadata_only: false,
+    notes: "fixture traffic counter retention",
+    prune_limit: 10000,
     retention_days: 3650,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
@@ -2272,18 +2279,6 @@ const historyRetentionPolicies = [
     metadata_only: false,
     notes: "fixture network observation retention",
     prune_limit: 5000,
-    retention_days: 180,
-    updated_at: "2026-06-02T10:00:00Z",
-    updated_by: null,
-  },
-  {
-    built_in_default: true,
-    domain: "topology_history",
-    enabled: true,
-    export_enabled: true,
-    metadata_only: false,
-    notes: "fixture topology retention",
-    prune_limit: 2000,
     retention_days: 180,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
@@ -4258,6 +4253,7 @@ export async function installConsoleApiMock(
       keyLifecycleReportFixture,
       fleetAlertNotificationChannelsFixture,
       fleetAlertNotificationsFixture,
+      fleetAlertNotificationsTruncatedFixture,
       fleetAlertPoliciesFixture,
       fleetAlertHistoryFixture,
       fleetAlertHistoryTruncatedFixture,
@@ -4276,6 +4272,7 @@ export async function installConsoleApiMock(
       currentPolicyAlertsFixture,
       currentPolicyAlertsTruncatedFixture,
       policyAlertsFixture,
+      policyAlertsTruncatedFixture,
       policyDryRunFixture,
       portForwardRulesFixture,
       fileTransferSourceArtifactsFixture,
@@ -4557,6 +4554,10 @@ export async function installConsoleApiMock(
       let releaseNextTagOrderGet: (() => void) | null = null;
       let nextRuntimeConfigApplyGate: Promise<void> | null = null;
       let releaseNextRuntimeConfigApply: (() => void) | null = null;
+      let nextBulkResolveGate: Promise<void> | null = null;
+      let releaseNextBulkResolve: (() => void) | null = null;
+      let terminalInputAcksHeld = false;
+      const heldTerminalInputAcks: Array<() => void> = [];
       Object.defineProperty(window, "__vpsmanSetTagOrderState", {
         configurable: true,
         value: (state: typeof currentTagOrderState) => {
@@ -4591,6 +4592,36 @@ export async function installConsoleApiMock(
         value: () => {
           releaseNextRuntimeConfigApply?.();
           releaseNextRuntimeConfigApply = null;
+        },
+      });
+      Object.defineProperty(window, "__vpsmanGateNextBulkResolve", {
+        configurable: true,
+        value: () => {
+          nextBulkResolveGate = new Promise<void>((resolve) => {
+            releaseNextBulkResolve = resolve;
+          });
+        },
+      });
+      Object.defineProperty(window, "__vpsmanReleaseNextBulkResolve", {
+        configurable: true,
+        value: () => {
+          releaseNextBulkResolve?.();
+          releaseNextBulkResolve = null;
+        },
+      });
+      Object.defineProperty(window, "__vpsmanGateTerminalInputAcks", {
+        configurable: true,
+        value: () => {
+          terminalInputAcksHeld = true;
+        },
+      });
+      Object.defineProperty(window, "__vpsmanReleaseTerminalInputAcks", {
+        configurable: true,
+        value: () => {
+          terminalInputAcksHeld = false;
+          for (const dispatchAck of heldTerminalInputAcks.splice(0)) {
+            dispatchAck();
+          }
         },
       });
       const visibleTunnelPlans = () =>
@@ -5911,7 +5942,7 @@ export async function installConsoleApiMock(
             ? ((body.keys as string[] | undefined) ?? ["traffic.quota.total"])
             : Object.keys(
                 (body.values as Record<string, string> | undefined) ?? {
-                  "traffic.reset_day": "14",
+                  "traffic.reset_day": "14 05:00",
                 },
               );
         const values =
@@ -5919,7 +5950,8 @@ export async function installConsoleApiMock(
         const targets = resolveBulkTargets(body);
         const changes = targets.flatMap((target) =>
           keys.map((key) => {
-            const after = operation === "unset" ? null : (values[key] ?? "14");
+            const after =
+              operation === "unset" ? null : (values[key] ?? "14 05:00");
             const before =
               vpsRuleValuesFixture.find(
                 (row) => row.client_id === target.id && row.key === key,
@@ -5962,6 +5994,219 @@ export async function installConsoleApiMock(
             "3333333333333333333333333333333333333333333333333333333333333333",
         };
       };
+      const monitoringCardItemsPayload = (fixedClientId: string | null) => {
+        const networkScale =
+          telemetryNetworkRateScalesFixture[
+            Math.min(
+              monitoringCardsRequestCount,
+              telemetryNetworkRateScalesFixture.length - 1,
+            )
+          ] ?? 1;
+        monitoringCardsRequestCount += 1;
+        const cardAgents = fixedClientId
+          ? visibleAgents().filter((client) => client.id === fixedClientId)
+          : visibleAgents();
+        const items = cardAgents.map((client, clientIndex) => ({
+          billing:
+            client.id === "agent-sfo-01"
+              ? {
+                  currency: "CNY",
+                  currency_display: "¥",
+                  cycle: "14",
+                  disabled: false,
+                  display: "29.90 ¥/m",
+                  period: "month",
+                  period_code: "m",
+                  price: "29.90",
+                }
+              : null,
+          client,
+          product_name:
+            vpsRuleValuesFixture.find(
+              (rule) =>
+                rule.client_id === client.id && rule.key === "product.name",
+            )?.value_raw ?? null,
+          network_rate_expected:
+            monitoringNetworkRateExpectedOverrideFixture ?? true,
+          network:
+            client.id === "agent-sfo-01" &&
+            monitoringNetworkRateExpectedOverrideFixture !== false
+              ? [
+                  {
+                    bucket_secs: 60,
+                    bucket_start: "2026-06-05T20:35:00Z",
+                    client_id: client.id,
+                    interface: "eth0",
+                    rx_bps_avg: 19_200_000 * networkScale,
+                    rx_bytes_avg: 71_303_168,
+                    rx_bytes_delta: 480_000 * networkScale,
+                    sample_count: 1,
+                    tx_bps_avg: 18_400_000 * networkScale,
+                    tx_bytes_avg: 68_157_440,
+                    tx_bytes_delta: 458_752 * networkScale,
+                    updated_at: "2026-06-05T20:35:00Z",
+                  },
+                ]
+              : [],
+          network_history:
+            client.id === "agent-sfo-01" &&
+            monitoringNetworkRateExpectedOverrideFixture !== false
+              ? [
+                  [9_600_000, 9_200_000],
+                  [14_400_000, 13_800_000],
+                  [19_200_000, 18_400_000],
+                ].map(([rxBps, txBps], index) => ({
+                  bucket_secs: 60,
+                  bucket_start: [
+                    "2026-06-05T20:33:00Z",
+                    "2026-06-05T20:34:00Z",
+                    "2026-06-05T20:35:00Z",
+                  ][index],
+                  client_id: client.id,
+                  interface: "eth0",
+                  rx_bps_avg: rxBps * networkScale,
+                  rx_bytes_avg: 71_303_168,
+                  rx_bytes_delta: 240_000 * (index + 1) * networkScale,
+                  sample_count: 1,
+                  tx_bps_avg: txBps * networkScale,
+                  tx_bytes_avg: 68_157_440,
+                  tx_bytes_delta: 230_000 * (index + 1) * networkScale,
+                  updated_at: [
+                    "2026-06-05T20:33:00Z",
+                    "2026-06-05T20:34:00Z",
+                    "2026-06-05T20:35:00Z",
+                  ][index],
+                }))
+              : [],
+          port_speed:
+            client.id === "agent-sfo-01"
+              ? { bps: 1_500_000_000, display: "1.5 Gbps" }
+              : null,
+          primary_ping:
+            monitoringPingStateCoverageFixture && clientIndex < 2
+              ? {
+                  checked_at: new Date().toISOString(),
+                  enabled: true,
+                  generation: 1,
+                  latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
+                  loss_ratio: clientIndex === 0 ? 0 : 0.2,
+                  reason:
+                    clientIndex === 0 ? null : "Intermittent packet loss",
+                  state: clientIndex === 0 ? "ok" : "degraded",
+                  status: clientIndex === 0 ? "ok" : "degraded",
+                  target_id:
+                    clientIndex === 0
+                      ? "61000000-0000-4000-8000-000000000001"
+                      : "61000000-0000-4000-8000-000000000002",
+                  target_name:
+                    clientIndex === 0
+                      ? "Fixture healthy gateway"
+                      : "Fixture degraded gateway",
+                }
+              : null,
+          primary_ping_history:
+            monitoringPingStateCoverageFixture && clientIndex < 2
+              ? [
+                  {
+                    bucket_secs: 60,
+                    bucket_start: new Date().toISOString(),
+                    client_id: client.id,
+                    generation: 1,
+                    is_primary: true,
+                    latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
+                    latency_max_ms: clientIndex === 0 ? 19 : 70,
+                    latency_min_ms: clientIndex === 0 ? 18 : 66,
+                    latest_checked_at: new Date().toISOString(),
+                    latest_reason:
+                      clientIndex === 0 ? null : "Intermittent packet loss",
+                    latest_status: clientIndex === 0 ? "ok" : "degraded",
+                    loss_ratio_avg: clientIndex === 0 ? 0 : 0.2,
+                    loss_ratio_max: clientIndex === 0 ? 0 : 0.2,
+                    sample_count: 3,
+                    success_count: clientIndex === 0 ? 3 : 2,
+                    target_id:
+                      clientIndex === 0
+                        ? "61000000-0000-4000-8000-000000000001"
+                        : "61000000-0000-4000-8000-000000000002",
+                    target_name:
+                      clientIndex === 0
+                        ? "Fixture healthy gateway"
+                        : "Fixture degraded gateway",
+                    updated_at: new Date().toISOString(),
+                  },
+                ]
+              : [],
+          resource_history: [],
+          resources:
+            client.id === "agent-sfo-01"
+              ? {
+                  bucket_secs: 60,
+                  bucket_start: "2026-06-05T20:35:00Z",
+                  client_id: client.id,
+                  connections_observed_at: "2026-06-05T20:35:00Z",
+                  connections_sample_count: 1,
+                  cpu_cores_max: 4,
+                  cpu_load_1_avg: 0.71,
+                  cpu_load_1_max: 0.71,
+                  cpu_load_5_avg: 0.62,
+                  cpu_load_5_max: 0.62,
+                  cpu_load_15_avg: 0.55,
+                  cpu_load_15_max: 0.55,
+                  cpu_usage_avg: 0.24,
+                  cpu_usage_sample_count: 1,
+                  disk_available_bytes_avg: 40_000_000_000,
+                  disk_available_bytes_min: 40_000_000_000,
+                  disk_sample_count: 1,
+                  disk_total_bytes_max: 100_000_000_000,
+                  disk_used_ratio_avg: 0.6,
+                  disk_used_ratio_max: 0.6,
+                  latest_observed_at: "2026-06-05T20:35:00Z",
+                  memory_available_bytes_avg: 5_000_000_000,
+                  memory_available_bytes_min: 5_000_000_000,
+                  memory_total_bytes_max: 8_000_000_000,
+                  memory_used_ratio_avg: 0.375,
+                  memory_used_ratio_max: 0.375,
+                  sample_count: 1,
+                  swap_available_bytes_avg: 2_800_000_000,
+                  swap_available_bytes_min: 2_700_000_000,
+                  swap_sample_count: 1,
+                  swap_total_bytes_max: 4_000_000_000,
+                  swap_used_ratio_avg: 0.3,
+                  swap_used_ratio_max: 0.325,
+                  tcp_sockets_latest: 37,
+                  udp_sockets_latest: 4,
+                  updated_at: "2026-06-05T20:35:00Z",
+                }
+              : null,
+          system_information:
+            client.id === "agent-sfo-01"
+              ? {
+                  architecture: "x86_64",
+                  cpu_model: "AMD EPYC 7B13 64-Core Processor",
+                  kernel_release: "6.8.0-31-generic",
+                  os_name: "Ubuntu 24.04 LTS",
+                  reported_at: "2026-06-05T20:35:00Z",
+                  uptime_observed_at: "2026-06-05T20:35:00Z",
+                  uptime_secs: 702_000,
+                  virtualization: "kvm",
+                }
+              : null,
+          traffic:
+            trafficAccountingFixture.find(
+              (row) => row.client_id === client.id,
+            ) ?? null,
+        }));
+        if (monitoringCardsOverrideFixture) {
+          items.splice(
+            0,
+            items.length,
+            ...monitoringCardsOverrideFixture.filter((card) =>
+              cardAgents.some((client) => client.id === card.client.id),
+            ),
+          );
+        }
+        return items;
+      };
       const monitoringDetailFixture = (clientId: string) => {
         const client =
           agentsFixture.find((candidate) => candidate.id === clientId) ??
@@ -5998,8 +6243,6 @@ export async function installConsoleApiMock(
           memory_total_bytes_max: 8_000_000_000,
           memory_used_ratio_avg: 1 - [6.4, 6.1, 6.25][index] / 8,
           memory_used_ratio_max: 1 - [6.2, 5.9, 6.1][index] / 8,
-          network_rx_bytes_max: [18, 18.4, 18.9][index] * 1_000_000_000,
-          network_tx_bytes_max: [8, 8.2, 8.45][index] * 1_000_000_000,
           sample_count: 1,
           swap_available_bytes_avg: [3.2, 3, 2.8][index] * 1_000_000_000,
           swap_available_bytes_min: [3.1, 2.9, 2.7][index] * 1_000_000_000,
@@ -6094,6 +6337,17 @@ export async function installConsoleApiMock(
                 rule.client_id === client.id && rule.key === "product.name",
             )?.value_raw ?? null,
           network,
+          network_current_detail: [
+            network[network.length - 1],
+            {
+              ...network[network.length - 1],
+              interface: "wg0",
+            },
+          ],
+          tunnel_current_detail: telemetryTunnelsPayload().filter(
+            (tunnel) =>
+              tunnel.client_id === client.id && tunnel.interface === "tunab",
+          ),
           ping,
           ping_targets: pingTargets,
           primary_ping: pingTargets[0],
@@ -6138,6 +6392,394 @@ export async function installConsoleApiMock(
         };
       };
 
+      const availableSnapshotSource = (data: unknown) => ({
+        data,
+        error: null,
+      });
+      const unavailableSnapshotSource = (error: string) => ({
+        data: null,
+        error,
+      });
+      const fleetSummaryPayload = () => {
+        const currentAgents = visibleAgents();
+        const online = currentAgents.filter(
+          (agent) => agent.status === "online" && Boolean(agent.last_seen_at),
+        ).length;
+        const offline = currentAgents.filter((agent) =>
+          ["offline", "disconnected"].includes(agent.status),
+        ).length;
+        const never = currentAgents.filter(
+          (agent) => agent.status === "never",
+        ).length;
+        const stale = currentAgents.filter(
+          (agent) => agent.status === "stale",
+        ).length;
+        const suspended = currentAgents.filter(
+          (agent) => agent.status === "suspended",
+        ).length;
+        const revoked = currentAgents.filter(
+          (agent) => agent.status === "revoked",
+        ).length;
+        const unknown =
+          currentAgents.length -
+          online -
+          offline -
+          never -
+          suspended -
+          revoked -
+          stale;
+        return {
+          ...summaryFixture,
+          never,
+          offline,
+          online,
+          suspended,
+          revoked,
+          stale,
+          total: currentAgents.length,
+          unknown,
+          warnings: offline + never + revoked + stale + unknown,
+        };
+      };
+      const telemetryNetworkRatesPayload = () => {
+        const scale =
+          telemetryNetworkRateScalesFixture[
+            Math.min(
+              telemetryNetworkRateRequestCount,
+              telemetryNetworkRateScalesFixture.length - 1,
+            )
+          ] ?? 1;
+        telemetryNetworkRateRequestCount += 1;
+        return [
+          {
+            client_id: "agent-fra-02",
+            interface: "eth0",
+            bucket_start: "2026-05-31T10:00:00Z",
+            bucket_secs: 300,
+            sample_count: 2,
+            rx_bytes_avg: 45875200,
+            tx_bytes_avg: 62914560,
+            rx_bytes_delta: 65536,
+            tx_bytes_delta: 131072,
+            rx_bps_avg: 8738 * scale,
+            tx_bps_avg: 17476 * scale,
+            updated_at: "2026-05-31T10:02:05Z",
+          },
+          {
+            client_id: "agent-fra-02",
+            interface: "tunab",
+            bucket_start: "2026-05-31T10:00:00Z",
+            bucket_secs: 300,
+            sample_count: 2,
+            rx_bytes_avg: 18350080,
+            tx_bytes_avg: 22544384,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 3125000,
+            tx_bps_avg: 2760000,
+            updated_at: "2026-05-31T10:02:05Z",
+          },
+          {
+            client_id: "agent-fra-02",
+            interface: "ovpn42",
+            bucket_start: "2026-05-31T09:55:00Z",
+            bucket_secs: 300,
+            sample_count: 1,
+            rx_bytes_avg: 7864320,
+            tx_bytes_avg: 7340032,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 980000 * scale,
+            tx_bps_avg: 860000 * scale,
+            updated_at: "2026-05-31T10:00:10Z",
+          },
+          {
+            client_id: "agent-sfo-01",
+            interface: "eth0",
+            bucket_start: "2026-05-31T10:00:00Z",
+            bucket_secs: 300,
+            sample_count: 3,
+            rx_bytes_avg: 73400320,
+            tx_bytes_avg: 68157440,
+            rx_bytes_delta: 393216,
+            tx_bytes_delta: 458752,
+            rx_bps_avg: 19200000 * scale,
+            tx_bps_avg: 18400000 * scale,
+            updated_at: "2026-05-31T10:02:06Z",
+          },
+        ];
+      };
+      const telemetryTunnelsPayload = () => [
+        {
+          client_id: "agent-fra-02",
+          observed_at: "2026-05-31T10:02:00Z",
+          interface: "tunab",
+          kind: "gre",
+          ownership_mode: "agent_builtin",
+          mutation_policy: "managed_declared_plan",
+          plan_id: "dddddddd-eeee-4fff-8000-111111111111",
+          plan_name: "sfo-fra-gre",
+          plan_runtime_manager: "agent_builtin",
+          endpoint_side: "right",
+          peer_client_id: "agent-sfo-01",
+          source: "declared_plan_status",
+          operstate: "up",
+          mtu: 1500,
+          link_type: 65534,
+          address: "00:00:00:00:00:00",
+          rx_bytes: 18350080,
+          tx_bytes: 22544384,
+          traffic_source: "interface_counters",
+          traffic_status: "ok",
+          traffic_reason: null,
+          traffic_checked_unix: 1780202520,
+          adapter_health: null,
+          latency_monitoring_enabled: true,
+          latency_status: "down",
+          latency_reason: "latency_probe_missing_healthy_sample:3/3",
+          latency_primary_family: "ipv4",
+          latency_target: "10.255.0.0",
+          latency_checked_unix: 1780202520,
+          latency_avg_ms: null,
+          packet_loss_ratio: 1,
+          latency_healthy_windows: 0,
+          latency_missed_windows: 3,
+        },
+        {
+          client_id: "agent-sfo-01",
+          observed_at: "2026-05-31T10:02:00Z",
+          interface: "tunab",
+          kind: "gre",
+          ownership_mode: "agent_builtin",
+          mutation_policy: "managed_declared_plan",
+          plan_id: "dddddddd-eeee-4fff-8000-111111111111",
+          plan_name: "sfo-fra-gre",
+          plan_runtime_manager: "agent_builtin",
+          endpoint_side: "left",
+          peer_client_id: "agent-fra-02",
+          source: "declared_plan_status",
+          operstate: "up",
+          mtu: 1476,
+          link_type: 778,
+          address: "00:00:00:00:00:00",
+          rx_bytes: 22544384,
+          tx_bytes: 18350080,
+          traffic_source: "interface_counters",
+          traffic_status: "ok",
+          traffic_reason: null,
+          traffic_checked_unix: 1780202520,
+          adapter_health: null,
+          latency_monitoring_enabled: true,
+          latency_status: "healthy",
+          latency_reason: "probe_ok",
+          latency_primary_family: "ipv4",
+          latency_target: "10.255.0.1",
+          latency_checked_unix: 1780202520,
+          latency_avg_ms: 18.4,
+          packet_loss_ratio: 0,
+          latency_healthy_windows: 5,
+          latency_missed_windows: 0,
+        },
+        {
+          client_id: "agent-sfo-01",
+          observed_at: "2026-05-31T10:00:00Z",
+          interface: "ovpn42",
+          kind: "openvpn",
+          ownership_mode: "external_observed",
+          mutation_policy: "observe_only_declared_plan",
+          plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
+          plan_name: "external-openvpn-observed",
+          plan_runtime_manager: "external_observed",
+          endpoint_side: "left",
+          peer_client_id: "agent-fra-02",
+          source: "declared_interface_status",
+          operstate: "up",
+          mtu: 1500,
+          link_type: null,
+          address: null,
+          rx_bytes: 7340032,
+          tx_bytes: 7864320,
+          traffic_source: "interface_counters",
+          traffic_status: "ok",
+          traffic_reason: null,
+          traffic_checked_unix: 1780202400,
+          adapter_health: null,
+          latency_monitoring_enabled: true,
+          latency_status: "healthy",
+          latency_reason: "probe_ok",
+          latency_primary_family: "ipv4",
+          latency_target: "10.44.0.1",
+          latency_checked_unix: 1780202400,
+          latency_avg_ms: 18.1,
+          packet_loss_ratio: 0,
+          latency_healthy_windows: 3,
+          latency_missed_windows: 0,
+        },
+        {
+          client_id: "agent-fra-02",
+          observed_at: "2026-05-31T10:00:00Z",
+          interface: "ovpn42",
+          kind: "openvpn",
+          ownership_mode: "external_observed",
+          mutation_policy: "observe_only_declared_plan",
+          plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
+          plan_name: "external-openvpn-observed",
+          plan_runtime_manager: "external_observed",
+          endpoint_side: "right",
+          peer_client_id: "agent-sfo-01",
+          source: "declared_interface_status",
+          operstate: "unknown",
+          mtu: 1500,
+          link_type: null,
+          address: null,
+          rx_bytes: 7864320,
+          tx_bytes: 7340032,
+          traffic_source: "interface_counters",
+          traffic_status: "ok",
+          traffic_reason: null,
+          traffic_checked_unix: 1780202400,
+          adapter_health: null,
+          latency_monitoring_enabled: true,
+          latency_status: "missed",
+          latency_reason: "latency_probe_missing_healthy_sample:1/3",
+          latency_primary_family: "ipv4",
+          latency_target: "10.44.0.0",
+          latency_checked_unix: 1780202400,
+          latency_avg_ms: null,
+          packet_loss_ratio: 1,
+          latency_healthy_windows: 0,
+          latency_missed_windows: 1,
+        },
+      ];
+      const dashboardOverviewPayload = (requestUrl: string) => {
+        const params = new URL(requestUrl, window.location.href).searchParams;
+        const requestedWindow = params.get("window") ?? "1d";
+        const requestedGroupBy = params.get("group_by") ?? "labels";
+        const requestedResourceMetric =
+          params.get("resource_metric") ??
+          dashboardOverviewFixture.resource_curve.metric;
+        const scopeKind = params.get("scope_kind") ?? "all";
+        const scopeValue = params.get("scope_value");
+        const startAt = params.get("start_at");
+        const endAt = params.get("end_at");
+        const scopedAgents = agentsFixture.filter((agent) => {
+          if (scopeKind === "all" || !scopeValue) return true;
+          if (scopeKind === "client") {
+            return agent.id === scopeValue || agent.display_name === scopeValue;
+          }
+          const expected =
+            scopeKind === "provider" || scopeKind === "country"
+              ? scopeValue.startsWith(`${scopeKind}:`)
+                ? scopeValue
+                : `${scopeKind}:${scopeValue}`
+              : scopeValue;
+          return agent.tags.includes(expected);
+        });
+        const scopedClientIds = new Set(scopedAgents.map((agent) => agent.id));
+        const scopedResourceSeries =
+          dashboardOverviewFixture.resource_curve.series
+            .filter((series) => scopedClientIds.has(series.client_id))
+            .map((series) => {
+              if (requestedResourceMetric === "cpu_load") return series;
+
+              const transform =
+                requestedResourceMetric === "memory_used"
+                  ? (value: number) =>
+                      0.36 + Math.min(Math.max(value, 0) / 4, 0.52)
+                  : (value: number) =>
+                      0.82 - Math.min(Math.max(value, 0) / 4, 0.62);
+              const points = series.points.map((point) => ({
+                ...point,
+                value: transform(point.value),
+              }));
+
+              return {
+                ...series,
+                critical_threshold: null,
+                current: points.at(-1)?.value ?? transform(series.current),
+                peak: transform(series.peak),
+                points,
+                threshold_direction:
+                  requestedResourceMetric === "memory_used"
+                    ? "above"
+                    : "below",
+                warning_threshold: null,
+              };
+            });
+        return {
+          ...dashboardOverviewFixture,
+          group_by: requestedGroupBy,
+          label_clusters: dashboardOverviewFixture.label_clusters.map(
+            (cluster) => ({
+              ...cluster,
+              counts_truncated:
+                dashboardCountsTruncatedFixture || cluster.counts_truncated,
+            }),
+          ),
+          operations: {
+            ...dashboardOverviewFixture.operations,
+            alerts_truncated:
+              dashboardCountsTruncatedFixture ||
+              dashboardOverviewFixture.operations.alerts_truncated,
+            backups_truncated:
+              dashboardCountsTruncatedFixture ||
+              dashboardOverviewFixture.operations.backups_truncated,
+            running_jobs_truncated:
+              dashboardCountsTruncatedFixture ||
+              dashboardOverviewFixture.operations.running_jobs_truncated,
+          },
+          resource_curve: {
+            ...dashboardOverviewFixture.resource_curve,
+            latest_sample_at:
+              dashboardLatestSampleAtOverrideFixture ??
+              dashboardOverviewFixture.resource_curve.latest_sample_at,
+            metric: requestedResourceMetric,
+            sampled_clients: scopedResourceSeries.length,
+            series: scopedResourceSeries,
+          },
+          resources: {
+            ...dashboardOverviewFixture.resources,
+            sampled_clients: scopedResourceSeries.length,
+          },
+          summary: {
+            ...dashboardOverviewFixture.summary,
+            ...dashboardSummaryOverrideFixture,
+            running_jobs_truncated:
+              dashboardCountsTruncatedFixture ||
+              dashboardOverviewFixture.summary.running_jobs_truncated,
+            warnings_truncated:
+              dashboardCountsTruncatedFixture ||
+              dashboardOverviewFixture.summary.warnings_truncated,
+          },
+          scope: {
+            kind: scopeKind,
+            label:
+              scopeKind === "all"
+                ? "All VPS"
+                : scopeKind === "provider"
+                  ? `provider:${scopeValue}`
+                  : scopeKind === "country"
+                    ? `country:${scopeValue}`
+                    : scopeValue,
+            matched_clients: scopedAgents.length,
+            query: scopeValue ? `${scopeKind}:${scopeValue}` : null,
+            value: scopeValue,
+          },
+          time_range: {
+            ...dashboardOverviewFixture.time_range,
+            end_at: endAt ?? dashboardOverviewFixture.time_range.end_at,
+            mode: startAt
+              ? "custom"
+              : requestedWindow === "all"
+                ? "all"
+                : "window",
+            start_at: startAt ?? dashboardOverviewFixture.time_range.start_at,
+            window: startAt ? null : requestedWindow,
+          },
+          window: requestedWindow,
+        };
+      };
+
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
         const pathname = new URL(url, window.location.href).pathname;
@@ -6148,120 +6790,53 @@ export async function installConsoleApiMock(
           __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
         };
         trackedWindow.__vpsmanFetchRequests ??= [];
-        const fixtureInternalRequest =
-          new Headers(init?.headers).get("x-vpsman-fixture-internal") === "1";
-        if (!fixtureInternalRequest) {
-          trackedWindow.__vpsmanFetchRequests.push({ method, url });
-        }
+        trackedWindow.__vpsmanFetchRequests.push({ method, url });
         if (pathname === "/api/v1/home/snapshot" && method === "GET") {
           if (homeSnapshotHeld) {
             await new Promise<void>((resolve) => {
               homeSnapshotWaiters.push(resolve);
             });
           }
-          const loadHomeSource = async (source: string, path: string) => {
-            if (homeSnapshotSourceFailureFixture === source) {
-              return {
-                data: null,
-                error: `home_snapshot_${source}_unavailable`,
-              };
-            }
-            const response = await window.fetch(path, {
-              headers: { "x-vpsman-fixture-internal": "1" },
-            });
-            const body = await response.json();
-            return response.ok
-              ? { data: body, error: null }
-              : {
-                  data: null,
-                  error:
-                    (body as { error?: string; message?: string }).message ??
-                    (body as { error?: string }).error ??
-                    `home snapshot source returned ${response.status}`,
-                };
-          };
-          const loadHomeMonitoringCards = async () => {
-            const source = await loadHomeSource(
-              "monitoring_cards",
-              "/api/v1/monitoring/cards?limit=1000&offset=0",
+          const fleetSummary = availableSnapshotSource(fleetSummaryPayload());
+          const fleetAgents = availableSnapshotSource(dashboardAgents());
+          const telemetryRollups =
+            telemetryFailurePathFixture === "rollups"
+              ? unavailableSnapshotSource("telemetry_rollups_unavailable")
+              : availableSnapshotSource([]);
+          const telemetryNetworkRates =
+            telemetryFailurePathFixture === "network-rates"
+              ? unavailableSnapshotSource(
+                  "telemetry_network_rates_unavailable",
+                )
+              : availableSnapshotSource(telemetryNetworkRatesPayload());
+          const fleetAlerts = ["current", "both"].includes(
+            fleetAlertSourceFailureFixture ?? "",
+          )
+            ? unavailableSnapshotSource(
+                "Simulated current fleet alert source failure.",
+              )
+            : availableSnapshotSource(fleetAlertsFixture);
+          let homeMonitoringCards;
+          if (homeSnapshotSourceFailureFixture === "monitoring_cards") {
+            homeMonitoringCards = unavailableSnapshotSource(
+              "home_snapshot_monitoring_cards_unavailable",
             );
-            return source.data === null
-              ? source
-              : {
-                  data: (source.data as { items: unknown[] }).items,
-                  error: null,
-                };
-          };
-          const query = new URL(url, window.location.href).search;
-          const [
-            fleetSummary,
-            fleetAgents,
-            telemetryRollups,
-            telemetryNetworkRates,
-            fleetAlerts,
-            homeMonitoringCards,
-            homeJobs,
-            homeFileTransfers,
-            homeTerminalSessions,
-            homeBackups,
-            homeBackupArtifacts,
-            homeAudit,
-            homeSchedules,
-            homeSystemDashboard,
-            homeDashboardOverview,
-          ] = await Promise.all([
-            loadHomeSource("summary", "/api/v1/fleet/summary"),
-            loadHomeSource("agents", "/api/v1/agents"),
-            loadHomeSource(
-              "telemetry_rollups",
-              "/api/v1/telemetry/rollups?latest=true&limit=1000",
-            ),
-            loadHomeSource(
-              "telemetry_network_rates",
-              "/api/v1/telemetry/network-rates?latest=true&limit=5000",
-            ),
-            loadHomeSource(
-              "fleet_alerts",
-              "/api/v1/fleet-alerts?limit=200&include_muted=true",
-            ),
-            loadHomeMonitoringCards(),
-            loadHomeSource(
-              "jobs",
-              "/api/v1/jobs?limit=1000&sort=created_at&dir=desc",
-            ),
-            loadHomeSource(
-              "file_transfers",
-              "/api/v1/file-transfers?limit=200",
-            ),
-            loadHomeSource(
-              "terminal_sessions",
-              "/api/v1/terminal-sessions?limit=200",
-            ),
-            loadHomeSource(
-              "backups",
-              "/api/v1/backups?limit=1000&sort=created_at&dir=desc",
-            ),
-            loadHomeSource(
-              "backup_artifacts",
-              "/api/v1/backup-artifacts?limit=1000&sort=created_at&dir=desc",
-            ),
-            loadHomeSource(
-              "audit",
-              "/api/v1/audit?limit=1000&sort=created_at&dir=desc",
-            ),
-            loadHomeSource(
-              "schedules",
-              "/api/v1/schedules?limit=1000&sort=next_run_at&dir=asc",
-            ),
-            loadHomeSource(
-              "system_dashboard",
-              "/api/v1/system/dashboard?chart_points=240&window=1d",
-            ),
-            loadHomeSource(
-              "dashboard_overview",
-              `/api/v1/dashboard/overview${query}`,
-            ),
-          ]);
+          } else {
+            if (monitoringCardsDelayMsFixture > 0) {
+              await new Promise((resolve) =>
+                window.setTimeout(resolve, monitoringCardsDelayMsFixture),
+              );
+            }
+            homeMonitoringCards = availableSnapshotSource(
+              monitoringCardItemsPayload(null),
+            );
+          }
+          const homeSystemDashboard =
+            homeSnapshotSourceFailureFixture === "system_dashboard"
+              ? unavailableSnapshotSource(
+                  "home_snapshot_system_dashboard_unavailable",
+                )
+              : availableSnapshotSource(systemDashboardFixture);
           return jsonResponse({
             generated_at: "2026-06-05T20:44:58Z",
             operator: operatorView(currentOperatorRecord),
@@ -6272,148 +6847,24 @@ export async function installConsoleApiMock(
             fleet_alerts: fleetAlerts,
             fleet_alerts_truncated: fleetAlertsTruncatedFixture,
             monitoring_cards: homeMonitoringCards,
-            jobs: homeJobs,
-            file_transfers: homeFileTransfers,
-            terminal_sessions: homeTerminalSessions,
-            backups: homeBackups,
-            backup_artifacts: homeBackupArtifacts,
-            audit: homeAudit,
-            schedules: homeSchedules,
+            jobs: availableSnapshotSource(jobsFixture),
+            file_transfers: availableSnapshotSource(fileTransfersFixture),
+            terminal_sessions:
+              availableSnapshotSource(terminalSessionsFixture),
+            backups: availableSnapshotSource(backupsFixture),
+            backup_artifacts: availableSnapshotSource(artifactsFixture),
+            audit: availableSnapshotSource(auditLogsFixture),
+            schedules: availableSnapshotSource(
+              currentSchedules.filter((schedule) => !schedule.deleted_at),
+            ),
             system_dashboard: homeSystemDashboard,
-            dashboard_overview: homeDashboardOverview,
+            dashboard_overview: availableSnapshotSource(
+              dashboardOverviewPayload(url),
+            ),
           });
         }
         if (pathname === "/api/v1/dashboard/overview") {
-          const params = new URL(url, window.location.href).searchParams;
-          const requestedWindow = params.get("window") ?? "1d";
-          const requestedGroupBy = params.get("group_by") ?? "labels";
-          const requestedResourceMetric =
-            params.get("resource_metric") ??
-            dashboardOverviewFixture.resource_curve.metric;
-          const scopeKind = params.get("scope_kind") ?? "all";
-          const scopeValue = params.get("scope_value");
-          const startAt = params.get("start_at");
-          const endAt = params.get("end_at");
-          const scopedAgents = agentsFixture.filter((agent) => {
-            if (scopeKind === "all" || !scopeValue) return true;
-            if (scopeKind === "client") {
-              return (
-                agent.id === scopeValue || agent.display_name === scopeValue
-              );
-            }
-            const expected =
-              scopeKind === "provider" || scopeKind === "country"
-                ? scopeValue.startsWith(`${scopeKind}:`)
-                  ? scopeValue
-                  : `${scopeKind}:${scopeValue}`
-                : scopeValue;
-            return agent.tags.includes(expected);
-          });
-          const scopedClientIds = new Set(
-            scopedAgents.map((agent) => agent.id),
-          );
-          const scopedResourceSeries =
-            dashboardOverviewFixture.resource_curve.series
-              .filter((series) => scopedClientIds.has(series.client_id))
-              .map((series) => {
-                if (requestedResourceMetric === "cpu_load") return series;
-
-                const transform =
-                  requestedResourceMetric === "memory_used"
-                    ? (value: number) =>
-                        0.36 + Math.min(Math.max(value, 0) / 4, 0.52)
-                    : (value: number) =>
-                        0.82 - Math.min(Math.max(value, 0) / 4, 0.62);
-                const points = series.points.map((point) => ({
-                  ...point,
-                  value: transform(point.value),
-                }));
-
-                return {
-                  ...series,
-                  critical_threshold: null,
-                  current: points.at(-1)?.value ?? transform(series.current),
-                  peak: transform(series.peak),
-                  points,
-                  threshold_direction:
-                    requestedResourceMetric === "memory_used"
-                      ? "above"
-                      : "below",
-                  warning_threshold: null,
-                };
-              });
-          return jsonResponse({
-            ...dashboardOverviewFixture,
-            group_by: requestedGroupBy,
-            label_clusters: dashboardOverviewFixture.label_clusters.map(
-              (cluster) => ({
-                ...cluster,
-                counts_truncated:
-                  dashboardCountsTruncatedFixture || cluster.counts_truncated,
-              }),
-            ),
-            operations: {
-              ...dashboardOverviewFixture.operations,
-              alerts_truncated:
-                dashboardCountsTruncatedFixture ||
-                dashboardOverviewFixture.operations.alerts_truncated,
-              backups_truncated:
-                dashboardCountsTruncatedFixture ||
-                dashboardOverviewFixture.operations.backups_truncated,
-              running_jobs_truncated:
-                dashboardCountsTruncatedFixture ||
-                dashboardOverviewFixture.operations.running_jobs_truncated,
-            },
-            resource_curve: {
-              ...dashboardOverviewFixture.resource_curve,
-              latest_sample_at:
-                dashboardLatestSampleAtOverrideFixture ??
-                dashboardOverviewFixture.resource_curve.latest_sample_at,
-              metric: requestedResourceMetric,
-              sampled_clients: scopedResourceSeries.length,
-              series: scopedResourceSeries,
-            },
-            resources: {
-              ...dashboardOverviewFixture.resources,
-              sampled_clients: scopedResourceSeries.length,
-            },
-            summary: {
-              ...dashboardOverviewFixture.summary,
-              ...dashboardSummaryOverrideFixture,
-              running_jobs_truncated:
-                dashboardCountsTruncatedFixture ||
-                dashboardOverviewFixture.summary.running_jobs_truncated,
-              warnings_truncated:
-                dashboardCountsTruncatedFixture ||
-                dashboardOverviewFixture.summary.warnings_truncated,
-            },
-            scope: {
-              kind: scopeKind,
-              label:
-                scopeKind === "all"
-                  ? "All VPS"
-                  : scopeKind === "provider"
-                    ? `provider:${scopeValue}`
-                    : scopeKind === "country"
-                      ? `country:${scopeValue}`
-                      : scopeValue,
-              matched_clients: scopedAgents.length,
-              query: scopeValue ? `${scopeKind}:${scopeValue}` : null,
-              value: scopeValue,
-            },
-            time_range: {
-              ...dashboardOverviewFixture.time_range,
-              end_at: endAt ?? dashboardOverviewFixture.time_range.end_at,
-              mode: startAt
-                ? "custom"
-                : requestedWindow === "all"
-                  ? "all"
-                  : "window",
-              start_at: startAt ?? dashboardOverviewFixture.time_range.start_at,
-              window: startAt ? null : requestedWindow,
-            },
-            window: requestedWindow,
-          });
+          return jsonResponse(dashboardOverviewPayload(url));
         }
         if (pathname === "/api/v1/system/dashboard") {
           return jsonResponse(systemDashboardFixture);
@@ -6429,7 +6880,7 @@ export async function installConsoleApiMock(
               path: "config/vpsman.toml",
               redacted: suiteConfigRedactedFixture,
               restart_required_note:
-                "Bind addresses, gateway/API URLs and identities, database URL/migration path/pool sizes, secret refs, object-store clients and local object directories, worker identity/once mode, and connect/write timeout changes require service restart.",
+                "Bind addresses, gateway/API URLs and identities, database URL/migration path/pool sizes, secret refs, object-store clients and local object directories, worker once mode, and connect/write timeout changes require service restart.",
               toml: currentSuiteConfigToml,
               validation: suiteConfigValidationFixture,
             });
@@ -6526,40 +6977,22 @@ export async function installConsoleApiMock(
               400,
             );
           }
-          const loadSnapshotSource = async (path: string) => {
-            const response = await window.fetch(path, {
-              headers: { "x-vpsman-fixture-internal": "1" },
-            });
-            const body = await response.json();
-            if (response.ok) {
-              return { data: body, error: null };
-            }
-            const failure = body as { error?: string; message?: string };
-            return {
-              data: null,
-              error:
-                failure.message ??
-                failure.error ??
-                `snapshot source returned ${response.status}`,
-            };
-          };
-          const [
-            summary,
-            agents,
-            telemetryRollups,
-            telemetryNetworkRates,
-            telemetryTunnels,
-          ] = await Promise.all([
-            loadSnapshotSource("/api/v1/fleet/summary"),
-            loadSnapshotSource("/api/v1/agents"),
-            loadSnapshotSource(
-              "/api/v1/telemetry/rollups?latest=true&limit=1000",
-            ),
-            loadSnapshotSource(
-              "/api/v1/telemetry/network-rates?latest=true&limit=5000",
-            ),
-            loadSnapshotSource("/api/v1/telemetry/tunnels?limit=1000"),
-          ]);
+          const summary = availableSnapshotSource(fleetSummaryPayload());
+          const agents = availableSnapshotSource(dashboardAgents());
+          const telemetryRollups =
+            telemetryFailurePathFixture === "rollups"
+              ? unavailableSnapshotSource("telemetry_rollups_unavailable")
+              : availableSnapshotSource([]);
+          const telemetryNetworkRates =
+            telemetryFailurePathFixture === "network-rates"
+              ? unavailableSnapshotSource(
+                  "telemetry_network_rates_unavailable",
+                )
+              : availableSnapshotSource(telemetryNetworkRatesPayload());
+          const telemetryTunnels =
+            telemetryFailurePathFixture === "tunnels"
+              ? unavailableSnapshotSource("telemetry_tunnels_unavailable")
+              : availableSnapshotSource(telemetryTunnelsPayload());
           const snapshot: Record<string, unknown> = {
             agents,
             generated_at: "2026-06-02T10:02:00Z",
@@ -6572,101 +7005,57 @@ export async function installConsoleApiMock(
               uptimeSourceWindow.__vpsmanTestTelemetryUptimesSource,
           };
           if (mode === "full") {
-            const [
-              fleetAlerts,
-              fleetAlertHistory,
-              fleetAlertStates,
-              fleetAlertPolicies,
-              vpsRuleValues,
-              trafficAccounting,
-              policyAlerts,
-              notificationChannels,
-              notifications,
-              webhookRules,
-              webhookDeliveries,
-            ] = await Promise.all([
-              loadSnapshotSource(
-                "/api/v1/fleet-alerts?limit=200&include_muted=true",
-              ),
-              loadSnapshotSource(
-                "/api/v1/fleet-alert-history?limit=200&include_muted=true",
-              ),
-              loadSnapshotSource("/api/v1/fleet-alert-states?limit=200"),
-              loadSnapshotSource("/api/v1/fleet-alert-policies?limit=200"),
-              loadSnapshotSource("/api/v1/vps-rules?limit=5000"),
-              loadSnapshotSource("/api/v1/traffic-accounting?limit=200"),
-              loadSnapshotSource("/api/v1/policy-alerts?limit=200"),
-              loadSnapshotSource(
-                "/api/v1/fleet-alert-notification-channels?limit=200",
-              ),
-              loadSnapshotSource("/api/v1/fleet-alert-notifications?limit=200"),
-              loadSnapshotSource("/api/v1/webhook-rules?limit=200"),
-              loadSnapshotSource("/api/v1/webhook-deliveries?limit=200"),
-            ]);
+            const fleetAlerts = ["current", "both"].includes(
+              fleetAlertSourceFailureFixture ?? "",
+            )
+              ? unavailableSnapshotSource(
+                  "Simulated current fleet alert source failure.",
+                )
+              : availableSnapshotSource(fleetAlertsFixture);
+            const fleetAlertHistory = ["history", "both"].includes(
+              fleetAlertSourceFailureFixture ?? "",
+            )
+              ? unavailableSnapshotSource(
+                  "Simulated fleet alert history source failure.",
+                )
+              : availableSnapshotSource(fleetAlertHistoryFixture);
             Object.assign(snapshot, {
-              current_policy_alerts: {
-                data: currentPolicyAlertsFixture,
-                error: null,
-              },
+              current_policy_alerts: availableSnapshotSource(
+                currentPolicyAlertsFixture,
+              ),
               current_policy_alerts_truncated:
                 currentPolicyAlertsTruncatedFixture,
-              fleet_alert_notification_channels: notificationChannels,
-              fleet_alert_notifications: notifications,
-              fleet_alert_policies: fleetAlertPolicies,
+              fleet_alert_notification_channels: availableSnapshotSource(
+                fleetAlertNotificationChannelsFixture,
+              ),
+              fleet_alert_notifications: availableSnapshotSource(
+                fleetAlertNotificationsFixture,
+              ),
+              fleet_alert_notifications_truncated:
+                fleetAlertNotificationsTruncatedFixture,
+              fleet_alert_policies: availableSnapshotSource(
+                fleetAlertPoliciesFixture,
+              ),
               fleet_alert_history: fleetAlertHistory,
               fleet_alert_history_truncated: fleetAlertHistoryTruncatedFixture,
-              fleet_alert_states: fleetAlertStates,
               fleet_alerts: fleetAlerts,
               fleet_alerts_truncated: fleetAlertsTruncatedFixture,
-              policy_alerts: policyAlerts,
-              traffic_accounting: trafficAccounting,
-              vps_rule_values: vpsRuleValues,
-              webhook_rule_deliveries: webhookDeliveries,
-              webhook_rules: webhookRules,
+              policy_alerts: availableSnapshotSource(policyAlertsFixture),
+              policy_alerts_truncated: policyAlertsTruncatedFixture,
+              traffic_accounting:
+                availableSnapshotSource(trafficAccountingFixture),
+              vps_rule_values: availableSnapshotSource(vpsRuleValuesFixture),
+              webhook_rule_deliveries: availableSnapshotSource(
+                webhookDeliveriesFixture,
+              ),
+              webhook_rule_deliveries_truncated: false,
+              webhook_rules: availableSnapshotSource(webhookRulesFixture),
             });
           }
           return jsonResponse(snapshot);
         }
         if (pathname === "/api/v1/fleet/summary") {
-          const currentAgents = visibleAgents();
-          const online = currentAgents.filter(
-            (agent) => agent.status === "online" && Boolean(agent.last_seen_at),
-          ).length;
-          const offline = currentAgents.filter((agent) =>
-            ["offline", "disconnected"].includes(agent.status),
-          ).length;
-          const never = currentAgents.filter(
-            (agent) => agent.status === "never",
-          ).length;
-          const stale = currentAgents.filter(
-            (agent) => agent.status === "stale",
-          ).length;
-          const suspended = currentAgents.filter(
-            (agent) => agent.status === "suspended",
-          ).length;
-          const revoked = currentAgents.filter(
-            (agent) => agent.status === "revoked",
-          ).length;
-          const unknown =
-            currentAgents.length -
-            online -
-            offline -
-            never -
-            suspended -
-            revoked -
-            stale;
-          return jsonResponse({
-            ...summaryFixture,
-            never,
-            offline,
-            online,
-            suspended,
-            revoked,
-            stale,
-            total: currentAgents.length,
-            unknown,
-            warnings: offline + never + revoked + stale + unknown,
-          });
+          return jsonResponse(fleetSummaryPayload());
         }
         if (
           pathname.startsWith("/api/v1/fleet-alerts/") &&
@@ -7178,218 +7567,7 @@ export async function installConsoleApiMock(
           const fixedClientId = params
             .get("selector_expression")
             ?.match(/^id:([^\s]+)$/)?.[1];
-          const networkScale =
-            telemetryNetworkRateScalesFixture[
-              Math.min(
-                monitoringCardsRequestCount,
-                telemetryNetworkRateScalesFixture.length - 1,
-              )
-            ] ?? 1;
-          monitoringCardsRequestCount += 1;
-          const cardAgents = fixedClientId
-            ? visibleAgents().filter((client) => client.id === fixedClientId)
-            : visibleAgents();
-          const items = cardAgents.map((client, clientIndex) => ({
-            billing:
-              client.id === "agent-sfo-01"
-                ? {
-                    currency: "CNY",
-                    currency_display: "¥",
-                    cycle: "14",
-                    disabled: false,
-                    display: "29.90 ¥/m",
-                    period: "month",
-                    period_code: "m",
-                    price: "29.90",
-                  }
-                : null,
-            client,
-            product_name:
-              vpsRuleValuesFixture.find(
-                (rule) =>
-                  rule.client_id === client.id && rule.key === "product.name",
-              )?.value_raw ?? null,
-            network_rate_expected:
-              monitoringNetworkRateExpectedOverrideFixture ?? true,
-            network:
-              client.id === "agent-sfo-01" &&
-              monitoringNetworkRateExpectedOverrideFixture !== false
-                ? [
-                    {
-                      bucket_secs: 60,
-                      bucket_start: "2026-06-05T20:35:00Z",
-                      client_id: client.id,
-                      interface: "eth0",
-                      rx_bps_avg: 19_200_000 * networkScale,
-                      rx_bytes_avg: 71_303_168,
-                      rx_bytes_delta: 480_000 * networkScale,
-                      sample_count: 1,
-                      tx_bps_avg: 18_400_000 * networkScale,
-                      tx_bytes_avg: 68_157_440,
-                      tx_bytes_delta: 458_752 * networkScale,
-                      updated_at: "2026-06-05T20:35:00Z",
-                    },
-                  ]
-                : [],
-            network_history:
-              client.id === "agent-sfo-01" &&
-              monitoringNetworkRateExpectedOverrideFixture !== false
-                ? [
-                    [9_600_000, 9_200_000],
-                    [14_400_000, 13_800_000],
-                    [19_200_000, 18_400_000],
-                  ].map(([rxBps, txBps], index) => ({
-                    bucket_secs: 60,
-                    bucket_start: [
-                      "2026-06-05T20:33:00Z",
-                      "2026-06-05T20:34:00Z",
-                      "2026-06-05T20:35:00Z",
-                    ][index],
-                    client_id: client.id,
-                    interface: "eth0",
-                    rx_bps_avg: rxBps * networkScale,
-                    rx_bytes_avg: 71_303_168,
-                    rx_bytes_delta: 240_000 * (index + 1) * networkScale,
-                    sample_count: 1,
-                    tx_bps_avg: txBps * networkScale,
-                    tx_bytes_avg: 68_157_440,
-                    tx_bytes_delta: 230_000 * (index + 1) * networkScale,
-                    updated_at: [
-                      "2026-06-05T20:33:00Z",
-                      "2026-06-05T20:34:00Z",
-                      "2026-06-05T20:35:00Z",
-                    ][index],
-                  }))
-                : [],
-            port_speed:
-              client.id === "agent-sfo-01"
-                ? { bps: 1_500_000_000, display: "1.5 Gbps" }
-                : null,
-            primary_ping:
-              monitoringPingStateCoverageFixture && clientIndex < 2
-                ? {
-                    checked_at: new Date().toISOString(),
-                    enabled: true,
-                    generation: 1,
-                    latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
-                    loss_ratio: clientIndex === 0 ? 0 : 0.2,
-                    reason:
-                      clientIndex === 0 ? null : "Intermittent packet loss",
-                    state: clientIndex === 0 ? "ok" : "degraded",
-                    status: clientIndex === 0 ? "ok" : "degraded",
-                    target_id:
-                      clientIndex === 0
-                        ? "61000000-0000-4000-8000-000000000001"
-                        : "61000000-0000-4000-8000-000000000002",
-                    target_name:
-                      clientIndex === 0
-                        ? "Fixture healthy gateway"
-                        : "Fixture degraded gateway",
-                  }
-                : null,
-            primary_ping_history:
-              monitoringPingStateCoverageFixture && clientIndex < 2
-                ? [
-                    {
-                      bucket_secs: 60,
-                      bucket_start: new Date().toISOString(),
-                      client_id: client.id,
-                      generation: 1,
-                      is_primary: true,
-                      latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
-                      latency_max_ms: clientIndex === 0 ? 19 : 70,
-                      latency_min_ms: clientIndex === 0 ? 18 : 66,
-                      latest_checked_at: new Date().toISOString(),
-                      latest_reason:
-                        clientIndex === 0 ? null : "Intermittent packet loss",
-                      latest_status: clientIndex === 0 ? "ok" : "degraded",
-                      loss_ratio_avg: clientIndex === 0 ? 0 : 0.2,
-                      loss_ratio_max: clientIndex === 0 ? 0 : 0.2,
-                      sample_count: 3,
-                      success_count: clientIndex === 0 ? 3 : 2,
-                      target_id:
-                        clientIndex === 0
-                          ? "61000000-0000-4000-8000-000000000001"
-                          : "61000000-0000-4000-8000-000000000002",
-                      target_name:
-                        clientIndex === 0
-                          ? "Fixture healthy gateway"
-                          : "Fixture degraded gateway",
-                      updated_at: new Date().toISOString(),
-                    },
-                  ]
-                : [],
-            resource_history: [],
-            resources:
-              client.id === "agent-sfo-01"
-                ? {
-                    bucket_secs: 60,
-                    bucket_start: "2026-06-05T20:35:00Z",
-                    client_id: client.id,
-                    connections_observed_at: "2026-06-05T20:35:00Z",
-                    connections_sample_count: 1,
-                    cpu_cores_max: 4,
-                    cpu_load_1_avg: 0.71,
-                    cpu_load_1_max: 0.71,
-                    cpu_load_5_avg: 0.62,
-                    cpu_load_5_max: 0.62,
-                    cpu_load_15_avg: 0.55,
-                    cpu_load_15_max: 0.55,
-                    cpu_usage_avg: 0.24,
-                    cpu_usage_sample_count: 1,
-                    disk_available_bytes_avg: 40_000_000_000,
-                    disk_available_bytes_min: 40_000_000_000,
-                    disk_sample_count: 1,
-                    disk_total_bytes_max: 100_000_000_000,
-                    disk_used_ratio_avg: 0.6,
-                    disk_used_ratio_max: 0.6,
-                    latest_observed_at: "2026-06-05T20:35:00Z",
-                    memory_available_bytes_avg: 5_000_000_000,
-                    memory_available_bytes_min: 5_000_000_000,
-                    memory_total_bytes_max: 8_000_000_000,
-                    memory_used_ratio_avg: 0.375,
-                    memory_used_ratio_max: 0.375,
-                    network_rx_bytes_max: 71_303_168,
-                    network_tx_bytes_max: 68_157_440,
-                    sample_count: 1,
-                    swap_available_bytes_avg: 2_800_000_000,
-                    swap_available_bytes_min: 2_700_000_000,
-                    swap_sample_count: 1,
-                    swap_total_bytes_max: 4_000_000_000,
-                    swap_used_ratio_avg: 0.3,
-                    swap_used_ratio_max: 0.325,
-                    tcp_sockets_latest: 37,
-                    udp_sockets_latest: 4,
-                    updated_at: "2026-06-05T20:35:00Z",
-                  }
-                : null,
-            system_information:
-              client.id === "agent-sfo-01"
-                ? {
-                    architecture: "x86_64",
-                    cpu_model: "AMD EPYC 7B13 64-Core Processor",
-                    kernel_release: "6.8.0-31-generic",
-                    os_name: "Ubuntu 24.04 LTS",
-                    reported_at: "2026-06-05T20:35:00Z",
-                    uptime_observed_at: "2026-06-05T20:35:00Z",
-                    uptime_secs: 702_000,
-                    virtualization: "kvm",
-                  }
-                : null,
-            traffic:
-              trafficAccountingFixture.find(
-                (row) => row.client_id === client.id,
-              ) ?? null,
-          }));
-          if (monitoringCardsOverrideFixture) {
-            items.splice(
-              0,
-              items.length,
-              ...monitoringCardsOverrideFixture.filter((card) =>
-                cardAgents.some((client) => client.id === card.client.id),
-              ),
-            );
-          }
+          const items = monitoringCardItemsPayload(fixedClientId ?? null);
           const page = items.slice(offset, offset + limit);
           const nextOffset = offset + page.length;
           return jsonResponse({
@@ -8195,72 +8373,7 @@ export async function installConsoleApiMock(
           pathname === "/api/v1/telemetry/network-rates" &&
           method === "GET"
         ) {
-          const scale =
-            telemetryNetworkRateScalesFixture[
-              Math.min(
-                telemetryNetworkRateRequestCount,
-                telemetryNetworkRateScalesFixture.length - 1,
-              )
-            ] ?? 1;
-          telemetryNetworkRateRequestCount += 1;
-          return jsonResponse([
-            {
-              client_id: "agent-fra-02",
-              interface: "eth0",
-              bucket_start: "2026-05-31T10:00:00Z",
-              bucket_secs: 300,
-              sample_count: 2,
-              rx_bytes_avg: 45875200,
-              tx_bytes_avg: 62914560,
-              rx_bytes_delta: 65536,
-              tx_bytes_delta: 131072,
-              rx_bps_avg: 8738 * scale,
-              tx_bps_avg: 17476 * scale,
-              updated_at: "2026-05-31T10:02:05Z",
-            },
-            {
-              client_id: "agent-fra-02",
-              interface: "tunab",
-              bucket_start: "2026-05-31T10:00:00Z",
-              bucket_secs: 300,
-              sample_count: 2,
-              rx_bytes_avg: 18350080,
-              tx_bytes_avg: 22544384,
-              rx_bytes_delta: 0,
-              tx_bytes_delta: 0,
-              rx_bps_avg: 3125000,
-              tx_bps_avg: 2760000,
-              updated_at: "2026-05-31T10:02:05Z",
-            },
-            {
-              client_id: "agent-fra-02",
-              interface: "ovpn42",
-              bucket_start: "2026-05-31T09:55:00Z",
-              bucket_secs: 300,
-              sample_count: 1,
-              rx_bytes_avg: 7864320,
-              tx_bytes_avg: 7340032,
-              rx_bytes_delta: 0,
-              tx_bytes_delta: 0,
-              rx_bps_avg: 980000 * scale,
-              tx_bps_avg: 860000 * scale,
-              updated_at: "2026-05-31T10:00:10Z",
-            },
-            {
-              client_id: "agent-sfo-01",
-              interface: "eth0",
-              bucket_start: "2026-05-31T10:00:00Z",
-              bucket_secs: 300,
-              sample_count: 3,
-              rx_bytes_avg: 73400320,
-              tx_bytes_avg: 68157440,
-              rx_bytes_delta: 393216,
-              tx_bytes_delta: 458752,
-              rx_bps_avg: 19200000 * scale,
-              tx_bps_avg: 18400000 * scale,
-              updated_at: "2026-05-31T10:02:06Z",
-            },
-          ]);
+          return jsonResponse(telemetryNetworkRatesPayload());
         }
         if (
           pathname === "/api/v1/telemetry/tunnels" &&
@@ -8270,148 +8383,7 @@ export async function installConsoleApiMock(
           return jsonResponse({ error: "telemetry_tunnels_unavailable" }, 503);
         }
         if (pathname === "/api/v1/telemetry/tunnels" && method === "GET")
-          return jsonResponse([
-            {
-              client_id: "agent-fra-02",
-              observed_at: "2026-05-31T10:02:00Z",
-              interface: "tunab",
-              kind: "gre",
-              ownership_mode: "agent_builtin",
-              mutation_policy: "managed_declared_plan",
-              plan_id: "dddddddd-eeee-4fff-8000-111111111111",
-              plan_name: "sfo-fra-gre",
-              plan_runtime_manager: "agent_builtin",
-              endpoint_side: "right",
-              peer_client_id: "agent-sfo-01",
-              source: "declared_plan_status",
-              operstate: "up",
-              mtu: 1500,
-              link_type: 65534,
-              address: "00:00:00:00:00:00",
-              rx_bytes: 18350080,
-              tx_bytes: 22544384,
-              traffic_source: "interface_counters",
-              traffic_status: "ok",
-              traffic_reason: null,
-              traffic_checked_unix: 1780202520,
-              adapter_health: null,
-              latency_monitoring_enabled: true,
-              latency_status: "down",
-              latency_reason: "latency_probe_missing_healthy_sample:3/3",
-              latency_primary_family: "ipv4",
-              latency_target: "10.255.0.0",
-              latency_checked_unix: 1780202520,
-              latency_avg_ms: null,
-              packet_loss_ratio: 1,
-              latency_healthy_windows: 0,
-              latency_missed_windows: 3,
-            },
-            {
-              client_id: "agent-sfo-01",
-              observed_at: "2026-05-31T10:02:00Z",
-              interface: "tunab",
-              kind: "gre",
-              ownership_mode: "agent_builtin",
-              mutation_policy: "managed_declared_plan",
-              plan_id: "dddddddd-eeee-4fff-8000-111111111111",
-              plan_name: "sfo-fra-gre",
-              plan_runtime_manager: "agent_builtin",
-              endpoint_side: "left",
-              peer_client_id: "agent-fra-02",
-              source: "declared_plan_status",
-              operstate: "up",
-              mtu: 1476,
-              link_type: 778,
-              address: "00:00:00:00:00:00",
-              rx_bytes: 22544384,
-              tx_bytes: 18350080,
-              traffic_source: "interface_counters",
-              traffic_status: "ok",
-              traffic_reason: null,
-              traffic_checked_unix: 1780202520,
-              adapter_health: null,
-              latency_monitoring_enabled: true,
-              latency_status: "healthy",
-              latency_reason: "probe_ok",
-              latency_primary_family: "ipv4",
-              latency_target: "10.255.0.1",
-              latency_checked_unix: 1780202520,
-              latency_avg_ms: 18.4,
-              packet_loss_ratio: 0,
-              latency_healthy_windows: 5,
-              latency_missed_windows: 0,
-            },
-            {
-              client_id: "agent-sfo-01",
-              observed_at: "2026-05-31T10:00:00Z",
-              interface: "ovpn42",
-              kind: "openvpn",
-              ownership_mode: "external_observed",
-              mutation_policy: "observe_only_declared_plan",
-              plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
-              plan_name: "external-openvpn-observed",
-              plan_runtime_manager: "external_observed",
-              endpoint_side: "left",
-              peer_client_id: "agent-fra-02",
-              source: "declared_interface_status",
-              operstate: "up",
-              mtu: 1500,
-              link_type: null,
-              address: null,
-              rx_bytes: 7340032,
-              tx_bytes: 7864320,
-              traffic_source: "interface_counters",
-              traffic_status: "ok",
-              traffic_reason: null,
-              traffic_checked_unix: 1780202400,
-              adapter_health: null,
-              latency_monitoring_enabled: true,
-              latency_status: "healthy",
-              latency_reason: "probe_ok",
-              latency_primary_family: "ipv4",
-              latency_target: "10.44.0.1",
-              latency_checked_unix: 1780202400,
-              latency_avg_ms: 18.1,
-              packet_loss_ratio: 0,
-              latency_healthy_windows: 3,
-              latency_missed_windows: 0,
-            },
-            {
-              client_id: "agent-fra-02",
-              observed_at: "2026-05-31T10:00:00Z",
-              interface: "ovpn42",
-              kind: "openvpn",
-              ownership_mode: "external_observed",
-              mutation_policy: "observe_only_declared_plan",
-              plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
-              plan_name: "external-openvpn-observed",
-              plan_runtime_manager: "external_observed",
-              endpoint_side: "right",
-              peer_client_id: "agent-sfo-01",
-              source: "declared_interface_status",
-              operstate: "unknown",
-              mtu: 1500,
-              link_type: null,
-              address: null,
-              rx_bytes: 7864320,
-              tx_bytes: 7340032,
-              traffic_source: "interface_counters",
-              traffic_status: "ok",
-              traffic_reason: null,
-              traffic_checked_unix: 1780202400,
-              adapter_health: null,
-              latency_monitoring_enabled: true,
-              latency_status: "missed",
-              latency_reason: "latency_probe_missing_healthy_sample:1/3",
-              latency_primary_family: "ipv4",
-              latency_target: "10.44.0.0",
-              latency_checked_unix: 1780202400,
-              latency_avg_ms: null,
-              packet_loss_ratio: 1,
-              latency_healthy_windows: 0,
-              latency_missed_windows: 1,
-            },
-          ]);
+          return jsonResponse(telemetryTunnelsPayload());
         if (pathname === "/api/v1/configuration-presets" && method === "GET") {
           const behavior = new URL(url, window.location.href).searchParams.get(
             "behavior",
@@ -11153,6 +11125,11 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/bulk/resolve" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.bulkResolve.push(body);
+          const gate = nextBulkResolveGate;
+          nextBulkResolveGate = null;
+          if (gate) {
+            await gate;
+          }
           if (bulkResolveDelayMsFixture > 0) {
             await new Promise((resolve) =>
               window.setTimeout(resolve, bulkResolveDelayMsFixture),
@@ -11848,15 +11825,8 @@ export async function installConsoleApiMock(
               dispatch({ type: "session_state", session: { ...session } });
             }
           };
-          const ackDelayMs = Number(
-            (
-              window as typeof window & {
-                __vpsmanTerminalControlAckDelayMs?: number;
-              }
-            ).__vpsmanTerminalControlAckDelayMs ?? 0,
-          );
-          if (ackDelayMs > 0) {
-            window.setTimeout(dispatchAck, ackDelayMs);
+          if (frame.type === "input" && terminalInputAcksHeld) {
+            heldTerminalInputAcks.push(dispatchAck);
           } else {
             dispatchAck();
           }
@@ -11979,6 +11949,8 @@ export async function installConsoleApiMock(
             id: `fdfdfdfd-aaaa-4aaa-8aaa-${String(index).padStart(12, "0")}`,
           }))
         : fleetAlertNotifications,
+      fleetAlertNotificationsTruncatedFixture:
+        options.alertEvidenceSaturated === true,
       fleetAlertPoliciesFixture: fleetAlertPolicies,
       fleetAlertHistoryFixture: options.fleetAlertHistorySaturated
         ? Array.from({ length: 200 }, (_, index) => ({
@@ -12147,6 +12119,9 @@ export async function installConsoleApiMock(
           }))
         : [policyAlerts[0]],
       currentPolicyAlertsTruncatedFixture: options.alertEvidenceSaturated,
+      policyAlertsTruncatedFixture:
+        options.alertEvidenceSaturated === true ||
+        options.policyAlertHistorySaturated === true,
       policyDryRunFixture: options.policyDryRunOccurrence
         ? {
             ...policyDryRunFixture,

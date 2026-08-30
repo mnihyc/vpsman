@@ -8,8 +8,8 @@ use crate::{
         otpauth_uri, TOTP_DIGITS, TOTP_PERIOD_SECS,
     },
     model::{
-        AuditLogView, AuthContext, OperatorRecord, OperatorView, TotpSetupOutcome,
-        TotpSetupResponse, TotpUpdateOutcome,
+        AuthContext, OperatorRecord, OperatorView, TotpSetupOutcome, TotpSetupResponse,
+        TotpUpdateOutcome,
     },
     repository::Repository,
     repository_auth::{parse_operator_preferences, parse_scopes, postgres_totp_step},
@@ -23,36 +23,6 @@ impl Repository {
         password: &str,
     ) -> Result<TotpSetupOutcome> {
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let Some(operator) = operators
-                    .iter_mut()
-                    .find(|operator| operator.id == actor.operator.id)
-                else {
-                    return Ok(TotpSetupOutcome::OperatorMissing);
-                };
-                if operator.totp_enabled {
-                    return Ok(TotpSetupOutcome::AlreadyEnabled);
-                }
-                if !verify_operator_password(password, &operator.password_hash)? {
-                    return Ok(TotpSetupOutcome::InvalidPassword);
-                }
-                if let Some(secret) = existing_pending_totp_secret(operator, password)? {
-                    return Ok(TotpSetupOutcome::Created(setup_response(
-                        &operator.view(),
-                        &secret,
-                    )));
-                }
-                let (secret, encrypted) = encrypt_new_totp_secret(password)?;
-                operator.totp_secret_ciphertext_hex = Some(encrypted.ciphertext_hex);
-                operator.totp_secret_nonce_hex = Some(encrypted.nonce_hex);
-                operator.totp_secret_salt_hex = Some(encrypted.salt_hex);
-                operator.totp_last_accepted_step = None;
-                let response = setup_response(&operator.view(), &secret);
-                drop(operators);
-                record_totp_audit(memory, actor, "operator_totp.setup", "pending").await;
-                Ok(TotpSetupOutcome::Created(response))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let Some(operator) = select_operator_for_update(&mut tx, actor.operator.id).await?
@@ -127,55 +97,6 @@ impl Repository {
         enable: bool,
     ) -> Result<TotpUpdateOutcome> {
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let Some(operator) = operators
-                    .iter_mut()
-                    .find(|operator| operator.id == actor.operator.id)
-                else {
-                    return Ok(TotpUpdateOutcome::OperatorMissing);
-                };
-                if operator.encrypted_totp_secret().is_none() {
-                    return Ok(TotpUpdateOutcome::NotConfigured);
-                }
-                if enable && operator.totp_enabled {
-                    return Ok(TotpUpdateOutcome::AlreadyEnabled);
-                }
-                let Some(matched_step) = matching_operator_totp_step(operator, password, code)?
-                else {
-                    return Ok(TotpUpdateOutcome::InvalidCredentials);
-                };
-                if operator
-                    .totp_last_accepted_step
-                    .is_some_and(|last_step| matched_step <= last_step)
-                {
-                    return Ok(TotpUpdateOutcome::InvalidCredentials);
-                }
-                if enable {
-                    operator.totp_enabled = true;
-                    operator.totp_last_accepted_step = Some(matched_step);
-                } else {
-                    operator.totp_enabled = false;
-                    operator.totp_secret_ciphertext_hex = None;
-                    operator.totp_secret_nonce_hex = None;
-                    operator.totp_secret_salt_hex = None;
-                    operator.totp_last_accepted_step = None;
-                }
-                let view = operator.view();
-                drop(operators);
-                record_totp_audit(
-                    memory,
-                    actor,
-                    if enable {
-                        "operator_totp.enabled"
-                    } else {
-                        "operator_totp.disabled"
-                    },
-                    if enable { "enabled" } else { "disabled" },
-                )
-                .await;
-                Ok(TotpUpdateOutcome::Updated(Box::new(view)))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let Some(operator) = select_operator_for_update(&mut tx, actor.operator.id).await?
@@ -370,32 +291,6 @@ async fn select_operator_for_update(
         })
     })
     .transpose()
-}
-
-async fn record_totp_audit(
-    memory: &crate::repository::MemoryState,
-    actor: &AuthContext,
-    action: &str,
-    status: &str,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(actor.operator.id),
-        action: action.to_string(),
-        target: format!("operator:{}", actor.operator.id),
-        command_hash: None,
-        metadata: serde_json::json!({
-            "operator_id": actor.operator.id,
-            "operator_username": actor.operator.username,
-            "operator_role": actor.operator.role,
-            "operator_session_id": actor.audit_session_id(),
-            "totp_status": status,
-            "result": "succeeded",
-            "origin_kind": "operator_request",
-            "component": "operator-totp",
-        }),
-        created_at: unix_now().to_string(),
-    });
 }
 
 async fn insert_totp_audit(

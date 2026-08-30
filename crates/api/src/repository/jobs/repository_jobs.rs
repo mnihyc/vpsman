@@ -1,29 +1,25 @@
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{bail, Result};
-use base64::Engine as _;
-use chrono::{Duration, Utc};
+use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    job_command_safety, job_command_safety_by_operation_type, payload_hash,
-    runtime_config_content_hash, AgentRuntimeConfig, CommandOutput, JobCommand, JobCommandSafety,
-    DEFAULT_MAX_JOB_TIMEOUT_SECS, JOB_COMMAND_SAFETY_EXCLUSIVE,
+    job_command_safety_by_operation_type, payload_hash, runtime_config_content_hash,
+    AgentRuntimeConfig, CommandOutput, JobCommand, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    JOB_COMMAND_SAFETY_EXCLUSIVE,
 };
+pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS,
-    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST,
-    TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED,
-    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED,
-    TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
+    JOB_STATUS_QUEUED, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
+    TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED,
+    TARGET_STATUS_SKIPPED,
 };
 
-pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
-
-const EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS: i32 = 0x5650_534d;
 const MAX_CAPABILITY_DEGRADED_REASON_CHARS: usize = 256;
 const MAX_CAPABILITY_DEGRADED_HINT_CHARS: usize = 2048;
 const INVALID_JOB_OPERATION_CODE: &str = "invalid_job_operation";
@@ -31,21 +27,24 @@ const MAX_JOB_OPERATION_DECODE_ERROR_CHARS: usize = 1024;
 const INVALID_JOB_OPERATION_RETRY_DEFER_SECS: i32 = 30;
 const INVALID_JOB_OPERATION_RETRY_MARKER: &str = "invalid_job_operation:";
 
+pub(crate) fn canonical_target_write_order(targets: &[String]) -> Vec<&str> {
+    let mut ordered = targets.iter().map(String::as_str).collect::<Vec<_>>();
+    ordered.sort_unstable();
+    ordered
+}
+
 use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
-use crate::repository_job_outputs::{append_lock_keys, job_output_sequence_contiguous_in_views};
+use crate::repository_job_outputs::append_lock_keys;
 use crate::repository_key_lifecycle::{
-    lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
-    require_visible_postgres_clients_in_tx,
+    lock_postgres_client_lifecycles_in_tx, require_visible_postgres_clients_in_tx,
+    try_lock_postgres_client_lifecycles_in_tx,
 };
-use crate::repository_runtime_config::{
-    queue_runtime_config_apply_memory_state, queue_runtime_config_apply_postgres_in_tx,
-};
+use crate::repository_runtime_config::queue_runtime_config_apply_postgres_in_tx;
 use crate::runtime_config::redact_runtime_tunnel_credentials;
 use crate::util::{
-    compare_timestamps_desc, limit_or_default, offset_or_default, output_stream_name,
-    search_pattern, sort_descending,
+    limit_or_default, offset_or_default, output_stream_name, search_pattern, sort_descending,
 };
 use crate::{unix_now, TargetDispatchOutcome};
 
@@ -185,7 +184,6 @@ fn pending_runtime_config_apply(
 
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalizedTarget {
-    pub(crate) event_id: Uuid,
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) outcome: TargetDispatchOutcome,
@@ -206,13 +204,11 @@ pub(crate) struct TerminalizationBatch {
 impl TerminalizationBatch {
     pub(crate) fn push_target(
         &mut self,
-        event_id: Uuid,
         job_id: Uuid,
         client_id: impl Into<String>,
         outcome: TargetDispatchOutcome,
     ) {
         self.targets.push(TerminalizedTarget {
-            event_id,
             job_id,
             client_id: client_id.into(),
             outcome,
@@ -256,30 +252,6 @@ fn precompleted_targets_by_client<'a>(
         }
     }
     Ok(by_client)
-}
-
-fn precompleted_output_view(
-    job_id: Uuid,
-    client_id: &str,
-    seq: i32,
-    output: &CommandOutput,
-    created_at: &str,
-) -> JobOutputView {
-    JobOutputView {
-        job_id,
-        client_id: client_id.to_string(),
-        seq,
-        stream: output_stream_name(output.stream).to_string(),
-        data_base64: base64::engine::general_purpose::STANDARD.encode(&output.data),
-        storage: "inline".to_string(),
-        artifact_object_key: None,
-        artifact_sha256_hex: Some(payload_hash(&output.data)),
-        artifact_size_bytes: Some(output.data.len() as i64),
-        exit_code: output.exit_code,
-        done: output.done,
-        received_at: None,
-        created_at: created_at.to_string(),
-    }
 }
 
 async fn insert_precompleted_output_in_tx(
@@ -882,7 +854,7 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     status: &str,
     phase: &str,
     request_cancel: bool,
-    control_deadline_extra_secs: Option<i32>,
+    require_elapsed_deadline: bool,
 ) -> Result<bool> {
     let component = if phase == "control_deadline_expiry" {
         "job-deadline-reconciler"
@@ -912,13 +884,10 @@ async fn terminalize_invalid_job_operation_target_in_tx(
           AND target.completed_at IS NULL
           AND target.status IN ('dispatching', 'running')
           AND (
-            $6::integer IS NULL
+            NOT $6::boolean
             OR (
               target.deadline_at IS NOT NULL
               AND target.deadline_at <= now()
-              AND target.started_at IS NOT NULL
-              AND target.started_at
-                    + make_interval(secs => (job.max_timeout_secs + $6)::integer) <= now()
               AND (
                 ($7::uuid IS NULL AND target.process_incarnation_id IS NULL)
                 OR target.process_incarnation_id = $7::uuid
@@ -932,7 +901,7 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     .bind(status)
     .bind(&target.message)
     .bind(request_cancel)
-    .bind(control_deadline_extra_secs)
+    .bind(require_elapsed_deadline)
     .bind(target.process_incarnation_id)
     .execute(&mut **tx)
     .await?;
@@ -1001,7 +970,7 @@ async fn terminalize_invalid_job_operation_target(
     status: &str,
     phase: &str,
     request_cancel: bool,
-    control_deadline_extra_secs: Option<i32>,
+    require_elapsed_deadline: bool,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     let terminalized = terminalize_invalid_job_operation_target_in_tx(
@@ -1010,7 +979,7 @@ async fn terminalize_invalid_job_operation_target(
         status,
         phase,
         request_cancel,
-        control_deadline_extra_secs,
+        require_elapsed_deadline,
     )
     .await?;
     tx.commit().await?;
@@ -1425,132 +1394,6 @@ pub(crate) async fn append_synthetic_agent_lost_output_in_tx(
     .await
 }
 
-fn compare_text_or_number(left: &str, right: &str) -> Ordering {
-    match (left.parse::<i128>(), right.parse::<i128>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
-}
-
-fn compare_job_history(
-    left: &JobHistoryView,
-    right: &JobHistoryView,
-    sort: Option<&str>,
-) -> Ordering {
-    match sort.unwrap_or("created_at") {
-        "actor_id" => left.actor_id.cmp(&right.actor_id),
-        "command_type" | "command" => left.command_type.cmp(&right.command_type),
-        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
-        "privileged" => left.privileged.cmp(&right.privileged),
-        "status" => left.status.cmp(&right.status),
-        "target_count" | "targets" => left.target_count.cmp(&right.target_count),
-        "completed_at" => left.completed_at.cmp(&right.completed_at),
-        _ => compare_text_or_number(&left.created_at, &right.created_at),
-    }
-}
-
-fn job_matches_search(job: &JobHistoryView, needle: &str) -> bool {
-    job.id.to_string().to_ascii_lowercase().contains(needle)
-        || job
-            .actor_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || job.command_type.to_ascii_lowercase().contains(needle)
-        || job.status.to_ascii_lowercase().contains(needle)
-        || job.payload_hash.to_ascii_lowercase().contains(needle)
-        || job
-            .causation_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || job
-            .schedule_lineage
-            .iter()
-            .any(|id| id.to_string().to_ascii_lowercase().contains(needle))
-}
-
-fn compare_job_approval(
-    left: &JobApprovalView,
-    right: &JobApprovalView,
-    sort: Option<&str>,
-) -> Ordering {
-    match sort.unwrap_or("requested_at") {
-        "command_type" | "command" => left.command_type.cmp(&right.command_type),
-        "decided_at" => left.decided_at.cmp(&right.decided_at),
-        "job_id" => left.job_id.cmp(&right.job_id),
-        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
-        "requester" | "requester_username" => {
-            left.requester_username.cmp(&right.requester_username)
-        }
-        "risk" => left.risk.cmp(&right.risk),
-        "status" => left.status.cmp(&right.status),
-        "target_count" | "targets" => left.target_count.cmp(&right.target_count),
-        _ => compare_text_or_number(&left.requested_at, &right.requested_at),
-    }
-}
-
-fn job_approval_matches_search(approval: &JobApprovalView, needle: &str) -> bool {
-    approval
-        .id
-        .to_string()
-        .to_ascii_lowercase()
-        .contains(needle)
-        || approval
-            .job_id
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(needle)
-        || approval.status.to_ascii_lowercase().contains(needle)
-        || approval.command_type.to_ascii_lowercase().contains(needle)
-        || approval
-            .selector_expression
-            .to_ascii_lowercase()
-            .contains(needle)
-        || approval
-            .target_client_ids
-            .iter()
-            .any(|target| target.to_ascii_lowercase().contains(needle))
-        || approval.payload_hash.to_ascii_lowercase().contains(needle)
-        || approval
-            .request_fingerprint
-            .to_ascii_lowercase()
-            .contains(needle)
-        || approval
-            .requester_username
-            .to_ascii_lowercase()
-            .contains(needle)
-        || approval.risk.to_ascii_lowercase().contains(needle)
-}
-
-fn job_approval_allows_dispatch(
-    approvals: &[JobApprovalView],
-    approval_id: Option<Uuid>,
-    job_id: Uuid,
-    payload_hash: &str,
-    request_fingerprint: Option<&str>,
-) -> bool {
-    approval_id.is_none_or(|approval_id| {
-        approvals
-            .iter()
-            .find(|approval| approval.id == approval_id)
-            .is_some_and(|approval| {
-                approval.job_id == job_id
-                    && approval.status == "approved"
-                    && approval.payload_hash == payload_hash
-                    && request_fingerprint.is_some_and(|fingerprint| {
-                        approval.request_fingerprint.as_str() == fingerprint
-                    })
-            })
-    })
-}
-
-fn aggregate_job_status_from_targets(targets: &[JobTargetView]) -> &'static str {
-    let statuses = targets
-        .iter()
-        .map(|target| target.status.clone())
-        .collect::<Vec<_>>();
-    aggregate_job_status_from_statuses(&statuses, targets.len())
-}
-
 fn exclusive_operation_types() -> Vec<&'static str> {
     job_command_safety_by_operation_type()
         .iter()
@@ -1602,31 +1445,6 @@ fn job_approval_order_by(sort: Option<&str>, descending: bool) -> &'static str {
         (_, true) => "requested_at DESC, id DESC",
         (_, false) => "requested_at ASC, id ASC",
     }
-}
-
-fn compare_audit_log(left: &AuditLogView, right: &AuditLogView, sort: Option<&str>) -> Ordering {
-    match sort.unwrap_or("created_at") {
-        "actor_id" | "operator" => left.actor_id.cmp(&right.actor_id),
-        "action" => left.action.cmp(&right.action),
-        "command_hash" | "hash" => left.command_hash.cmp(&right.command_hash),
-        "target" => left.target.cmp(&right.target),
-        _ => compare_text_or_number(&left.created_at, &right.created_at),
-    }
-}
-
-fn audit_matches_search(audit: &AuditLogView, needle: &str) -> bool {
-    audit.id.to_string().to_ascii_lowercase().contains(needle)
-        || audit
-            .actor_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || audit.action.to_ascii_lowercase().contains(needle)
-        || audit.target.to_ascii_lowercase().contains(needle)
-        || audit
-            .command_hash
-            .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
 }
 
 fn audit_log_order_by(sort: Option<&str>, descending: bool) -> &'static str {
@@ -1739,10 +1557,10 @@ pub(crate) struct ClaimedJobTarget {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) actor_id: Option<Uuid>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) command_type: String,
     pub(crate) payload_hash: String,
     pub(crate) process_incarnation_id: Uuid,
+    pub(crate) dispatch_attempt: i32,
+    pub(crate) resource_owner_token: Option<Uuid>,
     pub(crate) operation: JobCommand,
     pub(crate) source_schedule_id: Option<Uuid>,
     pub(crate) causation_id: Option<Uuid>,
@@ -1773,11 +1591,21 @@ pub(crate) struct JobCompletionContext {
 #[derive(Clone, Debug)]
 struct ClaimedJobTerminalEvent {
     id: Uuid,
+    owner_token: Uuid,
     event_kind: String,
     job_id: Uuid,
     client_id: Option<String>,
     status: String,
     outcome: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedJobTerminalEnrichment {
+    pub(crate) event_id: Uuid,
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) status: String,
+    pub(crate) owner_token: Uuid,
 }
 
 fn job_webhook_predicates(command_type: &str, status: &str, include_created: bool) -> Vec<String> {
@@ -1889,13 +1717,6 @@ fn job_approval_audit(
 impl Repository {
     pub(crate) async fn get_job(&self, job_id: Uuid) -> Result<Option<JobHistoryView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .jobs
-                .read()
-                .await
-                .iter()
-                .find(|job| job.id == job_id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let Some(row) = sqlx::query(
                     r#"
@@ -1947,27 +1768,6 @@ impl Repository {
         job_id: Uuid,
     ) -> Result<Option<JobCompletionContext>> {
         match self {
-            Self::Memory(memory) => {
-                let Some(job) = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .find(|job| job.id == job_id)
-                    .cloned()
-                else {
-                    return Ok(None);
-                };
-                let Some(operation) = memory.job_operations.read().await.get(&job_id).cloned()
-                else {
-                    return Ok(None);
-                };
-                Ok(Some(JobCompletionContext {
-                    actor_id: job.actor_id,
-                    payload_hash: job.payload_hash,
-                    operation,
-                }))
-            }
             Self::Postgres(pool) => {
                 let Some(row) = sqlx::query(
                     r#"
@@ -1996,12 +1796,6 @@ impl Repository {
 
     pub(crate) async fn get_job_request_fingerprint(&self, job_id: Uuid) -> Result<Option<String>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .job_request_fingerprints
-                .read()
-                .await
-                .get(&job_id)
-                .cloned()),
             Self::Postgres(pool) => sqlx::query_scalar(
                 r#"
                     SELECT request_fingerprint
@@ -2023,39 +1817,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let mut approvals = memory
-                    .job_approvals
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|approval| {
-                        q.as_deref()
-                            .map(|needle| job_approval_matches_search(approval, needle))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                approvals.sort_by(|left, right| {
-                    compare_job_approval(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    approvals.reverse();
-                }
-                Ok(approvals
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = job_approval_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -2117,26 +1879,6 @@ impl Repository {
         approval_id: Uuid,
     ) -> Result<Option<(JobApprovalView, CreateJobRequest)>> {
         match self {
-            Self::Memory(memory) => {
-                let approval = memory
-                    .job_approvals
-                    .read()
-                    .await
-                    .iter()
-                    .find(|approval| approval.id == approval_id)
-                    .cloned();
-                let Some(approval) = approval else {
-                    return Ok(None);
-                };
-                let request = memory
-                    .job_approval_requests
-                    .read()
-                    .await
-                    .get(&approval_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("job_approval_request_missing"))?;
-                Ok(Some((approval, request)))
-            }
             Self::Postgres(pool) => {
                 let Some(row) = sqlx::query(
                     r#"
@@ -2188,28 +1930,6 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<JobApprovalView> {
         match self {
-            Self::Memory(memory) => {
-                if memory
-                    .job_approvals
-                    .read()
-                    .await
-                    .iter()
-                    .any(|existing| existing.id == approval.id)
-                {
-                    bail!("job_approval_id_reused");
-                }
-                memory.job_approvals.write().await.push(approval.clone());
-                memory
-                    .job_approval_requests
-                    .write()
-                    .await
-                    .insert(approval.id, request.clone());
-                memory.audits.write().await.push(job_approval_audit(
-                    &approval,
-                    "job.approval_requested",
-                    operator,
-                ));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let inserted = sqlx::query(
@@ -2300,36 +2020,6 @@ impl Repository {
             bail!("job_approval_decision_invalid");
         }
         match self {
-            Self::Memory(memory) => {
-                let mut approvals = memory.job_approvals.write().await;
-                let approval = approvals
-                    .iter_mut()
-                    .find(|approval| approval.id == approval_id)
-                    .ok_or_else(|| anyhow::anyhow!("job_approval_not_found"))?;
-                if approval.status != "pending" {
-                    if approval.status == status {
-                        return Ok(approval.clone());
-                    }
-                    bail!("job_approval_not_pending");
-                }
-                approval.status = status.to_string();
-                approval.decision_by = job_actor_id(operator);
-                approval.decision_username = Some(operator.operator.username.clone());
-                approval.decision_reason = reason.map(str::to_string);
-                approval.decided_at = Some(unix_now().to_string());
-                let updated = approval.clone();
-                drop(approvals);
-                memory.audits.write().await.push(job_approval_audit(
-                    &updated,
-                    if status == "approved" {
-                        "job.approval_approved"
-                    } else {
-                        "job.approval_rejected"
-                    },
-                    operator,
-                ));
-                Ok(updated)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let updated = sqlx::query(
@@ -2419,62 +2109,6 @@ impl Repository {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn list_jobs(&self, limit: i64) -> Result<Vec<JobHistoryView>> {
-        match self {
-            Self::Memory(memory) => {
-                let jobs = memory.jobs.read().await;
-                Ok(jobs.iter().rev().take(limit as usize).cloned().collect())
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        command_type,
-                        source_schedule_id,
-                        causation_id,
-                        schedule_lineage,
-                        privileged,
-                        status,
-                        target_count,
-                        payload_hash,
-                        max_timeout_secs,
-                        created_at::text AS created_at,
-                        completed_at::text AS completed_at
-                    FROM jobs
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(JobHistoryView {
-                            id: row.try_get("id")?,
-                            actor_id: row.try_get("actor_id")?,
-                            command_type: row.try_get("command_type")?,
-                            source_schedule_id: row.try_get("source_schedule_id")?,
-                            causation_id: row.try_get("causation_id")?,
-                            schedule_lineage: row.try_get("schedule_lineage")?,
-                            privileged: row.try_get("privileged")?,
-                            status: row.try_get("status")?,
-                            target_count: row.try_get("target_count")?,
-                            payload_hash: row.try_get("payload_hash")?,
-                            max_timeout_secs: row.try_get::<i64, _>("max_timeout_secs")?.max(1)
-                                as u64,
-                            created_at: row.try_get("created_at")?,
-                            completed_at: row.try_get("completed_at")?,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn list_dashboard_running_jobs(
         &self,
         client_ids: &[String],
@@ -2487,37 +2121,6 @@ impl Repository {
         // so count saturation can be disclosed instead of shown as exact.
         let limit = limit.clamp(1, 201);
         match self {
-            Self::Memory(memory) => {
-                let client_ids = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let scoped_job_ids = memory
-                    .job_targets
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|target| client_ids.contains(target.client_id.as_str()))
-                    .map(|target| target.job_id)
-                    .collect::<HashSet<_>>();
-                let mut jobs = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|job| {
-                        matches!(job.status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING)
-                            && scoped_job_ids.contains(&job.id)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                jobs.sort_by(|left, right| {
-                    compare_timestamps_desc(&left.created_at, &right.created_at)
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                jobs.truncate(limit as usize);
-                Ok(jobs)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2579,39 +2182,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let mut jobs = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|job| {
-                        q.as_deref()
-                            .map(|needle| job_matches_search(job, needle))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                jobs.sort_by(|left, right| {
-                    compare_job_history(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    jobs.reverse();
-                }
-                Ok(jobs
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = job_history_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -2677,14 +2248,6 @@ impl Repository {
 
     pub(crate) async fn list_job_targets(&self, job_id: Uuid) -> Result<Vec<JobTargetView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .job_targets
-                .read()
-                .await
-                .iter()
-                .filter(|target| target.job_id == job_id)
-                .cloned()
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2734,24 +2297,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let job_ids = job_ids.iter().copied().collect::<HashSet<_>>();
-                let client_ids = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                Ok(memory
-                    .job_targets
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|target| {
-                        job_ids.contains(&target.job_id)
-                            && client_ids.contains(target.client_id.as_str())
-                    })
-                    .cloned()
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2803,21 +2348,6 @@ impl Repository {
             return Ok(HashSet::new());
         }
         match self {
-            Self::Memory(memory) => Ok(memory
-                .job_targets
-                .read()
-                .await
-                .iter()
-                .filter(|target| target.job_id != exclude_job_id)
-                .filter(|target| target.completed_at.is_none())
-                .filter(|target| target_status_is_active(&target.status))
-                .filter(|target| {
-                    client_ids
-                        .iter()
-                        .any(|client_id| client_id == &target.client_id)
-                })
-                .map(|target| target.client_id.clone())
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2842,10 +2372,6 @@ impl Repository {
 
     pub(crate) async fn list_audit_logs(&self, limit: i64) -> Result<Vec<AuditLogView>> {
         match self {
-            Self::Memory(memory) => {
-                let audits = memory.audits.read().await;
-                Ok(audits.iter().rev().take(limit as usize).cloned().collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2872,13 +2398,6 @@ impl Repository {
 
     pub(crate) async fn get_audit_log(&self, audit_id: Uuid) -> Result<Option<AuditLogView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .audits
-                .read()
-                .await
-                .iter()
-                .find(|audit| audit.id == audit_id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -2906,39 +2425,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let mut audits = memory
-                    .audits
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|audit| {
-                        q.as_deref()
-                            .map(|needle| audit_matches_search(audit, needle))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                audits.sort_by(|left, right| {
-                    compare_audit_log(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    audits.reverse();
-                }
-                Ok(audits
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = audit_log_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -3006,62 +2493,8 @@ impl Repository {
         let operation = request.job_command().ok();
         let actor_id = job_actor_id(operator);
         match self {
-            Self::Memory(memory) => {
-                let created_at = unix_now().to_string();
-                memory.jobs.write().await.push(JobHistoryView {
-                    id: job_id,
-                    actor_id,
-                    command_type: "api_job_request".to_string(),
-                    source_schedule_id: None,
-                    causation_id: None,
-                    schedule_lineage: Vec::new(),
-                    privileged: request.privileged,
-                    status: status.to_string(),
-                    target_count: resolved_targets.len() as i32,
-                    payload_hash: command_hash.to_string(),
-                    max_timeout_secs: request
-                        .max_timeout_secs
-                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
-                        .max(1),
-                    created_at: created_at.clone(),
-                    completed_at: Some(created_at.clone()),
-                });
-                memory
-                    .job_request_fingerprints
-                    .write()
-                    .await
-                    .insert(job_id, request_fingerprint.to_string());
-                memory
-                    .job_targets
-                    .write()
-                    .await
-                    .extend(
-                        resolved_targets
-                            .iter()
-                            .cloned()
-                            .map(|client_id| JobTargetView {
-                                job_id,
-                                client_id,
-                                status: status.to_string(),
-                                message: Some(reason.to_string()),
-                                exit_code: None,
-                                started_at: None,
-                                deadline_at: None,
-                                completed_at: Some(created_at.clone()),
-                                process_incarnation_id: None,
-                            }),
-                    );
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id,
-                    action: format!("job.{status}"),
-                    target: "api:/api/v1/jobs".to_string(),
-                    command_hash: Some(command_hash.to_string()),
-                    metadata,
-                    created_at,
-                });
-            }
             Self::Postgres(pool) => {
+                let target_write_order = canonical_target_write_order(&resolved_targets);
                 let mut tx = pool.begin().await?;
                 sqlx::query(
                     r#"
@@ -3089,7 +2522,7 @@ impl Repository {
                 )
                 .execute(&mut *tx)
                 .await?;
-                for client_id in &resolved_targets {
+                for client_id in target_write_order {
                     sqlx::query(
                         r#"
                         INSERT INTO job_targets (
@@ -3143,21 +2576,6 @@ impl Repository {
                 tx.commit().await?;
             }
         }
-        if matches!(self, Self::Memory(_)) {
-            self.reconcile_memory_job_event_sources(job_id).await?;
-            self.record_job_created_webhook_event(JobCreatedWebhookEvent {
-                job_id,
-                command_type: "api_job_request",
-                status,
-                privileged: request.privileged,
-                command_hash,
-                resolved_targets: &resolved_targets,
-                actor_id,
-                source_schedule_id: None,
-                operation: operation.as_ref(),
-            })
-            .await?;
-        }
         Ok(job_id)
     }
 
@@ -3181,31 +2599,8 @@ impl Repository {
             None,
             &[],
             None,
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_dispatching_job_for_approval(
-        &self,
-        job_id: Uuid,
-        request: &CreateJobRequest,
-        command_hash: &str,
-        request_fingerprint: &str,
-        operator: &AuthContext,
-        resolved_targets: &[String],
-        approval_id: Uuid,
-    ) -> Result<Uuid> {
-        self.record_dispatching_job_with_source(
-            job_id,
-            request,
-            command_hash,
-            request_fingerprint,
-            operator,
-            resolved_targets,
             None,
-            &[],
-            Some(approval_id),
+            None,
         )
         .await
     }
@@ -3231,12 +2626,13 @@ impl Repository {
             None,
             precompleted_targets,
             approval_id,
+            None,
+            None,
         )
         .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn record_dispatching_job_from_schedule(
+    pub(crate) async fn record_dispatching_runtime_config_job_with_precompleted(
         &self,
         job_id: Uuid,
         request: &CreateJobRequest,
@@ -3244,7 +2640,10 @@ impl Repository {
         request_fingerprint: &str,
         operator: &AuthContext,
         resolved_targets: &[String],
-        source_schedule_id: Uuid,
+        precompleted_targets: &[PrecompletedJobTarget],
+        approval_id: Option<Uuid>,
+        desired_revision: i64,
+        claim_token: Uuid,
     ) -> Result<Uuid> {
         self.record_dispatching_job_with_source(
             job_id,
@@ -3253,9 +2652,11 @@ impl Repository {
             request_fingerprint,
             operator,
             resolved_targets,
-            Some(source_schedule_id),
-            &[],
             None,
+            precompleted_targets,
+            approval_id,
+            Some(desired_revision),
+            Some(claim_token),
         )
         .await
     }
@@ -3281,6 +2682,8 @@ impl Repository {
             Some(source_schedule_id),
             precompleted_targets,
             None,
+            None,
+            None,
         )
         .await
     }
@@ -3296,6 +2699,8 @@ impl Repository {
         source_schedule_id: Option<Uuid>,
         precompleted_targets: &[PrecompletedJobTarget],
         approval_id: Option<Uuid>,
+        runtime_config_claim_revision: Option<i64>,
+        runtime_config_claim_token: Option<Uuid>,
     ) -> Result<Uuid> {
         let command_type = request.command_type_label().to_string();
         let actor_id = job_actor_id(operator);
@@ -3349,237 +2754,9 @@ impl Repository {
             .collect::<HashMap<_, _>>();
         let pending_runtime_config = pending_runtime_config_apply(&operation, resolved_targets)?;
         let prepared_rollout = prepare_job_rollout(request.rollout.as_ref(), resolved_targets)?;
-        let mut finished_status = None::<String>;
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    &required_live_targets,
-                    "job_target_no_longer_available",
-                )
-                .await?;
-                let agents = memory.agents.read().await;
-                anyhow::ensure!(
-                    required_live_targets
-                        .iter()
-                        .all(|client_id| agents.iter().any(|agent| {
-                            agent.id == *client_id
-                                && !matches!(
-                                    agent.status.as_str(),
-                                    "suspended" | "revoked" | "deleted"
-                                )
-                        })),
-                    "job_target_no_longer_available"
-                );
-                drop(agents);
-                let created_at = unix_now().to_string();
-                memory.jobs.write().await.push(JobHistoryView {
-                    id: job_id,
-                    actor_id,
-                    command_type: command_type.clone(),
-                    source_schedule_id,
-                    causation_id: None,
-                    schedule_lineage: Vec::new(),
-                    privileged: request.privileged,
-                    status: JOB_STATUS_QUEUED.to_string(),
-                    target_count: resolved_targets.len() as i32,
-                    payload_hash: command_hash.to_string(),
-                    max_timeout_secs: request
-                        .max_timeout_secs
-                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
-                        .max(1),
-                    created_at: created_at.clone(),
-                    completed_at: None,
-                });
-                memory
-                    .job_request_fingerprints
-                    .write()
-                    .await
-                    .insert(job_id, request_fingerprint.to_string());
-                memory
-                    .job_operations
-                    .write()
-                    .await
-                    .insert(job_id, operation.clone());
-                memory.job_timeouts.write().await.insert(
-                    job_id,
-                    request
-                        .max_timeout_secs
-                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
-                        .max(1),
-                );
-                if let Some(schedule_id) = source_schedule_id {
-                    memory
-                        .job_source_schedule_ids
-                        .write()
-                        .await
-                        .insert(job_id, schedule_id);
-                }
-                if let Some(approval_id) = approval_id {
-                    memory
-                        .job_approval_ids
-                        .write()
-                        .await
-                        .insert(job_id, approval_id);
-                }
-                if let Some(pending) = pending_runtime_config.as_ref().filter(|pending| {
-                    !precompleted_by_client.contains_key(pending.client_id.as_str())
-                }) {
-                    queue_runtime_config_apply_memory_state(
-                        memory,
-                        &pending.client_id,
-                        pending.version,
-                        &pending.content_hash,
-                        &pending.config,
-                        job_id,
-                        &pending.reason,
-                    )
-                    .await;
-                }
-                if let Some(rollout) = prepared_rollout.as_ref() {
-                    memory
-                        .job_rollouts
-                        .write()
-                        .await
-                        .push(MemoryJobRolloutRecord {
-                            job_id,
-                            status: "running".to_string(),
-                            policy: rollout.policy.clone(),
-                            current_batch: 0,
-                            total_batches: rollout.total_batches,
-                            failure_baseline: 0,
-                            pause_reason: None,
-                            next_batch_unix: unix_now(),
-                            created_at: created_at.clone(),
-                            updated_at: created_at.clone(),
-                            completed_at: None,
-                        });
-                    let mut assignments = memory.job_rollout_targets.write().await;
-                    assignments.extend(rollout.target_batches.iter().map(
-                        |(client_id, batch_index)| ((job_id, client_id.clone()), *batch_index),
-                    ));
-                }
-                memory
-                    .job_targets
-                    .write()
-                    .await
-                    .extend(resolved_targets.iter().cloned().map(|client_id| {
-                        JobTargetView {
-                            job_id,
-                            status: precompleted_by_client
-                                .get(client_id.as_str())
-                                .map(|outcome| outcome.status.clone())
-                                .unwrap_or_else(|| TARGET_STATUS_QUEUED.to_string()),
-                            message: precompleted_by_client
-                                .get(client_id.as_str())
-                                .map(|outcome| outcome.message.clone()),
-                            exit_code: precompleted_by_client
-                                .get(client_id.as_str())
-                                .and_then(|outcome| outcome.exit_code),
-                            started_at: precompleted_by_client
-                                .contains_key(client_id.as_str())
-                                .then_some(created_at.clone()),
-                            deadline_at: None,
-                            completed_at: precompleted_by_client
-                                .contains_key(client_id.as_str())
-                                .then_some(created_at.clone()),
-                            process_incarnation_id: None,
-                            client_id,
-                        }
-                    }));
-                if !precompleted_targets.is_empty() {
-                    let mut outputs = memory.job_outputs.write().await;
-                    for target in precompleted_targets {
-                        for (index, output) in target.outcome.outputs.iter().enumerate() {
-                            outputs.push(precompleted_output_view(
-                                job_id,
-                                &target.client_id,
-                                i32::try_from(index)?,
-                                output,
-                                &created_at,
-                            ));
-                        }
-                    }
-                }
-                if !capability_degraded_by_client.is_empty() {
-                    memory.capability_degraded_job_targets.write().await.extend(
-                        capability_degraded_by_client
-                            .iter()
-                            .map(|(client_id, metadata)| {
-                                ((job_id, client_id.clone()), metadata.clone())
-                            }),
-                    );
-                }
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id,
-                    action: "job.dispatch_requested".to_string(),
-                    target: "api:/api/v1/jobs".to_string(),
-                    command_hash: Some(command_hash.to_string()),
-                    metadata,
-                    created_at: created_at.clone(),
-                });
-                if !precompleted_targets.is_empty() {
-                    let mut audits = memory.audits.write().await;
-                    for target in precompleted_targets {
-                        audits.push(AuditLogView {
-                            id: Uuid::new_v4(),
-                            actor_id: None,
-                            action: "job.target_result".to_string(),
-                            target: format!("client:{}", target.client_id),
-                            command_hash: Some(command_hash.to_string()),
-                            metadata: json!({
-                                "job_id": job_id,
-                                "status": target.outcome.status,
-                                "result": target.outcome.status,
-                                "exit_code": target.outcome.exit_code,
-                                "accepted": target.outcome.accepted,
-                                "message": target.outcome.message,
-                                "received_at": target.outcome.received_at,
-                                "origin_kind": "control_plane",
-                                "component": "job-dispatch-validation",
-                            }),
-                            created_at: created_at.clone(),
-                        });
-                    }
-                }
-                let target_statuses = resolved_targets
-                    .iter()
-                    .map(|client_id| {
-                        precompleted_by_client
-                            .get(client_id.as_str())
-                            .map(|outcome| outcome.status.as_str())
-                            .unwrap_or(TARGET_STATUS_QUEUED)
-                    })
-                    .collect::<Vec<_>>();
-                if !target_statuses.is_empty()
-                    && !target_statuses
-                        .iter()
-                        .any(|status| target_status_is_active(status))
-                {
-                    let status = aggregate_job_status_from_statuses(
-                        &target_statuses
-                            .iter()
-                            .map(|status| (*status).to_string())
-                            .collect::<Vec<_>>(),
-                        target_statuses.len(),
-                    )
-                    .to_string();
-                    if let Some(job) = memory
-                        .jobs
-                        .write()
-                        .await
-                        .iter_mut()
-                        .find(|job| job.id == job_id && job.completed_at.is_none())
-                    {
-                        job.status = status.clone();
-                        job.completed_at = Some(created_at.clone());
-                        finished_status = Some(status);
-                    }
-                }
-            }
             Self::Postgres(pool) => {
+                let target_write_order = canonical_target_write_order(resolved_targets);
                 let mut tx = pool.begin().await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
@@ -3631,18 +2808,21 @@ impl Repository {
                     queue_runtime_config_apply_postgres_in_tx(
                         &mut tx,
                         &pending.client_id,
+                        runtime_config_claim_revision
+                            .context("runtime_config_reconcile_claim_revision_required")?,
                         pending.version,
                         &pending.content_hash,
                         &pending.config,
                         job_id,
                         &pending.reason,
+                        runtime_config_claim_token
+                            .context("runtime_config_reconcile_claim_token_required")?,
                     )
                     .await?;
                 }
-                for client_id in resolved_targets {
-                    if let Some(outcome) = precompleted_by_client.get(client_id.as_str()) {
-                        let capability_degraded =
-                            capability_degraded_by_client.get(client_id.as_str());
+                for client_id in target_write_order {
+                    if let Some(outcome) = precompleted_by_client.get(client_id) {
+                        let capability_degraded = capability_degraded_by_client.get(client_id);
                         sqlx::query(
                             r#"
                             INSERT INTO job_targets (
@@ -3673,20 +2853,6 @@ impl Repository {
                         .bind(capability_degraded.map(|(_, hint)| hint))
                         .execute(&mut *tx)
                         .await?;
-                        for (index, output) in outcome.outputs.iter().enumerate() {
-                            insert_precompleted_output_in_tx(
-                                &mut tx,
-                                job_id,
-                                client_id,
-                                i32::try_from(index)?,
-                                output,
-                            )
-                            .await?;
-                        }
-                        enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome)
-                            .await?;
-                        insert_target_result_audit_in_tx(&mut tx, job_id, client_id, outcome)
-                            .await?;
                     } else {
                         sqlx::query(
                             r#"
@@ -3702,6 +2868,24 @@ impl Repository {
                         .execute(&mut *tx)
                         .await?;
                     }
+                }
+                for client_id in resolved_targets {
+                    let Some(outcome) = precompleted_by_client.get(client_id.as_str()) else {
+                        continue;
+                    };
+                    for (index, output) in outcome.outputs.iter().enumerate() {
+                        insert_precompleted_output_in_tx(
+                            &mut tx,
+                            job_id,
+                            client_id,
+                            i32::try_from(index)?,
+                            output,
+                        )
+                        .await?;
+                    }
+                    enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome)
+                        .await?;
+                    insert_target_result_audit_in_tx(&mut tx, job_id, client_id, outcome).await?;
                 }
                 if let Some(rollout) = prepared_rollout.as_ref() {
                     sqlx::query(
@@ -3761,7 +2945,7 @@ impl Repository {
                 .bind(metadata)
                 .execute(&mut *tx)
                 .await?;
-                finished_status =
+                let finished_status =
                     finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
                         .await?;
                 crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
@@ -3786,36 +2970,6 @@ impl Repository {
                 tx.commit().await?;
             }
         }
-        if matches!(self, Self::Memory(_)) {
-            self.record_job_created_webhook_event(JobCreatedWebhookEvent {
-                job_id,
-                command_type: &command_type,
-                status: finished_status.as_deref().unwrap_or(JOB_STATUS_QUEUED),
-                privileged: request.privileged,
-                command_hash,
-                resolved_targets,
-                actor_id,
-                source_schedule_id,
-                operation: Some(&operation),
-            })
-            .await?;
-            self.reconcile_memory_job_event_sources(job_id).await?;
-            for target in precompleted_targets {
-                self.record_runtime_config_apply_terminal_for_target_status(
-                    job_id,
-                    &target.client_id,
-                    &target.outcome.status,
-                    Some(target.outcome.message.as_str()),
-                )
-                .await?;
-                self.record_job_target_webhook_event(job_id, &target.client_id, &target.outcome)
-                    .await?;
-            }
-            if let Some(status) = finished_status {
-                self.record_job_terminal_side_effects(job_id, &status)
-                    .await?;
-            }
-        }
         Ok(job_id)
     }
 
@@ -3826,290 +2980,110 @@ impl Repository {
         control_deadline_extra_secs: u64,
     ) -> Result<Vec<ClaimedJobTarget>> {
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let now_unix = unix_now();
-                let now = now_unix.to_string();
-                let dispatchable_clients = {
-                    let hidden = memory.hidden_clients.read().await;
-                    memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|agent| {
-                            !hidden.contains(&agent.id)
-                                && !matches!(
-                                    agent.status.as_str(),
-                                    "suspended" | "revoked" | "deleted"
-                                )
-                        })
-                        .map(|agent| agent.id.clone())
-                        .collect::<HashSet<_>>()
-                };
-                let operations = memory.job_operations.read().await.clone();
-                let timeouts = memory.job_timeouts.read().await.clone();
-                let jobs = memory.jobs.read().await.clone();
-                let approvals = memory.job_approvals.read().await.clone();
-                let approval_ids = memory.job_approval_ids.read().await.clone();
-                let request_fingerprints = memory.job_request_fingerprints.read().await.clone();
-                let target_snapshot = memory.job_targets.read().await.clone();
-                let rollouts = memory.job_rollouts.read().await.clone();
-                let rollout_targets = memory.job_rollout_targets.read().await.clone();
-                let mut active_clients = target_snapshot
-                    .iter()
-                    .filter(|target| {
-                        target.completed_at.is_none()
-                            && matches!(
-                                target.status.as_str(),
-                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
-                            )
-                    })
-                    .map(|target| target.client_id.clone())
-                    .collect::<std::collections::HashSet<_>>();
-                let mut active_exclusive_clients = target_snapshot
-                    .iter()
-                    .filter(|target| {
-                        target.completed_at.is_none()
-                            && matches!(
-                                target.status.as_str(),
-                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
-                            )
-                    })
-                    .filter_map(|target| {
-                        let operation = operations.get(&target.job_id)?;
-                        (job_command_safety(operation) == JobCommandSafety::Exclusive)
-                            .then(|| target.client_id.clone())
-                    })
-                    .collect::<std::collections::HashSet<_>>();
-                let mut targets = memory.job_targets.write().await;
-                let mut claimed = Vec::new();
-                let mut selected = 0_usize;
-                let mut invalid_operations = Vec::new();
-                for target in targets.iter_mut().filter(|target| {
-                    target.completed_at.is_none() && target.status == TARGET_STATUS_QUEUED
-                }) {
-                    if selected >= limit.clamp(1, 500) as usize {
-                        break;
-                    }
-                    if !dispatchable_clients.contains(&target.client_id) {
-                        continue;
-                    }
-                    let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
-                        continue;
-                    };
-                    if !job_approval_allows_dispatch(
-                        &approvals,
-                        approval_ids.get(&job.id).copied(),
-                        job.id,
-                        &job.payload_hash,
-                        request_fingerprints.get(&job.id).map(String::as_str),
-                    ) {
-                        continue;
-                    }
-                    if let Some(rollout) = rollouts.iter().find(|rollout| {
-                        rollout.job_id == target.job_id && rollout.completed_at.is_none()
-                    }) {
-                        let Some(batch_index) =
-                            rollout_targets.get(&(target.job_id, target.client_id.clone()))
-                        else {
-                            continue;
-                        };
-                        if rollout.status != "running"
-                            || rollout.next_batch_unix > now_unix
-                            || *batch_index > rollout.current_batch
-                        {
-                            continue;
-                        }
-                    }
-                    let Some(operation) = operations.get(&target.job_id).cloned() else {
-                        selected += 1;
-                        let decode_error =
-                            "operation is missing from the in-memory job record".to_string();
-                        let message = invalid_job_operation_message(
-                            "stored job operation is invalid; target was not dispatched",
-                            &decode_error,
-                        );
-                        let output_data = invalid_job_operation_status_output_value(
-                            target.job_id,
-                            &target.client_id,
-                            TARGET_STATUS_FAILED,
-                            &InvalidJobOperationEvidence {
-                                phase: "dispatch_claim",
-                                message: &message,
-                                decode_error: &decode_error,
-                                process_incarnation_id: None,
-                            },
-                        )
-                        .to_string()
-                        .into_bytes();
-                        target.status = TARGET_STATUS_FAILED.to_string();
-                        target.message = Some(message.clone());
-                        target.exit_code = None;
-                        target.started_at = Some(now.clone());
-                        target.completed_at = Some(now.clone());
-                        invalid_operations.push((
-                            InvalidJobOperationTarget {
-                                job_id: target.job_id,
-                                client_id: target.client_id.clone(),
-                                message,
-                                decode_error,
-                                process_incarnation_id: None,
-                            },
-                            output_data,
-                        ));
-                        continue;
-                    };
-                    let is_exclusive =
-                        job_command_safety(&operation) == JobCommandSafety::Exclusive;
-                    if (is_exclusive && active_clients.contains(&target.client_id))
-                        || (!is_exclusive && active_exclusive_clients.contains(&target.client_id))
-                    {
-                        continue;
-                    }
-                    selected += 1;
-                    let max_timeout_secs = timeouts
-                        .get(&target.job_id)
-                        .copied()
-                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
-                        .max(1);
-                    target.status = TARGET_STATUS_DISPATCHING.to_string();
-                    target.started_at.get_or_insert_with(|| now.clone());
-                    if is_exclusive {
-                        active_exclusive_clients.insert(target.client_id.clone());
-                    }
-                    active_clients.insert(target.client_id.clone());
-                    claimed.push(ClaimedJobTarget {
-                        job_id: target.job_id,
-                        client_id: target.client_id.clone(),
-                        actor_id: job.actor_id,
-                        command_type: job.command_type.clone(),
-                        payload_hash: job.payload_hash.clone(),
-                        process_incarnation_id: Uuid::nil(),
-                        operation,
-                        source_schedule_id: job.source_schedule_id,
-                        causation_id: job.causation_id,
-                        schedule_lineage: job.schedule_lineage.clone(),
-                        max_timeout_secs,
-                    });
-                }
-                let claimed_job_ids = claimed
-                    .iter()
-                    .map(|target| target.job_id)
-                    .collect::<std::collections::HashSet<_>>();
-                let invalid_job_ids = invalid_operations
-                    .iter()
-                    .map(|(target, _)| target.job_id)
-                    .collect::<std::collections::HashSet<_>>();
-                drop(targets);
-                if !claimed_job_ids.is_empty() || !invalid_job_ids.is_empty() {
-                    let target_snapshot = memory.job_targets.read().await.clone();
-                    let mut jobs = memory.jobs.write().await;
-                    for job in jobs.iter_mut().filter(|job| {
-                        claimed_job_ids.contains(&job.id)
-                            && job.completed_at.is_none()
-                            && job.status == JOB_STATUS_QUEUED
-                    }) {
-                        job.status = JOB_STATUS_RUNNING.to_string();
-                    }
-                    for job_id in &invalid_job_ids {
-                        let job_targets = target_snapshot
-                            .iter()
-                            .filter(|target| target.job_id == *job_id)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        if job_targets.is_empty()
-                            || job_targets
-                                .iter()
-                                .any(|target| target_status_is_active(&target.status))
-                        {
-                            continue;
-                        }
-                        if let Some(job) = jobs
-                            .iter_mut()
-                            .find(|job| job.id == *job_id && job.completed_at.is_none())
-                        {
-                            job.status =
-                                aggregate_job_status_from_targets(&job_targets).to_string();
-                            job.completed_at = Some(now.clone());
-                        }
-                    }
-                }
-                if !invalid_operations.is_empty() {
-                    {
-                        let mut outputs = memory.job_outputs.write().await;
-                        for (target, data) in &invalid_operations {
-                            let seq = outputs
-                                .iter()
-                                .filter(|output| {
-                                    output.job_id == target.job_id
-                                        && output.client_id == target.client_id
-                                })
-                                .map(|output| output.seq)
-                                .max()
-                                .unwrap_or(-1)
-                                .saturating_add(1);
-                            outputs.push(JobOutputView {
-                                job_id: target.job_id,
-                                client_id: target.client_id.clone(),
-                                seq,
-                                stream: "status".to_string(),
-                                data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-                                storage: "inline".to_string(),
-                                artifact_object_key: None,
-                                artifact_sha256_hex: None,
-                                artifact_size_bytes: None,
-                                exit_code: None,
-                                done: true,
-                                received_at: Some(now.clone()),
-                                created_at: now.clone(),
-                            });
-                        }
-                    }
-                    {
-                        let mut audits = memory.audits.write().await;
-                        for (target, _) in &invalid_operations {
-                            audits.push(AuditLogView {
-                                id: Uuid::new_v4(),
-                                actor_id: None,
-                                action: "job.target_result".to_string(),
-                                target: format!("client:{}", target.client_id),
-                                command_hash: jobs
-                                    .iter()
-                                    .find(|job| job.id == target.job_id)
-                                    .map(|job| job.payload_hash.clone()),
-                                metadata: json!({
-                                    "job_id": target.job_id,
-                                    "status": TARGET_STATUS_FAILED,
-                                    "result": TARGET_STATUS_FAILED,
-                                    "message": target.message,
-                                    "reason": INVALID_JOB_OPERATION_CODE,
-                                    "phase": "dispatch_claim",
-                                    "decode_error": target.decode_error,
-                                    "origin_kind": "control_plane",
-                                    "component": "job-dispatcher",
-                                }),
-                                created_at: now.clone(),
-                            });
-                        }
-                    }
-                    for (target, _) in &invalid_operations {
-                        warn!(
-                            job_id = %target.job_id,
-                            client_id = %target.client_id,
-                            error = %target.decode_error,
-                            "terminalized dispatch target with invalid stored job operation"
-                        );
-                    }
-                }
-                for job_id in invalid_job_ids {
-                    self.reconcile_memory_job_event_sources(job_id).await?;
-                }
-                Ok(claimed)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                // Identify only clients with potentially due durable work,
+                // acquire their exact lifecycle identities in canonical order,
+                // then evaluate and lock targets from a fresh statement
+                // snapshot. Lifecycle mutations never race a stale client
+                // snapshot, while clients without due work remain independent.
+                let candidate_client_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT candidate.client_id
+                    FROM (
+                      SELECT DISTINCT ON (target.client_id)
+                        target.client_id,
+                        job.created_at AS job_created_at,
+                        target.job_id
+                      FROM job_targets target
+                      JOIN jobs job ON job.id = target.job_id
+                      JOIN visible_clients clients ON clients.id = target.client_id
+                      WHERE target.completed_at IS NULL
+                      AND target.cancel_requested_at IS NULL
+                      AND target.status IN ('queued', 'dispatching')
+                      AND job.completed_at IS NULL
+                      AND job.status IN ('queued', 'running')
+                      AND (
+                        job.approval_id IS NULL
+                        OR EXISTS (
+                          SELECT 1
+                          FROM job_approvals approval
+                          WHERE approval.id = job.approval_id
+                            AND approval.job_id = job.id
+                            AND approval.status = 'approved'
+                            AND approval.payload_hash = job.payload_hash
+                            AND approval.request_fingerprint = job.request_fingerprint
+                        )
+                      )
+                      AND (
+                        NOT EXISTS (
+                          SELECT 1
+                          FROM job_rollouts rollout
+                          WHERE rollout.job_id = target.job_id
+                        )
+                        OR EXISTS (
+                          SELECT 1
+                          FROM job_rollouts rollout
+                          JOIN job_rollout_targets rollout_target
+                            ON rollout_target.job_id = rollout.job_id
+                           AND rollout_target.client_id = target.client_id
+                          WHERE rollout.job_id = target.job_id
+                            AND rollout_target.batch_index <= rollout.current_batch
+                            AND (
+                              (
+                                target.status = 'queued'
+                                AND rollout.status = 'running'
+                                AND rollout.next_batch_at <= now()
+                              )
+                              OR (
+                                target.status = 'dispatching'
+                                AND rollout.status IN ('running', 'paused')
+                              )
+                            )
+                        )
+                      )
+                      AND clients.hidden_at IS NULL
+                      AND clients.status NOT IN ('suspended', 'revoked', 'deleted')
+                      AND clients.process_incarnation_id IS NOT NULL
+                      AND (
+                        (
+                          target.status = 'queued'
+                          AND target.started_at IS NULL
+                          AND target.process_incarnation_id IS NULL
+                        )
+                        OR (
+                          target.status = 'dispatching'
+                          AND target.started_at IS NOT NULL
+                          AND target.process_incarnation_id = clients.process_incarnation_id
+                          AND target.deadline_at IS NOT NULL
+                          AND target.deadline_at > now()
+                        )
+                      )
+                        AND (
+                          target.status = 'queued'
+                          OR target.dispatch_lease_until IS NULL
+                          OR target.dispatch_lease_until < now()
+                        )
+                      ORDER BY target.client_id, job.created_at, target.job_id
+                    ) candidate
+                    ORDER BY candidate.job_created_at, candidate.job_id, candidate.client_id
+                    LIMIT $1
+                    "#,
+                )
+                .bind(limit.clamp(1, 500))
+                .fetch_all(&mut *tx)
+                .await?;
+                if candidate_client_ids.is_empty() {
+                    tx.commit().await?;
+                    return Ok(Vec::new());
+                }
+                let claimed_client_lifecycles =
+                    try_lock_postgres_client_lifecycles_in_tx(&mut tx, &candidate_client_ids)
+                        .await?;
+                if claimed_client_lifecycles.is_empty() {
+                    tx.commit().await?;
+                    return Ok(Vec::new());
+                }
                 let rows = sqlx::query(
                     r#"
                     WITH due AS (
@@ -4124,6 +3098,9 @@ impl Repository {
                             job.causation_id,
                             job.schedule_lineage,
                             job.max_timeout_secs,
+                            job.created_at AS job_created_at,
+                            job.resource_kind,
+                            job.resource_id,
                             clients.process_incarnation_id AS client_process_incarnation_id
                         FROM job_targets target
                         JOIN jobs job ON job.id = target.job_id
@@ -4175,6 +3152,7 @@ impl Repository {
                               AND clients.hidden_at IS NULL
                               AND clients.status NOT IN ('suspended', 'revoked', 'deleted')
                               AND clients.process_incarnation_id IS NOT NULL
+                              AND clients.id = ANY($5::text[])
                               AND (
                                 (
                                   target.status = 'queued'
@@ -4193,10 +3171,6 @@ impl Repository {
                               AND (
                                 (
                                   COALESCE(job.operation ->> 'type', '') <> ALL($3::text[])
-                                      AND pg_try_advisory_xact_lock(
-                                        $4::integer,
-                                        hashtext(target.client_id)
-                                      )
                                   AND NOT EXISTS (
                                     SELECT 1
                                     FROM job_targets active_target
@@ -4272,10 +3246,6 @@ impl Repository {
                                 )
                                 OR (
                                   COALESCE(job.operation ->> 'type', '') = ANY($3::text[])
-                                  AND pg_try_advisory_xact_lock(
-                                    $4::integer,
-                                    hashtext(target.client_id)
-                                  )
                                   AND NOT EXISTS (
                                     SELECT 1
                                     FROM job_targets active_target
@@ -4353,9 +3323,41 @@ impl Repository {
                                 OR target.dispatch_lease_until IS NULL
                                 OR target.dispatch_lease_until < now()
                               )
+                              AND (
+                                job.resource_kind IS NULL
+                                OR NOT EXISTS (
+                                  SELECT 1
+                                  FROM file_transfer_session_owners resource_owner
+                                  WHERE resource_owner.client_id = target.client_id
+                                    AND resource_owner.session_id = job.resource_id
+                                    AND resource_owner.job_id <> target.job_id
+                                )
+                              )
                         ORDER BY job.created_at ASC, target.client_id ASC
                         LIMIT $1
                         FOR UPDATE OF target, job SKIP LOCKED
+                    ),
+                    acquired_resource_owners AS (
+                        INSERT INTO file_transfer_session_owners (
+                            client_id,
+                            session_id,
+                            job_id
+                        )
+                        SELECT DISTINCT ON (due.client_id, due.resource_id)
+                            due.client_id,
+                            due.resource_id,
+                            due.job_id
+                        FROM due
+                        WHERE due.resource_kind = 'file_transfer_session'
+                        ORDER BY
+                            due.client_id,
+                            due.resource_id,
+                            due.job_created_at,
+                            due.job_id
+                        ON CONFLICT (client_id, session_id) DO UPDATE
+                        SET owner_token = file_transfer_session_owners.owner_token
+                        WHERE file_transfer_session_owners.job_id = EXCLUDED.job_id
+                        RETURNING client_id, session_id, job_id, owner_token
                     ),
                     updated_targets AS (
                         UPDATE job_targets target
@@ -4371,17 +3373,26 @@ impl Repository {
                             deadline_at = COALESCE(
                                 target.deadline_at,
                                 COALESCE(target.started_at, now())
-                                    + make_interval(secs => (due.max_timeout_secs + $5)::integer)
+                                    + make_interval(secs => (due.max_timeout_secs + $4)::integer)
                             ),
                             last_dispatch_error = NULL
                         FROM due
                         WHERE target.job_id = due.job_id
                           AND target.client_id = due.client_id
+                          AND (
+                            due.resource_kind IS NULL
+                            OR EXISTS (
+                              SELECT 1
+                              FROM acquired_resource_owners resource_owner
+                              WHERE resource_owner.client_id = due.client_id
+                                AND resource_owner.session_id = due.resource_id
+                                AND resource_owner.job_id = due.job_id
+                            )
+                          )
                         RETURNING
                             due.job_id,
                             due.client_id,
                             due.actor_id,
-                            due.command_type,
                             due.payload_hash,
                             COALESCE(
                                 target.process_incarnation_id,
@@ -4391,7 +3402,15 @@ impl Repository {
                             due.source_schedule_id,
                             due.causation_id,
                             due.schedule_lineage,
-                            due.max_timeout_secs
+                            due.max_timeout_secs,
+                            target.dispatch_attempts AS dispatch_attempt,
+                            (
+                              SELECT resource_owner.owner_token
+                              FROM acquired_resource_owners resource_owner
+                              WHERE resource_owner.client_id = due.client_id
+                                AND resource_owner.session_id = due.resource_id
+                                AND resource_owner.job_id = due.job_id
+                            ) AS resource_owner_token
                     ),
                     promoted_jobs AS (
                         UPDATE jobs job
@@ -4409,7 +3428,6 @@ impl Repository {
                         updated_targets.job_id,
                         updated_targets.client_id,
                         updated_targets.actor_id,
-                        updated_targets.command_type,
                         updated_targets.payload_hash,
                         updated_targets.process_incarnation_id,
                         updated_targets.operation,
@@ -4417,6 +3435,8 @@ impl Repository {
                         updated_targets.causation_id,
                         updated_targets.schedule_lineage,
                         updated_targets.max_timeout_secs,
+                        updated_targets.dispatch_attempt,
+                        updated_targets.resource_owner_token,
                         (SELECT count(*) FROM promoted_jobs) AS promoted_jobs
                     FROM updated_targets
                     "#,
@@ -4424,8 +3444,8 @@ impl Repository {
                 .bind(limit.clamp(1, 500))
                 .bind(lease_secs.clamp(1, 7200) as i32)
                 .bind(exclusive_operation_types())
-                .bind(EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS)
                 .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
+                .bind(&claimed_client_lifecycles)
                 .fetch_all(&mut *tx)
                 .await?;
                 let mut claimed = Vec::with_capacity(rows.len());
@@ -4473,9 +3493,10 @@ impl Repository {
                         job_id,
                         client_id,
                         actor_id: row.try_get("actor_id")?,
-                        command_type: row.try_get("command_type")?,
                         payload_hash: row.try_get("payload_hash")?,
                         process_incarnation_id,
+                        dispatch_attempt: row.try_get("dispatch_attempt")?,
+                        resource_owner_token: row.try_get("resource_owner_token")?,
                         operation,
                         source_schedule_id: row.try_get("source_schedule_id")?,
                         causation_id: row.try_get("causation_id")?,
@@ -4491,7 +3512,7 @@ impl Repository {
                         TARGET_STATUS_FAILED,
                         "dispatch_claim",
                         false,
-                        None,
+                        false,
                     )
                     .await
                     {
@@ -4520,10 +3541,10 @@ impl Repository {
         }
     }
 
-    /// Final durable check immediately before the gateway enqueue. Claim and
-    /// client suspension share the identity lifecycle lock, but a claim is
-    /// returned after that transaction commits; this check closes the gap
-    /// between claim return and the central gateway's suspension fence.
+    /// Final durable check immediately before the gateway enqueue. The exact
+    /// client lifecycle owner, dispatch attempt, and optional resource token
+    /// fence the claimed consumer without serializing unrelated clients or
+    /// file-transfer sessions.
     pub(crate) async fn claimed_job_target_dispatchable(
         &self,
         claimed: &ClaimedJobTarget,
@@ -4532,39 +3553,13 @@ impl Repository {
         const SUSPENSION_MESSAGE: &str =
             "target_suspended: target skipped because VPS is suspended";
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let suspended = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == claimed.client_id)
-                    .is_some_and(|agent| agent.status == "suspended");
-                if suspended {
-                    self.skip_suspended_undelivered_targets_for_client(
-                        &claimed.client_id,
-                        SUSPENSION_REASON,
-                        SUSPENSION_MESSAGE,
-                    )
-                    .await?;
-                    return Ok(false);
-                }
-                Ok(memory.job_targets.read().await.iter().any(|target| {
-                    target.job_id == claimed.job_id
-                        && target.client_id == claimed.client_id
-                        && target.status == TARGET_STATUS_DISPATCHING
-                        && target.completed_at.is_none()
-                        && target
-                            .process_incarnation_id
-                            .is_none_or(|process_incarnation_id| {
-                                process_incarnation_id == claimed.process_incarnation_id
-                            })
-                }))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_client_lifecycles_in_tx(
+                    &mut tx,
+                    std::slice::from_ref(&claimed.client_id),
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     SELECT client.status AS client_status,
@@ -4572,11 +3567,19 @@ impl Repository {
                            client.process_incarnation_id AS client_process_incarnation_id,
                            target.status AS target_status,
                            target.completed_at,
-                           target.process_incarnation_id AS target_process_incarnation_id
+                           target.process_incarnation_id AS target_process_incarnation_id,
+                           target.dispatch_attempts,
+                           job.resource_kind,
+                           resource_owner.owner_token AS resource_owner_token
                     FROM job_targets target
-                    LEFT JOIN clients client ON client.id=target.client_id
+                    JOIN jobs job ON job.id=target.job_id
+                    JOIN clients client ON client.id=target.client_id
+                    LEFT JOIN file_transfer_session_owners resource_owner
+                      ON resource_owner.client_id=target.client_id
+                     AND resource_owner.session_id=job.resource_id
+                     AND resource_owner.job_id=target.job_id
                     WHERE target.job_id=$1 AND target.client_id=$2
-                    FOR UPDATE OF target
+                    FOR UPDATE OF client, target
                     "#,
                 )
                 .bind(claimed.job_id)
@@ -4600,6 +3603,16 @@ impl Repository {
                     tx.commit().await?;
                     return Ok(false);
                 }
+                let resource_kind: Option<String> = row.try_get("resource_kind")?;
+                let stored_resource_owner_token: Option<Uuid> =
+                    row.try_get("resource_owner_token")?;
+                let resource_owner_matches = match claimed.resource_owner_token {
+                    Some(owner_token) => {
+                        resource_kind.as_deref() == Some("file_transfer_session")
+                            && stored_resource_owner_token == Some(owner_token)
+                    }
+                    None => resource_kind.is_none() && stored_resource_owner_token.is_none(),
+                };
                 let dispatchable = !row
                     .try_get::<Option<bool>, _>("client_hidden")?
                     .unwrap_or(true)
@@ -4609,349 +3622,17 @@ impl Repository {
                     && row.try_get::<Option<Uuid>, _>("client_process_incarnation_id")?
                         == Some(claimed.process_incarnation_id)
                     && row.try_get::<String, _>("target_status")? == TARGET_STATUS_DISPATCHING
+                    && row.try_get::<i32, _>("dispatch_attempts")? == claimed.dispatch_attempt
                     && row
                         .try_get::<Option<chrono::DateTime<Utc>>, _>("completed_at")?
                         .is_none()
                     && row.try_get::<Option<Uuid>, _>("target_process_incarnation_id")?
-                        == Some(claimed.process_incarnation_id);
+                        == Some(claimed.process_incarnation_id)
+                    && resource_owner_matches;
                 tx.commit().await?;
                 Ok(dispatchable)
             }
         }
-    }
-
-    pub(crate) async fn refresh_job_status_from_targets(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Option<String>> {
-        let Some(job) = self.get_job(job_id).await? else {
-            return Ok(None);
-        };
-        if job.completed_at.is_some() {
-            return Ok(None);
-        }
-        let targets = self.list_job_targets(job_id).await?;
-        if targets.is_empty()
-            || targets
-                .iter()
-                .any(|target| target_status_is_active(&target.status))
-        {
-            return Ok(Some(job.status));
-        }
-        let status = aggregate_job_status_from_targets(&targets);
-        if self.finish_job(job_id, status).await? {
-            Ok(Some(status.to_string()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub(crate) async fn skip_unstarted_queued_targets_for_client(
-        &self,
-        client_id: &str,
-        reason_code: &str,
-        message: &str,
-    ) -> Result<Vec<Uuid>> {
-        self.skip_undelivered_targets_for_client(client_id, reason_code, message, false, &[])
-            .await
-    }
-
-    pub(crate) async fn skip_suspended_undelivered_targets_for_client(
-        &self,
-        client_id: &str,
-        reason_code: &str,
-        message: &str,
-    ) -> Result<Vec<Uuid>> {
-        self.skip_suspended_undelivered_targets_for_client_except(
-            client_id,
-            reason_code,
-            message,
-            &[],
-        )
-        .await
-    }
-
-    pub(crate) async fn skip_suspended_undelivered_targets_for_client_except(
-        &self,
-        client_id: &str,
-        reason_code: &str,
-        message: &str,
-        protected_enqueued_job_ids: &[Uuid],
-    ) -> Result<Vec<Uuid>> {
-        self.skip_undelivered_targets_for_client(
-            client_id,
-            reason_code,
-            message,
-            true,
-            protected_enqueued_job_ids,
-        )
-        .await
-    }
-
-    async fn skip_undelivered_targets_for_client(
-        &self,
-        client_id: &str,
-        reason_code: &str,
-        message: &str,
-        include_claimed_dispatching: bool,
-        protected_enqueued_job_ids: &[Uuid],
-    ) -> Result<Vec<Uuid>> {
-        let job_ids = match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let mut changed = Vec::new();
-                {
-                    let mut targets = memory.job_targets.write().await;
-                    for target in targets.iter_mut().filter(|target| {
-                        target.client_id == client_id
-                            && !protected_enqueued_job_ids.contains(&target.job_id)
-                            && target.completed_at.is_none()
-                            && ((target.status == TARGET_STATUS_QUEUED
-                                && target.started_at.is_none()
-                                && target.process_incarnation_id.is_none())
-                                || (include_claimed_dispatching
-                                    && target.status == TARGET_STATUS_DISPATCHING
-                                    && target.started_at.is_some()))
-                    }) {
-                        target.status = TARGET_STATUS_SKIPPED.to_string();
-                        target.message = Some(message.to_string());
-                        target.exit_code = Some(0);
-                        target.started_at = Some(now.clone());
-                        target.completed_at = Some(now.clone());
-                        target.deadline_at = None;
-                        changed.push((target.job_id, target.client_id.clone()));
-                    }
-                }
-                if !changed.is_empty() {
-                    let mut outputs = memory.job_outputs.write().await;
-                    for (job_id, target_client_id) in &changed {
-                        let seq = outputs
-                            .iter()
-                            .filter(|output| {
-                                output.job_id == *job_id && output.client_id == *target_client_id
-                            })
-                            .map(|output| output.seq)
-                            .max()
-                            .map_or(0, |seq| seq + 1);
-                        let value = target_skipped_status_output_value(
-                            *job_id,
-                            target_client_id,
-                            reason_code,
-                            message,
-                        );
-                        let data = serde_json::to_vec(&value)?;
-                        outputs.push(JobOutputView {
-                            job_id: *job_id,
-                            client_id: target_client_id.clone(),
-                            seq,
-                            stream: "status".to_string(),
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
-                            storage: "inline".to_string(),
-                            artifact_object_key: None,
-                            artifact_sha256_hex: None,
-                            artifact_size_bytes: None,
-                            exit_code: Some(0),
-                            done: true,
-                            received_at: Some(now.clone()),
-                            created_at: now.clone(),
-                        });
-                    }
-                }
-                if !changed.is_empty() {
-                    let jobs = memory.jobs.read().await;
-                    let mut audits = memory.audits.write().await;
-                    for (job_id, target_client_id) in &changed {
-                        audits.push(AuditLogView {
-                            id: Uuid::new_v4(),
-                            actor_id: None,
-                            action: "job.target_result".to_string(),
-                            target: format!("client:{target_client_id}"),
-                            command_hash: jobs
-                                .iter()
-                                .find(|job| job.id == *job_id)
-                                .map(|job| job.payload_hash.clone()),
-                            metadata: json!({
-                                "job_id": job_id,
-                                "status": TARGET_STATUS_SKIPPED,
-                                "result": TARGET_STATUS_SKIPPED,
-                                "exit_code": 0,
-                                "accepted": false,
-                                "message": message,
-                                "reason": reason_code,
-                                "origin_kind": "control_plane",
-                                "component": "client-lifecycle",
-                            }),
-                            created_at: now.clone(),
-                        });
-                    }
-                }
-                changed
-                    .into_iter()
-                    .map(|(job_id, _)| job_id)
-                    .collect::<Vec<_>>()
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                let job_ids = skip_undelivered_targets_for_client_in_tx(
-                    &mut tx,
-                    client_id,
-                    reason_code,
-                    message,
-                    include_claimed_dispatching,
-                    protected_enqueued_job_ids,
-                )
-                .await?;
-                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &job_ids).await?;
-                tx.commit().await?;
-                return Ok(job_ids);
-            }
-        };
-        let mut unique_job_ids = job_ids;
-        unique_job_ids.sort();
-        unique_job_ids.dedup();
-        for job_id in &unique_job_ids {
-            self.refresh_job_status_from_targets(*job_id).await?;
-            self.record_backup_request_terminal_for_target_status(
-                *job_id,
-                client_id,
-                TARGET_STATUS_SKIPPED,
-                None,
-            )
-            .await?;
-            self.record_runtime_config_apply_terminal_for_target_status(
-                *job_id,
-                client_id,
-                TARGET_STATUS_SKIPPED,
-                Some(message),
-            )
-            .await?;
-        }
-        Ok(unique_job_ids)
-    }
-
-    pub(crate) async fn mark_active_targets_agent_lost_for_client(
-        &self,
-        client_id: &str,
-        expected_process_incarnation_id: Uuid,
-        current_process_incarnation_id: Option<Uuid>,
-        code: &str,
-        message: &str,
-    ) -> Result<Vec<Uuid>> {
-        let job_ids = match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let mut changed = Vec::new();
-                {
-                    let mut targets = memory.job_targets.write().await;
-                    for target in targets.iter_mut().filter(|target| {
-                        target.client_id == client_id
-                            && target.completed_at.is_none()
-                            && matches!(
-                                target.status.as_str(),
-                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
-                            )
-                            && target.process_incarnation_id
-                                == Some(expected_process_incarnation_id)
-                    }) {
-                        target.status = TARGET_STATUS_AGENT_LOST.to_string();
-                        target.message = Some(message.to_string());
-                        target.completed_at = Some(now.clone());
-                        changed.push((target.job_id, target.client_id.clone()));
-                    }
-                }
-                if !changed.is_empty() {
-                    let mut outputs = memory.job_outputs.write().await;
-                    for (job_id, target_client_id) in &changed {
-                        let seq = outputs
-                            .iter()
-                            .filter(|output| {
-                                output.job_id == *job_id && output.client_id == *target_client_id
-                            })
-                            .map(|output| output.seq)
-                            .max()
-                            .map_or(0, |seq| seq + 1);
-                        let value = agent_lost_status_output_value(
-                            *job_id,
-                            target_client_id,
-                            message,
-                            Some(expected_process_incarnation_id),
-                            current_process_incarnation_id,
-                            code,
-                        );
-                        let data = serde_json::to_vec(&value)?;
-                        outputs.push(JobOutputView {
-                            job_id: *job_id,
-                            client_id: target_client_id.clone(),
-                            seq,
-                            stream: "status".to_string(),
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
-                            storage: "inline".to_string(),
-                            artifact_object_key: None,
-                            artifact_sha256_hex: None,
-                            artifact_size_bytes: None,
-                            exit_code: None,
-                            done: true,
-                            received_at: Some(now.clone()),
-                            created_at: now.clone(),
-                        });
-                    }
-                }
-                if !changed.is_empty() {
-                    let jobs = memory.jobs.read().await;
-                    let mut audits = memory.audits.write().await;
-                    for (job_id, target_client_id) in &changed {
-                        audits.push(AuditLogView {
-                            id: Uuid::new_v4(),
-                            actor_id: None,
-                            action: "job.target_result".to_string(),
-                            target: format!("client:{target_client_id}"),
-                            command_hash: jobs
-                                .iter()
-                                .find(|job| job.id == *job_id)
-                                .map(|job| job.payload_hash.clone()),
-                            metadata: json!({
-                                "job_id": job_id,
-                                "status": TARGET_STATUS_AGENT_LOST,
-                                "result": TARGET_STATUS_AGENT_LOST,
-                                "message": message,
-                                "reason": code,
-                                "expected_process_incarnation_id": expected_process_incarnation_id,
-                                "current_process_incarnation_id": current_process_incarnation_id,
-                                "origin_kind": "control_plane",
-                                "component": "client-lifecycle",
-                            }),
-                            created_at: now.clone(),
-                        });
-                    }
-                }
-                changed
-                    .into_iter()
-                    .map(|(job_id, _)| job_id)
-                    .collect::<Vec<_>>()
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                let job_ids = mark_active_targets_agent_lost_for_client_in_tx(
-                    &mut tx,
-                    client_id,
-                    expected_process_incarnation_id,
-                    current_process_incarnation_id,
-                    code,
-                    message,
-                )
-                .await?;
-                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &job_ids).await?;
-                tx.commit().await?;
-                return Ok(job_ids);
-            }
-        };
-        let mut unique_job_ids = job_ids;
-        unique_job_ids.sort();
-        unique_job_ids.dedup();
-        for job_id in &unique_job_ids {
-            self.refresh_job_status_from_targets(*job_id).await?;
-        }
-        Ok(unique_job_ids)
     }
 
     pub(crate) async fn mark_job_target_running(
@@ -4960,44 +3641,37 @@ impl Repository {
         client_id: &str,
         message: &str,
     ) -> Result<()> {
+        self.mark_job_target_running_if_dispatch_attempt(job_id, client_id, message, None)
+            .await
+    }
+
+    pub(crate) async fn mark_claimed_job_target_running(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        message: &str,
+        dispatch_attempt: i32,
+    ) -> Result<()> {
+        self.mark_job_target_running_if_dispatch_attempt(
+            job_id,
+            client_id,
+            message,
+            Some(dispatch_attempt),
+        )
+        .await
+    }
+
+    async fn mark_job_target_running_if_dispatch_attempt(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        message: &str,
+        expected_dispatch_attempt: Option<i32>,
+    ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let target_updated = if let Some(target) =
-                    memory.job_targets.write().await.iter_mut().find(|target| {
-                        target.job_id == job_id
-                            && target.client_id == client_id
-                            && target.completed_at.is_none()
-                            && target_status_is_active(&target.status)
-                    }) {
-                    target.status = TARGET_STATUS_RUNNING.to_string();
-                    target.message = Some(message.to_string());
-                    target
-                        .started_at
-                        .get_or_insert_with(|| unix_now().to_string());
-                    true
-                } else {
-                    false
-                };
-                if target_updated {
-                    memory
-                        .network_traffic_import_retry_not_before
-                        .write()
-                        .await
-                        .remove(&(job_id, client_id.to_string()));
-                    if let Some(job) = memory
-                        .jobs
-                        .write()
-                        .await
-                        .iter_mut()
-                        .find(|job| job.id == job_id && job.completed_at.is_none())
-                    {
-                        job.status = "running".to_string();
-                    }
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query(
+                let updated = sqlx::query(
                     r#"
                     UPDATE job_targets
                     SET status = 'running',
@@ -5011,25 +3685,29 @@ impl Repository {
                       AND client_id = $2
                       AND completed_at IS NULL
                       AND status IN ('queued', 'dispatching', 'running')
+                      AND ($4::integer IS NULL OR dispatch_attempts = $4)
                     "#,
                 )
                 .bind(job_id)
                 .bind(client_id)
                 .bind(message)
+                .bind(expected_dispatch_attempt)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE jobs
-                    SET status = 'running'
-                    WHERE id = $1
-                      AND completed_at IS NULL
-                      AND status = 'queued'
-                    "#,
-                )
-                .bind(job_id)
-                .execute(&mut *tx)
-                .await?;
+                if updated.rows_affected() > 0 {
+                    sqlx::query(
+                        r#"
+                        UPDATE jobs
+                        SET status = 'running'
+                        WHERE id = $1
+                          AND completed_at IS NULL
+                          AND status = 'queued'
+                        "#,
+                    )
+                    .bind(job_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 tx.commit().await?;
             }
         }
@@ -5041,9 +3719,9 @@ impl Repository {
         job_id: Uuid,
         client_id: &str,
         message: &str,
+        dispatch_attempt: i32,
     ) -> Result<()> {
         match self {
-            Self::Memory(_) => {}
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -5052,11 +3730,13 @@ impl Repository {
                     WHERE job_id = $1
                       AND client_id = $2
                       AND completed_at IS NULL
+                      AND dispatch_attempts = $4
                     "#,
                 )
                 .bind(job_id)
                 .bind(client_id)
                 .bind(message)
+                .bind(dispatch_attempt)
                 .execute(pool)
                 .await?;
             }
@@ -5071,6 +3751,7 @@ impl Repository {
         message: &str,
         expected_process_incarnation_id: Option<Uuid>,
         observed_process_incarnation_id: Option<Uuid>,
+        expected_dispatch_attempt: i32,
     ) -> Result<Option<String>> {
         let outcome = TargetDispatchOutcome {
             status: TARGET_STATUS_AGENT_LOST.to_string(),
@@ -5083,84 +3764,6 @@ impl Repository {
             outputs: Vec::new(),
         };
         match self {
-            Self::Memory(memory) => {
-                let completed_at = unix_now().to_string();
-                let output_data = serde_json::to_vec(&agent_lost_status_output_value(
-                    job_id,
-                    client_id,
-                    message,
-                    expected_process_incarnation_id,
-                    observed_process_incarnation_id,
-                    "agent_process_restarted",
-                ))?;
-                let mut targets = memory.job_targets.write().await;
-                let Some(target) = targets.iter_mut().find(|target| {
-                    target.job_id == job_id
-                        && target.client_id == client_id
-                        && target.completed_at.is_none()
-                        && target_status_is_active(&target.status)
-                }) else {
-                    return Ok(None);
-                };
-                target.status = TARGET_STATUS_AGENT_LOST.to_string();
-                target.message = Some(message.to_string());
-                target.completed_at = Some(completed_at.clone());
-                target
-                    .started_at
-                    .get_or_insert_with(|| completed_at.clone());
-                drop(targets);
-                let seq = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
-                    .map(|output| output.seq)
-                    .max()
-                    .unwrap_or(-1)
-                    .saturating_add(1);
-                memory.job_outputs.write().await.push(JobOutputView {
-                    job_id,
-                    client_id: client_id.to_string(),
-                    seq,
-                    stream: "status".to_string(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(output_data),
-                    storage: "inline".to_string(),
-                    artifact_object_key: None,
-                    artifact_sha256_hex: None,
-                    artifact_size_bytes: None,
-                    exit_code: None,
-                    done: true,
-                    received_at: Some(completed_at.clone()),
-                    created_at: completed_at.clone(),
-                });
-                let command_hash = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .find(|job| job.id == job_id)
-                    .map(|job| job.payload_hash.clone());
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: None,
-                    action: "job.target_result".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash,
-                    metadata: json!({
-                        "job_id": job_id,
-                        "status": TARGET_STATUS_AGENT_LOST,
-                        "result": TARGET_STATUS_AGENT_LOST,
-                        "message": message,
-                        "expected_process_incarnation_id": expected_process_incarnation_id,
-                        "current_process_incarnation_id": observed_process_incarnation_id,
-                        "reason": "agent_process_restarted",
-                        "origin_kind": "control_plane",
-                        "component": "job-dispatcher",
-                    }),
-                    created_at: completed_at,
-                });
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let target_row = sqlx::query(
@@ -5171,11 +3774,13 @@ impl Repository {
                       AND client_id = $2
                       AND completed_at IS NULL
                       AND status IN ('queued', 'dispatching', 'running')
+                      AND dispatch_attempts = $3
                     FOR UPDATE
                     "#,
                 )
                 .bind(job_id)
                 .bind(client_id)
+                .bind(expected_dispatch_attempt)
                 .fetch_optional(&mut *tx)
                 .await?;
                 let Some(target_row) = target_row else {
@@ -5215,11 +3820,13 @@ impl Repository {
                       AND client_id = $2
                       AND completed_at IS NULL
                       AND status IN ('queued', 'dispatching', 'running')
+                      AND dispatch_attempts = $4
                     "#,
                 )
                 .bind(job_id)
                 .bind(client_id)
                 .bind(message)
+                .bind(expected_dispatch_attempt)
                 .execute(&mut *tx)
                 .await?;
                 if updated.rows_affected() == 0 {
@@ -5268,265 +3875,16 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(completed_status);
+                Ok(completed_status)
             }
         }
-        let status = self.refresh_job_status_from_targets(job_id).await?;
-        self.record_backup_request_terminal_for_target_status(
-            job_id,
-            client_id,
-            TARGET_STATUS_AGENT_LOST,
-            None,
-        )
-        .await?;
-        self.record_runtime_config_apply_terminal_for_target_status(
-            job_id,
-            client_id,
-            TARGET_STATUS_AGENT_LOST,
-            Some(outcome.message.as_str()),
-        )
-        .await?;
-        self.record_job_target_webhook_event(job_id, client_id, &outcome)
-            .await?;
-        Ok(status)
     }
 
     pub(crate) async fn expire_control_timeout_targets(
         &self,
         limit: i64,
-        control_deadline_extra_secs: u64,
     ) -> Result<Vec<DeadlineExpiredJobTarget>> {
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now();
-                let completed_at = now.to_string();
-                let timeouts = memory.job_timeouts.read().await.clone();
-                let operations = memory.job_operations.read().await.clone();
-                let jobs = memory.jobs.read().await.clone();
-                let stored_outputs = memory.job_outputs.read().await;
-                let awaiting_network_traffic_import = stored_outputs
-                    .iter()
-                    .filter(|output| {
-                        output.done
-                            && matches!(
-                                operations.get(&output.job_id),
-                                Some(JobCommand::NetworkTrafficImportVnstat { .. })
-                            )
-                            && job_output_sequence_contiguous_in_views(
-                                &stored_outputs,
-                                output.job_id,
-                                &output.client_id,
-                                output.seq,
-                            )
-                    })
-                    .map(|output| (output.job_id, output.client_id.clone()))
-                    .collect::<HashSet<_>>();
-                drop(stored_outputs);
-                let mut expired = Vec::new();
-                let mut synthetic_outputs = Vec::new();
-                let mut deadline_audit_evidence = Vec::new();
-                let mut targets = memory.job_targets.write().await;
-                for target in targets
-                    .iter_mut()
-                    .filter(|target| {
-                        target.completed_at.is_none()
-                            && matches!(
-                                target.status.as_str(),
-                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
-                            )
-                            && !awaiting_network_traffic_import
-                                .contains(&(target.job_id, target.client_id.clone()))
-                    })
-                    .take(limit.clamp(1, 500) as usize)
-                {
-                    let Some(started_at) = target
-                        .started_at
-                        .as_deref()
-                        .and_then(|value| value.parse::<u64>().ok())
-                    else {
-                        continue;
-                    };
-                    let max_timeout_secs = timeouts
-                        .get(&target.job_id)
-                        .copied()
-                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
-                        .max(1)
-                        .saturating_add(control_deadline_extra_secs);
-                    if now.saturating_sub(started_at) < max_timeout_secs {
-                        continue;
-                    }
-                    let (status, message, output_value, exit_code, invalid_decode_error) =
-                        match operations.get(&target.job_id) {
-                            None => {
-                                let decode_error =
-                                    "operation is missing from the in-memory job record"
-                                        .to_string();
-                                let message = invalid_job_operation_message(
-                                    "control deadline elapsed and stored job operation is invalid",
-                                    &decode_error,
-                                );
-                                (
-                                    TARGET_STATUS_CONTROL_TIMEOUT,
-                                    message.clone(),
-                                    invalid_job_operation_status_output_value(
-                                        target.job_id,
-                                        &target.client_id,
-                                        TARGET_STATUS_CONTROL_TIMEOUT,
-                                        &InvalidJobOperationEvidence {
-                                            phase: "control_deadline_expiry",
-                                            message: &message,
-                                            decode_error: &decode_error,
-                                            process_incarnation_id: target.process_incarnation_id,
-                                        },
-                                    ),
-                                    None,
-                                    Some(decode_error),
-                                )
-                            }
-                            Some(JobCommand::AgentUpdateActivate {
-                                restart_agent: true,
-                                ..
-                            }) => {
-                                let message = "agent update activation restart did not reconnect with matching heartbeat before deadline".to_string();
-                                (
-                                    TARGET_STATUS_AGENT_LOST,
-                                    message.clone(),
-                                    agent_lost_status_output_value(
-                                        target.job_id,
-                                        &target.client_id,
-                                        &message,
-                                        target.process_incarnation_id,
-                                        None,
-                                        "agent_update_restart_missing_heartbeat",
-                                    ),
-                                    None,
-                                    None,
-                                )
-                            }
-                            Some(_) => {
-                                let message =
-                                    "control deadline elapsed before final command output"
-                                        .to_string();
-                                (
-                                    TARGET_STATUS_CONTROL_TIMEOUT,
-                                    message.clone(),
-                                    json!({
-                                        "type": "control_timeout",
-                                        "status": TARGET_STATUS_CONTROL_TIMEOUT,
-                                        "code": "control_deadline_elapsed",
-                                        "message": message,
-                                        "job_id": target.job_id,
-                                        "client_id": &target.client_id,
-                                        "process_incarnation_id": target.process_incarnation_id,
-                                    }),
-                                    None,
-                                    None,
-                                )
-                            }
-                        };
-                    let reason = if invalid_decode_error.is_some() {
-                        INVALID_JOB_OPERATION_CODE
-                    } else if status == TARGET_STATUS_AGENT_LOST {
-                        "agent_update_restart_missing_heartbeat"
-                    } else {
-                        "control_deadline_elapsed"
-                    };
-                    deadline_audit_evidence.push((
-                        target.job_id,
-                        target.client_id.clone(),
-                        status.to_string(),
-                        message.clone(),
-                        reason,
-                        invalid_decode_error,
-                    ));
-                    let output_data = output_value.to_string().into_bytes();
-                    target.status = status.to_string();
-                    target.message = Some(message.clone());
-                    target.completed_at = Some(completed_at.clone());
-                    synthetic_outputs.push((
-                        target.job_id,
-                        target.client_id.clone(),
-                        output_data,
-                        exit_code,
-                    ));
-                    expired.push(DeadlineExpiredJobTarget {
-                        job_id: target.job_id,
-                        client_id: target.client_id.clone(),
-                        status: status.to_string(),
-                    });
-                }
-                drop(targets);
-                if !synthetic_outputs.is_empty() {
-                    let mut outputs = memory.job_outputs.write().await;
-                    for (job_id, client_id, data, exit_code) in synthetic_outputs {
-                        let seq = outputs
-                            .iter()
-                            .filter(|output| {
-                                output.job_id == job_id && output.client_id == client_id
-                            })
-                            .map(|output| output.seq)
-                            .max()
-                            .unwrap_or(-1)
-                            .saturating_add(1);
-                        outputs.push(JobOutputView {
-                            job_id,
-                            client_id,
-                            seq,
-                            stream: "status".to_string(),
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-                            storage: "inline".to_string(),
-                            artifact_object_key: None,
-                            artifact_sha256_hex: None,
-                            artifact_size_bytes: None,
-                            exit_code,
-                            done: true,
-                            received_at: Some(completed_at.clone()),
-                            created_at: completed_at.clone(),
-                        });
-                    }
-                }
-                if !deadline_audit_evidence.is_empty() {
-                    let mut audits = memory.audits.write().await;
-                    for (job_id, client_id, status, message, reason, decode_error) in
-                        &deadline_audit_evidence
-                    {
-                        audits.push(AuditLogView {
-                            id: Uuid::new_v4(),
-                            actor_id: None,
-                            action: "job.target_result".to_string(),
-                            target: format!("client:{client_id}"),
-                            command_hash: jobs
-                                .iter()
-                                .find(|job| job.id == *job_id)
-                                .map(|job| job.payload_hash.clone()),
-                            metadata: json!({
-                                "job_id": job_id,
-                                "status": status,
-                                "result": status,
-                                "message": message,
-                                "reason": reason,
-                                "phase": "control_deadline_expiry",
-                                "decode_error": decode_error,
-                                "origin_kind": "control_plane",
-                                "component": "job-deadline-reconciler",
-                            }),
-                            created_at: completed_at.clone(),
-                        });
-                    }
-                    drop(audits);
-                    for (job_id, client_id, _, _, _, decode_error) in deadline_audit_evidence {
-                        if let Some(decode_error) = decode_error {
-                            warn!(
-                                %job_id,
-                                client_id,
-                                error = %decode_error,
-                                "terminalized expired target with invalid stored job operation"
-                            );
-                        }
-                    }
-                }
-                Ok(expired)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let rows = sqlx::query(
@@ -5541,42 +3899,49 @@ impl Repository {
                     JOIN jobs job ON job.id = target.job_id
                     WHERE target.completed_at IS NULL
                       AND target.status IN ('dispatching', 'running')
-                      AND NOT (
-                        job.command_type = 'network_traffic_import_vnstat'
-                        AND EXISTS (
-                          SELECT 1
-                          FROM job_outputs final_output
-                          WHERE final_output.job_id = target.job_id
-                            AND final_output.client_id = target.client_id
-                            AND final_output.done = TRUE
-                            AND final_output.seq >= 0
-                            AND (
-                              SELECT COUNT(DISTINCT chunk.seq)
-                              FROM job_outputs chunk
-                              WHERE chunk.job_id = final_output.job_id
-                                AND chunk.client_id = final_output.client_id
-                                AND chunk.seq BETWEEN 0 AND final_output.seq
-                            ) = final_output.seq::bigint + 1
-                        )
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM network_traffic_import_finalizations finalization
+                        WHERE finalization.job_id = target.job_id
+                          AND finalization.client_id = target.client_id
                       )
                       AND NOT (
-                        COALESCE(target.last_dispatch_error LIKE ($3 || '%'), false)
+                        COALESCE(target.last_dispatch_error LIKE ($2 || '%'), false)
                         AND COALESCE(target.dispatch_lease_until > now(), false)
                       )
                       AND target.deadline_at IS NOT NULL
                       AND target.deadline_at <= now()
-                      AND target.started_at IS NOT NULL
-                      AND target.started_at + make_interval(secs => (job.max_timeout_secs + $2)::integer) <= now()
                     ORDER BY target.deadline_at ASC, target.job_id, target.client_id
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
                     "#,
                 )
                 .bind(limit.clamp(1, 500))
-                .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
                 .bind(INVALID_JOB_OPERATION_RETRY_MARKER)
                 .fetch_all(&mut *tx)
                 .await?;
+                let mut metric_owner_client_ids = rows
+                    .iter()
+                    .map(|row| row.try_get::<String, _>("client_id").map_err(Into::into))
+                    .collect::<Result<Vec<_>>>()?;
+                metric_owner_client_ids.sort_unstable();
+                metric_owner_client_ids.dedup();
+                let locked_metric_owner_client_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT client_id
+                    FROM system_dashboard_target_metrics
+                    WHERE client_id = ANY($1::text[])
+                    ORDER BY client_id COLLATE "C"
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&metric_owner_client_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(
+                    locked_metric_owner_client_ids == metric_owner_client_ids,
+                    "system_dashboard_target_metric_owner_missing"
+                );
                 let mut expired = Vec::new();
                 let mut invalid_operations = Vec::new();
                 for row in rows {
@@ -5708,11 +4073,9 @@ impl Repository {
                           )
                           AND target.deadline_at IS NOT NULL
                           AND target.deadline_at <= now()
-                          AND target.started_at IS NOT NULL
-                          AND target.started_at + make_interval(secs => (job.max_timeout_secs + $5)::integer) <= now()
                           AND (
-                            ($6::uuid IS NULL AND target.process_incarnation_id IS NULL)
-                            OR target.process_incarnation_id = $6::uuid
+                            ($5::uuid IS NULL AND target.process_incarnation_id IS NULL)
+                            OR target.process_incarnation_id = $5::uuid
                           )
                         "#,
                     )
@@ -5720,7 +4083,6 @@ impl Repository {
                     .bind(&client_id)
                     .bind(status)
                     .bind(&message)
-                    .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
                     .bind(process_incarnation_id)
                     .execute(&mut *tx)
                     .await?;
@@ -5777,8 +4139,6 @@ impl Repository {
                     .collect::<Vec<_>>();
                 finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &changed_job_ids).await?;
                 tx.commit().await?;
-                let control_deadline_extra_secs =
-                    control_deadline_extra_secs.min(i32::MAX as u64) as i32;
                 for target in invalid_operations {
                     match terminalize_invalid_job_operation_target(
                         pool,
@@ -5786,7 +4146,7 @@ impl Repository {
                         TARGET_STATUS_CONTROL_TIMEOUT,
                         "control_deadline_expiry",
                         true,
-                        Some(control_deadline_extra_secs),
+                        true,
                     )
                     .await
                     {
@@ -5834,128 +4194,6 @@ impl Repository {
             .filter(|value| !value.is_empty())
             .unwrap_or("operator_cancel_requested");
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let mut cancel_targets = Vec::new();
-                let mut canceled_targets = Vec::new();
-                {
-                    let targets = memory.job_targets.read().await;
-                    for target in targets
-                        .iter()
-                        .filter(|target| target.job_id == job_id && target.completed_at.is_none())
-                    {
-                        match target.status.as_str() {
-                            TARGET_STATUS_QUEUED => {
-                                canceled_targets.push(target.client_id.clone());
-                            }
-                            TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING => {
-                                cancel_targets.push(target.client_id.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                if !canceled_targets.is_empty() {
-                    let mut outputs = memory.job_outputs.write().await;
-                    for client_id in &canceled_targets {
-                        let value =
-                            command_canceled_status_output_value(job_id, client_id, message);
-                        let data = serde_json::to_vec(&value)?;
-                        let seq = outputs
-                            .iter()
-                            .filter(|output| {
-                                output.job_id == job_id && output.client_id == *client_id
-                            })
-                            .map(|output| output.seq)
-                            .max()
-                            .unwrap_or(-1)
-                            .saturating_add(1);
-                        outputs.push(JobOutputView {
-                            job_id,
-                            client_id: client_id.clone(),
-                            seq,
-                            stream: "status".to_string(),
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
-                            storage: "inline".to_string(),
-                            artifact_object_key: None,
-                            artifact_sha256_hex: None,
-                            artifact_size_bytes: None,
-                            exit_code: None,
-                            done: true,
-                            received_at: Some(now.clone()),
-                            created_at: now.clone(),
-                        });
-                    }
-                }
-                let canceled_target_set = canceled_targets.iter().cloned().collect::<HashSet<_>>();
-                if !canceled_target_set.is_empty() {
-                    let mut targets = memory.job_targets.write().await;
-                    for target in targets.iter_mut().filter(|target| {
-                        target.job_id == job_id
-                            && target.completed_at.is_none()
-                            && target.status == TARGET_STATUS_QUEUED
-                            && canceled_target_set.contains(&target.client_id)
-                    }) {
-                        target.status = TARGET_STATUS_CANCELED.to_string();
-                        target.message = Some(message.to_string());
-                        target.completed_at = Some(now.clone());
-                    }
-                }
-                let pending_canceled = canceled_targets.len();
-                if let Some(rollout) = memory
-                    .job_rollouts
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|rollout| rollout.job_id == job_id && rollout.completed_at.is_none())
-                {
-                    rollout.status = "aborted".to_string();
-                    rollout.pause_reason = Some(message.to_string());
-                    rollout.updated_at = now.clone();
-                    rollout.completed_at = Some(now.clone());
-                }
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor_id),
-                    action: "job.cancel_requested".to_string(),
-                    target: format!("job:{job_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "job_id": job_id,
-                        "reason": message,
-                        "pending_canceled": pending_canceled,
-                        "cancel_targets": cancel_targets,
-                        "result": "requested",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "job-cancel-controller",
-                    }),
-                    created_at: now,
-                });
-                for client_id in &canceled_targets {
-                    self.record_backup_request_terminal_for_target_status(
-                        job_id,
-                        client_id,
-                        TARGET_STATUS_CANCELED,
-                        None,
-                    )
-                    .await?;
-                    self.record_runtime_config_apply_terminal_for_target_status(
-                        job_id,
-                        client_id,
-                        TARGET_STATUS_CANCELED,
-                        Some(message),
-                    )
-                    .await?;
-                }
-                Ok(JobCancelPlan {
-                    cancel_targets,
-                    pending_canceled,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let pending_rows = sqlx::query(
@@ -6099,25 +4337,7 @@ impl Repository {
         applied: bool,
         message: &str,
     ) -> Result<()> {
-        let mut terminalized = false;
         match self {
-            Self::Memory(memory) => {
-                if applied {
-                    let now = unix_now().to_string();
-                    if let Some(target) =
-                        memory.job_targets.write().await.iter_mut().find(|target| {
-                            target.job_id == job_id
-                                && target.client_id == client_id
-                                && target.completed_at.is_none()
-                        })
-                    {
-                        target.status = TARGET_STATUS_CANCELED.to_string();
-                        target.message = Some(message.to_string());
-                        target.completed_at = Some(now);
-                        terminalized = true;
-                    }
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let updated = sqlx::query(
@@ -6150,7 +4370,6 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 if applied && updated.rows_affected() > 0 {
-                    terminalized = true;
                     let outcome =
                         synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, accepted);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome)
@@ -6165,22 +4384,6 @@ impl Repository {
                 tx.commit().await?;
             }
         }
-        if terminalized && matches!(self, Self::Memory(_)) {
-            self.record_backup_request_terminal_for_target_status(
-                job_id,
-                client_id,
-                TARGET_STATUS_CANCELED,
-                None,
-            )
-            .await?;
-            self.record_runtime_config_apply_terminal_for_target_status(
-                job_id,
-                client_id,
-                TARGET_STATUS_CANCELED,
-                Some(message),
-            )
-            .await?;
-        }
         Ok(())
     }
 
@@ -6190,7 +4393,6 @@ impl Repository {
         client_id: &str,
     ) -> Result<()> {
         match self {
-            Self::Memory(_) => {}
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -6219,129 +4421,34 @@ impl Repository {
         client_id: &str,
         outcome: &TargetDispatchOutcome,
     ) -> Result<bool> {
+        self.update_job_target_result_if_dispatch_attempt(job_id, client_id, outcome, None)
+            .await
+    }
+
+    pub(crate) async fn update_claimed_job_target_result(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        outcome: &TargetDispatchOutcome,
+        dispatch_attempt: i32,
+    ) -> Result<bool> {
+        self.update_job_target_result_if_dispatch_attempt(
+            job_id,
+            client_id,
+            outcome,
+            Some(dispatch_attempt),
+        )
+        .await
+    }
+
+    async fn update_job_target_result_if_dispatch_attempt(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        outcome: &TargetDispatchOutcome,
+        expected_dispatch_attempt: Option<i32>,
+    ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                let completed_at = unix_now().to_string();
-                let mut updated = false;
-                {
-                    let mut targets = memory.job_targets.write().await;
-                    if let Some(target) = targets.iter_mut().find(|target| {
-                        target.job_id == job_id
-                            && target.client_id == client_id
-                            && target.completed_at.is_none()
-                    }) {
-                        target.status = outcome.status.clone();
-                        target.message = Some(outcome.message.clone());
-                        target.exit_code = outcome.exit_code;
-                        target
-                            .started_at
-                            .get_or_insert_with(|| completed_at.clone());
-                        target.completed_at = Some(completed_at.clone());
-                        updated = true;
-                    }
-                    if !updated {
-                        return Ok(false);
-                    }
-                }
-                if updated {
-                    memory
-                        .network_traffic_import_retry_not_before
-                        .write()
-                        .await
-                        .remove(&(job_id, client_id.to_string()));
-                    let command_hash = memory
-                        .jobs
-                        .read()
-                        .await
-                        .iter()
-                        .find(|job| job.id == job_id)
-                        .map(|job| job.payload_hash.clone());
-                    memory.audits.write().await.push(AuditLogView {
-                        id: Uuid::new_v4(),
-                        actor_id: None,
-                        action: "job.target_result".to_string(),
-                        target: format!("client:{client_id}"),
-                        command_hash,
-                        metadata: json!({
-                            "job_id": job_id,
-                            "status": outcome.status,
-                            "result": outcome.status,
-                            "exit_code": outcome.exit_code,
-                            "accepted": outcome.accepted,
-                            "message": outcome.message,
-                            "received_at": outcome.received_at,
-                            "origin_kind": "control_plane",
-                            "component": "job-dispatcher",
-                        }),
-                        created_at: completed_at,
-                    });
-                    let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
-                        || agent_update_activation_failure_status(&outcome.status)
-                    {
-                        match memory.job_operations.read().await.get(&job_id).cloned() {
-                            Some(
-                                operation @ (JobCommand::AgentUpdateActivate { .. }
-                                | JobCommand::AgentUpdateRollback { .. }),
-                            ) => Some(operation),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    match update_lifecycle_operation {
-                        Some(JobCommand::AgentUpdateActivate {
-                            staged_sha256_hex, ..
-                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                            self.record_agent_update_activation_completed(
-                                client_id,
-                                job_id,
-                                &staged_sha256_hex,
-                            )
-                            .await?;
-                        }
-                        Some(JobCommand::AgentUpdateActivate {
-                            staged_sha256_hex, ..
-                        }) if agent_update_activation_failure_status(&outcome.status) => {
-                            self.record_agent_update_activation_failed(
-                                client_id,
-                                job_id,
-                                &staged_sha256_hex,
-                                &outcome.status,
-                                outcome.exit_code,
-                                &outcome.message,
-                            )
-                            .await?;
-                        }
-                        Some(JobCommand::AgentUpdateRollback {
-                            rollback_sha256_hex,
-                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                            self.record_agent_update_rollback_completed(
-                                client_id,
-                                job_id,
-                                rollback_sha256_hex.as_deref(),
-                            )
-                            .await?;
-                        }
-                        Some(JobCommand::AgentUpdateRollback {
-                            rollback_sha256_hex,
-                        }) if agent_update_activation_failure_status(&outcome.status) => {
-                            self.record_agent_update_rollback_failed(
-                                client_id,
-                                job_id,
-                                rollback_sha256_hex.as_deref(),
-                                &outcome.status,
-                                outcome.exit_code,
-                                &outcome.message,
-                            )
-                            .await?;
-                        }
-                        _ => {}
-                    }
-                }
-                self.record_job_target_webhook_event(job_id, client_id, outcome)
-                    .await?;
-                Ok(true)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let updated = sqlx::query(
@@ -6359,6 +4466,7 @@ impl Repository {
                       AND client_id = $2
                       AND completed_at IS NULL
                       AND status IN ('queued', 'dispatching', 'running')
+                      AND ($7::integer IS NULL OR dispatch_attempts = $7)
                     "#,
                 )
                 .bind(job_id)
@@ -6367,6 +4475,7 @@ impl Repository {
                 .bind(&outcome.message)
                 .bind(outcome.exit_code)
                 .bind(outcome.received_at.as_deref())
+                .bind(expected_dispatch_attempt)
                 .execute(&mut *tx)
                 .await?;
                 if updated.rows_affected() == 0 {
@@ -6414,56 +4523,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn finish_job(&self, job_id: Uuid, status: &str) -> Result<bool> {
-        let finished = match self {
-            Self::Memory(memory) => {
-                let completed_at = unix_now().to_string();
-                let mut jobs = memory.jobs.write().await;
-                let Some(job) = jobs
-                    .iter_mut()
-                    .find(|job| job.id == job_id && job.completed_at.is_none())
-                else {
-                    return Ok(false);
-                };
-                job.status = status.to_string();
-                job.completed_at = Some(completed_at);
-                true
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                let row = sqlx::query(
-                    r#"
-                    UPDATE jobs
-                    SET status = $2, completed_at = now()
-                    WHERE id = $1
-                      AND completed_at IS NULL
-                    RETURNING id
-                    "#,
-                )
-                .bind(job_id)
-                .bind(status)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let finished = row.is_some();
-                if finished {
-                    enqueue_job_terminal_event_in_tx(&mut tx, job_id, status).await?;
-                    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
-                        &mut tx,
-                        job_id,
-                    )
-                    .await?;
-                }
-                tx.commit().await?;
-                finished
-            }
-        };
-        if finished && matches!(self, Self::Memory(_)) {
-            self.record_job_terminal_side_effects(job_id, status)
-                .await?;
-        }
-        Ok(finished)
-    }
-
     pub(crate) async fn process_pending_job_terminal_events(
         &self,
         limit: i64,
@@ -6473,7 +4532,6 @@ impl Repository {
         let mut batch = TerminalizationBatch::default();
         loop {
             let events = match self {
-                Self::Memory(_) => Vec::new(),
                 Self::Postgres(pool) => {
                     let lease_id = Uuid::new_v4();
                     let rows = sqlx::query(
@@ -6497,12 +4555,19 @@ impl Repository {
                         )
                         AND (
                             event.event_kind <> 'job_terminalized'
-                            OR NOT EXISTS (
-                                SELECT 1
-                                FROM job_terminal_events target_event
-                                WHERE target_event.job_id = event.job_id
-                                  AND target_event.event_kind = 'target_terminalized'
-                                  AND target_event.processing_status <> 'processed'
+                            OR (
+                                NOT EXISTS (
+                                    SELECT 1
+                                    FROM job_terminal_events target_event
+                                    WHERE target_event.job_id = event.job_id
+                                      AND target_event.event_kind = 'target_terminalized'
+                                      AND target_event.processing_status <> 'processed'
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM job_terminal_enrichment_work enrichment
+                                    WHERE enrichment.job_id = event.job_id
+                                )
                             )
                         )
                         ORDER BY
@@ -6512,14 +4577,14 @@ impl Repository {
                                 ELSE 1
                             END ASC,
                             event.id ASC
-                        LIMIT $1
+                        LIMIT 1
                         FOR UPDATE SKIP LOCKED
                     )
                     UPDATE job_terminal_events event
                     SET
                         processing_status = 'processing',
-                        lease_id = $2,
-                        lease_until = now() + ($3::bigint * interval '1 second'),
+                        lease_id = $1,
+                        lease_until = now() + ($2::bigint * interval '1 second'),
                         attempt_count = attempt_count + 1,
                         last_error = NULL
                     FROM claim
@@ -6533,9 +4598,8 @@ impl Repository {
                         event.outcome
                     "#,
                     )
-                    .bind(remaining)
                     .bind(lease_id)
-                    .bind(lease_secs.clamp(1, 3600))
+                    .bind(lease_secs)
                     .fetch_all(pool)
                     .await?;
                     rows.into_iter()
@@ -6544,6 +4608,7 @@ impl Repository {
                                 row.try_get("outcome")?;
                             Ok::<_, anyhow::Error>(ClaimedJobTerminalEvent {
                                 id: row.try_get("id")?,
+                                owner_token: lease_id,
                                 event_kind: row.try_get("event_kind")?,
                                 job_id: row.try_get("job_id")?,
                                 client_id: row.try_get("client_id")?,
@@ -6577,15 +4642,25 @@ impl Repository {
             match result {
                 Ok(Some(processed)) => {
                     if event.event_kind == "target_terminalized" {
-                        self.mark_job_terminal_event_repository_side_effects_processed(event.id)
-                            .await?;
+                        if !self
+                            .complete_job_terminal_target_repository_stage(&event)
+                            .await?
+                        {
+                            continue;
+                        }
                     } else {
-                        self.mark_job_terminal_event_processed(event.id).await?;
+                        if !self
+                            .mark_job_terminal_event_processed(event.id, event.owner_token)
+                            .await?
+                        {
+                            continue;
+                        }
                     }
                     batch.extend(processed);
                 }
                 Ok(None) => {
-                    self.mark_job_terminal_event_processed(event.id).await?;
+                    self.mark_job_terminal_event_processed(event.id, event.owner_token)
+                        .await?;
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -6596,7 +4671,7 @@ impl Repository {
                         event_kind = %event.event_kind,
                         "job terminal event processing failed"
                     );
-                    self.mark_job_terminal_event_failed(event.id, &message)
+                    self.mark_job_terminal_event_failed(event.id, event.owner_token, &message)
                         .await?;
                 }
             }
@@ -6616,34 +4691,23 @@ impl Repository {
                 };
                 let outcome =
                     target_outcome_from_event_payload(&event.status, event.outcome.clone());
-                let repository_side_effects_processed =
-                    event.outcome.as_ref().is_some_and(|outcome| {
-                        outcome.get("repository_side_effects_processed") == Some(&Value::Bool(true))
-                    });
-                if !repository_side_effects_processed {
-                    self.repair_persisted_job_output_derivations_for_target(
-                        event.job_id,
-                        client_id,
-                    )
+                self.record_backup_request_terminal_for_target_status(
+                    event.job_id,
+                    client_id,
+                    &event.status,
+                    None,
+                )
+                .await?;
+                self.record_runtime_config_apply_terminal_for_target_status(
+                    event.job_id,
+                    client_id,
+                    &event.status,
+                    Some(outcome.message.as_str()),
+                )
+                .await?;
+                self.record_job_target_webhook_event(event.job_id, client_id, &outcome)
                     .await?;
-                    self.record_backup_request_terminal_for_target_status(
-                        event.job_id,
-                        client_id,
-                        &event.status,
-                        None,
-                    )
-                    .await?;
-                    self.record_runtime_config_apply_terminal_for_target_status(
-                        event.job_id,
-                        client_id,
-                        &event.status,
-                        Some(outcome.message.as_str()),
-                    )
-                    .await?;
-                    self.record_job_target_webhook_event(event.job_id, client_id, &outcome)
-                        .await?;
-                }
-                batch.push_target(event.id, event.job_id, client_id, outcome);
+                batch.push_target(event.job_id, client_id, outcome);
                 Ok(Some(batch))
             }
             "job_terminalized" => {
@@ -6656,39 +4720,205 @@ impl Repository {
         }
     }
 
-    async fn mark_job_terminal_event_repository_side_effects_processed(
+    async fn complete_job_terminal_target_repository_stage(
         &self,
-        event_id: Uuid,
-    ) -> Result<()> {
+        event: &ClaimedJobTerminalEvent,
+    ) -> Result<bool> {
         match self {
-            Self::Memory(_) => {}
             Self::Postgres(pool) => {
-                sqlx::query(
+                let mut tx = pool.begin().await?;
+                let completed = sqlx::query(
                     r#"
                     UPDATE job_terminal_events
-                    SET outcome = jsonb_set(
-                        outcome,
-                        '{repository_side_effects_processed}',
-                        'true'::jsonb,
-                        TRUE
-                    )
+                    SET processing_status = 'processed',
+                        processed_at = COALESCE(processed_at, now()),
+                        lease_id = NULL,
+                        lease_until = NULL,
+                        next_attempt_at = NULL,
+                        last_error = NULL
                     WHERE id = $1
                       AND event_kind = 'target_terminalized'
+                      AND processing_status = 'processing'
+                      AND lease_id = $2
+                    RETURNING job_id, client_id, status
+                    "#,
+                )
+                .bind(event.id)
+                .bind(event.owner_token)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(completed) = completed else {
+                    return Ok(false);
+                };
+                let job_id: Uuid = completed.try_get("job_id")?;
+                let client_id: String = completed.try_get("client_id")?;
+                let status: String = completed.try_get("status")?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO job_terminal_enrichment_work (
+                        event_id, job_id, client_id, status
+                    ) VALUES ($1, $2, $3, $4)
+                    "#,
+                )
+                .bind(event.id)
+                .bind(job_id)
+                .bind(client_id)
+                .bind(status)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(true)
+            }
+        }
+    }
+
+    pub(crate) async fn claim_job_terminal_enrichments(
+        &self,
+        limit: i64,
+        lease_secs: i64,
+    ) -> Result<Vec<ClaimedJobTerminalEnrichment>> {
+        match self {
+            Self::Postgres(pool) => {
+                let owner_token = Uuid::new_v4();
+                let rows = sqlx::query(
+                    r#"
+                    WITH claim AS (
+                        SELECT work.event_id
+                        FROM job_terminal_enrichment_work work
+                        WHERE (
+                            work.lease_id IS NULL
+                            AND work.next_attempt_at <= now()
+                        ) OR (
+                            work.lease_id IS NOT NULL
+                            AND work.lease_until <= now()
+                        )
+                        ORDER BY work.created_at ASC, work.event_id ASC
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE job_terminal_enrichment_work work
+                    SET lease_id = $2,
+                        lease_until = now() + ($3::bigint * interval '1 second'),
+                        attempt_count = work.attempt_count + 1,
+                        last_error = NULL,
+                        updated_at = now()
+                    FROM claim
+                    WHERE work.event_id = claim.event_id
+                    RETURNING work.event_id, work.job_id, work.client_id, work.status
+                    "#,
+                )
+                .bind(limit)
+                .bind(owner_token)
+                .bind(lease_secs)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(ClaimedJobTerminalEnrichment {
+                            event_id: row.try_get("event_id")?,
+                            job_id: row.try_get("job_id")?,
+                            client_id: row.try_get("client_id")?,
+                            status: row.try_get("status")?,
+                            owner_token,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn renew_job_terminal_enrichment_owner(
+        &self,
+        event_id: Uuid,
+        owner_token: Uuid,
+        lease_secs: i64,
+    ) -> Result<bool> {
+        match self {
+            Self::Postgres(pool) => {
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE job_terminal_enrichment_work
+                    SET lease_until = now() + ($3::bigint * interval '1 second'),
+                        updated_at = now()
+                    WHERE event_id = $1
+                      AND lease_id = $2
                     "#,
                 )
                 .bind(event_id)
+                .bind(owner_token)
+                .bind(lease_secs)
                 .execute(pool)
                 .await?;
+                Ok(updated.rows_affected() == 1)
             }
         }
-        Ok(())
     }
 
-    pub(crate) async fn mark_job_terminal_event_processed(&self, event_id: Uuid) -> Result<()> {
+    pub(crate) async fn acknowledge_job_terminal_enrichment(
+        &self,
+        event_id: Uuid,
+        owner_token: Uuid,
+    ) -> Result<bool> {
         match self {
-            Self::Memory(_) => {}
             Self::Postgres(pool) => {
-                sqlx::query(
+                let deleted = sqlx::query(
+                    r#"
+                    DELETE FROM job_terminal_enrichment_work
+                    WHERE event_id = $1
+                      AND lease_id = $2
+                    "#,
+                )
+                .bind(event_id)
+                .bind(owner_token)
+                .execute(pool)
+                .await?;
+                Ok(deleted.rows_affected() == 1)
+            }
+        }
+    }
+
+    pub(crate) async fn defer_job_terminal_enrichment(
+        &self,
+        event_id: Uuid,
+        owner_token: Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        let error = error.chars().take(4096).collect::<String>();
+        match self {
+            Self::Postgres(pool) => {
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE job_terminal_enrichment_work
+                    SET lease_id = NULL,
+                        lease_until = NULL,
+                        next_attempt_at = now() + (
+                            LEAST(3600, GREATEST(5, attempt_count * attempt_count * 5))
+                            * interval '1 second'
+                        ),
+                        last_error = $3,
+                        updated_at = now()
+                    WHERE event_id = $1
+                      AND lease_id = $2
+                    "#,
+                )
+                .bind(event_id)
+                .bind(owner_token)
+                .bind(error)
+                .execute(pool)
+                .await?;
+                Ok(updated.rows_affected() == 1)
+            }
+        }
+    }
+
+    pub(crate) async fn mark_job_terminal_event_processed(
+        &self,
+        event_id: Uuid,
+        owner_token: Uuid,
+    ) -> Result<bool> {
+        match self {
+            Self::Postgres(pool) => {
+                let updated = sqlx::query(
                     r#"
                     UPDATE job_terminal_events
                     SET
@@ -6699,26 +4929,29 @@ impl Repository {
                         next_attempt_at = NULL,
                         last_error = NULL
                     WHERE id = $1
+                      AND processing_status = 'processing'
+                      AND lease_id = $2
                     "#,
                 )
                 .bind(event_id)
+                .bind(owner_token)
                 .execute(pool)
                 .await?;
+                Ok(updated.rows_affected() == 1)
             }
         }
-        Ok(())
     }
 
     pub(crate) async fn mark_job_terminal_event_failed(
         &self,
         event_id: Uuid,
+        owner_token: Uuid,
         error: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let error = error.chars().take(4096).collect::<String>();
         match self {
-            Self::Memory(_) => {}
             Self::Postgres(pool) => {
-                sqlx::query(
+                let updated = sqlx::query(
                     r#"
                     UPDATE job_terminal_events
                     SET
@@ -6731,15 +4964,18 @@ impl Repository {
                         ),
                         last_error = $2
                     WHERE id = $1
+                      AND processing_status = 'processing'
+                      AND lease_id = $3
                     "#,
                 )
                 .bind(event_id)
                 .bind(error)
+                .bind(owner_token)
                 .execute(pool)
                 .await?;
+                Ok(updated.rows_affected() == 1)
             }
         }
-        Ok(())
     }
 
     pub(crate) async fn record_job_terminal_side_effects(
@@ -6747,13 +4983,6 @@ impl Repository {
         job_id: Uuid,
         status: &str,
     ) -> Result<()> {
-        let _memory_side_effect_guard = match self {
-            Self::Memory(memory) => Some(memory.job_terminal_side_effects.lock().await),
-            Self::Postgres(_) => None,
-        };
-        if matches!(self, Self::Memory(_)) {
-            self.reconcile_memory_job_event_sources(job_id).await?;
-        }
         self.record_job_status_webhook_event(job_id, status).await?;
         self.record_schedule_job_outcome(job_id, status).await?;
         Ok(())
@@ -6770,8 +4999,8 @@ impl Repository {
             return Ok(());
         };
         // The linked backup request is the authoritative relation here. Avoid
-        // decoding jobs.operation while consuming a terminal event: a corrupt
-        // legacy operation must not poison terminal side-effect delivery.
+        // decoding jobs.operation while consuming a terminal event: a malformed
+        // operation must not poison terminal side-effect delivery.
         self.mark_open_backup_request_execution_terminal(
             job_id,
             client_id,
@@ -6789,24 +5018,6 @@ impl Repository {
         process_incarnation_id: Uuid,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                let operations = memory.job_operations.read().await;
-                if !matches!(
-                    operations.get(&job_id),
-                    Some(JobCommand::AgentUpdateCheck { .. })
-                ) {
-                    return Ok(false);
-                }
-                Ok(memory.job_targets.read().await.iter().any(|target| {
-                    target.job_id == job_id
-                        && target.client_id == client_id
-                        && target.completed_at.is_none()
-                        && matches!(
-                            target.status.as_str(),
-                            TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
-                        )
-                }))
-            }
             Self::Postgres(pool) => {
                 let matches: bool = sqlx::query_scalar(
                     r#"
@@ -6848,48 +5059,6 @@ impl Repository {
             );
         let event_id = format!("schedule:{}:job:{}:finished", schedule_id, job_id);
         let schedule_outcome = match self {
-            Self::Memory(memory) => {
-                let already_recorded = memory.webhook_events.read().await.iter().any(|event| {
-                    event.kind == "schedule.job_finished" && event.event_id == event_id
-                });
-                let mut schedules = memory.schedules.write().await;
-                let schedule = schedules
-                    .iter_mut()
-                    .find(|schedule| schedule.id == schedule_id);
-                let Some(schedule) = schedule else {
-                    return Ok(());
-                };
-                if !already_recorded {
-                    if let Some(error) = outcome_error.as_deref() {
-                        schedule.failure_count += 1;
-                        schedule.last_error = Some(error.to_string());
-                        if schedule.failure_count >= schedule.max_failures {
-                            schedule.enabled = false;
-                        } else if let Some(retry_delay_secs) = schedule.retry_delay_secs {
-                            schedule.next_run_at = Some(
-                                (Utc::now() + Duration::seconds(retry_delay_secs.max(0)))
-                                    .to_rfc3339(),
-                            );
-                        }
-                    } else if status == JOB_STATUS_COMPLETED {
-                        schedule.failure_count = 0;
-                        schedule.last_error = None;
-                    }
-                    schedule.updated_at = unix_now().to_string();
-                }
-                Some(ScheduleJobOutcome {
-                    schedule_id,
-                    schedule_name: schedule.name.clone(),
-                    job_id,
-                    status: status.to_string(),
-                    error: outcome_error.clone(),
-                    enabled: schedule.enabled,
-                    failure_count: schedule.failure_count,
-                    max_failures: schedule.max_failures,
-                    retry_delay_secs: schedule.retry_delay_secs,
-                    next_run_at: schedule.next_run_at.clone(),
-                })
-            }
             Self::Postgres(pool) => {
                 let row = if outcome_neutral {
                     sqlx::query(
@@ -7104,42 +5273,6 @@ impl Repository {
             return Ok(());
         };
         match self {
-            Self::Memory(memory) => {
-                let job_id_string = schedule_outcome.job_id.to_string();
-                let mut audits = memory.audits.write().await;
-                let audit_exists = audits.iter().any(|audit| {
-                    audit.action == "schedule.job_failed"
-                        && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
-                });
-                if !audit_exists {
-                    audits.push(AuditLogView {
-                        id: Uuid::new_v4(),
-                        actor_id: summary.actor_id,
-                        action: "schedule.job_failed".to_string(),
-                        target: format!("schedule:{}", schedule_outcome.schedule_id),
-                        command_hash: None,
-                        metadata: json!({
-                            "schedule_id": schedule_outcome.schedule_id,
-                            "schedule_name": &schedule_outcome.schedule_name,
-                            "failure_count": schedule_outcome.failure_count,
-                            "max_failures": schedule_outcome.max_failures,
-                            "retry_delay_secs": schedule_outcome.retry_delay_secs,
-                            "next_run_at": &schedule_outcome.next_run_at,
-                            "disabled": !schedule_outcome.enabled,
-                            "error": error,
-                            "job_id": schedule_outcome.job_id,
-                            "job_status": &schedule_outcome.status,
-                            "result": "failed",
-                            "operator_id": summary.actor_id,
-                            "operator_username": &summary.actor_username,
-                            "operator_role": &summary.actor_role,
-                            "origin_kind": "control_plane",
-                            "component": "schedule-job-observer",
-                        }),
-                        created_at: unix_now().to_string(),
-                    });
-                }
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -7236,15 +5369,6 @@ impl Repository {
         Ok(())
     }
 
-    pub(crate) async fn record_job_created_webhook_event(
-        &self,
-        event: JobCreatedWebhookEvent<'_>,
-    ) -> Result<()> {
-        self.record_webhook_event(job_created_webhook_event_candidate(event))
-            .await?;
-        Ok(())
-    }
-
     pub(crate) async fn record_job_target_webhook_event(
         &self,
         job_id: Uuid,
@@ -7330,63 +5454,6 @@ impl Repository {
 
     async fn webhook_job_summary(&self, job_id: Uuid) -> Result<Option<WebhookJobSummary>> {
         match self {
-            Self::Memory(memory) => {
-                let Some(job) = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .find(|job| job.id == job_id)
-                    .cloned()
-                else {
-                    return Ok(None);
-                };
-                let actor = match job.actor_id {
-                    Some(actor_id) => memory
-                        .operators
-                        .read()
-                        .await
-                        .iter()
-                        .find(|operator| operator.id == actor_id)
-                        .map(|operator| (operator.username.clone(), operator.role.clone())),
-                    None => None,
-                };
-                let target_records = memory
-                    .job_targets
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|target| target.job_id == job_id)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let targets = target_records
-                    .iter()
-                    .map(|target| target.client_id.clone())
-                    .collect::<Vec<_>>();
-                let target_statuses = target_records
-                    .iter()
-                    .map(|target| target.status.clone())
-                    .collect::<Vec<_>>();
-                let source_schedule_id = memory
-                    .job_source_schedule_ids
-                    .read()
-                    .await
-                    .get(&job_id)
-                    .copied();
-                Ok(Some(WebhookJobSummary {
-                    actor_id: job.actor_id,
-                    actor_username: actor.as_ref().map(|actor| actor.0.clone()),
-                    actor_role: actor.map(|actor| actor.1),
-                    command_type: job.command_type,
-                    privileged: job.privileged,
-                    status: job.status,
-                    target_count: job.target_count,
-                    payload_hash: job.payload_hash,
-                    source_schedule_id,
-                    targets,
-                    target_statuses,
-                }))
-            }
             Self::Postgres(pool) => {
                 let Some(row) = sqlx::query(
                     r#"

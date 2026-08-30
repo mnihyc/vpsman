@@ -72,15 +72,6 @@ impl Default for GatewayClientTimeouts {
 }
 
 impl GatewayDispatchClient {
-    #[cfg(test)]
-    pub(crate) fn new(control_url: Option<String>, internal_token: Option<String>) -> Self {
-        Self::new_with_timeouts(
-            control_url,
-            internal_token,
-            GatewayClientTimeouts::default(),
-        )
-    }
-
     pub(crate) fn new_with_timeouts(
         control_url: Option<String>,
         internal_token: Option<String>,
@@ -117,29 +108,14 @@ impl GatewayDispatchClient {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_privilege_auto_approve() -> Self {
-        Self {
-            control_url: None,
-            internal_token: None,
-            timeouts: Arc::new(StdRwLock::new(GatewayClientTimeouts::default())),
-            test_privilege_auto_approve: true,
-        }
+    pub(crate) fn test_privilege_auto_approves(&self) -> bool {
+        self.test_privilege_auto_approve
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_privilege_auto_approve(mut self) -> Self {
         self.test_privilege_auto_approve = true;
         self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_privilege_auto_approves(&self) -> bool {
-        self.test_privilege_auto_approve
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_timeouts(&self) -> GatewayClientTimeouts {
-        self.timeouts()
     }
 
     pub(crate) fn set_read_timeout(&self, read: Duration) {
@@ -161,6 +137,7 @@ impl GatewayDispatchClient {
         request: JobRequest,
         expected_process_incarnation_id: uuid::Uuid,
         payload_hash: String,
+        timeouts: GatewayClientTimeouts,
     ) -> Result<GatewayCommandDispatchResult> {
         let control_url = self
             .control_url
@@ -175,7 +152,7 @@ impl GatewayDispatchClient {
                 payload_hash,
             },
             self.internal_token.as_deref(),
-            self.timeouts(),
+            timeouts,
         )
         .await
     }

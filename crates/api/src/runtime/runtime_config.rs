@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
+use sqlx::postgres::PgListener;
+use tokio::sync::oneshot;
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -23,16 +24,32 @@ use crate::{
         AgentView, AuthContext, CreateJobRequest, CreateJobResponse, RuntimeConfigDispatchView,
         TunnelPlanView,
     },
-    routes_jobs::create_job_from_internal_operator_mutation,
+    repository::Repository,
+    repository_runtime_config::ClaimedRuntimeConfigReconciliation,
+    routes_jobs::create_job_from_runtime_config_reconciliation,
     state::AppState,
 };
 
-static LAST_RUNTIME_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 const AUTHORITATIVE_RUNTIME_CONFIG_SYNC_REASON: &str = "agent_reconnect_authoritative_sync";
 const AUTHORITATIVE_PORT_FORWARDING_SYNC_REASON: &str =
     "agent_reconnect_authoritative_port_forwarding_sync";
 const PORT_FORWARDING_RECONNECT_SYNC_REASON: &str = "agent_reconnect_port_forwarding_sync";
 const RUNTIME_TUNNELS_RECONNECT_SYNC_REASON: &str = "agent_reconnect_runtime_tunnels_sync";
+// The lease fences ownership; it never bounds composition or job creation.
+// Renewal at one third leaves two missed-heartbeat margins before takeover.
+const RUNTIME_CONFIG_RECONCILE_LEASE_SECS: i32 = 30;
+const RUNTIME_CONFIG_RECONCILE_RENEW_SECS: u64 = 10;
+// NOTIFY is the normal wake path. This interval is only missed-notification or
+// listener-reconnect recovery and does not limit a non-empty drain.
+const RUNTIME_CONFIG_RECONCILE_RECOVERY_POLL_SECS: u64 = 5;
+// A failed source document remains durable. A short retry avoids a hot error
+// loop; any new source mutation resets it to immediately due.
+const RUNTIME_CONFIG_RECONCILE_ERROR_RETRY_SECS: i32 = 5;
+
+enum RuntimeConfigReconcileOutcome {
+    Job(Box<CreateJobResponse>),
+    Unchanged,
+}
 
 struct AbortTaskOnDrop<T>(tokio::task::JoinHandle<T>);
 
@@ -49,7 +66,8 @@ pub(crate) async fn dispatch_runtime_config_for_clients(
     reason: &str,
 ) -> Vec<RuntimeConfigDispatchView> {
     let clients = normalized_runtime_config_clients(client_ids);
-    let known_clients = match state.repo.list_agents().await {
+    let client_values = clients.iter().cloned().collect::<Vec<_>>();
+    let known_clients = match state.repo.list_agents_for_client_ids(&client_values).await {
         Ok(agents) => agents
             .into_iter()
             .map(|agent| agent.id)
@@ -69,66 +87,195 @@ pub(crate) async fn dispatch_runtime_config_for_clients(
         }
     };
 
-    let mut outcomes = Vec::with_capacity(clients.len());
-    for client_id in clients {
-        if !known_clients.contains(&client_id) {
-            outcomes.push(RuntimeConfigDispatchView {
+    let known = clients
+        .iter()
+        .filter(|client_id| known_clients.contains(*client_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Err(error) = state
+        .repo
+        .ensure_runtime_config_reconciliations(&known, reason, Some(operator.operator.id))
+        .await
+    {
+        let error = ApiError::from(error);
+        let message = operator_dispatch_error(&error, "Runtime reconciliation");
+        return clients
+            .into_iter()
+            .map(|client_id| RuntimeConfigDispatchView {
                 client_id,
-                status: "not_queued".to_string(),
+                status: "queue_failed".to_string(),
                 job_id: None,
-                error: Some("VPS is no longer available".to_string()),
-            });
-            continue;
-        }
-        // Runtime composition and internal job creation each have bounded state machines, but
-        // polling their debug-build frames beneath a network mutation handler can exhaust the
-        // standard worker stack before the first yield. A task root bounds that composition;
-        // abort-on-drop preserves cancellation and prevents a detached config mutation.
-        let task_state = state.clone();
-        let task_operator = operator.clone();
-        let task_client_id = client_id.clone();
-        let task_reason = reason.to_string();
-        let mut push_task = AbortTaskOnDrop(tokio::spawn(async move {
-            push_runtime_config_for_known_client(
-                &task_state,
-                &task_operator,
-                task_client_id,
-                &task_reason,
-            )
-            .await
-        }));
-        let push_result = match (&mut push_task.0).await {
-            Ok(result) => result,
-            Err(error) => Err(ApiError::internal(
-                "runtime_config_dispatch_task_failed",
-                "The runtime configuration could not be queued.",
-                error.into(),
-            )),
-        };
-        match push_result {
-            Ok(job) => outcomes.push(RuntimeConfigDispatchView {
-                client_id,
-                status: "queued".to_string(),
-                job_id: Some(job.job_id),
-                error: None,
-            }),
-            Err(error) => {
-                warn!(
-                    ?error,
-                    %client_id,
-                    %reason,
-                    "failed to queue composed runtime configuration"
-                );
-                outcomes.push(RuntimeConfigDispatchView {
+                error: Some(message.clone()),
+            })
+            .collect();
+    }
+
+    clients
+        .into_iter()
+        .map(|client_id| {
+            if known_clients.contains(&client_id) {
+                // The source mutation and its trigger own the durable revision.
+                // This response path only reports the queued handoff; the sole
+                // reconciler claims, composes, and creates any runtime job.
+                RuntimeConfigDispatchView {
                     client_id,
-                    status: "queue_failed".to_string(),
+                    status: "queued".to_string(),
                     job_id: None,
-                    error: Some(operator_dispatch_error(&error, "Runtime apply job")),
-                });
+                    error: None,
+                }
+            } else {
+                RuntimeConfigDispatchView {
+                    client_id,
+                    status: "not_queued".to_string(),
+                    job_id: None,
+                    error: Some("VPS is no longer available".to_string()),
+                }
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn spawn_runtime_config_reconciler(state: AppState) -> tokio::task::JoinHandle<()> {
+    let pool = match &state.repo {
+        Repository::Postgres(pool) => pool.clone(),
+    };
+    tokio::spawn(async move {
+        loop {
+            let mut listener = match PgListener::connect_with(&pool).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    warn!(%error, "runtime config reconcile listener connection failed");
+                    tokio::time::sleep(Duration::from_secs(
+                        RUNTIME_CONFIG_RECONCILE_RECOVERY_POLL_SECS,
+                    ))
+                    .await;
+                    continue;
+                }
+            };
+            if let Err(error) = listener.listen("runtime_config_reconcile").await {
+                warn!(%error, "runtime config reconcile listener registration failed");
+                tokio::time::sleep(Duration::from_secs(
+                    RUNTIME_CONFIG_RECONCILE_RECOVERY_POLL_SECS,
+                ))
+                .await;
+                continue;
+            }
+            loop {
+                match drain_runtime_config_reconciliations(&state).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(?error, "runtime config reconciliation drain failed");
+                    }
+                }
+                match tokio::time::timeout(
+                    Duration::from_secs(RUNTIME_CONFIG_RECONCILE_RECOVERY_POLL_SECS),
+                    listener.recv(),
+                )
+                .await
+                {
+                    Ok(Ok(_)) | Err(_) => {}
+                    Ok(Err(error)) => {
+                        warn!(%error, "runtime config reconcile listener disconnected");
+                        break;
+                    }
+                }
             }
         }
+    })
+}
+
+async fn drain_runtime_config_reconciliations(state: &AppState) -> Result<bool, ApiError> {
+    let Some(claim) = state
+        .repo
+        .claim_runtime_config_reconciliation(None, RUNTIME_CONFIG_RECONCILE_LEASE_SECS)
+        .await?
+    else {
+        return Ok(false);
+    };
+    let operator = system_operator("runtime-config-reconciler");
+    if let Err(error) = reconcile_runtime_config_claim(state, &operator, claim).await {
+        warn!(
+            ?error,
+            "durable runtime configuration reconciliation failed"
+        );
     }
-    outcomes
+    Ok(true)
+}
+
+async fn reconcile_runtime_config_claim(
+    state: &AppState,
+    operator: &AuthContext,
+    claim: ClaimedRuntimeConfigReconciliation,
+) -> Result<RuntimeConfigReconcileOutcome, ApiError> {
+    let heartbeat_claim = claim.clone();
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(RUNTIME_CONFIG_RECONCILE_RENEW_SECS)) => {
+                    if !heartbeat_claim
+                        .renew(RUNTIME_CONFIG_RECONCILE_LEASE_SECS)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                }
+                _ = &mut stop_rx => break,
+            }
+        }
+    });
+    let task_state = state.clone();
+    let task_operator = operator.clone();
+    let task_client_id = claim.client_id.clone();
+    let task_reason = claim.reason.clone();
+    let version = claim.apply_version;
+    let task_claim = claim.clone();
+    let mut push_task = AbortTaskOnDrop(tokio::spawn(async move {
+        let config = compose_runtime_config(&task_state, &task_client_id, version).await?;
+        let content_hash = runtime_config_content_hash(&config).map_err(|error| {
+            ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}"))
+        })?;
+        if task_claim
+            .acknowledge_if_content_current(&content_hash)
+            .await?
+            .is_some()
+        {
+            return Ok(RuntimeConfigReconcileOutcome::Unchanged);
+        }
+        push_runtime_config_job(
+            &task_state,
+            &task_operator,
+            task_client_id,
+            &task_reason,
+            task_claim.desired_revision,
+            version,
+            config,
+            task_claim.claim_token,
+        )
+        .await
+        .map(|response| RuntimeConfigReconcileOutcome::Job(Box::new(response)))
+    }));
+    let result = match (&mut push_task.0).await {
+        Ok(result) => result,
+        Err(error) => Err(ApiError::internal(
+            "runtime_config_dispatch_task_failed",
+            "The runtime configuration could not be queued.",
+            error.into(),
+        )),
+    };
+    let _ = stop_tx.send(());
+    let _ = heartbeat.await;
+    if let Err(error) = &result {
+        let _ = claim
+            .defer(
+                &error.code.replace('_', " "),
+                RUNTIME_CONFIG_RECONCILE_ERROR_RETRY_SECS,
+            )
+            .await;
+    }
+    result
 }
 
 pub(crate) fn operator_dispatch_error(error: &ApiError, operation: &str) -> String {
@@ -180,17 +327,6 @@ fn normalized_runtime_config_clients(
         .collect()
 }
 
-async fn push_runtime_config_for_known_client(
-    state: &AppState,
-    operator: &AuthContext,
-    client_id: String,
-    reason: &str,
-) -> Result<CreateJobResponse, ApiError> {
-    let version = next_runtime_config_version(state, &client_id).await?;
-    let config = compose_runtime_config(state, &client_id, version).await?;
-    push_runtime_config_job(state, operator, client_id, reason, version, config).await
-}
-
 pub(crate) async fn request_runtime_config_reload_for_agent(
     state: &AppState,
     client_id: &str,
@@ -198,7 +334,7 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
     reason: &str,
     reconcile_scope: RuntimeConfigReconcileScope,
 ) -> Result<Vec<CreateJobResponse>, ApiError> {
-    let mut config = compose_runtime_config(state, client_id, 1).await?;
+    let config = compose_runtime_config(state, client_id, 1).await?;
     let desired_content_hash = runtime_config_content_hash(&config)
         .map_err(|error| ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}")))?;
     if !reconcile_scope.requires_reconcile()
@@ -231,20 +367,25 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
             return Ok(Vec::new());
         }
     }
-    let version = next_runtime_config_version(state, client_id).await?;
-    config.version = version;
     let operator = system_operator("runtime-config-agent-request");
     let sync_reason = runtime_config_reload_reason(&reconcile_scope, reason);
-    push_runtime_config_job(
-        state,
-        &operator,
-        client_id.to_string(),
-        sync_reason,
-        version,
-        config,
-    )
-    .await
-    .map(|response| vec![response])
+    state
+        .repo
+        .enqueue_runtime_config_reconciliations(&[client_id.to_string()], sync_reason, None)
+        .await?;
+    let claim = state
+        .repo
+        .claim_runtime_config_reconciliation(Some(client_id), RUNTIME_CONFIG_RECONCILE_LEASE_SECS)
+        .await?;
+    match claim {
+        Some(claim) => reconcile_runtime_config_claim(state, &operator, claim)
+            .await
+            .map(|outcome| match outcome {
+                RuntimeConfigReconcileOutcome::Job(response) => vec![*response],
+                RuntimeConfigReconcileOutcome::Unchanged => Vec::new(),
+            }),
+        None => Ok(Vec::new()),
+    }
 }
 
 fn runtime_config_reload_reason<'a>(
@@ -258,8 +399,8 @@ fn runtime_config_reload_reason<'a>(
     {
         AUTHORITATIVE_PORT_FORWARDING_SYNC_REASON
     } else if scope.authoritative || scope.resources.len() > 1 {
-        // The legacy command wire has no scope field. A full reconcile is the safe
-        // superset when an older agent receives a multi-resource repair request.
+        // The persisted job reason carries the requested reconciliation scope
+        // through dispatch and acknowledgement.
         AUTHORITATIVE_RUNTIME_CONFIG_SYNC_REASON
     } else if scope
         .resources
@@ -460,8 +601,10 @@ async fn push_runtime_config_job(
     operator: &AuthContext,
     client_id: String,
     reason: &str,
+    desired_revision: i64,
     version: u64,
     config: AgentRuntimeConfig,
+    claim_token: Uuid,
 ) -> Result<CreateJobResponse, ApiError> {
     let job_id = Uuid::new_v4();
     let request = CreateJobRequest {
@@ -483,8 +626,14 @@ async fn push_runtime_config_job(
         privilege_assertion: None,
         rollout: None,
     };
-    let (status, response) =
-        create_job_from_internal_operator_mutation(state, operator, request).await?;
+    let (status, response) = create_job_from_runtime_config_reconciliation(
+        state,
+        operator,
+        request,
+        desired_revision,
+        claim_token,
+    )
+    .await?;
     let response = response.0;
     if !status.is_success() {
         return Err(ApiError {
@@ -725,47 +874,6 @@ fn merge_toml_value(target: &mut toml::Value, patch: toml::Value) -> Result<()> 
         (target, patch) => {
             *target = patch;
             Ok(())
-        }
-    }
-}
-
-async fn next_runtime_config_version(state: &AppState, client_id: &str) -> Result<u64, ApiError> {
-    let floor = state
-        .repo
-        .list_runtime_config_apply_states(Some(client_id))
-        .await?
-        .into_iter()
-        .flat_map(|record| [record.applied_version, record.pending_version])
-        .flatten()
-        .max()
-        .unwrap_or(0);
-    runtime_config_version_after(floor).map_err(ApiError::from)
-}
-
-fn runtime_config_version_after(floor: u64) -> Result<u64> {
-    const MAX_PERSISTED_VERSION: u64 = i64::MAX as u64;
-    anyhow::ensure!(
-        floor < MAX_PERSISTED_VERSION,
-        "runtime config version space exhausted"
-    );
-    let wall_clock = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros().min(u128::from(MAX_PERSISTED_VERSION)) as u64)
-        .unwrap_or(1)
-        .max(1);
-    let minimum = wall_clock.max(floor + 1);
-    loop {
-        let previous = LAST_RUNTIME_CONFIG_VERSION.load(Ordering::Relaxed);
-        let candidate = minimum.max(previous.saturating_add(1));
-        anyhow::ensure!(
-            candidate <= MAX_PERSISTED_VERSION,
-            "runtime config version space exhausted"
-        );
-        if LAST_RUNTIME_CONFIG_VERSION
-            .compare_exchange(previous, candidate, Ordering::SeqCst, Ordering::Relaxed)
-            .is_ok()
-        {
-            return Ok(candidate);
         }
     }
 }

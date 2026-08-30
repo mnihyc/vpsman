@@ -21,7 +21,7 @@ import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { CountryBadge } from "../components/CountryFlag";
 import { useHistoryEntryState } from "../historyEntryState";
 import { useProjectedMonitoringMetadata } from "../hooks/useProjectedMonitoringMetadata";
-import { FLEET_DETAIL_LIMIT, formatLowerBoundCount } from "../constants";
+import { formatLowerBoundCount } from "../constants";
 import {
   alertCategoryLabel,
   alertLifecycleLabel,
@@ -143,6 +143,7 @@ type VpsDetailPanelProps = {
   onOpenTerminal: (agent: AgentView) => void;
   policyAlerts: PolicyAlertRecord[];
   policyAlertsEvidenceAvailable: boolean;
+  policyAlertsTruncated: boolean;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   configurationSources: ConfigurationSourceView[];
@@ -210,6 +211,7 @@ export function VpsDetailPanel({
   onOpenTerminal,
   policyAlerts,
   policyAlertsEvidenceAvailable,
+  policyAlertsTruncated,
   runtimeConfigApplyStates,
   runtimeConfigEvidenceState,
   configurationSources,
@@ -225,7 +227,7 @@ export function VpsDetailPanel({
   );
   const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
   const policyAlertHistoryTruncated =
-    policyAlertsEvidenceAvailable && policyAlerts.length >= FLEET_DETAIL_LIMIT;
+    policyAlertsEvidenceAvailable && policyAlertsTruncated;
   const agentId = agent?.id ?? null;
   useEffect(() => {
     if (!agentId) {

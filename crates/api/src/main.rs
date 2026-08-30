@@ -83,6 +83,10 @@ mod network_ospf_controller;
 pub(crate) mod object_store {
     pub(crate) use vpsman_object_store::*;
 }
+#[path = "runtime/dashboard_projection_maintenance.rs"]
+mod dashboard_projection_maintenance;
+#[path = "runtime/dashboard_telemetry_resident.rs"]
+mod dashboard_telemetry_resident;
 #[path = "auth/privilege.rs"]
 mod privilege;
 #[path = "repository/core/repository.rs"]
@@ -97,6 +101,8 @@ mod repository_alert_notifications;
 mod repository_alert_policies;
 #[path = "repository/fleet/repository_alert_states.rs"]
 mod repository_alert_states;
+#[path = "repository/jobs/repository_artifact_deletions.rs"]
+mod repository_artifact_deletions;
 #[path = "repository/access/repository_auth.rs"]
 mod repository_auth;
 #[path = "repository/backup/repository_backup_artifacts.rs"]
@@ -167,6 +173,8 @@ mod repository_server_jobs;
 mod repository_suite_config;
 #[path = "repository/system/repository_system_dashboard.rs"]
 mod repository_system_dashboard;
+#[path = "repository/fleet/repository_telemetry_policy_activation.rs"]
+mod repository_telemetry_policy_activation;
 #[path = "repository/fleet/repository_telemetry_rollups.rs"]
 mod repository_telemetry_rollups;
 #[path = "repository/jobs/repository_terminal_sessions.rs"]
@@ -286,75 +294,10 @@ pub(crate) use security::{
 pub(crate) use util::{output_stream_name, unix_now};
 
 #[cfg(test)]
-pub(crate) async fn test_auth_context_and_headers(state: &AppState) -> (AuthContext, HeaderMap) {
-    let operator = OperatorRecord {
-        id: Uuid::new_v4(),
-        username: format!("test-admin-{}", Uuid::new_v4()),
-        password_hash: "test-only-session-issued-directly".to_string(),
-        status: "active".to_string(),
-        role: "admin".to_string(),
-        scopes: vec!["*".to_string()],
-        preferences: OperatorPreferences::default(),
-        totp_enabled: false,
-        totp_secret_ciphertext_hex: None,
-        totp_secret_nonce_hex: None,
-        totp_secret_salt_hex: None,
-        totp_last_accepted_step: None,
-        session_refresh_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
-        created_at: unix_now().to_string(),
-        disabled_at: None,
-        deleted_at: None,
-    };
-    if let Repository::Memory(memory) = &state.repo {
-        memory.operators.write().await.push(operator.clone());
-    } else {
-        panic!("test_auth_context_and_headers currently supports the unit-test repository fixture");
-    }
-    let auth = state
-        .repo
-        .issue_session(operator.view())
-        .await
-        .expect("test operator session");
-    let context = state
-        .repo
-        .authenticate_access_token(&auth.access_token)
-        .await
-        .expect("test access token auth")
-        .expect("test access token context");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        format!("Bearer {}", auth.access_token)
-            .parse()
-            .expect("test bearer header"),
-    );
-    (context, headers)
-}
-
-#[cfg(test)]
-pub(crate) async fn test_auth_headers(state: &AppState) -> HeaderMap {
-    test_auth_context_and_headers(state).await.1
-}
-
-#[cfg(test)]
-use axum::http::{header::AUTHORIZATION, HeaderMap};
-#[cfg(test)]
 use model::*;
 #[cfg(test)]
-use model_alert_notifications::*;
-#[cfg(test)]
-use model_alert_policies::*;
-#[cfg(test)]
-use repository::MemoryState;
-#[cfg(test)]
-use repository_ingest::upsert_memory_agent;
-#[cfg(test)]
-use routes_schedules::validate_schedule_request;
-#[cfg(test)]
-use security::{constant_time_eq, role_allows, validate_operator_role};
+use security::{role_allows, validate_operator_role};
 use uuid::Uuid;
-#[cfg(test)]
-use vpsman_common::{encode_json, payload_hash, OutputStream};
 
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-api", about = "VPS control-plane API")]
@@ -644,6 +587,76 @@ fn apply_usize_default(target: &mut usize, env_name: &str, value: Option<usize>)
     }
 }
 
+struct LongLivedConsumer {
+    name: &'static str,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl LongLivedConsumer {
+    fn new(name: &'static str, handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            name,
+            handle: Some(handle),
+        }
+    }
+
+    async fn wait_for_unexpected_exit(&mut self) -> Result<()> {
+        let result = self
+            .handle
+            .as_mut()
+            .context("long-lived API consumer handle was already consumed")?
+            .await;
+        drop(self.handle.take());
+        match result {
+            Ok(()) => anyhow::bail!("{} exited unexpectedly", self.name),
+            Err(error) => Err(error).with_context(|| format!("{} failed", self.name)),
+        }
+    }
+
+    fn abort(&self) {
+        if let Some(handle) = self.handle.as_ref() {
+            handle.abort();
+        }
+    }
+
+    async fn join_after_abort(mut self) -> Result<()> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match handle.await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("{} failed", self.name)),
+        }
+    }
+}
+
+async fn wait_for_background_consumer_exit(consumers: &mut [LongLivedConsumer]) -> Result<()> {
+    let waits = consumers
+        .iter_mut()
+        .map(|consumer| Box::pin(consumer.wait_for_unexpected_exit()))
+        .collect::<Vec<_>>();
+    let (result, _, _) = futures_util::future::select_all(waits).await;
+    result
+}
+
+async fn wait_for_dashboard_projection_exit(
+    task: &mut Option<dashboard_projection_maintenance::DashboardProjectionMaintenanceTask>,
+) -> Result<()> {
+    match task {
+        Some(task) => task.wait_for_unexpected_exit().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn record_runtime_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
+    if slot.is_none() {
+        *slot = Some(error);
+    } else {
+        tracing::warn!(?error, "additional API shutdown failure");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let log_writer = std::io::stderr
@@ -671,13 +684,18 @@ async fn main() -> Result<()> {
     );
     reject_api_privilege_verifier_env()?;
     let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
-    repo.canonicalize_alert_event_expressions()
+    repo.initialize_system_configuration_presets()
         .await
-        .context("failed to canonicalize persisted alert event expressions")?;
-    repo.reconcile_operational_alerts_startup()
-        .await
-        .context("failed to initialize operational Fleet-alert lifecycle")?;
+        .context("failed to initialize system configuration presets")?;
     let (events, ws_invalidations) = WsEventBus::new(256);
+    // Install one coherent projection snapshot behind the LISTEN fence before
+    // starting its durable queue publisher. Later commits notify that listener,
+    // and both owners are established before HTTP readiness.
+    let (dashboard_telemetry, mut dashboard_telemetry_resident_task) =
+        dashboard_telemetry_resident::DashboardTelemetryResident::initialize(&repo, events.clone())
+            .await?;
+    let mut dashboard_projection_maintenance_task =
+        dashboard_projection_maintenance::spawn_dashboard_projection_maintenance_task(&repo);
     let internal_token = required_internal_token(args.internal_token.as_deref())?;
     let gateway = GatewayDispatchClient::new_with_timeouts(
         args.gateway_control_url.clone(),
@@ -703,12 +721,16 @@ async fn main() -> Result<()> {
         allowed_channels = args.agent_update_allowed_channels.len(),
         "agent update release policy configured"
     );
+    let (reviewed_artifact_deletions, reviewed_artifact_deletion_inbox) =
+        repository_artifact_deletions::reviewed_artifact_deletion_channel();
     let state = AppState {
         repo,
         events,
+        dashboard_telemetry,
         internal_token: Some(internal_token),
         gateway,
-        backup_object_store: Some(backup_object_store),
+        backup_object_store: Some(backup_object_store.clone()),
+        reviewed_artifact_deletions,
         update_release_policy,
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
         artifact_max_bytes: args.artifact_max_bytes,
@@ -719,6 +741,8 @@ async fn main() -> Result<()> {
             in_flight: args.dispatcher_in_flight.clamp(1, 512),
             dispatch_ack_secs: args.dispatch_ack_secs.clamp(1, 3600),
             event_post_secs: args.event_post_secs.clamp(1, 3600),
+            internal_http_connect_secs: args.internal_http_connect_secs.clamp(1, 300),
+            internal_http_write_secs: args.internal_http_write_secs.clamp(1, 300),
             internal_http_read_secs: args.internal_http_read_secs.clamp(1, 3600),
             control_deadline_grace_secs: args.control_deadline_grace_secs.clamp(0, 3600),
             max_job_timeout_secs: args
@@ -747,39 +771,192 @@ async fn main() -> Result<()> {
             actor_id: None,
         })
         .await?;
-    backup_upload_sessions::spawn_backup_upload_session_cleanup();
-    job_traffic_import::spawn_network_traffic_import_finalizer(state.clone());
-    job_dispatcher::spawn_job_dispatcher(state.clone());
-    network_ospf_controller::spawn_automatic_ospf_controller(state.clone());
-    spawn_policy_evaluator(
-        state.repo.clone(),
-        args.policy_evaluation_interval_secs.clamp(5, 3600),
-    );
-    spawn_operational_alert_reconciler(
-        state.repo.clone(),
-        args.policy_evaluation_interval_secs.clamp(5, 3600),
-    );
-    spawn_system_metric_sampler(state.clone());
+    let mut telemetry_projector_task =
+        repository_ingest::spawn_telemetry_projector(state.repo.clone());
+    let (_telemetry_policy_activation_shutdown, telemetry_policy_activation_shutdown_rx) =
+        tokio::sync::watch::channel(false);
+    let telemetry_policy_activation_repo = state.repo.clone();
+    let mut background_consumers = vec![
+        LongLivedConsumer::new(
+            "reviewed artifact deletion consumer",
+            repository_artifact_deletions::spawn_reviewed_artifact_deletion_consumer(
+                state.repo.clone(),
+                backup_object_store,
+                reviewed_artifact_deletion_inbox,
+            ),
+        ),
+        LongLivedConsumer::new(
+            "telemetry policy activation consumer",
+            tokio::spawn(async move {
+                repository_telemetry_policy_activation::run_telemetry_policy_activation_consumer(
+                    telemetry_policy_activation_repo,
+                    telemetry_policy_activation_shutdown_rx,
+                )
+                .await
+                .expect("telemetry policy activation consumer failed");
+            }),
+        ),
+        LongLivedConsumer::new(
+            "durable job-output projection consumer",
+            repository_job_outputs::spawn_job_output_projection_consumer(state.repo.clone()),
+        ),
+        LongLivedConsumer::new(
+            "backup upload session cleanup consumer",
+            backup_upload_sessions::spawn_backup_upload_session_cleanup(),
+        ),
+        LongLivedConsumer::new(
+            "network traffic import finalizer consumer",
+            job_traffic_import::spawn_network_traffic_import_finalizer(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "runtime configuration reconciliation consumer",
+            runtime_config::spawn_runtime_config_reconciler(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "durable job dispatch consumer",
+            job_dispatcher::spawn_job_dispatcher(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "durable job deadline-expiry consumer",
+            job_dispatcher::spawn_job_deadline_expiry_consumer(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "durable job terminal-event consumer",
+            job_dispatcher::spawn_job_terminal_event_consumer(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "durable job terminal-enrichment consumer",
+            job_dispatcher::spawn_job_terminal_enrichment_consumer(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "automatic OSPF control consumer",
+            network_ospf_controller::spawn_automatic_ospf_controller(state.clone()),
+        ),
+        LongLivedConsumer::new(
+            "fleet alert policy evaluation consumer",
+            spawn_policy_evaluator(
+                state.repo.clone(),
+                args.policy_evaluation_interval_secs.clamp(5, 3600),
+            ),
+        ),
+        LongLivedConsumer::new(
+            "system metric sampling consumer",
+            spawn_system_metric_sampler(state.clone()),
+        ),
+    ];
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API on {}", args.bind))?;
     info!(bind = %args.bind, "api listening");
-    let ws_invalidation_task =
-        routes_ws::spawn_ws_invalidation_coalescer(state.events.clone(), ws_invalidations);
-    let server_result = axum::serve(
-        listener,
-        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
-    ws_invalidation_task.abort();
-    match ws_invalidation_task.await {
-        Err(error) if error.is_cancelled() => {}
-        Err(error) => return Err(error).context("WebSocket invalidation task failed"),
-        Ok(()) => {}
+    background_consumers.push(LongLivedConsumer::new(
+        "WebSocket invalidation coalescing consumer",
+        routes_ws::spawn_ws_invalidation_coalescer(state.events.clone(), ws_invalidations),
+    ));
+    let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = http_shutdown_rx.await;
+        }),
+    );
+    tokio::pin!(server);
+
+    enum ApiRuntimeExit {
+        ShutdownSignal,
+        Http(std::io::Result<()>),
+        Consumer(Result<()>),
     }
-    server_result?;
-    Ok(())
+
+    let runtime_exit = tokio::select! {
+        _ = shutdown_signal() => ApiRuntimeExit::ShutdownSignal,
+        result = &mut server => ApiRuntimeExit::Http(result),
+        result = wait_for_background_consumer_exit(&mut background_consumers) => {
+            ApiRuntimeExit::Consumer(result)
+        }
+        result = wait_for_dashboard_projection_exit(
+            &mut dashboard_projection_maintenance_task,
+        ) => ApiRuntimeExit::Consumer(result),
+        result = dashboard_telemetry_resident_task.wait_for_unexpected_exit() => {
+            ApiRuntimeExit::Consumer(result)
+        }
+        result = telemetry_projector_task.wait_for_unexpected_exit() => {
+            ApiRuntimeExit::Consumer(result)
+        }
+    };
+
+    let mut runtime_error = None;
+    let http_completed = match runtime_exit {
+        ApiRuntimeExit::ShutdownSignal => false,
+        ApiRuntimeExit::Http(Ok(())) => {
+            record_runtime_error(
+                &mut runtime_error,
+                anyhow::anyhow!("API HTTP server exited unexpectedly"),
+            );
+            true
+        }
+        ApiRuntimeExit::Http(Err(error)) => {
+            record_runtime_error(
+                &mut runtime_error,
+                anyhow::Error::new(error).context("API HTTP server failed"),
+            );
+            true
+        }
+        ApiRuntimeExit::Consumer(Ok(())) => {
+            record_runtime_error(
+                &mut runtime_error,
+                anyhow::anyhow!("long-lived API consumer exited unexpectedly"),
+            );
+            false
+        }
+        ApiRuntimeExit::Consumer(Err(error)) => {
+            record_runtime_error(&mut runtime_error, error);
+            false
+        }
+    };
+
+    if !http_completed {
+        let _ = http_shutdown_tx.send(());
+    }
+    if let Some(task) = dashboard_projection_maintenance_task.as_ref() {
+        task.request_shutdown();
+    }
+    dashboard_telemetry_resident_task.request_shutdown();
+    telemetry_projector_task.request_shutdown();
+    for consumer in &background_consumers {
+        consumer.abort();
+    }
+
+    if !http_completed {
+        if let Err(error) = server.await {
+            record_runtime_error(
+                &mut runtime_error,
+                anyhow::Error::new(error).context("API HTTP server failed during shutdown"),
+            );
+        }
+    }
+    if let Some(task) = dashboard_projection_maintenance_task {
+        if let Err(error) = task.shutdown().await {
+            record_runtime_error(&mut runtime_error, error);
+        }
+    }
+    if let Err(error) = dashboard_telemetry_resident_task.shutdown().await {
+        record_runtime_error(&mut runtime_error, error);
+    }
+    if let Err(error) = telemetry_projector_task.shutdown().await {
+        record_runtime_error(&mut runtime_error, error);
+    }
+    for consumer in background_consumers {
+        if let Err(error) = consumer.join_after_abort().await {
+            record_runtime_error(&mut runtime_error, error);
+        }
+    }
+    match runtime_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 async fn shutdown_signal() {
@@ -804,7 +981,7 @@ async fn shutdown_signal() {
     }
 }
 
-fn spawn_system_metric_sampler(state: AppState) {
+fn spawn_system_metric_sampler(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -813,36 +990,22 @@ fn spawn_system_metric_sampler(state: AppState) {
                 tracing::warn!(%error, "failed to record system dashboard metric sample");
             }
         }
-    });
+    })
 }
 
-fn spawn_policy_evaluator(repo: Repository, interval_secs: u64) {
+fn spawn_policy_evaluator(repo: Repository, interval_secs: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        let mut recovery = time::interval(std::time::Duration::from_secs(interval_secs));
         loop {
-            ticker.tick().await;
-            if let Err(error) = repo.evaluate_policy_rules().await {
+            tokio::select! {
+                _ = recovery.tick() => {}
+                _ = repository_alert_policies::wait_for_policy_evaluator_wake() => {}
+            }
+            if let Err(error) = repo.drain_policy_rule_backlog().await {
                 tracing::warn!(%error, "failed to evaluate fleet alert policies");
             }
         }
-    });
-}
-
-fn spawn_operational_alert_reconciler(repo: Repository, interval_secs: u64) {
-    tokio::spawn(async move {
-        let mut ticker = time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-        // Startup reconciliation completed synchronously before the listener was
-        // bound, so avoid an immediate duplicate pass.
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            if let Err(error) = repo.reconcile_operational_alerts().await {
-                tracing::warn!(%error, "failed to reconcile operational Fleet-alert lifecycle");
-            }
-        }
-    });
+    })
 }
 
 fn required_internal_token(value: Option<&str>) -> Result<String> {
@@ -955,9 +1118,6 @@ where
 #[path = "runtime/tests_main.rs"]
 mod tests;
 #[cfg(test)]
-#[path = "monitoring/tests_alerts.rs"]
-mod tests_alerts;
-#[cfg(test)]
 #[path = "auth/tests_auth.rs"]
 mod tests_auth;
 #[cfg(test)]
@@ -967,20 +1127,11 @@ mod tests_backups;
 #[path = "runtime/tests_config.rs"]
 mod tests_config;
 #[cfg(test)]
-#[path = "monitoring/tests_dashboard.rs"]
-mod tests_dashboard;
-#[cfg(test)]
 #[path = "jobs/tests_files.rs"]
 mod tests_files;
 #[cfg(test)]
-#[path = "monitoring/tests_history.rs"]
-mod tests_history;
-#[cfg(test)]
 #[path = "auth/tests_identity.rs"]
 mod tests_identity;
-#[cfg(test)]
-#[path = "jobs/tests_job_approvals.rs"]
-mod tests_job_approvals;
 #[cfg(test)]
 #[path = "repository/core/tests_migrations.rs"]
 mod tests_migrations;
@@ -993,12 +1144,6 @@ mod tests_network;
 #[cfg(test)]
 #[path = "monitoring/tests_network_observations.rs"]
 mod tests_network_observations;
-#[cfg(test)]
-#[path = "monitoring/tests_network_ospf_updates.rs"]
-mod tests_network_ospf_updates;
-#[cfg(test)]
-#[path = "monitoring/tests_network_telemetry.rs"]
-mod tests_network_telemetry;
 #[cfg(test)]
 #[path = "backup/tests_object_store.rs"]
 mod tests_object_store;
@@ -1015,14 +1160,8 @@ mod tests_process;
 #[path = "backup/tests_restores.rs"]
 mod tests_restores;
 #[cfg(test)]
-#[path = "jobs/tests_rollouts.rs"]
-mod tests_rollouts;
-#[cfg(test)]
 #[path = "jobs/tests_schedules.rs"]
 mod tests_schedules;
 #[cfg(test)]
 #[path = "jobs/tests_terminal.rs"]
 mod tests_terminal;
-#[cfg(test)]
-#[path = "jobs/tests_update_releases.rs"]
-mod tests_update_releases;

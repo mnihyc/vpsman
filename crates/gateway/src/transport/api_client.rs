@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex as StdMutex, RwLock as StdRwLock,
@@ -15,6 +17,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, Mutex, Notify, OwnedSemaphorePermit, Semaphore},
+    task::{Id, JoinSet},
     time::{self, sleep, Duration},
 };
 use tracing::warn;
@@ -27,8 +30,15 @@ use vpsman_common::{
     OutputStream,
 };
 
-type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
-type GatewaySessionRejectionHandler = Arc<dyn Fn(String, uuid::Uuid) + Send + Sync + 'static>;
+type CriticalForwardingFailureFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type CriticalForwardingFailureHandler =
+    Arc<dyn Fn(String, &'static str) -> CriticalForwardingFailureFuture + Send + Sync + 'static>;
+type GatewaySessionRejectionFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type GatewaySessionRejectionHandler =
+    Arc<dyn Fn(String, uuid::Uuid) -> GatewaySessionRejectionFuture + Send + Sync + 'static>;
+type TelemetryRouteRefreshFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type TelemetryRouteRefreshHandler =
+    Arc<dyn Fn(String, uuid::Uuid) -> TelemetryRouteRefreshFuture + Send + Sync + 'static>;
 const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V2\n";
 const SPOOL_SCHEMA_VERSION: u16 = 2;
 const COMMAND_OUTPUT_PATH: &str = "/internal/v1/gateway/command-output";
@@ -84,29 +94,51 @@ impl GatewayControlClient {
             forwarder,
             timeouts,
         };
-        client.forwarder.start_spool_replay(client.timeouts.clone());
         client
+    }
+
+    pub(crate) fn start_forward_consumers(&self) -> tokio::task::JoinHandle<()> {
+        self.forwarder
+            .start_forward_consumers(self.timeouts.clone())
     }
 
     pub(crate) fn forward_metrics(&self) -> Arc<GatewayForwardMetrics> {
         self.forwarder.metrics.clone()
     }
 
-    pub(crate) fn set_critical_failure_handler<F>(&self, handler: F)
+    pub(crate) fn set_critical_failure_handler<F, Fut>(&self, handler: F)
     where
-        F: Fn(String, &'static str) + Send + Sync + 'static,
+        F: Fn(String, &'static str) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         if let Ok(mut slot) = self.forwarder.critical_failure_handler.write() {
-            *slot = Some(Arc::new(handler));
+            *slot = Some(Arc::new(move |client_id, reason| {
+                Box::pin(handler(client_id, reason))
+            }));
         }
     }
 
-    pub(crate) fn set_session_rejection_handler<F>(&self, handler: F)
+    pub(crate) fn set_session_rejection_handler<F, Fut>(&self, handler: F)
     where
-        F: Fn(String, uuid::Uuid) + Send + Sync + 'static,
+        F: Fn(String, uuid::Uuid) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         if let Ok(mut slot) = self.forwarder.session_rejection_handler.write() {
-            *slot = Some(Arc::new(handler));
+            *slot = Some(Arc::new(move |client_id, gateway_session_id| {
+                Box::pin(handler(client_id, gateway_session_id))
+            }));
+        }
+    }
+
+    pub(crate) fn set_telemetry_route_refresh_handler<F, Fut>(&self, handler: F)
+    where
+        F: Fn(String, uuid::Uuid) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        if let Ok(mut slot) = self.forwarder.telemetry_route_refresh_handler.write() {
+            *slot = Some(Arc::new(move |client_id, gateway_session_id| {
+                Box::pin(handler(client_id, gateway_session_id))
+            }));
         }
     }
 
@@ -324,29 +356,121 @@ impl Default for GatewaySpoolConfig {
 }
 
 struct GatewayEventForwarder {
-    queues: Mutex<HashMap<String, GatewayForwardQueue>>,
+    queues: Arc<Mutex<HashMap<String, GatewayForwardQueue>>>,
     telemetry_pending: Arc<Mutex<GatewayTelemetryPending>>,
-    telemetry_admission: Arc<Semaphore>,
+    telemetry_http_owners: Arc<Semaphore>,
     critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
     session_rejection_handler: Arc<StdRwLock<Option<GatewaySessionRejectionHandler>>>,
+    telemetry_route_refresh_handler: Arc<StdRwLock<Option<TelemetryRouteRefreshHandler>>>,
     metrics: Arc<GatewayForwardMetrics>,
     spool: Arc<GatewayForwardSpool>,
     runtime_config: Arc<GatewayForwardRuntimeConfig>,
     enqueue_seq: AtomicU64,
+    queue_owner_seq: AtomicU64,
+    telemetry_drain_seq: AtomicU64,
+    consumer_health: Arc<GatewayConsumerHealth>,
+    consumer_commands: mpsc::UnboundedSender<GatewayConsumerCommand>,
+    consumer_command_rx: StdMutex<Option<mpsc::UnboundedReceiver<GatewayConsumerCommand>>>,
+    accepting: AtomicBool,
+}
+
+#[derive(Default)]
+struct GatewayConsumerHealth {
+    failed: AtomicBool,
+    changed: Notify,
+}
+
+impl GatewayConsumerHealth {
+    fn fail(&self) {
+        if !self.failed.swap(true, Ordering::AcqRel) {
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    async fn failed(&self) {
+        if self.is_failed() {
+            return;
+        }
+        let changed = self.changed.notified();
+        if self.is_failed() {
+            return;
+        }
+        changed.await;
+    }
 }
 
 #[derive(Default)]
 struct GatewayTelemetryPending {
-    // A target in `draining_targets` owns exactly one detached drain task (or
-    // its one queued launch token). Further samples replace its single event
-    // slot instead of allocating more queue tokens or mutex waiters.
+    // A target in `draining_targets` owns exactly one supervisor-joined drain
+    // task (or its one queued launch token). Further samples replace its single
+    // event slot instead of allocating more queue tokens or mutex waiters.
     events: HashMap<String, GatewayForwardEvent>,
-    draining_targets: HashSet<String>,
+    draining_targets: HashMap<String, GatewayTelemetryDrainOwner>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GatewayTelemetryDrainOwner {
+    token: u64,
+    phase: GatewayTelemetryDrainPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayTelemetryDrainPhase {
+    Queued,
+    Running,
+}
+
+#[derive(Clone)]
+struct GatewayTelemetryDrainContext {
+    telemetry_pending: Arc<Mutex<GatewayTelemetryPending>>,
+    telemetry_http_owners: Arc<Semaphore>,
+    metrics: Arc<GatewayForwardMetrics>,
+    critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
+    session_rejection_handler: Arc<StdRwLock<Option<GatewaySessionRejectionHandler>>>,
+    telemetry_route_refresh_handler: Arc<StdRwLock<Option<TelemetryRouteRefreshHandler>>>,
+    spool: Arc<GatewayForwardSpool>,
+    runtime_config: Arc<GatewayForwardRuntimeConfig>,
+    timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
+    consumer_health: Arc<GatewayConsumerHealth>,
+    consumer_commands: mpsc::UnboundedSender<GatewayConsumerCommand>,
+}
+
+enum GatewayConsumerCommand {
+    StartForwardQueue {
+        target_key: String,
+        owner_token: u64,
+        receiver: mpsc::Receiver<GatewayForwardQueueItem>,
+        queues: Arc<Mutex<HashMap<String, GatewayForwardQueue>>>,
+        context: GatewayTelemetryDrainContext,
+    },
+    StartTelemetryDrain {
+        target_key: String,
+        drain_token: u64,
+        context: GatewayTelemetryDrainContext,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum GatewayConsumerIdentity {
+    SpoolReplay,
+    ForwardQueue {
+        target_key: String,
+        owner_token: u64,
+    },
+    TelemetryDrain {
+        target_key: String,
+        drain_token: u64,
+    },
 }
 
 struct GatewayForwardQueue {
     sender: mpsc::Sender<GatewayForwardQueueItem>,
     last_enqueue_unix: u64,
+    owner_token: u64,
 }
 
 struct GatewayForwardSpool {
@@ -354,6 +478,9 @@ struct GatewayForwardSpool {
     ram_bytes: AtomicU64,
     disk_bytes: AtomicU64,
     accounted_spool_files: StdMutex<HashMap<PathBuf, u64>>,
+    replay_owners: Arc<StdMutex<HashSet<PathBuf>>>,
+    replay_blocked_targets: Arc<StdMutex<HashSet<String>>>,
+    replay_ready: Arc<Notify>,
     shutdown_requested: AtomicBool,
     shutdown_notify: Notify,
 }
@@ -381,16 +508,34 @@ pub(crate) struct GatewayForwardMetrics {
     unhealthy: AtomicBool,
 }
 
-struct GatewayTelemetryAdmissionPermit {
+struct GatewayTelemetryHttpOwner {
     _permit: OwnedSemaphorePermit,
     metrics: Arc<GatewayForwardMetrics>,
 }
 
-struct GatewayTelemetryAdmissionWaiter {
+struct GatewayTelemetryHttpAdmission {
+    owners: Arc<Semaphore>,
+    metrics: Arc<GatewayForwardMetrics>,
+    initial_owner: Option<GatewayTelemetryHttpOwner>,
+}
+
+enum GatewayTelemetryHttpOwnerWait {
+    Acquired(GatewayTelemetryHttpOwner),
+    Shutdown,
+    Expired,
+}
+
+enum GatewayTelemetryRetryWait {
+    Ready,
+    Shutdown,
+    Expired,
+}
+
+struct GatewayTelemetryHttpWaiter {
     metrics: Arc<GatewayForwardMetrics>,
 }
 
-impl Drop for GatewayTelemetryAdmissionPermit {
+impl Drop for GatewayTelemetryHttpOwner {
     fn drop(&mut self) {
         self.metrics
             .telemetry_admission_active
@@ -398,7 +543,7 @@ impl Drop for GatewayTelemetryAdmissionPermit {
     }
 }
 
-impl Drop for GatewayTelemetryAdmissionWaiter {
+impl Drop for GatewayTelemetryHttpWaiter {
     fn drop(&mut self) {
         self.metrics
             .telemetry_admission_waiting
@@ -506,9 +651,11 @@ enum GatewayForwardQueueItem {
         disk_bytes: u64,
         kind: GatewayForwardEventKind,
         critical: bool,
+        _replay_owner: Option<GatewaySpoolReplayOwner>,
     },
     Telemetry {
         created_unix: u64,
+        drain_token: u64,
     },
 }
 
@@ -527,6 +674,43 @@ struct GatewayForwardEventHandle {
     ram_bytes: u64,
     spool_path: Option<PathBuf>,
     spool_bytes: u64,
+    _replay_owner: Option<GatewaySpoolReplayOwner>,
+}
+
+#[derive(Debug)]
+struct GatewaySpoolReplayOwner {
+    path: PathBuf,
+    target_key: String,
+    owners: Arc<StdMutex<HashSet<PathBuf>>>,
+    blocked_targets: Arc<StdMutex<HashSet<String>>>,
+    ready: Arc<Notify>,
+    wake_on_drop: bool,
+}
+
+impl Drop for GatewaySpoolReplayOwner {
+    fn drop(&mut self) {
+        let released = self
+            .owners
+            .lock()
+            .map(|mut owners| owners.remove(&self.path))
+            .unwrap_or(false);
+        if released && self.wake_on_drop {
+            let was_blocked = self
+                .blocked_targets
+                .lock()
+                .map(|mut targets| targets.remove(&self.target_key))
+                .unwrap_or(false);
+            if was_blocked {
+                self.ready.notify_one();
+            }
+        }
+    }
+}
+
+impl GatewaySpoolReplayOwner {
+    fn defer_until_target_space(&mut self) {
+        self.wake_on_drop = false;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -546,7 +730,6 @@ struct SpooledGatewayForwardHeader {
     kind: GatewayForwardEventKind,
     critical: bool,
     created_unix: u64,
-    #[serde(default)]
     enqueue_seq: u64,
     body_sha256_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -715,16 +898,24 @@ impl GatewayEventForwarder {
         metrics
             .telemetry_admission_limit
             .store(telemetry_in_flight as u64, Ordering::Relaxed);
+        let (consumer_commands, consumer_command_rx) = mpsc::unbounded_channel();
         Self {
-            queues: Mutex::default(),
+            queues: Arc::default(),
             telemetry_pending: Arc::default(),
-            telemetry_admission: Arc::new(Semaphore::new(telemetry_in_flight)),
+            telemetry_http_owners: Arc::new(Semaphore::new(telemetry_in_flight)),
             critical_failure_handler: Arc::default(),
             session_rejection_handler: Arc::default(),
+            telemetry_route_refresh_handler: Arc::default(),
             metrics,
             spool,
             runtime_config: Arc::new(GatewayForwardRuntimeConfig::new(forward_config)),
             enqueue_seq: AtomicU64::new(enqueue_seq),
+            queue_owner_seq: AtomicU64::new(0),
+            telemetry_drain_seq: AtomicU64::new(0),
+            consumer_health: Arc::default(),
+            consumer_commands,
+            consumer_command_rx: StdMutex::new(Some(consumer_command_rx)),
+            accepting: AtomicBool::new(true),
         }
     }
 
@@ -738,62 +929,73 @@ impl GatewayEventForwarder {
             .saturating_add(1)
     }
 
-    fn start_spool_replay(self: &Arc<Self>, timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>) {
-        if !self.spool.config.enabled {
-            return;
-        }
+    fn start_forward_consumers(
+        self: &Arc<Self>,
+        timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
+    ) -> tokio::task::JoinHandle<()> {
         let forwarder = self.clone();
-        tokio::spawn(async move {
-            loop {
-                let saw_pending = forwarder.replay_pending_spool_once(timeouts.clone()).await;
-                if forwarder.spool.shutdown_requested() {
-                    break;
-                }
-                while forwarder
-                    .metrics
-                    .current_queue_depth
-                    .load(Ordering::Relaxed)
-                    > 0
-                    && !forwarder.spool.shutdown_requested()
-                {
-                    sleep(Duration::from_millis(250)).await;
-                }
-                if !saw_pending {
-                    sleep(Duration::from_secs(1)).await;
-                }
-            }
-        });
+        let command_rx = self
+            .consumer_command_rx
+            .lock()
+            .expect("gateway forward consumer receiver mutex is available")
+            .take()
+            .expect("gateway forward consumers are started exactly once");
+        tokio::spawn(run_gateway_forward_consumers(
+            forwarder, timeouts, command_rx,
+        ))
     }
 
     async fn replay_pending_spool_once(
         &self,
         timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> bool {
-        let items = self.spool.pending_items().await;
-        let saw_pending = !items.is_empty();
-        for (target_key, item) in items {
-            if let Err(error) = self
+        let mut blocked_targets = self.spool.replay_blocked_targets();
+        let items = self.spool.pending_items_excluding(&blocked_targets).await;
+        let mut accepted = false;
+        for (target_key, mut item) in items {
+            if blocked_targets.contains(&target_key) {
+                item.defer_spool_replay_until_target_space();
+                continue;
+            }
+            self.spool.block_replay_target(&target_key);
+            match self
                 .enqueue_queue_item(target_key.clone(), item, timeouts.clone())
                 .await
             {
-                warn!(
-                    %error,
-                    target_key,
-                    "failed to enqueue spooled gateway event for replay"
-                );
+                Ok(()) => {
+                    self.spool.clear_replay_target_block(&target_key);
+                    accepted = true;
+                }
+                Err(error) => {
+                    // Once an earlier durable event cannot enter this target's
+                    // queue, later sequence values must not overtake it. Other
+                    // targets remain independently eligible in this same scan.
+                    blocked_targets.insert(target_key.clone());
+                    warn!(
+                        %error,
+                        target_key,
+                        "failed to enqueue spooled gateway event for replay"
+                    );
+                }
             }
         }
-        saw_pending
+        accepted
     }
 
     async fn shutdown_flush(&self, timeout: Duration) {
-        self.spool.request_shutdown();
+        // Listener and connection owners are drained before this is called, so
+        // closing admission cannot reject a legitimate producer. Keep replay
+        // and every accepted exact-target consumer alive for the flush window.
+        self.accepting.store(false, Ordering::Release);
         let deadline = time::Instant::now() + timeout;
-        while self.metrics.current_queue_depth.load(Ordering::Relaxed) > 0
+        while (self.metrics.current_queue_depth.load(Ordering::Relaxed) > 0
+            || self.spool.disk_bytes.load(Ordering::Relaxed) > 0)
             && time::Instant::now() < deadline
+            && !self.consumer_health.is_failed()
         {
             sleep(Duration::from_millis(100)).await;
         }
+        self.spool.request_shutdown();
     }
 
     async fn enqueue(
@@ -802,6 +1004,9 @@ impl GatewayEventForwarder {
         event: GatewayForwardEvent,
         timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
+        if !self.accepting.load(Ordering::Acquire) {
+            anyhow::bail!("gateway_forwarder_shutdown");
+        }
         if event.kind == GatewayForwardEventKind::Telemetry {
             return self.enqueue_telemetry(target_key, event, timeouts).await;
         }
@@ -837,24 +1042,41 @@ impl GatewayEventForwarder {
             );
             return Ok(());
         }
-        if !pending.draining_targets.insert(target_key.clone()) {
+        if pending.draining_targets.contains_key(&target_key) {
             drop(pending);
             self.record_telemetry_pending_without_queue_token(created_unix);
             return Ok(());
         }
+        let drain_token = self
+            .telemetry_drain_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        pending.draining_targets.insert(
+            target_key.clone(),
+            GatewayTelemetryDrainOwner {
+                token: drain_token,
+                phase: GatewayTelemetryDrainPhase::Queued,
+            },
+        );
         drop(pending);
 
         if let Err(error) = self
             .enqueue_queue_item(
                 target_key.clone(),
-                GatewayForwardQueueItem::Telemetry { created_unix },
+                GatewayForwardQueueItem::Telemetry {
+                    created_unix,
+                    drain_token,
+                },
                 timeouts,
             )
             .await
         {
             let removed = {
                 let mut pending = self.telemetry_pending.lock().await;
-                pending.draining_targets.remove(&target_key);
+                if telemetry_drain_owner_is(pending.draining_targets.get(&target_key), drain_token)
+                {
+                    pending.draining_targets.remove(&target_key);
+                }
                 pending.events.remove(&target_key)
             };
             if let Some(event) = removed {
@@ -1015,44 +1237,67 @@ impl GatewayEventForwarder {
     ) -> Result<()> {
         let event_unix = item.created_unix();
         let event_enqueue_seq = item.enqueue_seq();
-        let sender = {
+        let enqueue_unix = unix_now();
+        let (sender, queue_owner_token) = {
             let mut queues = self.queues.lock().await;
-            self.reap_idle_queues_locked(&mut queues, unix_now());
             if !queues.contains_key(&target_key) {
                 let (sender, receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
+                let owner_token = self
+                    .queue_owner_seq
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                let queues_owner = self.queues.clone();
                 let metrics = self.metrics.clone();
                 let telemetry_pending = self.telemetry_pending.clone();
-                let telemetry_admission = self.telemetry_admission.clone();
+                let telemetry_http_owners = self.telemetry_http_owners.clone();
                 let critical_failure_handler = self.critical_failure_handler.clone();
                 let session_rejection_handler = self.session_rejection_handler.clone();
+                let telemetry_route_refresh_handler = self.telemetry_route_refresh_handler.clone();
                 let spool = self.spool.clone();
                 let runtime_config = self.runtime_config.clone();
-                self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(run_forward_queue(
-                    target_key.clone(),
-                    receiver,
+                let telemetry_drain_context = GatewayTelemetryDrainContext {
                     telemetry_pending,
-                    telemetry_admission,
-                    metrics,
+                    telemetry_http_owners,
+                    metrics: metrics.clone(),
                     critical_failure_handler,
                     session_rejection_handler,
-                    spool,
+                    telemetry_route_refresh_handler,
+                    spool: spool.clone(),
                     runtime_config,
                     timeouts,
-                ));
+                    consumer_health: self.consumer_health.clone(),
+                    consumer_commands: self.consumer_commands.clone(),
+                };
                 queues.insert(
                     target_key.clone(),
                     GatewayForwardQueue {
-                        sender,
-                        last_enqueue_unix: event_unix,
+                        sender: sender.clone(),
+                        last_enqueue_unix: enqueue_unix,
+                        owner_token,
                     },
                 );
+                if self
+                    .consumer_commands
+                    .send(GatewayConsumerCommand::StartForwardQueue {
+                        target_key: target_key.clone(),
+                        owner_token,
+                        receiver,
+                        queues: queues_owner,
+                        context: telemetry_drain_context,
+                    })
+                    .is_err()
+                {
+                    queues.remove(&target_key);
+                    self.consumer_health.fail();
+                    anyhow::bail!("gateway_forward_consumer_unavailable");
+                }
+                self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
             }
             let queue = queues
                 .get_mut(&target_key)
                 .expect("queue sender exists after creation");
-            queue.last_enqueue_unix = event_unix;
-            queue.sender.clone()
+            queue.last_enqueue_unix = enqueue_unix;
+            (queue.sender.clone(), queue.owner_token)
         };
         let previous_depth = self
             .metrics
@@ -1068,8 +1313,12 @@ impl GatewayEventForwarder {
                 self.metrics.queued_events.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(item))
-            | Err(mpsc::error::TrySendError::Closed(item)) => {
+            Err(error) => {
+                let queue_closed = matches!(&error, mpsc::error::TrySendError::Closed(_));
+                let item = error.into_inner();
+                if queue_closed {
+                    remove_forward_queue_owner(&self.queues, &target_key, queue_owner_token).await;
+                }
                 let previous = self
                     .metrics
                     .current_queue_depth
@@ -1118,8 +1367,14 @@ impl GatewayEventForwarder {
                         path,
                         kind,
                         critical,
+                        _replay_owner: mut replay_owner,
                         ..
                     } => {
+                        if !queue_closed {
+                            if let Some(owner) = replay_owner.as_mut() {
+                                owner.defer_until_target_space();
+                            }
+                        }
                         self.metrics
                             .record_drop(kind, GatewayForwardDropReason::TargetQueueFull);
                         if critical {
@@ -1127,7 +1382,8 @@ impl GatewayEventForwarder {
                             self.notify_critical_failure(
                                 &target_key,
                                 GatewayForwardDropReason::TargetQueueFull,
-                            );
+                            )
+                            .await;
                         }
                         warn!(
                             path = %path.display(),
@@ -1155,18 +1411,6 @@ impl GatewayEventForwarder {
         spool_event_for_later_replay(&self.spool, target_key, event, reason).await
     }
 
-    fn reap_idle_queues_locked(
-        &self,
-        queues: &mut HashMap<String, GatewayForwardQueue>,
-        now_unix: u64,
-    ) {
-        queues.retain(|_, queue| {
-            let idle = now_unix.saturating_sub(queue.last_enqueue_unix) >= QUEUE_IDLE_REAP_SECS;
-            let empty = queue.sender.capacity() == queue.sender.max_capacity();
-            !(idle && empty)
-        });
-    }
-
     async fn drop_enqueue_event(
         &self,
         target_key: &str,
@@ -1176,7 +1420,7 @@ impl GatewayEventForwarder {
         self.record_drop(&event, reason);
         if event.critical {
             self.record_critical_failure(reason);
-            self.notify_critical_failure(target_key, reason);
+            self.notify_critical_failure(target_key, reason).await;
             anyhow::bail!(
                 "gateway_forwarder_critical_event_dropped:{}:{}",
                 reason.as_str(),
@@ -1200,11 +1444,14 @@ impl GatewayEventForwarder {
         self.metrics.record_critical_failure(reason);
     }
 
-    fn notify_critical_failure(&self, target_key: &str, reason: GatewayForwardDropReason) {
-        if let Ok(slot) = self.critical_failure_handler.read() {
-            if let Some(handler) = slot.as_ref() {
-                handler(target_key.to_string(), reason.as_str());
-            }
+    async fn notify_critical_failure(&self, target_key: &str, reason: GatewayForwardDropReason) {
+        let handler = self
+            .critical_failure_handler
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+        if let Some(handler) = handler {
+            handler(target_key.to_string(), reason.as_str()).await;
         }
     }
 }
@@ -1216,6 +1463,9 @@ impl GatewayForwardSpool {
             ram_bytes: AtomicU64::new(0),
             disk_bytes: AtomicU64::new(0),
             accounted_spool_files: StdMutex::new(HashMap::new()),
+            replay_owners: Arc::new(StdMutex::new(HashSet::new())),
+            replay_blocked_targets: Arc::new(StdMutex::new(HashSet::new())),
+            replay_ready: Arc::new(Notify::new()),
             shutdown_requested: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
         }
@@ -1377,6 +1627,9 @@ impl GatewayForwardSpool {
                 )
             });
         }
+        // New durable work wakes the consumer, but it does not override an
+        // exact target that is waiting for queue space.
+        self.replay_ready.notify_one();
         Ok(GatewayForwardQueueItem::Spooled {
             path: final_path,
             created_unix: event.created_unix,
@@ -1384,10 +1637,19 @@ impl GatewayForwardSpool {
             disk_bytes,
             kind: event.kind,
             critical: event.critical,
+            _replay_owner: None,
         })
     }
 
+    #[cfg(test)]
     async fn pending_items(&self) -> Vec<(String, GatewayForwardQueueItem)> {
+        self.pending_items_excluding(&HashSet::new()).await
+    }
+
+    async fn pending_items_excluding(
+        &self,
+        blocked_targets: &HashSet<String>,
+    ) -> Vec<(String, GatewayForwardQueueItem)> {
         let mut candidates = Vec::new();
         let pending_dir = self.pending_dir();
         let Ok(mut entries) = tokio::fs::read_dir(&pending_dir).await else {
@@ -1413,6 +1675,9 @@ impl GatewayForwardSpool {
                 warn!(path = %path.display(), "ignoring malformed gateway spool filename");
                 continue;
             };
+            if blocked_targets.contains(&target_key) {
+                continue;
+            }
             let disk_bytes = metadata.len();
             let event = match self.load_spooled_event(&path).await {
                 Ok(event) => event,
@@ -1463,6 +1728,11 @@ impl GatewayForwardSpool {
                 );
                 continue;
             }
+            let Some(replay_owner) =
+                self.claim_replay_owner(&candidate.path, &candidate.target_key)
+            else {
+                continue;
+            };
             items.push((
                 candidate.target_key,
                 GatewayForwardQueueItem::Spooled {
@@ -1472,10 +1742,56 @@ impl GatewayForwardSpool {
                     disk_bytes: candidate.disk_bytes,
                     kind: candidate.kind,
                     critical: candidate.critical,
+                    _replay_owner: Some(replay_owner),
                 },
             ));
         }
         items
+    }
+
+    fn claim_replay_owner(&self, path: &Path, target_key: &str) -> Option<GatewaySpoolReplayOwner> {
+        let mut owners = self.replay_owners.lock().ok()?;
+        if !owners.insert(path.to_path_buf()) {
+            return None;
+        }
+        Some(GatewaySpoolReplayOwner {
+            path: path.to_path_buf(),
+            target_key: target_key.to_string(),
+            owners: self.replay_owners.clone(),
+            blocked_targets: self.replay_blocked_targets.clone(),
+            ready: self.replay_ready.clone(),
+            wake_on_drop: true,
+        })
+    }
+
+    fn mark_replay_target_ready(&self, target_key: &str) {
+        let was_blocked = self
+            .replay_blocked_targets
+            .lock()
+            .map(|mut targets| targets.remove(target_key))
+            .unwrap_or(false);
+        if was_blocked {
+            self.replay_ready.notify_one();
+        }
+    }
+
+    fn replay_blocked_targets(&self) -> HashSet<String> {
+        self.replay_blocked_targets
+            .lock()
+            .map(|targets| targets.clone())
+            .unwrap_or_default()
+    }
+
+    fn block_replay_target(&self, target_key: &str) {
+        if let Ok(mut targets) = self.replay_blocked_targets.lock() {
+            targets.insert(target_key.to_string());
+        }
+    }
+
+    fn clear_replay_target_block(&self, target_key: &str) {
+        if let Ok(mut targets) = self.replay_blocked_targets.lock() {
+            targets.remove(target_key);
+        }
     }
 
     async fn load_spooled_event(&self, path: &Path) -> Result<GatewayForwardEvent> {
@@ -1906,119 +2222,455 @@ impl GatewayForwardCriticalFailureAtomicCounters {
     }
 }
 
-async fn run_forward_queue(
-    target_key: String,
-    mut receiver: mpsc::Receiver<GatewayForwardQueueItem>,
-    telemetry_pending: Arc<Mutex<GatewayTelemetryPending>>,
-    telemetry_admission: Arc<Semaphore>,
-    metrics: Arc<GatewayForwardMetrics>,
-    critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
-    session_rejection_handler: Arc<StdRwLock<Option<GatewaySessionRejectionHandler>>>,
-    spool: Arc<GatewayForwardSpool>,
-    runtime_config: Arc<GatewayForwardRuntimeConfig>,
+async fn run_gateway_forward_consumers(
+    forwarder: Arc<GatewayEventForwarder>,
+    timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
+    mut commands: mpsc::UnboundedReceiver<GatewayConsumerCommand>,
+) {
+    let mut consumers = JoinSet::new();
+    let mut identities = HashMap::<Id, GatewayConsumerIdentity>::new();
+    spawn_gateway_consumer(
+        &mut consumers,
+        &mut identities,
+        GatewayConsumerCommandOrReplay::SpoolReplay {
+            forwarder: forwarder.clone(),
+            timeouts,
+        },
+    );
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = forwarder.spool.notified_shutdown() => break,
+            _ = forwarder.consumer_health.failed() => break,
+            command = commands.recv() => {
+                let Some(command) = command else {
+                    forwarder.consumer_health.fail();
+                    break;
+                };
+                spawn_gateway_consumer(
+                    &mut consumers,
+                    &mut identities,
+                    GatewayConsumerCommandOrReplay::Command(command),
+                );
+            }
+            completed = consumers.join_next_with_id(), if !consumers.is_empty() => {
+                if observe_gateway_consumer_completion(
+                    completed,
+                    &mut identities,
+                    &forwarder,
+                    false,
+                ).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    commands.close();
+    forwarder.accepting.store(false, Ordering::Release);
+    forwarder.spool.request_shutdown();
+    // Dropping the exact queue senders lets each queue owner consume work that
+    // was already accepted and then finish. A queue/drain may still submit its
+    // exact child while owners are draining, so consume those commands before
+    // deciding that the owned task set is empty.
+    forwarder.queues.lock().await.clear();
+    loop {
+        while let Ok(command) = commands.try_recv() {
+            spawn_gateway_consumer(
+                &mut consumers,
+                &mut identities,
+                GatewayConsumerCommandOrReplay::Command(command),
+            );
+        }
+        if consumers.is_empty() {
+            break;
+        }
+        let completed = consumers.join_next_with_id().await;
+        observe_gateway_consumer_completion(completed, &mut identities, &forwarder, true).await;
+    }
+}
+
+enum GatewayConsumerCommandOrReplay {
+    Command(GatewayConsumerCommand),
+    SpoolReplay {
+        forwarder: Arc<GatewayEventForwarder>,
+        timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
+    },
+}
+
+fn spawn_gateway_consumer(
+    consumers: &mut JoinSet<GatewayConsumerIdentity>,
+    identities: &mut HashMap<Id, GatewayConsumerIdentity>,
+    command: GatewayConsumerCommandOrReplay,
+) {
+    let (identity, abort_handle) = match command {
+        GatewayConsumerCommandOrReplay::SpoolReplay {
+            forwarder,
+            timeouts,
+        } => {
+            let identity = GatewayConsumerIdentity::SpoolReplay;
+            let completed_identity = identity.clone();
+            let abort_handle = consumers.spawn(async move {
+                run_gateway_spool_replay(forwarder, timeouts).await;
+                completed_identity
+            });
+            (identity, abort_handle)
+        }
+        GatewayConsumerCommandOrReplay::Command(GatewayConsumerCommand::StartForwardQueue {
+            target_key,
+            owner_token,
+            receiver,
+            queues,
+            context,
+        }) => {
+            let identity = GatewayConsumerIdentity::ForwardQueue {
+                target_key: target_key.clone(),
+                owner_token,
+            };
+            let completed_identity = identity.clone();
+            let abort_handle = consumers.spawn(async move {
+                run_forward_queue(target_key, owner_token, receiver, queues, context).await;
+                completed_identity
+            });
+            (identity, abort_handle)
+        }
+        GatewayConsumerCommandOrReplay::Command(GatewayConsumerCommand::StartTelemetryDrain {
+            target_key,
+            drain_token,
+            context,
+        }) => {
+            let identity = GatewayConsumerIdentity::TelemetryDrain {
+                target_key: target_key.clone(),
+                drain_token,
+            };
+            let completed_identity = identity.clone();
+            let abort_handle = consumers.spawn(async move {
+                run_telemetry_drain(target_key, drain_token, context).await;
+                completed_identity
+            });
+            (identity, abort_handle)
+        }
+    };
+    identities.insert(abort_handle.id(), identity);
+}
+
+async fn observe_gateway_consumer_completion(
+    completed: Option<std::result::Result<(Id, GatewayConsumerIdentity), tokio::task::JoinError>>,
+    identities: &mut HashMap<Id, GatewayConsumerIdentity>,
+    forwarder: &GatewayEventForwarder,
+    shutting_down: bool,
+) -> bool {
+    let Some(completed) = completed else {
+        return !shutting_down;
+    };
+    let (identity, failure) = match completed {
+        Ok((id, identity)) => {
+            identities.remove(&id);
+            (identity, None)
+        }
+        Err(error) => {
+            let identity = identities.remove(&error.id());
+            (
+                identity.unwrap_or(GatewayConsumerIdentity::SpoolReplay),
+                Some(error),
+            )
+        }
+    };
+    cleanup_gateway_consumer_identity(forwarder, &identity).await;
+
+    if let Some(error) = failure {
+        forwarder.consumer_health.fail();
+        warn!(%error, ?identity, "gateway owned forwarding consumer failed");
+        return !shutting_down;
+    }
+    if matches!(identity, GatewayConsumerIdentity::SpoolReplay) && !shutting_down {
+        forwarder.consumer_health.fail();
+        warn!("gateway spool replay consumer stopped unexpectedly");
+        return true;
+    }
+    false
+}
+
+async fn cleanup_gateway_consumer_identity(
+    forwarder: &GatewayEventForwarder,
+    identity: &GatewayConsumerIdentity,
+) {
+    match identity {
+        GatewayConsumerIdentity::SpoolReplay => {}
+        GatewayConsumerIdentity::ForwardQueue {
+            target_key,
+            owner_token,
+        } => {
+            remove_forward_queue_owner(&forwarder.queues, target_key, *owner_token).await;
+            forwarder
+                .metrics
+                .active_queues
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+        GatewayConsumerIdentity::TelemetryDrain {
+            target_key,
+            drain_token,
+        } => {
+            remove_telemetry_drain_owner(&forwarder.telemetry_pending, target_key, *drain_token)
+                .await;
+        }
+    }
+}
+
+async fn run_gateway_spool_replay(
+    forwarder: Arc<GatewayEventForwarder>,
     timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
 ) {
-    while let Some(item) = receiver.recv().await {
-        if matches!(&item, GatewayForwardQueueItem::Telemetry { .. }) {
-            tokio::spawn(run_telemetry_drain(
-                target_key.clone(),
-                telemetry_pending.clone(),
-                telemetry_admission.clone(),
-                metrics.clone(),
-                critical_failure_handler.clone(),
-                session_rejection_handler.clone(),
-                spool.clone(),
-                runtime_config.clone(),
-                timeouts.clone(),
-            ));
+    if !forwarder.spool.config.enabled {
+        tokio::select! {
+            _ = forwarder.spool.notified_shutdown() => {}
+            _ = forwarder.consumer_health.failed() => {}
+        }
+        return;
+    }
+    loop {
+        if forwarder.consumer_health.is_failed() {
+            return;
+        }
+        // Register before scanning so a newly durable file or a released exact
+        // replay owner cannot be lost between the scan and wait.
+        let replay_ready = forwarder.spool.replay_ready.notified();
+        let accepted = forwarder.replay_pending_spool_once(timeouts.clone()).await;
+        if forwarder.spool.shutdown_requested() {
+            break;
+        }
+        if accepted {
+            tokio::task::yield_now().await;
+            continue;
+        }
+        tokio::select! {
+            _ = replay_ready => {}
+            _ = forwarder.spool.notified_shutdown() => break,
+            _ = forwarder.consumer_health.failed() => return,
+        }
+    }
+}
+
+async fn run_forward_queue(
+    target_key: String,
+    owner_token: u64,
+    mut receiver: mpsc::Receiver<GatewayForwardQueueItem>,
+    queues: Arc<Mutex<HashMap<String, GatewayForwardQueue>>>,
+    context: GatewayTelemetryDrainContext,
+) {
+    loop {
+        let Some(idle_wait) = forward_queue_idle_wait(&queues, &target_key, owner_token).await
+        else {
+            break;
+        };
+        let item = tokio::select! {
+            biased;
+            item = receiver.recv() => item,
+            _ = sleep(idle_wait) => {
+                if retire_forward_queue_if_idle(
+                    &queues,
+                    &target_key,
+                    owner_token,
+                    unix_now(),
+                )
+                .await
+                {
+                    break;
+                }
+                continue;
+            }
+        };
+        let Some(item) = item else {
+            break;
+        };
+        context.spool.mark_replay_target_ready(&target_key);
+        if let GatewayForwardQueueItem::Telemetry { drain_token, .. } = &item {
+            if mark_telemetry_drain_running(&context.telemetry_pending, &target_key, *drain_token)
+                .await
+            {
+                if context
+                    .consumer_commands
+                    .send(GatewayConsumerCommand::StartTelemetryDrain {
+                        target_key: target_key.clone(),
+                        drain_token: *drain_token,
+                        context: context.clone(),
+                    })
+                    .is_err()
+                {
+                    context.consumer_health.fail();
+                    let event = {
+                        let mut pending = context.telemetry_pending.lock().await;
+                        if telemetry_drain_owner_is(
+                            pending.draining_targets.get(&target_key),
+                            *drain_token,
+                        ) {
+                            pending.draining_targets.remove(&target_key);
+                            pending.events.remove(&target_key)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(event) = event {
+                        warn!(
+                            path = %event.path,
+                            target_key,
+                            drain_token,
+                            "discarded telemetry because its owned consumer is unavailable"
+                        );
+                    }
+                    finish_forward_event(&context.metrics, &context.spool, None, false).await;
+                }
+            } else {
+                finish_forward_event(&context.metrics, &context.spool, None, false).await;
+            }
             continue;
         }
         let Some(handle) = queue_item_event(
             item,
             &target_key,
-            &telemetry_pending,
-            &metrics,
-            &critical_failure_handler,
-            &spool,
+            &context.telemetry_pending,
+            &context.metrics,
+            &context.critical_failure_handler,
+            &context.spool,
         )
         .await
         else {
-            finish_forward_event(&metrics, &spool, None, false).await;
+            finish_forward_event(&context.metrics, &context.spool, None, false).await;
             continue;
         };
         forward_event_handle(
             &target_key,
             handle,
-            &metrics,
-            &critical_failure_handler,
-            &session_rejection_handler,
-            &spool,
-            &runtime_config,
-            &timeouts,
+            &context.metrics,
+            &context.critical_failure_handler,
+            &context.session_rejection_handler,
+            &context.telemetry_route_refresh_handler,
+            &context.spool,
+            &context.runtime_config,
+            &context.timeouts,
+            None,
         )
         .await;
     }
-    metrics.active_queues.fetch_sub(1, Ordering::Relaxed);
+}
+
+async fn forward_queue_idle_wait(
+    queues: &Mutex<HashMap<String, GatewayForwardQueue>>,
+    target_key: &str,
+    owner_token: u64,
+) -> Option<Duration> {
+    let queues = queues.lock().await;
+    let queue = queues
+        .get(target_key)
+        .filter(|queue| queue.owner_token == owner_token)?;
+    let idle_at = queue.last_enqueue_unix.saturating_add(QUEUE_IDLE_REAP_SECS);
+    Some(Duration::from_secs(
+        idle_at.saturating_sub(unix_now()).max(1),
+    ))
+}
+
+async fn retire_forward_queue_if_idle(
+    queues: &Mutex<HashMap<String, GatewayForwardQueue>>,
+    target_key: &str,
+    owner_token: u64,
+    now_unix: u64,
+) -> bool {
+    let mut queues = queues.lock().await;
+    let removable = queues.get(target_key).is_some_and(|queue| {
+        queue.owner_token == owner_token
+            && now_unix.saturating_sub(queue.last_enqueue_unix) >= QUEUE_IDLE_REAP_SECS
+            && queue.sender.capacity() == queue.sender.max_capacity()
+    });
+    if removable {
+        queues.remove(target_key);
+    }
+    removable
+}
+
+async fn remove_forward_queue_owner(
+    queues: &Mutex<HashMap<String, GatewayForwardQueue>>,
+    target_key: &str,
+    owner_token: u64,
+) -> bool {
+    let mut queues = queues.lock().await;
+    if !queues
+        .get(target_key)
+        .is_some_and(|queue| queue.owner_token == owner_token)
+    {
+        return false;
+    }
+    queues.remove(target_key);
+    true
 }
 
 async fn run_telemetry_drain(
     target_key: String,
-    telemetry_pending: Arc<Mutex<GatewayTelemetryPending>>,
-    telemetry_admission: Arc<Semaphore>,
-    metrics: Arc<GatewayForwardMetrics>,
-    critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
-    session_rejection_handler: Arc<StdRwLock<Option<GatewaySessionRejectionHandler>>>,
-    spool: Arc<GatewayForwardSpool>,
-    runtime_config: Arc<GatewayForwardRuntimeConfig>,
-    timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
+    drain_token: u64,
+    context: GatewayTelemetryDrainContext,
 ) {
     loop {
-        let Some(admission_permit) =
-            acquire_telemetry_admission(telemetry_admission.clone(), metrics.clone()).await
-        else {
-            finish_forward_event(&metrics, &spool, None, false).await;
-            telemetry_pending
+        if !telemetry_drain_owner_is(
+            context
+                .telemetry_pending
                 .lock()
                 .await
                 .draining_targets
-                .remove(&target_key);
+                .get(&target_key),
+            drain_token,
+        ) {
             return;
+        }
+        // Wait before taking the coalesced slot so newer samples can continue
+        // replacing it while this target waits for gateway-wide HTTP ownership.
+        let initial_http_owner = tokio::select! {
+            biased;
+            _ = context.spool.notified_shutdown() => None,
+            owner = acquire_telemetry_http_owner(
+                context.telemetry_http_owners.clone(),
+                context.metrics.clone(),
+            ) => Some(owner),
         };
         let Some(handle) = queue_item_event(
             GatewayForwardQueueItem::Telemetry {
                 created_unix: unix_now(),
+                drain_token,
             },
             &target_key,
-            &telemetry_pending,
-            &metrics,
-            &critical_failure_handler,
-            &spool,
+            &context.telemetry_pending,
+            &context.metrics,
+            &context.critical_failure_handler,
+            &context.spool,
         )
         .await
         else {
-            drop(admission_permit);
-            finish_forward_event(&metrics, &spool, None, false).await;
-            telemetry_pending
-                .lock()
-                .await
-                .draining_targets
-                .remove(&target_key);
+            finish_forward_event(&context.metrics, &context.spool, None, false).await;
+            remove_telemetry_drain_owner(&context.telemetry_pending, &target_key, drain_token)
+                .await;
             return;
         };
         forward_event_handle(
             &target_key,
             handle,
-            &metrics,
-            &critical_failure_handler,
-            &session_rejection_handler,
-            &spool,
-            &runtime_config,
-            &timeouts,
+            &context.metrics,
+            &context.critical_failure_handler,
+            &context.session_rejection_handler,
+            &context.telemetry_route_refresh_handler,
+            &context.spool,
+            &context.runtime_config,
+            &context.timeouts,
+            initial_http_owner.map(|owner| GatewayTelemetryHttpAdmission {
+                owners: context.telemetry_http_owners.clone(),
+                metrics: context.metrics.clone(),
+                initial_owner: Some(owner),
+            }),
         )
         .await;
-        drop(admission_permit);
 
-        let mut pending = telemetry_pending.lock().await;
+        let mut pending = context.telemetry_pending.lock().await;
+        if !telemetry_drain_owner_is(pending.draining_targets.get(&target_key), drain_token) {
+            return;
+        }
         if pending.events.contains_key(&target_key) {
             continue;
         }
@@ -2027,25 +2679,79 @@ async fn run_telemetry_drain(
     }
 }
 
-async fn acquire_telemetry_admission(
-    telemetry_admission: Arc<Semaphore>,
+async fn acquire_telemetry_http_owner(
+    telemetry_http_owners: Arc<Semaphore>,
     metrics: Arc<GatewayForwardMetrics>,
-) -> Option<GatewayTelemetryAdmissionPermit> {
+) -> GatewayTelemetryHttpOwner {
     metrics
         .telemetry_admission_waiting
         .fetch_add(1, Ordering::Relaxed);
-    let waiting = GatewayTelemetryAdmissionWaiter {
+    let waiting = GatewayTelemetryHttpWaiter {
         metrics: metrics.clone(),
     };
-    let permit = telemetry_admission.acquire_owned().await.ok()?;
+    let permit = telemetry_http_owners
+        .acquire_owned()
+        .await
+        .expect("telemetry HTTP ownership semaphore remains open");
     drop(waiting);
     metrics
         .telemetry_admission_active
         .fetch_add(1, Ordering::Relaxed);
-    Some(GatewayTelemetryAdmissionPermit {
+    GatewayTelemetryHttpOwner {
         _permit: permit,
         metrics,
-    })
+    }
+}
+
+async fn remove_telemetry_drain_owner(
+    telemetry_pending: &Mutex<GatewayTelemetryPending>,
+    target_key: &str,
+    drain_token: u64,
+) -> bool {
+    let mut pending = telemetry_pending.lock().await;
+    if !telemetry_drain_owner_is(pending.draining_targets.get(target_key), drain_token) {
+        return false;
+    }
+    pending.draining_targets.remove(target_key);
+    true
+}
+
+fn telemetry_drain_owner_is(owner: Option<&GatewayTelemetryDrainOwner>, drain_token: u64) -> bool {
+    owner.is_some_and(|owner| owner.token == drain_token)
+}
+
+async fn mark_telemetry_drain_running(
+    telemetry_pending: &Mutex<GatewayTelemetryPending>,
+    target_key: &str,
+    drain_token: u64,
+) -> bool {
+    let mut pending = telemetry_pending.lock().await;
+    let Some(owner) = pending.draining_targets.get_mut(target_key) else {
+        return false;
+    };
+    if owner.token != drain_token || owner.phase != GatewayTelemetryDrainPhase::Queued {
+        return false;
+    }
+    owner.phase = GatewayTelemetryDrainPhase::Running;
+    true
+}
+
+async fn record_expired_gateway_event(
+    event: &GatewayForwardEvent,
+    target_key: &str,
+    metrics: &GatewayForwardMetrics,
+    critical_failure_handler: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
+) {
+    metrics.record_drop(event.kind, GatewayForwardDropReason::Expired);
+    if event.critical {
+        metrics.record_critical_failure(GatewayForwardDropReason::Expired);
+        notify_critical_failure(
+            critical_failure_handler,
+            target_key,
+            GatewayForwardDropReason::Expired,
+        )
+        .await;
+    }
 }
 
 async fn forward_event_handle(
@@ -2054,21 +2760,15 @@ async fn forward_event_handle(
     metrics: &GatewayForwardMetrics,
     critical_failure_handler: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
     session_rejection_handler: &StdRwLock<Option<GatewaySessionRejectionHandler>>,
+    telemetry_route_refresh_handler: &StdRwLock<Option<TelemetryRouteRefreshHandler>>,
     spool: &GatewayForwardSpool,
     runtime_config: &GatewayForwardRuntimeConfig,
     timeouts: &StdRwLock<GatewayHttpTimeouts>,
+    telemetry_http_admission: Option<GatewayTelemetryHttpAdmission>,
 ) {
     let event = &handle.event;
     if event.expired(runtime_config) {
-        metrics.record_drop(event.kind, GatewayForwardDropReason::Expired);
-        if event.critical {
-            metrics.record_critical_failure(GatewayForwardDropReason::Expired);
-            notify_critical_failure(
-                critical_failure_handler,
-                target_key,
-                GatewayForwardDropReason::Expired,
-            );
-        }
+        record_expired_gateway_event(event, target_key, metrics, critical_failure_handler).await;
         warn!(
             path = %event.path,
             kind = ?event.kind,
@@ -2084,9 +2784,11 @@ async fn forward_event_handle(
         metrics,
         critical_failure_handler,
         session_rejection_handler,
+        telemetry_route_refresh_handler,
         spool,
         runtime_config,
         timeouts,
+        telemetry_http_admission,
     )
     .await;
     match outcome {
@@ -2103,7 +2805,8 @@ async fn forward_event_handle(
                         critical_failure_handler,
                         target_key,
                         GatewayForwardDropReason::GlobalQueueFull,
-                    );
+                    )
+                    .await;
                     warn!(
                         %error,
                         path = %event.path,
@@ -2138,12 +2841,14 @@ async fn queue_item_event(
             ram_bytes,
             spool_path: None,
             spool_bytes: 0,
+            _replay_owner: None,
         }),
         GatewayForwardQueueItem::Spooled {
             path,
             disk_bytes,
             kind,
             critical,
+            _replay_owner: replay_owner,
             ..
         } => match spool.load_spooled_event(&path).await {
             Ok(mut event) => {
@@ -2160,6 +2865,7 @@ async fn queue_item_event(
                     ram_bytes: 0,
                     spool_path: Some(path),
                     spool_bytes: disk_bytes,
+                    _replay_owner: replay_owner,
                 })
             }
             Err(error) => {
@@ -2170,7 +2876,8 @@ async fn queue_item_event(
                         critical_failure_handler,
                         target_key,
                         GatewayForwardDropReason::GlobalQueueFull,
-                    );
+                    )
+                    .await;
                 }
                 warn!(
                     %error,
@@ -2192,6 +2899,7 @@ async fn queue_item_event(
                 ram_bytes: 0,
                 spool_path: None,
                 spool_bytes: 0,
+                _replay_owner: None,
             }),
     }
 }
@@ -2235,20 +2943,105 @@ async fn spool_event_for_later_replay(
     Ok(())
 }
 
+async fn acquire_telemetry_retry_http_owner(
+    admission: &GatewayTelemetryHttpAdmission,
+    event: &GatewayForwardEvent,
+    runtime_config: &GatewayForwardRuntimeConfig,
+    spool: &GatewayForwardSpool,
+) -> GatewayTelemetryHttpOwnerWait {
+    let Some(remaining_ttl) = event.remaining_ttl(runtime_config) else {
+        return GatewayTelemetryHttpOwnerWait::Expired;
+    };
+    tokio::select! {
+        biased;
+        _ = spool.notified_shutdown() => GatewayTelemetryHttpOwnerWait::Shutdown,
+        _ = time::sleep(remaining_ttl) => GatewayTelemetryHttpOwnerWait::Expired,
+        owner = acquire_telemetry_http_owner(
+            admission.owners.clone(),
+            admission.metrics.clone(),
+        ) => GatewayTelemetryHttpOwnerWait::Acquired(owner),
+    }
+}
+
+async fn wait_telemetry_retry_backoff(
+    delay: Duration,
+    event: &GatewayForwardEvent,
+    runtime_config: &GatewayForwardRuntimeConfig,
+    spool: &GatewayForwardSpool,
+) -> GatewayTelemetryRetryWait {
+    let Some(remaining_ttl) = event.remaining_ttl(runtime_config) else {
+        return GatewayTelemetryRetryWait::Expired;
+    };
+    tokio::select! {
+        biased;
+        _ = spool.notified_shutdown() => GatewayTelemetryRetryWait::Shutdown,
+        _ = time::sleep(remaining_ttl) => GatewayTelemetryRetryWait::Expired,
+        _ = time::sleep(delay) => GatewayTelemetryRetryWait::Ready,
+    }
+}
+
 async fn post_json_retry_until_expired(
     event: &GatewayForwardEvent,
     target_key: &str,
     metrics: &GatewayForwardMetrics,
     critical_failure_handler: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
     session_rejection_handler: &StdRwLock<Option<GatewaySessionRejectionHandler>>,
+    telemetry_route_refresh_handler: &StdRwLock<Option<TelemetryRouteRefreshHandler>>,
     spool: &GatewayForwardSpool,
     runtime_config: &GatewayForwardRuntimeConfig,
     timeouts: &StdRwLock<GatewayHttpTimeouts>,
+    mut telemetry_http_admission: Option<GatewayTelemetryHttpAdmission>,
 ) -> GatewayForwardOutcome {
     let mut attempt = 1_u64;
     loop {
         if spool.shutdown_requested() {
             return GatewayForwardOutcome::DeferredForShutdown;
+        }
+        let http_owner = if let Some(admission) = telemetry_http_admission.as_mut() {
+            if let Some(owner) = admission.initial_owner.take() {
+                Some(owner)
+            } else {
+                match acquire_telemetry_retry_http_owner(admission, event, runtime_config, spool)
+                    .await
+                {
+                    GatewayTelemetryHttpOwnerWait::Acquired(owner) => Some(owner),
+                    GatewayTelemetryHttpOwnerWait::Shutdown => {
+                        return GatewayForwardOutcome::DeferredForShutdown;
+                    }
+                    GatewayTelemetryHttpOwnerWait::Expired => {
+                        record_expired_gateway_event(
+                            event,
+                            target_key,
+                            metrics,
+                            critical_failure_handler,
+                        )
+                        .await;
+                        warn!(
+                            path = %event.path,
+                            kind = ?event.kind,
+                            target_key,
+                            attempt,
+                            "gateway event forwarding expired while awaiting HTTP ownership"
+                        );
+                        return GatewayForwardOutcome::NotDelivered;
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        if event.expired(runtime_config) {
+            drop(http_owner);
+            record_expired_gateway_event(event, target_key, metrics, critical_failure_handler)
+                .await;
+            warn!(
+                path = %event.path,
+                kind = ?event.kind,
+                target_key,
+                attempt,
+                "gateway event forwarding expired before an HTTP attempt"
+            );
+            return GatewayForwardOutcome::NotDelivered;
         }
         let post_result = tokio::select! {
             result = post_json_bytes(
@@ -2262,8 +3055,21 @@ async fn post_json_retry_until_expired(
                 return GatewayForwardOutcome::DeferredForShutdown;
             }
         };
+        // Telemetry admission bounds only active socket attempts. Route
+        // refresh, session callbacks, logging, and retry delay never retain a
+        // gateway-wide permit.
+        drop(http_owner);
         match post_result {
-            Ok(_) => return GatewayForwardOutcome::Delivered,
+            Ok(body) => {
+                refresh_telemetry_route_after_commit(
+                    telemetry_route_refresh_handler,
+                    target_key,
+                    event,
+                    &body,
+                )
+                .await;
+                return GatewayForwardOutcome::Delivered;
+            }
             Err(error) => {
                 metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
                 let session_not_active = error_is_gateway_session_not_active(&error);
@@ -2273,7 +3079,8 @@ async fn post_json_retry_until_expired(
                         session_rejection_handler,
                         target_key,
                         event.gateway_session_id,
-                    );
+                    )
+                    .await;
                 }
                 if session_not_active
                     && event_spools_under_pressure(event)
@@ -2299,7 +3106,8 @@ async fn post_json_retry_until_expired(
                                 critical_failure_handler,
                                 target_key,
                                 GatewayForwardDropReason::GlobalQueueFull,
-                            );
+                            )
+                            .await;
                             warn!(
                                 error = %error_message,
                                 spool_error = %spool_error,
@@ -2327,15 +3135,13 @@ async fn post_json_retry_until_expired(
                     return GatewayForwardOutcome::DeferredForShutdown;
                 }
                 if event.expired(runtime_config) {
-                    metrics.record_drop(event.kind, GatewayForwardDropReason::Expired);
-                    if event.critical {
-                        metrics.record_critical_failure(GatewayForwardDropReason::Expired);
-                        notify_critical_failure(
-                            critical_failure_handler,
-                            target_key,
-                            GatewayForwardDropReason::Expired,
-                        );
-                    }
+                    record_expired_gateway_event(
+                        event,
+                        target_key,
+                        metrics,
+                        critical_failure_handler,
+                    )
+                    .await;
                     warn!(
                         error = %error_message,
                         path = %event.path,
@@ -2355,26 +3161,57 @@ async fn post_json_retry_until_expired(
                 );
                 let backoff_ms =
                     250_u64.saturating_mul(2_u64.saturating_pow((attempt - 1).min(7) as u32));
-                sleep(Duration::from_millis(backoff_ms.min(5_000))).await;
+                let backoff = Duration::from_millis(backoff_ms.min(5_000));
+                if telemetry_http_admission.is_some() {
+                    match wait_telemetry_retry_backoff(backoff, event, runtime_config, spool).await
+                    {
+                        GatewayTelemetryRetryWait::Ready => {}
+                        GatewayTelemetryRetryWait::Shutdown => {
+                            return GatewayForwardOutcome::DeferredForShutdown;
+                        }
+                        GatewayTelemetryRetryWait::Expired => {
+                            record_expired_gateway_event(
+                                event,
+                                target_key,
+                                metrics,
+                                critical_failure_handler,
+                            )
+                            .await;
+                            warn!(
+                                error = %error_message,
+                                path = %event.path,
+                                kind = ?event.kind,
+                                target_key,
+                                attempt,
+                                "gateway event forwarding expired during retry backoff"
+                            );
+                            return GatewayForwardOutcome::NotDelivered;
+                        }
+                    }
+                } else {
+                    sleep(backoff).await;
+                }
                 attempt = attempt.saturating_add(1);
             }
         }
     }
 }
 
-fn notify_critical_failure(
+async fn notify_critical_failure(
     handler_slot: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
     target_key: &str,
     reason: GatewayForwardDropReason,
 ) {
-    if let Ok(slot) = handler_slot.read() {
-        if let Some(handler) = slot.as_ref() {
-            handler(target_key.to_string(), reason.as_str());
-        }
+    let handler = handler_slot
+        .read()
+        .ok()
+        .and_then(|slot| slot.as_ref().cloned());
+    if let Some(handler) = handler {
+        handler(target_key.to_string(), reason.as_str()).await;
     }
 }
 
-fn notify_session_rejection(
+async fn notify_session_rejection(
     handler_slot: &StdRwLock<Option<GatewaySessionRejectionHandler>>,
     target_key: &str,
     gateway_session_id: Option<uuid::Uuid>,
@@ -2382,10 +3219,39 @@ fn notify_session_rejection(
     let Some(gateway_session_id) = gateway_session_id else {
         return;
     };
-    if let Ok(slot) = handler_slot.read() {
-        if let Some(handler) = slot.as_ref() {
-            handler(target_key.to_string(), gateway_session_id);
-        }
+    let handler = handler_slot
+        .read()
+        .ok()
+        .and_then(|slot| slot.as_ref().cloned());
+    if let Some(handler) = handler {
+        handler(target_key.to_string(), gateway_session_id).await;
+    }
+}
+
+async fn refresh_telemetry_route_after_commit(
+    handler_slot: &StdRwLock<Option<TelemetryRouteRefreshHandler>>,
+    target_key: &str,
+    event: &GatewayForwardEvent,
+    response_body: &str,
+) {
+    if event.kind != GatewayForwardEventKind::Telemetry {
+        return;
+    }
+    let Some(gateway_session_id) = event.gateway_session_id else {
+        return;
+    };
+    let Ok(response) = serde_json::from_str::<GatewayIngestResponse>(response_body) else {
+        return;
+    };
+    if !response.accepted || !response.refresh_route {
+        return;
+    }
+    let handler = handler_slot
+        .read()
+        .ok()
+        .and_then(|slot| slot.as_ref().cloned());
+    if let Some(handler) = handler {
+        handler(target_key.to_string(), gateway_session_id).await;
     }
 }
 
@@ -2596,6 +3462,11 @@ impl GatewayForwardEvent {
         self.created_at.elapsed() >= self.ttl(runtime_config)
     }
 
+    fn remaining_ttl(&self, runtime_config: &GatewayForwardRuntimeConfig) -> Option<Duration> {
+        self.ttl(runtime_config)
+            .checked_sub(self.created_at.elapsed())
+    }
+
     fn ttl(&self, runtime_config: &GatewayForwardRuntimeConfig) -> Duration {
         match self.kind {
             GatewayForwardEventKind::TerminalOutput if self.critical => {
@@ -2611,7 +3482,7 @@ impl GatewayForwardQueueItem {
         match self {
             Self::Event { event, .. } => event.created_unix,
             Self::Spooled { created_unix, .. } => *created_unix,
-            Self::Telemetry { created_unix } => *created_unix,
+            Self::Telemetry { created_unix, .. } => *created_unix,
         }
     }
 
@@ -2620,6 +3491,16 @@ impl GatewayForwardQueueItem {
             Self::Event { event, .. } => event.enqueue_seq,
             Self::Spooled { enqueue_seq, .. } => *enqueue_seq,
             Self::Telemetry { .. } => 0,
+        }
+    }
+
+    fn defer_spool_replay_until_target_space(&mut self) {
+        if let Self::Spooled {
+            _replay_owner: Some(owner),
+            ..
+        } = self
+        {
+            owner.defer_until_target_space();
         }
     }
 }
@@ -2781,6 +3662,8 @@ pub(crate) struct GatewayIdentityValidationResponse {
 pub(crate) struct GatewayIngestResponse {
     pub(crate) accepted: bool,
     pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) refresh_route: bool,
 }
 
 #[cfg(test)]

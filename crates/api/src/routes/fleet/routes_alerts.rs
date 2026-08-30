@@ -1264,9 +1264,6 @@ fn vps_rules_error(error: anyhow::Error) -> ApiError {
             return ApiError::bad_request(code);
         }
     }
-    if message.contains("traffic.reset_day must be an integer") {
-        return ApiError::bad_request("traffic_reset_day_invalid");
-    }
     if message.contains("invalid selector expression") || message.contains("selector expression") {
         return ApiError::bad_request("vps_rules_selector_invalid");
     }

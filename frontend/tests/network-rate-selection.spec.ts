@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import {
+  networkInterfaceIsEligible,
   networkRateSelectionLabel,
+  resolveNetworkInterfaceEligibility,
   resolveNetworkRateInterfaces,
   selectedNetworkRates,
 } from "../src/networkRateSelection";
@@ -26,6 +28,7 @@ test("live-rate selection follows an explicit traffic-selector reference", () =>
       "[traffic.selectors]",
     ),
     rule("traffic.selectors", {
+      mode: "exact",
       selectors: [
         selector("eth0", "rx"),
         selector("eth1", "tx"),
@@ -50,26 +53,25 @@ test("live-rate selection follows an explicit traffic-selector reference", () =>
   );
 });
 
-test("a missing live-rate rule follows traffic selectors by default", () => {
+test("a missing live-rate rule selects none rather than inheriting traffic selectors", () => {
   const rules = [
     rule("traffic.selectors", {
+      mode: "exact",
       selectors: [selector("eth0", "rx")],
     }),
   ];
   expect(resolveNetworkRateInterfaces(rules)).toMatchObject({
     mode: "exact",
-    source: "traffic.selectors",
+    source: "network.rate.interfaces",
     valid: true,
   });
-  const selected = selectedNetworkRates(rates, rules);
-  expect(selected.map((rate) => rate.interface)).toEqual(["eth0"]);
-  expect(selected[0].tx_bps_avg).toBe(16_000);
-  expect(networkRateSelectionLabel(rules)).toContain(
-    "referenced from traffic.selectors",
+  expect(selectedNetworkRates(rates, rules)).toEqual([]);
+  expect(networkRateSelectionLabel(rules)).toBe(
+    "No live-rate interfaces selected",
   );
 
   expect(selectedNetworkRates(rates, [])).toEqual([]);
-  expect(networkRateSelectionLabel([])).toBe("Traffic interfaces unavailable");
+  expect(networkRateSelectionLabel([])).toBe("No live-rate interfaces selected");
 });
 
 test("live-rate reference object, rather than display syntax, controls inheritance", () => {
@@ -83,6 +85,7 @@ test("live-rate reference object, rather than display syntax, controls inheritan
       "eth9+tx",
     ),
     rule("traffic.selectors", {
+      mode: "exact",
       selectors: [selector("eth0", "rx")],
     }),
   ];
@@ -101,7 +104,7 @@ test("live-rate reference object, rather than display syntax, controls inheritan
     "Live-rate interface rule unavailable",
   );
 
-  rules[0] = rule("network.rate.interfaces", { mode: "all" }, "[]");
+  rules[0] = rule("network.rate.interfaces", { mode: "all" }, "*");
   rules[0].state = "invalid";
   expect(selectedNetworkRates(rates, rules)).toEqual([]);
   expect(networkRateSelectionLabel(rules)).toBe(
@@ -111,10 +114,10 @@ test("live-rate reference object, rather than display syntax, controls inheritan
 
 test("live-rate selection filters interfaces but keeps RX and TX", () => {
   const all = [
-    rule("network.rate.interfaces", { mode: "all" }, "[]"),
+    rule("network.rate.interfaces", { mode: "all" }, "*"),
   ];
-  expect(selectedNetworkRates(rates, all)).toEqual(rates);
-  expect(networkRateSelectionLabel(all)).toBe("All reported interfaces");
+  expect(selectedNetworkRates(rates, all)).toEqual(rates.slice(0, 2));
+  expect(networkRateSelectionLabel(all)).toBe("All eligible interfaces");
 
   const exact = [
     rule(
@@ -157,6 +160,58 @@ test("live-rate selection accepts accounting aggregation suffixes without combin
   expect(selected.map((rate) => rate.interface)).toEqual(["eth0", "eth1"]);
   expect(selected[0]).toMatchObject({ rx_bps_avg: 8_000, tx_bps_avg: 16_000 });
   expect(selected[1]).toMatchObject({ rx_bps_avg: 32_000, tx_bps_avg: 64_000 });
+});
+
+test("network interface eligibility is the outer boundary for all and exact rate selection", () => {
+  const defaultEligibility = resolveNetworkInterfaceEligibility([]);
+  expect(networkInterfaceIsEligible(defaultEligibility, "host", "eth0")).toBe(true);
+  expect(networkInterfaceIsEligible(defaultEligibility, "host", "wlan0")).toBe(true);
+  expect(networkInterfaceIsEligible(defaultEligibility, "host", "lo")).toBe(false);
+  expect(networkInterfaceIsEligible(defaultEligibility, "tunnel", "eth-tunnel")).toBe(false);
+
+  const exactConstrained = [
+    rule("network.interfaces", {
+      mode: "patterns",
+      patterns: ["eth0", "lo"],
+    }, "eth0,lo"),
+    rule("network.rate.interfaces", {
+      mode: "exact",
+      selectors: [selector("eth0", "total"), selector("eth1", "total")],
+    }, "eth0,eth1"),
+  ];
+  expect(selectedNetworkRates(rates, exactConstrained).map((rate) => rate.interface)).toEqual([
+    "eth0",
+  ]);
+
+  const allConstrained = [
+    rule("network.interfaces", {
+      mode: "patterns",
+      patterns: ["eth*"],
+    }, "eth*"),
+    rule("network.rate.interfaces", { mode: "all" }, "*"),
+  ];
+  expect(selectedNetworkRates(rates, allConstrained).map((rate) => rate.interface)).toEqual([
+    "eth0",
+    "eth1",
+  ]);
+
+  allConstrained[0] = rule("network.interfaces", { mode: "all" }, "*");
+  expect(selectedNetworkRates(rates, allConstrained)).toEqual(rates);
+});
+
+test("traffic-selector all remains constrained by network interface eligibility", () => {
+  const rules = [
+    rule("network.interfaces", {
+      mode: "patterns",
+      patterns: ["eth0"],
+    }, "eth0"),
+    rule("network.rate.interfaces", {
+      mode: "reference",
+      reference: { rule: "traffic.selectors" },
+    }, "[traffic.selectors]"),
+    rule("traffic.selectors", { mode: "all" }, "*"),
+  ];
+  expect(selectedNetworkRates(rates, rules).map((rate) => rate.interface)).toEqual(["eth0"]);
 });
 
 function rule(

@@ -32,13 +32,14 @@ use crate::{
         BackupArtifactUploadSessionView, BackupArtifactView, BackupPolicyPruneRequest,
         BackupPolicyPruneResponse, BackupPolicyView, BackupRequestStatus, BackupRequestView,
         BulkResolveRequest, CreateBackupPolicyRequest, CreateBackupRequest, CreateScheduleRequest,
-        ListQuery, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
-        UpdateScheduleRequest, UploadBackupArtifactRequest, WsEvent,
+        ListQuery, RecordBackupArtifactMetadataRequest, ServerArtifactReservation,
+        UpdateBackupPolicyRequest, UpdateScheduleRequest, UploadBackupArtifactRequest, WsEvent,
     },
     privilege::{
         verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput,
         SchedulePrivilegeIntent, SchedulePrivilegeIntentInput,
     },
+    repository_artifact_deletions::ReviewedArtifactDeletionOutcome,
     repository_backup_artifacts::backup_server_artifact,
     repository_backup_policies::BackupPolicyPruneCandidate,
     repository_schedules::ScheduleSnapshotExpectation,
@@ -583,46 +584,24 @@ async fn execute_backup_policy_prune_plan(
                 ))?;
         } else if !policy_plan.candidates.is_empty() {
             object_delete_attempted = true;
-            if let Some(store) = state.backup_object_store.as_ref() {
-                for candidate in &policy_plan.candidates {
-                    if !state
-                        .repo
-                        .begin_backup_policy_candidate_object_delete(candidate)
-                        .await
-                        .map_err(ApiError::internal_mapper(
-                            "backup_policy_prune_failed",
-                            "The backup-policy cleanup could not be completed.",
-                        ))?
-                    {
-                        continue;
+            for candidate in &policy_plan.candidates {
+                match state
+                    .reviewed_artifact_deletions
+                    .delete_backup_policy_candidate(policy_plan.policy.clone(), candidate.clone())
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "backup_policy_prune_failed",
+                        "The backup-policy cleanup could not be completed.",
+                    ))? {
+                    ReviewedArtifactDeletionOutcome::NotClaimed => {}
+                    ReviewedArtifactDeletionOutcome::Deleted(rows) => {
+                        object_keys.push(candidate.object_key.clone());
+                        pruned_rows += rows;
                     }
-                    object_keys.push(candidate.object_key.clone());
-                    match store.delete_confirmed(&candidate.object_key).await {
-                        Ok(()) => {
-                            let rows = state
-                                .repo
-                                .finalize_backup_policy_candidate_object_delete(candidate)
-                                .await
-                                .map_err(ApiError::internal_mapper(
-                                    "backup_policy_prune_failed",
-                                    "The backup-policy cleanup could not be completed.",
-                                ))?;
-                            pruned_rows += rows;
-                        }
-                        Err(error) => {
-                            let error_text = error.to_string();
-                            state
-                                .repo
-                                .mark_backup_policy_candidate_delete_failed(candidate, &error_text)
-                                .await
-                                .map_err(ApiError::internal_mapper(
-                                    "backup_policy_prune_failed",
-                                    "The backup-policy cleanup could not be completed.",
-                                ))?;
-                            object_delete_errors
-                                .push(format!("{}: {error_text}", candidate.object_key));
-                            break;
-                        }
+                    ReviewedArtifactDeletionOutcome::DeleteFailed(error) => {
+                        object_keys.push(candidate.object_key.clone());
+                        object_delete_errors.push(format!("{}: {error}", candidate.object_key));
+                        break;
                     }
                 }
             }
@@ -817,20 +796,28 @@ pub(crate) async fn record_backup_artifact_metadata(
         .as_ref()
         .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
     let artifact_id = uuid::Uuid::new_v4();
-    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &request).await?;
+    let reservation_token =
+        reserve_backup_artifact_object(&state, &backup_request, artifact_id, &request).await?;
     if let Err(error) = verify_staged_backup_artifact_object(&state, store, &request).await {
-        release_server_artifact_reservation(&state, &request.object_key).await;
+        release_server_artifact_reservation(&state, &request.object_key, reservation_token).await;
         return Err(error);
     }
 
     let artifact = match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, artifact_id, &request, &operator)
+        .record_backup_artifact_metadata(
+            &backup_request,
+            artifact_id,
+            &request,
+            Some(reservation_token),
+            &operator,
+        )
         .await
     {
         Ok(artifact) => artifact,
         Err(error) => {
-            release_server_artifact_reservation(&state, &request.object_key).await;
+            release_server_artifact_reservation(&state, &request.object_key, reservation_token)
+                .await;
             if error
                 .to_string()
                 .contains("backup_artifact_already_recorded")
@@ -893,10 +880,12 @@ pub(crate) async fn upload_backup_artifact(
         size_bytes,
         confirmed: request.confirmed,
     };
-    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let reservation_token =
+        reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request)
+            .await?;
 
     if let Err(error) = store.put_new(&request.object_key, &artifact_bytes).await {
-        release_server_artifact_reservation(&state, &request.object_key).await;
+        release_server_artifact_reservation(&state, &request.object_key, reservation_token).await;
         return Err({
             let error_text = error.to_string();
             if error_text.contains("object already exists") || error_text.contains("File exists") {
@@ -912,7 +901,13 @@ pub(crate) async fn upload_backup_artifact(
     }
     match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
+        .record_backup_artifact_metadata(
+            &backup_request,
+            artifact_id,
+            &metadata_request,
+            Some(reservation_token),
+            &operator,
+        )
         .await
     {
         Ok(artifact) => {
@@ -928,6 +923,7 @@ pub(crate) async fn upload_backup_artifact(
                 &state,
                 store,
                 &request.object_key,
+                reservation_token,
                 &error.to_string(),
                 true,
             )
@@ -1046,7 +1042,9 @@ pub(crate) async fn commit_backup_artifact_upload_session(
         size_bytes: prepared.size_bytes,
         confirmed: true,
     };
-    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let reservation_token =
+        reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request)
+            .await?;
     let created_object = match store
         .put_file_idempotent(
             &prepared.object_key,
@@ -1061,7 +1059,8 @@ pub(crate) async fn commit_backup_artifact_upload_session(
     {
         Ok(created_object) => created_object,
         Err(error) => {
-            release_server_artifact_reservation(&state, &prepared.object_key).await;
+            release_server_artifact_reservation(&state, &prepared.object_key, reservation_token)
+                .await;
             let error_text = error.to_string();
             return Err(
                 if error_text.contains("object already exists")
@@ -1080,7 +1079,13 @@ pub(crate) async fn commit_backup_artifact_upload_session(
     };
     match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
+        .record_backup_artifact_metadata(
+            &backup_request,
+            artifact_id,
+            &metadata_request,
+            Some(reservation_token),
+            &operator,
+        )
         .await
     {
         Ok(artifact) => {
@@ -1097,6 +1102,7 @@ pub(crate) async fn commit_backup_artifact_upload_session(
                 &state,
                 store,
                 &metadata_request.object_key,
+                reservation_token,
                 &error.to_string(),
                 created_object,
             )
@@ -1189,7 +1195,9 @@ pub(crate) async fn create_backup_artifact_handoff(
         size_bytes: prepared.size_bytes,
         confirmed: true,
     };
-    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let reservation_token =
+        reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request)
+            .await?;
     let created_object = match store
         .put_file_idempotent(
             &object_key,
@@ -1204,7 +1212,7 @@ pub(crate) async fn create_backup_artifact_handoff(
     {
         Ok(created_object) => created_object,
         Err(error) => {
-            release_server_artifact_reservation(&state, &object_key).await;
+            release_server_artifact_reservation(&state, &object_key, reservation_token).await;
             let _ = tokio::fs::remove_file(&prepared.staging_path).await;
             return Err(ApiError::internal(
                 "backup_artifact_store_failed",
@@ -1215,7 +1223,13 @@ pub(crate) async fn create_backup_artifact_handoff(
     };
     let result = match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
+        .record_backup_artifact_metadata(
+            &backup_request,
+            artifact_id,
+            &metadata_request,
+            Some(reservation_token),
+            &operator,
+        )
         .await
     {
         Ok(artifact) => {
@@ -1239,6 +1253,7 @@ pub(crate) async fn create_backup_artifact_handoff(
                 &state,
                 store,
                 &metadata_request.object_key,
+                reservation_token,
                 &error.to_string(),
                 created_object,
             )
@@ -1552,7 +1567,7 @@ async fn reserve_backup_artifact_object(
     backup_request: &BackupRequestView,
     artifact_id: uuid::Uuid,
     request: &RecordBackupArtifactMetadataRequest,
-) -> Result<(), ApiError> {
+) -> Result<uuid::Uuid, ApiError> {
     let artifact = BackupArtifactView {
         id: artifact_id,
         client_id: backup_request.client_id.clone(),
@@ -1563,11 +1578,17 @@ async fn reserve_backup_artifact_object(
         content_available: false,
         created_at: unix_now().to_string(),
     };
-    state
+    let reservation = state
         .repo
         .reserve_server_artifact(backup_server_artifact(backup_request, &artifact))
         .await
-        .map_err(map_backup_artifact_reservation_error)
+        .map_err(map_backup_artifact_reservation_error)?;
+    match reservation {
+        ServerArtifactReservation::Created(token) => Ok(token),
+        ServerArtifactReservation::AlreadyActiveIdentical | ServerArtifactReservation::Conflict => {
+            Err(ApiError::conflict("backup_artifact_object_exists"))
+        }
+    }
 }
 
 fn map_backup_artifact_reservation_error(error: anyhow::Error) -> ApiError {
@@ -1585,10 +1606,14 @@ fn map_backup_artifact_reservation_error(error: anyhow::Error) -> ApiError {
     }
 }
 
-async fn release_server_artifact_reservation(state: &AppState, object_key: &str) {
+async fn release_server_artifact_reservation(
+    state: &AppState,
+    object_key: &str,
+    reservation_token: uuid::Uuid,
+) {
     let _ = state
         .repo
-        .discard_server_artifact_reservation(object_key)
+        .discard_server_artifact_reservation(object_key, reservation_token)
         .await;
 }
 
@@ -1596,6 +1621,7 @@ async fn cleanup_created_reserved_artifact_after_error(
     state: &AppState,
     store: &crate::object_store::BackupObjectStore,
     object_key: &str,
+    reservation_token: uuid::Uuid,
     error: &str,
     created_object: bool,
 ) {
@@ -1604,14 +1630,15 @@ async fn cleanup_created_reserved_artifact_after_error(
             Ok(()) => {
                 let _ = state
                     .repo
-                    .discard_server_artifact_reservation(object_key)
+                    .discard_server_artifact_reservation(object_key, reservation_token)
                     .await;
             }
             Err(delete_error) => {
                 let _ = state
                     .repo
-                    .mark_server_artifact_delete_failed(
+                    .fail_server_artifact_reservation(
                         object_key,
+                        reservation_token,
                         &format!("{error}; cleanup_delete_failed: {delete_error}"),
                     )
                     .await;
@@ -1620,7 +1647,7 @@ async fn cleanup_created_reserved_artifact_after_error(
     } else {
         let _ = state
             .repo
-            .discard_server_artifact_reservation(object_key)
+            .discard_server_artifact_reservation(object_key, reservation_token)
             .await;
     }
 }

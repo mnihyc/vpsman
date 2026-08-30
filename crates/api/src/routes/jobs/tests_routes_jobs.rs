@@ -9,6 +9,21 @@ use super::*;
 use crate::job_request::validate_job_command;
 
 #[test]
+fn rollout_resume_keeps_the_backend_confirmation_fence() {
+    let error = crate::routes_job_rollouts::require_rollout_resume_confirmation(false)
+        .expect_err("an unconfirmed resume must not reach repository mutation");
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "job_rollout_resume_requires_confirmation");
+    assert_eq!(
+        error.error.to_string(),
+        "job_rollout_resume_requires_confirmation"
+    );
+    assert_eq!(error.public_message, None);
+    crate::routes_job_rollouts::require_rollout_resume_confirmation(true)
+        .expect("a confirmed resume may proceed to the repository owner");
+}
+
+#[test]
 fn gateway_timeout_output_maps_to_timed_out_target_status() {
     let job_id = Uuid::new_v4();
     let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {

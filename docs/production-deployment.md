@@ -22,8 +22,8 @@ cd "vpsman-deploy-${VPSMAN_RELEASE_TAG}"
 ```
 
 The control-plane host currently needs x86-64 Linux, rootful Docker Engine 27
-or newer with Compose, `cmp`, `curl`, `diff`, `flock`, `python3`, `sha384sum`,
-`tar`, and `unzip`. The gateway's dedicated IPv6-enabled Docker network relies
+or newer with Compose, `cmp`, `curl`, `diff`, `flock`, `python3`, `tar`, and
+`unzip`. The gateway's dedicated IPv6-enabled Docker network relies
 on Engine-managed address allocation. ARM64 remains supported for agents and
 the standalone `vpsctl` artifact, but the published server bundle is currently
 x86-64 only.
@@ -105,15 +105,10 @@ encrypted with the configured Noise identities, but that does not replace host
 firewalling, rate limiting, monitoring, or key rotation.
 
 The bundled Compose model gives only the raw gateway a dual-stack ingress
-network; the internal API network remains IPv4-only. Existing deployments must
-merge this Compose change and recreate the gateway container because
-`update.sh` intentionally does not overwrite deployment files. The existing
-`.env` value `VPSMAN_GATEWAY_PUBLISH=59443:9443` already has the intended
-dual-stack meaning and does not need to change. After recreation, verify source
-attribution with a canary agent connecting through each externally advertised
-address. A localhost or host-hairpin test can report a Docker bridge address and
-is not evidence of the external path. Corrected socket attribution applies to
-new connections; historical session and audit evidence is not rewritten.
+network; the internal API network remains IPv4-only. Verify source attribution
+with a canary agent connecting through each externally advertised address. A
+localhost or host-hairpin test can report a Docker bridge address and is not
+evidence of the external path.
 
 ## Control-Plane Backup
 
@@ -234,9 +229,7 @@ is running and do not treat a raw data directory as a portable substitute for
 `pg_dump`.
 
 `RELEASE_TAG` is created by the versioned bundle and updated atomically only
-after the updater commits a healthy first start, update, or metadata-bearing
-rollback. The validation above prevents a legacy rollback without embedded
-release metadata from producing an ambiguous recovery archive.
+after the updater commits a healthy first start, update, or rollback.
 The deployment archive also retains the maintained Compose and Nginx files,
 including any reviewed local image-digest pins or ingress changes.
 
@@ -256,9 +249,7 @@ rehearsal cannot compete with the production control plane for live agents.
 
 1. Read and export the tag with
    `export VPSMAN_RELEASE_TAG="$(tar -xOf deployment-files.tar.gz RELEASE_TAG)"`,
-   then obtain that exact deployment bundle. Review
-   [Migration Compatibility](migration-compatibility.md) before choosing a
-   different release.
+   then obtain that exact deployment bundle.
 2. Extract the deployment bundle, then extract `deployment-files.tar.gz` into
    its root. Confirm `.env`, `config/secrets/`, and `runtime/data` permissions.
 3. Start only PostgreSQL and wait until it accepts connections.
@@ -294,86 +285,28 @@ curl -fsS http://127.0.0.1:5173/health
 docker compose ps
 ```
 
-Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
-An exact v0.4.6 database already contains `0001`–`0014`; the v0.4.7 bundle
-applies only `0015`–`0020` after all old writers have stopped.
-The exact v0.4.4 `0001`–`0009` migration files and checksums may apply
-`0010_disabled_resource_alert_policies.sql`,
-`0011_operational_alert_lifecycle.sql`,
-`0012_policy_owned_alerts_event_schedules.sql`, and then
-`0013_revisioned_fleet_alert_state_bulk.sql` and
-`0014_disk_telemetry_presence.sql` and
-`0015_latest_network_rate_effective_index.sql` and
-`0016_streaming_traffic_hourly_refresh.sql` and
-`0017_agent_suspension.sql` and
-`0018_traffic_counter_import_class_stream_index.sql` and
-`0019_traffic_import_same_shape_update.sql` and
-`0020_retire_unused_traffic_cycle_usage.sql` in place. The exact v0.3.5
-`0001`–`0008` baseline may apply `0009` through `0020`. Keep any
-earlier or different database with its matching application release, or move
-reviewed data through a separate export/import procedure into a fresh database.
-`0013` deterministically backfills one exact hourly transition ledger from the
-retained traffic-counter rows while writers are stopped. Its runtime scales
-with retained counter volume; budget database/WAL headroom for the new hourly
-rows and the one-time ordered raw-counter pass, allow the migration to finish,
-and never start an old writer against the new trigger-maintained schema.
-`0014` adds disk-presence metadata without rewriting retained rollup rows;
-unversioned disk numerics remain stored but are unavailable to current charts
-and policy evaluation until a versioned agent sample supplies new evidence.
-`0015` builds an effective-observation index over retained network-rate rows.
-Keep writers stopped for the migration, and budget temporary disk, WAL, and
-execution time for one ordered index build over `telemetry_network_rates`.
-`0016` replaces only the hourly traffic-ledger refresh function with a narrow,
-per-stream whole-ledger repair; it does not rewrite retained traffic rows.
-`0017` adds nullable suspension provenance, validated state constraints, and
-the matching inventory view fields. It does not rewrite retained telemetry,
-traffic, jobs, or alert history. `0018` is the only no-transaction migration in
-this range: it performs one `CREATE INDEX CONCURRENTLY IF NOT EXISTS` over
-`traffic_counter_samples`. `0019` is transactional trigger code; applying it
-does not rewrite retained rows. Its import fast path is only selected after the
-API proves an exact dense keyset under the client/stream locks, and the trigger
-independently checks primary keys, accounting fields, import class, and clean
-hourly revision markers. Any mismatch falls through to the existing exact
-hourly refresh. `0020` removes the unused `traffic_cycle_usage` prototype
-without `CASCADE`; an external dependency aborts the upgrade. Keep old writers
-stopped through `0020`, and take a verified backup before applying it.
-
-Current API and worker startup share a session advisory lock around migration
-handling. They require the embedded `0018` source and its successful exact
-ledger row, then inspect the schema-qualified index definition and its
-valid/ready/live flags before allowing the migration runner to continue
-through `0020`. A missing index or an exact migration-owned invalid
-index left by an interrupted concurrent build is rebuilt once. A same-name
-object with any other relation kind or definition is never dropped
-automatically; startup fails closed for operator inspection. Follow
-[Traffic-ledger audit and recovery](traffic-ledger-recovery.md) rather than
-editing `_sqlx_migrations` or improvising a replacement.
+API and worker apply the bundled schema with the ordinary SQLx migration
+runner. A schema application failure aborts readiness.
 
 ## Upgrade and Rollback
 
 Before every production upgrade:
 
-1. Read the target release notes, this runbook, `SECURITY.md`, and
-   [Migration Compatibility](migration-compatibility.md).
+1. Read the target release notes, this runbook, and `SECURITY.md`.
 2. Take and test a control-plane backup.
-3. Before an upgrade that applies `0012`, let the existing webhook worker drain
-   every `queued`, `in_progress`, and retryable `failed` delivery. Verify the
-   read-only zero-count preflight in
-   [Migration Compatibility](migration-compatibility.md); do not discard
-   deliveries to make the check pass.
-4. Download the exact-tag target deployment bundle.
-5. Compare its `.env.example`, `compose.yml`, `nginx.conf`, `update.sh`, and
+3. Download the exact-tag target deployment bundle.
+4. Compare its `.env.example`, `compose.yml`, `nginx.conf`, `update.sh`, and
    `config/vpsman.toml` with the installed deployment.
    Merge reviewed deployment changes without overwriting `.env`,
    `config/secrets/`, or `runtime/`.
-6. Run `./update.sh vX.Y.Z`, then check `/health`, `docker compose ps`, recent
+5. Run `./update.sh vX.Y.Z`, then check `/health`, `docker compose ps`, recent
    service logs, operator sign-in, and a canary agent before wider operations.
 
 Use `latest` only for disposable environments; it makes change review and
 recovery less reproducible. Prereleases are not production-supported.
 
-For an existing deployment, the updater verifies the target migration history,
-stops application writers, stores a PostgreSQL dump under
+For an existing deployment, the updater stops application writers, stores a
+PostgreSQL dump under
 `runtime/update-backups/`, activates all three payloads as one transaction, and
 checks readiness and release identity. If an interrupted transaction remains,
 run `./update.sh recover` and preserve its evidence if automated recovery
@@ -381,15 +314,13 @@ refuses to proceed. This local safeguard does not replace an encrypted,
 off-host control-plane backup. These sensitive local dumps are mode-restricted
 but are not automatically encrypted or pruned; monitor their disk use and apply
 the reviewed retention policy after recovery points are safely stored off-host.
-First-start uses the same pre-activation database safeguard, including for the
-restore workflow above. Successful activation also updates `RELEASE_TAG`; do
-not hand-edit it to a tag that is not actually active.
+Successful activation also updates `RELEASE_TAG`; do not hand-edit it to a tag
+that is not actually active.
 
 `./update.sh rollback` transactionally swaps the server, frontend, and CLI
-payloads with their previous copies after checking migration compatibility and
-taking another database dump. It does not reverse database migrations,
-deployment file changes, configuration changes, or external side effects. If
-the previous release cannot safely read the upgraded database, rollback refuses
-the transition; restore the full pre-upgrade database and deployment backup
-instead. Keep the gateway blocked until exactly one recovered control plane is
-authoritative.
+payloads with their previous copies after taking another database dump. It does
+not reverse database migrations,
+deployment file changes, configuration changes, or external side effects.
+Restore the matching database and deployment backup whenever those also need
+to be reversed. Keep the gateway blocked until exactly one recovered control
+plane is authoritative.

@@ -35,6 +35,7 @@ export const DEFAULT_TUNNEL_BANDWIDTH_MBPS = 100;
 export const MIN_TUNNEL_MTU = 68;
 export const MIN_IPV6_TUNNEL_MTU = 1280;
 export const MAX_TUNNEL_MTU = 65535;
+export const MAX_TUNNEL_PLAN_NAME_BYTES = 128;
 const OSPF_BANDWIDTH_REFERENCE_MBPS = 100;
 const OSPF_BANDWIDTH_WEIGHT = 10;
 const OSPF_LOSS_WEIGHT = 400;
@@ -59,6 +60,14 @@ export type RuntimeControlFormValues = {
   openvpnListenerSide?: "left" | "right";
   openvpnPort?: string;
 };
+
+export function validateTunnelPlanName(name: string): string | null {
+  if (!name.trim()) return "Plan name is required";
+  if (new TextEncoder().encode(name).byteLength > MAX_TUNNEL_PLAN_NAME_BYTES) {
+    return "Plan name must be 128 UTF-8 bytes or fewer";
+  }
+  return null;
+}
 
 export type RuntimeTopologyFormValues = {
   version?: string | null;

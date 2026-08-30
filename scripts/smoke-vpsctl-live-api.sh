@@ -632,8 +632,7 @@ jq -e '.alert_id == "'"$alert_state_target_id"'" and .state == "open"' <<<"$aler
 alert_policy_json="$(vpsctl_auth alert-policy upsert \
   --name edge-resource-alerts \
   --selector 'tag:edge' \
-  --rule 'cpu.utilization_ratio >= 0.75' \
-  --severity warning \
+  --rule-json '{"name":"cpu","enabled":true,"rule_kind":"metric","evidence_source":"telemetry.combined","correlation_mode":"natural_key","trigger_condition_expression":"cpu.utilization_ratio >= 0.75","severity":"warning","category":"resource","title_template":"CPU busy","detail_template":"CPU utilization is high"}' \
   --notes live-smoke \
   --confirmed)"
 jq -e '
@@ -641,7 +640,7 @@ jq -e '
   .selector_expression == "tag:edge" and
   .enabled == true and
   (.rules | length) == 1 and
-  .rules[0].condition_expression == "cpu.utilization_ratio >= 0.75"
+  .rules[0].trigger_condition_expression == "cpu.utilization_ratio >= 0.75"
 ' <<<"$alert_policy_json" >/dev/null
 alert_policies_json="$(vpsctl_auth alert-policies list --selector 'tag:edge' --enabled true --limit 20)"
 jq -e 'length == 1 and .[0].name == "edge-resource-alerts"' <<<"$alert_policies_json" >/dev/null
@@ -656,7 +655,7 @@ fi
 scoped_alert_policy_write_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"name":"denied-alert-policy","enabled":true,"selector_expression":"tag:edge","rules":[{"name":"cpu","enabled":true,"traffic_selector":null,"condition_expression":"cpu.utilization_ratio >= 0.75","window_secs":0,"severity":"warning"}],"confirmed":true}' \
+  -d '{"name":"denied-alert-policy","enabled":true,"selector_expression":"tag:edge","rules":[{"name":"cpu","enabled":true,"rule_kind":"metric","evidence_source":"telemetry.combined","correlation_mode":"natural_key","traffic_selector":null,"trigger_condition_expression":"cpu.utilization_ratio >= 0.75","trigger_meta_condition":null,"resolve_condition_expression":null,"resolve_meta_condition":null,"severity":"warning","category":"resource","title_template":"CPU busy","detail_template":"CPU utilization is high"}],"notes":null,"confirmed":true,"preview_hash":null}' \
   "$api_url/api/v1/fleet-alert-policies")"
 scoped_alert_policy_write_status="${scoped_alert_policy_write_response##*$'\n'}"
 scoped_alert_policy_write_body="${scoped_alert_policy_write_response%$'\n'*}"
@@ -947,7 +946,7 @@ jq -e 'any(.[]; .action == "operator.created") and any(.[]; .action == "operator
   <<<"$audit_json" >/dev/null
 
 history_retention_json="$(vpsctl_auth history-retention)"
-jq -e 'any(.[]; .domain == "audit_logs" and .built_in_default == true) and any(.[]; .domain == "backup_artifacts")' \
+jq -e 'any(.[]; .domain == "audit_logs" and .built_in_default == true)' \
   <<<"$history_retention_json" >/dev/null
 history_policy_json="$(vpsctl_auth history-retention-upsert \
   --domain audit_logs \

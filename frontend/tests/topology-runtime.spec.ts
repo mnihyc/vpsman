@@ -6,6 +6,7 @@ import {
   defaultAgentTunnelMtu,
   isDerivedAgentTunnelMtu,
   runtimeManagerLabel,
+  validateTunnelPlanName,
 } from "../src/topologyRuntime";
 import { networkSpeedServerSide } from "../src/topologyNetworkJobs";
 
@@ -14,6 +15,17 @@ const runtimeControlValues = {
   egressKbps: "",
   ingressKbps: "",
 };
+
+test("tunnel plan names enforce the 128-byte UTF-8 boundary", () => {
+  expect(validateTunnelPlanName("p".repeat(128))).toBeNull();
+  expect(validateTunnelPlanName("é".repeat(64))).toBeNull();
+  expect(validateTunnelPlanName("é".repeat(65))).toBe(
+    "Plan name must be 128 UTF-8 bytes or fewer",
+  );
+  expect(validateTunnelPlanName(` ${"p".repeat(128)} `)).toBe(
+    "Plan name must be 128 UTF-8 bytes or fewer",
+  );
+});
 
 function previewCost(
   bandwidthMbps: number,

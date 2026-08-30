@@ -4,38 +4,20 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
-use vpsman_common::insert_tags_into_last_namespace_blocks;
 
 use crate::{
     model::{
-        AgentIdentityView, AgentView, AuditLogView, AuthContext, ClientKeyRevocationView,
-        ClientStatusHistoryView, KeyLifecycleClientView, KeyLifecycleReportView,
-        UpsertAgentIdentityRequest,
+        AgentIdentityView, AuthContext, ClientKeyRevocationView, KeyLifecycleClientView,
+        KeyLifecycleReportView, UpsertAgentIdentityRequest,
     },
     repository::Repository,
-    repository_inventory::{
-        ensure_postgres_tags_in_order, memory_tag_order_map, sort_agent_tags_by_order,
-    },
+    repository_inventory::ensure_postgres_tags_in_order,
     repository_jobs::{
         finish_jobs_in_tx_and_reconcile_event_sources,
         mark_active_targets_agent_lost_for_client_in_tx,
         skip_unstarted_queued_targets_for_client_in_tx,
     },
-    util::unix_now,
 };
-
-fn normalized_numeric_client_id_digits(client_id: &str) -> Option<String> {
-    let digits = client_id.strip_prefix("v-").unwrap_or(client_id);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let normalized = digits.trim_start_matches('0');
-    Some(if normalized.is_empty() {
-        "0".to_string()
-    } else {
-        normalized.to_string()
-    })
-}
 
 fn increment_decimal_digits(digits: &str) -> String {
     let mut bytes = digits.as_bytes().to_vec();
@@ -89,45 +71,6 @@ impl Repository {
             .await?;
 
         match self {
-            Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    anyhow::bail!("agent_identity_deactivated");
-                }
-                if memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .any(|agent| agent.id == client_id && agent.status == "deleted")
-                {
-                    anyhow::bail!("agent_identity_deactivated");
-                }
-                let existing = memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .get(client_id)
-                    .cloned();
-                if request.replace_existing_key {
-                    if existing.as_ref().is_none_or(|key| key.is_empty()) {
-                        anyhow::bail!("client_not_found_or_no_key");
-                    }
-                    anyhow::ensure!(
-                        existing.as_ref().is_some_and(|key| key != &public_key),
-                        "agent_identity_key_unchanged"
-                    );
-                } else if existing.is_some()
-                    || memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .any(|agent| agent.id == client_id)
-                {
-                    anyhow::bail!("client_id_already_registered");
-                }
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -215,269 +158,41 @@ impl Repository {
         }
 
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                if memory
-                    .client_key_revocations
-                    .read()
-                    .await
-                    .iter()
-                    .any(|record| record.public_key_sha256_hex == public_key_sha256_hex)
-                {
-                    anyhow::bail!("agent_identity_key_revoked");
-                }
-                if memory.hidden_clients.read().await.contains(&client_id) {
-                    anyhow::bail!("agent_identity_deactivated");
-                }
-                if memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .any(|agent| agent.id == client_id && agent.status == "deleted")
-                {
-                    anyhow::bail!("agent_identity_deactivated");
-                }
-                let existing = memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .get(&client_id)
-                    .cloned();
-                let creating_identity = existing.is_none();
-                if request.replace_existing_key {
-                    if existing.as_ref().is_none_or(|key| key.is_empty()) {
-                        anyhow::bail!("client_not_found_or_no_key");
-                    }
-                } else {
-                    if existing.is_some()
-                        || memory
-                            .agents
-                            .read()
-                            .await
-                            .iter()
-                            .any(|agent| agent.id == client_id)
-                    {
-                        anyhow::bail!("client_id_already_registered");
-                    }
-                }
-                let old_process_incarnation_id = if request.replace_existing_key {
-                    memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .find(|agent| agent.id == client_id)
-                        .and_then(|agent| agent.process_incarnation_id)
-                } else {
-                    None
-                };
-                let prior_status = if request.replace_existing_key {
-                    memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .find(|agent| agent.id == client_id)
-                        .map(|agent| agent.status.clone())
-                } else {
-                    None
-                };
-                let mut public_keys = memory.client_public_keys.write().await;
-                if public_keys.iter().any(|(owner_id, existing_key)| {
-                    owner_id != &client_id
-                        && !existing_key.is_empty()
-                        && existing_key == &public_key
-                }) {
-                    anyhow::bail!("agent_identity_key_already_registered");
-                }
-                if request.replace_existing_key {
-                    let existing_key = public_keys
-                        .get(&client_id)
-                        .context("client_not_found_or_no_key")?;
-                    anyhow::ensure!(existing_key != &public_key, "agent_identity_key_unchanged");
-                    let retired_fingerprint =
-                        crate::repository_key_lifecycle::public_key_sha256_hex(existing_key);
-                    let mut revocations = memory.client_key_revocations.write().await;
-                    if !revocations
-                        .iter()
-                        .any(|record| record.public_key_sha256_hex == retired_fingerprint)
-                    {
-                        revocations.push(ClientKeyRevocationView {
-                            id: Uuid::new_v4(),
-                            client_id: client_id.clone(),
-                            public_key_sha256_hex: retired_fingerprint,
-                            reason: Some("client_key_replaced".to_string()),
-                            revoked_by: Some(operator.operator.id),
-                            created_at: unix_now().to_string(),
-                        });
-                    }
-                }
-                public_keys.insert(client_id.to_string(), public_key.clone());
-                drop(public_keys);
-                let agent_lost_job_ids =
-                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
-                        self.mark_active_targets_agent_lost_for_client(
-                            &client_id,
-                            old_process_incarnation_id,
-                            None,
-                            "client_key_replaced",
-                            "client public key was replaced before final command output",
-                        )
-                        .await?
-                    } else {
-                        Vec::new()
-                    };
-                if request.replace_existing_key {
-                    let now = unix_now().to_string();
-                    for session in memory.gateway_sessions.write().await.iter_mut() {
-                        if session.client_id == client_id && session.status == "active" {
-                            session.status = "ended".to_string();
-                            session.last_seen_at = now.clone();
-                            session.ended_at = Some(now.clone());
-                            session.end_reason = Some("client_key_replaced".to_string());
-                        }
-                    }
-                }
-                let memory_tag_order = {
-                    let mut tag_order = memory.tag_order.write().await;
-                    let natural_sort = tag_order.namespace_natural_sort_enabled;
-                    insert_tags_into_last_namespace_blocks(
-                        &mut tag_order.names,
-                        &tags,
-                        natural_sort,
-                    );
-                    memory_tag_order_map(&tag_order.names)
-                };
-                let mut view = {
-                    let mut agents = memory.agents.write().await;
-                    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
-                        if agent.status == "deleted" {
-                            anyhow::bail!("agent_identity_deactivated");
-                        }
-                        if request.display_name.is_some() {
-                            agent.display_name = display_name.clone();
-                        }
-                        if request.replace_existing_key {
-                            if agent.status != "suspended" {
-                                agent.status = "offline".to_string();
-                            }
-                            agent.process_incarnation_id = None;
-                            agent.stale_since = None;
-                            agent.stale_reason = None;
-                        }
-                        for tag in &tags {
-                            if !agent.tags.iter().any(|existing| existing == tag) {
-                                agent.tags.push(tag.clone());
-                            }
-                        }
-                        AgentIdentityView {
-                            client_id: agent.id.clone(),
-                            display_name: agent.display_name.clone(),
-                            status: agent.status.clone(),
-                            current_public_key_sha256_hex: public_key_sha256_hex.clone(),
-                            tags: agent.tags.clone(),
-                        }
-                    } else {
-                        let agent_tags = tags.clone();
-                        agents.push(AgentView {
-                            id: client_id.to_string(),
-                            display_name: display_name.clone(),
-                            status: "never".to_string(),
-                            tags: agent_tags.clone(),
-                            registration_ip: None,
-                            last_ip: None,
-                            last_seen_at: None,
-                            arch: None,
-                            internal_build_number: 1,
-                            process_incarnation_id: None,
-                            stale_since: None,
-                            stale_reason: None,
-                            capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-                        });
-                        AgentIdentityView {
-                            client_id: client_id.to_string(),
-                            display_name,
-                            status: "never".to_string(),
-                            current_public_key_sha256_hex: public_key_sha256_hex.clone(),
-                            tags: agent_tags,
-                        }
-                    }
-                };
-                if request.replace_existing_key && prior_status.as_deref() == Some("suspended") {
-                    if let Some(record) = memory.agent_suspensions.write().await.get_mut(&client_id)
-                    {
-                        record.suspended_from_status = "offline".to_string();
-                    }
-                }
-                sort_agent_tags_by_order(&mut view.tags, &memory_tag_order);
-                if creating_identity {
-                    self.reconcile_memory_agent_alert_transition(
-                        &client_id,
-                        "never",
-                        &unix_now().to_string(),
-                    )
-                    .await?;
-                }
-                if let Some(prior_status) = prior_status.filter(|status| status != "offline") {
-                    memory
-                        .client_status_history
-                        .write()
-                        .await
-                        .push(ClientStatusHistoryView {
-                            id: Uuid::new_v4(),
-                            client_id: client_id.clone(),
-                            from_status: Some(prior_status.clone()),
-                            to_status: "offline".to_string(),
-                            reason: "client_key_replaced".to_string(),
-                            metadata: json!({
-                                "operator_id": operator.operator.id,
-                                "recovery_with_new_key": true,
-                            }),
-                            created_at: unix_now().to_string(),
-                        });
-                    self.record_client_status_webhook_event(
-                        &client_id,
-                        Some(&prior_status),
-                        "offline",
-                        "client_key_replaced",
-                        json!({
-                            "operator_id": operator.operator.id,
-                            "recovery_with_new_key": true,
-                            "origin_kind": "operator_request",
-                            "component": "agent-identity-controller",
-                        }),
-                    )
-                    .await?;
-                }
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "agent_identity.upserted".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: Some(identity_payload_hash.clone()),
-                    metadata: json!({
-                        "client_id": client_id,
-                        "requested_display_name": request.display_name.as_deref().map(str::trim),
-                        "public_key_sha256_hex": public_key_sha256_hex,
-                        "replace_existing_key": request.replace_existing_key,
-                        "tags": tags,
-                        "agent_lost_job_ids": agent_lost_job_ids,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "agent-identity-controller",
-                    }),
-                    created_at: unix_now().to_string(),
-                });
-                Ok(view)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_client_lifecycles_in_tx(&mut tx, std::slice::from_ref(&client_id))
+                    .await?;
+                let existing = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        display_name,
+                        status,
+                        public_key,
+                        process_incarnation_id,
+                        hidden_at IS NOT NULL AS hidden
+                    FROM clients
+                    WHERE id = $1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let mut owned_key_hashes = vec![public_key_sha256_hex.clone()];
+                if request.replace_existing_key {
+                    if let Some(row) = existing.as_ref() {
+                        let existing_key: Vec<u8> = row.try_get("public_key")?;
+                        if !existing_key.is_empty() {
+                            owned_key_hashes.push(
+                                crate::repository_key_lifecycle::public_key_sha256_hex(
+                                    &existing_key,
+                                ),
+                            );
+                        }
+                    }
+                }
+                lock_postgres_key_identities_in_tx(&mut tx, &owned_key_hashes).await?;
                 let mut agent_lost_job_ids = Vec::new();
                 if fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex)
                     .await?
@@ -503,23 +218,6 @@ impl Repository {
                 {
                     anyhow::bail!("agent_identity_key_already_registered");
                 }
-                let existing = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        display_name,
-                        status,
-                        public_key,
-                        process_incarnation_id,
-                        hidden_at IS NOT NULL AS hidden
-                    FROM clients
-                    WHERE id = $1
-                    FOR UPDATE
-                    "#,
-                )
-                .bind(&client_id)
-                .fetch_optional(&mut *tx)
-                .await?;
                 let creating_identity = existing.is_none();
                 let prior_status = existing
                     .as_ref()
@@ -652,10 +350,11 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 }
-                if let Some(prior_status) = replacement_transition_prior_status(
+                let replacement_transition_from = replacement_transition_prior_status(
                     request.replace_existing_key,
                     prior_status.as_deref(),
-                ) {
+                );
+                if let Some(prior_status) = replacement_transition_from {
                     crate::repository_ingest::record_client_status_transition_in_tx(
                         &mut tx,
                         &client_id,
@@ -668,6 +367,16 @@ impl Repository {
                         }),
                         "operator_request",
                         "agent-identity-controller",
+                    )
+                    .await?;
+                } else if !creating_identity && request.replace_existing_key {
+                    // Replacing an offline or suspended client's key does not
+                    // create another status edge, but it does invalidate the
+                    // prior process/session boundary. Publish that tunnel
+                    // evidence transition atomically with the replacement.
+                    crate::repository_operational_alerts::mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
+                        &mut tx,
+                        std::slice::from_ref(&client_id),
                     )
                     .await?;
                 }
@@ -717,20 +426,6 @@ impl Repository {
 
     async fn generate_auto_client_id(&self) -> Result<String> {
         match self {
-            Self::Memory(memory) => {
-                let max_numeric_digits = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|agent| normalized_numeric_client_id_digits(&agent.id))
-                    .max_by(|left, right| {
-                        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-                    })
-                    .unwrap_or_else(|| "0".to_string());
-                let next = increment_decimal_digits(&max_numeric_digits);
-                Ok(format!("v-{next}"))
-            }
             Self::Postgres(pool) => {
                 let max_numeric_digits = sqlx::query_scalar::<_, String>(
                     r#"
@@ -772,176 +467,9 @@ impl Repository {
     ) -> Result<ClientKeyRevocationView> {
         let reason = normalized_reason(reason);
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    anyhow::bail!("client not found: {client_id}");
-                }
-                let current_public_key = memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .get(client_id)
-                    .cloned()
-                    .with_context(|| format!("client public key missing for {client_id}"))?;
-                let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
-                let old_process_incarnation_id = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .and_then(|agent| agent.process_incarnation_id);
-                if let Some(existing) = memory
-                    .client_key_revocations
-                    .read()
-                    .await
-                    .iter()
-                    .find(|record| record.public_key_sha256_hex == public_key_sha256_hex)
-                    .cloned()
-                {
-                    let agent_lost_job_ids =
-                        if let Some(old_process_incarnation_id) = old_process_incarnation_id {
-                            self.mark_active_targets_agent_lost_for_client(
-                                client_id,
-                                old_process_incarnation_id,
-                                None,
-                                "client_key_revoked",
-                                "client key was revoked before final command output",
-                            )
-                            .await?
-                        } else {
-                            Vec::new()
-                        };
-                    let skipped_job_ids = self
-                        .skip_unstarted_queued_targets_for_client(
-                            client_id,
-                            "client_key_revoked",
-                            "client_key_revoked: target skipped before dispatch",
-                        )
-                        .await?;
-                    let prior_status =
-                        mark_memory_agent_revoked(memory, client_id, reason.as_deref()).await;
-                    memory.audits.write().await.push(AuditLogView {
-                        id: Uuid::new_v4(),
-                        actor_id: Some(operator.operator.id),
-                        action: "client_key.revoked".to_string(),
-                        target: format!("client:{client_id}"),
-                        command_hash: None,
-                        metadata: json!({
-                            "client_id": client_id,
-                            "public_key_sha256_hex": existing.public_key_sha256_hex,
-                            "reason": existing.reason,
-                            "recovered_existing_revocation": true,
-                            "agent_lost_job_ids": agent_lost_job_ids,
-                            "skipped_unstarted_job_ids": skipped_job_ids,
-                            "result": "succeeded",
-                            "operator_id": operator.operator.id,
-                            "operator_username": &operator.operator.username,
-                            "operator_role": &operator.operator.role,
-                            "operator_session_id": operator.audit_session_id(),
-                            "origin_kind": "operator_request",
-                            "component": "client-key-controller",
-                        }),
-                        created_at: unix_now().to_string(),
-                    });
-                    if let Some(prior_status) = prior_status {
-                        self.record_client_status_webhook_event(
-                            client_id,
-                            Some(&prior_status),
-                            "revoked",
-                            "client_key_revoked",
-                            json!({
-                                "reason": reason,
-                                "access_deactivated": true,
-                                "recovery_allowed_with_new_key": true,
-                                "origin_kind": "operator_request",
-                                "component": "client-key-controller",
-                            }),
-                        )
-                        .await?;
-                    }
-                    return Ok(existing);
-                }
-
-                let record = ClientKeyRevocationView {
-                    id: Uuid::new_v4(),
-                    client_id: client_id.to_string(),
-                    public_key_sha256_hex,
-                    reason: reason.clone(),
-                    revoked_by: Some(operator.operator.id),
-                    created_at: unix_now().to_string(),
-                };
-                memory
-                    .client_key_revocations
-                    .write()
-                    .await
-                    .push(record.clone());
-                let agent_lost_job_ids =
-                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
-                        self.mark_active_targets_agent_lost_for_client(
-                            client_id,
-                            old_process_incarnation_id,
-                            None,
-                            "client_key_revoked",
-                            "client key was revoked before final command output",
-                        )
-                        .await?
-                    } else {
-                        Vec::new()
-                    };
-                let skipped_job_ids = self
-                    .skip_unstarted_queued_targets_for_client(
-                        client_id,
-                        "client_key_revoked",
-                        "client_key_revoked: target skipped before dispatch",
-                    )
-                    .await?;
-                let prior_status =
-                    mark_memory_agent_revoked(memory, client_id, reason.as_deref()).await;
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "client_key.revoked".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "client_id": client_id,
-                        "public_key_sha256_hex": record.public_key_sha256_hex,
-                        "reason": record.reason,
-                        "agent_lost_job_ids": agent_lost_job_ids,
-                        "skipped_unstarted_job_ids": skipped_job_ids,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "client-key-controller",
-                    }),
-                    created_at: unix_now().to_string(),
-                });
-                if let Some(prior_status) = prior_status {
-                    self.record_client_status_webhook_event(
-                        client_id,
-                        Some(&prior_status),
-                        "revoked",
-                        "client_key_revoked",
-                        json!({
-                            "reason": reason,
-                            "access_deactivated": true,
-                            "recovery_allowed_with_new_key": true,
-                            "origin_kind": "operator_request",
-                            "component": "client-key-controller",
-                        }),
-                    )
-                    .await?;
-                }
-                Ok(record)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
                 let row = sqlx::query(
                     r#"
                     SELECT public_key, status, process_incarnation_id
@@ -964,6 +492,11 @@ impl Repository {
                 let old_process_incarnation_id: Option<Uuid> =
                     row.try_get("process_incarnation_id")?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
+                lock_postgres_key_identities_in_tx(
+                    &mut tx,
+                    std::slice::from_ref(&public_key_sha256_hex),
+                )
+                .await?;
                 if let Some(existing) =
                     fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex).await?
                 {
@@ -1114,12 +647,6 @@ impl Repository {
         limit: i64,
     ) -> Result<Vec<ClientKeyRevocationView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory.client_key_revocations.read().await.clone();
-                records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-                records.truncate(limit as usize);
-                Ok(records)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1150,57 +677,6 @@ impl Repository {
         // legitimately conflict and retry with the next report value.
         let suggested_client_id = self.generate_auto_client_id().await?;
         match self {
-            Self::Memory(memory) => {
-                let agents = memory.agents.read().await.clone();
-                let hidden = memory.hidden_clients.read().await.clone();
-                let public_keys = memory.client_public_keys.read().await.clone();
-                let revocations = memory.client_key_revocations.read().await.clone();
-                let mut current_key_revoked_count = 0usize;
-                let mut clients = agents
-                    .into_iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .map(|agent| {
-                        let current_public_key_sha256_hex =
-                            public_keys.get(&agent.id).and_then(|key| {
-                                (!key.is_empty()).then(|| public_key_sha256_hex(key.as_slice()))
-                            });
-                        let latest = latest_current_revocation(
-                            &revocations,
-                            &agent.id,
-                            current_public_key_sha256_hex.as_deref(),
-                        );
-                        if latest.is_some() {
-                            current_key_revoked_count += 1;
-                        }
-                        KeyLifecycleClientView {
-                            client_id: agent.id,
-                            display_name: agent.display_name,
-                            status: agent.status,
-                            current_key_revoked: latest.is_some(),
-                            current_public_key_sha256_hex,
-                            latest_revoked_at: latest.map(|record| record.created_at.clone()),
-                            latest_revocation_reason: latest
-                                .and_then(|record| record.reason.clone()),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                clients.sort_by(|left, right| {
-                    left.display_name
-                        .cmp(&right.display_name)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                });
-                let direct_identity_client_count = clients
-                    .iter()
-                    .filter(|client| client.current_public_key_sha256_hex.is_some())
-                    .count();
-                Ok(KeyLifecycleReportView {
-                    suggested_client_id,
-                    direct_identity_client_count,
-                    current_key_revoked_count,
-                    revocation_count: revocations.len(),
-                    clients,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -1326,12 +802,6 @@ impl Repository {
     pub(crate) async fn is_public_key_revoked(&self, public_key: &[u8]) -> Result<bool> {
         let public_key_sha256_hex = public_key_sha256_hex(public_key);
         match self {
-            Self::Memory(memory) => Ok(memory
-                .client_key_revocations
-                .read()
-                .await
-                .iter()
-                .any(|record| record.public_key_sha256_hex == public_key_sha256_hex)),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -1355,18 +825,6 @@ impl Repository {
         public_key: &[u8],
     ) -> Result<()> {
         let duplicate = match self {
-            Self::Memory(memory) => {
-                memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .iter()
-                    .any(|(owner_id, existing_key)| {
-                        owner_id != client_id
-                            && !existing_key.is_empty()
-                            && existing_key == public_key
-                    })
-            }
             Self::Postgres(pool) => sqlx::query(
                 r#"
                 SELECT 1
@@ -1392,18 +850,6 @@ impl Repository {
         client_id: &str,
     ) -> Result<Option<String>> {
         match self {
-            Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    return Ok(None);
-                }
-                Ok(memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .get(client_id)
-                    .filter(|key| !key.is_empty())
-                    .map(|key| public_key_sha256_hex(key)))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -1423,60 +869,6 @@ impl Repository {
             }
         }
     }
-}
-
-async fn mark_memory_agent_revoked(
-    memory: &crate::repository::MemoryState,
-    client_id: &str,
-    request_reason: Option<&str>,
-) -> Option<String> {
-    let now = unix_now().to_string();
-    let mut prior_status = None;
-    if let Some(agent) = memory
-        .agents
-        .write()
-        .await
-        .iter_mut()
-        .find(|agent| agent.id == client_id)
-    {
-        if agent.status != "revoked" {
-            prior_status = Some(agent.status.clone());
-        }
-        agent.status = "revoked".to_string();
-        agent.process_incarnation_id = None;
-        agent.stale_since = None;
-        agent.stale_reason = None;
-    }
-    if let Some(prior_status) = prior_status.as_ref() {
-        memory
-            .client_status_history
-            .write()
-            .await
-            .push(ClientStatusHistoryView {
-                id: Uuid::new_v4(),
-                client_id: client_id.to_string(),
-                from_status: Some(prior_status.clone()),
-                to_status: "revoked".to_string(),
-                reason: "client_key_revoked".to_string(),
-                metadata: json!({
-                    "reason": request_reason,
-                    "frontend_visible": true,
-                    "access_deactivated": true,
-                    "recovery_allowed_with_new_key": true,
-                }),
-                created_at: now.clone(),
-            });
-    }
-    for session in memory.gateway_sessions.write().await.iter_mut() {
-        if session.client_id == client_id && session.status == "active" {
-            session.status = "ended".to_string();
-            session.last_seen_at = now.clone();
-            session.ended_at = Some(now.clone());
-            session.end_reason = Some("client_key_revoked".to_string());
-        }
-    }
-    memory.agent_suspensions.write().await.remove(client_id);
-    prior_status
 }
 
 async fn mark_postgres_agent_revoked(
@@ -1571,14 +963,130 @@ async fn fetch_postgres_agent_identity(
     })
 }
 
-pub(crate) async fn lock_postgres_agent_identity_lifecycle(
+pub(crate) async fn lock_postgres_client_lifecycles_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_ids: &[String],
 ) -> Result<()> {
-    // Identity and endpoint mutations are rare; one lock closes cross-record lifecycle races.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
-        .execute(&mut **tx)
+    // This advisory identity exists even before (or after) the client row, so
+    // registration, deletion, key mutation, and dispatch can all use the same
+    // exact owner. Canonical ordering prevents multi-client callers from
+    // deadlocking without serializing unrelated clients.
+    let ordered = client_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !ordered.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT pg_advisory_xact_lock(
+                hashtextextended('vpsman:client-lifecycle:' || client.client_id, 0)
+            )
+            FROM unnest($1::text[]) WITH ORDINALITY AS client(client_id, lock_order)
+            ORDER BY client.lock_order
+            "#,
+        )
+        .bind(ordered)
+        .fetch_all(&mut **tx)
         .await?;
+    }
     Ok(())
+}
+
+pub(crate) async fn lock_postgres_key_identities_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    public_key_sha256_hexes: &[String],
+) -> Result<()> {
+    let ordered = public_key_sha256_hexes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !ordered.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT pg_advisory_xact_lock(
+                hashtextextended('vpsman:key-lifecycle:' || key.public_key_sha256_hex, 0)
+            )
+            FROM unnest($1::text[]) WITH ORDINALITY
+                AS key(public_key_sha256_hex, lock_order)
+            ORDER BY key.lock_order
+            "#,
+        )
+        .bind(ordered)
+        .fetch_all(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn lock_postgres_definition_lifecycles_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    definition_identities: &[String],
+) -> Result<()> {
+    let ordered = definition_identities
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !ordered.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT pg_advisory_xact_lock(
+                hashtextextended('vpsman:definition-lifecycle:' || definition.identity, 0)
+            )
+            FROM unnest($1::text[]) WITH ORDINALITY AS definition(identity, lock_order)
+            ORDER BY definition.lock_order
+            "#,
+        )
+        .bind(ordered)
+        .fetch_all(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn lock_postgres_definitions_and_clients_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    definition_identities: &[String],
+    client_ids: &[String],
+) -> Result<()> {
+    // Every shared-definition writer uses the same namespace order: exact
+    // definitions first, then exact clients. Each namespace is sorted/deduped.
+    lock_postgres_definition_lifecycles_in_tx(tx, definition_identities).await?;
+    lock_postgres_client_lifecycles_in_tx(tx, client_ids).await
+}
+
+pub(crate) async fn try_lock_postgres_client_lifecycles_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_ids: &[String],
+) -> Result<Vec<String>> {
+    let ordered = client_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if ordered.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT client.client_id
+        FROM unnest($1::text[]) WITH ORDINALITY AS client(client_id, lock_order)
+        WHERE pg_try_advisory_xact_lock(
+            hashtextextended('vpsman:client-lifecycle:' || client.client_id, 0)
+        )
+        ORDER BY client.lock_order
+        "#,
+    )
+    .bind(ordered)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(Into::into)
 }
 
 pub(crate) async fn require_visible_postgres_clients_in_tx(
@@ -1586,11 +1094,12 @@ pub(crate) async fn require_visible_postgres_clients_in_tx(
     client_ids: &[String],
     error_code: &str,
 ) -> Result<()> {
-    lock_postgres_agent_identity_lifecycle(tx).await?;
     let expected = client_ids.iter().cloned().collect::<BTreeSet<_>>();
     if expected.is_empty() {
         return Ok(());
     }
+    lock_postgres_client_lifecycles_in_tx(tx, &expected.iter().cloned().collect::<Vec<_>>())
+        .await?;
     let visible = sqlx::query_scalar::<_, String>(
         r#"
         SELECT id
@@ -1606,22 +1115,6 @@ pub(crate) async fn require_visible_postgres_clients_in_tx(
     .into_iter()
     .collect::<BTreeSet<_>>();
     anyhow::ensure!(visible == expected, error_code.to_string());
-    Ok(())
-}
-
-pub(crate) async fn require_visible_memory_clients(
-    memory: &crate::repository::MemoryState,
-    client_ids: &[String],
-    error_code: &str,
-) -> Result<()> {
-    let expected = client_ids.iter().collect::<BTreeSet<_>>();
-    let hidden = memory.hidden_clients.read().await;
-    let agents = memory.agents.read().await;
-    let all_visible = expected.iter().all(|client_id| {
-        !hidden.contains(client_id.as_str())
-            && agents.iter().any(|agent| agent.id == client_id.as_str())
-    });
-    anyhow::ensure!(all_visible, error_code.to_string());
     Ok(())
 }
 
@@ -1659,6 +1152,7 @@ fn client_key_revocation_from_row(row: sqlx::postgres::PgRow) -> Result<ClientKe
     })
 }
 
+#[cfg(test)]
 fn latest_current_revocation<'a>(
     revocations: &'a [ClientKeyRevocationView],
     client_id: &str,

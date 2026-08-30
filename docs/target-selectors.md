@@ -424,24 +424,28 @@ provenance.
 
 Counted occurrences correlate per subject or globally. Immediate occurrences
 retain their unique natural key. A global terminal-job source must use global
-correlation when Count is selected.
+correlation when Count is selected. Matching occurrences accepted while a
+counted episode is open belong to that episode; the next cohort starts empty
+after the episode resolves.
 
 #### Evidence cadence and meta-condition timing
 
 Meta-condition seconds are a dwell, Count window, or expiry duration. They are
-**not a polling interval**. API-owned evidence is normally evaluated in the
-database transaction that accepts it. Worker-owned evidence is durably
-appended first and consumed by the API receipt repairer. The same API timer
-also revisits persisted Sustained and Elapsed deadlines; it does not poll the
-underlying source.
+**not a polling interval**. An API-owned source fact is evaluated in the
+transaction that accepts that fact. Raw telemetry acceptance and liveness are
+immediate; its derived metric, Ping, counter, and policy facts are accepted and
+evaluated together by the ordered asynchronous projection. Worker-owned
+evidence is durably marked pending and consumed by the API evaluator.
+The same API timer also revisits persisted Sustained and Elapsed deadlines; it
+does not poll the underlying source.
 
 | Evidence or timer                         | When it normally advances                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CPU, RAM, disk, and traffic-cycle metrics | On each accepted, nonduplicate agent telemetry sample. Agent `telemetry_interval_secs` defaults to 15s and accepts 5-3,600s. Configured Ping targets or enabled tunnel status/latency plans can shorten the effective telemetry tick to meet their own interval. Collection, transport, reconnects, and database work add jitter.                                             |
+| CPU, RAM, disk, and traffic-cycle metrics | The ordered projector advances them after each accepted, nonduplicate agent telemetry sample. Agent `telemetry_interval_secs` defaults to 15s and accepts 5-3,600s. Configured Ping targets or enabled tunnel status/latency plans can shorten the effective telemetry tick to meet their own interval. Collection, transport, reconnects, and projection add jitter.                                 |
 | `tunnel.adapter` and `tunnel.traffic`     | The agent checks configured runtime tunnel plans when `network.runtime_status_telemetry_interval_secs` is due: default 60s, allowed 15-3,600s. The check runs during telemetry collection; its cached result is carried by intervening telemetry and reconciled on each accepted sample. Probe duration and telemetry timing add jitter.                                      |
-| `agent.status` and `agent.access`         | Connect, disconnect, access, and other authoritative status transactions reconcile evidence directly; telemetry may reconcile online state, but an unchanged status boundary deduplicates. Silent-online offline detection uses `worker.agent_offline_timeout_secs` (bundled/default 300s; suite range 1-86,400s), then the next eligible worker pass and API receipt repair. |
-| Job, backup, and capability occurrences   | Event-driven when the terminal job result, failed backup, or capability skip is accepted; never sampled on a telemetry interval. API-owned paths evaluate in that transaction. Worker-owned scheduled-job facts are durably appended and reach rules on an API receipt-repair pass.                                                                                           |
-| Persisted policy deadlines and repair     | The API `--policy-evaluation-interval-secs` / `VPSMAN_POLICY_EVALUATION_INTERVAL_SECS` timer defaults to 30s and is clamped to 5-3,600s. Each delayed tick repairs up to 500 missing receipts, then handles up to 200 due transitions, so contention or a backlog can delay an edge beyond the nominal next tick.                                                             |
+| `agent.status` and `agent.access`         | Connect, disconnect, access, and other authoritative status transactions reconcile evidence directly; telemetry may reconcile online state, but an unchanged status boundary deduplicates. Silent-online offline detection uses `worker.agent_offline_timeout_secs` (bundled/default 300s; suite range 1-86,400s), then the next eligible worker pass and API pending-evidence pass. |
+| Job, backup, and capability occurrences   | Event-driven when the terminal job result, failed backup, or capability skip is accepted; never sampled on a telemetry interval. API-owned paths evaluate in that transaction. Worker-owned scheduled-job facts are durably marked pending and reach rules on the next API evaluator pass.                                                                                           |
+| Persisted deadlines and pending evidence  | The API `--policy-evaluation-interval-secs` / `VPSMAN_POLICY_EVALUATION_INTERVAL_SECS` idle/retry timer defaults to 30s and is clamped to 5-3,600s. One maintenance page covers up to 200 dirty clients, 500 pending evidence facts, and 200 due transitions. Full pages yield and continue immediately; the timer applies only after durable work is drained. |
 
 The same offline timeout is available as
 `--agent-offline-timeout-secs` / `VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS`. The
@@ -452,7 +456,7 @@ accepts 1-3,600s. With that bundled tick, an otherwise idle worker normally
 checks about every 60s; a longer tick, ongoing work, or scheduling delay makes
 the next check later. Consequently, silent "offline for 5m" means: first
 accept the offline state after its connectivity timeout and worker-pass delay,
-then consume it in receipt repair and apply the policy's 5m Trigger dwell. It
+then consume its pending evidence and apply the policy's 5m Trigger dwell. It
 is not five minutes from the last packet with an exact wall-clock edge. An
 explicit gateway disconnect is event-driven and does not wait for this silent
 offline scan.
@@ -484,7 +488,7 @@ Elapsed Resolve stores `triggered_at + seconds` as the occurrence deadline and
 needs no fresh source fact or operator. The next successful API evaluator pass
 at or after that deadline emits Resolved. All cadence figures above are nominal
 configuration intervals: worker polling, probe execution, delivery, database
-contention, delayed-tick behavior, and bounded repair/due batches mean they are
+contention, delayed-tick behavior, and bounded pending/due batches mean they are
 not exact delivery-time guarantees.
 
 Condition evaluation uses three-valued logic. For example, `true OR Unknown`
@@ -538,7 +542,7 @@ Deduplication is part of the durable model, not a timing assumption:
 1. A source fact is unique by evidence source plus source event ID. The same
    fact cannot become two evidence revisions.
 2. A rule version records one durable evaluation receipt per evidence sequence.
-   Repair and repeated evaluator passes find that receipt instead of consuming
+   Deferred and repeated evaluator passes find that receipt instead of consuming
    the evidence again.
 3. Count confirmations are unique by rule version, correlation bucket, phase,
    and evidence ID. Only a distinct accepted evidence revision or occurrence

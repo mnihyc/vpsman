@@ -15,8 +15,6 @@ use crate::model_alert_policies::{
     AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
 };
 
-const POLICY_EVIDENCE_ARM_LOCK: &str = "vpsman.alert_policy_evidence_arm";
-const LIFECYCLE_ARM_LOCK: &str = "vpsman.alert_lifecycle_arm";
 const MAX_LINEAGE: usize = 16;
 
 /// Presentation-neutral fact accepted from a source transaction. Alert copy,
@@ -89,6 +87,20 @@ struct EvaluatorRule {
     armed_at: DateTime<Utc>,
 }
 
+/// Enabled immutable rule generations for one evidence source. Telemetry
+/// projection loads and generation-stamps them once for its complete claimed
+/// client suffix, so an absent consumer bypasses all policy-only work.
+pub(crate) struct PolicyEvidenceRuleSet {
+    source_kind: String,
+    rules: Vec<EvaluatorRule>,
+}
+
+impl PolicyEvidenceRuleSet {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct EvaluationState {
     truth_state: String,
@@ -113,8 +125,6 @@ struct ActiveEpisode {
     lifecycle_state: String,
     schedule_lineage: Vec<Uuid>,
     triggered_at: DateTime<Utc>,
-    confirmed: bool,
-    backfilled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +143,11 @@ enum ScopeTruth {
 #[derive(Debug)]
 struct DeterministicPolicyEvaluationError(String);
 
+enum PolicyRuleEvaluationDisposition {
+    Terminal,
+    Retry(anyhow::Error),
+}
+
 impl fmt::Display for DeterministicPolicyEvaluationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -140,6 +155,19 @@ impl fmt::Display for DeterministicPolicyEvaluationError {
 }
 
 impl std::error::Error for DeterministicPolicyEvaluationError {}
+
+/// Converts only failures from pure rule/evidence evaluation boundaries. SQL,
+/// transaction, and durable-write failures never pass through this helper and
+/// therefore retain retry semantics.
+fn deterministic_policy_evaluator_error(boundary: &str, error: anyhow::Error) -> anyhow::Error {
+    if error
+        .downcast_ref::<DeterministicPolicyEvaluationError>()
+        .is_some()
+    {
+        return error;
+    }
+    DeterministicPolicyEvaluationError(format!("{boundary}:{error}")).into()
+}
 
 impl GatePhase {
     fn storage(self) -> &'static str {
@@ -152,8 +180,60 @@ impl GatePhase {
 
 pub(crate) async fn record_policy_evidence_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    mut fact: PolicyEvidenceFact,
+    fact: PolicyEvidenceFact,
 ) -> Result<bool> {
+    let fact = prepare_policy_evidence_fact_in_tx(tx, fact).await?;
+
+    let rule_set = load_policy_evidence_rule_set_in_tx(tx, &fact.source_kind).await?;
+    insert_and_evaluate_policy_evidence_in_tx(tx, fact, &rule_set).await
+}
+
+/// Loads one source's enabled generations under row-key-share ownership.
+/// Different producers remain fully concurrent; a mutation waits only for the
+/// exact affected generation so it can drain its stamped evidence before
+/// replacing that generation.
+pub(crate) async fn load_policy_evidence_rule_set_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_kind: &str,
+) -> Result<PolicyEvidenceRuleSet> {
+    Ok(PolicyEvidenceRuleSet {
+        source_kind: source_kind.to_string(),
+        rules: load_evaluator_rules_in_tx(tx, source_kind).await?,
+    })
+}
+
+/// Records a fact against generations already claimed and loaded by its source
+/// owner. This preserves one definition snapshot across a claimed telemetry
+/// suffix without a rule-table query per sample.
+pub(crate) async fn record_policy_evidence_with_rule_set_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fact: PolicyEvidenceFact,
+    rule_set: &PolicyEvidenceRuleSet,
+) -> Result<bool> {
+    anyhow::ensure!(
+        fact.source_kind == rule_set.source_kind,
+        "policy evidence rule-set source mismatch"
+    );
+    let fact = prepare_policy_evidence_fact_in_tx(tx, fact).await?;
+    insert_and_evaluate_policy_evidence_in_tx(tx, fact, rule_set).await
+}
+
+/// Appends a current condition fact without evaluating it. The telemetry
+/// activation consumer calls this while it owns one exact client/sample work
+/// row; the short finalizer captures the rule arm boundary only after every
+/// such row is acknowledged.
+pub(crate) async fn materialize_policy_evidence_baseline_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fact: PolicyEvidenceFact,
+) -> Result<bool> {
+    let fact = prepare_policy_evidence_fact_in_tx(tx, fact).await?;
+    Ok(insert_policy_evidence_in_tx(tx, fact).await?.is_some())
+}
+
+async fn prepare_policy_evidence_fact_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    mut fact: PolicyEvidenceFact,
+) -> Result<PolicyEvidenceFact> {
     validate_policy_evidence_fact(&fact)?;
     fact.schedule_lineage = canonical_lineage(fact.schedule_lineage)?;
 
@@ -162,15 +242,13 @@ pub(crate) async fn record_policy_evidence_in_tx(
             fact.subject_snapshot = snapshot;
         }
     }
+    Ok(fact)
+}
 
-    // Source identity is locked by the caller. The shared arm fence is next in
-    // the global order; rule edits take its exclusive counterpart before policy
-    // rows, which drains in-flight facts without a hot counter-row lock.
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext($1)::bigint)")
-        .bind(POLICY_EVIDENCE_ARM_LOCK)
-        .execute(&mut **tx)
-        .await?;
-
+async fn insert_policy_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fact: PolicyEvidenceFact,
+) -> Result<Option<StoredEvidence>> {
     let evidence_id = Uuid::new_v4();
     let row = sqlx::query(
         r#"
@@ -178,10 +256,10 @@ pub(crate) async fn record_policy_evidence_in_tx(
             id, source_kind, source_event_id, fact_kind, natural_key,
             confirmation_bucket_key, subject_client_id, target_kind, target_id,
             source_status, completeness, subject_snapshot, payload, observed_at,
-            state_started_at, causation_id, schedule_lineage
+            state_started_at, causation_id, schedule_lineage, evaluation_pending
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16, $17
+            $12, $13, $14, $15, $16, $17, FALSE
         )
         ON CONFLICT (source_kind, source_event_id) DO NOTHING
         RETURNING id, evidence_seq, created_at
@@ -207,10 +285,10 @@ pub(crate) async fn record_policy_evidence_in_tx(
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else {
-        return Ok(false);
+        return Ok(None);
     };
 
-    let evidence = StoredEvidence {
+    Ok(Some(StoredEvidence {
         id: row.try_get("id")?,
         evidence_seq: row.try_get("evidence_seq")?,
         source_kind: fact.source_kind,
@@ -230,73 +308,90 @@ pub(crate) async fn record_policy_evidence_in_tx(
         state_started_at: fact.state_started_at,
         causation_id: fact.causation_id,
         schedule_lineage: fact.schedule_lineage,
-    };
+    }))
+}
 
-    let rules = load_evaluator_rules_in_tx(tx, &evidence.source_kind).await?;
-    for rule in rules {
+async fn insert_and_evaluate_policy_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fact: PolicyEvidenceFact,
+    rule_set: &PolicyEvidenceRuleSet,
+) -> Result<bool> {
+    let Some(evidence) = insert_policy_evidence_in_tx(tx, fact).await? else {
+        return Ok(false);
+    };
+    stamp_policy_evidence_targets_in_tx(tx, &evidence, &rule_set.rules).await?;
+    let mut evaluation_pending = false;
+    for rule in &rule_set.rules {
         if evidence.evidence_seq <= rule.armed_after_evidence_seq {
             // Occurrences are strictly prospective. State/metric definitions
             // receive an explicit latest-fact baseline when armed; therefore a
             // normal source hook may safely classify this historical row.
-            record_receipt_in_tx(tx, &rule, &evidence, "pre_armed", None).await?;
+            record_receipt_in_tx(tx, rule, &evidence, "pre_armed", None).await?;
             continue;
         }
-        if receipt_exists_in_tx(tx, &rule, evidence.evidence_seq).await? {
-            continue;
+        // This transaction has just inserted the globally new evidence_seq.
+        // A receipt has an FK to that uncommitted row, so no concurrent
+        // transaction can have created one and no earlier row can share the
+        // sequence. Replay/deferred paths retain their explicit receipt
+        // checks; the fresh source path can evaluate exactly once directly.
+        if let PolicyRuleEvaluationDisposition::Retry(error) =
+            evaluate_rule_to_receipt_in_tx(tx, rule, &evidence, None).await?
+        {
+            // Do not terminal-consume a possibly transient evaluator/DB
+            // failure. The fact commits with the source mutation, while its
+            // explicit lifecycle bit durably owns the ordered retry.
+            evaluation_pending = true;
+            tracing::warn!(
+                policy_rule_id = %rule.id,
+                evidence_seq = evidence.evidence_seq,
+                error = %error,
+                "deferred alert policy evidence evaluation"
+            );
         }
-        sqlx::query("SAVEPOINT alert_policy_rule_evaluation")
+    }
+    if evaluation_pending {
+        sqlx::query("UPDATE alert_policy_evidence SET evaluation_pending=TRUE WHERE id=$1")
+            .bind(evidence.id)
             .execute(&mut **tx)
             .await?;
-        match evaluate_rule_in_tx(tx, &rule, &evidence, false).await {
-            Ok(result) => {
-                sqlx::query("RELEASE SAVEPOINT alert_policy_rule_evaluation")
-                    .execute(&mut **tx)
-                    .await?;
-                record_receipt_in_tx(tx, &rule, &evidence, result, None).await?;
-            }
-            Err(error) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_rule_evaluation")
-                    .execute(&mut **tx)
-                    .await?;
-                sqlx::query("RELEASE SAVEPOINT alert_policy_rule_evaluation")
-                    .execute(&mut **tx)
-                    .await?;
-                if is_lineage_overflow_error(&error) {
-                    record_receipt_in_tx(
-                        tx,
-                        &rule,
-                        &evidence,
-                        "lineage_overflow",
-                        Some("policy_schedule_lineage_overflow"),
-                    )
-                    .await?;
-                    audit_policy_evaluation_skip_in_tx(tx, &rule, &evidence, "lineage_overflow")
-                        .await?;
-                } else if let Some(deterministic) =
-                    error.downcast_ref::<DeterministicPolicyEvaluationError>()
-                {
-                    record_receipt_in_tx(tx, &rule, &evidence, "error", Some(&deterministic.0))
-                        .await?;
-                    audit_policy_evaluation_skip_in_tx(tx, &rule, &evidence, &deterministic.0)
-                        .await?;
-                } else {
-                    // Do not terminal-consume a possibly transient
-                    // evaluator/DB failure. The immutable evidence commits
-                    // with the source mutation and bounded repair retries it.
-                    tracing::warn!(
-                        policy_rule_id = %rule.id,
-                        evidence_seq = evidence.evidence_seq,
-                        error = %error,
-                        "deferred alert policy evidence evaluation"
-                    );
-                }
-            }
-        }
     }
     Ok(true)
 }
 
-/// Resolves every confirmed client-owned episode and clears all pending policy
+async fn stamp_policy_evidence_targets_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    evidence: &StoredEvidence,
+    rules: &[EvaluatorRule],
+) -> Result<()> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let rule_ids = rules.iter().map(|rule| rule.id).collect::<Vec<_>>();
+    let rule_versions = rules
+        .iter()
+        .map(|rule| rule.rule_version)
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        INSERT INTO alert_policy_evidence_targets (
+            evidence_id, evidence_seq, policy_rule_id, rule_version
+        )
+        SELECT $1, $2, target.policy_rule_id, target.rule_version
+        FROM UNNEST($3::uuid[], $4::integer[])
+             AS target(policy_rule_id, rule_version)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(evidence.id)
+    .bind(evidence.evidence_seq)
+    .bind(rule_ids)
+    .bind(rule_versions)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Resolves every client-owned episode and clears all pending policy
 /// gates while the caller holds the client lifecycle row. Suspension is a
 /// subject-level scope exit, so this intentionally spans connectivity,
 /// resource, traffic, tunnel, backup, job, and future client-scoped policies.
@@ -312,11 +407,10 @@ pub(crate) async fn suppress_client_policy_alerts_in_tx(
         SELECT id, policy_rule_id, policy_rule_version,
                COALESCE(last_evidence_id, trigger_evidence_id) AS evidence_id,
                trigger_generation, lifecycle_state, schedule_lineage,
-               triggered_at, backfilled
+               triggered_at
         FROM alert_episodes
         WHERE client_id=$1
           AND resolved_at IS NULL
-          AND last_confirmed_at IS NOT NULL
         ORDER BY id
         FOR UPDATE
         "#,
@@ -363,27 +457,11 @@ pub(crate) async fn suppress_client_policy_alerts_in_tx(
             lifecycle_state: "resolved".to_string(),
             schedule_lineage: row.try_get("schedule_lineage")?,
             triggered_at: row.try_get("triggered_at")?,
-            confirmed: true,
-            backfilled: row.try_get("backfilled")?,
         };
         emit_lifecycle_edge_in_tx(tx, &rule, &evidence, &episode, "alert.resolved", now).await?;
     }
 
-    // Old pre-policy rows could own an unconfirmed Unknown placeholder. They
-    // were never user-visible alerts and cannot be marked Resolved without
-    // inventing a confirmation. Remove them before clearing their state so a
-    // later unsuspend can create a fresh episode under the unique live key.
-    sqlx::query(
-        r#"
-        DELETE FROM alert_episodes
-        WHERE client_id=$1 AND resolved_at IS NULL AND last_confirmed_at IS NULL
-        "#,
-    )
-    .bind(client_id)
-    .execute(&mut **tx)
-    .await?;
-
-    // Mark every surviving pre-suspension episode generation, including
+    // Mark every pre-suspension episode generation, including
     // already-resolved history whose triggered edge has not yet reached a
     // downstream materializer. Unsuspend creates fresh episode rows, so this
     // durable provenance marker cannot suppress a genuinely new incident.
@@ -461,9 +539,9 @@ pub(crate) async fn suppress_client_policy_alerts_in_tx(
     Ok(rows.len())
 }
 
-/// Fences the slow missing-receipt repair path against a client suspension.
-/// Normal evidence producers already own the client row; repair does not, so
-/// this narrow advisory lock prevents a repaired historical fact from
+/// Fences pending evidence evaluation against a client suspension.
+/// Normal evidence producers already own the client row; the deferred evaluator
+/// does not, so this narrow advisory lock prevents a deferred fact from
 /// committing an episode just after suspension's final suppression scan.
 pub(crate) async fn lock_client_policy_suppression_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -492,11 +570,11 @@ async fn lock_client_policy_suppression_shared_in_tx(
 }
 
 // One MVCC statement gives a coherent client/tags/rules subject. A source
-// transaction reads its own prior mutations; periodic reconciliation reads
+// transaction reads its own prior mutations; deferred evidence maintenance reads
 // the last committed subject without taking a client-row lock after the
 // operational advisory lock. Evidence stores a textual subject identity, so
 // deletion fencing is unnecessary and would invert the ingest lock order.
-async fn load_policy_subject_snapshot_in_tx(
+pub(crate) async fn load_policy_subject_snapshot_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
 ) -> Result<Option<Value>> {
@@ -549,62 +627,78 @@ async fn load_policy_subject_snapshot_in_tx(
     .map_err(Into::into)
 }
 
-/// Re-evaluates the latest authoritative condition facts against a new fleet
-/// selector snapshot without changing their source/state boundary. Client rows
-/// are locked here in canonical order before reading the monotonic scope
-/// revision, so both mutation hooks and periodic repair bind `scope:R:*` to the
-/// exact revision-R subject snapshot.
-pub(crate) async fn record_policy_scope_revision_evidence_for_clients_in_tx(
+/// Re-evaluates one client's latest authoritative condition facts against its
+/// exact queued selector snapshot without changing their source/state boundary.
+/// The consumer owns the client row before the queue row, matching mutation
+/// producers' client-then-trigger order and preventing a queue/client lock
+/// inversion. No caller may use this as an inline mutation hook.
+pub(crate) async fn record_claimed_policy_scope_revision_evidence_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_ids: &[String],
+    client_id: &str,
 ) -> Result<usize> {
-    if client_ids.is_empty() {
-        return Ok(0);
-    }
-    let mut client_ids = client_ids.to_vec();
-    client_ids.sort();
-    client_ids.dedup();
-    let client_ids = sqlx::query_scalar::<_, String>(
+    let work = sqlx::query(
         r#"
-        SELECT id
-        FROM clients
-        WHERE id=ANY($1::text[])
-        ORDER BY id
+        SELECT target_revision, requires_revision_advance
+        FROM alert_policy_scope_dirty_clients
+        WHERE client_id=$1
         FOR UPDATE
         "#,
     )
-    .bind(&client_ids)
-    .fetch_all(&mut **tx)
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
     .await?;
-    if client_ids.is_empty() {
+    let Some(work) = work else {
         return Ok(0);
+    };
+    let requires_revision_advance: bool = work.try_get("requires_revision_advance")?;
+    if requires_revision_advance {
+        // Enabling or changing a last-seen selector creates a new scope
+        // boundary even for an offline client whose last source fact already
+        // carries the otherwise-current revision.
+        sqlx::query(
+            r#"
+            UPDATE clients
+            SET policy_scope_revision=policy_scope_revision + 1
+            WHERE id=$1
+            "#,
+        )
+        .bind(client_id)
+        .execute(&mut **tx)
+        .await?;
     }
+    // Bind the coalesced request to the revision protected by the already-held
+    // client lock. The revision-advance trigger may have raised it above the
+    // value initially enqueued by the policy-definition producer.
+    sqlx::query(
+        r#"
+        UPDATE alert_policy_scope_dirty_clients dirty
+        SET target_revision=client.policy_scope_revision
+        FROM clients client
+        WHERE dirty.client_id=client.id
+          AND client.id=$1
+        "#,
+    )
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (evidence.source_kind, evidence.natural_key)
-               evidence.id, client.policy_scope_revision, client.status
-        FROM alert_policy_evidence evidence
-        JOIN clients client ON client.id=evidence.subject_client_id
-        WHERE evidence.subject_client_id=ANY($1::text[])
-          AND evidence.fact_kind IN ('metric','state')
-          AND evidence.source_event_id NOT LIKE 'scope:%'
+        SELECT evidence.id, client.policy_scope_revision, client.status
+        FROM alert_policy_effective_current_evidence current_fact
+        JOIN alert_policy_evidence evidence
+          ON evidence.id=current_fact.evidence_id
+        JOIN clients client ON client.id=current_fact.subject_client_id
+        WHERE current_fact.subject_client_id=$1
           AND COALESCE(
                 NULLIF(evidence.subject_snapshot->>'scope_revision','')::bigint,
                 0
               ) <> client.policy_scope_revision
-          AND NOT EXISTS (
-                SELECT 1
-                FROM alert_policy_evidence scoped
-                WHERE scoped.source_kind=evidence.source_kind
-                  AND scoped.natural_key=evidence.natural_key
-                  AND scoped.source_event_id LIKE
-                      ('scope:' || client.policy_scope_revision::text || ':%')
-              )
-        ORDER BY evidence.source_kind, evidence.natural_key,
-                 evidence.observed_at DESC, evidence.evidence_seq DESC
+        ORDER BY current_fact.subject_client_id,
+                 current_fact.source_kind,
+                 current_fact.natural_key
         "#,
     )
-    .bind(&client_ids)
+    .bind(client_id)
     .fetch_all(&mut **tx)
     .await?;
     let mut recorded = 0_usize;
@@ -621,7 +715,14 @@ pub(crate) async fn record_policy_scope_revision_evidence_for_clients_in_tx(
             tx,
             PolicyEvidenceFact {
                 source_kind: evidence.source_kind,
-                source_event_id: format!("scope:{scope_revision}:{identity_hash}"),
+                // A newer authoritative source fact can arrive with the same
+                // stale subject revision after an earlier R clone. Include
+                // its monotonic evidence version so R/E2 is evaluated rather
+                // than conflicting with the already-materialized R/E1 clone.
+                source_event_id: format!(
+                    "scope:{scope_revision}:{}:{identity_hash}",
+                    evidence.evidence_seq
+                ),
                 fact_kind: evidence.fact_kind,
                 natural_key: evidence.natural_key,
                 confirmation_bucket_key: evidence.confirmation_bucket_key,
@@ -645,52 +746,60 @@ pub(crate) async fn record_policy_scope_revision_evidence_for_clients_in_tx(
         .await?;
         recorded += usize::from(inserted);
     }
+    sqlx::query(
+        r#"
+        DELETE FROM alert_policy_scope_dirty_clients dirty
+        USING clients client
+        WHERE dirty.client_id=client.id
+          AND client.id=$1
+          AND dirty.target_revision=client.policy_scope_revision
+        "#,
+    )
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(recorded)
 }
 
-pub(crate) async fn repair_policy_scope_revision_evidence(
+pub(crate) async fn materialize_pending_policy_scope_revisions(
     pool: &sqlx::PgPool,
     limit: i64,
 ) -> Result<usize> {
-    let client_ids = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT evidence.subject_client_id
-        FROM alert_policy_evidence evidence
-        JOIN clients client ON client.id=evidence.subject_client_id
-        WHERE evidence.fact_kind IN ('metric','state')
-          AND evidence.source_event_id NOT LIKE 'scope:%'
-          AND COALESCE(
-                NULLIF(evidence.subject_snapshot->>'scope_revision','')::bigint,
-                0
-              ) <> client.policy_scope_revision
-          AND NOT EXISTS (
-                SELECT 1
-                FROM alert_policy_evidence scoped
-                WHERE scoped.source_kind=evidence.source_kind
-                  AND scoped.natural_key=evidence.natural_key
-                  AND scoped.source_event_id LIKE
-                      ('scope:' || client.policy_scope_revision::text || ':%')
-              )
-        ORDER BY evidence.subject_client_id
-        LIMIT $1
-        "#,
-    )
-    .bind(limit.clamp(1, 500))
-    .fetch_all(pool)
-    .await?;
-    if client_ids.is_empty() {
-        return Ok(0);
+    let mut consumed = 0_usize;
+    for _ in 0..limit.clamp(1, 500) {
+        let mut tx = pool.begin().await?;
+        // The client row is the exact claim and is acquired before the queue
+        // row. SKIP LOCKED lets API replicas consume unrelated clients without
+        // waiting or selecting the same work; each transaction owns one client
+        // only, so a slow evaluation cannot form a multi-client lock convoy.
+        let client_id = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT client.id
+            FROM alert_policy_scope_dirty_clients dirty
+            JOIN clients client ON client.id=dirty.client_id
+            ORDER BY dirty.dirty_at, dirty.client_id
+            FOR NO KEY UPDATE OF client SKIP LOCKED
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(client_id) = client_id else {
+            tx.commit().await?;
+            break;
+        };
+        record_claimed_policy_scope_revision_evidence_in_tx(&mut tx, &client_id).await?;
+        tx.commit().await?;
+        consumed += 1;
     }
-    let mut tx = pool.begin().await?;
-    let repaired =
-        record_policy_scope_revision_evidence_for_clients_in_tx(&mut tx, &client_ids).await?;
-    tx.commit().await?;
-    Ok(repaired)
+    // A client with no current source identity still consumed real durable
+    // work. The outer evaluator immediately continues after a full page.
+    Ok(consumed)
 }
 
 /// Closes state-source identities that disappeared from an authoritative
 /// source snapshot. The caller owns and locks the source identity (client,
-/// plan, or equivalent) before reaching the shared evidence arm fence.
+/// plan, or equivalent) before appending generation-stamped evidence.
 ///
 /// A source exit is an immutable fact rather than an inferred false sample:
 /// it resets any pending confirmation gate and resolves an active confirmed
@@ -707,14 +816,14 @@ pub(crate) async fn record_policy_source_scope_exits_in_tx(
     }
     let candidates = sqlx::query_scalar::<_, Uuid>(
         r#"
-        SELECT DISTINCT ON (evidence.source_kind, evidence.natural_key)
-               evidence.id
-        FROM alert_policy_evidence evidence
-        WHERE evidence.fact_kind='state'
-          AND evidence.source_kind=ANY($1::text[])
-          AND evidence.subject_client_id=ANY($2::text[])
-        ORDER BY evidence.source_kind, evidence.natural_key,
-                 evidence.observed_at DESC, evidence.evidence_seq DESC
+        SELECT current_fact.evidence_id
+        FROM alert_policy_current_evidence current_fact
+        WHERE current_fact.fact_kind='state'
+          AND current_fact.source_kind=ANY($1::text[])
+          AND current_fact.subject_client_id=ANY($2::text[])
+        ORDER BY current_fact.subject_client_id,
+                 current_fact.source_kind,
+                 current_fact.natural_key
         "#,
     )
     .bind(source_kinds)
@@ -778,51 +887,96 @@ pub(crate) async fn record_policy_source_scope_exits_in_tx(
     Ok(recorded)
 }
 
-pub(crate) async fn repair_missing_policy_evidence_receipts(
+#[cfg(test)]
+pub(crate) async fn evaluate_pending_policy_evidence(
     pool: &sqlx::PgPool,
     limit: i64,
 ) -> Result<usize> {
+    Ok(evaluate_pending_policy_evidence_page(pool, limit)
+        .await?
+        .changed)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PolicyMaintenancePage {
+    pub(crate) examined: usize,
+    pub(crate) changed: usize,
+    /// At least one durable candidate was observed but is currently owned by
+    /// another replica. The scheduler must follow this page immediately even
+    /// when it was shorter than the ordinary candidate-page boundary.
+    pub(crate) still_due: bool,
+}
+
+/// Evaluates only facts whose source transaction durably declared unfinished
+/// policy work. Only a short page with no contended durable owner is an idle
+/// signal; full or still-due pages are followed immediately by the caller and
+/// are never throughput limits.
+pub(crate) async fn evaluate_pending_policy_evidence_page(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<PolicyMaintenancePage> {
     let candidates = sqlx::query(
         r#"
-        SELECT rule.id AS rule_id, rule.rule_version, evidence.id AS evidence_id,
-               evidence.evidence_seq, evidence.subject_client_id
+        SELECT evidence.id AS evidence_id, evidence.evidence_seq,
+               evidence.subject_client_id
         FROM alert_policy_evidence evidence
-        JOIN policy_rules rule ON rule.evidence_source=evidence.source_kind
-        JOIN policy_groups group_row ON group_row.id=rule.group_id
-        LEFT JOIN alert_policy_evidence_receipts receipt
-          ON receipt.policy_rule_id=rule.id
-         AND receipt.rule_version=rule.rule_version
-         AND receipt.evidence_seq=evidence.evidence_seq
-        WHERE rule.enabled AND group_row.enabled AND receipt.evidence_seq IS NULL
-          AND evidence.evidence_seq > rule.armed_after_evidence_seq
-        ORDER BY evidence.evidence_seq, rule.id
+        WHERE evidence.evaluation_pending
+        ORDER BY evidence.evidence_seq
         LIMIT $1
         "#,
     )
     .bind(limit.clamp(1, 1000))
     .fetch_all(pool)
     .await?;
-    let mut repaired = 0_usize;
+    let examined = candidates.len();
+    let mut completed = 0_usize;
+    let mut still_due = false;
     for candidate in candidates {
-        let rule_id: Uuid = candidate.try_get("rule_id")?;
-        let rule_version: i32 = candidate.try_get("rule_version")?;
         let evidence_id: Uuid = candidate.try_get("evidence_id")?;
-        let evidence_seq: i64 = candidate.try_get("evidence_seq")?;
         let subject_client_id: Option<String> = candidate.try_get("subject_client_id")?;
         let mut tx = pool.begin().await?;
         if let Some(client_id) = subject_client_id.as_deref() {
             lock_client_policy_suppression_shared_in_tx(&mut tx, client_id).await?;
         }
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext($1)::bigint)")
-            .bind(POLICY_EVIDENCE_ARM_LOCK)
-            .execute(&mut *tx)
-            .await?;
-        let rule = load_evaluator_rule_by_id_in_tx(&mut tx, rule_id, rule_version).await?;
-        let evidence = load_stored_evidence_in_tx(&mut tx, evidence_id).await?;
-        if receipt_exists_in_tx(&mut tx, &rule, evidence_seq).await? {
+        let target_generations = sqlx::query_as::<_, (Uuid, i32)>(
+            r#"
+            SELECT policy_rule_id, rule_version
+            FROM alert_policy_evidence_targets
+            WHERE evidence_id=$1
+            ORDER BY policy_rule_id, rule_version
+            "#,
+        )
+        .bind(evidence_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut rules = Vec::with_capacity(target_generations.len());
+        for (rule_id, rule_version) in target_generations {
+            lock_evaluator_rule_generation_in_tx(&mut tx, rule_id, rule_version).await?;
+            rules.push(load_evaluator_rule_by_id_in_tx(&mut tx, rule_id, rule_version).await?);
+        }
+        // Client suppression and every immutable rule generation have already
+        // been acquired in the global lock order. Claim only this final,
+        // durable work row without waiting: another replica that owns the same
+        // evidence must not convoy the remaining ordered candidates in this
+        // page. A skipped row remains evaluation_pending and is therefore
+        // visible to the next immediate page while its current owner works.
+        let still_pending = sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_pending FROM alert_policy_evidence WHERE id=$1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(evidence_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if still_pending.is_none() {
+            // The candidate was pending in the page snapshot but its exact
+            // row could not be claimed. Conservatively keep the scheduler hot;
+            // a concurrent delete merely causes one harmless extra page.
+            still_due = true;
+        }
+        if still_pending != Some(true) {
             tx.commit().await?;
             continue;
         }
+        let evidence = load_stored_evidence_in_tx(&mut tx, evidence_id).await?;
         let subject_suspended = if let Some(client_id) = subject_client_id.as_deref() {
             sqlx::query_scalar::<_, bool>("SELECT status='suspended' FROM clients WHERE id=$1")
                 .bind(client_id)
@@ -832,108 +986,137 @@ pub(crate) async fn repair_missing_policy_evidence_receipts(
         } else {
             false
         };
-        if subject_suspended {
-            record_receipt_in_tx(
-                &mut tx,
-                &rule,
-                &evidence,
-                "out_of_scope",
-                Some("client_suspended"),
-            )
-            .await?;
-            tx.commit().await?;
-            repaired += 1;
-            continue;
-        }
-        sqlx::query("SAVEPOINT alert_policy_rule_repair")
-            .execute(&mut *tx)
-            .await?;
-        match evaluate_rule_in_tx(&mut tx, &rule, &evidence, false).await {
-            Ok(result) => {
-                sqlx::query("RELEASE SAVEPOINT alert_policy_rule_repair")
-                    .execute(&mut *tx)
-                    .await?;
-                record_receipt_in_tx(&mut tx, &rule, &evidence, result, Some("repair")).await?;
+        let mut retry_error = None;
+        for rule in rules {
+            if evidence.evidence_seq <= rule.armed_after_evidence_seq
+                || receipt_exists_in_tx(&mut tx, &rule, evidence.evidence_seq).await?
+            {
+                continue;
             }
-            Err(error) if is_lineage_overflow_error(&error) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_rule_repair")
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query("RELEASE SAVEPOINT alert_policy_rule_repair")
-                    .execute(&mut *tx)
-                    .await?;
+            if subject_suspended {
                 record_receipt_in_tx(
                     &mut tx,
                     &rule,
                     &evidence,
-                    "lineage_overflow",
-                    Some("policy_schedule_lineage_overflow"),
+                    "out_of_scope",
+                    Some("client_suspended"),
                 )
                 .await?;
-                audit_policy_evaluation_skip_in_tx(&mut tx, &rule, &evidence, "lineage_overflow")
-                    .await?;
+                continue;
             }
-            Err(error)
-                if error
-                    .downcast_ref::<DeterministicPolicyEvaluationError>()
-                    .is_some() =>
+            if let PolicyRuleEvaluationDisposition::Retry(error) = evaluate_rule_to_receipt_in_tx(
+                &mut tx,
+                &rule,
+                &evidence,
+                Some("pending_evaluation"),
+            )
+            .await?
             {
-                sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_rule_repair")
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query("RELEASE SAVEPOINT alert_policy_rule_repair")
-                    .execute(&mut *tx)
-                    .await?;
-                let deterministic = error
-                    .downcast_ref::<DeterministicPolicyEvaluationError>()
-                    .expect("guard proved deterministic policy error");
-                record_receipt_in_tx(&mut tx, &rule, &evidence, "error", Some(&deterministic.0))
-                    .await?;
-                audit_policy_evaluation_skip_in_tx(&mut tx, &rule, &evidence, &deterministic.0)
-                    .await?;
+                retry_error = Some(error);
+                break;
             }
-            Err(error) => return Err(error),
         }
+        if let Some(error) = retry_error {
+            // The locked row was already TRUE. Commit any terminal receipts
+            // preceding this transient rule without rewriting the partial
+            // index entry, then end this ordered drain wave for idle retry.
+            tx.commit().await?;
+            return Err(error.context("pending alert policy evidence evaluation failed"));
+        }
+        let remains_pending = recompute_policy_evidence_pending_in_tx(&mut tx, evidence_id).await?;
         tx.commit().await?;
-        repaired += 1;
+        completed += usize::from(!remains_pending);
     }
-    Ok(repaired)
+    Ok(PolicyMaintenancePage {
+        examined,
+        changed: completed,
+        still_due,
+    })
 }
 
-/// Linearizes a definition change after every already-committed prospective
-/// fact has reached the exact rule version being replaced. Callers must hold
-/// the exclusive policy-evidence arm advisory lock for this transaction.
+/// Recomputes the durable work bit from the evidence's immutable generation
+/// targets and exact-version terminal receipts.
+pub(crate) async fn recompute_policy_evidence_pending_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    evidence_id: Uuid,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        r#"
+        WITH desired AS MATERIALIZED (
+            SELECT evidence.id, EXISTS (
+                SELECT 1
+                FROM alert_policy_evidence_targets target
+                WHERE target.evidence_id=evidence.id
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM alert_policy_evidence_receipts receipt
+                        WHERE receipt.policy_rule_id=target.policy_rule_id
+                          AND receipt.rule_version=target.rule_version
+                          AND receipt.evidence_seq=evidence.evidence_seq
+                  )
+            ) AS evaluation_pending
+            FROM alert_policy_evidence evidence
+            WHERE evidence.id=$1
+        ), updated AS (
+            UPDATE alert_policy_evidence evidence
+            SET evaluation_pending=desired.evaluation_pending
+            FROM desired
+            WHERE evidence.id=desired.id
+              AND evidence.evaluation_pending IS DISTINCT FROM desired.evaluation_pending
+            RETURNING evidence.evaluation_pending
+        )
+        SELECT COALESCE(
+            (SELECT evaluation_pending FROM updated),
+            (SELECT evaluation_pending FROM desired),
+            FALSE
+        )
+        "#,
+    )
+    .bind(evidence_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or(false))
+}
+
+/// Linearizes a definition change after every committed target for the affected
+/// generation has reached an exact-version receipt. Callers own only those
+/// generation rows, never a repository-global arm.
 ///
-/// Worker-owned occurrence sources durably append evidence and rely on the
-/// receipt repairer for evaluation. Advancing a rule's arm boundary before
-/// draining those missing receipts would strand a pre-edit occurrence forever:
+/// Worker-owned sources durably mark evidence pending for evaluation.
+/// Advancing a rule's arm boundary before draining that owned work would
+/// strand a pre-edit occurrence forever:
 /// the old version would no longer exist and the new version would classify it
 /// as pre-armed. A transient evaluator/SQL failure therefore aborts the edit;
 /// deterministic definition/data failures are terminalized exactly as in the
-/// normal repair path.
+/// normal pending-work path. The returned evidence identities must be
+/// recomputed against the post-mutation definition set before commit.
 pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     rule_ids: &[Uuid],
-) -> Result<usize> {
+) -> Result<Vec<Uuid>> {
     if rule_ids.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let candidates = sqlx::query(
         r#"
         SELECT rule.id AS rule_id, rule.rule_version,
                evidence.id AS evidence_id, evidence.evidence_seq,
                COALESCE(subject.status='suspended',FALSE) AS subject_suspended
-        FROM policy_rules rule
+        FROM alert_policy_evidence_targets target
+        JOIN policy_rules rule
+          ON rule.id=target.policy_rule_id
+         AND rule.rule_version=target.rule_version
         JOIN policy_groups group_row ON group_row.id=rule.group_id
         JOIN alert_policy_evidence evidence
-          ON evidence.source_kind=rule.evidence_source
-         AND evidence.evidence_seq > rule.armed_after_evidence_seq
+          ON evidence.id=target.evidence_id
+         AND evidence.evidence_seq=target.evidence_seq
+         AND evidence.evaluation_pending
         LEFT JOIN clients subject ON subject.id=evidence.subject_client_id
         LEFT JOIN alert_policy_evidence_receipts receipt
           ON receipt.policy_rule_id=rule.id
          AND receipt.rule_version=rule.rule_version
          AND receipt.evidence_seq=evidence.evidence_seq
-        WHERE rule.id=ANY($1::uuid[])
+        WHERE target.policy_rule_id=ANY($1::uuid[])
           AND rule.enabled AND group_row.enabled
           AND receipt.evidence_seq IS NULL
         ORDER BY evidence.evidence_seq, rule.id
@@ -942,7 +1125,7 @@ pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
     .bind(rule_ids)
     .fetch_all(&mut **tx)
     .await?;
-    let mut drained = 0_usize;
+    let mut drained_evidence_ids = BTreeSet::new();
     for candidate in candidates {
         let rule_id: Uuid = candidate.try_get("rule_id")?;
         let rule_version: i32 = candidate.try_get("rule_version")?;
@@ -963,73 +1146,54 @@ pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
                 Some("client_suspended"),
             )
             .await?;
-            drained += 1;
+            drained_evidence_ids.insert(evidence_id);
             continue;
         }
-        sqlx::query("SAVEPOINT alert_policy_definition_fence_drain")
-            .execute(&mut **tx)
-            .await?;
-        match evaluate_rule_in_tx(tx, &rule, &evidence, false).await {
-            Ok(result) => {
-                sqlx::query("RELEASE SAVEPOINT alert_policy_definition_fence_drain")
-                    .execute(&mut **tx)
-                    .await?;
-                record_receipt_in_tx(tx, &rule, &evidence, result, Some("definition_fence_drain"))
-                    .await?;
-            }
-            Err(error) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_definition_fence_drain")
-                    .execute(&mut **tx)
-                    .await?;
-                sqlx::query("RELEASE SAVEPOINT alert_policy_definition_fence_drain")
-                    .execute(&mut **tx)
-                    .await?;
-                if is_lineage_overflow_error(&error) {
-                    record_receipt_in_tx(
-                        tx,
-                        &rule,
-                        &evidence,
-                        "lineage_overflow",
-                        Some("policy_schedule_lineage_overflow"),
-                    )
-                    .await?;
-                    audit_policy_evaluation_skip_in_tx(tx, &rule, &evidence, "lineage_overflow")
-                        .await?;
-                } else if let Some(deterministic) =
-                    error.downcast_ref::<DeterministicPolicyEvaluationError>()
-                {
-                    record_receipt_in_tx(tx, &rule, &evidence, "error", Some(&deterministic.0))
-                        .await?;
-                    audit_policy_evaluation_skip_in_tx(tx, &rule, &evidence, &deterministic.0)
-                        .await?;
-                } else {
-                    return Err(error);
-                }
-            }
+        if let PolicyRuleEvaluationDisposition::Retry(error) =
+            evaluate_rule_to_receipt_in_tx(tx, &rule, &evidence, Some("definition_fence_drain"))
+                .await?
+        {
+            return Err(error);
         }
-        drained += 1;
+        drained_evidence_ids.insert(evidence_id);
     }
-    Ok(drained)
+    for evidence_id in sqlx::query_scalar::<_, Uuid>(
+        r#"
+        DELETE FROM alert_policy_evidence_targets
+        WHERE policy_rule_id=ANY($1::uuid[])
+        RETURNING evidence_id
+        "#,
+    )
+    .bind(rule_ids)
+    .fetch_all(&mut **tx)
+    .await?
+    {
+        drained_evidence_ids.insert(evidence_id);
+    }
+    Ok(drained_evidence_ids.into_iter().collect())
 }
 
 /// Advances only persisted, due confirmation/expiry timers. Evaluator ticks do
 /// not create evidence or Count confirmations; they re-use the last accepted
 /// authoritative fact under the state-row lock.
+#[cfg(test)]
 pub(crate) async fn evaluate_due_policy_transitions(
     pool: &sqlx::PgPool,
     limit: i64,
 ) -> Result<usize> {
+    Ok(evaluate_due_policy_transitions_page(pool, limit)
+        .await?
+        .changed)
+}
+
+pub(crate) async fn evaluate_due_policy_transitions_page(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<PolicyMaintenancePage> {
+    let mut examined = 0_usize;
     let mut transitioned = 0_usize;
     for _ in 0..limit.clamp(1, 200) {
         let mut tx = pool.begin().await?;
-        // Due transitions take the exclusive evidence arm briefly. Besides
-        // fencing definition edits, this gives the due-row selection a real
-        // linearization point against worker facts that are durably appended
-        // before their receipt repair runs.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-            .bind(POLICY_EVIDENCE_ARM_LOCK)
-            .execute(&mut *tx)
-            .await?;
         let due = sqlx::query(
             r#"
             SELECT state.policy_rule_id, state.rule_version,
@@ -1052,13 +1216,22 @@ pub(crate) async fn evaluate_due_policy_transitions(
                     OR NOT EXISTS (
                         SELECT 1
                         FROM alert_policy_evidence newer
-                        WHERE newer.source_kind=rule.evidence_source
+                        WHERE newer.evaluation_pending
+                          AND newer.source_kind=rule.evidence_source
                           AND state.confirmation_bucket_key=
                               ('natural:' || newer.natural_key)
                           AND newer.evidence_seq > COALESCE(
                                 state.last_evidence_seq,
                                 rule.armed_after_evidence_seq
                               )
+                          AND EXISTS (
+                                SELECT 1
+                                FROM alert_policy_evidence_targets target
+                                WHERE target.evidence_id=newer.id
+                                  AND target.evidence_seq=newer.evidence_seq
+                                  AND target.policy_rule_id=rule.id
+                                  AND target.rule_version=rule.rule_version
+                          )
                           AND NOT EXISTS (
                                 SELECT 1
                                 FROM alert_policy_evidence_receipts receipt
@@ -1083,6 +1256,12 @@ pub(crate) async fn evaluate_due_policy_transitions(
                                 )::bigint,
                                 0
                               ) = subject.policy_scope_revision
+                          AND NOT EXISTS (
+                                SELECT 1
+                                FROM alert_policy_scope_dirty_clients scope_work
+                                WHERE scope_work.client_id=subject.id
+                                  AND scope_work.requires_revision_advance
+                          )
                     )
               )
             ORDER BY state.next_transition_at, state.policy_rule_id,
@@ -1097,6 +1276,7 @@ pub(crate) async fn evaluate_due_policy_transitions(
             tx.commit().await?;
             break;
         };
+        examined += 1;
         let rule_id: Uuid = due.try_get("policy_rule_id")?;
         let rule_version: i32 = due.try_get("rule_version")?;
         let bucket: String = due.try_get("confirmation_bucket_key")?;
@@ -1126,7 +1306,17 @@ pub(crate) async fn evaluate_due_policy_transitions(
         if rule.kind != AlertPolicyRuleKind::Occurrence {
             let current_scope_revision = if let Some(client_id) = subject_client_id.as_deref() {
                 sqlx::query_scalar::<_, i64>(
-                    "SELECT policy_scope_revision FROM clients WHERE id=$1",
+                    r#"
+                    SELECT policy_scope_revision
+                    FROM clients
+                    WHERE id=$1
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM alert_policy_scope_dirty_clients scope_work
+                            WHERE scope_work.client_id=clients.id
+                              AND scope_work.requires_revision_advance
+                      )
+                    "#,
                 )
                 .bind(client_id)
                 .fetch_optional(&mut *tx)
@@ -1139,10 +1329,9 @@ pub(crate) async fn evaluate_due_policy_transitions(
                 .get("scope_revision")
                 .and_then(Value::as_i64);
             if current_scope_revision != evidence_scope_revision {
-                // Every scope-revision trigger takes the shared evidence arm,
-                // so the exclusive due fence makes this nonlocking revision
-                // recheck stable without inverting client->arm lock order.
-                // Scope repair owns the next fact.
+                // A concurrent scope mutation queues its exact revision fact.
+                // This due transition therefore linearizes before that newer
+                // fact, which owns the subsequent correction.
                 tx.commit().await?;
                 continue;
             }
@@ -1331,7 +1520,11 @@ pub(crate) async fn evaluate_due_policy_transitions(
         }
         tx.commit().await?;
     }
-    Ok(transitioned)
+    Ok(PolicyMaintenancePage {
+        examined,
+        changed: transitioned,
+        still_due: false,
+    })
 }
 
 /// Evaluates the latest authoritative condition snapshot for a newly armed
@@ -1362,10 +1555,11 @@ pub(crate) async fn evaluate_policy_rule_baselines_in_tx(
         let boundary: i64 = definition.try_get("armed_after_evidence_seq")?;
         let evidence_ids = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT DISTINCT ON (natural_key) id
-            FROM alert_policy_evidence
-            WHERE source_kind=$1 AND evidence_seq <= $2
-            ORDER BY natural_key, observed_at DESC, evidence_seq DESC
+            SELECT current_fact.evidence_id
+            FROM alert_policy_effective_current_evidence current_fact
+            WHERE current_fact.source_kind=$1
+              AND current_fact.evidence_seq <= $2
+            ORDER BY current_fact.natural_key,current_fact.subject_client_id
             "#,
         )
         .bind(&source)
@@ -1379,10 +1573,9 @@ pub(crate) async fn evaluate_policy_rule_baselines_in_tx(
                 continue;
             }
             if !evidence_subject_scope_revision_is_current_in_tx(tx, &evidence).await? {
-                // Scope revision writers are fenced by the shared evidence
-                // arm. Under the caller's exclusive definition fence this is
-                // a stable stale-baseline verdict; the repairer will append a
-                // current scope fact above the arm boundary.
+                // The policy mutation owns this generation. A stale baseline
+                // is terminal for that arm; the scope-revision owner appends
+                // the current fact above the new boundary.
                 record_receipt_in_tx(
                     tx,
                     &rule,
@@ -1462,11 +1655,22 @@ async fn evidence_subject_scope_revision_is_current_in_tx(
         .subject_snapshot
         .get("scope_revision")
         .and_then(Value::as_i64);
-    let current_revision =
-        sqlx::query_scalar::<_, i64>("SELECT policy_scope_revision FROM clients WHERE id=$1")
-            .bind(client_id)
-            .fetch_optional(&mut **tx)
-            .await?;
+    let current_revision = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT policy_scope_revision
+        FROM clients
+        WHERE id=$1
+          AND NOT EXISTS (
+                SELECT 1
+                FROM alert_policy_scope_dirty_clients scope_work
+                WHERE scope_work.client_id=clients.id
+                  AND scope_work.requires_revision_advance
+          )
+        "#,
+    )
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
     Ok(snapshot_revision == current_revision)
 }
 
@@ -1492,7 +1696,6 @@ pub(crate) async fn resolve_policy_rules_for_definition_change_in_tx(
         FROM alert_episodes episode
         WHERE episode.policy_rule_id=ANY($1::uuid[])
           AND episode.resolved_at IS NULL
-          AND episode.last_confirmed_at IS NOT NULL
         ORDER BY episode.id
         FOR UPDATE
         "#,
@@ -1517,7 +1720,7 @@ pub(crate) async fn resolve_policy_rules_for_definition_change_in_tx(
             r#"
             UPDATE alert_episodes
             SET lifecycle_state='resolved',
-                resolved_at=GREATEST($2,COALESCE(last_confirmed_at,triggered_at)),
+                resolved_at=GREATEST($2,last_confirmed_at),
                 resolution_reason=$3, updated_at=$2
             WHERE id=$1 AND resolved_at IS NULL
             "#,
@@ -1560,8 +1763,7 @@ pub(crate) async fn resolve_policy_occurrence_episode_in_tx(
                COALESCE(episode.last_evidence_id,episode.trigger_evidence_id) AS evidence_id,
                episode.trigger_generation,
                episode.lifecycle_state, episode.schedule_lineage,
-               episode.triggered_at, episode.last_confirmed_at IS NOT NULL AS confirmed,
-               episode.backfilled
+               episode.triggered_at
         FROM alert_episodes episode
         WHERE episode.public_id=$1
         FOR UPDATE OF episode
@@ -1597,10 +1799,7 @@ pub(crate) async fn resolve_policy_occurrence_episode_in_tx(
         lifecycle_state: row.try_get("lifecycle_state")?,
         schedule_lineage: row.try_get("schedule_lineage")?,
         triggered_at: row.try_get("triggered_at")?,
-        confirmed: row.try_get("confirmed")?,
-        backfilled: row.try_get("backfilled")?,
     };
-    anyhow::ensure!(episode.confirmed, "fleet_alert_not_found");
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **tx)
         .await?;
@@ -1659,7 +1858,10 @@ async fn evaluate_rule_in_tx(
     effective_evidence.confirmation_bucket_key = effective_confirmation_bucket(rule, evidence)?;
     let evidence = &effective_evidence;
     if rule.kind != evidence.fact_kind {
-        anyhow::bail!("policy evidence kind mismatch");
+        return Err(DeterministicPolicyEvaluationError(
+            "policy_evidence_kind_mismatch".to_string(),
+        )
+        .into());
     }
     let mut state = lock_or_create_state_in_tx(tx, rule, evidence).await?;
     if matches!(
@@ -1674,7 +1876,7 @@ async fn evaluate_rule_in_tx(
                         .is_some_and(|last_seq| evidence.evidence_seq <= last_seq))
         })
     {
-        // Receipt ownership still advances, but a late repair cannot mutate
+        // Receipt ownership still advances, but delayed evaluation cannot mutate
         // truth, scope, presentation, or timers established by a newer fact.
         return Ok("stale");
     }
@@ -1765,39 +1967,6 @@ async fn evaluate_rule_in_tx(
         .await?;
     let mut active = load_active_episode_in_tx(tx, state.active_episode_id).await?;
 
-    if let Some(episode) = active.as_ref().filter(|episode| !episode.confirmed) {
-        // Older releases could persist an Unknown episode before it ever had
-        // a confirmed Triggered/Persisting sample. A conclusive false is not a
-        // recovery from something that was never confirmed, and must not
-        // synthesize a Resolved edge (or violate the resolved-row invariant).
-        if trigger_truth == ExpressionTruth::True {
-            persist_episode_confirmation_in_tx(tx, rule, evidence, episode, now).await?;
-            state.truth_state = "matched".to_string();
-        } else {
-            mark_episode_unknown_in_tx(tx, evidence, episode, now).await?;
-            reset_gate_if_contradicted_in_tx(
-                tx,
-                rule,
-                evidence,
-                &mut state,
-                GatePhase::Resolve,
-                ExpressionTruth::Unknown,
-                now,
-            )
-            .await?;
-            state.truth_state = "unknown".to_string();
-        }
-        state.last_evidence_observed_at = Some(evidence.observed_at);
-        state.last_evidence_seq = Some(evidence.evidence_seq);
-        state.last_evidence_source_event_id = Some(evidence.source_event_id.clone());
-        persist_state_in_tx(tx, rule, evidence, &state, now).await?;
-        return Ok(if trigger_truth == ExpressionTruth::True {
-            "matched"
-        } else {
-            "unknown"
-        });
-    }
-
     if active.is_some() && resolve_truth == ExpressionTruth::True {
         if advance_gate_in_tx(
             tx,
@@ -1882,27 +2051,17 @@ async fn evaluate_rule_in_tx(
             )
             .await?;
         }
-    } else if trigger_truth == ExpressionTruth::True
-        || (evidence.payload.get("backfilled").and_then(Value::as_bool) == Some(true)
-            && evidence
-                .payload
-                .get("retain_unknown_backfill")
-                .and_then(Value::as_bool)
-                == Some(true))
-    {
-        let quiet_backfill =
-            evidence.payload.get("backfilled").and_then(Value::as_bool) == Some(true);
-        let gate_passed = quiet_backfill
-            || advance_gate_in_tx(
-                tx,
-                rule,
-                evidence,
-                &mut state,
-                GatePhase::Trigger,
-                rule.trigger_meta.as_ref(),
-                now,
-            )
-            .await?;
+    } else if trigger_truth == ExpressionTruth::True {
+        let gate_passed = advance_gate_in_tx(
+            tx,
+            rule,
+            evidence,
+            &mut state,
+            GatePhase::Trigger,
+            rule.trigger_meta.as_ref(),
+            now,
+        )
+        .await?;
         if gate_passed {
             if let Some(episode) =
                 trigger_episode_in_tx(tx, rule, evidence, &mut state, now).await?
@@ -1960,7 +2119,7 @@ async fn advance_gate_in_tx(
     match meta {
         None | Some(AlertPolicyMetaCondition::Immediate) => Ok(true),
         Some(AlertPolicyMetaCondition::Sustained { seconds }) => {
-            insert_confirmation_in_tx(tx, rule, evidence, phase).await?;
+            retain_sustained_confirmation_anchor_in_tx(tx, rule, evidence, phase).await?;
             let (accumulated, segment) = phase_duration_fields(state, phase);
             let segment = segment.unwrap_or_else(|| evidence_state_boundary(rule, evidence, now));
             set_phase_segment(state, phase, Some(segment));
@@ -2116,34 +2275,13 @@ async fn trigger_episode_in_tx(
     let detail = render_policy_template(&rule.detail_template, &context, 4096)?;
     let payload =
         episode_evidence_payload(rule, evidence, &context, GatePhase::Trigger, tx).await?;
-    let backfilled = evidence.payload.get("backfilled").and_then(Value::as_bool) == Some(true);
-    let triggered_at = if backfilled {
-        evidence.observed_at
-    } else {
-        now
-    };
-    let retained_unknown_backfill = backfilled
-        && evidence
-            .payload
-            .get("retain_unknown_backfill")
-            .and_then(Value::as_bool)
-            == Some(true);
-    let lifecycle_state = if retained_unknown_backfill {
-        "unknown"
-    } else if backfilled {
-        "persisting"
-    } else {
-        "triggered"
-    };
+    let triggered_at = now;
+    let lifecycle_state = "triggered";
     let record_kind = match rule.kind {
         AlertPolicyRuleKind::Occurrence => "event",
         AlertPolicyRuleKind::Metric | AlertPolicyRuleKind::State => "condition",
     };
-    let public_id = if backfilled && rule.system_seed_key.is_some() {
-        validated_legacy_public_id(rule, evidence)?
-    } else {
-        format!("policy-alert:{id}")
-    };
+    let public_id = format!("policy-alert:{id}");
 
     sqlx::query(
         r#"
@@ -2152,17 +2290,17 @@ async fn trigger_episode_in_tx(
             trigger_generation, trigger_severity, trigger_category,
             severity, category, target_kind, target_id, client_id,
             title, detail, source_status, evidence, lifecycle_state,
-            triggered_at, last_confirmed_at, backfilled,
+            triggered_at, last_confirmed_at,
             policy_group_id, policy_rule_id, policy_rule_version, policy_rule_kind,
             policy_group_name, policy_rule_name, policy_rule_system_seed_key,
-            trigger_evidence_id, last_evidence_id, first_post_upgrade_evaluated_at,
+            trigger_evidence_id, last_evidence_id,
             causation_id, schedule_lineage, created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $7, $8, $9, $10, $11,
             $12, $13, $14, $15, $17,
-            $16, $16, $18,
-            $19, $20, $21, $22, $23, $24, $25, $26, $26,
-            $29, $27, $28, $29, $29
+            $16, $16,
+            $18, $19, $20, $21, $22, $23, $24, $25, $25,
+            $26, $27, $28, $28
         )
         "#,
     )
@@ -2183,7 +2321,6 @@ async fn trigger_episode_in_tx(
     .bind(SqlJson(payload))
     .bind(triggered_at)
     .bind(lifecycle_state)
-    .bind(backfilled)
     .bind(rule.group_id)
     .bind(rule.id)
     .bind(rule.rule_version)
@@ -2205,8 +2342,6 @@ async fn trigger_episode_in_tx(
         lifecycle_state: lifecycle_state.to_string(),
         schedule_lineage: lineage,
         triggered_at,
-        confirmed: true,
-        backfilled,
     };
     emit_lifecycle_edge_in_tx(
         tx,
@@ -2224,23 +2359,6 @@ async fn trigger_episode_in_tx(
     }
     clear_confirmations_in_tx(tx, rule, evidence, GatePhase::Trigger).await?;
     Ok(Some(episode))
-}
-
-fn validated_legacy_public_id(rule: &EvaluatorRule, evidence: &StoredEvidence) -> Result<String> {
-    let public_id = evidence
-        .payload
-        .get("legacy_public_id")
-        .and_then(Value::as_str)
-        .context("backfilled system evidence is missing its legacy public id")?;
-    let prefix = format!("{}:{}:", rule.category, evidence.target_kind);
-    let suffix = public_id
-        .strip_prefix(&prefix)
-        .context("backfilled system evidence has an invalid legacy public id prefix")?;
-    anyhow::ensure!(
-        suffix.len() == 16 && suffix.bytes().all(|value| value.is_ascii_hexdigit()),
-        "backfilled system evidence has an invalid legacy public id fingerprint"
-    );
-    Ok(public_id.to_string())
 }
 
 async fn resolve_episode_in_tx(
@@ -2397,13 +2515,6 @@ async fn emit_lifecycle_edge_in_tx(
     edge_kind: &str,
     occurred_at: DateTime<Utc>,
 ) -> Result<()> {
-    if episode.backfilled {
-        return Ok(());
-    }
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext($1)::bigint)")
-        .bind(LIFECYCLE_ARM_LOCK)
-        .execute(&mut **tx)
-        .await?;
     let suffix = if edge_kind == "alert.triggered" {
         "triggered"
     } else {
@@ -2502,7 +2613,7 @@ async fn emit_lifecycle_edge_in_tx(
         },
         "evidence": evidence.payload,
     });
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO alert_lifecycle_events (
             id, episode_id, trigger_generation, edge_kind, event_id,
@@ -2526,6 +2637,14 @@ async fn emit_lifecycle_edge_in_tx(
     .bind(recorded_at)
     .execute(&mut **tx)
     .await?;
+    if inserted.rows_affected() == 1 {
+        // The lifecycle row is the durable work owner. PostgreSQL publishes
+        // this wake only if the enclosing source transaction commits, so the
+        // worker can never observe a notification without its replay row.
+        sqlx::query("SELECT pg_notify('webhook_events', 'alert_lifecycle')")
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 
@@ -2546,7 +2665,15 @@ async fn load_evaluator_rules_in_tx(
         FROM policy_rules rule
         JOIN policy_groups group_row ON group_row.id = rule.group_id
         WHERE rule.enabled AND group_row.enabled AND rule.evidence_source = $1
+          AND ($1<>'telemetry.combined' OR EXISTS (
+              SELECT 1
+              FROM alert_telemetry_policy_activation activation
+              WHERE activation.singleton
+                AND activation.desired_enabled
+                AND activation.effective_generation=activation.generation
+          ))
         ORDER BY rule.group_id, rule.sort_order, rule.id
+        FOR KEY SHARE OF rule
         "#,
     )
     .bind(source_kind)
@@ -2580,6 +2707,31 @@ async fn load_evaluator_rule_by_id_in_tx(
     .fetch_one(&mut **tx)
     .await?;
     evaluator_rule_from_row(row)
+}
+
+async fn lock_evaluator_rule_generation_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rule_id: Uuid,
+    rule_version: i32,
+) -> Result<()> {
+    let exists = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM policy_rules
+        WHERE id=$1 AND rule_version=$2
+        FOR KEY SHARE
+        "#,
+    )
+    .bind(rule_id)
+    .bind(rule_version)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    anyhow::ensure!(
+        exists,
+        "alert policy generation retired before its evidence drained"
+    );
+    Ok(())
 }
 
 async fn load_stored_evidence_in_tx(
@@ -2673,6 +2825,12 @@ fn parse_correlation_mode(value: &str) -> Result<AlertPolicyCorrelationMode> {
 }
 
 fn policy_scope_truth(rule: &EvaluatorRule, evidence: &StoredEvidence) -> Result<ScopeTruth> {
+    policy_scope_truth_inner(rule, evidence).map_err(|error| {
+        deterministic_policy_evaluator_error("policy_scope_evaluation_failed", error)
+    })
+}
+
+fn policy_scope_truth_inner(rule: &EvaluatorRule, evidence: &StoredEvidence) -> Result<ScopeTruth> {
     if evidence
         .subject_snapshot
         .get("status")
@@ -2782,6 +2940,9 @@ fn expression_truth_for_evidence(
         &evidence.subject_snapshot,
         evidence.complete,
     )
+    .map_err(|error| {
+        deterministic_policy_evaluator_error("policy_expression_evaluation_failed", error)
+    })
 }
 
 /// Shared save-preview/runtime truth boundary. Metric rules retain the typed
@@ -2816,6 +2977,14 @@ async fn lock_or_create_state_in_tx(
     rule: &EvaluatorRule,
     evidence: &StoredEvidence,
 ) -> Result<EvaluationState> {
+    if let Some(state) = load_state_for_update_in_tx(tx, rule, evidence).await? {
+        return Ok(state);
+    }
+
+    // State creation is exceptional: the common telemetry path already has
+    // one durable row for each armed rule/bucket. Concurrent first evidence
+    // may race this insert; ON CONFLICT establishes one owner and the second
+    // locked read below observes it without changing evaluation order.
     sqlx::query(
         r#"
         INSERT INTO alert_policy_evaluation_states (
@@ -2840,6 +3009,16 @@ async fn lock_or_create_state_in_tx(
     .bind(&evidence.subject_client_id)
     .execute(&mut **tx)
     .await?;
+    load_state_for_update_in_tx(tx, rule, evidence)
+        .await?
+        .context("alert policy evaluation state missing after creation")
+}
+
+async fn load_state_for_update_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rule: &EvaluatorRule,
+    evidence: &StoredEvidence,
+) -> Result<Option<EvaluationState>> {
     let row = sqlx::query(
         r#"
         SELECT truth_state, last_evidence_seq, last_evidence_source_event_id,
@@ -2858,22 +3037,25 @@ async fn lock_or_create_state_in_tx(
     .bind(rule.id)
     .bind(rule.rule_version)
     .bind(&evidence.confirmation_bucket_key)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    Ok(EvaluationState {
-        truth_state: row.try_get("truth_state")?,
-        last_evidence_seq: row.try_get("last_evidence_seq")?,
-        last_evidence_source_event_id: row.try_get("last_evidence_source_event_id")?,
-        last_evidence_observed_at: row.try_get("last_evidence_observed_at")?,
-        trigger_confirmed_duration_secs: row.try_get("trigger_confirmed_duration_secs")?,
-        trigger_segment_started_at: row.try_get("trigger_segment_started_at")?,
-        resolve_confirmed_duration_secs: row.try_get("resolve_confirmed_duration_secs")?,
-        resolve_segment_started_at: row.try_get("resolve_segment_started_at")?,
-        trigger_generation: row.try_get("trigger_generation")?,
-        active_episode_id: row.try_get("active_episode_id")?,
-        active_triggered_at: row.try_get("active_triggered_at")?,
-        occurrence_cohort_id: row.try_get("occurrence_cohort_id")?,
+    row.map(|row| {
+        Ok(EvaluationState {
+            truth_state: row.try_get("truth_state")?,
+            last_evidence_seq: row.try_get("last_evidence_seq")?,
+            last_evidence_source_event_id: row.try_get("last_evidence_source_event_id")?,
+            last_evidence_observed_at: row.try_get("last_evidence_observed_at")?,
+            trigger_confirmed_duration_secs: row.try_get("trigger_confirmed_duration_secs")?,
+            trigger_segment_started_at: row.try_get("trigger_segment_started_at")?,
+            resolve_confirmed_duration_secs: row.try_get("resolve_confirmed_duration_secs")?,
+            resolve_segment_started_at: row.try_get("resolve_segment_started_at")?,
+            trigger_generation: row.try_get("trigger_generation")?,
+            active_episode_id: row.try_get("active_episode_id")?,
+            active_triggered_at: row.try_get("active_triggered_at")?,
+            occurrence_cohort_id: row.try_get("occurrence_cohort_id")?,
+        })
     })
+    .transpose()
 }
 
 async fn persist_state_in_tx(
@@ -2893,7 +3075,6 @@ async fn persist_state_in_tx(
             trigger_confirmed_duration_secs=$11, trigger_segment_started_at=$12,
             resolve_confirmed_duration_secs=$13, resolve_segment_started_at=$14,
             trigger_generation=$15, active_episode_id=$16,
-            first_post_upgrade_evaluated_at=COALESCE(first_post_upgrade_evaluated_at,$17),
             next_transition_at=$18, last_evaluated_at=$17, updated_at=$17
         WHERE policy_rule_id=$1 AND rule_version=$2 AND confirmation_bucket_key=$3
         "#,
@@ -2971,8 +3152,7 @@ async fn load_active_episode_in_tx(
         r#"
         SELECT id, COALESCE(last_evidence_id,trigger_evidence_id) AS last_evidence_id,
                trigger_generation, lifecycle_state,
-               schedule_lineage, triggered_at, last_confirmed_at IS NOT NULL AS confirmed,
-               backfilled
+               schedule_lineage, triggered_at
         FROM alert_episodes
         WHERE id=$1 AND resolved_at IS NULL
         FOR UPDATE
@@ -2989,8 +3169,6 @@ async fn load_active_episode_in_tx(
             lifecycle_state: row.try_get("lifecycle_state")?,
             schedule_lineage: row.try_get("schedule_lineage")?,
             triggered_at: row.try_get("triggered_at")?,
-            confirmed: row.try_get("confirmed")?,
-            backfilled: row.try_get("backfilled")?,
         })
     })
     .transpose()
@@ -3014,6 +3192,54 @@ async fn receipt_exists_in_tx(
     .bind(evidence_seq)
     .fetch_one(&mut **tx)
     .await?)
+}
+
+async fn evaluate_rule_to_receipt_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rule: &EvaluatorRule,
+    evidence: &StoredEvidence,
+    terminal_detail: Option<&str>,
+) -> Result<PolicyRuleEvaluationDisposition> {
+    sqlx::query("SAVEPOINT alert_policy_rule_evaluation")
+        .execute(&mut **tx)
+        .await?;
+    match evaluate_rule_in_tx(tx, rule, evidence, false).await {
+        Ok(result) => {
+            sqlx::query("RELEASE SAVEPOINT alert_policy_rule_evaluation")
+                .execute(&mut **tx)
+                .await?;
+            record_receipt_in_tx(tx, rule, evidence, result, terminal_detail).await?;
+            Ok(PolicyRuleEvaluationDisposition::Terminal)
+        }
+        Err(error) => {
+            sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_rule_evaluation")
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query("RELEASE SAVEPOINT alert_policy_rule_evaluation")
+                .execute(&mut **tx)
+                .await?;
+            if is_lineage_overflow_error(&error) {
+                record_receipt_in_tx(
+                    tx,
+                    rule,
+                    evidence,
+                    "lineage_overflow",
+                    Some("policy_schedule_lineage_overflow"),
+                )
+                .await?;
+                audit_policy_evaluation_skip_in_tx(tx, rule, evidence, "lineage_overflow").await?;
+                Ok(PolicyRuleEvaluationDisposition::Terminal)
+            } else if let Some(deterministic) =
+                error.downcast_ref::<DeterministicPolicyEvaluationError>()
+            {
+                record_receipt_in_tx(tx, rule, evidence, "error", Some(&deterministic.0)).await?;
+                audit_policy_evaluation_skip_in_tx(tx, rule, evidence, &deterministic.0).await?;
+                Ok(PolicyRuleEvaluationDisposition::Terminal)
+            } else {
+                Ok(PolicyRuleEvaluationDisposition::Retry(error))
+            }
+        }
+    }
 }
 
 async fn record_receipt_in_tx(
@@ -3068,6 +3294,9 @@ async fn audit_policy_evaluation_skip_in_tx(
     .bind(Uuid::new_v4())
     .bind(format!("fleet_alert_policy_rule:{}", rule.id))
     .bind(json!({
+        "result": "skipped",
+        "origin_kind": "control_plane",
+        "component": "alert-policy-evaluator",
         "policy_rule_id": rule.id,
         "policy_rule_version": rule.rule_version,
         "evidence_id": evidence.id,
@@ -3102,6 +3331,90 @@ async fn insert_confirmation_in_tx(
     .bind(evidence.accepted_at)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+/// Sustained truth and elapsed time live in the evaluation state. Keep only
+/// the first source fact as durable/public provenance for the current phase,
+/// while folding every later fact's schedule lineage into that one anchor.
+/// The state-row lock held by the evaluator serializes this read/update pair.
+async fn retain_sustained_confirmation_anchor_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rule: &EvaluatorRule,
+    evidence: &StoredEvidence,
+    phase: GatePhase,
+) -> Result<()> {
+    let existing = sqlx::query(
+        r#"
+        SELECT evidence_id, confirmation_lineage,
+               confirmation_lineage_overflow
+        FROM alert_policy_confirmations
+        WHERE policy_rule_id=$1 AND rule_version=$2
+          AND confirmation_bucket_key=$3 AND phase=$4
+        ORDER BY accepted_at,evidence_id DESC
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(rule.id)
+    .bind(rule.rule_version)
+    .bind(&evidence.confirmation_bucket_key)
+    .bind(phase.storage())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(existing) = existing {
+        let anchor_id: Uuid = existing.try_get("evidence_id")?;
+        let mut lineage: Vec<Uuid> = existing.try_get("confirmation_lineage")?;
+        let mut overflow: bool = existing.try_get("confirmation_lineage_overflow")?;
+        if !overflow {
+            lineage.extend(evidence.schedule_lineage.iter().copied());
+            lineage.sort_unstable();
+            lineage.dedup();
+            if lineage.len() > MAX_LINEAGE {
+                overflow = true;
+                lineage.truncate(MAX_LINEAGE);
+            }
+        }
+        sqlx::query(
+            r#"
+            UPDATE alert_policy_confirmations
+            SET confirmation_lineage=$6,
+                confirmation_lineage_overflow=$7
+            WHERE policy_rule_id=$1 AND rule_version=$2
+              AND confirmation_bucket_key=$3 AND phase=$4
+              AND evidence_id=$5
+            "#,
+        )
+        .bind(rule.id)
+        .bind(rule.rule_version)
+        .bind(&evidence.confirmation_bucket_key)
+        .bind(phase.storage())
+        .bind(anchor_id)
+        .bind(&lineage)
+        .bind(overflow)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO alert_policy_confirmations (
+                policy_rule_id, rule_version, confirmation_bucket_key,
+                phase, evidence_id, accepted_at, confirmation_lineage,
+                confirmation_lineage_overflow
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,FALSE)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(rule.id)
+        .bind(rule.rule_version)
+        .bind(&evidence.confirmation_bucket_key)
+        .bind(phase.storage())
+        .bind(evidence.id)
+        .bind(evidence.accepted_at)
+        .bind(&evidence.schedule_lineage)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -3163,9 +3476,10 @@ async fn contributing_lineage_in_tx(
     phase: GatePhase,
     retained: &[Uuid],
 ) -> Result<Vec<Uuid>> {
-    let rows = sqlx::query_scalar::<_, Vec<Uuid>>(
+    let rows = sqlx::query(
         r#"
-        SELECT source.schedule_lineage
+        SELECT source.schedule_lineage, confirmation.confirmation_lineage,
+               confirmation.confirmation_lineage_overflow
         FROM alert_policy_confirmations confirmation
         JOIN alert_policy_evidence source ON source.id=confirmation.evidence_id
         WHERE confirmation.policy_rule_id=$1
@@ -3184,7 +3498,11 @@ async fn contributing_lineage_in_tx(
     let mut values = retained.to_vec();
     values.extend(evidence.schedule_lineage.iter().copied());
     for row in rows {
-        values.extend(row);
+        if row.try_get::<bool, _>("confirmation_lineage_overflow")? {
+            anyhow::bail!("policy_schedule_lineage_overflow");
+        }
+        values.extend(row.try_get::<Vec<Uuid>, _>("schedule_lineage")?);
+        values.extend(row.try_get::<Vec<Uuid>, _>("confirmation_lineage")?);
     }
     canonical_lineage(values)
 }
@@ -3508,37 +3826,34 @@ async fn resolve_scope_exit_in_tx(
         .fetch_one(&mut **tx)
         .await?;
     if let Some(episode) = load_active_episode_in_tx(tx, state.active_episode_id).await? {
-        if episode.confirmed {
-            let lineage = canonical_lineage(
-                episode
-                    .schedule_lineage
-                    .iter()
-                    .copied()
-                    .chain(evidence.schedule_lineage.iter().copied())
-                    .collect(),
-            )?;
-            sqlx::query(
-                r#"
-                UPDATE alert_episodes
-                SET lifecycle_state='resolved', resolved_at=$2,
-                    resolution_reason='policy_scope_exited', last_evidence_id=$3,
-                    schedule_lineage=$4, updated_at=$2
-                WHERE id=$1 AND resolved_at IS NULL
-                "#,
-            )
-            .bind(episode.id)
-            .bind(now)
-            .bind(evidence.id)
-            .bind(&lineage)
-            .execute(&mut **tx)
-            .await?;
-            let edge_episode = ActiveEpisode {
-                schedule_lineage: lineage,
-                ..episode
-            };
-            emit_lifecycle_edge_in_tx(tx, rule, evidence, &edge_episode, "alert.resolved", now)
-                .await?;
-        }
+        let lineage = canonical_lineage(
+            episode
+                .schedule_lineage
+                .iter()
+                .copied()
+                .chain(evidence.schedule_lineage.iter().copied())
+                .collect(),
+        )?;
+        sqlx::query(
+            r#"
+            UPDATE alert_episodes
+            SET lifecycle_state='resolved', resolved_at=$2,
+                resolution_reason='policy_scope_exited', last_evidence_id=$3,
+                schedule_lineage=$4, updated_at=$2
+            WHERE id=$1 AND resolved_at IS NULL
+            "#,
+        )
+        .bind(episode.id)
+        .bind(now)
+        .bind(evidence.id)
+        .bind(&lineage)
+        .execute(&mut **tx)
+        .await?;
+        let edge_episode = ActiveEpisode {
+            schedule_lineage: lineage,
+            ..episode
+        };
+        emit_lifecycle_edge_in_tx(tx, rule, evidence, &edge_episode, "alert.resolved", now).await?;
     }
     state.active_episode_id = None;
     state.active_triggered_at = None;
@@ -3565,37 +3880,34 @@ async fn resolve_source_scope_exit_in_tx(
         .fetch_one(&mut **tx)
         .await?;
     if let Some(episode) = load_active_episode_in_tx(tx, state.active_episode_id).await? {
-        if episode.confirmed {
-            let lineage = canonical_lineage(
-                episode
-                    .schedule_lineage
-                    .iter()
-                    .copied()
-                    .chain(evidence.schedule_lineage.iter().copied())
-                    .collect(),
-            )?;
-            sqlx::query(
-                r#"
-                UPDATE alert_episodes
-                SET lifecycle_state='resolved', resolved_at=$2,
-                    resolution_reason='source_scope_exited', last_evidence_id=$3,
-                    schedule_lineage=$4, updated_at=$2
-                WHERE id=$1 AND resolved_at IS NULL
-                "#,
-            )
-            .bind(episode.id)
-            .bind(now)
-            .bind(evidence.id)
-            .bind(&lineage)
-            .execute(&mut **tx)
-            .await?;
-            let edge_episode = ActiveEpisode {
-                schedule_lineage: lineage,
-                ..episode
-            };
-            emit_lifecycle_edge_in_tx(tx, rule, evidence, &edge_episode, "alert.resolved", now)
-                .await?;
-        }
+        let lineage = canonical_lineage(
+            episode
+                .schedule_lineage
+                .iter()
+                .copied()
+                .chain(evidence.schedule_lineage.iter().copied())
+                .collect(),
+        )?;
+        sqlx::query(
+            r#"
+            UPDATE alert_episodes
+            SET lifecycle_state='resolved', resolved_at=$2,
+                resolution_reason='source_scope_exited', last_evidence_id=$3,
+                schedule_lineage=$4, updated_at=$2
+            WHERE id=$1 AND resolved_at IS NULL
+            "#,
+        )
+        .bind(episode.id)
+        .bind(now)
+        .bind(evidence.id)
+        .bind(&lineage)
+        .execute(&mut **tx)
+        .await?;
+        let edge_episode = ActiveEpisode {
+            schedule_lineage: lineage,
+            ..episode
+        };
+        emit_lifecycle_edge_in_tx(tx, rule, evidence, &edge_episode, "alert.resolved", now).await?;
     }
     state.active_episode_id = None;
     state.active_triggered_at = None;

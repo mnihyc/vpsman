@@ -16,7 +16,7 @@ use vpsman_common::{create_private_file_new_async, ensure_private_dir};
 
 use crate::{
     error::ApiError,
-    model::{JobOutputView, NewServerArtifact},
+    model::{JobOutputView, NewServerArtifact, ServerArtifactReservation},
     model_file_transfer::{
         FileTransferHandoffRequest, FileTransferHandoffView, FileTransferSessionView,
         FileTransferSourceArtifactView, UploadFileTransferSourceArtifactRequest,
@@ -150,14 +150,14 @@ pub(crate) async fn upload_file_transfer_source_artifact(
         created_at: crate::unix_now().to_string(),
         download_path: file_transfer_source_artifact_download_path(artifact_id),
     };
-    reserve_file_transfer_artifact(
+    let reservation_token = reserve_file_transfer_artifact(
         &state,
         file_transfer_source_server_artifact(&reserved_source),
         "file_transfer_source_object_exists",
     )
     .await?;
     if let Err(error) = store.put_new(&object_key, &bytes).await {
-        release_file_transfer_artifact_reservation(&state, &object_key).await;
+        release_file_transfer_artifact_reservation(&state, &object_key, reservation_token).await;
         return Err(ApiError::internal(
             "file_transfer_source_store_failed",
             "The file-transfer source could not be stored.",
@@ -172,6 +172,7 @@ pub(crate) async fn upload_file_transfer_source_artifact(
             object_key.clone(),
             sha256_hex,
             bytes.len() as i64,
+            reservation_token,
             &operator,
         )
         .await
@@ -182,6 +183,7 @@ pub(crate) async fn upload_file_transfer_source_artifact(
                 &state,
                 store,
                 &object_key,
+                reservation_token,
                 &error.to_string(),
                 true,
             )
@@ -317,7 +319,7 @@ pub(crate) async fn create_file_transfer_handoff(
             "path": &session.path,
         }),
     };
-    reserve_file_transfer_artifact(
+    let reservation_token = reserve_file_transfer_artifact(
         &state,
         handoff_artifact.clone(),
         "file_transfer_handoff_object_exists",
@@ -331,7 +333,8 @@ pub(crate) async fn create_file_transfer_handoff(
     {
         Ok(chunk_count) => chunk_count,
         Err(error) => {
-            release_file_transfer_artifact_reservation(&state, &object_key).await;
+            release_file_transfer_artifact_reservation(&state, &object_key, reservation_token)
+                .await;
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(error);
         }
@@ -345,7 +348,8 @@ pub(crate) async fn create_file_transfer_handoff(
             created_object
         }
         Err(error) => {
-            release_file_transfer_artifact_reservation(&state, &object_key).await;
+            release_file_transfer_artifact_reservation(&state, &object_key, reservation_token)
+                .await;
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(ApiError::internal(
                 "file_transfer_handoff_store_failed",
@@ -362,11 +366,16 @@ pub(crate) async fn create_file_transfer_handoff(
         }),
         ..handoff_artifact
     };
-    if let Err(error) = state.repo.register_server_artifact(handoff_artifact).await {
+    if let Err(error) = state
+        .repo
+        .activate_server_artifact_reservation(handoff_artifact, reservation_token)
+        .await
+    {
         cleanup_file_transfer_reserved_object_after_error(
             &state,
             store,
             &object_key,
+            reservation_token,
             &error.to_string(),
             created_object,
         )
@@ -865,8 +874,8 @@ async fn reserve_file_transfer_artifact(
     state: &AppState,
     artifact: NewServerArtifact,
     conflict_code: &'static str,
-) -> Result<(), ApiError> {
-    state
+) -> Result<Uuid, ApiError> {
+    let reservation = state
         .repo
         .reserve_server_artifact(artifact)
         .await
@@ -883,13 +892,23 @@ async fn reserve_file_transfer_artifact(
                     error,
                 )
             }
-        })
+        })?;
+    match reservation {
+        ServerArtifactReservation::Created(token) => Ok(token),
+        ServerArtifactReservation::AlreadyActiveIdentical | ServerArtifactReservation::Conflict => {
+            Err(ApiError::conflict(conflict_code))
+        }
+    }
 }
 
-async fn release_file_transfer_artifact_reservation(state: &AppState, object_key: &str) {
+async fn release_file_transfer_artifact_reservation(
+    state: &AppState,
+    object_key: &str,
+    reservation_token: Uuid,
+) {
     let _ = state
         .repo
-        .discard_server_artifact_reservation(object_key)
+        .discard_server_artifact_reservation(object_key, reservation_token)
         .await;
 }
 
@@ -897,6 +916,7 @@ async fn cleanup_file_transfer_reserved_object_after_error(
     state: &AppState,
     store: &BackupObjectStore,
     object_key: &str,
+    reservation_token: Uuid,
     error: &str,
     created_object: bool,
 ) {
@@ -905,14 +925,15 @@ async fn cleanup_file_transfer_reserved_object_after_error(
             Ok(()) => {
                 let _ = state
                     .repo
-                    .discard_server_artifact_reservation(object_key)
+                    .discard_server_artifact_reservation(object_key, reservation_token)
                     .await;
             }
             Err(delete_error) => {
                 let _ = state
                     .repo
-                    .mark_server_artifact_delete_failed(
+                    .fail_server_artifact_reservation(
                         object_key,
+                        reservation_token,
                         &format!("{error}; cleanup_delete_failed: {delete_error}"),
                     )
                     .await;
@@ -921,7 +942,7 @@ async fn cleanup_file_transfer_reserved_object_after_error(
     } else {
         let _ = state
             .repo
-            .discard_server_artifact_reservation(object_key)
+            .discard_server_artifact_reservation(object_key, reservation_token)
             .await;
     }
 }

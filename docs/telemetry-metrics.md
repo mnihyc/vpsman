@@ -11,32 +11,40 @@ Monitoring has one exact short-range source and one canonical, age-tiered
 long-term source:
 
 - Accepted high-resolution telemetry samples preserve the agent payload at its
-  configured collection cadence. Transactionally derived scalar and counter
-  facts provide an indexed projection of the same accepted sample. General Ping
-  stores one deterministic winner per logical probe instead of repeating an
-  unchanged cached result in every telemetry frame. Its internal logical key
-  uses the original agent check timestamp, while charts and range filters keep
-  using the API-rebased timestamp so a misconfigured VPS clock cannot move
-  evidence across the retained timeline. Raw samples and their facts
-  support realtime and short-range queries and default to seven days of
-  retention.
+  configured collection cadence. Acceptance and liveness are immediate; an
+  ordered asynchronous projection publishes one complete current generation
+  and its interface-admission and policy effects. Open-minute resource,
+  network-rate, and Ping views use that projected raw suffix; exact-cursor
+  consumers materialize complete closed UTC minutes before raw pruning.
+  General Ping stores one
+  deterministic winner per logical probe instead of repeating an unchanged
+  cached result in every telemetry frame. Its internal logical key uses the
+  original agent check timestamp, while charts and range filters keep using the
+  API-rebased timestamp so a misconfigured VPS clock cannot move evidence
+  across the retained timeline. Raw samples and their facts support realtime
+  and short-range queries with one day of historical rows; one canonical
+  current envelope remains per VPS.
 - Resource, network-rate, general-Ping, and system history retains 1-minute
   buckets through 2 days, 5-minute through 8 days, 30-minute through 31 days,
   1-hour through 91 days, 3-hour through 181 days, 6-hour through 366 days, and
   1-day buckets through 3,650 days.
-- Traffic counters remain exact minute endpoints through 32 days so every
-  supported active monthly cycle remains exact. Older traffic transitions use
-  1-hour buckets through 91 days, 3-hour through 181 days, 6-hour through 366
-  days, and 1-day through 3,650 days. Counter resets and imported versus live
-  provenance remain separate.
+- Traffic counters retain exact minute endpoints for one day plus the
+  current partial hour and one sequencing predecessor. Lossless hourly
+  authority continues through day 91, exceeding the 32-day minimum needed for
+  any monthly reset cycle, followed by 3-hour, 6-hour, and 1-day tiers. Counter
+  resets and imported versus live provenance remain separate.
 - vnStat imports replace only their imported traffic-ledger contribution.
   They retain live traffic contributions and never rewrite the independent
   live network-rate curve or its counter epochs.
-- Promotion sums sufficient statistics, counts, extrema, reset evidence, and
+- Resource, network-rate, Ping, and traffic promotion sums sufficient
+  statistics, counts, extrema, reset evidence, and
   the actual latest observation. It never spreads a coarse bucket into
   fabricated fine points. Sparse intervals therefore remain sparse.
+- System samples write only the 1-minute source tier. Ordinary closed-bucket
+  promotion derives each coarser tier before its source expires, and terminal
+  daily history is retained through the configured horizon.
 - Long-term rows are materialized before eligible exact evidence is pruned.
-  Promotion and pruning run in bounded, leased, transactional batches.
+  Promotion and pruning run in exact-owner transactional batches.
 
 The canonical VPS detail ranges are **15m**, **1h**, **8h**, **1d**, **7d**,
 **30d**, **90d**, **180d**, **1y**, **All**, and **Custom**. **15m** is the
@@ -54,28 +62,33 @@ labels that resolution and never interpolates missing detail.
 - Durable resource and interface-counter history uses API receive time, not the
   agent wall clock. A misconfigured VPS clock therefore cannot move a sample
   into another retained minute.
-- “Current” means the latest accepted evidence that satisfies the page's
-  freshness and scope rules. It does not mean a new read performed when the page
-  renders.
+- “Current” means the latest complete projected evidence that satisfies the
+  page's freshness and scope rules. It does not mean a new read performed when
+  the page renders.
 - Missing intervals remain gaps. Missing, stale, invalid, unsupported, and
   unconfigured values never become healthy zeroes.
 
-Operators manage exact and long-term retention independently under Audit > Retention & export:
-`telemetry_samples` is the high-resolution policy, while
-`telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
-`traffic_counter_samples` are long-term policies.
+Exact telemetry keeps one day of historical rows plus one canonical current
+envelope per VPS. Operators manage retained rollup horizons under Audit >
+Retention & export; those high-volume serving domains remain enabled while
+collection continues. Traffic's retained-history policy is
+`traffic_counter_rollups`, not its exact counter samples.
 
-Counter fact rows share the sample's retention lifecycle and are deleted with
-it. Logical Ping evidence uses the same seven-day cutoff but is keyed by target
-series and original checked time so cached repeats do not consume another row,
-even when transport timing rebases repeated frames to adjacent server seconds.
-The original time is identity-only and is not exposed as chart time. All facts
-are written only after the authenticated ingest sequence is accepted and in the
-same database transaction as the retained JSON payload and long-term rollups.
-Duplicate or stale frames therefore cannot create history, and the JSON payload
+The accepted sample is the raw audit row; derived counter and history records
+follow their own documented retention tiers rather than duplicating a second
+raw-fact table. Logical Ping evidence uses the same one-day cutoff but is
+keyed by target series and original checked time so cached repeats do not
+consume another row, even when transport timing rebases repeated frames to
+adjacent server seconds.
+The original time is identity-only and is not exposed as chart time. The
+retained JSON payload is committed only after its authenticated ingest sequence
+is accepted. Its projected generation and admission/policy effects publish
+atomically; exact-cursor minute consumers then materialize closed history
+before raw pruning. Duplicate or stale frames therefore cannot create history,
+a partially projected generation is never visible, and the JSON payload
 remains the raw audit/export representation.
 
-### Fleet scheduling and gateway admission
+### Fleet scheduling and gateway forwarding
 
 An agent does not publish an immediate sample when a gateway session opens. Its
 first tick is deterministically phased from the client ID, process incarnation,
@@ -85,18 +98,16 @@ interval change deliberately computes a new phase; a config read and an
 unrelated config update do not rearm collection. Missed Tokio interval ticks are
 skipped instead of replayed as a catch-up burst.
 
-The gateway bounds concurrent telemetry posts to the API at eight by default.
-Set restart-scoped `capacity.gateway_telemetry_in_flight` or
-`VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT` to a value from 1 through 512. A waiting
-client keeps one latest coalesced telemetry slot, and the permit is acquired
-before that slot is removed. Lifecycle, command-output, and terminal-output
-forwarding for the same client can continue while telemetry waits. The gateway
-keeps the original gateway session, process incarnation, and sequence on every
-delayed sample; if lifecycle overtakes a sample from an ended or replaced
-session, the API session fence rejects it instead of reassigning or reviving it.
-The gateway metrics payload exposes `telemetry_admission_limit`,
-`telemetry_admission_active`, and `telemetry_admission_waiting`; normal queue
-depth and coalescing counters continue to describe pending pressure.
+Each client owns one telemetry drain and at most one latest pending telemetry
+slot. A newer sample replaces only that client's pending sample while an API
+post is late; lifecycle, command-output, and terminal-output forwarding can
+continue. Gateway-wide telemetry HTTP ownership defaults to eight and is
+restart-configurable with `capacity.gateway_telemetry_in_flight`; the first post
+waits before taking the pending slot, while retry backoff holds no HTTP slot.
+The gateway preserves the original session,
+process incarnation, and sequence, so the API session fence rejects a delayed
+sample from an ended or replaced session. Queue depth and coalescing counters
+expose pending pressure.
 
 ## Resource Metrics
 
@@ -106,7 +117,7 @@ depth and coalescing counters continue to describe pending pressure.
 | Load 1/5/15                                 | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track.                                                                                                                                                                                             | Missing load evidence remains unavailable; it is not CPU utilization.                                                                                                                               |
 | Memory used                                 | `(MemTotal - MemAvailable) / MemTotal` per accepted snapshot; interval history retains the sample-weighted average and maximum of those ratios. Capacity maximum and availability average/minimum remain separate evidence.                                                                                                                                           | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero.                                                                                                |
 | Swap used                                   | `(SwapTotal - SwapAvailable) / SwapTotal` per complete, positive-capacity snapshot; interval history retains the swap-sample-weighted average and maximum. `swap_sample_count` counts only those positive-capacity utilization samples. A complete `(0, 0)` report is retained as explicit “no swap” current evidence but contributes no utilization point or weight. | Missing, one-sided, invalid, and zero-capacity swap evidence remain chart gaps. Swap has its own sample count instead of borrowing memory coverage or fabricating 0%.                               |
-| Aggregate block-device filesystem disk used | `(summed total - summed available) / summed total` per accepted, positive-capacity `persistent_block_filesystems_v1` snapshot, then disk-sample-weighted average and maximum across the interval. `disk_sample_count` is independent of the overall telemetry sample count. Capacity maximum and availability average/minimum remain separate evidence. | A missing/failed collection, unknown/legacy disk semantics, or explicit available zero-capacity inventory contributes no utilization value or weight. This is not a root-volume, raw-device-size, or quota claim. |
+| Aggregate block-device filesystem disk used | `(summed total - summed available) / summed total` per accepted, positive-capacity `persistent_block_filesystems_v1` snapshot, then disk-sample-weighted average and maximum across the interval. `disk_sample_count` is independent of the overall telemetry sample count. Capacity maximum and availability average/minimum remain separate evidence. | A missing/failed collection, unknown/unversioned disk semantics, or explicit available zero-capacity inventory contributes no utilization value or weight. This is not a root-volume, raw-device-size, or quota claim. |
 | TCP/UDP sockets                             | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry.                                                                                                                                                                             | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
 
 The Linux disk collector positively identifies mounted filesystems through
@@ -125,8 +136,8 @@ capacity is published only when the inventory completed; no placeholder disk
 capacity is fabricated. The wire payload carries both
 `disk_collection_available` and the versioned `disk_semantics` marker. Only an
 available `persistent_block_filesystems_v1` payload is authoritative. Missing
-or unknown markers remain unavailable for compatibility, even when an older
-payload contains mount entries. An available empty inventory is retained as an
+or unknown markers are deliberately unavailable, even when the payload contains
+mount entries. An available empty inventory is retained as an
 explicit zero-capacity fact but, like zero swap, has no utilization ratio.
 
 The contract follows the filesystem's immediate kernel block-device identity.
@@ -143,7 +154,7 @@ one-entry-per-device semantics because an external provider has no agent-side
 mount/device evidence to verify. To make that assertion authoritative, the
 same JSON patch must provide `disk_collection_available` and
 `disk_semantics: "persistent_block_filesystems_v1"` with `disks`; false
-availability requires an empty list. A legacy custom patch that supplies
+availability requires an empty list. A custom patch that supplies
 `disks` without both markers remains accepted for its other metrics, but its
 disk values stay deliberately unavailable. Other core procfs or custom-source
 failures still reject their atomic source collection so previous evidence ages
@@ -198,28 +209,21 @@ activity; the reset point is retained as the next interval's baseline. The
 first point without a baseline is likewise omitted, so both cases appear as an
 explicit chart gap.
 
-Config > Rules scopes aggregate live rate through `network.rate.interfaces`:
+Config > Rules applies one eligibility boundary before rate or traffic
+selection. An unset `network.interfaces` admits host names beginning with `e`
+or `w`, except an interface owned by an enabled managed-tunnel plan endpoint.
+`*` admits all interfaces; comma-separated exact or trailing-prefix patterns
+such as `eth0,ens*,w*` admit only their matches.
 
-- An absent or unset value defaults to a live reference to the current per-VPS
-  `traffic.selectors` rule, using its selected host interfaces.
-- The explicit input syntax `[traffic.selectors]` stores that same typed
-  reference object; it is not copied into a fixed selector list.
-- Empty input or `[]` explicitly selects every reported interface.
-- Any other value uses the existing interface/direction selector grammar. For
-  example, `eth0,eth1+tx` selects `eth0` and `eth1`. Live-rate scope ignores
-  direction suffixes and retains both separately reported speed directions for
-  every selected interface. Those suffixes remain meaningful only to
-  authoritative traffic accounting.
+An unset `network.rate.interfaces` selects no aggregate live rates. Use `*` for
+all eligible host interfaces, `[traffic.selectors]` to follow that rule, or an
+exact host selector list. `traffic.selectors=*` likewise means every eligible
+stored traffic stream. Direction suffixes affect traffic accounting but live
+rate views continue to show RX and TX separately.
 
-This scope controls aggregate rate values on VPS cards, charts, the dashboard,
-and public monitoring views. It does not filter agent collection or retained
-per-interface evidence: raw interface diagnostics, APIs, and CSV remain
-complete.
-
-If the default reference has no configured `traffic.selectors`, aggregate RX
-and TX display as **-**. That is an intentional empty selection, not partial
-telemetry. An explicit all or non-empty interface selection with missing
-samples remains incomplete and is surfaced as such.
+The eligibility boundary governs cards, dashboards, snapshots, retained
+history, exports, and rollups. A recently reported excluded interface remains
+available only in its VPS detail for up to 15 minutes.
 
 Fleet chart points sum both direction rates for the selected interfaces in each
 logical interval, then average those fleet totals when several intervals share
@@ -253,7 +257,8 @@ state; they never silently sum arbitrary interfaces as billing traffic.
 - `traffic.reset_day=-1` keeps accounting configured without a calendar reset.
   Its total is the sum of valid deltas from all retained counter evidence;
   cycle start and end are absent, and counter-reset intervals remain gaps. Days
-  `1` through `31` retain the existing UTC monthly-cycle behavior.
+  `1` through `31` may include a UTC hour, such as `29 05:00`; a day without a
+  time uses `00:00`.
 - Each selected source/interface counter stream is differenced independently.
   Diagnostic RX and TX are visible on cards and detail and by default in
   history, while the derived Total history series is selectable through the
@@ -270,21 +275,22 @@ state; they never silently sum arbitrary interfaces as billing traffic.
   positive `reset_count`, and nullable RX, TX, and total values, so its chart
   remains a gap. A mixed bucket retains its valid deltas and its reset count as
   explicit reset-gap evidence without degrading current accounting state.
-- Long-term traffic counters keep the latest accepted counter for each logical
-  minute and default to ten years. Pruning preserves one pre-cutoff baseline per
-  VPS/source/interface stream, and configured retention cannot be shorter than
-  32 days so an active monthly cycle remains computable.
+- Exact traffic counters retain one day plus the current partial UTC hour
+  and one sequencing predecessor. Completed older hours remain lossless in
+  hourly authority through day 91, exceeding the 32-day minimum needed for any
+  monthly reset cycle, then use the coarser retained tiers through the terminal
+  horizon.
 - Current monthly reads sum an exact hourly transition ledger for completed UTC
-  hours and inspect only the bounded current-hour raw tail. The ledger is
-  backfilled during migration and is repaired in the same database transaction
-  as every raw insert, conflict update, out-of-order import, epoch rewrite, or
-  retention delete; the affected sample and immediate-successor hours are both
-  rebuilt. A per-stream source/materialization revision proves coverage. If any
-  requested stream lacks proven coverage, the whole read uses the original raw
-  counter-window calculation, so optimization failure cannot present stale
-  usage as healthy. Selector, direction, quota, and reset-day edits need no
-  cache invalidation because they are still applied at read time over the exact
-  per-stream ledger.
+  hours and inspect only the bounded current-hour raw tail. Every raw insert,
+  conflict update, out-of-order import, epoch rewrite, or retention delete
+  updates the affected sample and immediate-successor hours in the same
+  transaction. A per-stream source/materialization revision proves coverage.
+  Fleet snapshots and cards keep healthy streams on this bounded path and mark
+  only an unready selector incomplete. Readers never reconstruct writer-owned
+  state or scan retained history as a fallback; an unsafe stream remains
+  unavailable rather than becoming a partial total. Selector, direction,
+  quota, and reset-time edits are applied at read time over the same per-stream
+  authority.
 
 ### One-time vnStat history import
 
@@ -297,7 +303,9 @@ operator may dispatch `network_traffic_import_vnstat` once. The command accepts
 an optional list of host interface names and a UTC-minute-aligned start. An
 empty list asks the agent to read one all-interface vnStat JSON snapshot and
 import every valid interface it reports; an explicit list remains exact and is
-queried with vnStat's canonical `--iface` option. The API derives
+queried with vnStat's canonical `--iface` option. The complete resolved set
+must satisfy `network.interfaces`; otherwise the import is rejected without a
+partial write. The API derives
 the end independently for each interface from its first retained live agent
 sample; an operator-supplied end could create a gap or overlap and is therefore
 not part of the command.
@@ -428,8 +436,8 @@ Automatic OSPF control requires the newest paired endpoint reachability window
 to be fresh and the configured number of preceding paired windows to be
 contiguously healthy. Endpoint probes may be independently phased within their
 declared cadence. Exact automatic reachability observations remain available
-for two days. Older automatic reachability history follows the same 5-minute,
-30-minute, 1-hour, 3-hour, 6-hour, and 1-day schedule as other retained
+for one day. Older automatic reachability history follows the same 1-minute,
+5-minute, 30-minute, 1-hour, 3-hour, 6-hour, and 1-day schedule as other retained
 monitoring evidence. Latest endpoint evidence is retained separately, so
 promotion never changes current topology or OSPF decisions. Manual probes,
 speed tests, and status records remain exact rows under their existing policy.
@@ -487,7 +495,9 @@ set or an unbounded export:
   episodes. Triggered and Persisting are active. Unknown conditions remain
   visible as current but are inactive. Resolved episodes are not current.
 - `GET /api/v1/fleet-alert-history` applies the same filters and returns all
-  lifecycle states, including Resolved episodes.
+  lifecycle states, including Resolved episodes. Resolved history remains for
+  90 days; endpoint result limits bound each response without shortening that
+  stored history. Current and unresolved episodes are not retention candidates.
 - `GET /api/v1/fleet-alert-events` is a dedicated manual review feed for
   unresolved occurrence episodes. It orders by
   `triggered_at DESC, episode UUID DESC` and returns

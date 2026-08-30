@@ -549,8 +549,6 @@ async function installTwentyFourVpsExpertMock(page: Page) {
           memory_total_bytes_max: 16 * gib,
           memory_used_ratio_avg: 1 - memoryAvailableGiB / 16,
           memory_used_ratio_max: 1 - Math.max(1, memoryAvailableGiB - 1) / 16,
-          network_rx_bytes_max: (120 + index * 3 + point) * 1024 * 1024,
-          network_tx_bytes_max: (70 + index * 2 + point) * 1024 * 1024,
           sample_count: 12 + point,
           swap_available_bytes_avg: null,
           swap_available_bytes_min: null,

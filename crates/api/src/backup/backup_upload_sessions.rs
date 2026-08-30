@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env,
+    fs::{File, OpenOptions, TryLockError},
     io::SeekFrom,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -44,7 +45,7 @@ pub(crate) fn backup_upload_sessions() -> &'static BackupArtifactUploadSessions 
     })
 }
 
-pub(crate) fn spawn_backup_upload_session_cleanup() {
+pub(crate) fn spawn_backup_upload_session_cleanup() -> tokio::task::JoinHandle<()> {
     let sessions = backup_upload_sessions().clone();
     tokio::spawn(async move {
         sessions.cleanup_expired().await;
@@ -55,7 +56,7 @@ pub(crate) fn spawn_backup_upload_session_cleanup() {
             ticker.tick().await;
             sessions.cleanup_expired().await;
         }
-    });
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +71,16 @@ pub(crate) struct PreparedBackupArtifactUpload {
     pub(crate) staging_path: PathBuf,
     pub(crate) sha256_hex: String,
     pub(crate) size_bytes: i64,
+    // The staging file is the exact cross-process ownership identity. Keeping
+    // this descriptor alive fences chunk/abort/cleanup for the whole object
+    // store commit without creating persistent lock-file garbage.
+    _owner: Arc<File>,
+}
+
+enum StagingOwnerAttempt {
+    Owned(File),
+    Busy,
+    Missing,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -105,7 +116,6 @@ impl BackupArtifactUploadSessions {
         ensure_private_dir_async(self.root.as_ref())
             .await
             .map_err(internal_error)?;
-        self.cleanup_expired().await;
 
         let now = unix_now();
         let upload_id = Uuid::new_v4();
@@ -143,8 +153,8 @@ impl BackupArtifactUploadSessions {
         upload_id: Uuid,
         request: BackupArtifactUploadChunkRequest,
     ) -> Result<BackupArtifactUploadSessionView, ApiError> {
-        self.cleanup_expired().await;
         let chunk = validate_backup_artifact_upload_chunk_request(&request)?;
+        let _owner = self.claim_staging_file(upload_id).await?;
         let mut session = self.load_session(upload_id).await?;
         ensure_session_matches_request(&session, backup_request_id)?;
         ensure_session_not_expired(&session)?;
@@ -195,13 +205,13 @@ impl BackupArtifactUploadSessions {
         expected_client_id: &str,
         request: BackupArtifactUploadCommitRequest,
     ) -> Result<PreparedBackupArtifactUpload, ApiError> {
-        self.cleanup_expired().await;
         if !request.confirmed {
             return Err(ApiError::conflict(
                 "backup_artifact_upload_commit_confirmation_required",
             ));
         }
 
+        let owner = self.claim_staging_file(upload_id).await?;
         let session = self.load_session(upload_id).await?;
         ensure_session_matches_request(&session, backup_request_id)?;
         ensure_session_not_expired(&session)?;
@@ -240,6 +250,7 @@ impl BackupArtifactUploadSessions {
             staging_path: session.staging_path,
             sha256_hex,
             size_bytes: session.expected_size_bytes,
+            _owner: Arc::new(owner),
         })
     }
 
@@ -256,12 +267,12 @@ impl BackupArtifactUploadSessions {
         upload_id: Uuid,
         confirmed: bool,
     ) -> Result<BackupArtifactUploadSessionView, ApiError> {
-        self.cleanup_expired().await;
         if !confirmed {
             return Err(ApiError::conflict(
                 "backup_artifact_upload_abort_confirmation_required",
             ));
         }
+        let _owner = self.claim_staging_file(upload_id).await?;
         let session = self.load_session(upload_id).await?;
         ensure_session_matches_request(&session, backup_request_id)?;
         let view = session.view_with_status("aborted");
@@ -276,6 +287,42 @@ impl BackupArtifactUploadSessions {
 
     fn manifest_path(&self, upload_id: Uuid) -> PathBuf {
         self.root.join(format!("{upload_id}.json"))
+    }
+
+    async fn claim_staging_file(&self, upload_id: Uuid) -> Result<File, ApiError> {
+        let path = self.staging_path(upload_id);
+        tokio::task::spawn_blocking(move || {
+            let file = OpenOptions::new().read(true).write(true).open(path)?;
+            file.lock()?;
+            Ok::<_, std::io::Error>(file)
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                ApiError::not_found("backup_artifact_upload_session_not_found")
+            }
+            _ => internal_error(error),
+        })
+    }
+
+    async fn try_claim_staging_path(&self, path: PathBuf) -> StagingOwnerAttempt {
+        tokio::task::spawn_blocking(move || {
+            let file = match OpenOptions::new().read(true).write(true).open(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return StagingOwnerAttempt::Missing;
+                }
+                Err(_) => return StagingOwnerAttempt::Busy,
+            };
+            match file.try_lock() {
+                Ok(()) => StagingOwnerAttempt::Owned(file),
+                Err(TryLockError::WouldBlock) => StagingOwnerAttempt::Busy,
+                Err(TryLockError::Error(_)) => StagingOwnerAttempt::Busy,
+            }
+        })
+        .await
+        .unwrap_or(StagingOwnerAttempt::Busy)
     }
 
     async fn load_session(&self, upload_id: Uuid) -> Result<BackupArtifactUploadSession, ApiError> {
@@ -339,15 +386,32 @@ impl BackupArtifactUploadSessions {
             };
             let expected_staging_path = self.staging_path(session.upload_id);
             if session.expires_unix <= now {
-                let _ = tokio::fs::remove_file(&expected_staging_path).await;
-                let _ = tokio::fs::remove_file(&path).await;
+                match self
+                    .try_claim_staging_path(expected_staging_path.clone())
+                    .await
+                {
+                    StagingOwnerAttempt::Owned(_owner) => {
+                        let _ = tokio::fs::remove_file(&expected_staging_path).await;
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                    StagingOwnerAttempt::Missing => {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                    StagingOwnerAttempt::Busy => {
+                        retained_staging_paths.insert(expected_staging_path);
+                    }
+                }
             } else if session.staging_path == expected_staging_path {
                 retained_staging_paths.insert(expected_staging_path);
             }
         }
         for path in orphan_staging_candidates {
             if !retained_staging_paths.contains(&path) && file_is_stale(&path, now).await {
-                let _ = tokio::fs::remove_file(path).await;
+                if let StagingOwnerAttempt::Owned(_owner) =
+                    self.try_claim_staging_path(path.clone()).await
+                {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
             }
         }
     }

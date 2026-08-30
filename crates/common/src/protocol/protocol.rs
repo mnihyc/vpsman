@@ -907,7 +907,6 @@ pub struct AgentHello {
     pub client_id: String,
     pub process_incarnation_id: Uuid,
     pub agent_version: String,
-    #[serde(default = "default_internal_build_number")]
     pub internal_build_number: u64,
     pub os_release: String,
     pub arch: String,
@@ -927,7 +926,6 @@ pub struct AgentHello {
 pub struct ServerHello {
     pub server_id: String,
     pub server_version: String,
-    #[serde(default = "default_internal_build_number")]
     pub server_build_number: u64,
     pub accepted: bool,
     pub message: String,
@@ -959,9 +957,6 @@ pub struct AgentRuntimeConfigReloadRequest {
     pub requires_authoritative_sync: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reconcile_resources: Vec<RuntimeConfigReconcileResource>,
-    // Kept on the wire while older APIs only understand the forwarding-specific flag.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub requires_port_forwarding_sync: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -979,14 +974,11 @@ pub struct RuntimeConfigReconcileScope {
 
 impl RuntimeConfigReconcileScope {
     pub fn from_reload_request(request: &AgentRuntimeConfigReloadRequest) -> Self {
-        let mut resources = request
+        let resources = request
             .reconcile_resources
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        if request.requires_port_forwarding_sync {
-            resources.insert(RuntimeConfigReconcileResource::PortForwarding);
-        }
         Self {
             authoritative: request.requires_authoritative_sync,
             resources,
@@ -1219,7 +1211,6 @@ pub struct AgentSessionDisconnect {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CommandResume {
     pub job_id: Uuid,
-    #[serde(default = "default_command_protocol_version")]
     pub command_version: u16,
     pub payload_hash: String,
     pub next_output_seq: i32,
@@ -1242,7 +1233,6 @@ pub struct GatewayPrivilegeVerificationResult {
 pub struct GatewayCommandDispatchResult {
     pub client_id: String,
     pub job_id: Uuid,
-    #[serde(default = "default_command_protocol_version")]
     pub command_version: u16,
     pub accepted: bool,
     pub message: String,
@@ -1390,7 +1380,6 @@ pub struct GatewayForwardMetricsSnapshot {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobRequest {
     pub job_id: Uuid,
-    #[serde(default = "default_command_protocol_version")]
     pub command_version: u16,
     pub command: JobCommand,
     pub max_timeout_secs: u64,
@@ -1401,11 +1390,6 @@ pub struct JobCancelRequest {
     pub job_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-pub fn default_command_protocol_version() -> u16 {
-    // Missing means the legacy v1 wire shape, not the receiver's newest shape.
-    MIN_COMMAND_PROTOCOL_VERSION
 }
 
 pub fn default_internal_build_number() -> u64 {

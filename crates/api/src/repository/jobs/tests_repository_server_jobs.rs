@@ -25,7 +25,6 @@ fn cleanup_preview_rejects_invalid_or_overflowing_size_totals() {
         client_id: Some("edge-a".to_string()),
         stream: Some("stdout".to_string()),
         seq: Some(0),
-        backup_artifact_id: None,
         created_at: "2026-07-01T00:00:00Z".to_string(),
         reference_protected: false,
     };
@@ -61,7 +60,6 @@ fn cleanup_preview_includes_age_protection_and_representative_objects() {
             client_id: Some("agent-fra-02".to_string()),
             stream: None,
             seq: None,
-            backup_artifact_id: Some(second_id),
             created_at: "2026-06-02T10:00:00Z".to_string(),
             reference_protected: true,
         },
@@ -76,7 +74,6 @@ fn cleanup_preview_includes_age_protection_and_representative_objects() {
             client_id: Some("agent-sfo-01".to_string()),
             stream: None,
             seq: None,
-            backup_artifact_id: None,
             created_at: "2026-05-31T10:00:00Z".to_string(),
             reference_protected: false,
         },

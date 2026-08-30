@@ -181,8 +181,8 @@ pub(crate) struct DashboardTrafficClientView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DashboardTrafficPointView {
     pub(crate) bucket_start: String,
-    pub(crate) rx_bytes: i64,
-    pub(crate) tx_bytes: i64,
+    pub(crate) rx_bytes: Option<i64>,
+    pub(crate) tx_bytes: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -340,8 +340,8 @@ pub(crate) struct SystemDashboardCapacityView {
     pub(crate) internal_http_read_secs: Option<u64>,
     pub(crate) control_deadline_grace_secs: Option<u64>,
     pub(crate) max_job_timeout_secs: Option<u64>,
-    pub(crate) worker_schedule_job_max_timeout_secs: Option<u64>,
-    pub(crate) agent_offline_secs: Option<i64>,
+    pub(crate) schedule_job_max_timeout_secs: Option<u64>,
+    pub(crate) agent_offline_timeout_secs: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

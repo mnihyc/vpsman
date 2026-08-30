@@ -65,7 +65,6 @@ install -m 0644 "$repo_root/deploy/README.md" "$bundle_root/README.md"
 # root README, so adjust its repository-relative runbook links.
 sed -i \
   -e 's#](../docs/production-deployment.md)#](docs/production-deployment.md)#' \
-  -e 's#](../docs/migration-compatibility.md)#](docs/migration-compatibility.md)#' \
   "$bundle_root/README.md"
 install -m 0644 \
   "$repo_root/deploy/AGENT_GATEWAY_INSTALL.md" \
@@ -77,9 +76,6 @@ install -m 0644 \
 install -m 0644 \
   "$repo_root/docs/production-deployment.md" \
   "$bundle_root/docs/production-deployment.md"
-install -m 0644 \
-  "$repo_root/docs/migration-compatibility.md" \
-  "$bundle_root/docs/migration-compatibility.md"
 install -m 0644 "$repo_root/SECURITY.md" "$bundle_root/SECURITY.md"
 install -m 0644 "$repo_root/LICENSE-APACHE" "$bundle_root/LICENSE-APACHE"
 install -m 0644 "$repo_root/LICENSE-MIT" "$bundle_root/LICENSE-MIT"

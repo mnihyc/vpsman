@@ -1301,11 +1301,6 @@ fn policy_rule_from_json(rule_json: &str, index: usize) -> Result<Value> {
     let object = rule
         .as_object()
         .with_context(|| format!("--rule-json {} must be a JSON object", index + 1))?;
-    anyhow::ensure!(
-        !object.contains_key("condition_expression") && !object.contains_key("window_secs"),
-        "--rule-json {} uses obsolete condition_expression/window_secs fields",
-        index + 1
-    );
     for field in [
         "name",
         "rule_kind",

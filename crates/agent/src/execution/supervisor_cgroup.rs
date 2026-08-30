@@ -12,13 +12,13 @@ const DEFAULT_CGROUP_ROOT: &str = "/sys/fs/cgroup/vpsman-supervisor";
 const CGROUP_V2_MIN_CPU_WEIGHT: u32 = 1;
 const CGROUP_V2_MAX_CPU_WEIGHT: u32 = 10_000;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ProcessLimitEvidence {
     #[serde(default)]
     pub(crate) cpu_shares: Option<LimitEvidence>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LimitEvidence {
     pub(crate) status: String,
     pub(crate) reason: String,

@@ -1,6 +1,11 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+};
+
 use anyhow::{Context, Result};
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, Mutex, OwnedMutexGuard},
     time::{self, Duration},
 };
 use vpsman_common::{
@@ -35,11 +40,6 @@ use crate::{
     process::execute_process_list,
     supervisor::execute_process_supervisor_command,
     terminal::execute_terminal_command,
-    update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
-    update_activation::{
-        execute_update_activate, execute_update_rollback, AgentUpdateActivateInput,
-        AgentUpdateRollbackInput,
-    },
 };
 
 const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
@@ -47,6 +47,70 @@ const COMMAND_OUTPUT_TRUNCATED_MESSAGE: &str =
     "command output truncated; only first 65536 bytes per stream were retained";
 const PRESET_USER_SESSIONS_W: &str = "/usr/bin/w";
 const PRESET_USER_SESSIONS_WHO: &str = "/usr/bin/who";
+
+static FILE_TRANSFER_SESSION_OWNERS: OnceLock<StdMutex<HashMap<uuid::Uuid, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+
+pub(crate) struct FileTransferSessionOwner {
+    session_id: uuid::Uuid,
+    entry: Arc<Mutex<()>>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for FileTransferSessionOwner {
+    fn drop(&mut self) {
+        // Release the exact session before taking the short registry mutex. A
+        // new owner either reuses this entry or creates one only after the old
+        // command has stopped owning the session.
+        drop(self.guard.take());
+        let mut owners = file_transfer_session_owners()
+            .lock()
+            .expect("file-transfer session owner registry poisoned");
+        let is_registered_entry = owners
+            .get(&self.session_id)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
+        if is_registered_entry && Arc::strong_count(&self.entry) == 2 {
+            owners.remove(&self.session_id);
+        }
+    }
+}
+
+fn file_transfer_session_owners() -> &'static StdMutex<HashMap<uuid::Uuid, Arc<Mutex<()>>>> {
+    FILE_TRANSFER_SESSION_OWNERS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+pub(crate) async fn acquire_file_transfer_session_owner(
+    session_id: uuid::Uuid,
+) -> FileTransferSessionOwner {
+    let entry = {
+        let mut owners = file_transfer_session_owners()
+            .lock()
+            .expect("file-transfer session owner registry poisoned");
+        owners
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let mut owner = FileTransferSessionOwner {
+        session_id,
+        entry: Arc::clone(&entry),
+        guard: None,
+    };
+    owner.guard = Some(entry.lock_owned().await);
+    owner
+}
+
+fn file_transfer_session_id(command: &JobCommand) -> Option<uuid::Uuid> {
+    match command {
+        JobCommand::FileTransferStart { session_id, .. }
+        | JobCommand::FileTransferChunk { session_id, .. }
+        | JobCommand::FileTransferCommit { session_id, .. }
+        | JobCommand::FileTransferAbort { session_id, .. }
+        | JobCommand::FileTransferDownloadStart { session_id, .. }
+        | JobCommand::FileTransferDownloadChunk { session_id, .. } => Some(*session_id),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 pub(crate) async fn execute_job_command(
@@ -109,6 +173,14 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     cancel_token.check(job_command_type_label(command))?;
+    // File-transfer operations are individually durable jobs, but the on-disk
+    // session is one exact mutable resource. Hold only that session across the
+    // complete command; unrelated sessions and every non-transfer command run
+    // independently.
+    let _file_transfer_session_owner = match file_transfer_session_id(command) {
+        Some(session_id) => Some(acquire_file_transfer_session_owner(session_id).await),
+        None => None,
+    };
     match command {
         JobCommand::RuntimeConfigSync { .. } => {
             anyhow::bail!("runtime config sync must run on the main agent task")
@@ -479,61 +551,11 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             )
             .await
         }
-        JobCommand::UpdateAgent {
-            artifact_url,
-            sha256_hex,
-        } => {
-            execute_update_agent(AgentUpdateInput {
-                job_id,
-                artifact_url,
-                sha256_hex,
-                max_timeout_secs,
-                cancel_token,
-            })
-            .await
-        }
-        JobCommand::AgentUpdateActivate {
-            staged_sha256_hex,
-            restart_agent,
-        } => {
-            execute_update_activate(AgentUpdateActivateInput {
-                job_id,
-                staged_sha256_hex: staged_sha256_hex.clone(),
-                restart_agent: *restart_agent,
-                max_timeout_secs,
-                cancel_token,
-            })
-            .await
-        }
-        JobCommand::AgentUpdateRollback {
-            rollback_sha256_hex,
-        } => {
-            execute_update_rollback(AgentUpdateRollbackInput {
-                job_id,
-                rollback_sha256_hex: rollback_sha256_hex.clone(),
-                max_timeout_secs,
-                cancel_token,
-            })
-            .await
-        }
-        JobCommand::AgentUpdateCheck {
-            version_url,
-            activate,
-            restart_agent,
-        } => {
-            let version_url = version_url
-                .as_deref()
-                .unwrap_or(config.update.unmanaged_version_url.as_str());
-            execute_update_check(AgentUpdateCheckInput {
-                job_id,
-                version_url,
-                activate: *activate,
-                restart_agent: *restart_agent,
-                max_timeout_secs,
-                cancel_token,
-                verification_tx: None,
-            })
-            .await
+        JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. } => {
+            anyhow::bail!("agent update commands require the runtime update execution owner")
         }
         JobCommand::AgentStop => execute_agent_stop(job_id),
         JobCommand::AgentRestart => execute_agent_restart(job_id),

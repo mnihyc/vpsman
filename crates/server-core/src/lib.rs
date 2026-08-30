@@ -6,15 +6,17 @@ use vpsman_common::{
 
 #[path = "runtime/client_suppression.rs"]
 mod client_suppression;
-#[path = "runtime/postgres_migrations.rs"]
-mod postgres_migrations;
+#[path = "runtime/traffic_terminal_retention.rs"]
+mod traffic_terminal_retention;
 #[path = "runtime/webhook_target.rs"]
 mod webhook_target;
 
-pub use client_suppression::{
-    client_policy_suppression_lock_key, ClientPolicySuppressionSharedGuard,
+pub use client_suppression::client_policy_suppression_lock_key;
+pub use traffic_terminal_retention::{
+    preview_traffic_terminal_retention, process_traffic_terminal_retention_page,
+    traffic_terminal_retention_cutoff_unix, traffic_terminal_retention_has_remaining_work,
+    TrafficTerminalRetentionPage,
 };
-pub use postgres_migrations::run_postgres_migrations;
 pub use webhook_target::{
     prepare_webhook_target, validate_webhook_target, PreparedWebhookTarget,
     DEVELOPMENT_LOOPBACK_WEBHOOKS_ENV,

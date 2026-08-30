@@ -111,6 +111,40 @@ fn automatic_reachability_timestamp_uses_the_existing_ping_clock_window() {
     assert!(!valid_agent_metrics(&metrics));
     metrics.tunnel_reachability[0].measured_unix = 0;
     assert!(!valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].measured_unix = observed_unix;
+    metrics.tunnel_reachability[0].stale_after_secs = i64::MAX as u64 + 1;
+    assert!(!valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].stale_after_secs = 180;
+    metrics.tunnel_reachability[0].transmitted = i32::MAX as u32 + 1;
+    metrics.tunnel_reachability[0].received = i32::MAX as u32 + 1;
+    assert!(!valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].transmitted = 3;
+    metrics.tunnel_reachability[0].received = 3;
+    assert!(valid_agent_metrics(&metrics));
+}
+
+#[test]
+fn duplicate_projected_tunnel_interfaces_are_rejected_before_acceptance() {
+    let tunnel = vpsman_common::RuntimeTunnelStat {
+        interface: "wg0".to_string(),
+        kind: "wireguard".to_string(),
+        plan_id: Some(uuid::Uuid::new_v4().to_string()),
+        plan_name: Some("site-link".to_string()),
+        endpoint_side: Some("left".to_string()),
+        ..Default::default()
+    };
+    let mut metrics = vpsman_common::AgentMetrics {
+        observed_unix: 1,
+        hostname: "vps".to_string(),
+        tunnels: vec![tunnel.clone(), tunnel.clone()],
+        ..Default::default()
+    };
+    assert!(!valid_agent_metrics(&metrics));
+
+    // A row filtered out by the durable projection cannot collide with the
+    // retained interface, so only projected tunnel identities must be unique.
+    metrics.tunnels[1].plan_id = None;
+    assert!(valid_agent_metrics(&metrics));
 }
 
 #[test]

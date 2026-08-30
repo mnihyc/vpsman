@@ -2,7 +2,7 @@ use std::{path::Path, str::FromStr};
 
 use anyhow::Result;
 use sqlx::{
-    postgres::{PgConnectOptions, PgPoolOptions},
+    postgres::{PgConnectOptions, PgListener, PgPoolOptions},
     PgPool,
 };
 use uuid::Uuid;
@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub(crate) struct PgWorkerTestDb {
     pub(crate) pool: PgPool,
     admin_pool: PgPool,
+    connect_options: PgConnectOptions,
     db_name: String,
 }
 
@@ -39,23 +40,44 @@ impl PgWorkerTestDb {
         sqlx::query(&format!("CREATE DATABASE {}", quote_ident(&db_name)))
             .execute(&admin_pool)
             .await?;
+        let database_options = base_options.database(&db_name);
+        crate::migrate_postgres_database(&database_options, &workspace_migrations_dir()).await?;
+        let connect_options = database_options.options([("search_path", "public")]);
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect_with(base_options.database(&db_name))
+            .connect_with(connect_options.clone())
             .await?;
-        let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir()).await?;
-        migrator.run(&pool).await?;
         Ok(Self {
             pool,
             admin_pool,
+            connect_options,
             db_name,
         })
+    }
+
+    pub(crate) async fn additional_pool(&self, max_connections: u32) -> Result<PgPool> {
+        Ok(PgPoolOptions::new()
+            .min_connections(0)
+            .max_connections(max_connections)
+            .connect_with(self.connect_options.clone())
+            .await?)
+    }
+
+    pub(crate) async fn telemetry_retention_pool(&self) -> Result<PgPool> {
+        Ok(crate::telemetry_retention_pool_options()
+            .connect_with(self.connect_options.clone())
+            .await?)
+    }
+
+    pub(crate) async fn notification_listener(&self) -> Result<PgListener> {
+        Ok(PgListener::connect_with(&self.pool).await?)
     }
 
     pub(crate) async fn cleanup(self) {
         let Self {
             pool,
             admin_pool,
+            connect_options: _,
             db_name,
         } = self;
         pool.close().await;

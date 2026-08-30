@@ -8,37 +8,34 @@ use std::{
 
 use anyhow::Result;
 use futures_util::{stream, StreamExt};
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
 use vpsman_server_core::{
-    operator_is_active_authorized, TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED,
-    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
+    operator_is_active_authorized, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
 };
 
 use crate::{
-    backup_auto_artifacts::try_auto_record_backup_artifact,
+    gateway_client::GatewayClientTimeouts,
     internal_operator::{server_issued_job_actor, system_operator},
     job_traffic_import::wake_network_traffic_import_finalizer,
     model::{AuthContext, BackupRequestStatus, CreateBackupRequest},
-    repository::Repository,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
-    repository_jobs::ClaimedJobTarget,
-    routes_ingest::record_network_routing_terminal_result,
+    repository_jobs::{ClaimedJobTarget, ClaimedJobTerminalEnrichment},
     state::AppState,
     TargetDispatchOutcome,
 };
 
 const DISPATCH_INTERVAL_SECS: u64 = 1;
-const DEADLINE_EXPIRE_LIMIT: i64 = 128;
+const DEADLINE_EXPIRY_INTERVAL_SECS: u64 = 1;
 
 struct DispatcherWakeState {
     notify: Notify,
     dispatching: AtomicBool,
     pending: AtomicBool,
-    loop_started: AtomicBool,
     sweeps_started: AtomicU64,
     sweeps_coalesced: AtomicU64,
     targets_claimed: AtomicU64,
@@ -61,7 +58,6 @@ impl Default for DispatcherWakeState {
             notify: Notify::new(),
             dispatching: AtomicBool::new(false),
             pending: AtomicBool::new(false),
-            loop_started: AtomicBool::new(false),
             sweeps_started: AtomicU64::new(0),
             sweeps_coalesced: AtomicU64::new(0),
             targets_claimed: AtomicU64::new(0),
@@ -73,6 +69,8 @@ impl Default for DispatcherWakeState {
 }
 
 static DISPATCHER_WAKE_STATE: OnceLock<DispatcherWakeState> = OnceLock::new();
+static TERMINAL_EVENT_WAKE: OnceLock<Notify> = OnceLock::new();
+static TERMINAL_ENRICHMENT_WAKE: OnceLock<Notify> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DispatcherMetricsSnapshot {
@@ -102,11 +100,11 @@ pub(crate) fn dispatcher_metrics_snapshot() -> DispatcherMetricsSnapshot {
     }
 }
 
-pub(crate) fn spawn_job_dispatcher(state: AppState) {
+pub(crate) fn spawn_job_dispatcher(state: AppState) -> tokio::task::JoinHandle<()> {
     let wake_state = dispatcher_wake_state();
-    wake_state.loop_started.store(true, Ordering::Release);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(DISPATCH_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
@@ -116,27 +114,234 @@ pub(crate) fn spawn_job_dispatcher(state: AppState) {
                 warn!(%error, "durable job dispatcher tick failed");
             }
         }
-    });
+    })
 }
 
-pub(crate) fn wake_job_dispatcher(state: AppState) {
+/// Owns elapsed control deadlines independently of dispatch backlog. A full
+/// page is redrained immediately; the one-second timer is consulted only once
+/// no immediately claimable deadline remains.
+pub(crate) fn spawn_job_deadline_expiry_consumer(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(DEADLINE_EXPIRY_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) = drain_control_timeout_targets(&state).await {
+                warn!(%error, "durable job deadline-expiry consumer failed");
+            }
+        }
+    })
+}
+
+/// Owns durable job-terminal side effects. Producers only commit their terminal
+/// transition and wake this task; request and dispatch paths never consume the
+/// global terminal queue themselves.
+pub(crate) fn spawn_job_terminal_event_consumer(state: AppState) -> tokio::task::JoinHandle<()> {
+    let wake = TERMINAL_EVENT_WAKE.get_or_init(Notify::new);
+    tokio::spawn(async move {
+        let mut recovery = tokio::time::interval(Duration::from_secs(DISPATCH_INTERVAL_SECS));
+        recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = recovery.tick() => {}
+                _ = wake.notified() => {}
+            }
+            if let Err(error) = drain_job_terminal_events(&state).await {
+                warn!(%error, "durable job terminal-event consumer failed");
+            }
+        }
+    })
+}
+
+pub(crate) fn wake_job_terminal_event_consumer() {
+    TERMINAL_EVENT_WAKE.get_or_init(Notify::new).notify_one();
+}
+
+/// Owns external terminal enrichment after the repository-stage consumer has
+/// committed an exact durable handoff. Work is independent across targets and
+/// uses the dispatcher's configured batch and in-flight capacity.
+pub(crate) fn spawn_job_terminal_enrichment_consumer(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    let wake = TERMINAL_ENRICHMENT_WAKE.get_or_init(Notify::new);
+    tokio::spawn(async move {
+        let mut recovery = tokio::time::interval(Duration::from_secs(DISPATCH_INTERVAL_SECS));
+        recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = recovery.tick() => {}
+                _ = wake.notified() => {}
+            }
+            if let Err(error) = drain_job_terminal_enrichments(&state).await {
+                warn!(%error, "durable job terminal-enrichment consumer failed");
+            }
+        }
+    })
+}
+
+fn wake_job_terminal_enrichment_consumer() {
+    TERMINAL_ENRICHMENT_WAKE
+        .get_or_init(Notify::new)
+        .notify_one();
+}
+
+async fn drain_job_terminal_events(state: &AppState) -> Result<usize> {
+    let mut handled_total = 0_usize;
+    loop {
+        // Repository ownership is one durable terminal row per claim. Keep that
+        // exact transaction boundary and drain until no immediately due row remains.
+        let batch = state.process_job_terminal_events(1).await?;
+        let handled = batch.targets.len().saturating_add(batch.jobs.len());
+        if !batch.targets.is_empty() {
+            wake_job_terminal_enrichment_consumer();
+        }
+        handled_total = handled_total.saturating_add(handled);
+        if handled == 0 {
+            return Ok(handled_total);
+        }
+    }
+}
+
+async fn drain_job_terminal_enrichments(state: &AppState) -> Result<usize> {
+    let mut handled_total = 0_usize;
+    loop {
+        let config = state.dispatcher_runtime_config();
+        let lease_secs = config.dispatch_lease_secs();
+        let claimed = state
+            .repo
+            .claim_job_terminal_enrichments(config.immediate_claim_limit(), lease_secs as i64)
+            .await?;
+        if claimed.is_empty() {
+            return Ok(handled_total);
+        }
+        handled_total = handled_total.saturating_add(claimed.len());
+        stream::iter(claimed)
+            .for_each_concurrent(config.in_flight, |work| async move {
+                if let Err(error) =
+                    process_claimed_job_terminal_enrichment(state, work, lease_secs).await
+                {
+                    warn!(%error, "durable job terminal enrichment owner failed");
+                }
+            })
+            .await;
+    }
+}
+
+// End-to-end tests use the production repository and enrichment owners in
+// their causal order. The second repository drain publishes terminal rows
+// whose durable enrichment handoff was acknowledged by the middle stage.
+#[cfg(test)]
+pub(crate) async fn drain_job_terminal_workflow_for_test(state: &AppState) -> Result<usize> {
+    let repository_before = drain_job_terminal_events(state).await?;
+    let enriched = drain_job_terminal_enrichments(state).await?;
+    let repository_after = drain_job_terminal_events(state).await?;
+    Ok(repository_before
+        .saturating_add(enriched)
+        .saturating_add(repository_after))
+}
+
+async fn process_claimed_job_terminal_enrichment(
+    state: &AppState,
+    work: ClaimedJobTerminalEnrichment,
+    lease_secs: u64,
+) -> Result<()> {
+    let heartbeat_repo = state.repo.clone();
+    let heartbeat_work = work.clone();
+    let (heartbeat_stop, heartbeat_stop_rx) = oneshot::channel();
+    let heartbeat = tokio::spawn(renew_job_terminal_enrichment_owner_until_stopped(
+        heartbeat_repo,
+        heartbeat_work,
+        lease_secs,
+        heartbeat_stop_rx,
+    ));
+    let enrichment = state.enrich_job_terminal_target(&work).await;
+    let _ = heartbeat_stop.send(());
+    let ownership_current = heartbeat.await??;
+    if !ownership_current {
+        warn!(
+            event_id = %work.event_id,
+            job_id = %work.job_id,
+            client_id = %work.client_id,
+            "terminal enrichment ownership changed while work was active"
+        );
+        return Ok(());
+    }
+    match enrichment {
+        Ok(()) => {
+            if state
+                .repo
+                .acknowledge_job_terminal_enrichment(work.event_id, work.owner_token)
+                .await?
+            {
+                wake_job_terminal_event_consumer();
+            } else {
+                warn!(
+                    event_id = %work.event_id,
+                    job_id = %work.job_id,
+                    client_id = %work.client_id,
+                    "terminal enrichment completed after ownership changed"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(
+                %error,
+                event_id = %work.event_id,
+                job_id = %work.job_id,
+                client_id = %work.client_id,
+                "durable job target enrichment deferred for retry"
+            );
+            if !state
+                .repo
+                .defer_job_terminal_enrichment(work.event_id, work.owner_token, &error.to_string())
+                .await?
+            {
+                warn!(
+                    event_id = %work.event_id,
+                    job_id = %work.job_id,
+                    client_id = %work.client_id,
+                    "terminal enrichment retry was not recorded after ownership changed"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn renew_job_terminal_enrichment_owner_until_stopped(
+    repo: crate::repository::Repository,
+    work: ClaimedJobTerminalEnrichment,
+    lease_secs: u64,
+    mut stop: oneshot::Receiver<()>,
+) -> Result<bool> {
+    let renewal_interval = Duration::from_secs((lease_secs / 3).max(1));
+    loop {
+        tokio::select! {
+            _ = &mut stop => return Ok(true),
+            _ = tokio::time::sleep(renewal_interval) => {
+                if !repo
+                    .renew_job_terminal_enrichment_owner(
+                        work.event_id,
+                        work.owner_token,
+                        lease_secs as i64,
+                    )
+                    .await?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn wake_job_dispatcher() {
     let wake_state = dispatcher_wake_state();
     wake_state.pending.store(true, Ordering::Release);
     if wake_state.dispatching.load(Ordering::Acquire) {
         wake_state.sweeps_coalesced.fetch_add(1, Ordering::Relaxed);
     }
     wake_state.notify.notify_one();
-    if !wake_state.loop_started.load(Ordering::Acquire) {
-        tokio::spawn(async move {
-            // Without the long-lived dispatcher loop there is no single state
-            // whose pending wakes can be coalesced. Dispatch this state's work
-            // directly so embedded callers and parallel tests cannot absorb
-            // each other's wakeups through the process-global coordinator.
-            if let Err(error) = dispatch_due_job_targets(&state).await {
-                warn!(%error, "durable job dispatcher wake failed");
-            }
-        });
-    }
 }
 
 async fn run_dispatcher_sweep(state: &AppState) -> Result<usize> {
@@ -189,51 +394,76 @@ async fn run_dispatcher_sweep(state: &AppState) -> Result<usize> {
 }
 
 pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> {
-    expire_control_timeout_targets(state).await?;
-    state.process_job_terminal_events(500).await?;
     state.repo.reconcile_job_rollouts(500).await?;
-    let dispatcher_config = state.dispatcher_runtime_config();
-    let claimed = state
-        .repo
-        .claim_due_job_targets(
-            dispatcher_config.batch_limit,
-            dispatcher_config.dispatch_lease_secs() as i64,
-            dispatcher_config.control_deadline_extra_secs(),
-        )
-        .await?;
-    let claimed_count = claimed.len();
-    if claimed_count == 0 {
-        return Ok(0);
-    }
-    dispatcher_wake_state()
-        .targets_claimed
-        .fetch_add(claimed_count as u64, Ordering::Relaxed);
-    debug!(claimed_count, "durable job dispatcher claimed targets");
-    stream::iter(claimed)
-        .for_each_concurrent(dispatcher_config.in_flight, |claimed| {
-            let state = state.clone();
-            async move {
-                // Poll each claimed target as a runtime task root. The command-output,
-                // terminalization, and backup-handoff state machines are independently bounded,
-                // but nesting all of their debug-build poll frames under FuturesUnordered can
-                // exhaust the standard worker stack before any operation yields.
-                let mut dispatch_task = AbortTaskOnDrop(tokio::spawn(async move {
-                    dispatch_claimed_target(&state, claimed).await
-                }));
-                match (&mut dispatch_task.0).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => warn!(%error, "durable job target dispatch failed"),
-                    Err(error) => warn!(%error, "durable job target dispatch task failed"),
+    let mut total = 0_usize;
+    loop {
+        // Claim and execute a wave from one coherent timeout snapshot. Hot
+        // reloads apply to the next wave and can never outgrow this wave's
+        // durable lease or control deadline after it has been claimed.
+        let dispatcher_config = state.dispatcher_runtime_config();
+        let claim_limit = dispatcher_config.immediate_claim_limit();
+        let gateway_timeouts = GatewayClientTimeouts {
+            connect: Duration::from_secs(dispatcher_config.internal_http_connect_secs),
+            write: Duration::from_secs(dispatcher_config.internal_http_write_secs),
+            read: Duration::from_secs(
+                dispatcher_config
+                    .dispatch_ack_secs
+                    .max(dispatcher_config.internal_http_read_secs),
+            ),
+        };
+        // Command dispatch receives this immutable snapshot directly. The
+        // shared client is updated from the same snapshot for cancel,
+        // terminal, suspension and other control calls that are not owned by
+        // a claimed command wave.
+        state.gateway.set_read_timeout(gateway_timeouts.read);
+        let claimed = state
+            .repo
+            .claim_due_job_targets(
+                claim_limit,
+                dispatcher_config.gateway_dispatch_attempt_lease_secs() as i64,
+                dispatcher_config.control_deadline_extra_secs(),
+            )
+            .await?;
+        let claimed_count = claimed.len();
+        if claimed_count == 0 {
+            return Ok(total);
+        }
+        total = total.saturating_add(claimed_count);
+        dispatcher_wake_state()
+            .targets_claimed
+            .fetch_add(claimed_count as u64, Ordering::Relaxed);
+        debug!(claimed_count, "durable job dispatcher claimed targets");
+        stream::iter(claimed)
+            .for_each_concurrent(dispatcher_config.in_flight, |claimed| {
+                let state = state.clone();
+                async move {
+                    // Poll each claimed target as a runtime task root. The command-output,
+                    // terminalization, and backup-handoff state machines are independently bounded,
+                    // but nesting all of their debug-build poll frames under FuturesUnordered can
+                    // exhaust the standard worker stack before any operation yields.
+                    let mut dispatch_task = AbortTaskOnDrop(tokio::spawn(async move {
+                        dispatch_claimed_target(&state, claimed, gateway_timeouts).await
+                    }));
+                    match (&mut dispatch_task.0).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => warn!(%error, "durable job target dispatch failed"),
+                        Err(error) => warn!(%error, "durable job target dispatch task failed"),
+                    }
                 }
-            }
-        })
-        .await;
-    state.process_job_terminal_events(500).await?;
-    state.repo.reconcile_job_rollouts(500).await?;
-    Ok(claimed_count)
+            })
+            .await;
+        // Terminal work from this completed wave has its own owner and may
+        // start while the dispatcher immediately claims the next free wave.
+        wake_job_terminal_event_consumer();
+        state.repo.reconcile_job_rollouts(500).await?;
+    }
 }
 
-async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) -> Result<()> {
+async fn dispatch_claimed_target(
+    state: &AppState,
+    claimed: ClaimedJobTarget,
+    gateway_timeouts: GatewayClientTimeouts,
+) -> Result<()> {
     if !state.gateway.configured() {
         dispatcher_wake_state()
             .gateway_dispatch_errors
@@ -262,9 +492,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
     if !state.repo.claimed_job_target_dispatchable(&claimed).await? {
-        state
-            .process_job_terminal_events_or_publish_refresh(500, claimed.job_id, None)
-            .await?;
+        wake_job_terminal_event_consumer();
         return Ok(());
     }
 
@@ -280,7 +508,6 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         command: claimed.operation.clone(),
         max_timeout_secs: claimed.max_timeout_secs.max(1),
     };
-    state.refresh_gateway_dispatch_timeouts();
     let outcome = match state
         .gateway
         .dispatch(
@@ -288,6 +515,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
             request,
             claimed.process_incarnation_id,
             claimed.payload_hash.clone(),
+            gateway_timeouts,
         )
         .await
     {
@@ -312,15 +540,20 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
                         &message,
                         Some(claimed.process_incarnation_id),
                         parse_agent_incarnation_mismatch_actual(&message),
+                        claimed.dispatch_attempt,
                     )
                     .await?;
-                state
-                    .process_job_terminal_events_or_publish_refresh(500, claimed.job_id, refreshed)
-                    .await?;
+                let _ = refreshed;
+                wake_job_terminal_event_consumer();
             } else {
                 state
                     .repo
-                    .record_job_target_delivery_error(claimed.job_id, &claimed.client_id, &message)
+                    .record_job_target_delivery_error(
+                        claimed.job_id,
+                        &claimed.client_id,
+                        &message,
+                        claimed.dispatch_attempt,
+                    )
                     .await?;
             }
             return Ok(());
@@ -332,7 +565,12 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
     }
     state
         .repo
-        .mark_job_target_running(claimed.job_id, &claimed.client_id, &outcome.message)
+        .mark_claimed_job_target_running(
+            claimed.job_id,
+            &claimed.client_id,
+            &outcome.message,
+            claimed.dispatch_attempt,
+        )
         .await?;
     Ok(())
 }
@@ -346,128 +584,95 @@ fn parse_agent_incarnation_mismatch_actual(message: &str) -> Option<Uuid> {
     Uuid::parse_str(token).ok()
 }
 
-async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
+async fn drain_control_timeout_targets(state: &AppState) -> Result<usize> {
     let dispatcher_config = state.dispatcher_runtime_config();
-    let expired = state
-        .repo
-        .expire_control_timeout_targets(
-            DEADLINE_EXPIRE_LIMIT,
-            dispatcher_config.control_deadline_extra_secs(),
-        )
-        .await?;
-    for target in expired {
-        if matches!(&state.repo, Repository::Memory(_)) {
-            if let Err(error) = state
-                .repo
-                .record_backup_request_terminal_for_target_status(
-                    target.job_id,
-                    &target.client_id,
-                    &target.status,
-                    None,
-                )
-                .await
-            {
-                warn!(
-                    %error,
-                    job_id = %target.job_id,
-                    client_id = %target.client_id,
-                    "backup request terminal status update failed after deadline expiry"
-                );
-            }
-            if let Err(error) = state
-                .repo
-                .record_runtime_config_apply_terminal_for_target_status(
-                    target.job_id,
-                    &target.client_id,
-                    &target.status,
-                    Some(&target.status),
-                )
-                .await
-            {
-                warn!(
-                    %error,
-                    job_id = %target.job_id,
-                    client_id = %target.client_id,
-                    "runtime config apply-state update failed after deadline expiry"
-                );
-            }
+    let claim_limit = dispatcher_config.immediate_claim_limit();
+    let mut total = 0_usize;
+    loop {
+        // The page equals work that this process can begin now. It bounds one
+        // database transaction without acting as a throughput allowance.
+        let expired = state
+            .repo
+            .expire_control_timeout_targets(claim_limit)
+            .await?;
+        let expired_count = expired.len();
+        if expired_count == 0 {
+            return Ok(total);
         }
-        if target.status == TARGET_STATUS_CONTROL_TIMEOUT {
+        total = total.saturating_add(expired_count);
+        wake_job_terminal_event_consumer();
+        let results =
+            stream::iter(expired)
+                .map(|target| async move {
+                    expire_control_timeout_target_side_effects(state, target).await
+                })
+                .buffer_unordered(dispatcher_config.in_flight)
+                .collect::<Vec<_>>()
+                .await;
+        for result in results {
+            result?;
+        }
+        if expired_count < claim_limit as usize {
+            return Ok(total);
+        }
+    }
+}
+
+async fn expire_control_timeout_target_side_effects(
+    state: &AppState,
+    target: crate::repository_jobs::DeadlineExpiredJobTarget,
+) -> Result<()> {
+    if target.status != TARGET_STATUS_CONTROL_TIMEOUT {
+        return Ok(());
+    }
+    state
+        .repo
+        .record_job_target_cancel_sent(target.job_id, &target.client_id)
+        .await?;
+    match state
+        .gateway
+        .cancel(
+            &target.client_id,
+            vpsman_common::JobCancelRequest {
+                job_id: target.job_id,
+                reason: Some("control_deadline_elapsed".to_string()),
+            },
+        )
+        .await
+    {
+        Ok(cancel) => {
             state
                 .repo
-                .record_job_target_cancel_sent(target.job_id, &target.client_id)
-                .await?;
-            match state
-                .gateway
-                .cancel(
+                .record_job_target_cancel_result(
+                    target.job_id,
                     &target.client_id,
-                    vpsman_common::JobCancelRequest {
-                        job_id: target.job_id,
-                        reason: Some("control_deadline_elapsed".to_string()),
-                    },
+                    cancel.accepted,
+                    cancel.acked,
+                    cancel.applied,
+                    &cancel.message,
                 )
-                .await
-            {
-                Ok(cancel) => {
-                    state
-                        .repo
-                        .record_job_target_cancel_result(
-                            target.job_id,
-                            &target.client_id,
-                            cancel.accepted,
-                            cancel.acked,
-                            cancel.applied,
-                            &cancel.message,
-                        )
-                        .await?;
-                }
-                Err(error) => {
-                    let message = format!("deadline cancel delivery failed: {error}");
-                    warn!(
-                        %error,
-                        job_id = %target.job_id,
-                        client_id = %target.client_id,
-                        "deadline cancel delivery failed"
-                    );
-                    state
-                        .repo
-                        .record_job_target_cancel_result(
-                            target.job_id,
-                            &target.client_id,
-                            false,
-                            false,
-                            false,
-                            &message,
-                        )
-                        .await?;
-                }
-            }
+                .await?;
         }
-        if matches!(&state.repo, Repository::Memory(_)) {
-            if let Err(error) = record_network_routing_terminal_result(
-                state,
-                target.job_id,
-                &target.client_id,
-                &target.status,
-                None,
-            )
-            .await
-            {
-                warn!(
-                    ?error,
-                    job_id = %target.job_id,
-                    client_id = %target.client_id,
-                    "network routing state update failed after deadline expiry"
-                );
-            }
+        Err(error) => {
+            let message = format!("deadline cancel delivery failed: {error}");
+            warn!(
+                %error,
+                job_id = %target.job_id,
+                client_id = %target.client_id,
+                "deadline cancel delivery failed"
+            );
+            state
+                .repo
+                .record_job_target_cancel_result(
+                    target.job_id,
+                    &target.client_id,
+                    false,
+                    false,
+                    false,
+                    &message,
+                )
+                .await?;
         }
-        let refreshed = state
-            .repo
-            .refresh_job_status_from_targets(target.job_id)
-            .await?;
-        state
-            .process_job_terminal_events_or_publish_refresh(500, target.job_id, refreshed)
-            .await?;
     }
     Ok(())
 }
@@ -489,11 +694,12 @@ async fn finish_claimed_target(
     {
         let write_results = state
             .repo
-            .record_active_job_outputs_checked_with_config(
+            .record_claimed_job_outputs_checked_with_config(
                 claimed.job_id,
                 &claimed.client_id,
                 &outcome.outputs,
                 persist_config,
+                claimed.dispatch_attempt,
             )
             .await?;
         if reject_conflicting_dispatch_outputs(state, claimed, &write_results).await? {
@@ -501,16 +707,17 @@ async fn finish_claimed_target(
         }
         state
             .repo
-            .mark_job_target_running(
+            .mark_claimed_job_target_running(
                 claimed.job_id,
                 &claimed.client_id,
                 "vnStat history collected; server import pending",
+                claimed.dispatch_attempt,
             )
             .await?;
         if !outcome.outputs.is_empty() {
             state.invalidate_job_details(claimed.job_id);
         }
-        wake_network_traffic_import_finalizer(state.clone());
+        wake_network_traffic_import_finalizer();
         return Ok(());
     }
     let final_output_index = outcome.outputs.iter().position(|output| output.done);
@@ -521,6 +728,7 @@ async fn finish_claimed_target(
                 claimed.job_id,
                 &claimed.client_id,
                 "job_output_after_final_marker",
+                claimed.dispatch_attempt,
             )
             .await?;
         return Ok(());
@@ -528,17 +736,18 @@ async fn finish_claimed_target(
     let prefix_end = final_output_index.unwrap_or(outcome.outputs.len());
     let prefix_results = state
         .repo
-        .record_active_job_outputs_checked_with_config(
+        .record_claimed_job_outputs_checked_with_config(
             claimed.job_id,
             &claimed.client_id,
             &outcome.outputs[..prefix_end],
             persist_config,
+            claimed.dispatch_attempt,
         )
         .await?;
     if reject_conflicting_dispatch_outputs(state, claimed, &prefix_results).await? {
         return Ok(());
     }
-    let target_terminalized = if let Some(final_index) = final_output_index {
+    if let Some(final_index) = final_output_index {
         let final_output = &outcome.outputs[final_index];
         let received_at = outcome
             .received_at
@@ -548,7 +757,7 @@ async fn finish_claimed_target(
         final_outcome.received_at = Some(received_at.clone());
         let record = state
             .repo
-            .record_active_final_job_output_and_target_result_with_config(
+            .record_claimed_final_job_output_and_target_result_with_config(
                 claimed.job_id,
                 &claimed.client_id,
                 i32::try_from(final_index)?,
@@ -556,90 +765,25 @@ async fn finish_claimed_target(
                 Some(received_at),
                 persist_config,
                 &final_outcome,
+                claimed.dispatch_attempt,
             )
             .await?;
         if reject_conflicting_dispatch_outputs(state, claimed, &[record.write_result]).await? {
             return Ok(());
         }
-        record.target_terminalized
     } else {
         state
             .repo
-            .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
-            .await?
-    };
+            .update_claimed_job_target_result(
+                claimed.job_id,
+                &claimed.client_id,
+                &outcome,
+                claimed.dispatch_attempt,
+            )
+            .await?;
+    }
     if !outcome.outputs.is_empty() {
         state.invalidate_job_details(claimed.job_id);
-    }
-    if target_terminalized
-        && matches!(&state.repo, Repository::Memory(_))
-        && matches!(&claimed.operation, JobCommand::Backup { .. })
-        && outcome.status == TARGET_STATUS_COMPLETED
-    {
-        if let Some(operator) = auth_context_for_claim(state, claimed).await? {
-            if let Err(error) = Box::pin(try_auto_record_backup_artifact(
-                state,
-                &operator,
-                &claimed.client_id,
-                &claimed.payload_hash,
-                claimed.job_id,
-                &outcome.outputs,
-            ))
-            .await
-            {
-                warn!(%error, job_id = %claimed.job_id, client_id = %claimed.client_id, "backup artifact auto-record failed");
-            }
-        }
-    }
-    if target_terminalized
-        && matches!(&claimed.operation, JobCommand::Backup { .. })
-        && outcome.status != TARGET_STATUS_COMPLETED
-        && matches!(&state.repo, Repository::Memory(_))
-    {
-        let status = if outcome.status == TARGET_STATUS_CANCELED {
-            BackupRequestStatus::ExecutionCanceled
-        } else {
-            BackupRequestStatus::ExecutionFailed
-        };
-        let operator = auth_context_for_claim(state, claimed).await?;
-        if let Err(error) = state
-            .repo
-            .mark_open_backup_request_execution_terminal(
-                claimed.job_id,
-                &claimed.client_id,
-                status,
-                operator.as_ref(),
-            )
-            .await
-        {
-            warn!(%error, job_id = %claimed.job_id, client_id = %claimed.client_id, "backup request terminal status update failed");
-        }
-    }
-    if target_terminalized && matches!(&state.repo, Repository::Memory(_)) {
-        let output = outcome.outputs.iter().rev().find(|output| output.done);
-        if let Err(error) = record_network_routing_terminal_result(
-            state,
-            claimed.job_id,
-            &claimed.client_id,
-            &outcome.status,
-            output,
-        )
-        .await
-        {
-            warn!(
-                ?error,
-                job_id = %claimed.job_id,
-                client_id = %claimed.client_id,
-                "network routing state update failed after synchronous dispatch"
-            );
-        }
-        let refreshed = state
-            .repo
-            .refresh_job_status_from_targets(claimed.job_id)
-            .await?;
-        state
-            .process_job_terminal_events_or_publish_refresh(500, claimed.job_id, refreshed)
-            .await?;
     }
     Ok(())
 }
@@ -661,6 +805,7 @@ async fn reject_conflicting_dispatch_outputs(
             claimed.job_id,
             &claimed.client_id,
             "job_output_sequence_conflict",
+            claimed.dispatch_attempt,
         )
         .await?;
     Ok(true)
@@ -815,6 +960,21 @@ fn dispatch_error_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome 
 mod task_boundary_tests {
     use super::AbortTaskOnDrop;
 
+    const DISPATCHER_SOURCE: &str = include_str!("job_dispatcher.rs");
+    const REPOSITORY_SOURCE: &str = include_str!("../repository/jobs/repository_jobs.rs");
+    const STATE_SOURCE: &str = include_str!("../runtime/state.rs");
+    const JOB_SCHEMA: &str = include_str!("../../../../migrations/0002_jobs_schedules.sql");
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        source
+            .split_once(start)
+            .expect("start marker")
+            .1
+            .split_once(end)
+            .expect("end marker")
+            .0
+    }
+
     struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
     impl Drop for DropSignal {
@@ -843,5 +1003,93 @@ mod task_boundary_tests {
             .await
             .expect("aborted dispatch task was not dropped")
             .expect("dispatch task drop signal was lost");
+    }
+
+    #[test]
+    fn terminal_enrichment_has_one_exact_durable_owner_and_ordering_fence() {
+        assert!(JOB_SCHEMA.contains("CREATE TABLE public.job_terminal_enrichment_work"));
+        assert!(JOB_SCHEMA
+            .contains("CONSTRAINT job_terminal_enrichment_work_pkey PRIMARY KEY (event_id)"));
+        assert!(JOB_SCHEMA.contains(
+            "FOREIGN KEY (event_id) REFERENCES public.job_terminal_events(id) ON DELETE CASCADE"
+        ));
+        assert!(JOB_SCHEMA.contains(
+            "CREATE INDEX job_terminal_enrichment_work_job_idx ON public.job_terminal_enrichment_work USING btree (job_id)"
+        ));
+
+        let completion = source_between(
+            REPOSITORY_SOURCE,
+            "async fn complete_job_terminal_target_repository_stage",
+            "pub(crate) async fn claim_job_terminal_enrichments",
+        );
+        assert!(completion.contains("let mut tx = pool.begin().await?"));
+        assert!(completion.contains("processing_status = 'processed'"));
+        assert!(completion.contains("INSERT INTO job_terminal_enrichment_work"));
+        assert!(completion.contains("tx.commit().await?"));
+
+        let claim = source_between(
+            REPOSITORY_SOURCE,
+            "pub(crate) async fn claim_job_terminal_enrichments",
+            "pub(crate) async fn renew_job_terminal_enrichment_owner",
+        );
+        assert!(claim.contains("LIMIT $1"));
+        assert!(claim.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(claim.contains("lease_id = $2"));
+        assert!(REPOSITORY_SOURCE.contains(
+            "FROM job_terminal_enrichment_work enrichment\n                                    WHERE enrichment.job_id = event.job_id"
+        ));
+
+        let terminal_stage = source_between(
+            STATE_SOURCE,
+            "pub(crate) async fn process_job_terminal_events",
+            "pub(crate) async fn enrich_job_terminal_target",
+        );
+        assert!(!terminal_stage.contains("record_network_routing_terminal_result"));
+        assert!(!terminal_stage.contains("try_auto_record_backup_artifact_for_job_target"));
+
+        let dispatcher = DISPATCHER_SOURCE
+            .split_once("#[cfg(test)]\nmod task_boundary_tests")
+            .expect("dispatcher task-boundary test module")
+            .0;
+        assert!(dispatcher.contains(
+            ".claim_job_terminal_enrichments(config.immediate_claim_limit(), lease_secs as i64)"
+        ));
+        assert!(dispatcher.contains(".for_each_concurrent(config.in_flight"));
+        let dispatch = source_between(
+            dispatcher,
+            "pub(crate) async fn dispatch_due_job_targets",
+            "async fn dispatch_claimed_target",
+        );
+        assert!(dispatch.contains("let claim_limit = dispatcher_config.immediate_claim_limit()"));
+        assert!(dispatch.contains("let gateway_timeouts = GatewayClientTimeouts"));
+        assert!(dispatch.contains("loop {"));
+        assert!(dispatch.contains("gateway_dispatch_attempt_lease_secs()"));
+        assert!(dispatch.contains("dispatch_claimed_target(&state, claimed, gateway_timeouts)"));
+        assert!(dispatch.contains("state.gateway.set_read_timeout(gateway_timeouts.read)"));
+        assert!(!dispatch.contains("refresh_gateway_dispatch_timeouts"));
+        assert!(!dispatch.contains("drain_control_timeout_targets"));
+        assert!(!dispatch.contains("dispatcher_config.batch_limit,"));
+        let timeout_path = source_between(
+            dispatcher,
+            "async fn drain_control_timeout_targets",
+            "async fn finish_claimed_target",
+        );
+        assert!(dispatcher.contains("pub(crate) fn spawn_job_deadline_expiry_consumer"));
+        assert!(
+            timeout_path.contains("let claim_limit = dispatcher_config.immediate_claim_limit()")
+        );
+        assert!(timeout_path.contains("buffer_unordered(dispatcher_config.in_flight)"));
+        assert!(timeout_path.contains("if expired_count < claim_limit as usize"));
+        assert!(!timeout_path.contains("refresh_job_status_from_targets"));
+        assert!(timeout_path.contains("wake_job_terminal_event_consumer"));
+
+        let expiry_repository = source_between(
+            REPOSITORY_SOURCE,
+            "pub(crate) async fn expire_control_timeout_targets",
+            "pub(crate) async fn request_job_cancel",
+        );
+        assert!(expiry_repository.contains("target.deadline_at <= now()"));
+        assert!(!expiry_repository.contains("control_deadline_extra_secs"));
+        assert!(!expiry_repository.contains("job.max_timeout_secs +"));
     }
 }

@@ -141,7 +141,7 @@ pub(crate) async fn create_migration_run(
                 )
             }
         })?;
-    crate::job_dispatcher::wake_job_dispatcher(state.clone());
+    crate::job_dispatcher::wake_job_dispatcher();
     let restore_job = migration_restore_job_response(&state, &plan);
     Ok((
         StatusCode::CREATED,

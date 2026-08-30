@@ -15,6 +15,7 @@ fn artifact_cleanup_worker_validates_all_sizes_before_deletion() {
         id,
         domain: "job_output".to_string(),
         object_key: format!("job-outputs/{id}"),
+        sha256_hex: "a".repeat(64),
         size_bytes,
         status: "active".to_string(),
         backup_artifact_id: None,
@@ -261,7 +262,7 @@ async fn postgres_invalid_cadence_disables_once_without_blocking_valid_schedules
 
     let processed = process_due_schedules(
         &db.pool,
-        10,
+        1,
         &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
     )
     .await
@@ -304,31 +305,22 @@ async fn postgres_invalid_cadence_disables_once_without_blocking_valid_schedules
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    let invalid_events: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM webhook_events WHERE kind = 'schedule.failed' AND event_id LIKE $1",
-    )
-    .bind(format!("schedule:{invalid_id}:invalid_cadence:%"))
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
     assert_eq!(invalid_audit.0["origin_kind"], "worker");
     assert_eq!(invalid_audit.0["component"], "schedule-dispatch-worker");
     assert_eq!(invalid_audit.0["result"], "failed");
     assert!(invalid_audit.0["operator_id"].is_string());
     assert!(invalid_audit.0["operator_username"].is_string());
     assert_eq!(invalid_audit.0["operator_role"], "operator");
-    assert_eq!(invalid_events, 1);
-
-    assert_eq!(
-        process_due_schedules(
-            &db.pool,
-            10,
-            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
-        )
-        .await
-        .unwrap(),
-        0
-    );
+    // The valid minute schedule can legitimately become due again when these
+    // two calls straddle a minute boundary. Re-run the shared dispatcher, but
+    // assert idempotence only on the invalid schedule this test owns.
+    process_due_schedules(
+        &db.pool,
+        10,
+        &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+    )
+    .await
+    .unwrap();
     let repeated_audits: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_logs WHERE action = 'schedule.due_failed' AND target = $1",
     )
@@ -337,7 +329,79 @@ async fn postgres_invalid_cadence_disables_once_without_blocking_valid_schedules
     .await
     .unwrap();
     assert_eq!(repeated_audits, 1);
+    let repeated_invalid_jobs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE source_schedule_id = $1")
+            .bind(invalid_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(repeated_invalid_jobs, 0);
+    let repeated_invalid_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_events WHERE kind = 'schedule.failed' AND event_id LIKE $1",
+    )
+    .bind(format!("schedule:{invalid_id}:invalid_cadence:%"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(repeated_invalid_events, 1);
 
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_cron_round_drains_starting_page_and_excludes_later_schedules() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    insert_worker_client(&db.pool, "cron-round", "online", false).await;
+    let starting_id = insert_worker_schedule(
+        &db.pool,
+        "cron-round-starting",
+        serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+        &["cron-round"],
+    )
+    .await;
+    let round_started_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let later_id = insert_worker_schedule(
+        &db.pool,
+        "cron-round-later",
+        serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+        &["cron-round"],
+    )
+    .await;
+    sqlx::query("UPDATE schedules SET created_at=$2 + interval '1 second' WHERE id=$1")
+        .bind(later_id)
+        .bind(round_started_at)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let processed = process_due_schedules_through(
+        &db.pool,
+        1,
+        &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+        round_started_at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(processed, 1);
+    let (starting_jobs, later_jobs): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*) FILTER (WHERE source_schedule_id=$1),
+            count(*) FILTER (WHERE source_schedule_id=$2)
+        FROM jobs
+        "#,
+    )
+    .bind(starting_id)
+    .bind(later_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!((starting_jobs, later_jobs), (1, 0));
     db.cleanup().await;
 }
 
@@ -396,7 +460,7 @@ async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
         webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
             .await
             .unwrap();
-    assert_eq!(result, (2, 0));
+    assert_eq!(result, 2);
 
     let deliveries = sqlx::query_as::<_, (Uuid, String, String, String, Option<String>)>(
         r#"
@@ -477,7 +541,7 @@ async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
         webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(),)
             .await
             .unwrap(),
-        (0, 0)
+        0
     );
     let delivery_count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_rule_deliveries")
         .fetch_one(&db.pool)
@@ -979,7 +1043,8 @@ async fn postgres_scheduled_capability_skip_records_neutral_policy_evidence() {
         SELECT id, source_event_id, fact_kind, natural_key,
                confirmation_bucket_key, subject_client_id, target_kind,
                target_id, source_status, completeness, subject_snapshot,
-               payload, state_started_at, causation_id, schedule_lineage
+               payload, state_started_at, causation_id, schedule_lineage,
+               evaluation_pending
         FROM alert_policy_evidence
         WHERE source_kind = 'job.capability' AND natural_key = $1
         "#,
@@ -997,6 +1062,7 @@ async fn postgres_scheduled_capability_skip_records_neutral_policy_evidence() {
         evidence.try_get::<String, _>("fact_kind").unwrap(),
         "occurrence"
     );
+    assert!(evidence.try_get::<bool, _>("evaluation_pending").unwrap());
     assert_eq!(
         evidence
             .try_get::<String, _>("confirmation_bucket_key")
@@ -1422,7 +1488,6 @@ fn worker_runtime_config_reloads_suite_file_from_base_args() {
             &path,
             worker_runtime_toml(
                 7,
-                17,
                 333,
                 41,
                 true,
@@ -1445,7 +1510,6 @@ fn worker_runtime_config_reloads_suite_file_from_base_args() {
         let runtime = load_worker_runtime_config(&args).unwrap();
 
         assert_eq!(runtime.tick_secs, 7);
-        assert_eq!(runtime.worker_lease_secs, 17);
         assert_eq!(runtime.agent_offline_timeout_secs, 333);
         assert_eq!(runtime.schedule_dispatch_config.max_timeout_secs, 41);
         assert!(
@@ -1477,7 +1541,6 @@ fn worker_runtime_config_reloads_suite_file_from_base_args() {
             &path,
             worker_runtime_toml(
                 19,
-                29,
                 444,
                 55,
                 false,
@@ -1498,7 +1561,6 @@ fn worker_runtime_config_reloads_suite_file_from_base_args() {
 
         let runtime = load_worker_runtime_config(&args).unwrap();
         assert_eq!(runtime.tick_secs, 19);
-        assert_eq!(runtime.worker_lease_secs, 29);
         assert_eq!(runtime.agent_offline_timeout_secs, 444);
         assert_eq!(runtime.schedule_dispatch_config.max_timeout_secs, 55);
         assert!(
@@ -1554,64 +1616,147 @@ fn suite_bool_defaults_do_not_disable_explicit_true_flags() {
     assert!(default_false);
 }
 
+async fn wait_for_ready_retention_events_to_drain(pool: &PgPool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let remains: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM telemetry_history_due_events
+                    WHERE coalesce_ready_at <= now()
+                )
+                "#,
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if !remains {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("telemetry retention scheduler did not complete a fresh pass")
+}
+
+async fn enqueue_ready_retention_proof(pool: &PgPool, minutes_ago: i32) {
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_history_due_events (
+            domain, source_bucket_secs, destination_bucket_secs,
+            owner_identity, destination_start, coalesce_ready_at, due_at
+        )
+        SELECT
+            'telemetry_rollups', 60, 300,
+            ARRAY['retention-scheduler-isolation'], boundary.bucket_start,
+            boundary.bucket_start + interval '5 minutes',
+            boundary.bucket_start + interval '2 days 5 minutes'
+        FROM (
+            SELECT date_bin(
+                interval '5 minutes',
+                clock_timestamp() - make_interval(mins => $1),
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ) AS bucket_start
+        ) boundary
+        "#,
+    )
+    .bind(minutes_ago)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
-async fn worker_lease_excludes_concurrent_and_legacy_ttl_holders() {
+async fn telemetry_retention_scheduler_runs_while_ordinary_pool_is_saturated_and_closes_cleanly() {
+    assert_eq!(
+        TELEMETRY_HISTORY_RETENTION_RECOVERY_INTERVAL,
+        Duration::from_secs(5)
+    );
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;
     };
+    enqueue_ready_retention_proof(&db.pool, 10).await;
 
-    let first = acquire_worker_lease(&db.pool, "lease-regression", "worker-a", 60)
+    let retention_pool = db.telemetry_retention_pool().await.unwrap();
+    let retention_plan_mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&retention_pool)
         .await
-        .unwrap()
-        .expect("first worker acquires lease");
-    assert!(
-        acquire_worker_lease(&db.pool, "lease-regression", "worker-b", 60)
-            .await
-            .unwrap()
-            .is_none(),
-        "transaction advisory lock must exclude a concurrent worker"
+        .unwrap();
+    assert_eq!(retention_plan_mode, "force_custom_plan");
+    let retention_pool_observer = retention_pool.clone();
+    let (_retention_wake_tx, retention_wake_rx) = telemetry_retention_wake_channel();
+    let scheduler = TelemetryRetentionScheduler::spawn(
+        retention_pool,
+        Duration::from_millis(100),
+        retention_wake_rx,
     );
-    first.finish().await.unwrap();
+    wait_for_ready_retention_events_to_drain(&db.pool).await;
 
-    sqlx::query(
-        r#"
-        UPDATE worker_leases
-        SET owner = 'legacy-worker',
-            lease_expires_at = now() + interval '60 seconds'
-        WHERE task_name = 'lease-regression'
-        "#,
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    let ordinary_pool = db.additional_pool(2).await.unwrap();
+    let ordinary_connection_a = ordinary_pool.acquire().await.unwrap();
+    let ordinary_connection_b = ordinary_pool.acquire().await.unwrap();
     assert!(
-        acquire_worker_lease(&db.pool, "lease-regression", "worker-c", 60)
+        tokio::time::timeout(Duration::from_millis(25), ordinary_pool.acquire())
             .await
-            .unwrap()
-            .is_none(),
-        "an unexpired legacy TTL row must block a new worker"
+            .is_err(),
+        "test precondition: both ordinary-workflow connections are occupied"
     );
+    enqueue_ready_retention_proof(&db.pool, 15).await;
+    wait_for_ready_retention_events_to_drain(&db.pool).await;
+    scheduler.shutdown().await.unwrap();
+    assert!(retention_pool_observer.is_closed());
 
-    sqlx::query(
-        "UPDATE worker_leases SET lease_expires_at = now() WHERE task_name = 'lease-regression'",
-    )
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    let recovered = acquire_worker_lease(&db.pool, "lease-regression", "worker-c", 60)
-        .await
-        .unwrap()
-        .expect("expired legacy lease is recoverable");
-    recovered.finish().await.unwrap();
-    let released: bool = sqlx::query_scalar(
-        "SELECT lease_expires_at <= now() FROM worker_leases WHERE task_name = 'lease-regression'",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert!(released);
-
+    drop(ordinary_connection_a);
+    drop(ordinary_connection_b);
+    ordinary_pool.close().await;
     db.cleanup().await;
+}
+
+#[tokio::test]
+async fn telemetry_retention_scheduler_exit_or_panic_is_fatal() {
+    let make_scheduler = |task| {
+        let pool = PgPoolOptions::new()
+            .min_connections(0)
+            .max_connections(2)
+            .connect_lazy("postgresql://localhost/vpsman-scheduler-supervision-test")
+            .unwrap();
+        let pool_observer = pool.clone();
+        let (control_tx, _control_rx) =
+            watch::channel(TelemetryRetentionSchedulerControl { shutdown: false });
+        (
+            TelemetryRetentionScheduler {
+                control_tx,
+                task: Some(task),
+                pool,
+            },
+            pool_observer,
+        )
+    };
+
+    let (mut completed_scheduler, completed_pool) = make_scheduler(tokio::spawn(async {}));
+    let completion_error = completed_scheduler
+        .wait_for_unexpected_exit()
+        .await
+        .unwrap_err();
+    assert!(completion_error
+        .to_string()
+        .contains("telemetry retention scheduler exited unexpectedly"));
+    completed_scheduler.shutdown().await.unwrap();
+    assert!(completed_pool.is_closed());
+
+    let (mut panicked_scheduler, panicked_pool) =
+        make_scheduler(tokio::spawn(async { panic!("scheduler-test-panic") }));
+    let panic_error = panicked_scheduler
+        .wait_for_unexpected_exit()
+        .await
+        .unwrap_err();
+    assert!(panic_error
+        .to_string()
+        .contains("telemetry retention scheduler task failed"));
+    panicked_scheduler.shutdown().await.unwrap();
+    assert!(panicked_pool.is_closed());
 }
 
 async fn insert_worker_client(pool: &PgPool, client_id: &str, status: &str, hidden: bool) {
@@ -1854,7 +1999,6 @@ async fn job_status_output(pool: &PgPool, job_id: Uuid, client_id: &str) -> serd
 
 const WORKER_HOT_RELOAD_ENV: &[&str] = &[
     "VPSMAN_WORKER_TICK_SECS",
-    "VPSMAN_WORKER_LEASE_SECS",
     "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS",
     "VPSMAN_WORKER_NOTIFICATION_DELIVERY_LIMIT",
     "VPSMAN_WORKER_NOTIFICATION_RETENTION_DAYS",
@@ -1911,7 +2055,6 @@ fn temp_suite_config_path(label: &str) -> std::path::PathBuf {
 #[allow(clippy::too_many_arguments)]
 fn worker_runtime_toml(
     tick_secs: u64,
-    worker_lease_secs: i32,
     agent_offline_timeout_secs: i64,
     schedule_job_max_timeout_secs: u64,
     require_registered_agent_updates: bool,
@@ -1932,7 +2075,6 @@ fn worker_runtime_toml(
 
 [worker]
 tick_secs = {tick_secs}
-worker_lease_secs = {worker_lease_secs}
 agent_offline_timeout_secs = {agent_offline_timeout_secs}
 schedule_job_max_timeout_secs = {schedule_job_max_timeout_secs}
 require_registered_agent_updates = {require_registered_agent_updates}

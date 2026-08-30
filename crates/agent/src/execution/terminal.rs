@@ -3,7 +3,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex as StdMutex, OnceLock,
     },
     time::Duration,
 };
@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{mpsc, Mutex},
+    sync::{mpsc, oneshot, Mutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
     time,
 };
 use tracing::warn;
@@ -37,12 +37,46 @@ const TERMINAL_IDLE_SCAN_SECS: u64 = 30;
 const TERMINAL_CLOSE_GRACE_MS: u64 = 500;
 const TERMINAL_FINAL_EVENT_SEND_TIMEOUT_SECS: u64 = 5;
 const TERMINAL_DISCONNECTED_GRACE_SECS: u64 = 3600;
-const TERMINAL_PENDING_FINAL_EVENTS_MAX: usize = 256;
 
 static TERMINAL_REGISTRY: OnceLock<TerminalRegistry> = OnceLock::new();
-static TERMINAL_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static TERMINAL_PENDING_FINAL_EVENTS: OnceLock<Mutex<VecDeque<TerminalStreamOutput>>> =
+static TERMINAL_OPEN_OWNERS: OnceLock<StdMutex<HashMap<uuid::Uuid, Arc<Mutex<()>>>>> =
     OnceLock::new();
+static TERMINAL_SESSION_CAPACITY: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static TERMINAL_PENDING_FINAL_EVENTS: OnceLock<Mutex<TerminalPendingFinalEvents>> = OnceLock::new();
+static TERMINAL_PENDING_FINAL_NOTIFY: OnceLock<Notify> = OnceLock::new();
+
+struct TerminalOpenOwner {
+    session_id: uuid::Uuid,
+    entry: Arc<Mutex<()>>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for TerminalOpenOwner {
+    fn drop(&mut self) {
+        self.guard.take();
+        let mut owners = terminal_open_owners()
+            .lock()
+            .expect("terminal-open owner registry poisoned");
+        let is_current = owners
+            .get(&self.session_id)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
+        if is_current && Arc::strong_count(&self.entry) == 2 {
+            owners.remove(&self.session_id);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingTerminalFinalEvent {
+    generation: u64,
+    pub(crate) event: TerminalStreamOutput,
+}
+
+#[derive(Default)]
+struct TerminalPendingFinalEvents {
+    next_generation: u64,
+    events: HashMap<uuid::Uuid, PendingTerminalFinalEvent>,
+}
 
 pub(crate) async fn execute_terminal_command(
     config: &AgentConfig,
@@ -84,8 +118,58 @@ pub(crate) async fn close_all_terminal_sessions_for_lifecycle(reason: &str) {
     }
 }
 
-pub(crate) async fn drain_pending_terminal_final_events() -> Vec<TerminalStreamOutput> {
-    pending_final_events().lock().await.drain(..).collect()
+pub(crate) async fn pending_terminal_final_events() -> Vec<PendingTerminalFinalEvent> {
+    let pending = pending_final_events().lock().await;
+    let mut events = pending.events.values().cloned().collect::<Vec<_>>();
+    events.sort_by_key(|event| event.generation);
+    events
+}
+
+pub(crate) async fn pending_terminal_final_event_ready() {
+    loop {
+        let notified = pending_final_notify().notified();
+        if !pending_final_events().lock().await.events.is_empty() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+pub(crate) async fn acknowledge_pending_terminal_final_event(
+    delivered: &PendingTerminalFinalEvent,
+) {
+    let mut pending = pending_final_events().lock().await;
+    if pending
+        .events
+        .get(&delivered.event.session_id)
+        .is_some_and(|current| current.generation == delivered.generation)
+    {
+        pending.events.remove(&delivered.event.session_id);
+    }
+}
+
+pub(crate) async fn retain_pending_terminal_final_event(event: TerminalStreamOutput) {
+    debug_assert!(event.output.done, "only final terminal events are retained");
+    let mut pending = pending_final_events().lock().await;
+    if pending
+        .events
+        .get(&event.session_id)
+        .is_some_and(|current| {
+            event.output_next_seq < current.event.output_next_seq
+                || (event.output_next_seq == current.event.output_next_seq
+                    && (!event.output.done || !current.event.output.done))
+        })
+    {
+        return;
+    }
+    pending.next_generation = pending.next_generation.saturating_add(1);
+    let generation = pending.next_generation;
+    pending.events.insert(
+        event.session_id,
+        PendingTerminalFinalEvent { generation, event },
+    );
+    drop(pending);
+    pending_final_notify().notify_one();
 }
 
 async fn execute_terminal_command_inner(
@@ -163,7 +247,7 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         .or(input.config.execution.working_directory.as_deref());
     validate_terminal_cwd(effective_cwd)?;
     let user_resolution = resolve_terminal_user(input.user, input.user_policy)?;
-    let _open_guard = terminal_open_lock().lock().await;
+    let _open_owner = acquire_terminal_open_owner(input.session_id).await;
     let registry = registry();
     if let Some(handle) = registry.get_handle(input.session_id).await {
         if handle.open_job_id != input.job_id {
@@ -201,19 +285,22 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
             Some(0),
         ));
     }
-    if registry.session_count().await >= MAX_TERMINAL_SESSIONS {
-        return Ok(vec![status_output(
-            input.job_id,
-            serde_json::json!({
-                "type": "terminal_open",
-                "status": "rejected",
-                "reason": "terminal_session_limit_reached",
-                "session_id": input.session_id,
-                "max_sessions": MAX_TERMINAL_SESSIONS,
-            }),
-            Some(125),
-        )]);
-    }
+    let capacity_owner = match terminal_session_capacity().try_acquire_owned() {
+        Ok(owner) => owner,
+        Err(_) => {
+            return Ok(vec![status_output(
+                input.job_id,
+                serde_json::json!({
+                    "type": "terminal_open",
+                    "status": "rejected",
+                    "reason": "terminal_session_limit_reached",
+                    "session_id": input.session_id,
+                    "max_sessions": MAX_TERMINAL_SESSIONS,
+                }),
+                Some(125),
+            )]);
+        }
+    };
 
     let pty = child_process::open_pty_stdio().context("failed to open terminal PTY")?;
     child_process::set_pty_window_size(&pty.master, input.cols, input.rows)
@@ -244,7 +331,7 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
     command.stdout(stdout);
     command.stderr(stderr);
 
-    let mut child = command
+    let child = command
         .spawn()
         .context("failed to spawn terminal command")?;
     drop(control);
@@ -264,19 +351,47 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         last_activity: Arc::new(AtomicU64::new(unix_now())),
         stream_tx: Arc::new(Mutex::new(input.stream_tx)),
     };
-    let reader_handle = handle.clone();
-    tokio::spawn(async move {
-        read_terminal_output(reader, reader_handle).await;
+    let (session_start_tx, session_start_rx) = oneshot::channel();
+    let session_handle = handle.clone();
+    let session_id = input.session_id;
+    let open_job_id = input.job_id;
+    let idle_timeout_secs = input.idle_timeout_secs;
+    let session_registry = registry;
+    let session_task = tokio::spawn(async move {
+        if session_start_rx.await.is_err() {
+            return;
+        }
+        let mut supervised = TerminalSessionRunOwner(tokio::spawn(run_terminal_session(
+            reader,
+            child,
+            session_handle,
+            idle_timeout_secs,
+        )));
+        let supervised = (&mut supervised.0).await;
+        if let Err(error) = supervised {
+            warn!(
+                %error,
+                %session_id,
+                %open_job_id,
+                "terminal session consumer failed"
+            );
+            if let Some(mut entry) = session_registry
+                .remove_if_current(session_id, open_job_id)
+                .await
+            {
+                if let Some(owner) = entry._session_owner.as_mut() {
+                    owner.disarm();
+                }
+                close_removed_terminal_entry(
+                    entry,
+                    "terminal_stream",
+                    "failed",
+                    "terminal_session_consumer_failed",
+                )
+                .await;
+            }
+        }
     });
-    let wait_handle = handle.clone();
-    tokio::spawn(async move {
-        let exit_code = child.wait().await.ok().and_then(|status| status.code());
-        *wait_handle.exit_code.lock().await = Some(exit_code);
-        wait_handle
-            .emit_stream_status("terminal_stream", "exited", true, exit_code)
-            .await;
-    });
-    spawn_idle_reaper(input.session_id, handle.clone(), input.idle_timeout_secs);
     registry
         .insert(
             input.session_id,
@@ -288,9 +403,17 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
                 idle_timeout_secs: input.idle_timeout_secs,
                 cols: input.cols,
                 rows: input.rows,
+                _capacity_owner: Some(capacity_owner),
+                _session_owner: Some(TerminalSessionOwner(Some(session_task.abort_handle()))),
             },
         )
         .await;
+    if session_start_tx.send(()).is_err() {
+        let _ = registry
+            .remove_if_current(input.session_id, input.job_id)
+            .await;
+        anyhow::bail!("terminal session consumer stopped before ownership handoff");
+    }
 
     time::sleep(Duration::from_millis(TERMINAL_OUTPUT_SETTLE_MS)).await;
     let (outputs, range) = collect_session_output(
@@ -637,14 +760,14 @@ impl TerminalSessionHandle {
             {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
-                    queue_pending_terminal_final_event(event).await;
+                    retain_pending_terminal_final_event(event).await;
                     warn!(
                         session_id = %self.session_id,
                         "terminal final stream status could not be queued because the stream receiver closed"
                     );
                 }
                 Err(_) => {
-                    queue_pending_terminal_final_event(event).await;
+                    retain_pending_terminal_final_event(event).await;
                     warn!(
                         session_id = %self.session_id,
                         "terminal final stream status timed out while waiting for queue capacity"
@@ -662,6 +785,7 @@ struct TerminalRegistry {
 }
 
 impl TerminalRegistry {
+    #[cfg(test)]
     async fn session_count(&self) -> usize {
         self.sessions.lock().await.len()
     }
@@ -693,6 +817,21 @@ impl TerminalRegistry {
 
     async fn remove(&self, session_id: uuid::Uuid) -> Option<TerminalRegistryEntry> {
         self.sessions.lock().await.remove(&session_id)
+    }
+
+    async fn remove_if_current(
+        &self,
+        session_id: uuid::Uuid,
+        open_job_id: uuid::Uuid,
+    ) -> Option<TerminalRegistryEntry> {
+        let mut sessions = self.sessions.lock().await;
+        if !sessions
+            .get(&session_id)
+            .is_some_and(|entry| entry.handle.open_job_id == open_job_id)
+        {
+            return None;
+        }
+        sessions.remove(&session_id)
     }
 
     async fn next_input(&self, session_id: uuid::Uuid) -> Option<(TerminalSessionHandle, u64)> {
@@ -737,32 +876,24 @@ impl TerminalRegistry {
         }
     }
 
-    async fn disconnected_expired_sessions(&self) -> Vec<TerminalRegistryEntry> {
+    async fn exact_session_disconnected_expired(
+        &self,
+        session_id: uuid::Uuid,
+        open_job_id: uuid::Uuid,
+    ) -> bool {
         let now = unix_now();
-        let expired = {
-            let sessions = self.sessions.lock().await;
-            sessions
-                .iter()
-                .filter_map(|(session_id, entry)| {
-                    let disconnected_since = entry.disconnected_since?;
-                    let grace = u64::from(entry.idle_timeout_secs.max(1))
-                        .min(TERMINAL_DISCONNECTED_GRACE_SECS);
-                    if now.saturating_sub(disconnected_since) >= grace {
-                        Some(*session_id)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut removed = Vec::with_capacity(expired.len());
-        let mut sessions = self.sessions.lock().await;
-        for session_id in expired {
-            if let Some(entry) = sessions.remove(&session_id) {
-                removed.push(entry);
-            }
-        }
-        removed
+        self.sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .filter(|entry| entry.handle.open_job_id == open_job_id)
+            .and_then(|entry| {
+                let disconnected_since = entry.disconnected_since?;
+                let grace =
+                    u64::from(entry.idle_timeout_secs.max(1)).min(TERMINAL_DISCONNECTED_GRACE_SECS);
+                Some(now.saturating_sub(disconnected_since) >= grace)
+            })
+            .unwrap_or(false)
     }
 
     async fn remove_all(&self) -> Vec<TerminalRegistryEntry> {
@@ -783,6 +914,32 @@ struct TerminalRegistryEntry {
     idle_timeout_secs: u32,
     cols: u16,
     rows: u16,
+    _capacity_owner: Option<OwnedSemaphorePermit>,
+    _session_owner: Option<TerminalSessionOwner>,
+}
+
+struct TerminalSessionOwner(Option<tokio::task::AbortHandle>);
+
+impl TerminalSessionOwner {
+    fn disarm(&mut self) {
+        self.0.take();
+    }
+}
+
+struct TerminalSessionRunOwner(tokio::task::JoinHandle<()>);
+
+impl Drop for TerminalSessionRunOwner {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for TerminalSessionOwner {
+    fn drop(&mut self) {
+        if let Some(owner) = self.0.take() {
+            owner.abort();
+        }
+    }
 }
 
 struct TerminalOutputBuffer {
@@ -955,7 +1112,18 @@ async fn collect_output_from_handle(
     (outputs, snapshot.range)
 }
 
-async fn read_terminal_output(mut reader: tokio::fs::File, handle: TerminalSessionHandle) {
+struct TerminalReaderOwner(tokio::task::JoinHandle<Result<()>>);
+
+impl Drop for TerminalReaderOwner {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn read_terminal_output(
+    mut reader: tokio::fs::File,
+    handle: TerminalSessionHandle,
+) -> Result<()> {
     let mut buffer = vec![0_u8; TERMINAL_READ_CHUNK_BYTES];
     loop {
         match reader.read(&mut buffer).await {
@@ -982,10 +1150,7 @@ async fn read_terminal_output(mut reader: tokio::fs::File, handle: TerminalSessi
                                     eof = true;
                                     break;
                                 }
-                                Err(_) => {
-                                    eof = true;
-                                    break;
-                                }
+                                Err(error) => return Err(error).context("terminal PTY read failed"),
                             }
                         }
                         _ = &mut settle => break,
@@ -1003,50 +1168,104 @@ async fn read_terminal_output(mut reader: tokio::fs::File, handle: TerminalSessi
                 }
             }
             Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-            Err(_) => break,
+            Err(error) => return Err(error).context("terminal PTY read failed"),
         }
     }
+    Ok(())
 }
 
-fn spawn_idle_reaper(
-    session_id: uuid::Uuid,
+async fn run_terminal_session(
+    reader: tokio::fs::File,
+    mut child: tokio::process::Child,
     handle: TerminalSessionHandle,
     idle_timeout_secs: u32,
 ) {
-    tokio::spawn(async move {
-        let idle_timeout_secs = u64::from(idle_timeout_secs.max(1));
-        loop {
-            time::sleep(Duration::from_secs(
-                idle_timeout_secs.min(TERMINAL_IDLE_SCAN_SECS),
-            ))
-            .await;
-            if handle.session_exited().await {
-                handle
-                    .emit_stream_status("terminal_stream", "exited", true, Some(0))
-                    .await;
-                let _ = registry().remove(session_id).await;
-                break;
+    let session_id = handle.session_id;
+    let open_job_id = handle.open_job_id;
+    let mut reader_owner =
+        TerminalReaderOwner(tokio::spawn(read_terminal_output(reader, handle.clone())));
+    let mut reader_finished = false;
+    let mut child_finished = false;
+    let idle_timeout_secs = u64::from(idle_timeout_secs.max(1));
+    let mut idle_checks = time::interval(Duration::from_secs(
+        idle_timeout_secs.min(TERMINAL_IDLE_SCAN_SECS),
+    ));
+    idle_checks.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    idle_checks.tick().await;
+    loop {
+        tokio::select! {
+            reader_result = &mut reader_owner.0, if !reader_finished => {
+                reader_finished = true;
+                match reader_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!(%error, %session_id, %open_job_id, "terminal output consumer failed");
+                        let _ = terminate_terminal_process_group(handle.process_group_id).await;
+                    }
+                    Err(error) => {
+                        warn!(%error, %session_id, %open_job_id, "terminal output consumer panicked");
+                        let _ = terminate_terminal_process_group(handle.process_group_id).await;
+                    }
+                }
             }
-            for entry in registry().disconnected_expired_sessions().await {
-                close_removed_terminal_entry(
-                    entry,
-                    "terminal_stream",
-                    "disconnected_timeout",
-                    "gateway_disconnected_timeout",
-                )
-                .await;
-            }
-            let idle_for = unix_now().saturating_sub(handle.last_activity.load(Ordering::Relaxed));
-            if idle_for >= idle_timeout_secs {
-                let _ = terminate_terminal_process_group(handle.process_group_id).await;
+            wait_result = child.wait(), if !child_finished => {
+                let (status, exit_code, reason) = match wait_result {
+                    Ok(status) => ("exited", status.code(), None),
+                    Err(error) => {
+                        warn!(%error, %session_id, %open_job_id, "terminal child waiter failed");
+                        ("failed", None, Some("terminal_child_wait_failed"))
+                    }
+                };
+                *handle.exit_code.lock().await = Some(exit_code);
                 handle
-                    .emit_stream_status("terminal_stream", "idle_timeout", true, Some(124))
+                    .emit_stream_status_with_reason(
+                        "terminal_stream",
+                        status,
+                        true,
+                        exit_code,
+                        reason,
+                    )
                     .await;
-                let _ = registry().remove(session_id).await;
-                break;
+                child_finished = true;
+            }
+            _ = idle_checks.tick() => {
+                if handle.session_exited().await {
+                    handle
+                        .emit_stream_status("terminal_stream", "exited", true, Some(0))
+                        .await;
+                    let _ = registry().remove_if_current(session_id, open_job_id).await;
+                    return;
+                }
+                if registry()
+                    .exact_session_disconnected_expired(session_id, open_job_id)
+                    .await
+                {
+                    let _ = terminate_terminal_process_group(handle.process_group_id).await;
+                    handle
+                        .emit_stream_status_with_reason(
+                            "terminal_stream",
+                            "disconnected_timeout",
+                            true,
+                            Some(0),
+                            Some("gateway_disconnected_timeout"),
+                        )
+                        .await;
+                    let _ = registry().remove_if_current(session_id, open_job_id).await;
+                    return;
+                }
+                let idle_for =
+                    unix_now().saturating_sub(handle.last_activity.load(Ordering::Relaxed));
+                if idle_for >= idle_timeout_secs {
+                    let _ = terminate_terminal_process_group(handle.process_group_id).await;
+                    handle
+                        .emit_stream_status("terminal_stream", "idle_timeout", true, Some(124))
+                        .await;
+                    let _ = registry().remove_if_current(session_id, open_job_id).await;
+                    return;
+                }
             }
         }
-    });
+    }
 }
 
 async fn close_removed_terminal_entry(
@@ -1187,21 +1406,46 @@ fn registry() -> &'static TerminalRegistry {
     })
 }
 
-fn terminal_open_lock() -> &'static Mutex<()> {
-    TERMINAL_OPEN_LOCK.get_or_init(|| Mutex::new(()))
+fn terminal_open_owners() -> &'static StdMutex<HashMap<uuid::Uuid, Arc<Mutex<()>>>> {
+    TERMINAL_OPEN_OWNERS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-fn pending_final_events() -> &'static Mutex<VecDeque<TerminalStreamOutput>> {
-    TERMINAL_PENDING_FINAL_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
+async fn acquire_terminal_open_owner(session_id: uuid::Uuid) -> TerminalOpenOwner {
+    let entry = {
+        let mut owners = terminal_open_owners()
+            .lock()
+            .expect("terminal-open owner registry poisoned");
+        owners
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let mut owner = TerminalOpenOwner {
+        session_id,
+        entry: entry.clone(),
+        guard: None,
+    };
+    owner.guard = Some(entry.lock_owned().await);
+    owner
 }
 
-async fn queue_pending_terminal_final_event(event: TerminalStreamOutput) {
-    let mut pending = pending_final_events().lock().await;
-    if pending.len() >= TERMINAL_PENDING_FINAL_EVENTS_MAX {
-        pending.pop_front();
-        warn!("terminal pending final event buffer full; dropped oldest final event");
-    }
-    pending.push_back(event);
+fn terminal_session_capacity() -> Arc<Semaphore> {
+    TERMINAL_SESSION_CAPACITY
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_TERMINAL_SESSIONS)))
+        .clone()
+}
+
+fn pending_final_events() -> &'static Mutex<TerminalPendingFinalEvents> {
+    TERMINAL_PENDING_FINAL_EVENTS.get_or_init(|| Mutex::new(TerminalPendingFinalEvents::default()))
+}
+
+fn pending_final_notify() -> &'static Notify {
+    TERMINAL_PENDING_FINAL_NOTIFY.get_or_init(Notify::new)
+}
+
+#[cfg(test)]
+pub(crate) async fn terminal_session_is_registered(session_id: uuid::Uuid) -> bool {
+    registry().sessions.lock().await.contains_key(&session_id)
 }
 
 #[cfg(test)]

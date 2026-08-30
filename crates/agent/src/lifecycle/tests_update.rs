@@ -290,7 +290,7 @@ async fn update_check_uses_explicit_manifest_download_urls() {
 }
 
 #[tokio::test]
-async fn update_check_rejects_legacy_name_only_manifest() {
+async fn update_check_requires_the_current_manifest_schema() {
     let Some(asset_name) = agent_asset_name() else {
         return;
     };
@@ -299,33 +299,37 @@ async fn update_check_rejects_legacy_name_only_manifest() {
     let current = dir.join("vpsman-agent");
     let manifest_path = dir.join("version.json");
     fs::write(&current, b"old-agent").unwrap();
-    fs::write(
-        &manifest_path,
-        serde_json::json!({
-            "schema_version": 1,
-            "project": "vpsman",
-            "version": "999.0.0",
-            "tag": "v999.0.0",
-            "assets": [asset_name],
+    for schema_version in [1, 2] {
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema_version": schema_version,
+                "project": "vpsman",
+                "version": "999.0.0",
+                "tag": "v999.0.0",
+                "assets": [asset_name],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = match check_and_stage_update(CheckStageInput {
+            job_id: uuid::Uuid::new_v4(),
+            version_url: &format!("file://{}", manifest_path.display()),
+            current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
+            verification_tx: None,
         })
-        .to_string(),
-    )
-    .unwrap();
+        .await
+        {
+            Ok(_) => panic!("unsupported update manifest unexpectedly passed"),
+            Err(error) => error.to_string(),
+        };
 
-    let error = match check_and_stage_update(CheckStageInput {
-        job_id: uuid::Uuid::new_v4(),
-        version_url: &format!("file://{}", manifest_path.display()),
-        current_exe: &current,
-        cancel_token: &crate::command_worker::CommandCancelToken::default(),
-        verification_tx: None,
-    })
-    .await
-    {
-        Ok(_) => panic!("legacy update manifest unexpectedly passed"),
-        Err(error) => error.to_string(),
-    };
-
-    assert!(error.contains("unsupported update manifest schema 1"));
+        assert!(error.contains(&format!(
+            "unsupported update manifest schema {schema_version}"
+        )));
+    }
 
     let _ = fs::remove_dir_all(dir);
 }

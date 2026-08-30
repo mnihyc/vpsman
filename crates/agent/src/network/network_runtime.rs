@@ -69,7 +69,7 @@ struct RuntimeCommandSpec {
     required: bool,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) async fn execute_runtime_tunnel_reconcile_report(
     input: NetworkRuntimeReconcileInput<'_>,
 ) -> Result<serde_json::Value> {

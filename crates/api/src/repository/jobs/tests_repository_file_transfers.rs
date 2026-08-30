@@ -1,164 +1,14 @@
 use super::{
-    build_file_transfer_sessions, file_transfer_handoff_download_path,
-    file_transfer_handoff_object_key, merge_persisted_file_transfer_session,
-    FileTransferStatusOutput,
+    assess_handoff_chunk_evidence, assess_loaded_handoff_chunk_evidence,
+    file_transfer_handoff_download_path, merge_persisted_file_transfer_session,
+    FileTransferDownloadHandoffChunk, LoadedHandoffChunkEvidence,
+    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT,
+    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED,
 };
-use crate::model_file_transfer::FileTransferSessionView;
+use crate::{model::JobOutputView, model_file_transfer::FileTransferSessionView};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
-
-#[test]
-fn builds_latest_upload_session_with_start_metadata() {
-    let session_id = Uuid::new_v4();
-    let start_job = Uuid::new_v4();
-    let chunk_job = Uuid::new_v4();
-    let commit_job = Uuid::new_v4();
-    let outputs = vec![
-        status_output(
-            commit_job,
-            "edge-a",
-            0,
-            "300",
-            "file_transfer_commit",
-            "file_transfer_commit",
-            serde_json::json!({
-                "type": "file_transfer_commit",
-                "session_id": session_id,
-                "path": "/opt/app.bin",
-                "next_offset": 12,
-                "size_bytes": 12,
-                "extra": {"sha256_hex": "b".repeat(64), "mode": 420}
-            }),
-        ),
-        status_output(
-            chunk_job,
-            "edge-a",
-            0,
-            "200",
-            "file_transfer_chunk",
-            "file_transfer_chunk_ack",
-            serde_json::json!({
-                "type": "file_transfer_chunk_ack",
-                "session_id": session_id,
-                "path": "/opt/app.bin",
-                "next_offset": 12,
-                "size_bytes": 12,
-                "extra": {"ack_offset": 0, "ack_size_bytes": 12}
-            }),
-        ),
-        status_output(
-            start_job,
-            "edge-a",
-            0,
-            "100",
-            "file_transfer_start",
-            "file_transfer_start",
-            serde_json::json!({
-                "type": "file_transfer_start",
-                "session_id": session_id,
-                "path": "/opt/app.bin",
-                "next_offset": 0,
-                "size_bytes": 12,
-                "extra": {"resumed": false, "chunk_size_bytes": 65536, "rate_limit_kbps": 1000}
-            }),
-        ),
-    ];
-
-    let sessions = build_file_transfer_sessions(outputs, 20, None);
-
-    assert_eq!(sessions.len(), 1);
-    let session = &sessions[0];
-    assert_eq!(session.session_id, session_id);
-    assert_eq!(session.client_id, "edge-a");
-    assert_eq!(session.direction, "upload");
-    assert_eq!(session.status, "completed");
-    assert_eq!(session.path, "/opt/app.bin");
-    assert_eq!(session.progress_bytes, 12);
-    assert_eq!(session.progress_ratio, Some(1.0));
-    assert_eq!(session.chunk_size_bytes, Some(65536));
-    assert_eq!(session.last_chunk_size_bytes, Some(12));
-    assert_eq!(session.rate_limit_kbps, Some(1000));
-    assert_eq!(session.last_job_id, commit_job);
-    assert_eq!(session.last_event, "file_transfer_commit");
-}
-
-#[test]
-fn delayed_lower_progress_event_cannot_regress_transfer_lifecycle() {
-    let session_id = Uuid::new_v4();
-    let delayed_job = Uuid::new_v4();
-    let advanced_job = Uuid::new_v4();
-    let commit_job = Uuid::new_v4();
-    let advanced_hash = "a".repeat(64);
-    let outputs = vec![
-        status_output(
-            delayed_job,
-            "edge-a",
-            0,
-            "400",
-            "file_transfer_chunk",
-            "file_transfer_chunk_ack",
-            serde_json::json!({
-                "type": "file_transfer_chunk_ack",
-                "session_id": session_id,
-                "path": "/opt/app.bin",
-                "next_offset": 4,
-                "size_bytes": 8,
-                "extra": {
-                    "ack_size_bytes": 4,
-                    "chunk_sha256_hex": "d".repeat(64)
-                }
-            }),
-        ),
-        status_output(
-            advanced_job,
-            "edge-a",
-            0,
-            "300",
-            "file_transfer_chunk",
-            "file_transfer_chunk_ack",
-            serde_json::json!({
-                "type": "file_transfer_chunk_ack",
-                "session_id": session_id,
-                "path": "/opt/app.bin",
-                "next_offset": 8,
-                "size_bytes": 8,
-                "extra": {
-                    "ack_size_bytes": 4,
-                    "chunk_sha256_hex": advanced_hash.clone()
-                }
-            }),
-        ),
-        status_output(
-            commit_job,
-            "edge-a",
-            0,
-            "200",
-            "file_transfer_commit",
-            "file_transfer_commit",
-            serde_json::json!({
-                "type": "file_transfer_commit",
-                "session_id": session_id,
-                "path": "/opt/app.bin",
-                "next_offset": 8,
-                "size_bytes": 8,
-                "extra": {"sha256_hex": "b".repeat(64)}
-            }),
-        ),
-    ];
-
-    let sessions = build_file_transfer_sessions(outputs, 20, None);
-
-    let session = &sessions[0];
-    assert_eq!(session.status, "completed");
-    assert_eq!(session.progress_bytes, 8);
-    assert_eq!(session.progress_ratio, Some(1.0));
-    assert_eq!(session.last_chunk_size_bytes, Some(4));
-    assert_eq!(
-        session.last_chunk_sha256_hex.as_deref(),
-        Some(advanced_hash.as_str())
-    );
-    assert_eq!(session.last_job_id, commit_job);
-    assert_eq!(session.last_event, "file_transfer_commit");
-}
 
 #[test]
 fn persisted_merge_keeps_newer_metadata_and_terminal_lifecycle() {
@@ -262,92 +112,6 @@ fn persisted_merge_rejects_invalid_source_timestamps() {
 }
 
 #[test]
-fn filters_download_sessions_and_marks_final_chunk_complete() {
-    let wanted = Uuid::new_v4();
-    let other = Uuid::new_v4();
-    let outputs = vec![
-        status_output(
-            Uuid::new_v4(),
-            "edge-b",
-            1,
-            "300",
-            "file_transfer_download_chunk",
-            "file_transfer_download_chunk",
-            serde_json::json!({
-                "type": "file_transfer_download_chunk",
-                "session_id": wanted,
-                "path": "/var/log/app.log",
-                "next_offset": 100,
-                "size_bytes": 100,
-                "extra": {"offset": 64, "chunk_size_bytes": 36, "chunk_sha256_hex": "a".repeat(64), "complete": true, "file_sha256_hex": "c".repeat(64)}
-            }),
-        ),
-        status_output(
-            Uuid::new_v4(),
-            "edge-b",
-            0,
-            "200",
-            "file_transfer_download_start",
-            "file_transfer_download_start",
-            serde_json::json!({
-                "type": "file_transfer_download_start",
-                "session_id": wanted,
-                "path": "/var/log/app.log",
-                "next_offset": 0,
-                "size_bytes": 100,
-                "extra": {"resumed": true, "sha256_hex": "c".repeat(64), "chunk_size_bytes": 64, "rate_limit_kbps": 0}
-            }),
-        ),
-        status_output(
-            Uuid::new_v4(),
-            "edge-c",
-            0,
-            "100",
-            "file_transfer_download_start",
-            "file_transfer_download_start",
-            serde_json::json!({
-                "type": "file_transfer_download_start",
-                "session_id": other,
-                "path": "/tmp/other",
-                "next_offset": 0,
-                "size_bytes": 1,
-                "extra": {"chunk_size_bytes": 1}
-            }),
-        ),
-    ];
-
-    let sessions = build_file_transfer_sessions(outputs, 20, Some(wanted));
-
-    assert_eq!(sessions.len(), 1);
-    let session = &sessions[0];
-    assert_eq!(session.session_id, wanted);
-    assert_eq!(session.direction, "download");
-    assert_eq!(session.status, "completed");
-    assert_eq!(session.chunk_size_bytes, Some(64));
-    assert_eq!(session.last_chunk_size_bytes, Some(36));
-    assert_eq!(session.resumed, Some(true));
-    let expected_file_hash = "c".repeat(64);
-    let expected_chunk_hash = "a".repeat(64);
-    assert_eq!(
-        session.sha256_hex.as_deref(),
-        Some(expected_file_hash.as_str())
-    );
-    assert_eq!(
-        session.last_chunk_sha256_hex.as_deref(),
-        Some(expected_chunk_hash.as_str())
-    );
-    assert!(session.handoff_available);
-    assert_eq!(
-        session.handoff_object_key.as_deref(),
-        Some(file_transfer_handoff_object_key("edge-b", wanted, &expected_file_hash).as_str())
-    );
-    assert_eq!(
-        session.handoff_download_path.as_deref(),
-        Some(file_transfer_handoff_download_path("edge-b", wanted).as_str())
-    );
-}
-
-#[test]
 fn handoff_download_path_percent_encodes_client_id() {
     let session_id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
 
@@ -357,30 +121,177 @@ fn handoff_download_path_percent_encodes_client_id() {
     );
 }
 
-fn status_output(
-    job_id: Uuid,
-    client_id: &str,
-    seq: i32,
-    created_at: &str,
-    command_type: &str,
-    expected_type: &str,
-    value: serde_json::Value,
-) -> FileTransferStatusOutput {
-    assert_eq!(
-        value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap(),
-        expected_type
+#[test]
+fn handoff_evidence_query_and_partial_index_use_normalized_session_identity() {
+    let repository_source = include_str!("repository_file_transfers.rs");
+    assert!(repository_source.contains("job.resource_id = request.session_id"));
+    assert!(repository_source.contains("job.resource_kind = 'file_transfer_session'"));
+    assert!(repository_source.contains("AND job.command_type = 'file_transfer_download_chunk'"));
+
+    let migration = include_str!("../../../../../migrations/0002_jobs_schedules.sql")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(migration.contains(
+        "CREATE INDEX jobs_file_transfer_download_resource_idx ON public.jobs USING btree (resource_id, id) WHERE ((resource_kind = 'file_transfer_session'::text) AND (command_type = 'file_transfer_download_chunk'::text));"
+    ));
+}
+
+#[test]
+fn handoff_chunk_evidence_preserves_retry_and_artifact_semantics() {
+    let unavailable_retry_job = Uuid::new_v4();
+    let available_retry_job = Uuid::new_v4();
+    let second_chunk_job = Uuid::new_v4();
+    let object_output = handoff_output(
+        unavailable_retry_job,
+        1,
+        "object_store",
+        &[],
+        Some(("chunks/missing", "a", 3)),
     );
-    FileTransferStatusOutput {
-        job_id,
-        client_id: client_id.to_string(),
-        seq,
-        data: serde_json::to_vec(&value).unwrap(),
-        created_at: created_at.to_string(),
-        command_type: command_type.to_string(),
-    }
+    let chunks = vec![
+        FileTransferDownloadHandoffChunk {
+            job_id: unavailable_retry_job,
+            offset: 0,
+            size_bytes: 3,
+            sha256_hex: "chunk-a".to_string(),
+            outputs: vec![object_output.clone()],
+        },
+        FileTransferDownloadHandoffChunk {
+            job_id: available_retry_job,
+            offset: 0,
+            size_bytes: 3,
+            sha256_hex: "chunk-a".to_string(),
+            outputs: vec![handoff_output(
+                available_retry_job,
+                1,
+                "inline",
+                b"abc",
+                None,
+            )],
+        },
+        FileTransferDownloadHandoffChunk {
+            job_id: second_chunk_job,
+            offset: 3,
+            size_bytes: 2,
+            sha256_hex: "chunk-b".to_string(),
+            outputs: vec![handoff_output(second_chunk_job, 1, "inline", b"de", None)],
+        },
+    ];
+
+    let evidence = assess_handoff_chunk_evidence(&chunks, 5, &BTreeSet::new(), &BTreeMap::new());
+
+    assert!(evidence.available);
+    assert_eq!(evidence.status, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE);
+    assert!(evidence.reason.is_none());
+
+    let active_artifact = BTreeSet::from([(unavailable_retry_job, object_output.seq)]);
+    let object_only = &chunks[..1];
+    let evidence =
+        assess_handoff_chunk_evidence(object_only, 3, &active_artifact, &BTreeMap::new());
+    assert!(evidence.available);
+}
+
+#[test]
+fn handoff_chunk_evidence_preserves_unavailable_classification() {
+    let no_artifacts = BTreeSet::new();
+    let pruned = assess_handoff_chunk_evidence(&[], 1, &no_artifacts, &BTreeMap::new());
+    assert_eq!(pruned.status, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED);
+    assert_eq!(
+        pruned.reason.as_deref(),
+        Some("retained_chunk_outputs_pruned")
+    );
+
+    let first_job = Uuid::new_v4();
+    let conflicting_job = Uuid::new_v4();
+    let conflict = assess_handoff_chunk_evidence(
+        &[
+            FileTransferDownloadHandoffChunk {
+                job_id: first_job,
+                offset: 0,
+                size_bytes: 3,
+                sha256_hex: "first".to_string(),
+                outputs: vec![handoff_output(first_job, 1, "inline", b"abc", None)],
+            },
+            FileTransferDownloadHandoffChunk {
+                job_id: conflicting_job,
+                offset: 0,
+                size_bytes: 3,
+                sha256_hex: "different".to_string(),
+                outputs: vec![handoff_output(conflicting_job, 1, "inline", b"abc", None)],
+            },
+        ],
+        3,
+        &no_artifacts,
+        &BTreeMap::new(),
+    );
+    assert_eq!(conflict.status, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT);
+    assert_eq!(
+        conflict.reason.as_deref(),
+        Some("duplicate_offset_conflict")
+    );
+
+    let gap_job = Uuid::new_v4();
+    let gap = assess_handoff_chunk_evidence(
+        &[FileTransferDownloadHandoffChunk {
+            job_id: gap_job,
+            offset: 1,
+            size_bytes: 2,
+            sha256_hex: "gap".to_string(),
+            outputs: vec![handoff_output(gap_job, 1, "inline", b"ab", None)],
+        }],
+        2,
+        &no_artifacts,
+        &BTreeMap::new(),
+    );
+    assert_eq!(gap.status, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE);
+    assert_eq!(gap.reason.as_deref(), Some("chunk_gap"));
+}
+
+#[test]
+fn summarized_handoff_evidence_preserves_status_and_part_semantics() {
+    let session_id = Uuid::new_v4();
+    let status = serde_json::to_vec(&serde_json::json!({
+        "type": "file_transfer_download_chunk",
+        "session_id": session_id,
+        "extra": {
+            "offset": 0,
+            "chunk_size_bytes": 5,
+            "chunk_sha256_hex": "a".repeat(64)
+        }
+    }))
+    .unwrap();
+    let chunk = LoadedHandoffChunkEvidence {
+        status_outputs: vec![b"malformed".to_vec(), status],
+        stdout_sizes: vec![2, 3],
+        stdout_available: vec![true, true],
+    };
+
+    let available =
+        assess_loaded_handoff_chunk_evidence(std::slice::from_ref(&chunk), session_id, 5);
+    assert!(available.available);
+    assert_eq!(
+        available.status,
+        HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE
+    );
+
+    let mut unavailable_part = chunk.clone();
+    unavailable_part.stdout_available[1] = false;
+    let incomplete = assess_loaded_handoff_chunk_evidence(&[unavailable_part], session_id, 5);
+    assert_eq!(
+        incomplete.status,
+        HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE
+    );
+    assert_eq!(
+        incomplete.reason.as_deref(),
+        Some("chunk_output_unavailable")
+    );
+
+    let mut status_only = chunk;
+    status_only.stdout_sizes.clear();
+    status_only.stdout_available.clear();
+    let pruned = assess_loaded_handoff_chunk_evidence(&[status_only], session_id, 5);
+    assert_eq!(pruned.status, HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED);
 }
 
 fn persisted_session(
@@ -428,5 +339,29 @@ fn persisted_session(
         handoff_unavailable_reason: None,
         handoff_object_key: None,
         handoff_download_path: None,
+    }
+}
+
+fn handoff_output(
+    job_id: Uuid,
+    seq: i32,
+    storage: &str,
+    data: &[u8],
+    artifact: Option<(&str, &str, i64)>,
+) -> JobOutputView {
+    JobOutputView {
+        job_id,
+        client_id: "edge-a".to_string(),
+        seq,
+        stream: "stdout".to_string(),
+        data_base64: BASE64.encode(data),
+        storage: storage.to_string(),
+        artifact_object_key: artifact.map(|value| value.0.to_string()),
+        artifact_sha256_hex: artifact.map(|value| value.1.to_string()),
+        artifact_size_bytes: artifact.map(|value| value.2),
+        exit_code: None,
+        done: false,
+        received_at: None,
+        created_at: "2026-08-26T00:00:00Z".to_string(),
     }
 }

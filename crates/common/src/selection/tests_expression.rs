@@ -225,139 +225,6 @@ fn canonical_alert_lifecycle_predicates_are_explicit() {
 }
 
 #[test]
-fn retired_alert_event_aliases_report_canonical_replacements() {
-    for (alias, canonical) in [
-        ("alert.open", "alert.triggered"),
-        ("alert.policy_reached", "alert.triggered"),
-        ("alert.policy_triggered", "alert.triggered"),
-        ("alert.policy_resolved", "alert.resolved"),
-    ] {
-        assert_eq!(
-            parse_expression(alias).unwrap_err(),
-            format!("retired alert event predicate `{alias}`; use `{canonical}`")
-        );
-        assert_eq!(
-            parse_expression(&format!("event.kind = {alias}")).unwrap_err(),
-            format!("retired alert event kind value `{alias}`; use `{canonical}`")
-        );
-        assert_eq!(
-            parse_expression(&format!("event.kind in [canonical, {alias}]")).unwrap_err(),
-            format!("retired alert event kind value `{alias}`; use `{canonical}`")
-        );
-    }
-    assert!(parse_expression("alert.detail = alert.open").is_ok());
-    for expression in ["alert.state", "alert.state:open", "alert.state = open"] {
-        assert_eq!(
-            parse_expression(expression).unwrap_err(),
-            "retired alert field `alert.state`; use `alert.lifecycle_state`"
-        );
-    }
-    for (field, canonical) in [
-        (
-            "policy_rule.condition_expression",
-            "policy_rule.trigger_condition_expression",
-        ),
-        (
-            "policy_rule.window_secs",
-            "policy_rule.trigger_meta_condition.window_seconds",
-        ),
-    ] {
-        assert_eq!(
-            parse_expression(&format!("{field} = value")).unwrap_err(),
-            format!("retired policy-rule field `{field}`; use `{canonical}`")
-        );
-        assert_eq!(
-            parse_expression(&format!("{field}:value")).unwrap_err(),
-            format!("retired policy-rule field `{field}`; use `{canonical}`")
-        );
-    }
-}
-
-#[test]
-fn retired_alert_event_alias_rewrite_preserves_the_expression_tree() {
-    let rewritten = rewrite_retired_alert_event_aliases(
-        "ALERT.OPEN || (alert.policy_reached && !(alert.policy_triggered || alert.policy_resolved))",
-    )
-    .unwrap();
-    let actual = parse_expression(&rewritten).unwrap().unwrap();
-    let expected = parse_expression(
-        "alert.triggered || (alert.triggered && !(alert.triggered || alert.resolved))",
-    )
-    .unwrap()
-    .unwrap();
-
-    assert_eq!(actual, expected);
-    assert_eq!(
-        expression_referenced_events(&actual),
-        BTreeSet::from(["alert.resolved".to_string(), "alert.triggered".to_string()])
-    );
-
-    let source = r#"alert.open && (provider:alpha || (name = "A \"quoted\" \\ path" && tag in ["a,b", /^prod\//] && !alert.policy_resolved))"#;
-    let rewritten = rewrite_retired_alert_event_aliases(source).unwrap();
-    let actual = parse_expression(&rewritten).unwrap().unwrap();
-    let expected = parse_expression(
-        r#"alert.triggered && (provider:alpha || (name = "A \"quoted\" \\ path" && tag in ["a,b", /^prod\//] && !alert.resolved))"#,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn retired_alert_event_rewrite_only_changes_exact_event_nodes() {
-    let input = "alert.open = alert.policy_resolved && alert.open:literal && alert.opened";
-    assert_eq!(rewrite_retired_alert_event_aliases(input).unwrap(), input);
-    assert!(rewrite_retired_alert_event_aliases("alert.open && (").is_err());
-}
-
-#[test]
-fn retired_alert_alias_rewrite_updates_exact_event_kind_values_only() {
-    let rewritten = rewrite_retired_alert_event_aliases(concat!(
-        "event.kind = alert.open || ",
-        "event.kind in [alert.policy_reached, alert.policy_triggered, alert.policy_resolved, other] || ",
-        "alert.detail = alert.open",
-    ))
-    .unwrap();
-    let actual = parse_expression(&rewritten).unwrap().unwrap();
-    let expected = parse_expression(concat!(
-        "event.kind = alert.triggered || ",
-        "event.kind in [alert.triggered, alert.triggered, alert.resolved, other] || ",
-        "alert.detail = alert.open",
-    ))
-    .unwrap()
-    .unwrap();
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn rewrite_updates_only_exact_policy_rule_field_references() {
-    let source = concat!(
-        "policy_rule.condition_expression = \"policy_rule.window_secs\" && ",
-        "policy_rule.window_secs in [0, 60] && ",
-        "policy_rule.window_secs_extra = 9",
-    );
-    let rewritten = rewrite_retired_alert_event_aliases(source).unwrap();
-    let actual = parse_expression(&rewritten).unwrap().unwrap();
-    let expected = parse_expression(concat!(
-        "policy_rule.trigger_condition_expression = \"policy_rule.window_secs\" && ",
-        "policy_rule.trigger_meta_condition.window_seconds in [0, 60] && ",
-        "policy_rule.window_secs_extra = 9",
-    ))
-    .unwrap()
-    .unwrap();
-
-    assert_eq!(actual, expected);
-    assert_eq!(
-        rewrite_retired_alert_event_aliases("policy_rule.window_secs_extra = 9").unwrap(),
-        "policy_rule.window_secs_extra = 9"
-    );
-    assert_eq!(
-        rewrite_retired_alert_event_aliases("policy_rule.window_secs").unwrap(),
-        "policy_rule.window_secs"
-    );
-}
-
-#[test]
 fn policy_rule_is_a_first_class_expression_context_root() {
     let context = ExpressionContext::default().with_json_root(
         "policy_rule",
@@ -479,7 +346,11 @@ fn invalid_expressions_report_errors() {
 #[test]
 fn vps_rules_support_key_presence_patterns_and_explicit_absence() {
     let context = ExpressionContext::default().with_vps_rules(rule_context(&[
-        ("traffic.reset_day", "15", serde_json::json!({"day": 15})),
+        (
+            "traffic.reset_day",
+            "15 00:00",
+            serde_json::json!({"day": 15, "hour": 0}),
+        ),
         (
             "network.port_speed",
             "1.5 Gbps",
@@ -570,7 +441,11 @@ fn vps_rule_globs_and_regexes_match_canonical_raw_text() {
 #[test]
 fn vps_rule_ordering_is_typed_and_excludes_sentinels() {
     let context = ExpressionContext::default().with_vps_rules(rule_context(&[
-        ("traffic.reset_day", "15", serde_json::json!({"day": 15})),
+        (
+            "traffic.reset_day",
+            "15 00:00",
+            serde_json::json!({"day": 15, "hour": 0}),
+        ),
         (
             "traffic.quota.total",
             "4TB",
@@ -600,7 +475,11 @@ fn vps_rule_ordering_is_typed_and_excludes_sentinels() {
     assert!(!matches("vps.rules:billing.price < \"50 CNY/y\"", &context));
 
     let sentinels = ExpressionContext::default().with_vps_rules(rule_context(&[
-        ("traffic.reset_day", "-1", serde_json::json!({"day": -1})),
+        (
+            "traffic.reset_day",
+            "-1",
+            serde_json::json!({"day": -1, "hour": 0}),
+        ),
         (
             "traffic.quota.total",
             "-1",
@@ -618,7 +497,7 @@ fn vps_rule_ordering_reparses_authoritative_raw_values_exactly() {
         (
             "traffic.quota.total",
             "9007199254740993B",
-            // Deliberately stale legacy JSON: ordered evaluation must use raw.
+            // Deliberately inexact cached JSON: ordered evaluation must use raw.
             serde_json::json!({"bytes": 9_007_199_254_740_992_i64}),
         ),
         (

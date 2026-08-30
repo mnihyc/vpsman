@@ -3,9 +3,8 @@ use std::net::IpAddr;
 use axum::{extract::State, http::HeaderMap, Json};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
-use tracing::warn;
 use vpsman_common::{
-    is_terminal_command_type, AgentUpdateVerificationResult, CommandOutput,
+    structurally_valid_projected_telemetry_tunnel, AgentUpdateVerificationResult, CommandOutput,
     GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
     GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
     GatewayTerminalOutputIngest, JobCommand, OutputStream, RoutingCostAdapterJobResult,
@@ -132,12 +131,7 @@ pub(crate) async fn ingest_agent_hello(
         client_id: event.hello.client_id,
         gateway_id: event.gateway_id,
     });
-    if let Err(error) = state.process_job_terminal_events(500).await {
-        warn!(
-            ?error,
-            "agent hello was accepted, but terminal event reconciliation was deferred to the durable dispatcher"
-        );
-    }
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
     Ok(Json(IngestResponse {
         accepted: true,
         message: "agent hello recorded".to_string(),
@@ -205,27 +199,26 @@ pub(crate) async fn ingest_telemetry(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(event): Json<GatewayTelemetryIngest>,
-) -> Result<Json<IngestResponse>, ApiError> {
+) -> Result<Json<TelemetryIngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_gateway_telemetry_event(&event)?;
     match state.repo.record_telemetry_outcome(&event).await? {
         TelemetryRecordOutcome::Recorded => {
-            super::routes_inventory::clear_committed_agent_suspension_fence(
-                &state,
-                &event.telemetry.client_id,
-                "agent_online_auto_unsuspend",
-            )
-            .await;
-            state.invalidate_fleet_telemetry();
-            Ok(Json(IngestResponse {
+            // The forwarding gateway is the route owner. Its successful HTTP
+            // delivery path applies this post-commit refresh only while the
+            // exact originating session remains current, avoiding a second
+            // API-to-gateway control request and fencing a later suspension.
+            Ok(Json(TelemetryIngestResponse {
                 accepted: true,
                 message: "telemetry recorded".to_string(),
+                refresh_route: true,
             }))
         }
         TelemetryRecordOutcome::AcceptedDuplicate | TelemetryRecordOutcome::AcceptedStale => {
-            Ok(Json(IngestResponse {
+            Ok(Json(TelemetryIngestResponse {
                 accepted: true,
                 message: "telemetry already recorded".to_string(),
+                refresh_route: false,
             }))
         }
         TelemetryRecordOutcome::GatewaySessionNotActive => {
@@ -329,7 +322,7 @@ pub(crate) async fn ingest_command_output(
                 )
                 .await?;
             state.invalidate_job_details(event.job_id);
-            wake_network_traffic_import_finalizer(state.clone());
+            wake_network_traffic_import_finalizer();
         }
     } else if event.output.done {
         let outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
@@ -360,13 +353,7 @@ pub(crate) async fn ingest_command_output(
         }
         state.invalidate_job_details(event.job_id);
         if record_result.terminal_reconciliation_ready {
-            let refreshed = state
-                .repo
-                .refresh_job_status_from_targets(event.job_id)
-                .await?;
-            state
-                .process_job_terminal_events_or_publish_refresh(500, event.job_id, refreshed)
-                .await?;
+            crate::job_dispatcher::wake_job_terminal_event_consumer();
         }
     } else {
         let is_network_traffic_import = job.command_type == "network_traffic_import_vnstat";
@@ -403,7 +390,7 @@ pub(crate) async fn ingest_command_output(
                     .mark_job_target_running(event.job_id, &event.client_id, &message)
                     .await?;
                 state.invalidate_job_details(event.job_id);
-                wake_network_traffic_import_finalizer(state.clone());
+                wake_network_traffic_import_finalizer();
             }
         } else {
             let record = match state
@@ -435,13 +422,7 @@ pub(crate) async fn ingest_command_output(
                 let _candidate = record
                     .contiguous_final
                     .ok_or_else(|| ApiError::conflict("job_terminal_output_evidence_missing"))?;
-                let refreshed = state
-                    .repo
-                    .refresh_job_status_from_targets(event.job_id)
-                    .await?;
-                state
-                    .process_job_terminal_events_or_publish_refresh(500, event.job_id, refreshed)
-                    .await?;
+                crate::job_dispatcher::wake_job_terminal_event_consumer();
             } else {
                 let message = status_output_message(&event.output)
                     .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
@@ -451,12 +432,6 @@ pub(crate) async fn ingest_command_output(
                     .await?;
             }
         }
-    }
-    if event.output.stream == OutputStream::Status && is_terminal_command_type(&job.command_type) {
-        state
-            .repo
-            .record_terminal_command_replay_chunks(event.job_id, &event.client_id)
-            .await?;
     }
     Ok(Json(IngestResponse {
         accepted: true,
@@ -874,6 +849,12 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
                     .observed_unix
                     .saturating_sub(observation.measured_unix)
                     > 3_900
+                // These three fields are persisted as PostgreSQL BIGINT/
+                // INTEGER. Values above the signed maxima could never have
+                // produced visible evidence in the synchronous path.
+                || observation.stale_after_secs > i64::MAX as u64
+                || observation.transmitted > i32::MAX as u32
+                || observation.received > i32::MAX as u32
                 || !observation.values_are_coherent()
         })
         || metrics
@@ -960,8 +941,9 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
     }) {
         return false;
     }
+    let mut projected_tunnel_interfaces = std::collections::HashSet::new();
     metrics.tunnels.iter().all(|tunnel| {
-        !tunnel.interface.is_empty()
+        let structurally_valid = !tunnel.interface.is_empty()
             && tunnel.interface.len() <= 64
             && !tunnel.interface.chars().any(char::is_control)
             && tunnel
@@ -969,7 +951,10 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
                 .is_none_or(|value| value.is_finite() && value >= 0.0)
             && tunnel
                 .packet_loss_ratio
-                .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+                .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value));
+        structurally_valid
+            && (!structurally_valid_projected_telemetry_tunnel(tunnel)
+                || projected_tunnel_interfaces.insert(tunnel.interface.as_str()))
     })
 }
 
@@ -1171,6 +1156,13 @@ fn validate_noise_public_key(key: &str) -> Result<(), ApiError> {
 pub(crate) struct IngestResponse {
     accepted: bool,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TelemetryIngestResponse {
+    accepted: bool,
+    message: String,
+    refresh_route: bool,
 }
 
 #[cfg(test)]

@@ -118,14 +118,12 @@ pub struct TunnelOspfConfig {
     #[serde(
         default,
         rename = "left_adapter_template_id",
-        alias = "left_adapter_definition_id",
         skip_serializing_if = "Option::is_none"
     )]
     pub left_adapter_definition_id: Option<String>,
     #[serde(
         default,
         rename = "right_adapter_template_id",
-        alias = "right_adapter_definition_id",
         skip_serializing_if = "Option::is_none"
     )]
     pub right_adapter_definition_id: Option<String>,
@@ -160,9 +158,9 @@ pub struct RuntimeTunnelCommand {
 pub struct RoutingCostAdapterCommands {
     #[serde(default)]
     pub source: RoutingCostCommandSource,
-    #[serde(rename = "template_id", alias = "definition_id")]
+    #[serde(rename = "template_id")]
     pub definition_id: String,
-    #[serde(rename = "template_name", alias = "definition_name")]
+    #[serde(rename = "template_name")]
     pub definition_name: String,
     pub definition_hash: String,
     pub status: RuntimeTunnelCommand,
@@ -179,9 +177,9 @@ pub enum RoutingCostCommandSource {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeTunnelAdapterCommands {
-    #[serde(rename = "template_id", alias = "definition_id")]
+    #[serde(rename = "template_id")]
     pub definition_id: String,
-    #[serde(rename = "template_name", alias = "definition_name")]
+    #[serde(rename = "template_name")]
     pub definition_name: String,
     pub definition_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +210,7 @@ pub struct RoutingCostAdapterJobResult {
     pub plan_id: String,
     pub endpoint_side: TunnelEndpointSide,
     pub client_id: String,
-    #[serde(rename = "adapter_template_id", alias = "adapter_definition_id")]
+    #[serde(rename = "adapter_template_id")]
     pub adapter_definition_id: String,
     pub adapter_definition_hash: String,
     pub previous_cost: Option<u16>,
@@ -418,14 +416,12 @@ pub struct RuntimeTunnelControl {
     #[serde(
         default,
         rename = "left_adapter_template_id",
-        alias = "left_adapter_definition_id",
         skip_serializing_if = "Option::is_none"
     )]
     pub left_adapter_definition_id: Option<String>,
     #[serde(
         default,
         rename = "right_adapter_template_id",
-        alias = "right_adapter_definition_id",
         skip_serializing_if = "Option::is_none"
     )]
     pub right_adapter_definition_id: Option<String>,

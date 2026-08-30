@@ -1,17 +1,64 @@
 use super::{
-    gateway_events_view, requested_chart_step_secs, retained_system_resolution_for_age,
-    system_metric_label_unit, tier_aligned_system_step_secs, validate_window, window_seconds,
+    normalize_system_dashboard_query, requested_chart_step_secs,
+    retained_system_resolution_for_age, system_dashboard_singleflight_key, system_dashboard_start,
+    tier_aligned_system_step_secs, validate_window, window_seconds, SystemDashboardQuery,
 };
-use crate::{
-    model::{
-        SystemDashboardCancellationsView, SystemDashboardDbPoolView, SystemDashboardDispatchView,
-        SystemDashboardGatewayEventsView, SystemDashboardTargetsView,
-    },
-    repository_system_dashboard::{
-        system_metric_samples_from_snapshot, SystemDashboardRepositorySnapshot,
-    },
-};
-use vpsman_common::GatewayForwardMetricsSnapshot;
+
+#[test]
+fn system_dashboard_singleflight_key_uses_canonical_query_and_auth() {
+    let operator_id = uuid::Uuid::new_v4();
+    let scopes = vec!["fleet:read".to_string(), "jobs:read".to_string()];
+    let default = SystemDashboardQuery {
+        window: None,
+        chart_points: None,
+    };
+    let explicit = SystemDashboardQuery {
+        window: Some(" 1d ".to_string()),
+        chart_points: Some(240),
+    };
+    let (default_window, default_points) = normalize_system_dashboard_query(&default).unwrap();
+    let (explicit_window, explicit_points) = normalize_system_dashboard_query(&explicit).unwrap();
+    assert_eq!(
+        (default_window, default_points),
+        (explicit_window, explicit_points)
+    );
+    assert_eq!(
+        system_dashboard_singleflight_key(operator_id, &scopes, default_window, default_points,),
+        system_dashboard_singleflight_key(
+            operator_id,
+            &["jobs:read".to_string(), "fleet:read".to_string()],
+            explicit_window,
+            explicit_points,
+        )
+    );
+
+    let clamped_low = SystemDashboardQuery {
+        window: Some("1d".to_string()),
+        chart_points: Some(0),
+    };
+    let clamped_high = SystemDashboardQuery {
+        window: Some("1d".to_string()),
+        chart_points: Some(i64::MAX),
+    };
+    assert_eq!(normalize_system_dashboard_query(&clamped_low).unwrap().1, 1);
+    assert_eq!(
+        normalize_system_dashboard_query(&clamped_high).unwrap().1,
+        1_440
+    );
+
+    assert_ne!(
+        system_dashboard_singleflight_key(operator_id, &scopes, "1d", 240),
+        system_dashboard_singleflight_key(operator_id, &scopes, "all", 240),
+    );
+    assert_ne!(
+        system_dashboard_singleflight_key(operator_id, &scopes, "1d", 240),
+        system_dashboard_singleflight_key(operator_id, &scopes, "1d", 241),
+    );
+    assert_ne!(
+        system_dashboard_singleflight_key(operator_id, &scopes, "1d", 240),
+        system_dashboard_singleflight_key(uuid::Uuid::new_v4(), &scopes, "1d", 240),
+    );
+}
 
 #[test]
 fn system_dashboard_uses_the_complete_monitoring_window_model() {
@@ -56,68 +103,46 @@ fn system_dashboard_uses_tier_aligned_truthful_resolution() {
         tier_aligned_system_step_secs(365 * DAY, requested, 21_600, 720),
         43_200
     );
-}
 
-#[test]
-fn system_dashboard_projects_and_labels_gateway_telemetry_admission() {
-    let projected = gateway_events_view(GatewayForwardMetricsSnapshot {
-        telemetry_admission_limit: 8,
-        telemetry_admission_active: 5,
-        telemetry_admission_waiting: 3,
-        ..GatewayForwardMetricsSnapshot::default()
-    });
-    assert_eq!(projected.telemetry_admission_limit, Some(8));
-    assert_eq!(projected.telemetry_admission_active, Some(5));
-    assert_eq!(projected.telemetry_admission_waiting, Some(3));
-
-    assert_eq!(
-        system_metric_label_unit("gateway_events.telemetry_admission_limit"),
-        ("Gateway telemetry admission limit", "posts")
-    );
-    assert_eq!(
-        system_metric_label_unit("gateway_events.telemetry_admission_active"),
-        ("Gateway telemetry posts active", "posts")
-    );
-    assert_eq!(
-        system_metric_label_unit("gateway_events.telemetry_admission_waiting"),
-        ("Gateway telemetry posts waiting", "posts")
-    );
-}
-
-#[test]
-fn system_dashboard_samples_gateway_telemetry_admission_history() {
-    let snapshot = SystemDashboardRepositorySnapshot {
-        db_pool: SystemDashboardDbPoolView {
-            max_connections: 0,
-            open_connections: 0,
-            idle_connections: 0,
-            in_use_connections: 0,
-        },
-        dispatch: SystemDashboardDispatchView::default(),
-        targets: SystemDashboardTargetsView::default(),
-        cancellations: SystemDashboardCancellationsView::default(),
-    };
-    let gateway_events = SystemDashboardGatewayEventsView {
-        telemetry_admission_limit: Some(8),
-        telemetry_admission_active: Some(6),
-        telemetry_admission_waiting: Some(4),
-        status: "live".to_string(),
-        ..SystemDashboardGatewayEventsView::default()
-    };
-    let samples = system_metric_samples_from_snapshot(&snapshot, &gateway_events);
-
-    for (metric, expected) in [
-        ("gateway_events.telemetry_admission_limit", 8.0),
-        ("gateway_events.telemetry_admission_active", 6.0),
-        ("gateway_events.telemetry_admission_waiting", 4.0),
+    for (span, points, expected_step, expected_points) in [
+        (7 * DAY, 420, 1_500, 404),
+        (7 * DAY, 480, 1_500, 404),
+        (365 * DAY, 420, 86_400, 366),
+        (365 * DAY, 480, 64_800, 487),
     ] {
-        assert_eq!(
-            samples
-                .iter()
-                .find(|sample| sample.metric == metric)
-                .map(|sample| sample.value),
-            Some(expected),
-            "missing or incorrect sample for {metric}"
-        );
+        let resolution = retained_system_resolution_for_age(span);
+        let requested = requested_chart_step_secs(span, points);
+        let step = tier_aligned_system_step_secs(span, requested, resolution, points as u64);
+        assert_eq!(step, expected_step);
+        assert_eq!(span / step as u64 + 1, expected_points);
+        assert_eq!(step % resolution, 0);
+        assert!(expected_points <= points as u64 + 12);
     }
+}
+
+#[test]
+fn all_window_density_uses_the_retained_extent_instead_of_unix_epoch() {
+    const DAY: u64 = 86_400;
+    let now = 1_787_600_000;
+    let retained_span = 3_650 * DAY;
+    let retained_start = now - retained_span;
+    assert_eq!(
+        system_dashboard_start(now, "all", Some(retained_start)),
+        retained_start
+    );
+    assert_eq!(system_dashboard_start(now, "all", None), now);
+    assert_eq!(
+        system_dashboard_start(now, "1d", Some(retained_start)),
+        now - DAY
+    );
+    let requested = requested_chart_step_secs(retained_span, 240);
+    let step = tier_aligned_system_step_secs(
+        retained_span,
+        requested,
+        retained_system_resolution_for_age(retained_span),
+        240,
+    );
+
+    assert_eq!(step % DAY as i32, 0);
+    assert!((230..=252).contains(&(retained_span / step as u64 + 1)));
 }

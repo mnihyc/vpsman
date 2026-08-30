@@ -31,7 +31,7 @@ use vpsman_common::{
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
 use crate::network_probe::parse_ping_measurement;
 use crate::network_runtime::render_runtime_adapter_command;
-use crate::port_forwarding::inspect_port_forwarding;
+use crate::port_forwarding::PortForwardingConsumerHandle;
 use crate::telemetry_custom::{
     apply_custom_metrics_if_configured, custom_metrics_replaces_linux,
     empty_custom_metrics_snapshot,
@@ -404,6 +404,7 @@ fn socket_protocol_count(proc_root: &Path, protocol: &str) -> Result<u64> {
 pub(crate) async fn collect_metrics_for_config(
     config: &AgentConfig,
     runtime_state: &mut TelemetryRuntimeState,
+    port_forwarding: &PortForwardingConsumerHandle,
 ) -> Result<AgentMetrics> {
     let mut metrics = if custom_metrics_replaces_linux(config) {
         runtime_state.cpu_time_counters = None;
@@ -422,7 +423,11 @@ pub(crate) async fn collect_metrics_for_config(
         .truncate(MAX_TELEMETRY_TUNNELS - reserved_runtime_tunnels);
     collect_runtime_status_telemetry(config, &mut metrics, runtime_state).await;
     collect_ping_target_telemetry(config, &mut metrics, runtime_state).await;
-    metrics.port_forwarding = Some(inspect_port_forwarding(&config.network.port_forwarding).await);
+    metrics.port_forwarding = Some(
+        port_forwarding
+            .inspect(&config.network.port_forwarding)
+            .await?,
+    );
     metrics.disks.truncate(MAX_TELEMETRY_DISKS);
     metrics.networks.truncate(MAX_TELEMETRY_NETWORKS);
     metrics.tunnels.truncate(MAX_TELEMETRY_TUNNELS);

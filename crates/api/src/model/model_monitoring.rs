@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    model::{AgentView, RuntimeConfigDispatchView, TelemetryNetworkRateView, TelemetryRollupView},
+    model::{
+        AgentView, RuntimeConfigDispatchView, TelemetryNetworkRateView, TelemetryRollupView,
+        TelemetryTunnelView,
+    },
     model_alert_policies::TrafficAccountingRecord,
 };
 
@@ -26,7 +29,6 @@ pub(crate) struct PingTargetAssignmentRecord {
     pub(crate) target_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) is_primary: bool,
-    pub(crate) assigned_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -52,8 +54,6 @@ pub(crate) struct MonitoringShareRecord {
     pub(crate) visibility: MonitoringShareVisibilityView,
     pub(crate) expires_at: String,
     pub(crate) revoked_at: Option<String>,
-    pub(crate) revoked_by: Option<Uuid>,
-    pub(crate) created_by: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
 }
@@ -94,16 +94,6 @@ impl MonitoringShareRecord {
             .find(|target| target.public_client_key == public_client_key)
             .map(|target| target.client_id.as_str())
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct MonitoringShareVisitorRecord {
-    pub(crate) share_id: Uuid,
-    pub(crate) visitor_id: Uuid,
-    pub(crate) source_ip: Option<String>,
-    pub(crate) user_agent: Option<String>,
-    pub(crate) first_seen_at: String,
-    pub(crate) last_seen_at: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -251,6 +241,7 @@ pub(crate) struct PingRollupView {
     pub(crate) latest_reason: Option<String>,
     pub(crate) latest_checked_at: String,
     #[serde(skip)]
+    #[cfg(test)]
     pub(crate) latest_source_checked_unix: u64,
 }
 
@@ -271,6 +262,10 @@ pub(crate) struct CurrentPingView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct MonitoringCardView {
     pub(crate) client: AgentView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_pending_since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_checked_at: Option<String>,
     pub(crate) product_name: Option<String>,
     pub(crate) billing: Option<BillingPlanView>,
     pub(crate) system_information: Option<SystemInformationView>,
@@ -354,6 +349,8 @@ pub(crate) struct ClientMonitoringView {
     pub(crate) range: MonitoringRangeView,
     pub(crate) resources: Vec<TelemetryRollupView>,
     pub(crate) network: Vec<TelemetryNetworkRateView>,
+    pub(crate) network_current_detail: Vec<TelemetryNetworkRateView>,
+    pub(crate) tunnel_current_detail: Vec<TelemetryTunnelView>,
     pub(crate) traffic: TrafficAccountingRecord,
     pub(crate) traffic_history: Vec<TrafficHistoryPointView>,
     pub(crate) ping_targets: Vec<CurrentPingView>,
@@ -377,6 +374,10 @@ pub(crate) struct PublicMonitoringCardView {
     pub(crate) client_key: String,
     pub(crate) display_name: String,
     pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_pending_since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) projection_checked_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,6 +535,7 @@ pub(crate) struct PublicTrafficMetricView {
     pub(crate) configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reset_day: Option<i32>,
+    pub(crate) reset_hour: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cycle_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

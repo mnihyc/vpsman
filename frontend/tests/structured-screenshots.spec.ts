@@ -320,7 +320,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Overview",
     heading: "Network overview",
     id: "23-network-overview",
-    requiredText: ["Create plan", "Latest evidence", "stale"],
+    requiredText: ["Create plan", "Latest evidence", "Declared observations"],
   },
   {
     view: "Network",

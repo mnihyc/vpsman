@@ -18,7 +18,7 @@ const ORPHANED_STAGE_AFTER_SECS: i64 = 120;
 const FAILED_STATUS_RETRY_AFTER_SECS: i64 = 300;
 const VERIFIED_STATUS_REFRESH_AFTER_SECS: i64 = 600;
 
-pub(crate) fn spawn_automatic_ospf_controller(state: AppState) {
+pub(crate) fn spawn_automatic_ospf_controller(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = time::interval(std::time::Duration::from_secs(CONTROLLER_INTERVAL_SECS));
         loop {
@@ -34,7 +34,7 @@ pub(crate) fn spawn_automatic_ospf_controller(state: AppState) {
                 Err(error) => warn!(%error, "automatic OSPF controller sweep failed"),
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn run_controller_sweep(state: &AppState) -> Result<usize> {

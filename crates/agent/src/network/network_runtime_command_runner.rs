@@ -22,27 +22,6 @@ struct LimitedOutput {
     truncated: bool,
 }
 
-#[allow(dead_code)]
-pub(super) async fn run_runtime_command(
-    label: &'static str,
-    argv: &[String],
-    mutates: bool,
-    required: bool,
-    max_timeout_secs: u64,
-    max_output_bytes: usize,
-) -> Result<serde_json::Value> {
-    run_runtime_command_cancelable(
-        label,
-        argv,
-        mutates,
-        required,
-        max_timeout_secs,
-        max_output_bytes,
-        CommandCancelToken::default(),
-    )
-    .await
-}
-
 pub(super) async fn run_runtime_command_cancelable(
     label: &'static str,
     argv: &[String],

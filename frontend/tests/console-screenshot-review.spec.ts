@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { openConsoleSubpage } from "./support/consoleNavigation";
@@ -19,26 +19,31 @@ const desktopViews = [
   { heading: "System overview", id: "system-overview", subpage: "Overview", view: "System" },
 ] as const;
 
-test.beforeEach(async ({ page }) => {
-  await installConsoleApiMock(page);
-});
+type ManifestEntry = {
+  heading: string;
+  horizontal_overflow_px: number;
+  project: string;
+  screenshot: string;
+  subpage: string;
+  view: string;
+  visible_text_length: number;
+};
 
-test("captures main console screenshots for regression review", async ({
-  page,
-}, testInfo) => {
-  const reviewRoot =
-    process.env.VPSMAN_SCREENSHOT_REVIEW_DIR ??
-    testInfo.outputPath("screenshots");
-  const projectDir = join(reviewRoot, testInfo.project.name);
-  mkdirSync(projectDir, { recursive: true });
+for (const entry of desktopViews) {
+  test(`captures ${entry.id} for regression review`, async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile") && entry !== desktopViews[0],
+      "the mobile review covers the home overview",
+    );
 
-  await page.goto("/");
-  const views = testInfo.project.name.includes("mobile")
-    ? desktopViews.slice(0, 1)
-    : desktopViews;
-  const manifest: Array<Record<string, unknown>> = [];
+    await installConsoleApiMock(page);
+    const reviewRoot =
+      process.env.VPSMAN_SCREENSHOT_REVIEW_DIR ??
+      join(testInfo.project.outputDir, "console-screenshot-review");
+    const projectDir = join(reviewRoot, testInfo.project.name);
+    mkdirSync(projectDir, { recursive: true });
 
-  for (const entry of views) {
+    await page.goto("/");
     await openConsoleSubpage(page, entry.view, entry.subpage);
     await expect(
       page
@@ -75,7 +80,7 @@ test("captures main console screenshots for regression review", async ({
       `${entry.view} screenshot should not be empty`,
     ).toBeGreaterThan(12_000);
 
-    manifest.push({
+    upsertManifest(projectDir, testInfo.project.name, {
       heading: entry.heading,
       horizontal_overflow_px: layout.horizontalOverflowPx,
       project: testInfo.project.name,
@@ -84,17 +89,33 @@ test("captures main console screenshots for regression review", async ({
       view: entry.view,
       visible_text_length: layout.visibleTextLength,
     });
-  }
+  });
+}
 
-  const manifestPath = join(
-    projectDir,
-    `manifest-${testInfo.project.name}.json`,
-  );
+function upsertManifest(
+  projectDir: string,
+  projectName: string,
+  entry: ManifestEntry,
+) {
+  const manifestPath = join(projectDir, `manifest-${projectName}.json`);
+  let manifest: ManifestEntry[] = [];
+  if (existsSync(manifestPath)) {
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      views?: ManifestEntry[];
+    };
+    manifest = parsed.views ?? [];
+  }
+  const byView = new Map(manifest.map((item) => [item.view, item]));
+  byView.set(entry.view, entry);
+  const orderedManifest = desktopViews.flatMap((view) => {
+    const item = byView.get(view.view);
+    return item ? [item] : [];
+  });
   writeFileSync(
     manifestPath,
-    `${JSON.stringify({ generated_by: "console-screenshot-review", views: manifest }, null, 2)}\n`,
+    `${JSON.stringify({ generated_by: "console-screenshot-review", views: orderedManifest }, null, 2)}\n`,
   );
-});
+}
 
 async function collectLayoutSignals(page: Page) {
   return page.evaluate(() => {

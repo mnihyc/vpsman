@@ -889,19 +889,22 @@ function buildTelemetryFreshness(
       stale: false,
     };
   }
-  const generatedMs = Date.parse(overview.generated_at);
   const rangeEndMs = Date.parse(overview.time_range.end_at);
-  const currentRange =
-    Number.isFinite(generatedMs) &&
-    Number.isFinite(rangeEndMs) &&
-    Math.abs(generatedMs - rangeEndMs) <= 5 * 60_000;
+  // The API derives these two values from the same server-owned timestamp for
+  // a current query. Exact equality identifies that range without inventing a
+  // wall-age allowance for configurable telemetry cadence.
+  const currentRange = overview.generated_at === overview.time_range.end_at;
+  const unavailableClients = Math.max(
+    0,
+    overview.summary.total - overview.summary.online,
+  );
   if (!lastSample) {
     return {
       detail: currentRange
         ? "No retained samples match the current scope and range"
         : "No retained samples match this historical scope and range",
       label: "No samples",
-      stale: currentRange,
+      stale: currentRange && overview.summary.total > 0,
     };
   }
   const lastSampleMs = Date.parse(lastSample);
@@ -916,18 +919,19 @@ function buildTelemetryFreshness(
     Number.isFinite(rangeEndMs) && Number.isFinite(lastSampleMs)
       ? Math.max(0, rangeEndMs - lastSampleMs)
       : 0;
-  if (lagMs <= 3 * 60_000) {
+  const lagDetail =
+    lagMs > 0 ? `, ${formatDuration(lagMs)} behind the selected range end` : "";
+  if (unavailableClients > 0) {
     return {
-      detail: `Latest sample ${formatEvidenceTime(lastSample)}`,
-      label: "Current",
-      stale: false,
+      detail: `${vpsCountLabel(unavailableClients)} currently unavailable by server state; latest retained sample ${formatEvidenceTime(lastSample)}${lagDetail}`,
+      label: "Current evidence incomplete",
+      stale: true,
     };
   }
-  const lag = formatDuration(lagMs);
   return {
-    detail: `Latest sample is ${lag} behind the selected range end; values remain visible as last-known evidence`,
-    label: `Telemetry ${lag} behind`,
-    stale: true,
+    detail: `Latest retained sample ${formatEvidenceTime(lastSample)}${lagDetail}`,
+    label: "Current",
+    stale: false,
   };
 }
 

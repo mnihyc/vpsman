@@ -3934,7 +3934,9 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitorEvidence .telemetryEvidence.partial,
-.vpsMonitorEvidence .telemetryEvidence.stale {
+.vpsMonitorEvidence .telemetryEvidence.stale,
+.vpsMonitorEvidence .telemetryEvidence.delayed,
+.vpsMonitorEvidence .telemetryEvidence.untrusted {
   color: var(--warning-text);
   font-weight: 700;
 }
@@ -8880,8 +8882,7 @@ button.vpsDetailRecord:hover {
 
 .networkMode .fleetSelectionStatsRow {
   grid-template-columns:
-    minmax(160px, 1fr) minmax(170px, 1fr) minmax(260px, 1.6fr)
-    minmax(160px, 1fr);
+    minmax(160px, 1fr) minmax(170px, 1fr) minmax(260px, 1.6fr);
 }
 
 .overviewMode .fleetSelectionStatsRow {

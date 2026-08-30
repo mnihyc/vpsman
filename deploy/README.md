@@ -49,7 +49,7 @@ rollback procedures. The same runbook is stored at
 ```
 
 The versioned release bundle also carries `LICENSE-APACHE`, `LICENSE-MIT`,
-`SECURITY.md`, and the production/migration runbooks under `docs/`.
+`SECURITY.md`, and the production runbook under `docs/`.
 `RELEASE_TAG` starts with the bundle tag and is then maintained atomically by
 the updater as the authoritative active payload tag.
 
@@ -112,9 +112,8 @@ files private.
 `update.sh first-start latest` installs release assets into
 `runtime/server/current`, `runtime/frontend/current`, and
 `runtime/cli/current`, creates missing compose secrets when
-`VPSMAN_SUPER_PASSWORD` is set, snapshots PostgreSQL, then starts compose. The
-snapshot makes API migrations reversible if activation fails, including for a
-restored database. A successful first-start prints the generated
+`VPSMAN_SUPER_PASSWORD` is set, snapshots PostgreSQL, then starts compose. A
+successful first-start prints the generated
 `VPSMAN_SUPER_SALT_HEX`; save it for browser and CLI privilege unlock. The
 persistent copy remains in `./config/secrets/operator-privilege.env`.
 
@@ -122,24 +121,18 @@ After first start, open the browser console. An empty control plane shows
 **Create first operator** and signs in the initial admin after creation. Once an
 operator exists, the same unauthenticated page shows **Sign in**.
 
-The current canonical database is intentionally fresh-only and does not support
-an in-place update from an earlier schema model; review
-[migration compatibility](../docs/migration-compatibility.md) before updating
-an older deployment.
-
 `update.sh latest` updates the same three release payloads for an existing
-deployment. It validates authoritative `version.json` metadata, asset layouts,
-and migration compatibility, stops application writers, stores a PostgreSQL
-dump under `runtime/update-backups/`, activates the release transactionally,
-and verifies readiness and release identity. Repeating the active tag is a
+deployment. It validates authoritative `version.json` metadata and asset
+layouts, stops application writers, stores a PostgreSQL dump under
+`runtime/update-backups/`, activates the release transactionally, and verifies
+readiness and release identity. Repeating the active tag is a
 no-op only after the version manifest, current payload contents, and live build
 readiness all match. Same-tag manifest drift, corruption, or unready services
-fail closed without replacing the older rollback payload.
+fail closed without replacing the rollback payload.
 Rollback applies the same safeguards before swapping `current` and `previous`
 for server, frontend, and CLI together. Use `update.sh recover` after an
 interrupted transaction. Successful activation updates `RELEASE_TAG`; a rollback
-to a legacy payload without embedded release metadata removes the marker rather
-than leaving a false recovery identity.
+only accepts a rollback payload with validated release metadata.
 
 `update.sh backup` immediately creates a validated custom-format PostgreSQL
 snapshot under `runtime/update-backups/` without stopping the application

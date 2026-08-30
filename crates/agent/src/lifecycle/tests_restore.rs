@@ -3,6 +3,15 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use super::*;
 
 #[test]
+fn restore_decoder_accepts_only_the_current_tar_archive() {
+    let error = decode_backup_archive(br#"{"not":"a tar archive"}"#).unwrap_err();
+    assert!(
+        error.to_string().contains("restore tar entry is invalid"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn restore_scope_matches_selected_files_and_directory_descendants() {
     let selected = BackupFileEntry {
         path: "/etc/nginx/conf.d/site.conf".to_string(),

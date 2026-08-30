@@ -791,7 +791,7 @@ pub(crate) enum Command {
     HistoryRetentionUpsert {
         #[arg(
             long,
-            help = "Retention domain: audit_logs, system_metric_rollups, telemetry_rollups, telemetry_network_rates, traffic_counter_samples, job_outputs, backup_artifacts, network_observations, topology_history, client_status_history, gateway_sessions"
+            help = "Retention domain: audit_logs, system_metric_rollups, telemetry_rollups, telemetry_network_rates, telemetry_ping_rollups, traffic_counter_rollups, job_outputs, network_observations, client_status_history, gateway_sessions"
         )]
         domain: String,
         #[arg(long)]
@@ -814,7 +814,7 @@ pub(crate) enum Command {
     HistoryRetentionPrune {
         #[arg(
             long,
-            help = "Retention domain: audit_logs, system_metric_rollups, telemetry_rollups, telemetry_network_rates, traffic_counter_samples, job_outputs, backup_artifacts, network_observations, topology_history, client_status_history, gateway_sessions"
+            help = "Retention domain: audit_logs, system_metric_rollups, telemetry_rollups, telemetry_network_rates, telemetry_ping_rollups, traffic_counter_rollups, job_outputs, network_observations, client_status_history, gateway_sessions"
         )]
         domain: Option<String>,
         #[arg(long, default_value_t = false)]

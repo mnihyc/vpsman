@@ -242,7 +242,7 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
     input.cancel_token.check("agent_update_check")?;
     let header: VersionManifestHeader = serde_json::from_slice(&manifest_bytes)
         .context("failed to parse update manifest header")?;
-    if !matches!(header.schema_version, 2 | VERSION_MANIFEST_SCHEMA_VERSION) {
+    if header.schema_version != VERSION_MANIFEST_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported update manifest schema {}",
             header.schema_version

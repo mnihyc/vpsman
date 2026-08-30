@@ -18,6 +18,7 @@ import type {
   PingRollupView,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
+  TelemetryTunnelRecord,
   TrafficAccountingRecord,
   TrafficHistoryPointView,
 } from "../types";
@@ -28,6 +29,7 @@ import {
   useByteRateFormatter,
   type ByteCountFormatter,
 } from "../panelDisplay";
+import { formatMonthlyTrafficResetUtc } from "../vpsRules";
 
 type MonitoringSection = "resources" | "ping";
 type PingMetric = "latency" | "loss";
@@ -68,6 +70,8 @@ type ClientMonitoringResponse = {
   range: MonitoringRange;
   resources: TelemetryRollupRecord[];
   network: TelemetryNetworkRateRecord[];
+  network_current_detail: TelemetryNetworkRateRecord[];
+  tunnel_current_detail: TelemetryTunnelRecord[];
   traffic: TrafficAccountingRecord;
   traffic_history: TrafficHistoryPointView[];
   ping_targets: CurrentPing[];
@@ -409,6 +413,20 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
     0,
   );
   const interfaces = new Set(data.network.map((row) => row.interface)).size;
+  const currentNetworkDetail = useMemo(
+    () =>
+      [...data.network_current_detail].sort((left, right) =>
+        left.interface.localeCompare(right.interface),
+      ),
+    [data.network_current_detail],
+  );
+  const currentTunnelDetail = useMemo(
+    () =>
+      [...data.tunnel_current_detail].sort((left, right) =>
+        left.interface.localeCompare(right.interface),
+      ),
+    [data.tunnel_current_detail],
+  );
   const memoryCapacity = maximumPositiveValue(
     data.resources.map((row) => row.memory_total_bytes_max),
   );
@@ -443,6 +461,56 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
         </ConsoleStatusBadge>
       </div>
       <div className="dashboardWidgetGrid vpsMonitoringChartGrid">
+        <div className="dashboardWidgetChart wideWidget">
+          <div className="dashboardWidgetHeader">
+            <strong>Current interface detail</strong>
+            <small>
+              Interfaces excluded by network.interfaces are shown only here
+              and expire after 15 minutes; eligible evidence follows history
+              and traffic-accounting rules
+            </small>
+          </div>
+          <div
+            aria-label="Current interface telemetry"
+            className="vpsMonitoringPingTargets"
+          >
+            {currentNetworkDetail.map((rate) => (
+              <div
+                className="vpsMonitoringPingTarget"
+                key={rate.interface}
+              >
+                <span>
+                  <strong className="truncateValue">{rate.interface}</strong>
+                  <em>Current rate</em>
+                </span>
+                <small>
+                  RX {formatByteRateFromBitsPerSecond(rate.rx_bps_avg)} · TX{" "}
+                  {formatByteRateFromBitsPerSecond(rate.tx_bps_avg)}
+                </small>
+              </div>
+            ))}
+            {currentTunnelDetail.map((tunnel) => (
+              <div
+                className="vpsMonitoringPingTarget"
+                key={`tunnel:${tunnel.interface}`}
+              >
+                <span>
+                  <strong className="truncateValue">{tunnel.interface}</strong>
+                  <em>Tunnel counter · current</em>
+                </span>
+                <small>
+                  RX {formatBytesNullable(tunnel.rx_bytes)} · TX{" "}
+                  {formatBytesNullable(tunnel.tx_bytes)}
+                </small>
+              </div>
+            ))}
+            {!currentNetworkDetail.length && !currentTunnelDetail.length ? (
+              <p className="dashboardEmptyChart">
+                No current interface detail is available for this VPS.
+              </p>
+            ) : null}
+          </div>
+        </div>
         <MonitoringChart
           data={resources.cpu}
           emptyLabel="CPU utilization is unavailable for this range"
@@ -488,7 +556,7 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
         <MonitoringChart
           className="wideWidget"
           data={network}
-          detail={`${interfaces} coherent network ${interfaces === 1 ? "interface" : "interfaces"}, aggregated by direction`}
+          detail={`${interfaces} coherent historical ${interfaces === 1 ? "interface" : "interfaces"}, aggregated by direction; current detail is listed separately`}
           emptyLabel="Network rate history is unavailable for this range"
           exportFileName={`${safeFilePart(data.client.id)}-network-${data.range.window}`}
           title="Network RX / TX"
@@ -702,10 +770,14 @@ function TrafficCycle({
   const overQuota = percent !== null && percent > 100;
   const quotaState = trafficQuotaState(traffic);
   const noReset = traffic.reset_day === -1;
+  const resetSchedule = formatMonthlyTrafficResetUtc(
+    traffic.reset_day,
+    traffic.reset_hour,
+  );
   const trafficWindow = noReset
     ? "Accumulated total"
     : configured && traffic.cycle_start && traffic.cycle_end
-      ? `${formatTime(traffic.cycle_start)} – ${formatTime(traffic.cycle_end)}`
+      ? `${formatTime(traffic.cycle_start)} – ${formatTime(traffic.cycle_end)}${resetSchedule ? ` · ${resetSchedule}` : ""}`
       : "Authoritative traffic accounting";
 
   return (

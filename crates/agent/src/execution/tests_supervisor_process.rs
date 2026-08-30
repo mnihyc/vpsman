@@ -13,6 +13,7 @@ use vpsman_common::{
 
 use crate::supervisor::{
     execute_blocking, execute_blocking_with_deadline, reconcile_supervisor_records_at_root,
+    reconcile_supervisor_runtime_records_at_root,
 };
 
 const TEST_LOG_TAIL_BYTES: u32 = 64 * 1024;
@@ -233,7 +234,7 @@ fn stop_deadline_clamps_long_graceful_policy() {
 }
 
 #[test]
-fn restart_monitor_restarts_failed_process_until_retry_budget() {
+fn supervisor_consumer_restarts_failed_process_until_retry_budget() {
     let root = test_root("restart");
     let counter = root.join("counter");
     let script = format!(
@@ -264,6 +265,7 @@ fn restart_monitor_restarts_failed_process_until_retry_budget() {
 
     let mut restarted = false;
     for _ in 0..30 {
+        reconcile_supervisor_runtime_records_at_root(&root).unwrap();
         let count = fs::read_to_string(&counter).unwrap_or_default();
         if count.trim() == "2" {
             restarted = true;
@@ -271,7 +273,10 @@ fn restart_monitor_restarts_failed_process_until_retry_budget() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(restarted, "restart monitor did not run the process twice");
+    assert!(
+        restarted,
+        "supervisor consumer did not run the process twice"
+    );
 
     let process = wait_for_process_status(&root, "flap", "running");
     assert_eq!(process["status"], "running");
@@ -290,7 +295,7 @@ fn restart_monitor_restarts_failed_process_until_retry_budget() {
 }
 
 #[test]
-fn startup_reconcile_marks_legacy_pid_record_stale() {
+fn startup_reconcile_marks_incomplete_pid_record_stale() {
     let root = test_root("startup-reconcile");
     let records = root.join("records");
     let logs = root.join("logs");

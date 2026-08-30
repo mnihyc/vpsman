@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { apiGet, isApiUnauthorized } from "../api";
+import { apiGet, isApiUnauthorized, LatestReadConsumer } from "../api";
 import { DEFAULT_MONITORING_REFRESH_INTERVAL_SECS } from "../constants";
 import { dashboardWindowOptions } from "../dashboardQuery";
 import type { SnapshotSource } from "../homeSnapshot";
@@ -52,60 +52,68 @@ export function useDashboardOverviewData(
     dashboardPreferencesToParams(dashboardPreferences).toString(),
   );
   const loadSequence = useRef(0);
+  const loadConsumer = useRef(new LatestReadConsumer());
   const currentApiToken = useRef(apiToken);
   currentApiToken.current = apiToken;
 
   const loadDashboardOverview = useCallback(
-    async (nextPreferences?: DashboardPreferences) => {
+    (nextPreferences?: DashboardPreferences): Promise<void> => {
       if (currentApiToken.current !== apiToken) {
-        return;
+        return Promise.resolve();
       }
       const requestPreferences =
         nextPreferences ?? dashboardPreferencesRef.current;
       const sequence = loadSequence.current + 1;
       loadSequence.current = sequence;
+      const requestKey =
+        dashboardPreferencesToParams(requestPreferences).toString();
+      desiredRequestKey.current = requestKey;
+      // Polling, WebSocket invalidations, and preference changes are producers
+      // for one browser-local read consumer. While a read is active, retain
+      // exactly the latest desired request; completion drains it immediately.
+      // Generation fences below still own publication, so a superseded result
+      // can neither overwrite the latest view nor suppress its trailing read.
       setDashboardOverviewLoading(true);
-      try {
-        const params = dashboardPreferencesToParams(requestPreferences);
-        const requestKey = params.toString();
-        desiredRequestKey.current = requestKey;
-        const overview = await apiGet<DashboardOverviewRecord>(
-          `/api/v1/dashboard/overview?${requestKey}`,
-          apiToken,
-        );
-        if (
-          sequence !== loadSequence.current ||
-          requestKey !== desiredRequestKey.current ||
-          currentApiToken.current !== apiToken
-        ) {
-          return;
+      return loadConsumer.current.enqueue(async () => {
+        try {
+          const overview = await apiGet<DashboardOverviewRecord>(
+            `/api/v1/dashboard/overview?${requestKey}`,
+            apiToken,
+          );
+          if (
+            sequence !== loadSequence.current ||
+            requestKey !== desiredRequestKey.current ||
+            currentApiToken.current !== apiToken
+          ) {
+            return;
+          }
+          dashboardOverviewRef.current = overview;
+          setDashboardOverview(overview);
+          setDashboardOverviewError(null);
+        } catch (error) {
+          if (
+            sequence !== loadSequence.current ||
+            currentApiToken.current !== apiToken
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setDashboardOverview(null);
+            setDashboardOverviewError("Operator login required");
+            return;
+          }
+          setDashboardOverviewError(
+            error instanceof Error
+              ? error.message
+              : "Dashboard overview unavailable",
+          );
+        } finally {
+          if (sequence === loadSequence.current) {
+            setDashboardOverviewLoading(false);
+          }
         }
-        dashboardOverviewRef.current = overview;
-        setDashboardOverview(overview);
-        setDashboardOverviewError(null);
-      } catch (error) {
-        if (
-          sequence !== loadSequence.current ||
-          currentApiToken.current !== apiToken
-        ) {
-          return;
-        }
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          setDashboardOverview(null);
-          setDashboardOverviewError("Operator login required");
-          return;
-        }
-        setDashboardOverviewError(
-          error instanceof Error
-            ? error.message
-            : "Dashboard overview unavailable",
-        );
-      } finally {
-        if (sequence === loadSequence.current) {
-          setDashboardOverviewLoading(false);
-        }
-      }
+      });
     },
     [apiToken, onUnauthorized],
   );
@@ -126,19 +134,13 @@ export function useDashboardOverviewData(
     [dashboardPreferences, loadDashboardOverview],
   );
 
-  const beginHomeDashboardOverviewHydration = useCallback(
-    () => {
-      setDashboardOverviewLoading(true);
-      return ++loadSequence.current;
-    },
-    [],
-  );
+  const beginHomeDashboardOverviewHydration = useCallback(() => {
+    setDashboardOverviewLoading(true);
+    return ++loadSequence.current;
+  }, []);
 
   const hydrateHomeDashboardOverview = useCallback(
-    (
-      sequence: number,
-      source: SnapshotSource<DashboardOverviewRecord>,
-    ) => {
+    (sequence: number, source: SnapshotSource<DashboardOverviewRecord>) => {
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -181,6 +183,7 @@ export function useDashboardOverviewData(
 
   const clearDashboardOverview = useCallback(() => {
     loadSequence.current += 1;
+    loadConsumer.current.discardPending();
     currentApiToken.current = "";
     dashboardOverviewRef.current = null;
     setDashboardOverview(null);
@@ -231,13 +234,14 @@ export function dashboardPreferencesToParams(
 }
 
 function dashboardChartPoints(pointDensity: DashboardPointDensity): number {
-  const width =
-    typeof window === "undefined"
-      ? 960
-      : Math.max(360, Math.min(1440, Math.floor(window.innerWidth - 420)));
-  const pixelsPerPoint =
-    pointDensity === "compact" ? 5 : pointDensity === "dense" ? 1.5 : 3;
-  return Math.max(60, Math.min(1440, Math.round(width / pixelsPerPoint)));
+  // Stable density profiles keep identical dashboards on the same bounded
+  // server read path across viewport sizes and avoid cache-key fragmentation.
+  // The three choices remain distinct presentation densities.
+  return pointDensity === "compact"
+    ? 120
+    : pointDensity === "dense"
+      ? 480
+      : 240;
 }
 
 function readDashboardPreferences(): DashboardPreferences {

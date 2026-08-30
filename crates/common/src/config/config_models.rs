@@ -124,10 +124,7 @@ pub struct AgentAuthConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentBackupConfig {
-    #[serde(
-        default = "default_agent_backup_max_uncompressed_bytes",
-        alias = "max_plaintext_bytes"
-    )]
+    #[serde(default = "default_agent_backup_max_uncompressed_bytes")]
     pub max_uncompressed_bytes: u64,
     #[serde(default = "default_agent_backup_max_archive_bytes")]
     pub max_archive_bytes: u64,

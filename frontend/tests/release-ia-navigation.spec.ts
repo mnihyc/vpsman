@@ -6,6 +6,7 @@ import {
   backupId,
   installConsoleApiMock,
 } from "./support/consoleLayoutFixtures";
+import { installMonitoringManagementApiMock } from "./support/monitoringManagementFixtures";
 import {
   activate,
   activateSystemMaintenanceSubpanel,
@@ -899,29 +900,49 @@ test(
     await page.evaluate(async () => {
       type AlertRow = { title: string } & Record<string, unknown>;
       type AlertRefreshState = { rows: AlertRow[] };
+      type FullFleetSnapshot = Record<string, unknown> & {
+        fleet_alerts: Record<string, unknown> & { data: AlertRow[] };
+      };
       const trackedWindow = window as typeof window & {
         __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
         __vpsmanFleetAlertRefreshState?: AlertRefreshState;
         __vpsmanTestWebSockets: EventTarget[];
       };
       const originalFetch = window.fetch.bind(window);
-      const response = await originalFetch("/api/v1/fleet-alerts");
-      const rows = (await response.json()) as AlertRow[];
+      const response = await originalFetch("/api/v1/fleet/snapshot?mode=full");
+      const initialSnapshot = (await response.json()) as FullFleetSnapshot;
+      const rows = [...initialSnapshot.fleet_alerts.data];
       rows[20] = { ...rows[20], title: "Refreshed page-three alert" };
       const state = { rows };
       trackedWindow.__vpsmanFleetAlertRefreshState = state;
       trackedWindow.__vpsmanFetchRequests = [];
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
-        const pathname = new URL(url, window.location.href).pathname;
+        const parsedUrl = new URL(url, window.location.href);
         const method = (
           init?.method ?? (input instanceof Request ? input.method : "GET")
         ).toUpperCase();
-        if (method === "GET" && pathname === "/api/v1/fleet-alerts") {
-          return new Response(JSON.stringify(state.rows), {
-            headers: { "Content-Type": "application/json" },
-            status: 200,
-          });
+        if (
+          method === "GET" &&
+          parsedUrl.pathname === "/api/v1/fleet/snapshot" &&
+          parsedUrl.searchParams.get("mode") === "full"
+        ) {
+          const snapshotResponse = await originalFetch(input, init);
+          const snapshot = (await snapshotResponse.json()) as FullFleetSnapshot;
+          return new Response(
+            JSON.stringify({
+              ...snapshot,
+              fleet_alerts: {
+                ...snapshot.fleet_alerts,
+                data: state.rows,
+              },
+            }),
+            {
+              headers: snapshotResponse.headers,
+              status: snapshotResponse.status,
+              statusText: snapshotResponse.statusText,
+            },
+          );
         }
         return originalFetch(input, init);
       };
@@ -1027,18 +1048,17 @@ test(
   },
 );
 
-test("release IA reaches every configured page and subpage", async ({
-  page,
-}) => {
-  test.setTimeout(120_000);
-  await gotoConsoleHome(page);
-
+test("release IA configuration covers every top-level page", () => {
   expect([...Object.keys(viewSubpages)].sort()).toEqual(
     [...releaseTopLevel].sort(),
   );
+});
 
-  for (const view of releaseTopLevel as ActiveView[]) {
-    for (const subpage of viewSubpages[view]) {
+for (const view of releaseTopLevel as ActiveView[]) {
+  for (const subpage of viewSubpages[view]) {
+    test(`release IA reaches ${view} / ${subpage.label}`, async ({ page }) => {
+      await installMonitoringManagementApiMock(page);
+      await gotoConsoleHome(page);
       await openConsoleSubpage(page, view, subpage.label);
 
       const header = page.locator(".consoleHeader");
@@ -1068,84 +1088,85 @@ test("release IA reaches every configured page and subpage", async ({
       await page.evaluate(() => new Promise(requestAnimationFrame));
       const tooltipViolations = await tooltipContractViolations(page);
       expect(tooltipViolations, `${view} / ${subpage.label}`).toEqual([]);
-    }
+    });
   }
-});
+}
 
-test("release pages use operational page headers", async ({ page }) => {
-  await gotoConsoleHome(page);
+const operationalHeaderRoutes = [
+  { view: "Home", subpage: "Overview", title: "Home", section: "Overview" },
+  {
+    view: "Fleet",
+    subpage: "Instances",
+    title: "Fleet instances",
+    section: "Instances",
+  },
+  {
+    view: "Remote Operations",
+    subpage: "Terminal",
+    title: "Terminal",
+    section: "Terminal",
+  },
+  {
+    view: "Jobs",
+    subpage: "History",
+    title: "Job history",
+    section: "History",
+  },
+  {
+    view: "Automation",
+    subpage: "Schedules",
+    title: "Schedules",
+    section: "Schedules",
+  },
+  {
+    view: "Network",
+    subpage: "Overview",
+    title: "Network overview",
+    section: "Overview",
+  },
+  {
+    view: "Backups",
+    subpage: "Overview",
+    title: "Backup overview",
+    section: "Overview",
+  },
+  {
+    view: "Config",
+    subpage: "Overview",
+    title: "Config",
+    section: "Overview",
+  },
+  {
+    view: "Observability",
+    subpage: "Fleet metrics",
+    title: "Fleet metrics",
+    section: "Fleet metrics",
+  },
+  {
+    view: "Audit",
+    subpage: "Events",
+    title: "Audit events",
+    section: "Events",
+  },
+  {
+    view: "Access",
+    subpage: "Overview",
+    title: "Access overview",
+    section: "Overview",
+  },
+  {
+    view: "System",
+    subpage: "Overview",
+    title: "System overview",
+    section: "Overview",
+  },
+] as const;
 
-  const defaultRoutes = [
-    { view: "Home", subpage: "Overview", title: "Home", section: "Overview" },
-    {
-      view: "Fleet",
-      subpage: "Instances",
-      title: "Fleet instances",
-      section: "Instances",
-    },
-    {
-      view: "Remote Operations",
-      subpage: "Terminal",
-      title: "Terminal",
-      section: "Terminal",
-    },
-    {
-      view: "Jobs",
-      subpage: "History",
-      title: "Job history",
-      section: "History",
-    },
-    {
-      view: "Automation",
-      subpage: "Schedules",
-      title: "Schedules",
-      section: "Schedules",
-    },
-    {
-      view: "Network",
-      subpage: "Overview",
-      title: "Network overview",
-      section: "Overview",
-    },
-    {
-      view: "Backups",
-      subpage: "Overview",
-      title: "Backup overview",
-      section: "Overview",
-    },
-    {
-      view: "Config",
-      subpage: "Overview",
-      title: "Config",
-      section: "Overview",
-    },
-    {
-      view: "Observability",
-      subpage: "Fleet metrics",
-      title: "Fleet metrics",
-      section: "Fleet metrics",
-    },
-    {
-      view: "Audit",
-      subpage: "Events",
-      title: "Audit events",
-      section: "Events",
-    },
-    {
-      view: "Access",
-      subpage: "Overview",
-      title: "Access overview",
-      section: "Overview",
-    },
-    {
-      view: "System",
-      subpage: "Overview",
-      title: "System overview",
-      section: "Overview",
-    },
-  ];
-
-  for (const route of defaultRoutes) {
+for (const route of operationalHeaderRoutes) {
+  test(`release page uses an operational header: ${route.view} / ${route.subpage}`, async ({
+    page,
+  }) => {
+    await gotoConsoleHome(page);
     await openConsoleSubpage(page, route.view, route.subpage);
     const header = page.locator(".consoleHeader");
     await expect(
@@ -1170,8 +1191,13 @@ test("release pages use operational page headers", async ({ page }) => {
       await expect(header.locator(".quickStats")).toHaveCount(0);
       await expect(header.locator(".fleetStatusStrip")).toContainText("VPS");
     }
-  }
+  });
+}
 
+test("Fleet Monitor owns its fleet summary outside the page header", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Monitor");
   const fleetMonitorHeader = page.locator(".consoleHeader");
   await expect(fleetMonitorHeader.locator(".quickStats")).toHaveCount(0);
@@ -3753,6 +3779,21 @@ test("fleet telemetry refresh keeps successful domains current when one domain f
   await installConsoleApiMock(page, {
     telemetryFailurePath: "tunnels",
     telemetryNetworkRateScales: [1, 2, 4, 8, 16, 32, 64],
+    vpsRuleValuesAdditional: [
+      {
+        client_id: "agent-sfo-01",
+        key: "network.rate.interfaces",
+        parsed_display: "all eligible interfaces",
+        source_id: null,
+        source_kind: "operator",
+        state: "ok",
+        updated_at: "2026-06-02T10:00:00Z",
+        updated_by: "fixture-admin",
+        validation_errors: [],
+        value_json: { mode: "all" },
+        value_raw: "*",
+      },
+    ],
   });
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Monitor");
@@ -4222,6 +4263,15 @@ test("fleet instance row actions expose release VPS workflows", async ({
       await expect(
         page.getByRole("combobox", { name: "File browser target VPS" }),
       ).toHaveValue(/edge-sfo-01/);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(localStorage.getItem("vpsman.fileBrowser.state") ?? "{}"),
+        ),
+      ).toEqual({
+        path: "/",
+        showHidden: false,
+        targetClientId: "agent-sfo-01",
+      });
     } else if (action.label === "Open processes") {
       await expect(
         page
@@ -4385,6 +4435,22 @@ test("VPS monitoring reports per-domain retained resolutions", async ({
   await expect(monitoring).toContainText("retained tiered history");
   await expect(monitoring).toContainText(
     "resources/network/Ping 5m; traffic 1m coarsest source resolutions",
+  );
+  const currentNetwork = monitoring.getByLabel("Current interface telemetry");
+  await expect(currentNetwork.locator(".vpsMonitoringPingTarget")).toHaveCount(
+    3,
+  );
+  await expect(currentNetwork).toContainText("eth0");
+  await expect(currentNetwork).toContainText("wg0");
+  await expect(currentNetwork).toContainText("tunab");
+  await expect(
+    currentNetwork.locator(".vpsMonitoringPingTarget", { hasText: "tunab" }),
+  ).toContainText("Tunnel counter · current");
+  await expect(
+    currentNetwork.locator(".vpsMonitoringPingTarget", { hasText: "wg0" }),
+  ).toContainText(/RX .+ · TX .+/);
+  await expect(monitoring).toContainText(
+    "Interfaces excluded by network.interfaces are shown only here and expire after 15 minutes; eligible evidence follows history and traffic-accounting rules",
   );
 });
 
@@ -6454,7 +6520,9 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   );
   await expect(controls.getByLabel("Fleet metrics group by")).toBeVisible();
   await expect(page.getByText("Scope: All VPS", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Telemetry .* behind/).first()).toBeVisible();
+  await expect(
+    page.getByText("Current evidence incomplete", { exact: true }).first(),
+  ).toBeVisible();
 
   const advancedFilters = page.locator(".fleetMetricsAdvancedFilters");
   await advancedFilters.getByText("Advanced filters", { exact: true }).click();
@@ -6609,11 +6677,43 @@ test("observability fleet metrics owns resource charts and read-only analysis co
 test("fleet metrics freshness uses exact sample time instead of the coarse chart bucket", async ({
   page,
 }) => {
+  const exactSampleAt = "2026-06-05T20:44:30Z";
+  const coarseBucketAt = "2026-06-05T20:35:00Z";
   await installConsoleApiMock(page, {
-    dashboardLatestSampleAtOverride: "2026-06-05T20:44:30Z",
+    dashboardLatestSampleAtOverride: exactSampleAt,
+    dashboardSummaryOverride: {
+      offline: 0,
+      online: 3,
+      revoked: 0,
+      stale: 0,
+      total: 3,
+    },
   });
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Fleet metrics");
+
+  const [exactSampleLabel, coarseBucketLabel] = await page.evaluate(
+    ([exactSample, coarseBucket]) => {
+      const formatter = new Intl.DateTimeFormat(undefined, {
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        month: "short",
+      });
+      return [
+        formatter.format(new Date(exactSample)),
+        formatter.format(new Date(coarseBucket)),
+      ];
+    },
+    [exactSampleAt, coarseBucketAt],
+  );
+  expect(exactSampleLabel).not.toBe(coarseBucketLabel);
+  await expect(page.locator(".observabilityRangeLine")).toContainText(
+    "Last sample:",
+  );
+  const freshnessEvidence = page.getByLabel("Fleet resource freshness");
+  await expect(freshnessEvidence).toContainText(exactSampleLabel);
+  await expect(freshnessEvidence).not.toContainText(coarseBucketLabel);
 
   const summary = page.getByLabel("Fleet metrics summary");
   await expect(summary).toContainText("Telemetry freshness");
@@ -8715,15 +8815,19 @@ test("network overview links to release network workflows", async ({
   await expect(page.getByLabel("Network posture summary")).toContainText(
     "Plans",
   );
-  await expect(page.getByLabel("Network posture summary")).toContainText(
-    "Declared observations",
+  const postureSummary = page.getByLabel("Network posture summary");
+  const declaredObservations = postureSummary.locator("span").filter({
+    has: page.getByText("Declared observations", { exact: true }),
+  });
+  await expect(declaredObservations.locator("strong")).toHaveText("4");
+  const latestEvidence = postureSummary.locator("span").filter({
+    has: page.getByText("Latest evidence", { exact: true }),
+  });
+  await expect(latestEvidence).toHaveAttribute(
+    "title",
+    /^Latest declared tunnel evidence /,
   );
-  await expect(page.getByLabel("Network posture summary")).toContainText(
-    "Latest evidence",
-  );
-  await expect(page.getByLabel("Network posture summary")).toContainText(
-    "Stale",
-  );
+  await expect(latestEvidence.locator("strong")).not.toHaveText("None");
   await expect(page.getByRole("button", { name: "Create plan" })).toBeVisible();
   await activate(page.getByRole("button", { name: "Create plan" }));
   await expect(
@@ -9838,15 +9942,11 @@ function metricSortMonitoringCard(
     disk_used_ratio_avg: values.diskRatio,
     disk_used_ratio_max: values.diskRatio,
     latest_observed_at: observedAt,
-    memory_available_bytes_avg:
-      values.memoryTotal * (1 - values.memoryRatio),
-    memory_available_bytes_min:
-      values.memoryTotal * (1 - values.memoryRatio),
+    memory_available_bytes_avg: values.memoryTotal * (1 - values.memoryRatio),
+    memory_available_bytes_min: values.memoryTotal * (1 - values.memoryRatio),
     memory_total_bytes_max: values.memoryTotal,
     memory_used_ratio_avg: values.memoryRatio,
     memory_used_ratio_max: values.memoryRatio,
-    network_rx_bytes_max: 0,
-    network_tx_bytes_max: 0,
     sample_count: 1,
     swap_available_bytes_avg: null,
     swap_available_bytes_min: null,

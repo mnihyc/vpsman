@@ -1,24 +1,29 @@
-use axum::{extract::State, Json};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use uuid::Uuid;
-use vpsman_common::{payload_hash, AgentHello, JobCommand};
 
 use crate::{
-    gateway_client::GatewayDispatchClient,
-    model::{
-        AuthContext, CreateBackupRequest, CreateJobRequest, CreateMigrationLinkRequest,
-        CreateMigrationRunRequest, CreateRestorePlanRequest, JobHistoryView, JobOutputView,
-        OperatorPreferences, OperatorView, RecordBackupArtifactMetadataRequest,
-    },
-    repository::{MemoryState, Repository},
-    repository_ingest::upsert_memory_agent,
-    routes_backups::create_backup_request,
-    routes_migrations::{
-        create_migration_link, create_migration_run, validate_create_migration_link,
-    },
-    routes_restores::create_restore_plan,
-    state::AppState,
+    model::CreateMigrationLinkRequest, repository::API_POSTGRES_SESSION_OPTIONS,
+    routes_migrations::validate_create_migration_link,
 };
+
+#[test]
+fn latency_facing_api_sessions_disable_jit_without_changing_migration_options() {
+    assert_eq!(
+        API_POSTGRES_SESSION_OPTIONS,
+        [("search_path", "public"), ("jit", "off")]
+    );
+
+    let repository = include_str!("repository.rs");
+    let (_, connect) = repository
+        .split_once("pub(crate) async fn connect(")
+        .expect("API repository connection owner");
+    let (connect, migration) = connect
+        .split_once("pub(crate) async fn migrate_postgres_database(")
+        .expect("dedicated migration connection boundary");
+    assert!(connect.contains("migrate_postgres_database(&connect_options, migrations_dir)"));
+    assert!(connect.contains(".options(API_POSTGRES_SESSION_OPTIONS)"));
+    assert!(migration.contains("PgConnection::connect_with(connect_options)"));
+    assert!(!migration.contains(".options(API_POSTGRES_SESSION_OPTIONS)"));
+}
 
 #[test]
 fn migration_link_validation_requires_confirmation() {
@@ -49,624 +54,195 @@ fn migration_link_validation_requires_confirmation() {
     );
 }
 
-#[tokio::test]
-async fn migration_link_records_restore_plan_identity_and_audit() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
-    let request = CreateMigrationLinkRequest {
-        restore_plan_id,
-        confirmed: true,
-        note: Some("rebuilt node ready".to_string()),
-        privilege_assertion: None,
-    };
+#[test]
+fn backup_latest_lists_have_matching_global_order_indexes() {
+    let migration = include_str!("../../../../../migrations/0007_backups_restores.sql")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(view)) = create_migration_link(State(state), headers, Json(request))
-        .await
-        .unwrap();
-    let links = repo.list_migration_links(10).await.unwrap();
-    let audits = repo.list_audit_logs(10).await.unwrap();
-
-    assert_eq!(status, axum::http::StatusCode::CREATED);
-    assert_eq!(view.restore_plan_id, restore_plan_id);
-    assert_eq!(view.source_backup_request_id, source_backup_id);
-    assert_eq!(view.source_client_id, "source-client");
-    assert_eq!(view.target_client_id, "rebuilt-client");
-    assert_eq!(view.paths, vec!["/etc/hostname"]);
-    assert!(view.include_config);
-    assert_eq!(view.destination_root.as_deref(), Some("/restore"));
-    assert_eq!(view.status, "linked_metadata_only");
-    assert_eq!(links.len(), 1);
-    assert_eq!(links[0].id, view.id);
-    assert!(audits
-        .iter()
-        .any(|audit| audit.action == "migration.linked_metadata_only"));
+    assert!(migration.contains(
+        "CREATE INDEX backup_artifacts_created_idx ON public.backup_artifacts USING btree (created_at DESC, id DESC);"
+    ));
+    assert!(migration.contains(
+        "CREATE INDEX backup_requests_created_idx ON public.backup_requests USING btree (created_at DESC, id DESC);"
+    ));
 }
 
-#[tokio::test]
-async fn migration_run_validation_failure_creates_no_link_or_job() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-
-    let first_error = create_migration_run(
-        State(state.clone()),
-        headers.clone(),
-        Json(migration_run_request(restore_plan_id, source_backup_id)),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(first_error.status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(first_error.code, "restore_source_backup_artifact_required");
-    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 0);
-    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 0);
-
-    let error = create_migration_run(
-        State(state),
-        headers,
-        Json(migration_run_request(restore_plan_id, source_backup_id)),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(error.code, "restore_source_backup_artifact_required");
-    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 0);
-    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn migration_run_rejects_revoked_target_before_recording_link_or_job() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
-    if let Repository::Memory(memory) = &repo {
-        memory
-            .agents
-            .write()
-            .await
-            .iter_mut()
-            .find(|agent| agent.id == "rebuilt-client")
-            .expect("rebuilt migration target")
-            .status = "revoked".to_string();
-    }
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-
-    let error = create_migration_run(
-        State(state),
-        headers,
-        Json(migration_run_request(restore_plan_id, source_backup_id)),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(error.code, "fixed_target_unavailable");
-    assert!(repo.list_migration_links(10).await.unwrap().is_empty());
-    assert!(!repo
-        .list_jobs(10)
-        .await
-        .unwrap()
-        .iter()
-        .any(|job| job.command_type == "restore"));
-}
-
-#[tokio::test]
-async fn migration_run_reuses_matching_existing_link_and_records_restore_job() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let (archive_path, archive_size_bytes, archive_sha256_hex) =
-        attach_source_backup_artifact(&repo, source_backup_id).await;
-    let session_id = Uuid::new_v4();
-    seed_completed_archive_upload(
-        &repo,
-        "rebuilt-client",
-        session_id,
-        &archive_path,
-        archive_size_bytes as i64,
-        &archive_sha256_hex,
-    )
-    .await;
-    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
-    let mut request = migration_run_request(restore_plan_id, source_backup_id);
-    bind_migration_archive(
-        &mut request,
-        session_id,
-        archive_path,
-        archive_size_bytes,
-        archive_sha256_hex,
+#[test]
+fn dashboard_relations_share_one_immutable_client_ownership_root() {
+    let migration = include_str!("../../../../../migrations/0006_telemetry_dashboard.sql");
+    let root_declaration = "CREATE TABLE public.telemetry_dashboard_clients (";
+    let first_child_declaration =
+        "CREATE TABLE public.telemetry_dashboard_resource_projection_heads (";
+    let root_declaration = migration
+        .find(root_declaration)
+        .expect("dashboard client root declaration");
+    let first_child_declaration = migration
+        .find(first_child_declaration)
+        .expect("dashboard first child declaration");
+    assert!(
+        root_declaration < first_child_declaration,
+        "the dashboard client root must exist before every dependent relation"
     );
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-
-    let (_, Json(existing_link)) = create_migration_link(
-        State(state.clone()),
-        headers.clone(),
-        Json(CreateMigrationLinkRequest {
-            restore_plan_id,
-            confirmed: true,
-            note: Some("run migration".to_string()),
-            privilege_assertion: None,
-        }),
-    )
-    .await
-    .unwrap();
-
-    let (status, Json(response)) = create_migration_run(State(state), headers, Json(request))
-        .await
-        .unwrap();
-
-    assert_eq!(status, axum::http::StatusCode::CREATED);
-    assert_eq!(response.migration_link.id, existing_link.id);
-    assert_eq!(response.restore_job.status, "queued");
-    assert_eq!(response.restore_job.target_count, 1);
-    assert_eq!(response.restore_job.target_counts.total, 1);
-    assert_eq!(response.restore_job.target_counts.queued, 1);
-    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 1);
     assert_eq!(
-        repo.list_jobs(10)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|job| job.command_type == "restore")
+        migration
+            .matches("REFERENCES public.clients(id) ON DELETE CASCADE")
             .count(),
-        1
+        1,
+        "only the immutable dashboard root may reference the mutable client tuple"
     );
-    let dispatch_audit = repo
-        .list_audit_logs(20)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|audit| audit.action == "job.dispatch_requested")
-        .expect("migration job dispatch audit");
+
+    let direct_client_relations = [
+        "telemetry_dashboard_resource_projection_heads",
+        "telemetry_dashboard_network_generations",
+        "telemetry_dashboard_traffic_generations",
+        "telemetry_dashboard_network_projection_heads",
+        "telemetry_dashboard_traffic_projection_heads",
+        "telemetry_dashboard_ping_projection_heads",
+        "telemetry_dashboard_projection_fences",
+        "telemetry_dashboard_block_events",
+        "telemetry_dashboard_generation_events",
+        "telemetry_dashboard_resource_generation_bounds",
+        "telemetry_dashboard_resource_blocks",
+    ];
     assert_eq!(
-        dispatch_audit.metadata["target_client_ids"],
-        serde_json::json!(["rebuilt-client"])
+        migration
+            .matches("REFERENCES public.telemetry_dashboard_clients(client_id)")
+            .count(),
+        direct_client_relations.len()
     );
-    assert!(dispatch_audit.metadata.get("resolved_targets").is_none());
-    let Repository::Memory(memory) = &repo else {
-        unreachable!();
-    };
-    let expected_event_id = format!("job:{}:created", response.restore_job.job_id);
-    let job_created_events = memory
-        .webhook_events
-        .read()
-        .await
-        .iter()
-        .filter(|event| event.kind == "job.created" && event.event_id == expected_event_id)
-        .count();
-    assert_eq!(job_created_events, 1);
+    for relation in direct_client_relations {
+        let declaration = format!("CREATE TABLE public.{relation} (");
+        let body = migration
+            .split_once(&declaration)
+            .unwrap_or_else(|| panic!("missing dashboard relation {relation}"))
+            .1
+            .split_once("\n);\n")
+            .unwrap_or_else(|| panic!("unterminated dashboard relation {relation}"))
+            .0;
+        assert!(
+            body.contains("REFERENCES public.telemetry_dashboard_clients(client_id)")
+                && body.contains("ON DELETE CASCADE"),
+            "dashboard relation {relation} bypasses the stable client root"
+        );
+    }
+
+    let initializer = migration
+        .split_once("CREATE FUNCTION public.initialize_telemetry_dashboard_client()")
+        .expect("dashboard client initializer")
+        .1
+        .split_once("CREATE TRIGGER clients_telemetry_dashboard_initialize")
+        .expect("dashboard client initializer boundary")
+        .0;
+    let root_insert = initializer
+        .find("INSERT INTO public.telemetry_dashboard_clients")
+        .expect("dashboard client root initialization");
+    let first_child_insert = initializer
+        .find("INSERT INTO public.telemetry_dashboard_resource_projection_heads")
+        .expect("dashboard resource-head initialization");
+    assert!(root_insert < first_child_insert);
+    assert!(!migration.contains("UPDATE public.telemetry_dashboard_clients"));
+    assert!(!migration.contains("DELETE FROM public.telemetry_dashboard_clients"));
 }
 
-#[tokio::test]
-async fn migration_run_conflicting_existing_link_creates_no_restore_job() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let (archive_path, archive_size_bytes, archive_sha256_hex) =
-        attach_source_backup_artifact(&repo, source_backup_id).await;
-    let session_id = Uuid::new_v4();
-    seed_completed_archive_upload(
-        &repo,
-        "rebuilt-client",
-        session_id,
-        &archive_path,
-        archive_size_bytes as i64,
-        &archive_sha256_hex,
-    )
-    .await;
-    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
-    let mut request = migration_run_request(restore_plan_id, source_backup_id);
-    bind_migration_archive(
-        &mut request,
-        session_id,
-        archive_path,
-        archive_size_bytes,
-        archive_sha256_hex,
+#[test]
+fn dashboard_source_delete_work_requires_a_live_dashboard_owner() {
+    let migration = include_str!("../../../../../migrations/0006_telemetry_dashboard.sql");
+    for function_name in [
+        "queue_telemetry_resource_blocks_after_delete",
+        "queue_telemetry_network_blocks_after_delete",
+        "maintain_telemetry_ping_series_dashboard_after_delete",
+        "maintain_telemetry_ping_dashboard_after_delete",
+    ] {
+        let declaration = format!("CREATE FUNCTION public.{function_name}()");
+        let body = migration
+            .split_once(&declaration)
+            .unwrap_or_else(|| panic!("missing dashboard delete function {function_name}"))
+            .1
+            .split_once("\n$$;\n")
+            .unwrap_or_else(|| panic!("unterminated dashboard delete function {function_name}"))
+            .0;
+        assert!(
+            body.contains("JOIN public.telemetry_dashboard_clients dashboard_client"),
+            "dashboard delete function {function_name} can emit work after owner removal"
+        );
+    }
+}
+
+#[test]
+fn dashboard_owner_acquisition_scans_one_row_per_ready_owner_without_a_scan_cap() {
+    let migration = include_str!("../../../../../migrations/0006_telemetry_dashboard.sql");
+    let acquisition = migration
+        .split_once("CREATE FUNCTION public.acquire_next_telemetry_dashboard_projection_owner()")
+        .expect("dashboard owner acquisition function")
+        .1
+        .split_once("CREATE FUNCTION public.claim_telemetry_dashboard_projection(")
+        .expect("dashboard owner acquisition boundary")
+        .0;
+
+    let ready_scan = acquisition
+        .find("FROM public.telemetry_dashboard_ready_owners ready")
+        .expect("bounded ready-owner scan");
+    let advisory_probe = acquisition
+        .find("IF pg_try_advisory_lock(candidate.owner_id)")
+        .expect("owner advisory probe");
+    let fence_lookup = acquisition
+        .find("FROM public.telemetry_dashboard_projection_fences fence")
+        .expect("post-lock stable owner fence lookup");
+
+    assert!(ready_scan < advisory_probe && advisory_probe < fence_lookup);
+    assert!(
+        acquisition.contains("WHERE ready.retry_not_before <= clock_timestamp()"),
+        "a failed owner must leave the due set without blocking later owners"
     );
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
+    assert!(acquisition.contains("ORDER BY ready.ready_at, ready.owner_id"));
+    assert!(acquisition.contains("WHERE fence.owner_id = candidate.owner_id"));
+    assert!(acquisition.contains("PERFORM pg_advisory_unlock(candidate.owner_id)"));
+    assert!(acquisition.contains("ready_revision := candidate.wake_revision"));
+    assert!(!acquisition.contains("telemetry_dashboard_block_events"));
+    assert!(!acquisition.contains("telemetry_dashboard_generation_events"));
+    assert!(!acquisition.contains("seen_resource_client_ids"));
+    assert!(!acquisition.contains("seen_network_client_ids"));
+    assert!(
+        !acquisition.contains("LIMIT "),
+        "owner acquisition must scan past every currently locked ready owner"
+    );
 
-    let (_, Json(_)) = create_migration_link(
-        State(state.clone()),
-        headers.clone(),
-        Json(CreateMigrationLinkRequest {
-            restore_plan_id,
-            confirmed: true,
-            note: Some("already linked".to_string()),
-            privilege_assertion: None,
-        }),
-    )
-    .await
-    .unwrap();
+    assert!(migration.contains("CREATE TABLE public.telemetry_dashboard_ready_owners ("));
+    assert!(migration.contains("CREATE INDEX telemetry_dashboard_ready_owners_fifo_idx"));
+    assert!(migration.contains("DEFAULT '-infinity'::TIMESTAMPTZ"));
+    assert!(migration.contains("retry_not_before = '-infinity'::TIMESTAMPTZ"));
+    assert_eq!(
+        migration
+            .matches("EXECUTE FUNCTION public.mark_telemetry_dashboard_owners_ready();")
+            .count(),
+        2,
+        "both immutable event relations must maintain the same ready-owner boundary"
+    );
+    assert!(!migration.contains("telemetry_dashboard_block_events_fifo_idx"));
+    assert!(!migration.contains("telemetry_dashboard_generation_events_fifo_idx"));
 
-    let error = create_migration_run(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(error.code, "migration_link_conflicts_with_request");
-    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 1);
-    assert!(!repo
-        .list_jobs(10)
-        .await
-        .unwrap()
-        .iter()
-        .any(|job| job.command_type == "restore"));
-}
-
-#[tokio::test]
-async fn migration_run_job_conflict_creates_no_migration_link() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let (archive_path, archive_size_bytes, archive_sha256_hex) =
-        attach_source_backup_artifact(&repo, source_backup_id).await;
-    let session_id = Uuid::new_v4();
-    seed_completed_archive_upload(
-        &repo,
-        "rebuilt-client",
-        session_id,
-        &archive_path,
-        archive_size_bytes as i64,
-        &archive_sha256_hex,
-    )
-    .await;
-    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
-    let mut request = migration_run_request(restore_plan_id, source_backup_id);
-    let conflict_job_id = request.job.job_id.unwrap();
-    if let Repository::Memory(memory) = &repo {
-        memory.jobs.write().await.push(JobHistoryView {
-            id: conflict_job_id,
-            actor_id: None,
-            command_type: "shell".to_string(),
-            source_schedule_id: None,
-            causation_id: None,
-            schedule_lineage: Vec::new(),
-            privileged: true,
-            status: "queued".to_string(),
-            target_count: 1,
-            payload_hash: "b".repeat(64),
-            max_timeout_secs: 60,
-            created_at: crate::unix_now().to_string(),
-            completed_at: None,
-        });
-    }
-    if let Some(JobCommand::Restore {
-        archive_transfer_session_id,
-        archive_path: path,
-        archive_size_bytes: size,
-        archive_sha256_hex: hash,
-        ..
-    }) = request.job.operation.as_mut()
-    {
-        *archive_transfer_session_id = session_id;
-        *path = Some(archive_path);
-        *size = Some(archive_size_bytes);
-        *hash = Some(archive_sha256_hex);
-    }
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-
-    let error = create_migration_run(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(error.code, "job_id_reused_with_different_request");
-    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 0);
-    assert!(!repo
-        .list_jobs(10)
-        .await
-        .unwrap()
-        .iter()
-        .any(|job| job.command_type == "restore"));
-}
-
-#[tokio::test]
-async fn migration_link_rejects_missing_restore_plan() {
-    let repo = seeded_migration_repo().await;
-    let request = CreateMigrationLinkRequest {
-        restore_plan_id: Uuid::new_v4(),
-        confirmed: true,
-        note: None,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_migration_link(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "migration_restore_plan_not_found");
-}
-
-#[tokio::test]
-async fn migration_link_rejects_same_source_and_replacement() {
-    let repo = seeded_migration_repo().await;
-    let source_backup_id = create_source_backup(&repo).await;
-    let restore_plan_id =
-        create_restore_plan_record_for_target(&repo, source_backup_id, "source-client").await;
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-
-    let error = create_migration_link(
-        State(state),
-        headers,
-        Json(CreateMigrationLinkRequest {
-            restore_plan_id,
-            confirmed: true,
-            note: None,
-            privilege_assertion: None,
-        }),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "migration_source_and_replacement_must_differ");
-    assert!(repo.list_migration_links(10).await.unwrap().is_empty());
-}
-
-async fn seeded_migration_repo() -> Repository {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        for client_id in ["source-client", "rebuilt-client"] {
-            upsert_memory_agent(
-                &memory.agents,
-                &AgentHello {
-                    client_id: client_id.to_string(),
-                    process_incarnation_id: uuid::Uuid::new_v4(),
-                    agent_version: "test".to_string(),
-                    os_release: "test".to_string(),
-                    arch: "x86_64".to_string(),
-                    cpu_model: None,
-                    kernel_release: None,
-                    virtualization: None,
-                    update_heartbeat: None,
-                    internal_build_number: 1,
-                    capabilities: Default::default(),
-                },
-            )
-            .await;
-        }
-    }
-    repo
-}
-
-async fn create_source_backup(repo: &Repository) -> Uuid {
-    let request = CreateBackupRequest {
-        client_id: "source-client".to_string(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: true,
-        follow_symlinks: false,
-        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
-        confirmed: true,
-        note: Some("pre-migration".to_string()),
-        privilege_assertion: None,
-    };
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (_, Json(view)) = create_backup_request(State(state), headers, Json(request))
-        .await
-        .unwrap();
-    view.id
-}
-
-async fn attach_source_backup_artifact(
-    repo: &Repository,
-    source_backup_id: Uuid,
-) -> (String, u64, String) {
-    let backup = repo
-        .list_backup_requests(10)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|backup| backup.id == source_backup_id)
-        .unwrap();
-    let archive_bytes = b"plain backup artifact for migration restore validation";
-    let archive_sha256_hex = payload_hash(archive_bytes);
-    let archive_size_bytes = archive_bytes.len() as u64;
-    let archive_path = format!("/var/lib/vpsman/restores/{source_backup_id}.tar");
-    repo.record_backup_artifact_metadata(
-        &backup,
-        Uuid::new_v4(),
-        &RecordBackupArtifactMetadataRequest {
-            object_key: format!("backups/{}/{}.tar", backup.client_id, backup.id),
-            sha256_hex: archive_sha256_hex.clone(),
-            size_bytes: archive_size_bytes as i64,
-            confirmed: true,
-        },
-        &migration_test_operator(),
-    )
-    .await
-    .unwrap();
-    (archive_path, archive_size_bytes, archive_sha256_hex)
-}
-
-async fn seed_completed_archive_upload(
-    repo: &Repository,
-    client_id: &str,
-    session_id: Uuid,
-    path: &str,
-    size_bytes: i64,
-    sha256_hex: &str,
-) {
-    if let Repository::Memory(memory) = repo {
-        let job_id = Uuid::new_v4();
-        memory.jobs.write().await.push(JobHistoryView {
-            id: job_id,
-            actor_id: None,
-            command_type: "file_transfer_commit".to_string(),
-            source_schedule_id: None,
-            causation_id: None,
-            schedule_lineage: Vec::new(),
-            privileged: true,
-            status: "completed".to_string(),
-            target_count: 1,
-            payload_hash: "1".repeat(64),
-            max_timeout_secs: 30,
-            created_at: crate::unix_now().to_string(),
-            completed_at: Some(crate::unix_now().to_string()),
-        });
-        let status = serde_json::json!({
-            "type": "file_transfer_commit",
-            "session_id": session_id,
-            "path": path,
-            "next_offset": size_bytes,
-            "size_bytes": size_bytes,
-            "extra": {
-                "sha256_hex": sha256_hex,
-                "mode": 0o600,
-            },
-        });
-        memory.job_outputs.write().await.push(JobOutputView {
-            job_id,
-            client_id: client_id.to_string(),
-            seq: 0,
-            stream: "status".to_string(),
-            data_base64: BASE64_STANDARD.encode(serde_json::to_vec(&status).unwrap()),
-            storage: "inline".to_string(),
-            artifact_object_key: None,
-            artifact_sha256_hex: None,
-            artifact_size_bytes: None,
-            exit_code: Some(0),
-            done: true,
-            received_at: None,
-            created_at: crate::unix_now().to_string(),
-        });
-    }
-}
-
-async fn create_restore_plan_record(repo: &Repository, source_backup_id: Uuid) -> Uuid {
-    create_restore_plan_record_for_target(repo, source_backup_id, "rebuilt-client").await
-}
-
-async fn create_restore_plan_record_for_target(
-    repo: &Repository,
-    source_backup_id: Uuid,
-    target_client_id: &str,
-) -> Uuid {
-    let request = CreateRestorePlanRequest {
-        source_backup_request_id: source_backup_id,
-        target_client_id: target_client_id.to_string(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: true,
-        destination_root: Some("/restore".to_string()),
-        confirmed: true,
-        note: Some("restore to rebuilt node".to_string()),
-        privilege_assertion: None,
-    };
-    let state = test_state(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (_, Json(view)) = create_restore_plan(State(state), headers, Json(request))
-        .await
-        .unwrap();
-    view.id
-}
-
-fn migration_run_request(
-    restore_plan_id: Uuid,
-    source_backup_id: Uuid,
-) -> CreateMigrationRunRequest {
-    let operation = JobCommand::Restore {
-        source_backup_request_id: source_backup_id,
-        archive_transfer_session_id: Uuid::new_v4(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: true,
-        destination_root: Some("/restore".to_string()),
-        archive_path: Some("/var/lib/vpsman/archive.tar".to_string()),
-        archive_size_bytes: Some(1024),
-        archive_sha256_hex: Some("a".repeat(64)),
-        dry_run: false,
-        post_restore_argv: Vec::new(),
-    };
-    CreateMigrationRunRequest {
-        link: CreateMigrationLinkRequest {
-            restore_plan_id,
-            confirmed: true,
-            note: Some("run migration".to_string()),
-            privilege_assertion: None,
-        },
-        job: CreateJobRequest {
-            job_id: Some(Uuid::new_v4()),
-            selector_expression: "id:rebuilt-client".to_string(),
-            target_client_ids: vec!["rebuilt-client".to_string()],
-            destructive: true,
-            confirmed: true,
-            command: "restore".to_string(),
-            argv: Vec::new(),
-            operation: Some(operation),
-            max_timeout_secs: Some(60),
-            force_unprivileged: false,
-            privileged: true,
-            privilege_assertion: None,
-            rollout: None,
-        },
-    }
-}
-
-fn bind_migration_archive(
-    request: &mut CreateMigrationRunRequest,
-    session_id: Uuid,
-    archive_path: String,
-    archive_size_bytes: u64,
-    archive_sha256_hex: String,
-) {
-    let Some(JobCommand::Restore {
-        archive_transfer_session_id,
-        archive_path: path,
-        archive_size_bytes: size,
-        archive_sha256_hex: hash,
-        ..
-    }) = request.job.operation.as_mut()
-    else {
-        panic!("migration test request must contain a restore operation");
-    };
-    *archive_transfer_session_id = session_id;
-    *path = Some(archive_path);
-    *size = Some(archive_size_bytes);
-    *hash = Some(archive_sha256_hex);
-}
-
-fn test_state(repo: Repository) -> AppState {
-    let (events, _) = crate::state::WsEventBus::new(1);
-    AppState {
-        repo,
-        events,
-        internal_token: None,
-        gateway: GatewayDispatchClient::new(
-            Some("http://127.0.0.1:9".to_string()),
-            Some("test-token-32-byte-minimum-value".to_string()),
-        )
-        .with_test_privilege_auto_approve(),
-        backup_object_store: None,
-        update_release_policy: Default::default(),
-        job_output_artifact_min_bytes: 32768,
-        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
-        require_registered_agent_updates: false,
-        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
-        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
-    }
-}
-
-fn migration_test_operator() -> AuthContext {
-    AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "migration-test-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: None,
+    let claim = migration
+        .split_once("CREATE FUNCTION public.claim_telemetry_dashboard_projection(")
+        .expect("dashboard owner claim function")
+        .1
+        .split_once("CREATE FUNCTION public.publish_telemetry_dashboard_projection(")
+        .expect("dashboard owner claim boundary")
+        .0;
+    for (relation, index) in [
+        (
+            "public.telemetry_dashboard_block_events event",
+            "telemetry_dashboard_block_events_owner_event_idx",
+        ),
+        (
+            "public.telemetry_dashboard_generation_events event",
+            "telemetry_dashboard_generation_events_owner_event_idx",
+        ),
+    ] {
+        assert!(claim.contains(relation));
+        assert!(claim.contains("event.client_id = locked.client_id"));
+        assert!(claim.contains("event.domain = locked.domain"));
+        assert!(migration.contains(&format!("CREATE INDEX {index}")));
     }
 }

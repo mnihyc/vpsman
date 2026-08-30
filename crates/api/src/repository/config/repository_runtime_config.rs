@@ -1,91 +1,276 @@
-use anyhow::Result;
-use sqlx::{Postgres, Row, Transaction};
-use tokio::sync::OwnedMutexGuard;
+use anyhow::{Context, Result};
+use sqlx::{postgres::PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::AgentRuntimeConfig;
 
 use crate::runtime_config_workspace::runtime_config_override_revision;
 use crate::{
     model::{
-        AuditLogView, AuthContext, RuntimeConfigApplyStateRecord, RuntimeConfigApplyStateView,
+        AuthContext, RuntimeConfigApplyStateRecord, RuntimeConfigApplyStateView,
         RuntimeConfigOverrideReplacement, RuntimeConfigOverrideView,
     },
-    repository::{MemoryState, Repository},
-    repository_key_lifecycle::require_visible_memory_clients,
-    unix_now,
+    repository::Repository,
+    repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx,
 };
 
-pub(crate) enum RuntimeConfigDesiredStateGuard {
-    Memory {
-        memory: Box<MemoryState>,
-        _agent_lifecycle: OwnedMutexGuard<()>,
-    },
-    Postgres {
-        tx: Transaction<'static, Postgres>,
-    },
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedRuntimeConfigReconciliation {
+    pub(crate) client_id: String,
+    pub(crate) desired_revision: i64,
+    pub(crate) reason: String,
+    pub(crate) claim_token: Uuid,
+    pub(crate) apply_version: u64,
+    pool: PgPool,
 }
 
-pub(crate) async fn queue_runtime_config_apply_memory_state(
-    memory: &MemoryState,
-    client_id: &str,
-    version: u64,
-    content_hash: &str,
-    config: &AgentRuntimeConfig,
-    job_id: Uuid,
-    reason: &str,
-) {
-    let now = unix_now().to_string();
-    let reason = reason.chars().take(4096).collect::<String>();
-    let mut states = memory.runtime_config_apply_states.write().await;
-    if let Some(state) = states.iter_mut().find(|state| state.client_id == client_id) {
-        let newest_recorded_version = [state.applied_version, state.pending_version]
-            .into_iter()
-            .flatten()
-            .max()
-            .unwrap_or(0);
-        if version <= newest_recorded_version {
-            return;
+pub(crate) enum RuntimeConfigDesiredStateGuard {
+    Postgres { tx: Transaction<'static, Postgres> },
+}
+
+impl ClaimedRuntimeConfigReconciliation {
+    pub(crate) async fn renew(&self, lease_secs: i32) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE client_runtime_config_reconcile_work
+            SET lease_until = now() + make_interval(secs => $4), updated_at = now()
+            WHERE client_id = $1
+              AND desired_revision = $2
+              AND claim_token = $3
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(self.desired_revision)
+        .bind(self.claim_token)
+        .bind(lease_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub(crate) async fn defer(self, error: &str, retry_secs: i32) -> Result<bool> {
+        let error = error.chars().take(4096).collect::<String>();
+        let result = sqlx::query(
+            r#"
+            UPDATE client_runtime_config_reconcile_work
+            SET claim_token = NULL,
+                claim_revision = NULL,
+                apply_version = NULL,
+                lease_until = NULL,
+                next_attempt_at = now() + make_interval(secs => $4),
+                last_error = $5,
+                updated_at = now()
+            WHERE client_id = $1
+              AND desired_revision = $2
+              AND claim_token = $3
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(self.desired_revision)
+        .bind(self.claim_token)
+        .bind(retry_secs)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Completes an effective no-op under the same token/revision/lease fence
+    /// used by job creation. The nested option distinguishes "not current"
+    /// from "already applied" (no job id) and "same job queued".
+    pub(crate) async fn acknowledge_if_content_current(
+        &self,
+        content_hash: &str,
+    ) -> Result<Option<Option<Uuid>>> {
+        let mut tx = self.pool.begin().await?;
+        let owns_revision = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT source_revision
+            FROM client_runtime_config_owners
+            WHERE client_id = $1
+              AND source_revision = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(self.desired_revision)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if !owns_revision {
+            tx.rollback().await?;
+            return Ok(None);
         }
-        state.pending_version = Some(version);
-        state.pending_content_hash = Some(content_hash.to_string());
-        state.pending_config = Some(config.clone());
-        state.pending_job_id = Some(job_id);
-        state.pending_reason = Some(reason);
-        state.pending_status = Some("queued".to_string());
-        state.pending_error = None;
-        state.pending_updated_at = Some(now.clone());
-        state.updated_at = now;
-    } else {
-        states.push(RuntimeConfigApplyStateRecord {
-            client_id: client_id.to_string(),
-            applied_version: None,
-            applied_content_hash: None,
-            applied_config: None,
-            applied_job_id: None,
-            applied_at: None,
-            pending_version: Some(version),
-            pending_content_hash: Some(content_hash.to_string()),
-            pending_config: Some(config.clone()),
-            pending_job_id: Some(job_id),
-            pending_reason: Some(reason),
-            pending_status: Some("queued".to_string()),
-            pending_error: None,
-            pending_updated_at: Some(now.clone()),
-            updated_at: now,
-        });
+
+        let owns_work = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT desired_revision
+            FROM client_runtime_config_reconcile_work
+            WHERE client_id = $1
+              AND desired_revision = $2
+              AND claim_token = $3
+              AND apply_version = $4
+              AND lease_until > now()
+            FOR UPDATE
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(self.desired_revision)
+        .bind(self.claim_token)
+        .bind(self.apply_version as i64)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if !owns_work {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let state = sqlx::query(
+            r#"
+            SELECT
+                COALESCE(lower(applied_content_hash) = lower($2), FALSE)
+                    AS applied_current,
+                COALESCE(
+                    pending_status = 'queued'
+                    AND lower(pending_content_hash) = lower($2),
+                    FALSE
+                ) AS pending_current,
+                pending_job_id
+            FROM client_runtime_config_apply_state
+            WHERE client_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(content_hash)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(state) = state else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let applied_current: bool = state.try_get("applied_current")?;
+        let pending_current: bool = state.try_get("pending_current")?;
+        if !applied_current && !pending_current {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let pending_job_id: Option<Uuid> = if pending_current {
+            state.try_get("pending_job_id")?
+        } else {
+            None
+        };
+
+        let advanced = sqlx::query(
+            r#"
+            UPDATE client_runtime_config_owners
+            SET reconciled_revision = $2, updated_at = now()
+            WHERE client_id = $1
+              AND source_revision = $2
+              AND reconciled_revision <= $2
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(self.desired_revision)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            advanced.rows_affected() == 1,
+            "runtime_config_reconcile_claim_lost"
+        );
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM client_runtime_config_reconcile_work
+            WHERE client_id = $1
+              AND desired_revision = $2
+              AND claim_token = $3
+              AND apply_version = $4
+            "#,
+        )
+        .bind(&self.client_id)
+        .bind(self.desired_revision)
+        .bind(self.claim_token)
+        .bind(self.apply_version as i64)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            deleted.rows_affected() == 1,
+            "runtime_config_reconcile_claim_lost"
+        );
+        tx.commit().await?;
+        Ok(Some(pending_job_id))
     }
 }
 
 pub(crate) async fn queue_runtime_config_apply_postgres_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     client_id: &str,
+    desired_revision: i64,
     version: u64,
     content_hash: &str,
     config: &AgentRuntimeConfig,
     job_id: Uuid,
     reason: &str,
+    claim_token: Uuid,
 ) -> Result<()> {
     let reason = reason.chars().take(4096).collect::<String>();
+    // Producers and consumers both acquire the exact desired-state owner
+    // before its work row. This prevents the source-trigger owner->work path
+    // from cycling with completion while retaining the same revision fence.
+    let owned_revision = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT source_revision
+        FROM client_runtime_config_owners
+        WHERE client_id = $1
+          AND source_revision = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(client_id)
+    .bind(desired_revision)
+    .fetch_optional(&mut **tx)
+    .await?
+    .context("runtime_config_reconcile_claim_lost")?;
+    let deleted_revision = sqlx::query_scalar::<_, i64>(
+        r#"
+        DELETE FROM client_runtime_config_reconcile_work
+        WHERE client_id = $1
+          AND desired_revision = $2
+          AND claim_revision = $2
+          AND apply_version = $3
+          AND claim_token = $4
+          AND lease_until > now()
+        RETURNING desired_revision
+        "#,
+    )
+    .bind(client_id)
+    .bind(desired_revision)
+    .bind(version as i64)
+    .bind(claim_token)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let deleted_revision = deleted_revision.context("runtime_config_reconcile_claim_lost")?;
+    anyhow::ensure!(
+        deleted_revision == owned_revision,
+        "runtime_config_reconcile_claim_lost"
+    );
+    let advanced = sqlx::query(
+        r#"
+        UPDATE client_runtime_config_owners
+        SET reconciled_revision = $2, updated_at = now()
+        WHERE client_id = $1
+          AND source_revision = $2
+          AND reconciled_revision <= $2
+        "#,
+    )
+    .bind(client_id)
+    .bind(owned_revision)
+    .execute(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        advanced.rows_affected() == 1,
+        "runtime_config_reconcile_claim_lost"
+    );
     sqlx::query(
         r#"
         INSERT INTO client_runtime_config_apply_state (
@@ -130,29 +315,132 @@ pub(crate) async fn queue_runtime_config_apply_postgres_in_tx(
 }
 
 impl Repository {
+    /// Ensures an exact client has durable work without superseding a producer
+    /// revision already committed by the source mutation. This is the
+    /// post-commit response/wake path; source triggers remain the authority.
+    pub(crate) async fn ensure_runtime_config_reconciliations(
+        &self,
+        client_ids: &[String],
+        reason: &str,
+        requested_by: Option<Uuid>,
+    ) -> Result<()> {
+        if client_ids.is_empty() {
+            return Ok(());
+        }
+        let reason = reason.chars().take(4096).collect::<String>();
+        match self {
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE client_runtime_config_reconcile_work
+                    SET reason = $2, requested_by = $3, updated_at = now()
+                    WHERE client_id = ANY($1::text[])
+                      AND claim_token IS NULL
+                    "#,
+                )
+                .bind(client_ids)
+                .bind(reason)
+                .bind(requested_by)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Explicit reloads are themselves desired-state events. Unlike the
+    /// response-only ensure path, they supersede an older claim atomically.
+    pub(crate) async fn enqueue_runtime_config_reconciliations(
+        &self,
+        client_ids: &[String],
+        reason: &str,
+        requested_by: Option<Uuid>,
+    ) -> Result<()> {
+        if client_ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                sqlx::query("SELECT enqueue_runtime_config_reconcile($1, $2, $3)")
+                    .bind(client_ids)
+                    .bind(reason)
+                    .bind(requested_by)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn claim_runtime_config_reconciliation(
+        &self,
+        client_id: Option<&str>,
+        lease_secs: i32,
+    ) -> Result<Option<ClaimedRuntimeConfigReconciliation>> {
+        match self {
+            Self::Postgres(pool) => {
+                let claim_token = Uuid::new_v4();
+                let row = sqlx::query(
+                    r#"
+                    WITH candidate AS (
+                        SELECT work.client_id
+                        FROM client_runtime_config_reconcile_work work
+                        JOIN visible_clients client ON client.id = work.client_id
+                        WHERE ($1::text IS NULL OR work.client_id = $1)
+                          AND client.status NOT IN ('suspended', 'revoked', 'deleted')
+                          AND client.status <> 'never'
+                          AND client.process_incarnation_id IS NOT NULL
+                          AND work.next_attempt_at <= now()
+                          AND (work.claim_token IS NULL OR work.lease_until <= now())
+                        ORDER BY work.next_attempt_at, work.updated_at, work.client_id
+                        FOR UPDATE OF work SKIP LOCKED
+                        LIMIT 1
+                    )
+                    UPDATE client_runtime_config_reconcile_work work
+                    SET claim_token = $2,
+                        claim_revision = work.desired_revision,
+                        apply_version = nextval('runtime_config_apply_version_seq'),
+                        lease_until = now() + make_interval(secs => $3),
+                        attempt_count = work.attempt_count + 1,
+                        last_error = NULL,
+                        updated_at = now()
+                    FROM candidate
+                    WHERE work.client_id = candidate.client_id
+                    RETURNING
+                        work.client_id,
+                        work.desired_revision,
+                        work.reason,
+                        work.claim_token,
+                        work.apply_version
+                    "#,
+                )
+                .bind(client_id)
+                .bind(claim_token)
+                .bind(lease_secs)
+                .fetch_optional(pool)
+                .await?;
+                row.map(|row| {
+                    let apply_version: i64 = row.try_get("apply_version")?;
+                    anyhow::ensure!(apply_version > 0, "runtime_config_apply_version_invalid");
+                    Ok(ClaimedRuntimeConfigReconciliation {
+                        client_id: row.try_get("client_id")?,
+                        desired_revision: row.try_get("desired_revision")?,
+                        reason: row.try_get("reason")?,
+                        claim_token: row.try_get("claim_token")?,
+                        apply_version: apply_version as u64,
+                        pool: pool.clone(),
+                    })
+                })
+                .transpose()
+            }
+        }
+    }
+
     pub(crate) async fn list_runtime_config_apply_records(
         &self,
         client_id: Option<&str>,
     ) -> Result<Vec<RuntimeConfigApplyStateRecord>> {
         match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let mut states = memory
-                    .runtime_config_apply_states
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|state| {
-                        !hidden.contains(&state.client_id)
-                            && client_id
-                                .map(|client_id| state.client_id == client_id)
-                                .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                states.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-                Ok(states)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -224,57 +512,6 @@ impl Repository {
             .collect())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn runtime_config_applied_state_for_client(
-        &self,
-        client_id: &str,
-    ) -> Result<Option<(u64, String, AgentRuntimeConfig)>> {
-        match self {
-            Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    return Ok(None);
-                }
-                Ok(memory
-                    .runtime_config_apply_states
-                    .read()
-                    .await
-                    .iter()
-                    .find(|state| state.client_id == client_id)
-                    .and_then(|state| {
-                        Some((
-                            state.applied_version?,
-                            state.applied_content_hash.clone()?,
-                            state.applied_config.clone()?,
-                        ))
-                    }))
-            }
-            Self::Postgres(pool) => {
-                let Some(row) = sqlx::query(
-                    r#"
-                    SELECT applied_version, applied_content_hash, applied_config
-                    FROM client_runtime_config_apply_state state
-                    JOIN visible_clients client ON client.id = state.client_id
-                    WHERE state.client_id = $1
-                      AND applied_version IS NOT NULL
-                      AND applied_content_hash IS NOT NULL
-                      AND applied_config IS NOT NULL
-                    "#,
-                )
-                .bind(client_id)
-                .fetch_optional(pool)
-                .await?
-                else {
-                    return Ok(None);
-                };
-                let version: i64 = row.try_get("applied_version")?;
-                let hash: String = row.try_get("applied_content_hash")?;
-                let config: sqlx::types::Json<AgentRuntimeConfig> =
-                    row.try_get("applied_config")?;
-                Ok(Some((version as u64, hash, config.0)))
-            }
-        }
-    }
-
     pub(crate) async fn runtime_config_pending_state_for_client(
         &self,
         client_id: &str,
@@ -287,95 +524,12 @@ impl Repository {
             .filter(|state| state.pending_status.is_some()))
     }
 
-    #[cfg(test)]
-    pub(crate) async fn queue_runtime_config_apply(
-        &self,
-        client_id: &str,
-        version: u64,
-        content_hash: &str,
-        config: &AgentRuntimeConfig,
-        job_id: Uuid,
-        reason: &str,
-    ) -> Result<()> {
-        match self {
-            Self::Memory(memory) => {
-                queue_runtime_config_apply_memory_state(
-                    memory,
-                    client_id,
-                    version,
-                    content_hash,
-                    config,
-                    job_id,
-                    reason,
-                )
-                .await;
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                queue_runtime_config_apply_postgres_in_tx(
-                    &mut tx,
-                    client_id,
-                    version,
-                    content_hash,
-                    config,
-                    job_id,
-                    reason,
-                )
-                .await?;
-                tx.commit().await?;
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn mark_runtime_config_apply_job_create_failed(
-        &self,
-        client_id: &str,
-        job_id: Uuid,
-        error: &str,
-    ) -> Result<()> {
-        self.mark_runtime_config_apply_failed_for_job(job_id, client_id, error)
-            .await
-    }
-
     pub(crate) async fn promote_runtime_config_apply_from_agent_hash(
         &self,
         client_id: &str,
         content_hash: &str,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                if let Some(state) = memory
-                    .runtime_config_apply_states
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|state| {
-                        state.client_id == client_id
-                            && state
-                                .pending_content_hash
-                                .as_deref()
-                                .is_some_and(|hash| hash.eq_ignore_ascii_case(content_hash))
-                    })
-                {
-                    state.applied_version = state.pending_version;
-                    state.applied_content_hash = state.pending_content_hash.clone();
-                    state.applied_config = state.pending_config.clone();
-                    state.applied_job_id = state.pending_job_id;
-                    state.applied_at = Some(now.clone());
-                    state.pending_version = None;
-                    state.pending_content_hash = None;
-                    state.pending_config = None;
-                    state.pending_job_id = None;
-                    state.pending_reason = None;
-                    state.pending_status = None;
-                    state.pending_error = None;
-                    state.pending_updated_at = None;
-                    state.updated_at = now;
-                }
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -418,7 +572,7 @@ impl Repository {
         // pending_job_id is the durable relation between a runtime-config apply
         // and its target job. The update helpers below are compare-and-set
         // no-ops for unrelated jobs, so terminal processing does not need to
-        // decode jobs.operation (which may be corrupt legacy data).
+        // decode jobs.operation (which may be corrupt persisted data).
         if target_status == vpsman_server_core::TARGET_STATUS_COMPLETED {
             self.promote_runtime_config_apply_for_job(job_id, client_id)
                 .await?;
@@ -439,33 +593,6 @@ impl Repository {
         client_id: &str,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                if let Some(state) = memory
-                    .runtime_config_apply_states
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|state| {
-                        state.client_id == client_id && state.pending_job_id == Some(job_id)
-                    })
-                {
-                    state.applied_version = state.pending_version;
-                    state.applied_content_hash = state.pending_content_hash.clone();
-                    state.applied_config = state.pending_config.clone();
-                    state.applied_job_id = Some(job_id);
-                    state.applied_at = Some(now.clone());
-                    state.pending_version = None;
-                    state.pending_content_hash = None;
-                    state.pending_config = None;
-                    state.pending_job_id = None;
-                    state.pending_reason = None;
-                    state.pending_status = None;
-                    state.pending_error = None;
-                    state.pending_updated_at = None;
-                    state.updated_at = now;
-                }
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -506,23 +633,6 @@ impl Repository {
     ) -> Result<()> {
         let error = error.chars().take(4096).collect::<String>();
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                if let Some(state) = memory
-                    .runtime_config_apply_states
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|state| {
-                        state.client_id == client_id && state.pending_job_id == Some(job_id)
-                    })
-                {
-                    state.pending_status = Some("failed".to_string());
-                    state.pending_error = Some(error);
-                    state.pending_updated_at = Some(now.clone());
-                    state.updated_at = now;
-                }
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -551,16 +661,6 @@ impl Repository {
         client_id: Option<&str>,
     ) -> Result<Vec<RuntimeConfigOverrideView>> {
         match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let mut overrides = memory.runtime_config_overrides.read().await.clone();
-                overrides.retain(|override_record| !hidden.contains(&override_record.client_id));
-                if let Some(client_id) = client_id {
-                    overrides.retain(|override_record| override_record.client_id == client_id);
-                }
-                overrides.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-                Ok(overrides)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -602,26 +702,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let selected = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<std::collections::BTreeSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let mut overrides = memory
-                    .runtime_config_overrides
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|record| {
-                        selected.contains(record.client_id.as_str())
-                            && !hidden.contains(&record.client_id)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                overrides.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-                Ok(overrides)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -655,40 +735,77 @@ impl Repository {
         }
     }
 
-    /// Holds every desired-config input stable while a reviewed override is
-    /// re-previewed and committed. Reads continue; preset/Ping/client changes,
-    /// tunnel or adapter changes, and port-forward changes wait for the guard.
+    /// Serializes a reviewed mutation only with producers for the same VPSes.
+    /// The canonical order is exact client lifecycle, visible client identity,
+    /// then desired-state owner. Lifecycle-sensitive writers use that order;
+    /// other composed-source writers serialize at their BEFORE trigger without
+    /// taking a source-row lock after the owner. Reviewed mutations therefore
+    /// cannot invert client and desired-state ownership.
     pub(crate) async fn lock_runtime_config_desired_state(
         &self,
+        client_ids: &[String],
     ) -> Result<RuntimeConfigDesiredStateGuard> {
         match self {
-            Self::Memory(memory) => {
-                let agent_lifecycle = memory.agent_key_lifecycle.clone().lock_owned().await;
-                Ok(RuntimeConfigDesiredStateGuard::Memory {
-                    memory: Box::new(memory.clone()),
-                    _agent_lifecycle: agent_lifecycle,
-                })
-            }
             Self::Postgres(pool) => {
-                anyhow::ensure!(
-                    pool.options().get_max_connections() >= 2,
-                    "runtime_config_desired_state_pool_capacity_too_small"
-                );
+                let mut client_ids = client_ids.to_vec();
+                client_ids.sort();
+                client_ids.dedup();
+                anyhow::ensure!(!client_ids.is_empty(), "runtime_config_targets_required");
                 let mut tx = pool.begin().await?;
                 sqlx::query("SET LOCAL lock_timeout = '10s'")
                     .execute(&mut *tx)
                     .await?;
-                let lifecycle_locked = sqlx::query_scalar::<_, bool>(
-                    "SELECT pg_try_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))",
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &client_ids).await?;
+                let visible = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT id
+                    FROM visible_clients
+                    WHERE id = ANY($1::text[])
+                    ORDER BY id
+                    FOR KEY SHARE
+                    "#,
                 )
-                .fetch_one(&mut *tx)
+                .bind(&client_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                anyhow::ensure!(lifecycle_locked, "runtime_config_desired_state_busy");
+                anyhow::ensure!(
+                    visible.len() == client_ids.len(),
+                    "runtime_config_target_no_longer_available"
+                );
                 sqlx::query(
-                    "LOCK TABLE tunnel_plans, network_adapter_definitions, port_forward_rules IN SHARE MODE",
+                    r#"
+                    INSERT INTO client_runtime_config_owners (
+                        client_id, source_revision, reconciled_revision
+                    )
+                    SELECT
+                        client.id,
+                        0,
+                        0
+                    FROM visible_clients client
+                    WHERE client.id = ANY($1::text[])
+                    ORDER BY client.id COLLATE "C"
+                    ON CONFLICT (client_id) DO NOTHING
+                    "#,
                 )
+                .bind(&client_ids)
                 .execute(&mut *tx)
                 .await?;
+                let locked = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT client_id
+                    FROM client_runtime_config_owners
+                    WHERE client_id = ANY($1::text[])
+                    ORDER BY client_id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&client_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(
+                    locked.len() == client_ids.len(),
+                    "runtime_config_target_no_longer_available"
+                );
                 Ok(RuntimeConfigDesiredStateGuard::Postgres { tx })
             }
         }
@@ -704,7 +821,11 @@ impl Repository {
         reason: &str,
         operator: &AuthContext,
     ) -> Result<Vec<RuntimeConfigOverrideView>> {
-        let guard = self.lock_runtime_config_desired_state().await?;
+        let client_ids = replacements
+            .iter()
+            .map(|replacement| replacement.client_id.clone())
+            .collect::<Vec<_>>();
+        let guard = self.lock_runtime_config_desired_state(&client_ids).await?;
         self.replace_runtime_config_overrides_cas_locked(guard, replacements, reason, operator)
             .await
     }
@@ -727,96 +848,8 @@ impl Repository {
             .map(|replacement| replacement.client_id.clone())
             .collect::<Vec<_>>();
         match guard {
-            RuntimeConfigDesiredStateGuard::Memory {
-                memory,
-                _agent_lifecycle,
-            } => {
-                require_visible_memory_clients(
-                    &memory,
-                    &client_ids,
-                    "runtime_config_target_no_longer_available",
-                )
-                .await?;
-                let mut overrides = memory.runtime_config_overrides.write().await;
-                for replacement in &replacements {
-                    let current = overrides
-                        .iter()
-                        .find(|record| record.client_id == replacement.client_id);
-                    anyhow::ensure!(
-                        runtime_config_override_revision(current) == replacement.expected_revision,
-                        "runtime_config_override_review_stale"
-                    );
-                }
-                let now = unix_now().to_string();
-                for replacement in &replacements {
-                    match replacement.toml.as_deref() {
-                        Some(toml) => {
-                            if let Some(existing) = overrides
-                                .iter_mut()
-                                .find(|record| record.client_id == replacement.client_id)
-                            {
-                                existing.toml = toml.to_string();
-                                existing.reason = reason.to_string();
-                                existing.updated_at = now.clone();
-                                existing.updated_by = Some(operator.operator.id);
-                            } else {
-                                overrides.push(RuntimeConfigOverrideView {
-                                    client_id: replacement.client_id.clone(),
-                                    toml: toml.to_string(),
-                                    reason: reason.to_string(),
-                                    updated_at: now.clone(),
-                                    updated_by: Some(operator.operator.id),
-                                });
-                            }
-                        }
-                        None => {
-                            overrides.retain(|record| record.client_id != replacement.client_id)
-                        }
-                    }
-                }
-                let selected = overrides
-                    .iter()
-                    .filter(|record| client_ids.contains(&record.client_id))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                drop(overrides);
-                let mut audits = memory.audits.write().await;
-                for replacement in &replacements {
-                    audits.push(AuditLogView {
-                        id: Uuid::new_v4(),
-                        actor_id: Some(operator.operator.id),
-                        action: if replacement.toml.is_some() {
-                            "runtime_config.client_override_replaced".to_string()
-                        } else {
-                            "runtime_config.client_override_reset".to_string()
-                        },
-                        target: format!("client:{}", replacement.client_id),
-                        command_hash: None,
-                        metadata: runtime_config_override_audit_metadata(
-                            &replacement.client_id,
-                            reason,
-                            operator,
-                        ),
-                        created_at: now.clone(),
-                    });
-                }
-                drop(_agent_lifecycle);
-                Ok(selected)
-            }
             RuntimeConfigDesiredStateGuard::Postgres { mut tx } => {
                 let mutation: Result<Vec<RuntimeConfigOverrideView>> = async {
-                    for client_id in &client_ids {
-                        let visible = sqlx::query_scalar::<_, String>(
-                            "SELECT id FROM clients WHERE id = $1 AND hidden_at IS NULL FOR UPDATE",
-                        )
-                        .bind(client_id)
-                        .fetch_optional(&mut *tx)
-                        .await?;
-                        anyhow::ensure!(
-                            visible.is_some(),
-                            "runtime_config_target_no_longer_available"
-                        );
-                    }
                     for replacement in &replacements {
                         let current = sqlx::query(
                             r#"
@@ -860,6 +893,18 @@ impl Repository {
                             .execute(&mut *tx)
                             .await?;
                         } else {
+                            sqlx::query(
+                                r#"
+                                UPDATE client_runtime_config_overrides
+                                SET reason = $2, updated_by = $3, updated_at = now()
+                                WHERE client_id = $1
+                                "#,
+                            )
+                            .bind(&replacement.client_id)
+                            .bind(reason)
+                            .bind(operator.operator.id)
+                            .execute(&mut *tx)
+                            .await?;
                             sqlx::query(
                                 "DELETE FROM client_runtime_config_overrides WHERE client_id = $1",
                             )
@@ -949,4 +994,77 @@ fn runtime_config_override_audit_metadata(
         "origin_kind": "operator_request",
         "component": "runtime-config-controller",
     })
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    fn assert_owner_precedes_work(section: &str) {
+        let owner = section
+            .find("client_runtime_config_owners")
+            .expect("runtime-config owner access");
+        let work = section
+            .find("client_runtime_config_reconcile_work")
+            .expect("runtime-config work access");
+        assert!(owner < work, "desired-state owner must precede work");
+    }
+
+    #[test]
+    fn runtime_config_producer_and_completions_share_owner_then_work_order() {
+        let source = include_str!("repository_runtime_config.rs");
+        let acknowledge = source
+            .split_once("pub(crate) async fn acknowledge_if_content_current")
+            .expect("no-op completion")
+            .1
+            .split_once("pub(crate) async fn queue_runtime_config_apply_postgres_in_tx")
+            .expect("job completion boundary")
+            .0;
+        assert_owner_precedes_work(acknowledge);
+        assert!(!acknowledge.contains("FOR UPDATE OF work, owner"));
+
+        let queue = source
+            .split_once("pub(crate) async fn queue_runtime_config_apply_postgres_in_tx")
+            .expect("job completion")
+            .1
+            .split_once("impl Repository")
+            .expect("repository boundary")
+            .0;
+        assert_owner_precedes_work(queue);
+
+        let schema = include_str!("../../../../../migrations/0009_config_presets_transfers.sql");
+        let producer = schema
+            .split_once("CREATE FUNCTION public.enqueue_runtime_config_reconcile")
+            .expect("runtime-config producer")
+            .1
+            .split_once("CREATE FUNCTION public.produce_runtime_config_override_reconcile")
+            .expect("producer boundary")
+            .0;
+        assert_owner_precedes_work(producer);
+    }
+
+    #[test]
+    fn runtime_config_claims_only_deliverable_clients_and_hello_wakes_exact_work() {
+        let source = include_str!("repository_runtime_config.rs");
+        let claim = source
+            .split_once("pub(crate) async fn claim_runtime_config_reconciliation")
+            .expect("runtime-config claim")
+            .1
+            .split_once("pub(crate) async fn list_runtime_config_apply_records")
+            .expect("claim boundary")
+            .0;
+        assert!(claim.contains("client.status <> 'never'"));
+        assert!(claim.contains("client.process_incarnation_id IS NOT NULL"));
+
+        let schema = include_str!("../../../../../migrations/0009_config_presets_transfers.sql");
+        let lifecycle = schema
+            .split_once("CREATE FUNCTION public.maintain_runtime_config_work_for_client_lifecycle")
+            .expect("runtime-config lifecycle")
+            .1
+            .split_once("CREATE TRIGGER client_runtime_config_overrides_reconcile")
+            .expect("lifecycle boundary")
+            .0;
+        assert!(lifecycle
+            .contains("OLD.process_incarnation_id IS DISTINCT FROM NEW.process_incarnation_id"));
+        assert!(lifecycle.contains("next_attempt_at = LEAST(work.next_attempt_at, now())"));
+        assert!(lifecycle.contains("pg_notify('runtime_config_reconcile', 'ready')"));
+    }
 }

@@ -1,7 +1,7 @@
 import { AlertTriangle, Bell, ExternalLink, RadioTower } from "lucide-react";
 import { useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
-import { FLEET_DETAIL_LIMIT, formatBoundedCount } from "../../constants";
+import { formatBoundedCount } from "../../constants";
 import { handleTabListKeyDown, tabId } from "../../components/AccessibleTabs";
 import {
   isActivePolicyAlert,
@@ -39,6 +39,7 @@ type AlertsPanelProps = {
   currentPolicyAlertsTruncated: boolean;
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
   fleetAlertNotifications: FleetAlertNotificationDeliveryRecord[];
+  fleetAlertNotificationsTruncated: boolean;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   fleetAlerts: FleetAlertRecord[];
   fleetAlertsEvidenceAvailable: boolean;
@@ -74,6 +75,7 @@ type AlertsPanelProps = {
   policyFocusId: string | null;
   policyAlerts: PolicyAlertRecord[];
   policyAlertsEvidenceAvailable: boolean;
+  policyAlertsTruncated: boolean;
 };
 
 export function AlertsPanel({
@@ -85,6 +87,7 @@ export function AlertsPanel({
   currentPolicyAlertsTruncated,
   fleetAlertNotificationChannels,
   fleetAlertNotifications,
+  fleetAlertNotificationsTruncated,
   fleetAlertPolicies,
   fleetAlerts,
   fleetAlertsEvidenceAvailable,
@@ -104,6 +107,7 @@ export function AlertsPanel({
   policyFocusId,
   policyAlerts,
   policyAlertsEvidenceAvailable,
+  policyAlertsTruncated,
 }: AlertsPanelProps) {
   const [activeTab, setActiveTab] = useState<AlertConfigTab>("policies");
   const [policyEditorOpen, setPolicyEditorOpen] = useState(false);
@@ -133,9 +137,7 @@ export function AlertsPanel({
     ["critical", "warning"].includes(alert.severity),
   ).length;
   const policyAlertHistoryTruncated =
-    policyAlertsEvidenceAvailable && policyAlerts.length >= FLEET_DETAIL_LIMIT;
-  const deliveriesTruncated =
-    fleetAlertNotifications.length >= FLEET_DETAIL_LIMIT;
+    policyAlertsEvidenceAvailable && policyAlertsTruncated;
 
   function openDeliveryEvidence() {
     setActiveTab("deliveries");
@@ -252,17 +254,17 @@ export function AlertsPanel({
                 onAction={() => setActiveTab("destinations")}
                 value={formatBoundedCount(
                   fleetAlertNotificationChannels.length,
-                  fleetAlertNotificationChannels.length >= FLEET_DETAIL_LIMIT,
+                  false,
                 )}
               />
               <MetricTile
                 actionLabel="Open failed deliveries"
-                detail={`${failedDeliveries} failed retained notification deliveries${deliveriesTruncated ? " in the loaded page" : ""}`}
+                detail={`${failedDeliveries} failed retained notification deliveries${fleetAlertNotificationsTruncated ? " in the loaded page" : ""}`}
                 label="Delivery history"
                 onAction={openDeliveryEvidence}
                 value={formatBoundedCount(
                   fleetAlertNotifications.length,
-                  deliveriesTruncated,
+                  fleetAlertNotificationsTruncated,
                 )}
               />
             </div>
@@ -430,6 +432,7 @@ export function AlertsPanel({
             <NotificationDeliveryHistoryGrid
               deliveries={fleetAlertNotifications}
               preview={false}
+              rowsTruncated={fleetAlertNotificationsTruncated}
             />
           </section>
         ) : null}

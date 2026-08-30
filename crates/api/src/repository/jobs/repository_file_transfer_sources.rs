@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     auth_model::AuthContext, model::NewServerArtifact,
-    model_file_transfer::FileTransferSourceArtifactView, repository::Repository, unix_now,
+    model_file_transfer::FileTransferSourceArtifactView, repository::Repository,
 };
 
 impl Repository {
@@ -14,15 +14,6 @@ impl Repository {
     ) -> Result<Vec<FileTransferSourceArtifactView>> {
         let limit = limit.clamp(1, 200);
         match self {
-            Self::Memory(memory) => {
-                let artifacts = memory.file_transfer_source_artifacts.read().await;
-                Ok(artifacts
-                    .iter()
-                    .rev()
-                    .take(limit as usize)
-                    .cloned()
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -58,13 +49,6 @@ impl Repository {
         artifact_id: Uuid,
     ) -> Result<Option<FileTransferSourceArtifactView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .file_transfer_source_artifacts
-                .read()
-                .await
-                .iter()
-                .find(|artifact| artifact.id == artifact_id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -99,28 +83,10 @@ impl Repository {
         object_key: String,
         sha256_hex: String,
         size_bytes: i64,
+        reservation_token: Uuid,
         operator: &AuthContext,
     ) -> Result<FileTransferSourceArtifactView> {
         let artifact = match self {
-            Self::Memory(memory) => {
-                let artifact = FileTransferSourceArtifactView {
-                    id: artifact_id,
-                    name,
-                    object_key,
-                    sha256_hex,
-                    size_bytes,
-                    status: "active".to_string(),
-                    created_by: Some(operator.operator.id),
-                    created_at: unix_now().to_string(),
-                    download_path: file_transfer_source_artifact_download_path(artifact_id),
-                };
-                memory
-                    .file_transfer_source_artifacts
-                    .write()
-                    .await
-                    .push(artifact.clone());
-                artifact
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -153,6 +119,7 @@ impl Repository {
                     &mut tx,
                     &file_transfer_source_server_artifact(&artifact),
                     "active",
+                    Some(reservation_token),
                 )
                 .await?;
                 tx.commit().await?;

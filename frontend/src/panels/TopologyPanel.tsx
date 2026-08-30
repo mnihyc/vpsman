@@ -68,6 +68,7 @@ import {
   OSPF_COST_MODEL_DETAIL,
   readableTelemetryToken,
   runtimeManagerLabel,
+  validateTunnelPlanName,
 } from "../topologyRuntime";
 import type {
   AgentView,
@@ -500,9 +501,10 @@ function NetworkOverview({
         : latest,
     null,
   );
-  const evidenceStale =
-    !latestEvidence ||
-    Date.now() - timestampMillis(latestEvidence) > 15 * 60 * 1000;
+  // Tunnel telemetry follows the configurable agent cadence. Its timestamp is
+  // useful evidence, but browser wall age cannot classify it as stale; endpoint
+  // health below already comes from the server-owned topology assessment.
+  const evidenceUnavailable = !latestEvidence;
   return (
     <div className="topologyPageStack">
       <section className="fleetPanel networkOverviewHeader">
@@ -561,11 +563,13 @@ function NetworkOverview({
           />
           <Metric
             label="Latest evidence"
-            title={latestEvidence ?? "No declared tunnel evidence"}
-            tone={evidenceStale ? "warning" : "normal"}
-            value={
-              latestEvidence ? (evidenceStale ? "Stale" : "Current") : "None"
+            title={
+              latestEvidence
+                ? `Latest declared tunnel evidence ${formatCompactTime(latestEvidence)}`
+                : "No declared tunnel evidence"
             }
+            tone={evidenceUnavailable ? "warning" : "normal"}
+            value={latestEvidence ? formatCompactTime(latestEvidence) : "None"}
           />
           <Metric
             label="OSPF attention"
@@ -4733,9 +4737,8 @@ function mbpsToKbpsText(value: string): string {
 }
 
 function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
-  if (!form.name.trim()) return "Plan name is required";
-  if (form.name.trim().length > 128)
-    return "Plan name must be 128 characters or fewer";
+  const planNameError = validateTunnelPlanName(form.name);
+  if (planNameError) return planNameError;
   if (!form.interfaceName.trim()) return "Interface name is required";
   if (!/^[A-Za-z0-9_.-]{1,15}$/.test(form.interfaceName.trim()))
     return "Interface must be 1-15 letters, numbers, dots, underscores, or hyphens";

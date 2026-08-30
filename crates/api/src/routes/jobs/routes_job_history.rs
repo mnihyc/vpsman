@@ -97,41 +97,9 @@ pub(crate) async fn list_jobs(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    let jobs = state
-        .repo
-        .query_jobs(&query)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "jobs_unavailable",
-            "Jobs could not be loaded.",
-        ))?;
-    let mut reconciled = false;
-    for job in jobs
-        .iter()
-        .filter(|job| job.command_type == "terminal_open")
-    {
-        state
-            .repo
-            .reconcile_terminal_job_by_id(job.id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "terminal_job_reconciliation_failed",
-                "Terminal job state could not be reconciled.",
-            ))?;
-        reconciled = true;
-    }
-    Ok(Json(if reconciled {
-        state
-            .repo
-            .query_jobs(&query)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "jobs_unavailable",
-                "Jobs could not be loaded.",
-            ))?
-    } else {
-        jobs
-    }))
+    Ok(Json(state.repo.query_jobs(&query).await.map_err(
+        ApiError::internal_mapper("jobs_unavailable", "Jobs could not be loaded."),
+    )?))
 }
 
 pub(crate) async fn get_job(
@@ -142,14 +110,6 @@ pub(crate) async fn get_job(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    state
-        .repo
-        .reconcile_terminal_job_by_id(job_id)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "terminal_job_reconciliation_failed",
-            "Terminal job state could not be reconciled.",
-        ))?;
     let job = state
         .repo
         .get_job(job_id)

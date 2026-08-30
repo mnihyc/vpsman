@@ -1,18 +1,19 @@
 use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
 };
 use uuid::Uuid;
-use vpsman_common::{
-    file_transfer_session_status, is_file_transfer_command_type, is_file_transfer_session_event,
-};
+use vpsman_common::{file_transfer_session_status, is_file_transfer_session_event};
 
 use crate::{
     model::JobOutputView, model_file_transfer::FileTransferSessionView, repository::Repository,
+    repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx,
 };
 
 const HANDOFF_EVIDENCE_ARTIFACT_AVAILABLE: &str = "artifact_available";
@@ -24,6 +25,112 @@ const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED: &str = "retained_outputs_pruned"
 const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE: &str = "retained_outputs_incomplete";
 const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT: &str = "retained_outputs_conflict";
 
+pub(crate) const FILE_TRANSFER_HANDOFF_EVIDENCE_SQL: &str = r#"
+WITH requested AS (
+    SELECT *
+    FROM unnest(
+        $1::bigint[],
+        $2::text[],
+        $3::uuid[],
+        $4::text[],
+        $5::bigint[],
+        $6::text[]
+    ) AS request(
+        request_index,
+        client_id,
+        session_id,
+        sha256_hex,
+        size_bytes,
+        object_key
+    )
+), evidence_requests AS MATERIALIZED (
+    SELECT
+        request.*,
+        final_artifact.id IS NOT NULL AS final_artifact_available
+    FROM requested request
+    LEFT JOIN server_artifacts final_artifact
+      ON final_artifact.object_key = request.object_key
+     AND final_artifact.domain = 'file_transfer_handoff'
+     AND final_artifact.sha256_hex = request.sha256_hex
+     AND final_artifact.size_bytes = request.size_bytes
+     AND final_artifact.status = 'active'
+), chunk_jobs AS MATERIALIZED (
+    -- The immutable command payload owns session membership. Status output is
+    -- still parsed and validated in Rust so malformed evidence stays local to
+    -- its job rather than failing the complete batch.
+    SELECT request.request_index, request.client_id, job.id AS job_id
+    FROM jobs job
+    JOIN evidence_requests request
+      ON NOT request.final_artifact_available
+     AND job.resource_id = request.session_id
+    WHERE job.resource_kind = 'file_transfer_session'
+      AND job.command_type = 'file_transfer_download_chunk'
+), chunk_evidence AS MATERIALIZED (
+    -- One row per chunk job prevents large inline output from multiplying the
+    -- batch result. Ordered arrays retain the exact per-output validation
+    -- semantics without returning stdout bytes to the API process.
+    SELECT
+        chunk_job.request_index,
+        chunk_job.client_id,
+        chunk_job.job_id,
+        COALESCE(
+            array_agg(output.data ORDER BY output.seq)
+                FILTER (WHERE output.stream = 'status'),
+            ARRAY[]::bytea[]
+        ) AS status_outputs,
+        COALESCE(
+            array_agg(
+                CASE output.storage
+                    WHEN 'inline' THEN octet_length(output.data)::bigint
+                    WHEN 'object_store' THEN COALESCE(output.data_size_bytes, 0)
+                    ELSE 0
+                END
+                ORDER BY output.seq
+            ) FILTER (WHERE output.stream = 'stdout'),
+            ARRAY[]::bigint[]
+        ) AS stdout_sizes,
+        COALESCE(
+            array_agg(
+                CASE output.storage
+                    WHEN 'inline' THEN TRUE
+                    WHEN 'object_store' THEN
+                        output.object_key IS NOT NULL
+                        AND output.data_sha256_hex IS NOT NULL
+                        AND output.data_size_bytes IS NOT NULL
+                        AND output_artifact.id IS NOT NULL
+                    ELSE FALSE
+                END
+                ORDER BY output.seq
+            ) FILTER (WHERE output.stream = 'stdout'),
+            ARRAY[]::boolean[]
+        ) AS stdout_available
+    FROM chunk_jobs chunk_job
+    LEFT JOIN job_outputs output
+      ON output.job_id = chunk_job.job_id
+     AND output.client_id = chunk_job.client_id
+    LEFT JOIN server_artifacts output_artifact
+      ON output.storage = 'object_store'
+     AND output_artifact.object_key = output.object_key
+     AND output_artifact.domain = 'job_output'
+     AND output_artifact.sha256_hex = output.data_sha256_hex
+     AND output_artifact.size_bytes = output.data_size_bytes
+     AND output_artifact.status = 'active'
+    GROUP BY chunk_job.request_index, chunk_job.client_id, chunk_job.job_id
+)
+SELECT
+    request.request_index,
+    request.final_artifact_available,
+    chunk.job_id AS output_job_id,
+    chunk.status_outputs,
+    chunk.stdout_sizes,
+    chunk.stdout_available
+FROM evidence_requests request
+LEFT JOIN chunk_evidence chunk
+  ON chunk.request_index = request.request_index
+ AND chunk.client_id = request.client_id
+ORDER BY request.request_index, chunk.job_id
+"#;
+
 impl Repository {
     pub(crate) async fn list_file_transfer_sessions(
         &self,
@@ -33,45 +140,6 @@ impl Repository {
     ) -> Result<Vec<FileTransferSessionView>> {
         let limit = limit.clamp(1, 200);
         match self {
-            Self::Memory(memory) => {
-                let command_types = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .map(|job| (job.id, job.command_type.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|output| {
-                        if output.stream != "status" {
-                            return None;
-                        }
-                        if let Some(client_id) = client_id {
-                            if output.client_id != client_id {
-                                return None;
-                            }
-                        }
-                        let command_type = command_types.get(&output.job_id)?;
-                        if !is_file_transfer_command(command_type) {
-                            return None;
-                        }
-                        Some(FileTransferStatusOutput {
-                            job_id: output.job_id,
-                            client_id: output.client_id.clone(),
-                            seq: output.seq,
-                            data: BASE64.decode(&output.data_base64).ok()?,
-                            created_at: output.created_at.clone(),
-                            command_type: command_type.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                sort_file_transfer_outputs_newest(&mut outputs)?;
-                Ok(build_file_transfer_sessions(outputs, limit, session_id))
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -122,7 +190,8 @@ impl Repository {
         &self,
         sessions: &mut [FileTransferSessionView],
     ) -> Result<()> {
-        for session in sessions {
+        let mut requests = Vec::new();
+        for (session_index, session) in sessions.iter_mut().enumerate() {
             let Some((sha256_hex, size_bytes)) = reset_and_validate_handoff_session(session) else {
                 continue;
             };
@@ -133,319 +202,206 @@ impl Repository {
             );
             let download_path =
                 file_transfer_handoff_download_path(&session.client_id, session.session_id);
-            if self
-                .active_server_artifact_matches(
-                    "file_transfer_handoff",
-                    &object_key,
-                    &sha256_hex,
-                    size_bytes,
-                )
-                .await?
-            {
+            requests.push(HandoffEvidenceRequest {
+                session_index,
+                client_id: session.client_id.clone(),
+                session_id: session.session_id,
+                sha256_hex,
+                size_bytes,
+                object_key,
+                download_path,
+            });
+        }
+        let mut evidence_by_session = self.load_file_transfer_handoff_evidence(&requests).await?;
+        ensure!(
+            evidence_by_session.len() == requests.len(),
+            "file transfer handoff evidence batch was incomplete"
+        );
+        for request in requests {
+            let evidence = evidence_by_session
+                .remove(&request.session_index)
+                .context("file transfer handoff evidence session was missing")?;
+            let session = &mut sessions[request.session_index];
+            if evidence.final_artifact_available {
                 set_handoff_evidence(
                     session,
                     true,
                     HANDOFF_EVIDENCE_ARTIFACT_AVAILABLE,
                     None,
-                    Some(object_key),
-                    Some(download_path),
+                    Some(request.object_key),
+                    Some(request.download_path),
                 );
                 continue;
             }
-            let chunks = self
-                .list_file_transfer_download_handoff_chunks(&session.client_id, session.session_id)
-                .await?;
-            let evidence = self
-                .assess_handoff_chunk_evidence(&chunks, size_bytes)
-                .await?;
-            if evidence.available {
+            let chunk_evidence = assess_loaded_handoff_chunk_evidence(
+                &evidence.chunks,
+                request.session_id,
+                request.size_bytes,
+            );
+            if chunk_evidence.available {
                 set_handoff_evidence(
                     session,
                     true,
                     HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE,
                     None,
-                    Some(object_key),
-                    Some(download_path),
+                    Some(request.object_key),
+                    Some(request.download_path),
                 );
             } else {
-                set_handoff_evidence(session, false, evidence.status, evidence.reason, None, None);
+                set_handoff_evidence(
+                    session,
+                    false,
+                    chunk_evidence.status,
+                    chunk_evidence.reason,
+                    None,
+                    None,
+                );
             }
         }
         Ok(())
     }
 
-    async fn assess_handoff_chunk_evidence(
+    async fn load_file_transfer_handoff_evidence(
         &self,
-        chunks: &[FileTransferDownloadHandoffChunk],
-        expected_size_bytes: i64,
-    ) -> Result<HandoffChunkEvidence> {
-        if expected_size_bytes == 0 && chunks.is_empty() {
-            return Ok(HandoffChunkEvidence::available());
+        requests: &[HandoffEvidenceRequest],
+    ) -> Result<HashMap<usize, LoadedHandoffEvidence>> {
+        if requests.is_empty() {
+            return Ok(HashMap::new());
         }
-        if chunks.is_empty() {
-            return Ok(HandoffChunkEvidence::unavailable(
-                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED,
-                "retained_chunk_outputs_pruned",
-            ));
+        let request_indices = requests
+            .iter()
+            .map(|request| request.session_index as i64)
+            .collect::<Vec<_>>();
+        let client_ids = requests
+            .iter()
+            .map(|request| request.client_id.clone())
+            .collect::<Vec<_>>();
+        let session_ids = requests
+            .iter()
+            .map(|request| request.session_id)
+            .collect::<Vec<_>>();
+        let sha256_hexes = requests
+            .iter()
+            .map(|request| request.sha256_hex.clone())
+            .collect::<Vec<_>>();
+        let size_bytes = requests
+            .iter()
+            .map(|request| request.size_bytes)
+            .collect::<Vec<_>>();
+        let object_keys = requests
+            .iter()
+            .map(|request| request.object_key.clone())
+            .collect::<Vec<_>>();
+        let Self::Postgres(pool) = self;
+        let rows = sqlx::query(FILE_TRANSFER_HANDOFF_EVIDENCE_SQL)
+            .bind(request_indices)
+            .bind(client_ids)
+            .bind(session_ids)
+            .bind(sha256_hexes)
+            .bind(size_bytes)
+            .bind(object_keys)
+            .fetch_all(pool)
+            .await?;
+        let mut loaded = HashMap::<usize, LoadedHandoffEvidence>::new();
+        for row in rows {
+            let request_index = usize::try_from(row.try_get::<i64, _>("request_index")?)
+                .context("file transfer handoff evidence index was invalid")?;
+            let evidence = loaded.entry(request_index).or_default();
+            evidence.final_artifact_available = row.try_get("final_artifact_available")?;
+            let Some(_job_id) = row.try_get::<Option<Uuid>, _>("output_job_id")? else {
+                continue;
+            };
+            evidence.chunks.push(LoadedHandoffChunkEvidence {
+                status_outputs: row.try_get("status_outputs")?,
+                stdout_sizes: row.try_get("stdout_sizes")?,
+                stdout_available: row.try_get("stdout_available")?,
+            });
         }
-        let mut by_offset = BTreeMap::<i64, HandoffOffsetEvidence>::new();
-        for chunk in chunks {
-            if chunk.offset < 0 || chunk.size_bytes <= 0 {
-                return Ok(HandoffChunkEvidence::unavailable(
-                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
-                    "chunk_metadata_invalid",
-                ));
-            }
-            let output_available = self.handoff_chunk_outputs_available(chunk).await?;
-            match by_offset.get_mut(&chunk.offset) {
-                Some(existing) => {
-                    if existing.size_bytes != chunk.size_bytes
-                        || existing.sha256_hex != chunk.sha256_hex
-                    {
-                        return Ok(HandoffChunkEvidence::unavailable(
-                            HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT,
-                            "duplicate_offset_conflict",
-                        ));
-                    }
-                    existing.output_available |= output_available;
-                }
-                None => {
-                    by_offset.insert(
-                        chunk.offset,
-                        HandoffOffsetEvidence {
-                            size_bytes: chunk.size_bytes,
-                            sha256_hex: chunk.sha256_hex.clone(),
-                            output_available,
-                        },
-                    );
-                }
-            }
-        }
-        let mut next_offset = 0_i64;
-        for (offset, evidence) in by_offset {
-            if offset != next_offset {
-                return Ok(HandoffChunkEvidence::unavailable(
-                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
-                    "chunk_gap",
-                ));
-            }
-            if !evidence.output_available {
-                return Ok(HandoffChunkEvidence::unavailable(
-                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
-                    "chunk_output_unavailable",
-                ));
-            }
-            next_offset = next_offset.saturating_add(evidence.size_bytes);
-        }
-        if next_offset != expected_size_bytes {
-            return Ok(HandoffChunkEvidence::unavailable(
-                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
-                "final_size_mismatch",
-            ));
-        }
-        Ok(HandoffChunkEvidence::available())
+        Ok(loaded)
     }
 
-    async fn handoff_chunk_outputs_available(
+    /// Projects one immutable job-output identity into its exact file-transfer
+    /// session. Non-file-transfer and non-status outputs are constant-time
+    /// no-ops; no client history is scanned.
+    pub(crate) async fn project_file_transfer_session_from_job_output(
         &self,
-        chunk: &FileTransferDownloadHandoffChunk,
-    ) -> Result<bool> {
-        if chunk.outputs.is_empty() {
-            return Ok(false);
-        }
-        let mut size_bytes = 0_i64;
-        for output in &chunk.outputs {
-            match output.storage.as_str() {
-                "inline" => {
-                    let Ok(data) = BASE64.decode(&output.data_base64) else {
-                        return Ok(false);
-                    };
-                    size_bytes = size_bytes.saturating_add(data.len() as i64);
-                }
-                "object_store" => {
-                    let Some(object_key) = output.artifact_object_key.as_deref() else {
-                        return Ok(false);
-                    };
-                    let Some(sha256_hex) = output.artifact_sha256_hex.as_deref() else {
-                        return Ok(false);
-                    };
-                    let Some(part_size) = output.artifact_size_bytes else {
-                        return Ok(false);
-                    };
-                    if !self
-                        .active_server_artifact_matches(
-                            "job_output",
-                            object_key,
-                            sha256_hex,
-                            part_size,
-                        )
-                        .await?
-                    {
-                        return Ok(false);
-                    }
-                    size_bytes = size_bytes.saturating_add(part_size);
-                }
-                _ => return Ok(false),
-            }
-            if size_bytes > chunk.size_bytes {
-                return Ok(false);
-            }
-        }
-        Ok(size_bytes == chunk.size_bytes)
-    }
-
-    pub(crate) async fn refresh_file_transfer_sessions_for_client(
-        &self,
+        job_id: Uuid,
         client_id: &str,
+        seq: i32,
     ) -> Result<()> {
-        let Self::Postgres(pool) = self else {
+        let Self::Postgres(pool) = self;
+        let row = sqlx::query(
+            r#"
+            SELECT output.stream, output.data,
+                   output.created_at::text AS created_at,
+                   job.command_type
+            FROM job_outputs output
+            JOIN jobs job ON job.id = output.job_id
+            WHERE output.job_id = $1
+              AND output.client_id = $2
+              AND output.seq = $3
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(seq)
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else {
             return Ok(());
         };
-        let sessions =
-            file_transfer_sessions_from_outputs(pool, Some(client_id), None, 200).await?;
-        if sessions.is_empty() {
+        if row.try_get::<String, _>("stream")? != "status" {
             return Ok(());
         }
-        let session_ids = sessions
-            .iter()
-            .map(|session| session.session_id)
-            .collect::<Vec<_>>();
+        let output = FileTransferStatusOutput {
+            job_id,
+            client_id: client_id.to_string(),
+            seq,
+            data: row.try_get("data")?,
+            created_at: row.try_get("created_at")?,
+            command_type: row.try_get("command_type")?,
+        };
+        let Some(event) = parse_file_transfer_event(output) else {
+            return Ok(());
+        };
+        let incoming = FileTransferAggregate::new(event).into_view();
         let mut tx = pool.begin().await?;
-        // Every writer of this derived per-client inventory goes through this
-        // refresh path. Serialize refreshes before locking the current rows so
-        // a concurrent first insert cannot bypass the same merge invariant.
+        lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
+        // A session may not have a row yet. This short exact-identity lock
+        // closes only that first-insert race; producers and unrelated sessions
+        // never acquire it.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(client_id)
+            .bind(format!(
+                "vpsman:file-transfer-session-projection:{client_id}:{}",
+                incoming.session_id
+            ))
             .execute(&mut *tx)
             .await?;
-        let existing_rows = sqlx::query(
+        let existing = sqlx::query(
             r#"
             SELECT
-                session_id,
-                client_id,
-                direction,
-                status,
-                path,
-                size_bytes,
-                progress_bytes,
-                progress_ratio,
-                sha256_hex,
-                chunk_size_bytes,
-                last_chunk_size_bytes,
-                last_chunk_sha256_hex,
-                rate_limit_kbps,
-                resumed,
-                last_event,
-                last_job_id,
-                last_command_type,
-                last_seq,
-                observed_at::text AS observed_at,
-                handoff_available,
-                handoff_object_key,
-                handoff_download_path
+                session_id, client_id, direction, status, path, size_bytes,
+                progress_bytes, progress_ratio, sha256_hex, chunk_size_bytes,
+                last_chunk_size_bytes, last_chunk_sha256_hex, rate_limit_kbps,
+                resumed, last_event, last_job_id, last_command_type, last_seq,
+                observed_at::text AS observed_at, handoff_available,
+                handoff_object_key, handoff_download_path
             FROM file_transfer_sessions
-            WHERE client_id = $1
-              AND session_id = ANY($2)
+            WHERE client_id = $1 AND session_id = $2
             FOR UPDATE
             "#,
         )
         .bind(client_id)
-        .bind(&session_ids)
-        .fetch_all(&mut *tx)
-        .await?;
-        let mut existing_by_session = existing_rows
-            .into_iter()
-            .map(|row| {
-                let session = file_transfer_session_from_row(row)?;
-                Ok((session.session_id, session))
-            })
-            .collect::<std::result::Result<HashMap<_, _>, sqlx::Error>>()?;
-        for incoming in sessions {
-            let session = if let Some(existing) = existing_by_session.remove(&incoming.session_id) {
-                merge_persisted_file_transfer_session(existing, incoming)?
-            } else {
-                incoming
-            };
-            sqlx::query(
-                r#"
-                INSERT INTO file_transfer_sessions (
-                    session_id,
-                    client_id,
-                    direction,
-                    status,
-                    path,
-                    size_bytes,
-                    progress_bytes,
-                    progress_ratio,
-                    sha256_hex,
-                    chunk_size_bytes,
-                    last_chunk_size_bytes,
-                    last_chunk_sha256_hex,
-                    rate_limit_kbps,
-                    resumed,
-                    last_event,
-                    last_job_id,
-                    last_command_type,
-                    last_seq,
-                    observed_at,
-                    handoff_available,
-                    handoff_object_key,
-                    handoff_download_path
-                )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                    $12, $13, $14, $15, $16, $17, $18, $19::timestamptz,
-                    $20, $21, $22
-                )
-                ON CONFLICT (client_id, session_id)
-                DO UPDATE SET
-                    direction = EXCLUDED.direction,
-                    status = EXCLUDED.status,
-                    path = EXCLUDED.path,
-                    size_bytes = EXCLUDED.size_bytes,
-                    progress_bytes = EXCLUDED.progress_bytes,
-                    progress_ratio = EXCLUDED.progress_ratio,
-                    sha256_hex = EXCLUDED.sha256_hex,
-                    chunk_size_bytes = EXCLUDED.chunk_size_bytes,
-                    last_chunk_size_bytes = EXCLUDED.last_chunk_size_bytes,
-                    last_chunk_sha256_hex = EXCLUDED.last_chunk_sha256_hex,
-                    rate_limit_kbps = EXCLUDED.rate_limit_kbps,
-                    resumed = EXCLUDED.resumed,
-                    last_event = EXCLUDED.last_event,
-                    last_job_id = EXCLUDED.last_job_id,
-                    last_command_type = EXCLUDED.last_command_type,
-                    last_seq = EXCLUDED.last_seq,
-                    observed_at = EXCLUDED.observed_at,
-                    handoff_available = EXCLUDED.handoff_available,
-                    handoff_object_key = EXCLUDED.handoff_object_key,
-                    handoff_download_path = EXCLUDED.handoff_download_path
-                "#,
-            )
-            .bind(session.session_id)
-            .bind(&session.client_id)
-            .bind(&session.direction)
-            .bind(&session.status)
-            .bind(&session.path)
-            .bind(session.size_bytes)
-            .bind(session.progress_bytes)
-            .bind(session.progress_ratio)
-            .bind(&session.sha256_hex)
-            .bind(session.chunk_size_bytes)
-            .bind(session.last_chunk_size_bytes)
-            .bind(&session.last_chunk_sha256_hex)
-            .bind(session.rate_limit_kbps)
-            .bind(session.resumed)
-            .bind(&session.last_event)
-            .bind(session.last_job_id)
-            .bind(&session.last_command_type)
-            .bind(session.last_seq)
-            .bind(&session.observed_at)
-            .bind(session.handoff_available)
-            .bind(&session.handoff_object_key)
-            .bind(&session.handoff_download_path)
-            .execute(&mut *tx)
-            .await?;
-        }
+        .bind(incoming.session_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(file_transfer_session_from_row)
+        .transpose()?;
+        let projected = match existing {
+            Some(existing) => merge_persisted_file_transfer_session(existing, incoming)?,
+            None => incoming,
+        };
+        upsert_postgres_file_transfer_session_in_tx(&mut tx, &projected).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -469,42 +425,8 @@ impl Repository {
         session_id: Uuid,
     ) -> Result<Vec<FileTransferChunkOutput>> {
         match self {
-            Self::Memory(memory) => {
-                let command_types = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .map(|job| (job.id, job.command_type.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|output| {
-                        if output.client_id != client_id {
-                            return None;
-                        }
-                        let command_type = command_types.get(&output.job_id)?;
-                        if command_type != "file_transfer_download_chunk" {
-                            return None;
-                        }
-                        Some(FileTransferChunkOutput {
-                            output: output.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                outputs.sort_by(|left, right| {
-                    left.output
-                        .job_id
-                        .cmp(&right.output.job_id)
-                        .then_with(|| left.output.seq.cmp(&right.output.seq))
-                });
-                Ok(outputs)
-            }
             Self::Postgres(pool) => {
-                let status_rows = sqlx::query(
+                let rows = sqlx::query(
                     r#"
                     SELECT
                         output.job_id,
@@ -522,52 +444,14 @@ impl Repository {
                     FROM job_outputs output
                     JOIN jobs job ON job.id = output.job_id
                     WHERE output.client_id = $1
-                      AND output.stream = 'status'
+                      AND job.resource_kind = 'file_transfer_session'
                       AND job.command_type = 'file_transfer_download_chunk'
+                      AND job.resource_id = $2
                     ORDER BY output.job_id, output.seq
                     "#,
                 )
                 .bind(client_id)
-                .fetch_all(pool)
-                .await?;
-                let status_outputs = status_rows
-                    .into_iter()
-                    .map(file_transfer_chunk_output_from_row)
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-                let chunk_job_ids = status_outputs
-                    .iter()
-                    .filter(|output| {
-                        parse_download_chunk_status(&output.output, session_id).is_some()
-                    })
-                    .map(|output| output.output.job_id)
-                    .collect::<BTreeSet<_>>();
-                if chunk_job_ids.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let chunk_job_ids = chunk_job_ids.into_iter().collect::<Vec<_>>();
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        output.job_id,
-                        output.client_id,
-                        output.seq,
-                        output.stream,
-                        output.data,
-                        output.storage,
-                        output.object_key,
-                        output.data_sha256_hex,
-                        output.data_size_bytes,
-                        output.exit_code,
-                        output.done,
-                        output.created_at::text AS created_at
-                    FROM job_outputs output
-                    WHERE output.client_id = $1
-                      AND output.job_id = ANY($2::uuid[])
-                    ORDER BY output.job_id, output.seq
-                    "#,
-                )
-                .bind(client_id)
-                .bind(chunk_job_ids)
+                .bind(session_id)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -577,6 +461,76 @@ impl Repository {
             }
         }
     }
+}
+
+async fn upsert_postgres_file_transfer_session_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    session: &FileTransferSessionView,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO file_transfer_sessions (
+            session_id, client_id, direction, status, path, size_bytes,
+            progress_bytes, progress_ratio, sha256_hex, chunk_size_bytes,
+            last_chunk_size_bytes, last_chunk_sha256_hex, rate_limit_kbps,
+            resumed, last_event, last_job_id, last_command_type, last_seq,
+            observed_at, handoff_available, handoff_object_key,
+            handoff_download_path
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            $12, $13, $14, $15, $16, $17, $18, $19::timestamptz,
+            $20, $21, $22
+        )
+        ON CONFLICT (client_id, session_id)
+        DO UPDATE SET
+            direction = EXCLUDED.direction,
+            status = EXCLUDED.status,
+            path = EXCLUDED.path,
+            size_bytes = EXCLUDED.size_bytes,
+            progress_bytes = EXCLUDED.progress_bytes,
+            progress_ratio = EXCLUDED.progress_ratio,
+            sha256_hex = EXCLUDED.sha256_hex,
+            chunk_size_bytes = EXCLUDED.chunk_size_bytes,
+            last_chunk_size_bytes = EXCLUDED.last_chunk_size_bytes,
+            last_chunk_sha256_hex = EXCLUDED.last_chunk_sha256_hex,
+            rate_limit_kbps = EXCLUDED.rate_limit_kbps,
+            resumed = EXCLUDED.resumed,
+            last_event = EXCLUDED.last_event,
+            last_job_id = EXCLUDED.last_job_id,
+            last_command_type = EXCLUDED.last_command_type,
+            last_seq = EXCLUDED.last_seq,
+            observed_at = EXCLUDED.observed_at,
+            handoff_available = EXCLUDED.handoff_available,
+            handoff_object_key = EXCLUDED.handoff_object_key,
+            handoff_download_path = EXCLUDED.handoff_download_path
+        "#,
+    )
+    .bind(session.session_id)
+    .bind(&session.client_id)
+    .bind(&session.direction)
+    .bind(&session.status)
+    .bind(&session.path)
+    .bind(session.size_bytes)
+    .bind(session.progress_bytes)
+    .bind(session.progress_ratio)
+    .bind(&session.sha256_hex)
+    .bind(session.chunk_size_bytes)
+    .bind(session.last_chunk_size_bytes)
+    .bind(&session.last_chunk_sha256_hex)
+    .bind(session.rate_limit_kbps)
+    .bind(session.resumed)
+    .bind(&session.last_event)
+    .bind(session.last_job_id)
+    .bind(&session.last_command_type)
+    .bind(session.last_seq)
+    .bind(&session.observed_at)
+    .bind(session.handoff_available)
+    .bind(&session.handoff_object_key)
+    .bind(&session.handoff_download_path)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn file_transfer_chunk_output_from_row(
@@ -600,59 +554,6 @@ fn file_transfer_chunk_output_from_row(
             created_at: row.try_get("created_at")?,
         },
     })
-}
-
-async fn file_transfer_sessions_from_outputs(
-    pool: &PgPool,
-    client_id: Option<&str>,
-    session_id: Option<Uuid>,
-    limit: i64,
-) -> Result<Vec<FileTransferSessionView>> {
-    let limit = limit.clamp(1, 200);
-    let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            output.job_id,
-            output.client_id,
-            output.seq,
-            output.data,
-            output.created_at::text AS created_at,
-            job.command_type
-        FROM job_outputs output
-        JOIN jobs job ON job.id = output.job_id
-        WHERE output.stream = 'status'
-          AND job.command_type IN (
-            'file_transfer_start',
-            'file_transfer_chunk',
-            'file_transfer_commit',
-            'file_transfer_abort',
-            'file_transfer_download_start',
-            'file_transfer_download_chunk'
-          )
-          AND ($2::text IS NULL OR output.client_id = $2)
-        ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
-        LIMIT $1
-        "#,
-    )
-    .bind(scan_limit)
-    .bind(client_id)
-    .fetch_all(pool)
-    .await?;
-    let outputs = rows
-        .into_iter()
-        .map(|row| {
-            Ok(FileTransferStatusOutput {
-                job_id: row.try_get("job_id")?,
-                client_id: row.try_get("client_id")?,
-                seq: row.try_get("seq")?,
-                data: row.try_get("data")?,
-                created_at: row.try_get("created_at")?,
-                command_type: row.try_get("command_type")?,
-            })
-        })
-        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-    Ok(build_file_transfer_sessions(outputs, limit, session_id))
 }
 
 fn file_transfer_session_from_row(
@@ -802,10 +703,20 @@ fn compare_file_transfer_sources(
         .context("incoming file transfer timestamp is invalid")?;
     let existing_observed_at = crate::util::parse_timestamp_utc(&existing.observed_at)
         .context("stored file transfer timestamp is invalid")?;
-    Ok(incoming_observed_at
-        .cmp(&existing_observed_at)
-        .then_with(|| incoming.last_job_id.cmp(&existing.last_job_id))
-        .then_with(|| incoming.last_seq.cmp(&existing.last_seq)))
+    Ok(if incoming.last_job_id == existing.last_job_id {
+        // Output sequence is the authoritative order inside one immutable
+        // job stream, even when transport retry makes an older chunk arrive
+        // later in wall-clock time.
+        incoming
+            .last_seq
+            .cmp(&existing.last_seq)
+            .then_with(|| incoming_observed_at.cmp(&existing_observed_at))
+    } else {
+        incoming_observed_at
+            .cmp(&existing_observed_at)
+            .then_with(|| incoming.last_job_id.cmp(&existing.last_job_id))
+            .then_with(|| incoming.last_seq.cmp(&existing.last_seq))
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -846,6 +757,30 @@ struct FileTransferChunkOutput {
 }
 
 #[derive(Clone, Debug)]
+struct HandoffEvidenceRequest {
+    session_index: usize,
+    client_id: String,
+    session_id: Uuid,
+    sha256_hex: String,
+    size_bytes: i64,
+    object_key: String,
+    download_path: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LoadedHandoffEvidence {
+    final_artifact_available: bool,
+    chunks: Vec<LoadedHandoffChunkEvidence>,
+}
+
+#[derive(Clone, Debug)]
+struct LoadedHandoffChunkEvidence {
+    status_outputs: Vec<Vec<u8>>,
+    stdout_sizes: Vec<i64>,
+    stdout_available: Vec<bool>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct FileTransferDownloadHandoffChunk {
     pub(crate) job_id: Uuid,
     pub(crate) offset: i64,
@@ -864,16 +799,12 @@ struct FileTransferAggregate {
     chunk_size_bytes: Option<i64>,
     last_chunk_size_bytes: Option<i64>,
     last_chunk_sha256_hex: Option<String>,
-    last_chunk_progress_bytes: Option<i64>,
     rate_limit_kbps: Option<i64>,
     resumed: Option<bool>,
 }
 
 impl FileTransferAggregate {
     fn new(event: FileTransferEvent) -> Self {
-        let last_chunk_progress_bytes = (event.last_chunk_size_bytes.is_some()
-            || event.last_chunk_sha256_hex.is_some())
-        .then_some(event.progress_bytes);
         Self {
             progress_bytes: event.progress_bytes,
             path: event.path.clone(),
@@ -882,50 +813,9 @@ impl FileTransferAggregate {
             chunk_size_bytes: event.chunk_size_bytes,
             last_chunk_size_bytes: event.last_chunk_size_bytes,
             last_chunk_sha256_hex: event.last_chunk_sha256_hex.clone(),
-            last_chunk_progress_bytes,
             rate_limit_kbps: event.rate_limit_kbps,
             resumed: event.resumed,
             latest: event,
-        }
-    }
-
-    fn merge_older(&mut self, event: FileTransferEvent) {
-        let replacement =
-            file_transfer_event_advances_lifecycle(&self.latest, &event).then(|| event.clone());
-        if self.path.is_empty() {
-            self.path = event.path.clone();
-        }
-        self.size_bytes = self.size_bytes.or(event.size_bytes);
-        self.sha256_hex = self.sha256_hex.take().or(event.sha256_hex.clone());
-        self.chunk_size_bytes = self.chunk_size_bytes.or(event.chunk_size_bytes);
-        if event.last_chunk_size_bytes.is_some() || event.last_chunk_sha256_hex.is_some() {
-            match self.last_chunk_progress_bytes {
-                Some(progress) if event.progress_bytes == progress => {
-                    self.last_chunk_size_bytes =
-                        self.last_chunk_size_bytes.or(event.last_chunk_size_bytes);
-                    self.last_chunk_sha256_hex = self
-                        .last_chunk_sha256_hex
-                        .take()
-                        .or(event.last_chunk_sha256_hex.clone());
-                }
-                None => {
-                    self.last_chunk_size_bytes = event.last_chunk_size_bytes;
-                    self.last_chunk_sha256_hex = event.last_chunk_sha256_hex.clone();
-                    self.last_chunk_progress_bytes = Some(event.progress_bytes);
-                }
-                Some(progress) if event.progress_bytes > progress => {
-                    self.last_chunk_size_bytes = event.last_chunk_size_bytes;
-                    self.last_chunk_sha256_hex = event.last_chunk_sha256_hex.clone();
-                    self.last_chunk_progress_bytes = Some(event.progress_bytes);
-                }
-                Some(_) => {}
-            }
-        }
-        self.rate_limit_kbps = self.rate_limit_kbps.or(event.rate_limit_kbps);
-        self.resumed = self.resumed.or(event.resumed);
-        self.progress_bytes = self.progress_bytes.max(event.progress_bytes);
-        if let Some(replacement) = replacement {
-            self.latest = replacement;
         }
     }
 
@@ -989,76 +879,6 @@ impl FileTransferAggregate {
             self.latest.session_id,
         ))
     }
-}
-
-fn file_transfer_event_advances_lifecycle(
-    current: &FileTransferEvent,
-    candidate: &FileTransferEvent,
-) -> bool {
-    if matches!(current.status, "completed" | "aborted") {
-        return false;
-    }
-    matches!(candidate.status, "completed" | "aborted")
-        || candidate.progress_bytes > current.progress_bytes
-}
-
-fn sort_file_transfer_outputs_newest(outputs: &mut [FileTransferStatusOutput]) -> Result<()> {
-    for output in outputs.iter() {
-        crate::util::parse_timestamp_utc(&output.created_at)
-            .context("file transfer source timestamp is invalid")?;
-    }
-    outputs.sort_by(|left, right| {
-        crate::util::parse_timestamp_utc(&right.created_at)
-            .expect("file transfer timestamps were validated before sorting")
-            .cmp(
-                &crate::util::parse_timestamp_utc(&left.created_at)
-                    .expect("file transfer timestamps were validated before sorting"),
-            )
-            .then_with(|| right.job_id.cmp(&left.job_id))
-            .then_with(|| right.seq.cmp(&left.seq))
-    });
-    Ok(())
-}
-
-fn build_file_transfer_sessions(
-    outputs: Vec<FileTransferStatusOutput>,
-    limit: i64,
-    session_filter: Option<Uuid>,
-) -> Vec<FileTransferSessionView> {
-    let mut order = Vec::<(String, Uuid)>::new();
-    let mut aggregates = BTreeMap::<(String, Uuid), FileTransferAggregate>::new();
-
-    for output in outputs {
-        let Some(event) = parse_file_transfer_event(output) else {
-            continue;
-        };
-        if session_filter.is_some_and(|session_id| event.session_id != session_id) {
-            continue;
-        }
-        let key = (event.client_id.clone(), event.session_id);
-        if let Some(aggregate) = aggregates.get_mut(&key) {
-            aggregate.merge_older(event);
-        } else {
-            order.push(key.clone());
-            aggregates.insert(key, FileTransferAggregate::new(event));
-        }
-    }
-
-    let limit = limit.clamp(1, 200) as usize;
-    let mut views = Vec::new();
-    let mut emitted = BTreeSet::new();
-    for key in order {
-        if !emitted.insert(key.clone()) {
-            continue;
-        }
-        if let Some(aggregate) = aggregates.remove(&key) {
-            views.push(aggregate.into_view());
-            if views.len() >= limit {
-                break;
-            }
-        }
-    }
-    views
 }
 
 fn parse_file_transfer_event(output: FileTransferStatusOutput) -> Option<FileTransferEvent> {
@@ -1146,10 +966,6 @@ fn json_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
 }
 
-fn is_file_transfer_command(command_type: &str) -> bool {
-    is_file_transfer_command_type(command_type)
-}
-
 fn is_file_transfer_status_event(event_type: &str) -> bool {
     is_file_transfer_session_event(event_type)
 }
@@ -1207,7 +1023,17 @@ fn parse_download_chunk_status(
     output: &JobOutputView,
     expected_session_id: Uuid,
 ) -> Option<DownloadChunkStatus> {
-    let value = serde_json::from_slice::<Value>(&BASE64.decode(&output.data_base64).ok()?).ok()?;
+    parse_download_chunk_status_data(
+        &BASE64.decode(&output.data_base64).ok()?,
+        expected_session_id,
+    )
+}
+
+fn parse_download_chunk_status_data(
+    data: &[u8],
+    expected_session_id: Uuid,
+) -> Option<DownloadChunkStatus> {
+    let value = serde_json::from_slice::<Value>(data).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("file_transfer_download_chunk") {
         return None;
     }
@@ -1286,6 +1112,206 @@ struct HandoffOffsetEvidence {
     size_bytes: i64,
     sha256_hex: String,
     output_available: bool,
+}
+
+#[derive(Clone, Debug)]
+struct HandoffChunkCandidate {
+    offset: i64,
+    size_bytes: i64,
+    sha256_hex: String,
+    output_available: bool,
+}
+
+fn assess_loaded_handoff_chunk_evidence(
+    chunks: &[LoadedHandoffChunkEvidence],
+    expected_session_id: Uuid,
+    expected_size_bytes: i64,
+) -> HandoffChunkEvidence {
+    let candidates = chunks
+        .iter()
+        .filter_map(|chunk| {
+            // The direct path has always ignored a status-only job. Preserve
+            // that distinction from a retained chunk whose stdout is present
+            // but unavailable.
+            if chunk.stdout_sizes.is_empty() {
+                return None;
+            }
+            let status = chunk
+                .status_outputs
+                .iter()
+                .find_map(|data| parse_download_chunk_status_data(data, expected_session_id))?;
+            Some(HandoffChunkCandidate {
+                offset: status.offset,
+                size_bytes: status.size_bytes,
+                sha256_hex: status.sha256_hex,
+                output_available: summarized_chunk_outputs_available(chunk, status.size_bytes),
+            })
+        })
+        .collect::<Vec<_>>();
+    assess_handoff_chunk_candidates(&candidates, expected_size_bytes)
+}
+
+fn summarized_chunk_outputs_available(
+    chunk: &LoadedHandoffChunkEvidence,
+    expected_size_bytes: i64,
+) -> bool {
+    if chunk.stdout_sizes.is_empty() || chunk.stdout_sizes.len() != chunk.stdout_available.len() {
+        return false;
+    }
+    let mut size_bytes = 0_i64;
+    for (part_size, available) in chunk.stdout_sizes.iter().zip(chunk.stdout_available.iter()) {
+        if !available {
+            return false;
+        }
+        size_bytes = size_bytes.saturating_add(*part_size);
+        if size_bytes > expected_size_bytes {
+            return false;
+        }
+    }
+    size_bytes == expected_size_bytes
+}
+
+#[cfg(test)]
+fn assess_handoff_chunk_evidence(
+    chunks: &[FileTransferDownloadHandoffChunk],
+    expected_size_bytes: i64,
+    active_output_artifacts: &BTreeSet<(Uuid, i32)>,
+    inline_output_sizes: &BTreeMap<(Uuid, i32), i64>,
+) -> HandoffChunkEvidence {
+    let candidates = chunks
+        .iter()
+        .map(|chunk| HandoffChunkCandidate {
+            offset: chunk.offset,
+            size_bytes: chunk.size_bytes,
+            sha256_hex: chunk.sha256_hex.clone(),
+            output_available: handoff_chunk_outputs_available(
+                chunk,
+                active_output_artifacts,
+                inline_output_sizes,
+            ),
+        })
+        .collect::<Vec<_>>();
+    assess_handoff_chunk_candidates(&candidates, expected_size_bytes)
+}
+
+fn assess_handoff_chunk_candidates(
+    chunks: &[HandoffChunkCandidate],
+    expected_size_bytes: i64,
+) -> HandoffChunkEvidence {
+    if expected_size_bytes == 0 && chunks.is_empty() {
+        return HandoffChunkEvidence::available();
+    }
+    if chunks.is_empty() {
+        return HandoffChunkEvidence::unavailable(
+            HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED,
+            "retained_chunk_outputs_pruned",
+        );
+    }
+    let mut by_offset = BTreeMap::<i64, HandoffOffsetEvidence>::new();
+    for chunk in chunks {
+        if chunk.offset < 0 || chunk.size_bytes <= 0 {
+            return HandoffChunkEvidence::unavailable(
+                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                "chunk_metadata_invalid",
+            );
+        }
+        match by_offset.get_mut(&chunk.offset) {
+            Some(existing) => {
+                if existing.size_bytes != chunk.size_bytes
+                    || existing.sha256_hex != chunk.sha256_hex
+                {
+                    return HandoffChunkEvidence::unavailable(
+                        HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT,
+                        "duplicate_offset_conflict",
+                    );
+                }
+                existing.output_available |= chunk.output_available;
+            }
+            None => {
+                by_offset.insert(
+                    chunk.offset,
+                    HandoffOffsetEvidence {
+                        size_bytes: chunk.size_bytes,
+                        sha256_hex: chunk.sha256_hex.clone(),
+                        output_available: chunk.output_available,
+                    },
+                );
+            }
+        }
+    }
+    let mut next_offset = 0_i64;
+    for (offset, evidence) in by_offset {
+        if offset != next_offset {
+            return HandoffChunkEvidence::unavailable(
+                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                "chunk_gap",
+            );
+        }
+        if !evidence.output_available {
+            return HandoffChunkEvidence::unavailable(
+                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                "chunk_output_unavailable",
+            );
+        }
+        next_offset = next_offset.saturating_add(evidence.size_bytes);
+    }
+    if next_offset != expected_size_bytes {
+        return HandoffChunkEvidence::unavailable(
+            HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+            "final_size_mismatch",
+        );
+    }
+    HandoffChunkEvidence::available()
+}
+
+#[cfg(test)]
+fn handoff_chunk_outputs_available(
+    chunk: &FileTransferDownloadHandoffChunk,
+    active_output_artifacts: &BTreeSet<(Uuid, i32)>,
+    inline_output_sizes: &BTreeMap<(Uuid, i32), i64>,
+) -> bool {
+    if chunk.outputs.is_empty() {
+        return false;
+    }
+    let mut size_bytes = 0_i64;
+    for output in &chunk.outputs {
+        match output.storage.as_str() {
+            "inline" => {
+                let inline_size =
+                    if let Some(size) = inline_output_sizes.get(&(output.job_id, output.seq)) {
+                        *size
+                    } else {
+                        let Ok(data) = BASE64.decode(&output.data_base64) else {
+                            return false;
+                        };
+                        data.len() as i64
+                    };
+                if inline_size < 0 {
+                    return false;
+                }
+                size_bytes = size_bytes.saturating_add(inline_size);
+            }
+            "object_store" => {
+                if output.artifact_object_key.is_none()
+                    || output.artifact_sha256_hex.is_none()
+                    || output.artifact_size_bytes.is_none()
+                    || !active_output_artifacts.contains(&(output.job_id, output.seq))
+                {
+                    return false;
+                }
+                size_bytes = size_bytes.saturating_add(
+                    output
+                        .artifact_size_bytes
+                        .expect("object-store output size was checked"),
+                );
+            }
+            _ => return false,
+        }
+        if size_bytes > chunk.size_bytes {
+            return false;
+        }
+    }
+    size_bytes == chunk.size_bytes
 }
 
 fn reset_and_validate_handoff_session(
@@ -1379,6 +1405,75 @@ fn set_handoff_evidence(
     session.handoff_unavailable_reason = reason;
     session.handoff_object_key = object_key;
     session.handoff_download_path = download_path;
+}
+
+#[cfg(test)]
+mod exact_projection_tests {
+    use super::{merge_persisted_file_transfer_session, FileTransferSessionView};
+    use uuid::Uuid;
+
+    fn session(
+        session_id: Uuid,
+        job_id: Uuid,
+        seq: i32,
+        status: &str,
+        progress_bytes: i64,
+        observed_at: &str,
+    ) -> FileTransferSessionView {
+        FileTransferSessionView {
+            session_id,
+            client_id: "edge-a".to_string(),
+            direction: "download".to_string(),
+            status: status.to_string(),
+            path: "/tmp/archive".to_string(),
+            size_bytes: Some(100),
+            progress_bytes,
+            progress_ratio: Some(progress_bytes as f64 / 100.0),
+            sha256_hex: Some("hash".to_string()),
+            chunk_size_bytes: Some(10),
+            last_chunk_size_bytes: None,
+            last_chunk_sha256_hex: None,
+            rate_limit_kbps: None,
+            resumed: None,
+            last_event: status.to_string(),
+            last_job_id: job_id,
+            last_command_type: "file_transfer_download_chunk".to_string(),
+            last_seq: seq,
+            observed_at: observed_at.to_string(),
+            handoff_available: false,
+            handoff_evidence_status: "not_completed".to_string(),
+            handoff_unavailable_reason: None,
+            handoff_object_key: None,
+            handoff_download_path: None,
+        }
+    }
+
+    #[test]
+    fn same_job_sequence_not_transport_time_orders_incremental_projection() {
+        let session_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let existing = session(
+            session_id,
+            job_id,
+            1,
+            "transferring",
+            10,
+            "2026-08-28T00:00:10Z",
+        );
+        let incoming = session(
+            session_id,
+            job_id,
+            2,
+            "completed",
+            100,
+            "2026-08-28T00:00:00Z",
+        );
+
+        let merged = merge_persisted_file_transfer_session(existing, incoming).unwrap();
+        assert_eq!(merged.last_seq, 2);
+        assert_eq!(merged.status, "completed");
+        assert_eq!(merged.progress_bytes, 100);
+    }
 }
 
 #[cfg(test)]

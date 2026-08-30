@@ -88,11 +88,6 @@ server, frontend, and host CLI release payloads and recreates the compose
 services. Runtime state stays under the deployment directory, not
 Docker-managed named volumes.
 
-The current canonical database is intentionally fresh-only and does not support
-an in-place update from an earlier schema model; review
-[migration compatibility](../docs/migration-compatibility.md) before updating
-an older deployment.
-
 ## Start Processes Manually
 
 Manual startup is useful while iterating:
@@ -177,12 +172,6 @@ Run these before trusting a local environment:
 bash scripts/smoke-vpsctl-live-api.sh
 bash scripts/smoke-postgres-persistence.sh
 bash scripts/smoke-frontend-live-api.sh
-```
-
-For a broad pre-release pass:
-
-```sh
-bash scripts/release-check.sh
 ```
 
 Resource threshold alerts are issued only by enabled policy groups. Configure

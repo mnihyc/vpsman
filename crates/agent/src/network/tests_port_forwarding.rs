@@ -30,14 +30,44 @@ fn renders_only_the_owned_table_and_local_destination_rules() {
     assert!(script.contains("hook output priority -110"));
     assert!(script.contains("hook postrouting priority 90"));
     assert!(script.contains("ct id @owned_flows"));
-    assert!(script.contains("tcp dport map @pf_0_tcp_1"));
-    assert!(script.contains("udp dport map @pf_0_udp_1"));
+    assert!(script.contains("tcp dport vmap @pf_dispatch_ipv4_tcp"));
+    assert!(script.contains("udp dport vmap @pf_dispatch_ipv4_udp"));
+    assert!(script.contains("tcp dport map @pf_0_tcp_fixed"));
+    assert!(script.contains("udp dport map @pf_0_udp_fixed"));
+    assert!(script.contains("tcp dport map @pf_0_tcp_shift"));
+    assert!(script.contains("udp dport map @pf_0_udp_shift"));
+    assert_eq!(script.matches("fib daddr type local").count(), 2);
+    assert_eq!(script.matches("vpsman-rule:").count(), 2);
     assert!(!script.contains("flush ruleset"));
     assert!(!script.contains("docker"));
     assert!(!script.contains("iptables"));
     assert!(!script.contains("sysctl"));
     assert!(!script.contains(" iifname "));
     assert!(!script.contains(" oifname "));
+}
+
+#[test]
+fn unchanged_large_port_range_stays_compact() {
+    let rules = vec![PortForwardRule {
+        id: uuid::Uuid::parse_str("018f89ac-a5ec-7d71-a249-7ccddc0a0002").unwrap(),
+        revision: 1,
+        name: "identity-range".to_string(),
+        protocol: PortForwardProtocol::Tcp,
+        target_ip: "192.0.2.9".parse().unwrap(),
+        mappings: pair_port_expressions("10000-30000", "10000-30000").unwrap(),
+        masquerade: true,
+    }];
+    let config = AgentPortForwardingConfig {
+        desired_hash: port_forwarding_desired_hash(&rules),
+        rules,
+        ..AgentPortForwardingConfig::default()
+    };
+
+    let script = render_apply_script(&config, false).unwrap();
+    assert!(script.contains("tcp dport { 10000-30000 } dnat ip to 192.0.2.9"));
+    assert!(!script.contains("_shift"));
+    assert!(!script.contains("10001 : 10001"));
+    assert!(script.len() < 4 * 1024);
 }
 
 #[test]
@@ -134,6 +164,10 @@ fn normalization_ignores_live_owned_flow_entries_only() {
         normalized_table_hash(&empty),
         normalized_table_hash(&changed_map)
     );
+    assert_eq!(
+        normalized_table_structure_hash(&empty),
+        normalized_table_structure_hash(&changed_map)
+    );
 }
 
 #[test]
@@ -167,7 +201,50 @@ fn ownership_requires_the_exact_table_marker() {
     }}]});
 
     assert!(table_is_owned(&owned));
+    assert!(table_has_ownership_declaration(&owned));
     assert!(!table_is_owned(&comment_only));
+    assert!(!table_has_ownership_declaration(&comment_only));
     assert!(!table_is_owned(&foreign));
     assert!(!table_is_owned(&unmarked));
+}
+
+#[test]
+fn terse_ownership_declaration_does_not_require_hidden_elements() {
+    let terse = serde_json::json!({"nftables":[
+        {"table":{
+            "family":"inet",
+            "name":"vpsman_port_forward"
+        }},
+        {"set":{
+            "family":"inet",
+            "table":"vpsman_port_forward",
+            "name":"vpsman_ownership_v1",
+            "type":"mark"
+        }}
+    ]});
+    assert!(!table_is_owned(&terse));
+    assert!(table_has_ownership_declaration(&terse));
+}
+
+#[test]
+fn nft_monitor_ignores_only_live_owned_flow_updates() {
+    assert!(nft_event_invalidates_owned_table(
+        "add element inet vpsman_port_forward ports { 80 : 8080 }"
+    ));
+    assert!(nft_event_invalidates_owned_table(
+        "delete table inet vpsman_port_forward"
+    ));
+    assert!(!nft_event_invalidates_owned_table(
+        "add element inet vpsman_port_forward owned_flows { 7 timeout 2m }"
+    ));
+    assert!(!nft_event_invalidates_owned_table(
+        "add table inet unrelated"
+    ));
+}
+
+#[test]
+fn nft_monitor_start_owner_is_released_when_spawn_fails() {
+    assert!(
+        start_nft_monitor(Path::new("/definitely-missing-vpsman-nft-monitor-binary")).is_none()
+    );
 }

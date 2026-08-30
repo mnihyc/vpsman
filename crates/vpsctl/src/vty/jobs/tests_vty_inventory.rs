@@ -38,25 +38,7 @@ fn parses_typed_alert_policy_json_with_vty_quoting() {
 }
 
 #[test]
-fn rejects_obsolete_alert_policy_vty_vocabulary() {
-    for obsolete_argument in [
-        "--rule 'evidence.status = offline'",
-        "--window-secs 60",
-        "--severity critical",
-        "--traffic-selector eth0",
-    ] {
-        let command = format!(
-            "alert-policy-preview --name offline-agents --selector tag:edge --rule-json='{TYPED_ALERT_RULE_JSON}' {obsolete_argument}"
-        );
-        assert!(
-            parse_vty_inventory_command(&command).is_err(),
-            "accepted {obsolete_argument}"
-        );
-    }
-}
-
-#[test]
-fn builds_typed_alert_policy_request_without_legacy_fields() {
+fn builds_typed_alert_policy_request() {
     let request = crate::commands_inventory::alert_policy_request(
         crate::commands_inventory::AlertPolicyWriteOptions {
             name: "offline-agents".to_string(),
@@ -75,24 +57,7 @@ fn builds_typed_alert_policy_request_without_legacy_fields() {
         rule,
         &serde_json::from_str::<serde_json::Value>(TYPED_ALERT_RULE_JSON).unwrap()
     );
-    assert!(rule.get("condition_expression").is_none());
-    assert!(rule.get("window_secs").is_none());
     assert!(rule.get("trigger_meta_condition").is_none());
-
-    let error = crate::commands_inventory::alert_policy_request(
-        crate::commands_inventory::AlertPolicyWriteOptions {
-            name: "legacy".to_string(),
-            selector: Some("tag:edge".to_string()),
-            rule_json: vec![r#"{"condition_expression":"true","window_secs":60}"#.to_string()],
-            enabled: true,
-            notes: None,
-            file: None,
-            confirmed: false,
-        },
-        None,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("obsolete"));
 }
 
 #[test]

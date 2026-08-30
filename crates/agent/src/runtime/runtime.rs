@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot, Semaphore},
+    sync::{mpsc, oneshot, watch, Semaphore},
     task::JoinSet,
     time,
 };
@@ -55,46 +55,136 @@ use crate::{
     network_status::{
         execute_network_status_command, runtime_tunnel_requires_reconnect_sync, NetworkStatusInput,
     },
-    port_forwarding::{
-        inspect_port_forwarding, probe_port_forwarding_capability, reconcile_port_forwarding,
-    },
+    port_forwarding::{PortForwardingConsumer, PortForwardingConsumerHandle},
     restore::{execute_restore_command, RestoreCommandInput},
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     runtime_config_cache::RuntimeConfigCache,
-    supervisor::reconcile_supervised_processes_on_start,
+    supervisor::ProcessSupervisorConsumer,
     telemetry::{
         collect_connection_host_facts, collect_metrics_for_config, TelemetryRuntimeState,
         GENERAL_PING_INTERVAL_SECS,
     },
     terminal::{
-        close_all_terminal_sessions_for_lifecycle, control_terminal_session,
-        drain_pending_terminal_final_events, execute_terminal_command_with_stream_sink,
-        mark_gateway_connected, mark_gateway_disconnected,
+        acknowledge_pending_terminal_final_event, close_all_terminal_sessions_for_lifecycle,
+        control_terminal_session, execute_terminal_command_with_stream_sink,
+        mark_gateway_connected, mark_gateway_disconnected, pending_terminal_final_event_ready,
+        pending_terminal_final_events, retain_pending_terminal_final_event,
     },
     update::{
         execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput,
         AgentUpdateVerificationWork,
     },
-    update_activation::read_activation_heartbeat,
+    update_activation::{
+        execute_update_activate, execute_update_rollback, read_activation_heartbeat,
+        AgentUpdateActivateInput, AgentUpdateRollbackInput,
+    },
 };
 
 pub(crate) async fn run_agent(
+    config: AgentConfig,
+    config_path: PathBuf,
+    endpoint_override: Option<String>,
+) -> Result<()> {
+    let command_ledger = CommandLedger::open_default().await?;
+    let process_supervisor = match ProcessSupervisorConsumer::prepare().await {
+        Ok((report, consumer)) => {
+            log_supervisor_startup_reconcile(&report);
+            consumer
+        }
+        Err(error) => {
+            warn!(%error, "process supervisor startup reconcile failed");
+            ProcessSupervisorConsumer::dormant()
+        }
+    };
+    let (update_execution, update_consumer) = AgentUpdateConsumer::channel();
+    let update_shutdown = update_execution.clone();
+    let (port_forwarding_handle, port_forwarding_consumer) = PortForwardingConsumer::channel();
+    let cleanup_ledger = command_ledger.clone();
+    let mut cleanup_consumer =
+        tokio::spawn(async move { cleanup_ledger.run_cleanup_consumer().await });
+    let mut process_supervisor_consumer = tokio::spawn(process_supervisor.run());
+    let mut update_consumer = tokio::spawn(update_consumer.run());
+    let mut port_forwarding_consumer = tokio::spawn(port_forwarding_consumer.run());
+    let runtime = run_agent_with_ledger(
+        config,
+        config_path,
+        endpoint_override,
+        command_ledger,
+        update_execution,
+        port_forwarding_handle,
+    );
+    tokio::pin!(runtime);
+    let mut result = tokio::select! {
+        result = &mut runtime => result,
+        consumer = &mut cleanup_consumer => match consumer {
+            Ok(Ok(())) => anyhow::bail!("command ledger cleanup consumer exited unexpectedly"),
+            Ok(Err(error)) => Err(error.context("command ledger cleanup consumer failed")),
+            Err(error) => Err(error).context("command ledger cleanup consumer task failed"),
+        },
+        consumer = &mut process_supervisor_consumer => match consumer {
+            Ok(Ok(())) => anyhow::bail!("process supervisor consumer exited unexpectedly"),
+            Ok(Err(error)) => Err(error.context("process supervisor consumer failed")),
+            Err(error) => Err(error).context("process supervisor consumer task failed"),
+        },
+        consumer = &mut update_consumer => match consumer {
+            Ok(Ok(())) => anyhow::bail!("agent update consumer exited unexpectedly"),
+            Ok(Err(error)) => Err(error.context("agent update consumer failed")),
+            Err(error) => Err(error).context("agent update consumer task failed"),
+        },
+        consumer = &mut port_forwarding_consumer => match consumer {
+            Ok(Ok(())) => anyhow::bail!("port-forwarding consumer exited unexpectedly"),
+            Ok(Err(error)) => Err(error.context("port-forwarding consumer failed")),
+            Err(error) => Err(error).context("port-forwarding consumer task failed"),
+        },
+    };
+    update_shutdown.shutdown();
+    if !update_consumer.is_finished() {
+        match update_consumer.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                if result.is_ok() {
+                    result = Err(error.context("agent update consumer shutdown failed"));
+                }
+            }
+            Err(error) => {
+                if result.is_ok() {
+                    result = Err(error).context("agent update consumer shutdown task failed");
+                }
+            }
+        }
+    }
+    if !cleanup_consumer.is_finished() {
+        cleanup_consumer.abort();
+        let _ = cleanup_consumer.await;
+    }
+    if !process_supervisor_consumer.is_finished() {
+        process_supervisor_consumer.abort();
+        let _ = process_supervisor_consumer.await;
+    }
+    if !port_forwarding_consumer.is_finished() {
+        port_forwarding_consumer.abort();
+        let _ = port_forwarding_consumer.await;
+    }
+    result
+}
+
+async fn run_agent_with_ledger(
     mut config: AgentConfig,
     config_path: PathBuf,
     endpoint_override: Option<String>,
+    command_ledger: CommandLedger,
+    update_execution: AgentUpdateConsumerHandle,
+    port_forwarding: PortForwardingConsumerHandle,
 ) -> Result<()> {
     let override_endpoint = endpoint_override.map(|tcp_addr| ServerEndpoint {
         label: "override".to_string(),
         tcp_addr,
         priority: 0,
     });
-    let command_ledger = CommandLedger::open_default().await?;
     let runtime_config_cache = RuntimeConfigCache::open_default().await?;
     let mut loaded_cached_runtime_config_version = None;
-    let mut cached_runtime_config_requires_authoritative_sync = false;
     match runtime_config_cache.load().await {
-        Ok(Some(loaded)) => {
-            let runtime_config = loaded.config;
+        Ok(Some(runtime_config)) => {
             let mut candidate = config.clone();
             runtime_config.apply_to_agent_config(&mut candidate);
             match validate_agent_config_shape(&candidate) {
@@ -105,13 +195,6 @@ pub(crate) async fn run_agent(
                     );
                     config = candidate;
                     loaded_cached_runtime_config_version = Some(runtime_config.version);
-                    cached_runtime_config_requires_authoritative_sync =
-                        loaded.requires_authoritative_runtime_config_sync;
-                    if cached_runtime_config_requires_authoritative_sync {
-                        info!(
-                            "legacy server identity fields were detected in the verified runtime config cache; requesting one authoritative v3 sync"
-                        );
-                    }
                 }
                 Err(error) => {
                     warn!(%error, "ignored invalid last accepted runtime config");
@@ -126,23 +209,18 @@ pub(crate) async fn run_agent(
         runtime_config_cache,
         loaded_cached_runtime_config_version,
     );
-    let startup_runtime_config_requires_sync = startup_requires_authoritative_runtime_config_sync(
-        loaded_cached_runtime_config_version,
-        cached_runtime_config_requires_authoritative_sync,
-    );
+    let startup_runtime_config_requires_sync =
+        startup_requires_authoritative_runtime_config_sync(loaded_cached_runtime_config_version);
     let mut startup_reconcile_resources = BTreeSet::new();
     let process_incarnation_id = uuid::Uuid::new_v4();
-    match reconcile_supervised_processes_on_start().await {
-        Ok(report) => log_supervisor_startup_reconcile(&report),
-        Err(error) => warn!(%error, "process supervisor startup reconcile failed"),
-    }
     if loaded_cached_runtime_config_version.is_some() {
-        match reconcile_port_forwarding(
-            &config.network.port_forwarding,
-            !config.network.port_forwarding.rules.is_empty(),
-            CommandCancelToken::default(),
-        )
-        .await
+        match port_forwarding
+            .reconcile(
+                &config.network.port_forwarding,
+                !config.network.port_forwarding.rules.is_empty(),
+                CommandCancelToken::default(),
+            )
+            .await
         {
             Ok(snapshot) => info!(?snapshot.status, "startup port-forwarding reconcile completed"),
             Err(error) => {
@@ -185,6 +263,8 @@ pub(crate) async fn run_agent(
                 &endpoint.tcp_addr,
                 &mut command_runtime,
                 process_incarnation_id,
+                &update_execution,
+                &port_forwarding,
             )
             .await
             {
@@ -288,11 +368,318 @@ fn accept_telemetry_interval_update(
     Some(next_interval_secs)
 }
 
+#[derive(Clone)]
+struct TelemetryCollectionConfig {
+    config: AgentConfig,
+    interval_secs: u64,
+    revision: u64,
+}
+
+struct CollectedTelemetrySample {
+    revision: u64,
+    telemetry: TelemetryEnvelope,
+}
+
+fn telemetry_sample_revision_is_current(active_revision: u64, sample_revision: u64) -> bool {
+    active_revision == sample_revision
+}
+
+struct TelemetryCollectionConsumer {
+    config_rx: watch::Receiver<TelemetryCollectionConfig>,
+    sample_tx: mpsc::Sender<CollectedTelemetrySample>,
+    process_incarnation_id: uuid::Uuid,
+    port_forwarding: PortForwardingConsumerHandle,
+}
+
+impl TelemetryCollectionConsumer {
+    fn channel(
+        config: AgentConfig,
+        interval_secs: u64,
+        process_incarnation_id: uuid::Uuid,
+        port_forwarding: PortForwardingConsumerHandle,
+    ) -> (
+        watch::Sender<TelemetryCollectionConfig>,
+        mpsc::Receiver<CollectedTelemetrySample>,
+        Self,
+    ) {
+        let (config_tx, config_rx) = watch::channel(TelemetryCollectionConfig {
+            config,
+            interval_secs,
+            revision: 0,
+        });
+        // One pending sample provides backpressure between the single collector
+        // and the socket owner without accumulating a telemetry backlog.
+        let (sample_tx, sample_rx) = mpsc::channel(1);
+        (
+            config_tx,
+            sample_rx,
+            Self {
+                config_rx,
+                sample_tx,
+                process_incarnation_id,
+                port_forwarding,
+            },
+        )
+    }
+
+    async fn run(mut self) -> Result<()> {
+        let mut active = self.config_rx.borrow_and_update().clone();
+        let mut ticker = telemetry_ticker(
+            &active.config.client_id,
+            self.process_incarnation_id,
+            active.interval_secs,
+        );
+        let mut runtime_state = TelemetryRuntimeState::default();
+        loop {
+            tokio::select! {
+                biased;
+                changed = self.config_rx.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                    let next = self.config_rx.borrow_and_update().clone();
+                    if next.interval_secs != active.interval_secs {
+                        ticker = telemetry_ticker(
+                            &next.config.client_id,
+                            self.process_incarnation_id,
+                            next.interval_secs,
+                        );
+                    }
+                    active = next;
+                }
+                _ = ticker.tick() => {
+                    let metrics = match collect_metrics_for_config(
+                        &active.config,
+                        &mut runtime_state,
+                        &self.port_forwarding,
+                    )
+                    .await
+                    {
+                        Ok(metrics) => metrics,
+                        Err(error) => {
+                            warn!(%error, "telemetry collection failed; no sample published");
+                            continue;
+                        }
+                    };
+                    let sample = CollectedTelemetrySample {
+                        revision: active.revision,
+                        telemetry: TelemetryEnvelope {
+                            client_id: active.config.client_id.clone(),
+                            metrics,
+                        },
+                    };
+                    if self.sample_tx.send(sample).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AgentUpdateConsumerHandle {
+    command_tx: mpsc::Sender<AgentUpdateWork>,
+    unmanaged_tx: watch::Sender<Option<AgentConfig>>,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl AgentUpdateConsumerHandle {
+    fn request_unmanaged(&self, config: AgentConfig) {
+        self.unmanaged_tx.send_replace(Some(config));
+    }
+
+    async fn execute(&self, operation: AgentUpdateOperation) -> Result<Vec<CommandOutput>> {
+        let (response, result) = oneshot::channel();
+        self.command_tx
+            .send(AgentUpdateWork {
+                operation,
+                response,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("agent update consumer is unavailable"))?;
+        result
+            .await
+            .context("agent update consumer stopped before returning the correlated result")?
+    }
+
+    fn shutdown(&self) {
+        self.shutdown_tx.send_replace(true);
+    }
+}
+
+enum AgentUpdateOperation {
+    Stage {
+        job_id: uuid::Uuid,
+        artifact_url: String,
+        sha256_hex: String,
+        max_timeout_secs: u64,
+        cancel_token: CommandCancelToken,
+    },
+    Check {
+        job_id: uuid::Uuid,
+        version_url: String,
+        activate: bool,
+        restart_agent: bool,
+        max_timeout_secs: u64,
+        cancel_token: CommandCancelToken,
+        verification_tx: Option<mpsc::Sender<AgentUpdateVerificationWork>>,
+    },
+    Activate {
+        job_id: uuid::Uuid,
+        staged_sha256_hex: String,
+        restart_agent: bool,
+        max_timeout_secs: u64,
+        cancel_token: CommandCancelToken,
+    },
+    Rollback {
+        job_id: uuid::Uuid,
+        rollback_sha256_hex: Option<String>,
+        max_timeout_secs: u64,
+        cancel_token: CommandCancelToken,
+    },
+}
+
+struct AgentUpdateWork {
+    operation: AgentUpdateOperation,
+    response: oneshot::Sender<Result<Vec<CommandOutput>>>,
+}
+
+struct AgentUpdateConsumer {
+    command_rx: mpsc::Receiver<AgentUpdateWork>,
+    unmanaged_rx: watch::Receiver<Option<AgentConfig>>,
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+impl AgentUpdateConsumer {
+    fn channel() -> (AgentUpdateConsumerHandle, Self) {
+        // Runtime admission permits one explicit update command at a time. Keep
+        // exactly one handoff slot so the owner applies backpressure instead of
+        // accumulating a second, hidden update queue.
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (unmanaged_tx, unmanaged_rx) = watch::channel(None);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        (
+            AgentUpdateConsumerHandle {
+                command_tx,
+                unmanaged_tx,
+                shutdown_tx,
+            },
+            Self {
+                command_rx,
+                unmanaged_rx,
+                shutdown_rx,
+            },
+        )
+    }
+
+    async fn run(mut self) -> Result<()> {
+        loop {
+            tokio::select! {
+                biased;
+                changed = self.shutdown_rx.changed() => {
+                    if changed.is_err() || *self.shutdown_rx.borrow_and_update() {
+                        return Ok(());
+                    }
+                }
+                work = self.command_rx.recv() => {
+                    let Some(work) = work else {
+                        return Ok(());
+                    };
+                    let result = execute_agent_update_operation(work.operation).await;
+                    let _ = work.response.send(result);
+                }
+                changed = self.unmanaged_rx.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                    let request = self.unmanaged_rx.borrow_and_update().clone();
+                    if let Some(config) = request {
+                        run_unmanaged_update_check(&config).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn execute_agent_update_operation(
+    operation: AgentUpdateOperation,
+) -> Result<Vec<CommandOutput>> {
+    match operation {
+        AgentUpdateOperation::Stage {
+            job_id,
+            artifact_url,
+            sha256_hex,
+            max_timeout_secs,
+            cancel_token,
+        } => {
+            execute_update_agent(AgentUpdateInput {
+                job_id,
+                artifact_url: &artifact_url,
+                sha256_hex: &sha256_hex,
+                max_timeout_secs,
+                cancel_token,
+            })
+            .await
+        }
+        AgentUpdateOperation::Check {
+            job_id,
+            version_url,
+            activate,
+            restart_agent,
+            max_timeout_secs,
+            cancel_token,
+            verification_tx,
+        } => {
+            execute_update_check(AgentUpdateCheckInput {
+                job_id,
+                version_url: &version_url,
+                activate,
+                restart_agent,
+                max_timeout_secs,
+                cancel_token,
+                verification_tx,
+            })
+            .await
+        }
+        AgentUpdateOperation::Activate {
+            job_id,
+            staged_sha256_hex,
+            restart_agent,
+            max_timeout_secs,
+            cancel_token,
+        } => {
+            execute_update_activate(AgentUpdateActivateInput {
+                job_id,
+                staged_sha256_hex,
+                restart_agent,
+                max_timeout_secs,
+                cancel_token,
+            })
+            .await
+        }
+        AgentUpdateOperation::Rollback {
+            job_id,
+            rollback_sha256_hex,
+            max_timeout_secs,
+            cancel_token,
+        } => {
+            execute_update_rollback(AgentUpdateRollbackInput {
+                job_id,
+                rollback_sha256_hex,
+                max_timeout_secs,
+                cancel_token,
+            })
+            .await
+        }
+    }
+}
+
 fn startup_requires_authoritative_runtime_config_sync(
     loaded_cached_runtime_config_version: Option<u64>,
-    cached_runtime_config_contains_legacy_identity: bool,
 ) -> bool {
-    loaded_cached_runtime_config_version.is_none() || cached_runtime_config_contains_legacy_identity
+    loaded_cached_runtime_config_version.is_none()
 }
 
 async fn connect_and_stream(
@@ -301,6 +688,8 @@ async fn connect_and_stream(
     endpoint: &str,
     command_runtime: &mut AgentCommandRuntime,
     process_incarnation_id: uuid::Uuid,
+    update_execution: &AgentUpdateConsumerHandle,
+    port_forwarding: &PortForwardingConsumerHandle,
 ) -> Result<()> {
     let os_release = configured_os_release(config.telemetry.os_release_file.as_deref())?;
     let host_facts = collect_connection_host_facts(config);
@@ -308,7 +697,7 @@ async fn connect_and_stream(
     let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
     let mut stream = connect_noise_stream(tcp, config).await?;
 
-    let port_forwarding_capability = probe_port_forwarding_capability().await;
+    let port_forwarding_capability = port_forwarding.probe().await?;
     let hello = AgentHello {
         client_id: config.client_id.clone(),
         process_incarnation_id,
@@ -340,7 +729,9 @@ async fn connect_and_stream(
     mark_gateway_connected().await;
 
     let mut reconcile_resources = command_runtime.pending_reconcile_resources.clone();
-    let port_forwarding_snapshot = inspect_port_forwarding(&config.network.port_forwarding).await;
+    let port_forwarding_snapshot = port_forwarding
+        .inspect(&config.network.port_forwarding)
+        .await?;
     if port_forwarding_snapshot_requires_reconnect_sync(&port_forwarding_snapshot) {
         info!(
             status = ?port_forwarding_snapshot.status,
@@ -362,26 +753,31 @@ async fn connect_and_stream(
         reconcile_resources,
     )
     .await?;
-    for output in drain_pending_terminal_final_events().await {
+    for pending in pending_terminal_final_events().await {
         send_json_frame(
             &mut stream,
             MessageKind::TerminalStreamOutput,
             0,
             seq,
-            &output,
+            &pending.event,
         )
         .await?;
         seq += 1;
+        acknowledge_pending_terminal_final_event(&pending).await;
     }
     resume_active_commands(&mut stream, &mut seq, command_runtime).await?;
-    let mut telemetry_runtime_state = TelemetryRuntimeState::default();
     let mut active_telemetry_interval_secs =
         effective_telemetry_interval_secs(server_hello.telemetry_interval_secs, &config.network);
-    let mut ticker = telemetry_ticker(
-        &config.client_id,
-        process_incarnation_id,
-        active_telemetry_interval_secs,
-    );
+    let mut active_telemetry_config_revision = 0_u64;
+    let (telemetry_config_tx, mut telemetry_sample_rx, telemetry_consumer) =
+        TelemetryCollectionConsumer::channel(
+            config.clone(),
+            active_telemetry_interval_secs,
+            process_incarnation_id,
+            port_forwarding.clone(),
+        );
+    let telemetry_consumer = telemetry_consumer.run();
+    tokio::pin!(telemetry_consumer);
     let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
     let mut unmanaged_update_sleep =
         Box::pin(time::sleep_until(unmanaged_update_schedule.next_due()));
@@ -389,21 +785,26 @@ async fn connect_and_stream(
         HashMap::<uuid::Uuid, oneshot::Sender<AgentUpdateVerificationResult>>::new();
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
-                let metrics = match collect_metrics_for_config(config, &mut telemetry_runtime_state).await {
-                    Ok(metrics) => metrics,
-                    Err(error) => {
-                        warn!(%error, "telemetry collection failed; no sample published");
-                        continue;
-                    }
-                };
-                let telemetry = TelemetryEnvelope {
-                    client_id: config.client_id.clone(),
-                    metrics,
-                };
-                send_json_frame(&mut stream, MessageKind::Telemetry, 0, seq, &telemetry).await?;
+            sample = telemetry_sample_rx.recv() => {
+                let sample = sample.context("telemetry collection consumer closed its sample channel")?;
+                if !telemetry_sample_revision_is_current(
+                    active_telemetry_config_revision,
+                    sample.revision,
+                ) {
+                    debug!(
+                        sample_revision = sample.revision,
+                        active_revision = active_telemetry_config_revision,
+                        "discarded telemetry collected from a superseded accepted config"
+                    );
+                    continue;
+                }
+                send_json_frame(&mut stream, MessageKind::Telemetry, 0, seq, &sample.telemetry).await?;
                 seq += 1;
             }
+            consumer = &mut telemetry_consumer => match consumer {
+                Ok(()) => anyhow::bail!("telemetry collection consumer exited unexpectedly"),
+                Err(error) => return Err(error.context("telemetry collection consumer failed")),
+            },
             frame = stream.read_frame() => {
                 let frame = frame?;
                 match frame.kind {
@@ -416,6 +817,8 @@ async fn connect_and_stream(
                                 stream: &mut stream,
                                 seq: &mut seq,
                                 command_runtime,
+                                port_forwarding,
+                                update_execution,
                             },
                         )
                         .await?;
@@ -528,12 +931,15 @@ async fn connect_and_stream(
                                     );
                                 *config = next_config;
                                 if let Some(next_interval_secs) = rephase_interval_secs {
-                                    ticker = telemetry_ticker(
-                                        &config.client_id,
-                                        process_incarnation_id,
-                                        next_interval_secs,
-                                    );
+                                    active_telemetry_interval_secs = next_interval_secs;
                                 }
+                                active_telemetry_config_revision =
+                                    active_telemetry_config_revision.saturating_add(1);
+                                telemetry_config_tx.send_replace(TelemetryCollectionConfig {
+                                    config: config.clone(),
+                                    interval_secs: active_telemetry_interval_secs,
+                                    revision: active_telemetry_config_revision,
+                                });
                                 unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                                 unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                             }
@@ -550,15 +956,34 @@ async fn connect_and_stream(
             }
             output = command_runtime.terminal_stream_rx.recv() => {
                 if let Some(output) = output {
-                    send_json_frame(
+                    if let Err(error) = send_json_frame(
                         &mut stream,
                         MessageKind::TerminalStreamOutput,
                         0,
                         seq,
                         &output,
                     )
+                    .await {
+                        if output.output.done {
+                            retain_pending_terminal_final_event(output).await;
+                        }
+                        return Err(error);
+                    }
+                    seq += 1;
+                }
+            }
+            _ = pending_terminal_final_event_ready() => {
+                if let Some(pending) = pending_terminal_final_events().await.into_iter().next() {
+                    send_json_frame(
+                        &mut stream,
+                        MessageKind::TerminalStreamOutput,
+                        0,
+                        seq,
+                        &pending.event,
+                    )
                     .await?;
                     seq += 1;
+                    acknowledge_pending_terminal_final_event(&pending).await;
                 }
             }
             work = command_runtime.update_verification_rx.recv() => {
@@ -597,7 +1022,7 @@ async fn connect_and_stream(
                 if unmanaged_update_schedule.due(config) {
                     unmanaged_update_schedule.mark_attempt(config);
                     unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
-                    run_unmanaged_update_check(config).await;
+                    update_execution.request_unmanaged(config.clone());
                 }
             }
         }
@@ -633,10 +1058,6 @@ async fn request_runtime_config_reload(
         reason: "agent_reconnect_runtime_config_check".to_string(),
         requires_authoritative_sync,
         reconcile_resources: reconcile_resources.iter().copied().collect(),
-        // New agents keep this compatibility projection until old APIs no longer
-        // need the forwarding-only reconnect signal.
-        requires_port_forwarding_sync: reconcile_resources
-            .contains(&RuntimeConfigReconcileResource::PortForwarding),
     };
     send_json_frame(stream, MessageKind::ConfigUpdate, 0, *seq, &request).await?;
     *seq += 1;
@@ -753,9 +1174,9 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
     }
     let job_id = uuid::Uuid::new_v4();
     info!(%job_id, %version_url, "running unmanaged agent update check");
-    match execute_update_check(AgentUpdateCheckInput {
+    match execute_agent_update_operation(AgentUpdateOperation::Check {
         job_id,
-        version_url,
+        version_url: version_url.to_string(),
         activate: config.update.unmanaged_activate,
         restart_agent: config.update.unmanaged_restart_agent,
         max_timeout_secs: config.auth.max_job_timeout_secs.max(300),
@@ -779,7 +1200,6 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 async fn reconcile_configured_runtime_tunnels(
     config: &AgentConfig,
     trigger: &'static str,
@@ -910,13 +1330,14 @@ struct RuntimeConfigSyncResult {
     fully_applied: bool,
 }
 
-async fn apply_runtime_config_sync(
+async fn apply_runtime_config_sync_owned(
     job_id: uuid::Uuid,
     config: &AgentConfig,
     runtime_config: &AgentRuntimeConfig,
     desired_version: u64,
     reason: &str,
     cancel_token: CommandCancelToken,
+    port_forwarding_consumer: &PortForwardingConsumerHandle,
 ) -> Result<RuntimeConfigSyncResult> {
     anyhow::ensure!(
         runtime_config.version == desired_version,
@@ -943,12 +1364,13 @@ async fn apply_runtime_config_sync(
             !candidate_config.network.port_forwarding.rules.is_empty(),
             reason,
         );
-        match reconcile_port_forwarding(
-            &candidate_config.network.port_forwarding,
-            require_table_access,
-            cancel_token.clone(),
-        )
-        .await
+        match port_forwarding_consumer
+            .reconcile(
+                &candidate_config.network.port_forwarding,
+                require_table_access,
+                cancel_token.clone(),
+            )
+            .await
         {
             Ok(snapshot) => serde_json::to_value(snapshot).unwrap_or_else(|error| {
                 serde_json::json!({
@@ -1089,6 +1511,32 @@ async fn apply_runtime_config_sync(
         accepted_runtime_config,
         fully_applied: status == "applied",
     })
+}
+
+#[cfg(test)]
+async fn apply_runtime_config_sync(
+    job_id: uuid::Uuid,
+    config: &AgentConfig,
+    runtime_config: &AgentRuntimeConfig,
+    desired_version: u64,
+    reason: &str,
+    cancel_token: CommandCancelToken,
+) -> Result<RuntimeConfigSyncResult> {
+    let (port_forwarding, consumer) = PortForwardingConsumer::channel();
+    let consumer = tokio::spawn(consumer.run());
+    let result = apply_runtime_config_sync_owned(
+        job_id,
+        config,
+        runtime_config,
+        desired_version,
+        reason,
+        cancel_token,
+        &port_forwarding,
+    )
+    .await;
+    drop(port_forwarding);
+    let _ = consumer.await;
+    result
 }
 
 #[cfg(test)]
@@ -1512,7 +1960,7 @@ struct ActiveCommand {
     pending_outputs: VecDeque<SequencedCommandOutput>,
     next_output_seq: i32,
     finished: bool,
-    _task: tokio::task::JoinHandle<()>,
+    _consumer_supervisor: tokio::task::JoinHandle<()>,
 }
 
 struct CommandExecutionResult {
@@ -1531,18 +1979,44 @@ enum CommandExecutionEvent {
     Finished(Box<CommandExecutionResult>),
 }
 
+async fn supervise_command_task(
+    command_task: tokio::task::JoinHandle<()>,
+    event_tx: mpsc::Sender<CommandExecutionEvent>,
+    job_id: uuid::Uuid,
+    operation_type: &'static str,
+    max_timeout_secs: u64,
+) {
+    if let Err(error) = command_task.await {
+        let _ = event_tx
+            .send(CommandExecutionEvent::Finished(Box::new(
+                CommandExecutionResult {
+                    job_id,
+                    operation_type,
+                    max_timeout_secs,
+                    result: Err(anyhow::anyhow!("command consumer failed: {error}")),
+                    config_update: None,
+                    runtime_config_update: None,
+                    runtime_config_fully_applied: false,
+                    runtime_config_reconcile_scope: RuntimeConfigReconcileScope::default(),
+                },
+            )))
+            .await;
+    }
+}
+
 struct CommandFrameContext<'a> {
     config: &'a mut AgentConfig,
     config_path: &'a Path,
     stream: &'a mut NoiseFrameStream<TcpStream>,
     seq: &'a mut u64,
     command_runtime: &'a mut AgentCommandRuntime,
+    port_forwarding: &'a PortForwardingConsumerHandle,
+    update_execution: &'a AgentUpdateConsumerHandle,
 }
 
 #[derive(Deserialize)]
 struct JobRequestWire {
     job_id: uuid::Uuid,
-    #[serde(default = "vpsman_common::default_command_protocol_version")]
     command_version: u16,
     command: serde_json::Value,
     max_timeout_secs: u64,
@@ -1944,6 +2418,8 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         stream,
         seq,
         command_runtime,
+        port_forwarding,
+        update_execution,
     } = ctx;
     let payload = frame.decoded_payload()?;
     let request = match decode_job_request_payload(&payload)? {
@@ -2196,7 +2672,9 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let event_tx = command_runtime.command_event_tx.clone();
     let update_verification_tx = command_runtime.update_verification_tx.clone();
     let task_cancel_token = cancel_token.clone();
-    let task = if let Some((desired_version, reason, runtime_config)) = runtime_sync {
+    let task_port_forwarding = port_forwarding.clone();
+    let task_update_execution = update_execution.clone();
+    let command_task = if let Some((desired_version, reason, runtime_config)) = runtime_sync {
         let runtime_config_reconcile_scope = runtime_config_reconcile_scope_from_reason(&reason);
         tokio::spawn(async move {
             let result = time::timeout(
@@ -2204,13 +2682,14 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 run_cancelable(
                     operation_type,
                     task_cancel_token.clone(),
-                    apply_runtime_config_sync(
+                    apply_runtime_config_sync_owned(
                         job_id,
                         &task_config,
                         &runtime_config,
                         desired_version,
                         &reason,
                         task_cancel_token.clone(),
+                        &task_port_forwarding,
                     ),
                 ),
             )
@@ -2274,9 +2753,13 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 update_verification_tx,
                 terminal_stream_tx,
                 task_cancel_token,
+                task_update_execution,
             )
             .await;
-            let _ = output_forwarder.await;
+            let result = match output_forwarder.await {
+                Ok(()) => result,
+                Err(error) => Err(anyhow::anyhow!("command output consumer failed: {error}")),
+            };
             let _ = event_tx
                 .send(CommandExecutionEvent::Finished(Box::new(
                     CommandExecutionResult {
@@ -2293,6 +2776,14 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 .await;
         })
     };
+    let command_owner_event_tx = command_runtime.command_event_tx.clone();
+    let task = tokio::spawn(supervise_command_task(
+        command_task,
+        command_owner_event_tx,
+        job_id,
+        operation_type,
+        max_timeout_secs,
+    ));
     command_runtime.active_commands.insert(
         job_id,
         ActiveCommand {
@@ -2308,7 +2799,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             pending_outputs: VecDeque::new(),
             next_output_seq: 0,
             finished: false,
-            _task: task,
+            _consumer_supervisor: task,
         },
     );
     Ok(())
@@ -2450,6 +2941,7 @@ async fn execute_authorized_command(
     update_verification_tx: mpsc::Sender<AgentUpdateVerificationWork>,
     terminal_stream_tx: mpsc::Sender<TerminalStreamOutput>,
     cancel_token: CommandCancelToken,
+    update_execution: AgentUpdateConsumerHandle,
 ) -> Result<Vec<CommandOutput>> {
     let operation_type = job_command_type_label(&request.command);
     let request_payload_hash = command_payload_hash(&request.command)?;
@@ -2628,14 +3120,41 @@ async fn execute_authorized_command(
             artifact_url,
             sha256_hex,
         } => {
-            execute_update_agent(AgentUpdateInput {
-                job_id: request.job_id,
-                artifact_url,
-                sha256_hex,
-                max_timeout_secs,
-                cancel_token: cancel_token.clone(),
-            })
-            .await
+            update_execution
+                .execute(AgentUpdateOperation::Stage {
+                    job_id: request.job_id,
+                    artifact_url: artifact_url.clone(),
+                    sha256_hex: sha256_hex.clone(),
+                    max_timeout_secs,
+                    cancel_token: cancel_token.clone(),
+                })
+                .await
+        }
+        JobCommand::AgentUpdateActivate {
+            staged_sha256_hex,
+            restart_agent,
+        } => {
+            update_execution
+                .execute(AgentUpdateOperation::Activate {
+                    job_id: request.job_id,
+                    staged_sha256_hex: staged_sha256_hex.clone(),
+                    restart_agent: *restart_agent,
+                    max_timeout_secs,
+                    cancel_token: cancel_token.clone(),
+                })
+                .await
+        }
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex,
+        } => {
+            update_execution
+                .execute(AgentUpdateOperation::Rollback {
+                    job_id: request.job_id,
+                    rollback_sha256_hex: rollback_sha256_hex.clone(),
+                    max_timeout_secs,
+                    cancel_token: cancel_token.clone(),
+                })
+                .await
         }
         JobCommand::AgentUpdateCheck {
             version_url,
@@ -2645,16 +3164,17 @@ async fn execute_authorized_command(
             let version_url = version_url
                 .as_deref()
                 .unwrap_or(config.update.unmanaged_version_url.as_str());
-            execute_update_check(AgentUpdateCheckInput {
-                job_id: request.job_id,
-                version_url,
-                activate: *activate,
-                restart_agent: *restart_agent,
-                max_timeout_secs,
-                cancel_token: cancel_token.clone(),
-                verification_tx: Some(update_verification_tx),
-            })
-            .await
+            update_execution
+                .execute(AgentUpdateOperation::Check {
+                    job_id: request.job_id,
+                    version_url: version_url.to_string(),
+                    activate: *activate,
+                    restart_agent: *restart_agent,
+                    max_timeout_secs,
+                    cancel_token: cancel_token.clone(),
+                    verification_tx: Some(update_verification_tx),
+                })
+                .await
         }
         JobCommand::TerminalOpen { .. } => {
             run_cancelable(

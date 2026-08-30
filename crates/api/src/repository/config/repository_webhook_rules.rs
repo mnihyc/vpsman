@@ -1,22 +1,19 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use serde_json::{json, Value};
+use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{types::Json as SqlJson, Executor, PgConnection, Postgres, Row, Transaction};
-use std::collections::{HashMap, HashSet};
-use tokio::sync::OwnedMutexGuard;
+use sqlx::{types::Json as SqlJson, Executor, Postgres, Row, Transaction};
+use std::collections::HashSet;
 use uuid::Uuid;
 use vpsman_common::{
-    rewrite_retired_alert_event_aliases, rewrite_template_retired_alert_event_aliases,
     validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
     WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
-    WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
-    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
-use vpsman_server_core::ClientPolicySuppressionSharedGuard;
 
 use crate::{
-    model::{AgentView, AuditLogView, AuthContext},
+    model::{AgentView, AuthContext},
     model_webhook_rules::{
         CreateWebhookRuleRequest, WebhookDeliveryRotationRequest, WebhookDeliveryRotationResponse,
         WebhookEventCandidate, WebhookEventRow, WebhookRuleDeliveryCandidate,
@@ -37,10 +34,9 @@ const MAX_NOTES_BYTES: usize = 1024;
 const MAX_SIGNING_SECRET_BYTES: usize = 1024;
 const WEBHOOK_ROTATION_SCAN_BATCH_SIZE: i64 = 1_000;
 
-pub(crate) struct WebhookRuleAlertSendGuard {
-    postgres_suppression: Option<ClientPolicySuppressionSharedGuard>,
-    memory_lifecycle: Option<OwnedMutexGuard<()>>,
+pub(crate) struct WebhookRuleAlertSendEligibilityRevision {
     eligibility: WebhookRuleAlertSendEligibility,
+    revision: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +48,7 @@ enum WebhookRuleAlertSendEligibility {
     LeaseLost,
 }
 
-impl WebhookRuleAlertSendGuard {
+impl WebhookRuleAlertSendEligibilityRevision {
     pub(crate) fn is_deliverable(&self) -> bool {
         self.eligibility == WebhookRuleAlertSendEligibility::Deliverable
     }
@@ -69,153 +65,31 @@ impl WebhookRuleAlertSendGuard {
         }
     }
 
-    fn postgres_connection(&mut self) -> Option<&mut PgConnection> {
-        self.postgres_suppression
-            .as_mut()
-            .map(ClientPolicySuppressionSharedGuard::connection)
-    }
-
-    pub(crate) async fn release(self) -> Result<()> {
-        if let Some(guard) = self.postgres_suppression {
-            guard.release().await?;
-        }
-        drop(self.memory_lifecycle);
-        Ok(())
+    pub(crate) fn revision(&self) -> Option<i64> {
+        self.revision
     }
 }
 
 impl Repository {
-    /// Performs the single guarded 0012 canonicalization pass before any
-    /// rejecting parser or worker consumer is allowed to see persisted data.
-    pub(crate) async fn canonicalize_alert_event_expressions(&self) -> Result<()> {
-        match self {
-            Self::Memory(memory) => {
-                let mut rules = memory.webhook_rules.write().await;
-                for rule in rules.iter_mut() {
-                    rule.expression = rewrite_retired_alert_event_aliases(&rule.expression)
-                        .map_err(anyhow::Error::msg)?;
-                    rule.body_template =
-                        rewrite_template_retired_alert_event_aliases(&rule.body_template)
-                            .map_err(anyhow::Error::msg)?;
-                }
-                Ok(())
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-                    .bind("vpsman.alert_expression_migration")
-                    .execute(&mut *tx)
-                    .await?;
-                let completed: bool = sqlx::query_scalar(
-                    r#"
-                    SELECT completed_at IS NOT NULL
-                    FROM alert_expression_migration_meta
-                    WHERE singleton
-                    FOR UPDATE
-                    "#,
-                )
-                .fetch_one(&mut *tx)
-                .await?;
-                if completed {
-                    tx.commit().await?;
-                    return Ok(());
-                }
-
-                let mut expression_count = 0_i64;
-                let mut template_count = 0_i64;
-                for row in sqlx::query(
-                    "SELECT id, expression, body_template FROM webhook_rules ORDER BY id FOR UPDATE",
-                )
-                .fetch_all(&mut *tx)
-                .await?
-                {
-                    let id: Uuid = row.try_get("id")?;
-                    let expression: String = row.try_get("expression")?;
-                    let body_template: String = row.try_get("body_template")?;
-                    let rewritten_expression = rewrite_retired_alert_event_aliases(&expression)
-                        .map_err(anyhow::Error::msg)?;
-                    let rewritten_template =
-                        rewrite_template_retired_alert_event_aliases(&body_template)
-                            .map_err(anyhow::Error::msg)?;
-                    if rewritten_expression != expression || rewritten_template != body_template {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO alert_expression_migration_audit (
-                                rule_id, prior_expression, rewritten_expression,
-                                prior_body_template, rewritten_body_template,
-                                prior_expression_sha256, rewritten_expression_sha256,
-                                prior_body_template_sha256, rewritten_body_template_sha256
-                            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                            ON CONFLICT (rule_id) DO NOTHING
-                            "#,
-                        )
-                        .bind(id)
-                        .bind(&expression)
-                        .bind(&rewritten_expression)
-                        .bind(&body_template)
-                        .bind(&rewritten_template)
-                        .bind(sha256_text(&expression))
-                        .bind(sha256_text(&rewritten_expression))
-                        .bind(sha256_text(&body_template))
-                        .bind(sha256_text(&rewritten_template))
-                        .execute(&mut *tx)
-                        .await?;
-                        sqlx::query(
-                            "UPDATE webhook_rules SET expression=$2, body_template=$3 WHERE id=$1",
-                        )
-                        .bind(id)
-                        .bind(&rewritten_expression)
-                        .bind(&rewritten_template)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                    expression_count += i64::from(rewritten_expression != expression);
-                    template_count += i64::from(rewritten_template != body_template);
-                }
-                canonicalize_pending_alert_event_rows_in_tx(&mut tx).await?;
-                sqlx::query(
-                    r#"
-                    UPDATE alert_expression_migration_meta
-                    SET completed_at=clock_timestamp(), rewritten_rule_count=$1,
-                        rewritten_template_count=$2
-                    WHERE singleton AND completed_at IS NULL
-                    "#,
-                )
-                .bind(expression_count)
-                .bind(template_count)
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                Ok(())
-            }
-        }
-    }
-
     pub(crate) async fn list_webhook_rules(
         &self,
         limit: i64,
         enabled: Option<bool>,
     ) -> Result<Vec<WebhookRuleView>> {
+        self.query_webhook_rules(Some(limit.clamp(1, 1000)), enabled)
+            .await
+    }
+
+    pub(crate) async fn list_all_webhook_rules(&self) -> Result<Vec<WebhookRuleView>> {
+        self.query_webhook_rules(None, None).await
+    }
+
+    async fn query_webhook_rules(
+        &self,
+        limit: Option<i64>,
+        enabled: Option<bool>,
+    ) -> Result<Vec<WebhookRuleView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .webhook_rules
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rule| enabled.is_none_or(|value| rule.enabled == value))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    right.enabled.cmp(&left.enabled).then_with(|| {
-                        left.name
-                            .to_ascii_lowercase()
-                            .cmp(&right.name.to_ascii_lowercase())
-                    })
-                });
-                rows.truncate(limit.clamp(1, 1000) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -238,7 +112,7 @@ impl Repository {
                     LIMIT $1
                     "#,
                 )
-                .bind(limit.clamp(1, 1000))
+                .bind(limit)
                 .bind(enabled)
                 .fetch_all(pool)
                 .await?;
@@ -252,13 +126,6 @@ impl Repository {
         rule_id: Uuid,
     ) -> Result<Option<WebhookRuleView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .webhook_rules
-                .read()
-                .await
-                .iter()
-                .find(|rule| rule.id == rule_id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -294,73 +161,20 @@ impl Repository {
     ) -> Result<WebhookRuleView> {
         let candidate = webhook_rule_from_request(request, operator)?;
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                // Match the rule -> delivery order used by deletion and acquire audit state
-                // before mutating either collection.
-                let mut rules = memory.webhook_rules.write().await;
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                let mut audits = memory.audits.write().await;
-                if request.id.is_none() {
-                    if let Some(stored) = rules.iter().find(|stored| stored.name == candidate.name)
-                    {
-                        anyhow::ensure!(
-                            webhook_rule_material_matches(stored, &candidate),
-                            "webhook_rule_name_conflict"
-                        );
-                        return Ok(stored.clone());
-                    }
-                }
-                anyhow::ensure!(
-                    !rules.iter().any(|stored| {
-                        stored.name == candidate.name && Some(stored.id) != request.id
-                    }),
-                    "webhook_rule_name_conflict"
-                );
-                let rule = if let Some(stored) = rules
-                    .iter_mut()
-                    .find(|stored| request.id.is_some_and(|id| stored.id == id))
-                {
-                    stored.name = candidate.name.clone();
-                    stored.enabled = candidate.enabled;
-                    stored.expression = candidate.expression.clone();
-                    stored.target = candidate.target.clone();
-                    stored.body_template = candidate.body_template.clone();
-                    stored.signing_secret = if request.clear_signing_secret {
-                        None
-                    } else {
-                        candidate
-                            .signing_secret
-                            .clone()
-                            .or_else(|| stored.signing_secret.clone())
-                    };
-                    stored.signing_secret_set = stored.signing_secret.is_some();
-                    stored.cooldown_secs = candidate.cooldown_secs;
-                    stored.notes = candidate.notes.clone();
-                    stored.actor_id = candidate.actor_id;
-                    stored.updated_at = now.clone();
-                    stored.clone()
-                } else {
-                    rules.push(candidate.clone());
-                    candidate
-                };
-                if !rule.enabled {
-                    cancel_memory_webhook_rule_deliveries(
-                        &mut deliveries,
-                        rule.id,
-                        "webhook rule disabled",
-                    );
-                }
-                audits.push(webhook_rule_audit(&rule, operator, now));
-                Ok(rule)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 if request.id.is_none() {
-                    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-                        .bind("vpsman.webhook_rule.idless_upsert")
-                        .execute(&mut *tx)
-                        .await?;
+                    sqlx::query(
+                        r#"
+                        SELECT pg_advisory_xact_lock(hashtextextended(
+                            'vpsman:webhook-rule-name:' || $1::text,
+                            0
+                        ))
+                        "#,
+                    )
+                    .bind(&candidate.name)
+                    .execute(&mut *tx)
+                    .await?;
                     let existing = sqlx::query(
                         r#"
                         SELECT
@@ -456,24 +270,12 @@ impl Repository {
                 .map_err(webhook_rule_database_error)?;
                 let rule = webhook_rule_from_row(row)?;
                 if !rule.enabled {
-                    sqlx::query(
-                        r#"
-                        UPDATE webhook_rule_deliveries
-                        SET
-                            status = 'canceled_disabled',
-                            error = $2,
-                            delivery_lease_id = NULL,
-                            delivery_lease_until = NULL,
-                            next_attempt_at = NULL,
-                            delivered_at = NULL
-                        WHERE rule_id = $1
-                          AND status IN ('queued', 'failed', 'in_progress')
-                        "#,
-                    )
-                    .bind(rule.id)
-                    .bind("webhook rule disabled")
-                    .execute(&mut *tx)
-                    .await?;
+                    // The rule row is the durable source state. The worker is
+                    // the sole delivery terminalizer and rechecks this state
+                    // immediately before external I/O.
+                    sqlx::query("SELECT pg_notify('webhook_events', 'webhook_rule_state')")
+                        .execute(&mut *tx)
+                        .await?;
                 }
                 insert_webhook_rule_audit(&mut tx, &rule, operator).await?;
                 tx.commit().await?;
@@ -489,37 +291,6 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let mut rules = memory.webhook_rules.write().await;
-                let position = rules
-                    .iter()
-                    .position(|rule| rule.id == rule_id)
-                    .ok_or_else(|| anyhow::anyhow!("webhook_rule_not_found:{rule_id}"))?;
-                anyhow::ensure!(
-                    rules[position].name == reviewed_name.trim(),
-                    "webhook_rule_delete_review_stale"
-                );
-                let rule = rules.remove(position);
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                cancel_memory_webhook_rule_deliveries(
-                    &mut deliveries,
-                    rule_id,
-                    "webhook rule deleted",
-                );
-                drop(deliveries);
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(webhook_rule_audit_with_action(
-                        &rule,
-                        operator,
-                        unix_now().to_string(),
-                        "webhook_rule.deleted",
-                    ));
-                drop(rules);
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let current_name = sqlx::query_scalar::<_, String>(
@@ -533,24 +304,6 @@ impl Repository {
                     current_name == reviewed_name.trim(),
                     "webhook_rule_delete_review_stale"
                 );
-                sqlx::query(
-                    r#"
-                    UPDATE webhook_rule_deliveries
-                    SET
-                        status = 'canceled_disabled',
-                        error = $2,
-                        delivery_lease_id = NULL,
-                        delivery_lease_until = NULL,
-                        next_attempt_at = NULL,
-                        delivered_at = NULL
-                    WHERE rule_id = $1
-                      AND status IN ('queued', 'failed', 'in_progress')
-                    "#,
-                )
-                .bind(rule_id)
-                .bind("webhook rule deleted")
-                .execute(&mut *tx)
-                .await?;
                 let row = sqlx::query(
                     r#"
                     DELETE FROM webhook_rules
@@ -584,6 +337,9 @@ impl Repository {
                     "webhook_rule.deleted",
                 )
                 .await?;
+                sqlx::query("SELECT pg_notify('webhook_events', 'webhook_rule_state')")
+                    .execute(&mut *tx)
+                    .await?;
                 tx.commit().await?;
                 Ok(())
             }
@@ -600,29 +356,6 @@ impl Repository {
         let event_kind = normalize_optional_filter(event_kind);
         let status = normalize_optional_status(status)?;
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .webhook_rule_deliveries
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|delivery| rule_id.is_none_or(|value| delivery.rule_id == value))
-                    .filter(|delivery| {
-                        event_kind
-                            .as_deref()
-                            .is_none_or(|value| delivery.event_kind == value)
-                    })
-                    .filter(|delivery| {
-                        status
-                            .as_deref()
-                            .is_none_or(|value| delivery.status == value)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-                rows.truncate(limit.clamp(1, 1000) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -665,36 +398,11 @@ impl Repository {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn record_webhook_rule_deliveries(
         &self,
         candidates: &[WebhookRuleDeliveryCandidate],
     ) -> Result<Vec<WebhookRuleDeliveryView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut persisted = Vec::new();
-                let rules = memory.webhook_rules.read().await;
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                for candidate in candidates {
-                    if !rules.iter().any(|rule| rule.id == candidate.rule_id) {
-                        continue;
-                    }
-                    if deliveries.iter().any(|stored| {
-                        stored.rule_id == candidate.rule_id && stored.event_id == candidate.event_id
-                    }) {
-                        continue;
-                    }
-                    let delivery = webhook_delivery_from_candidate(
-                        candidate,
-                        WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
-                    );
-                    deliveries.push(delivery.clone());
-                    persisted.push(delivery);
-                }
-                drop(deliveries);
-                drop(rules);
-                Ok(persisted)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let mut rule_ids = candidates
@@ -710,7 +418,6 @@ impl Repository {
                     FROM webhook_rules
                     WHERE id = ANY($1)
                     ORDER BY id
-                    FOR UPDATE
                     "#,
                 )
                 .bind(&rule_ids)
@@ -762,19 +469,6 @@ impl Repository {
     ) -> Result<WebhookEventRow> {
         let occurred_at = Utc::now();
         match self {
-            Self::Memory(memory) => {
-                let row = webhook_event_row(event, occurred_at)?;
-                let mut events = memory.webhook_events.write().await;
-                if let Some(stored) = events
-                    .iter()
-                    .find(|stored| stored.kind == row.kind && stored.event_id == row.event_id)
-                    .cloned()
-                {
-                    return Ok(stored);
-                }
-                events.push(row.clone());
-                Ok(row)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = record_webhook_event_in_tx(&mut tx, event, occurred_at).await?;
@@ -792,61 +486,6 @@ impl Repository {
         let older_than_text = older_than.as_ref().map(DateTime::<Utc>::to_rfc3339);
         let status = normalize_optional_status(request.status.as_deref())?;
         match self {
-            Self::Memory(memory) => {
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                let mut matched_ids = deliveries
-                    .iter()
-                    .filter(|delivery| {
-                        rotation_delivery_matches(
-                            delivery,
-                            older_than,
-                            status.as_deref(),
-                            request.rule_id,
-                        )
-                    })
-                    .map(|delivery| delivery.id)
-                    .collect::<Vec<_>>();
-                let preview_hash = webhook_rotation_preview_hash(
-                    older_than_text.as_deref(),
-                    status.as_deref(),
-                    request.rule_id,
-                    &mut matched_ids,
-                )?;
-                if request.confirmed {
-                    anyhow::ensure!(
-                        request.preview_hash.as_deref() == Some(preview_hash.as_str()),
-                        "webhook_delivery_rotation_preview_hash_mismatch"
-                    );
-                }
-                let deleted = if request.confirmed {
-                    let before = deliveries.len();
-                    deliveries.retain(|delivery| {
-                        !rotation_delivery_matches(
-                            delivery,
-                            older_than,
-                            status.as_deref(),
-                            request.rule_id,
-                        )
-                    });
-                    let deleted = before.saturating_sub(deliveries.len());
-                    anyhow::ensure!(
-                        deleted == matched_ids.len(),
-                        "webhook_delivery_rotation_changed_during_confirmation"
-                    );
-                    deleted
-                } else {
-                    0
-                };
-                Ok(WebhookDeliveryRotationResponse {
-                    matched_count: matched_ids.len(),
-                    deleted_count: deleted,
-                    confirmation_required: !request.confirmed,
-                    older_than: older_than_text,
-                    status,
-                    rule_id: request.rule_id,
-                    preview_hash,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let transaction_mode = if request.confirmed {
@@ -910,77 +549,24 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn claim_webhook_rule_deliveries_for_process(
+    pub(crate) async fn claim_webhook_rule_delivery_for_process(
         &self,
-        delivery_ids: &[Uuid],
+        delivery_id: Uuid,
         lease_id: Uuid,
         lease_secs: i64,
-    ) -> Result<Vec<WebhookRuleDeliveryView>> {
-        if delivery_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let id_set = delivery_ids.iter().copied().collect::<HashSet<_>>();
+    ) -> Result<Option<WebhookRuleDeliveryView>> {
         match self {
-            Self::Memory(memory) => {
-                let enabled_rule_secrets = memory
-                    .webhook_rules
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rule| rule.enabled)
-                    .map(|rule| (rule.id, rule.signing_secret.clone()))
-                    .collect::<HashMap<_, _>>();
-                let suspended_client_ids = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status == "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                let mut claimed = Vec::new();
-                for delivery in deliveries.iter_mut() {
-                    if !id_set.contains(&delivery.id)
-                        || !enabled_rule_secrets.contains_key(&delivery.rule_id)
-                        || !matches!(
-                            delivery.status.as_str(),
-                            WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
-                                | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
-                        )
-                        || (delivery.event_kind == "alert.triggered"
-                            && delivery
-                                .matched_vps
-                                .iter()
-                                .any(|agent| suspended_client_ids.contains(&agent.id)))
-                    {
-                        continue;
-                    }
-                    delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS.to_string();
-                    delivery.error = None;
-                    delivery.next_attempt_at = None;
-                    delivery.signing_secret = enabled_rule_secrets
-                        .get(&delivery.rule_id)
-                        .cloned()
-                        .flatten();
-                    claimed.push(delivery.clone());
-                }
-                Ok(claimed)
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
+                let row = sqlx::query(
                     r#"
-                    WITH requested AS (
-                        SELECT unnest($1::uuid[]) AS id
-                    ),
-                    claim AS (
+                    WITH claim AS (
                         SELECT delivery.id, rule.signing_secret
                         FROM webhook_rule_deliveries delivery
-                        JOIN requested ON requested.id = delivery.id
                         JOIN webhook_rules rule
                           ON rule.id = delivery.rule_id
                          AND rule.enabled = TRUE
-                        WHERE delivery.status IN ('queued', 'failed')
+                        WHERE delivery.id = $1
+                          AND delivery.status IN ('queued', 'failed')
                           AND NOT (
                               delivery.event_kind='alert.triggered'
                               AND EXISTS (
@@ -990,7 +576,6 @@ impl Repository {
                                   WHERE subject.status='suspended'
                               )
                           )
-                        ORDER BY delivery.created_at ASC, delivery.id ASC
                         FOR UPDATE OF delivery SKIP LOCKED
                     )
                     UPDATE webhook_rule_deliveries delivery
@@ -1025,24 +610,18 @@ impl Repository {
                         delivery.delivered_at::text AS delivered_at
                     "#,
                 )
-                .bind(delivery_ids)
+                .bind(delivery_id)
                 .bind(lease_id)
                 .bind(lease_secs.max(1))
-                .fetch_all(pool)
+                .fetch_optional(pool)
                 .await?;
-                rows.into_iter().map(webhook_delivery_from_row).collect()
+                row.map(webhook_delivery_from_row).transpose()
             }
         }
     }
 
     pub(crate) async fn webhook_rule_enabled(&self, rule_id: Uuid) -> Result<bool> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .webhook_rules
-                .read()
-                .await
-                .iter()
-                .any(|rule| rule.id == rule_id && rule.enabled)),
             Self::Postgres(pool) => {
                 let enabled = sqlx::query_scalar::<_, bool>(
                     r#"
@@ -1064,138 +643,10 @@ impl Repository {
         &self,
         delivery_id: Uuid,
         lease_id: Uuid,
-    ) -> Result<WebhookRuleAlertSendGuard> {
+    ) -> Result<WebhookRuleAlertSendEligibilityRevision> {
         match self {
-            Self::Memory(memory) => {
-                let initial = memory
-                    .webhook_rule_deliveries
-                    .read()
-                    .await
-                    .iter()
-                    .find(|delivery| delivery.id == delivery_id)
-                    .cloned()
-                    .context("webhook rule delivery not found")?;
-                if initial.event_kind != "alert.triggered" || initial.matched_vps.is_empty() {
-                    return Ok(WebhookRuleAlertSendGuard {
-                        postgres_suppression: None,
-                        memory_lifecycle: None,
-                        eligibility: if initial.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS {
-                            WebhookRuleAlertSendEligibility::Deliverable
-                        } else {
-                            WebhookRuleAlertSendEligibility::LeaseLost
-                        },
-                    });
-                }
-                let lifecycle = memory.agent_key_lifecycle.clone().lock_owned().await;
-                let delivery = memory
-                    .webhook_rule_deliveries
-                    .read()
-                    .await
-                    .iter()
-                    .find(|delivery| delivery.id == delivery_id)
-                    .cloned()
-                    .context("webhook rule delivery not found")?;
-                let mut client_ids = delivery
-                    .matched_vps
-                    .iter()
-                    .map(|agent| agent.id.clone())
-                    .collect::<Vec<_>>();
-                client_ids.sort();
-                client_ids.dedup();
-                let enabled = memory
-                    .webhook_rules
-                    .read()
-                    .await
-                    .iter()
-                    .any(|rule| rule.id == delivery.rule_id && rule.enabled);
-                let agents = memory.agents.read().await;
-                let subject_count = agents
-                    .iter()
-                    .filter(|agent| client_ids.contains(&agent.id))
-                    .count();
-                let subject_suspended = agents
-                    .iter()
-                    .any(|agent| client_ids.contains(&agent.id) && agent.status == "suspended");
-                let eligibility = if delivery.status != WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS {
-                    WebhookRuleAlertSendEligibility::LeaseLost
-                } else if !enabled {
-                    WebhookRuleAlertSendEligibility::RuleDisabled
-                } else if client_ids.is_empty()
-                    || client_ids.len() != delivery.matched_vps.len()
-                    || subject_count != client_ids.len()
-                {
-                    WebhookRuleAlertSendEligibility::InvalidClientScope
-                } else if subject_suspended {
-                    WebhookRuleAlertSendEligibility::ClientSuspended
-                } else {
-                    WebhookRuleAlertSendEligibility::Deliverable
-                };
-                Ok(WebhookRuleAlertSendGuard {
-                    postgres_suppression: None,
-                    memory_lifecycle: Some(lifecycle),
-                    eligibility,
-                })
-            }
             Self::Postgres(pool) => {
-                let Some((event_kind, matched_count, mut client_ids)) =
-                    sqlx::query_as::<_, (String, i32, Vec<String>)>(
-                        r#"
-                        SELECT event_kind, jsonb_array_length(matched_vps),
-                               ARRAY(
-                                   SELECT matched->>'id'
-                                   FROM jsonb_array_elements(matched_vps) matched
-                                   WHERE jsonb_typeof(matched)='object'
-                                     AND NULLIF(btrim(matched->>'id'),'') IS NOT NULL
-                                   ORDER BY matched->>'id'
-                               )
-                        FROM webhook_rule_deliveries
-                        WHERE id=$1
-                        "#,
-                    )
-                    .bind(delivery_id)
-                    .fetch_optional(pool)
-                    .await?
-                else {
-                    return Ok(WebhookRuleAlertSendGuard {
-                        postgres_suppression: None,
-                        memory_lifecycle: None,
-                        eligibility: WebhookRuleAlertSendEligibility::LeaseLost,
-                    });
-                };
-                if event_kind != "alert.triggered" || matched_count == 0 {
-                    return Ok(WebhookRuleAlertSendGuard {
-                        postgres_suppression: None,
-                        memory_lifecycle: None,
-                        eligibility: WebhookRuleAlertSendEligibility::Deliverable,
-                    });
-                }
-                client_ids.sort();
-                client_ids.dedup();
-                if client_ids.is_empty() {
-                    return Ok(WebhookRuleAlertSendGuard {
-                        postgres_suppression: None,
-                        memory_lifecycle: None,
-                        eligibility: WebhookRuleAlertSendEligibility::InvalidClientScope,
-                    });
-                }
-                let mut guard = ClientPolicySuppressionSharedGuard::acquire_many(
-                    pool,
-                    client_ids.iter().map(String::as_str),
-                )
-                .await?;
-                let eligibility = postgres_webhook_rule_alert_send_eligibility(
-                    guard.connection(),
-                    delivery_id,
-                    lease_id,
-                    &client_ids,
-                    matched_count,
-                )
-                .await?;
-                Ok(WebhookRuleAlertSendGuard {
-                    postgres_suppression: Some(guard),
-                    memory_lifecycle: None,
-                    eligibility,
-                })
+                postgres_arm_webhook_rule_alert_send(pool, delivery_id, lease_id).await
             }
         }
     }
@@ -1207,64 +658,25 @@ impl Repository {
         status: &str,
         error: Option<&str>,
         next_attempt_after_secs: Option<i64>,
-        send_guard: Option<&mut WebhookRuleAlertSendGuard>,
+        eligibility_revision: Option<i64>,
     ) -> Result<WebhookRuleDeliveryView> {
         let status = normalize_delivery_attempt_status(status)?;
         let error = error
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.chars().take(MAX_NOTES_BYTES).collect::<String>());
-        let now = unix_now().to_string();
         match self {
-            Self::Memory(memory) => {
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                let delivery = deliveries
-                    .iter_mut()
-                    .find(|delivery| delivery.id == delivery_id)
-                    .context("webhook rule delivery not found")?;
-                if delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED {
-                    return Ok(delivery.clone());
-                }
-                anyhow::ensure!(
-                    delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
-                    "webhook rule delivery is not claimed"
-                );
-                delivery.status = status.to_string();
-                delivery.error = error;
-                delivery.attempt_count = delivery.attempt_count.saturating_add(1);
-                delivery.next_attempt_at = next_attempt_after_secs
-                    .filter(|seconds| *seconds > 0)
-                    .map(|seconds| (Utc::now() + Duration::seconds(seconds)).to_rfc3339());
-                delivery.last_attempt_at = Some(now.clone());
-                delivery.delivered_at =
-                    (status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).then_some(now);
-                Ok(delivery.clone())
-            }
             Self::Postgres(pool) => {
-                match send_guard.and_then(WebhookRuleAlertSendGuard::postgres_connection) {
-                    Some(connection) => {
-                        postgres_complete_webhook_rule_delivery_attempt(
-                            connection,
-                            delivery_id,
-                            lease_id,
-                            status,
-                            error.as_deref(),
-                            next_attempt_after_secs,
-                        )
-                        .await
-                    }
-                    None => {
-                        postgres_complete_webhook_rule_delivery_attempt(
-                            pool,
-                            delivery_id,
-                            lease_id,
-                            status,
-                            error.as_deref(),
-                            next_attempt_after_secs,
-                        )
-                        .await
-                    }
-                }
+                postgres_complete_webhook_rule_delivery_attempt(
+                    pool,
+                    delivery_id,
+                    lease_id,
+                    status,
+                    error.as_deref(),
+                    next_attempt_after_secs,
+                    eligibility_revision,
+                )
+                .await
             }
         }
     }
@@ -1274,7 +686,6 @@ impl Repository {
         delivery_id: Uuid,
         lease_id: Uuid,
         error: &str,
-        send_guard: Option<&mut WebhookRuleAlertSendGuard>,
     ) -> Result<WebhookRuleDeliveryView> {
         let error = error
             .trim()
@@ -1282,46 +693,9 @@ impl Repository {
             .take(MAX_NOTES_BYTES)
             .collect::<String>();
         match self {
-            Self::Memory(memory) => {
-                let mut deliveries = memory.webhook_rule_deliveries.write().await;
-                let delivery = deliveries
-                    .iter_mut()
-                    .find(|delivery| delivery.id == delivery_id)
-                    .context("webhook rule delivery not found")?;
-                if delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED {
-                    return Ok(delivery.clone());
-                }
-                anyhow::ensure!(
-                    delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
-                    "webhook rule delivery is not claimed"
-                );
-                delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string();
-                delivery.error = Some(error);
-                delivery.next_attempt_at = None;
-                delivery.delivered_at = None;
-                Ok(delivery.clone())
-            }
             Self::Postgres(pool) => {
-                match send_guard.and_then(WebhookRuleAlertSendGuard::postgres_connection) {
-                    Some(connection) => {
-                        postgres_cancel_claimed_webhook_rule_delivery(
-                            connection,
-                            delivery_id,
-                            lease_id,
-                            &error,
-                        )
-                        .await
-                    }
-                    None => {
-                        postgres_cancel_claimed_webhook_rule_delivery(
-                            pool,
-                            delivery_id,
-                            lease_id,
-                            &error,
-                        )
-                        .await
-                    }
-                }
+                postgres_cancel_claimed_webhook_rule_delivery(pool, delivery_id, lease_id, &error)
+                    .await
             }
         }
     }
@@ -1363,18 +737,6 @@ impl Repository {
             })).collect::<Vec<_>>(),
         });
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "webhook.rule_deliveries_processed".to_string(),
-                    target: "webhook_rules".to_string(),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -1483,7 +845,6 @@ fn webhook_rule_database_error(error: sqlx::Error) -> anyhow::Error {
     }
 }
 
-#[allow(dead_code)]
 fn insert_delivery_query(
     delivery: &WebhookRuleDeliveryView,
 ) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
@@ -1608,6 +969,7 @@ fn webhook_delivery_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleDe
         created_at: row.try_get("created_at")?,
         delivered_at: row.try_get("delivered_at")?,
         review_preview_hash: None,
+        process_outcome: None,
     })
 }
 
@@ -1638,6 +1000,7 @@ fn webhook_delivery_from_candidate(
         delivered_at: (status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED)
             .then(|| unix_now().to_string()),
         review_preview_hash: None,
+        process_outcome: None,
     }
 }
 
@@ -1673,7 +1036,6 @@ async fn insert_webhook_rule_audit_with_action(
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn insert_webhook_dispatch_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deliveries: &[WebhookRuleDeliveryView],
@@ -1706,31 +1068,6 @@ async fn insert_webhook_dispatch_audit(
     .execute(&mut **tx)
     .await?;
     Ok(())
-}
-
-fn webhook_rule_audit(
-    rule: &WebhookRuleView,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    webhook_rule_audit_with_action(rule, operator, created_at, "webhook.rule_upserted")
-}
-
-fn webhook_rule_audit_with_action(
-    rule: &WebhookRuleView,
-    operator: &AuthContext,
-    created_at: String,
-    action: &str,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: format!("webhook_rule:{}", rule.id),
-        command_hash: None,
-        metadata: webhook_rule_metadata(rule, operator),
-        created_at,
-    }
 }
 
 fn webhook_rule_metadata(rule: &WebhookRuleView, operator: &AuthContext) -> serde_json::Value {
@@ -1786,55 +1123,16 @@ fn normalize_signing_secret(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(value.to_string()))
 }
 
-pub(crate) async fn ensure_webhook_event_partition(
-    pool: &sqlx::PgPool,
-    timestamp: DateTime<Utc>,
-) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    ensure_webhook_event_partition_in_tx(&mut tx, timestamp).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-pub(crate) async fn ensure_webhook_event_partition_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    timestamp: DateTime<Utc>,
-) -> Result<()> {
-    let date = timestamp.date_naive();
-    let next = date
-        .succ_opt()
-        .context("failed to calculate webhook event partition date")?;
-    let table_name = format!("webhook_events_{}", date.format("%Y%m%d"));
-    let partition_exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(&table_name)
-        .fetch_one(&mut **tx)
-        .await?;
-    if partition_exists {
-        return Ok(());
-    }
-    let lock_name = format!("vpsman:webhook_events:{date}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(lock_name)
-        .execute(&mut **tx)
-        .await?;
-    let sql = format!(
-        r#"
-        CREATE TABLE IF NOT EXISTS {table_name}
-        PARTITION OF webhook_events
-        FOR VALUES FROM ('{date}') TO ('{next}')
-        "#
-    );
-    sqlx::query(&sql).execute(&mut **tx).await?;
-    Ok(())
-}
-
 pub(crate) async fn record_webhook_event_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event: WebhookEventCandidate,
     occurred_at: DateTime<Utc>,
 ) -> Result<WebhookEventRow> {
     let row = webhook_event_row(event, occurred_at)?;
-    ensure_webhook_event_partition_in_tx(tx, occurred_at).await?;
+    anyhow::ensure!(
+        row.kind != "telemetry.rollup",
+        "telemetry webhook events are materialized from canonical samples"
+    );
     let lock_name = format!("vpsman:webhook-event:{}:{}", row.kind, row.event_id);
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(lock_name)
@@ -1896,9 +1194,12 @@ pub(crate) async fn record_webhook_event_in_tx(
     )
     .bind(&row.kind)
     .bind(&row.event_id)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    webhook_event_from_row(stored)
+    if let Some(stored) = stored {
+        return webhook_event_from_row(stored);
+    }
+    anyhow::bail!("webhook event dedupe source disappeared")
 }
 
 pub(crate) fn webhook_event_row(
@@ -1977,33 +1278,7 @@ fn rotation_older_than(request: &WebhookDeliveryRotationRequest) -> Result<Optio
     Ok(None)
 }
 
-fn rotation_delivery_matches(
-    delivery: &WebhookRuleDeliveryView,
-    older_than: Option<DateTime<Utc>>,
-    status: Option<&str>,
-    rule_id: Option<Uuid>,
-) -> bool {
-    if let Some(rule_id) = rule_id {
-        if delivery.rule_id != rule_id {
-            return false;
-        }
-    }
-    if let Some(status) = status {
-        if delivery.status != status {
-            return false;
-        }
-    }
-    if let Some(older_than) = older_than {
-        let Ok(created_at) = DateTime::parse_from_rfc3339(&delivery.created_at) else {
-            return false;
-        };
-        if created_at.with_timezone(&Utc) >= older_than {
-            return false;
-        }
-    }
-    true
-}
-
+#[cfg(test)]
 fn webhook_rotation_preview_hash(
     older_than: Option<&str>,
     status: Option<&str>,
@@ -2122,84 +1397,112 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
         .transpose()
 }
 
-async fn postgres_webhook_rule_alert_send_eligibility<'e, E>(
+async fn postgres_arm_webhook_rule_alert_send<'e, E>(
     executor: E,
     delivery_id: Uuid,
     lease_id: Uuid,
-    expected_client_ids: &[String],
-    expected_matched_count: i32,
-) -> Result<WebhookRuleAlertSendEligibility>
+) -> Result<WebhookRuleAlertSendEligibilityRevision>
 where
     E: Executor<'e, Database = Postgres>,
 {
     let Some(row) = sqlx::query(
         r#"
-        SELECT
-            delivery.status='in_progress'
-                AND delivery.delivery_lease_id=$2 AS lease_owned,
-            rule.enabled AS rule_enabled,
-            delivery.event_kind='alert.triggered'
-                AND jsonb_array_length(delivery.matched_vps)=$4
-                AND cardinality($3::text[])=$4
-                AND ARRAY(
-                    SELECT client.id
-                    FROM (
-                        SELECT DISTINCT matched->>'id' AS id
+        WITH delivery_scope AS MATERIALIZED (
+            SELECT delivery.id, delivery.event_kind, delivery.event_id,
+                   delivery.status='in_progress'
+                     AND delivery.delivery_lease_id=$2 AS lease_owned,
+                   rule.enabled AS rule_enabled,
+                   jsonb_array_length(delivery.matched_vps) AS matched_count,
+                   ARRAY(
+                        SELECT DISTINCT matched->>'id'
                         FROM jsonb_array_elements(delivery.matched_vps) matched
                         WHERE jsonb_typeof(matched)='object'
                           AND NULLIF(btrim(matched->>'id'),'') IS NOT NULL
-                    ) client
-                    ORDER BY client.id
-                ) = $3::text[]
-                AND (
-                    SELECT count(*) FROM clients subject
-                    WHERE subject.id=ANY($3::text[])
-                ) = cardinality($3::text[]) AS scope_exact,
-            EXISTS (
-                SELECT 1 FROM clients subject
-                WHERE subject.id=ANY($3::text[])
-                  AND subject.status='suspended'
-            ) AS subject_suspended,
-            EXISTS (
-                SELECT 1
-                FROM alert_lifecycle_events lifecycle
-                JOIN alert_episodes episode
-                  ON episode.id=lifecycle.episode_id
-                 AND episode.trigger_generation=lifecycle.trigger_generation
-                WHERE lifecycle.edge_kind='alert.triggered'
-                  AND lifecycle.event_id=delivery.event_id
-                  AND episode.evidence#>>'{_vpsman_client_suspension,client_id}'
-                        = ANY($3::text[])
-            ) AS source_suppressed
-        FROM webhook_rule_deliveries delivery
-        JOIN webhook_rules rule ON rule.id=delivery.rule_id
-        WHERE delivery.id=$1
+                        ORDER BY matched->>'id'
+                   ) AS client_ids
+            FROM webhook_rule_deliveries delivery
+            JOIN webhook_rules rule ON rule.id=delivery.rule_id
+            WHERE delivery.id=$1
+        ), eligibility AS MATERIALIZED (
+            SELECT scope.*,
+                   scope.event_kind<>'alert.triggered'
+                     OR scope.matched_count=0
+                     OR (
+                        cardinality(scope.client_ids)=scope.matched_count
+                        AND (
+                            SELECT count(*)
+                            FROM clients subject
+                            WHERE subject.id=ANY(scope.client_ids)
+                        )=cardinality(scope.client_ids)
+                     ) AS scope_exact,
+                   scope.event_kind='alert.triggered'
+                     AND EXISTS (
+                        SELECT 1 FROM clients subject
+                        WHERE subject.id=ANY(scope.client_ids)
+                          AND subject.status='suspended'
+                     ) AS subject_suspended,
+                   scope.event_kind='alert.triggered'
+                     AND EXISTS (
+                        SELECT 1
+                        FROM alert_lifecycle_events lifecycle
+                        JOIN alert_episodes episode
+                          ON episode.id=lifecycle.episode_id
+                         AND episode.trigger_generation=lifecycle.trigger_generation
+                        WHERE lifecycle.edge_kind='alert.triggered'
+                          AND lifecycle.event_id=scope.event_id
+                          AND episode.evidence#>>'{_vpsman_client_suspension,client_id}'
+                                = ANY(scope.client_ids)
+                     ) AS source_suppressed
+            FROM delivery_scope scope
+        ), armed AS (
+            UPDATE webhook_rule_deliveries delivery
+            SET eligibility_revision=delivery.eligibility_revision+1
+            FROM eligibility
+            WHERE delivery.id=eligibility.id
+              AND eligibility.lease_owned AND eligibility.rule_enabled
+              AND eligibility.scope_exact
+              AND NOT eligibility.subject_suspended
+              AND NOT eligibility.source_suppressed
+            RETURNING delivery.eligibility_revision
+        )
+        SELECT eligibility.lease_owned, eligibility.rule_enabled,
+               eligibility.scope_exact, eligibility.subject_suspended,
+               eligibility.source_suppressed, armed.eligibility_revision
+        FROM eligibility LEFT JOIN armed ON TRUE
         "#,
     )
     .bind(delivery_id)
     .bind(lease_id)
-    .bind(expected_client_ids)
-    .bind(expected_matched_count)
     .fetch_optional(executor)
     .await?
     else {
-        return Ok(WebhookRuleAlertSendEligibility::LeaseLost);
+        return Ok(WebhookRuleAlertSendEligibilityRevision {
+            eligibility: WebhookRuleAlertSendEligibility::LeaseLost,
+            revision: None,
+        });
     };
-    if !row.try_get::<bool, _>("lease_owned")? {
-        return Ok(WebhookRuleAlertSendEligibility::LeaseLost);
-    }
-    if !row.try_get::<bool, _>("rule_enabled")? {
-        return Ok(WebhookRuleAlertSendEligibility::RuleDisabled);
-    }
-    if !row.try_get::<bool, _>("scope_exact")? {
-        return Ok(WebhookRuleAlertSendEligibility::InvalidClientScope);
-    }
-    if row.try_get::<bool, _>("subject_suspended")?
+    let eligibility = if !row.try_get::<bool, _>("lease_owned")? {
+        WebhookRuleAlertSendEligibility::LeaseLost
+    } else if !row.try_get::<bool, _>("rule_enabled")? {
+        WebhookRuleAlertSendEligibility::RuleDisabled
+    } else if !row.try_get::<bool, _>("scope_exact")? {
+        WebhookRuleAlertSendEligibility::InvalidClientScope
+    } else if row.try_get::<bool, _>("subject_suspended")?
         || row.try_get::<bool, _>("source_suppressed")?
     {
-        return Ok(WebhookRuleAlertSendEligibility::ClientSuspended);
-    }
-    Ok(WebhookRuleAlertSendEligibility::Deliverable)
+        WebhookRuleAlertSendEligibility::ClientSuspended
+    } else {
+        WebhookRuleAlertSendEligibility::Deliverable
+    };
+    let revision: Option<i64> = row.try_get("eligibility_revision")?;
+    anyhow::ensure!(
+        eligibility != WebhookRuleAlertSendEligibility::Deliverable || revision.is_some(),
+        "webhook delivery eligibility revision was not armed"
+    );
+    Ok(WebhookRuleAlertSendEligibilityRevision {
+        eligibility,
+        revision,
+    })
 }
 
 async fn postgres_complete_webhook_rule_delivery_attempt<'e, E>(
@@ -2209,6 +1512,7 @@ async fn postgres_complete_webhook_rule_delivery_attempt<'e, E>(
     status: &str,
     error: Option<&str>,
     next_attempt_after_secs: Option<i64>,
+    eligibility_revision: Option<i64>,
 ) -> Result<WebhookRuleDeliveryView>
 where
     E: Executor<'e, Database = Postgres>,
@@ -2225,6 +1529,7 @@ where
             last_attempt_at=now(),
             delivered_at=CASE WHEN $2='delivered' THEN now() ELSE NULL END
         WHERE id=$1 AND status='in_progress' AND delivery_lease_id=$4
+          AND ($6::bigint IS NULL OR eligibility_revision=$6)
         RETURNING
             id, rule_id, rule_name, event_kind, event_id, status, target,
             dedupe_key, payload, matched_vps, message, error,
@@ -2240,6 +1545,7 @@ where
     .bind(error)
     .bind(lease_id)
     .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
+    .bind(eligibility_revision)
     .fetch_optional(executor)
     .await?
     .context("webhook rule delivery not found or not claimed")?;
@@ -2306,186 +1612,6 @@ fn normalize_delivery_attempt_status(status: &str) -> Result<&'static str> {
         }
         _ => anyhow::bail!("webhook rule delivery attempt status is invalid"),
     }
-}
-
-fn cancel_memory_webhook_rule_deliveries(
-    deliveries: &mut [WebhookRuleDeliveryView],
-    rule_id: Uuid,
-    reason: &str,
-) {
-    for delivery in deliveries.iter_mut() {
-        if delivery.rule_id != rule_id
-            || !matches!(
-                delivery.status.as_str(),
-                WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
-                    | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
-                    | WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS
-            )
-        {
-            continue;
-        }
-        delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string();
-        delivery.error = Some(reason.to_string());
-        delivery.next_attempt_at = None;
-        delivery.delivered_at = None;
-    }
-}
-
-async fn canonicalize_pending_alert_event_rows_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<()> {
-    let pending_delivery_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM webhook_rule_deliveries
-        WHERE status IN ('queued','in_progress','failed')
-        "#,
-    )
-    .fetch_one(&mut **tx)
-    .await?;
-    anyhow::ensure!(
-        pending_delivery_count == 0,
-        "alert expression migration requires queued, in-progress, and retryable webhook deliveries to be drained before upgrade"
-    );
-
-    let rows = sqlx::query(
-        r#"
-        SELECT occurred_at, id, kind, event_predicates, payload
-        FROM webhook_events
-        WHERE processed_at IS NULL
-        ORDER BY occurred_at, id
-        FOR UPDATE
-        "#,
-    )
-    .fetch_all(&mut **tx)
-    .await?;
-    for row in rows {
-        let occurred_at: DateTime<Utc> = row.try_get("occurred_at")?;
-        let id: Uuid = row.try_get("id")?;
-        let kind: String = row.try_get("kind")?;
-        let predicates: Vec<String> = row.try_get("event_predicates")?;
-        let payload: Value = row.try_get::<SqlJson<Value>, _>("payload")?.0;
-        let canonical_kind = canonical_alert_event_name(&kind).to_string();
-        let canonical_predicates = canonical_alert_event_predicates(&predicates);
-        let canonical_payload = canonicalize_alert_event_payload(payload);
-        if canonical_kind != kind
-            || canonical_predicates != predicates
-            || canonical_payload != row.try_get::<SqlJson<Value>, _>("payload")?.0
-        {
-            sqlx::query(
-                r#"
-                UPDATE webhook_events
-                SET kind=$3, event_predicates=$4, payload=$5
-                WHERE occurred_at=$1 AND id=$2
-                "#,
-            )
-            .bind(occurred_at)
-            .bind(id)
-            .bind(canonical_kind)
-            .bind(canonical_predicates)
-            .bind(SqlJson(canonical_payload))
-            .execute(&mut **tx)
-            .await?;
-        }
-    }
-
-    Ok(())
-}
-
-fn canonical_alert_event_name(value: &str) -> &str {
-    match value {
-        "alert.open" | "alert.policy_reached" | "alert.policy_triggered" => "alert.triggered",
-        "alert.policy_resolved" => "alert.resolved",
-        value => value,
-    }
-}
-
-fn canonical_alert_event_predicates(values: &[String]) -> Vec<String> {
-    let mut canonical = Vec::with_capacity(values.len());
-    for value in values {
-        let value = canonical_alert_event_name(value).to_string();
-        if !canonical.contains(&value) {
-            canonical.push(value);
-        }
-    }
-    canonical
-}
-
-fn canonicalize_alert_event_payload(mut payload: Value) -> Value {
-    let Some(root) = payload.as_object_mut() else {
-        return payload;
-    };
-    if let Some(Value::String(kind)) = root.get_mut("kind") {
-        *kind = canonical_alert_event_name(kind).to_string();
-    }
-    if let Some(Value::Object(event)) = root.get_mut("event") {
-        if let Some(Value::String(kind)) = event.get_mut("kind") {
-            *kind = canonical_alert_event_name(kind).to_string();
-        }
-        if let Some(Value::Array(predicates)) = event.get_mut("predicates") {
-            let values = predicates
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            *predicates = canonical_alert_event_predicates(&values)
-                .into_iter()
-                .map(Value::String)
-                .collect();
-        }
-    }
-    if let Some(legacy_rule) = root.remove("rule") {
-        if !root.contains_key("policy_rule") {
-            root.insert(
-                "policy_rule".to_string(),
-                canonicalize_legacy_policy_rule_payload(legacy_rule),
-            );
-        }
-    }
-    payload
-}
-
-fn canonicalize_legacy_policy_rule_payload(mut rule: Value) -> Value {
-    let Some(object) = rule.as_object_mut() else {
-        return rule;
-    };
-    if !object.contains_key("trigger_condition_expression") {
-        if let Some(expression) = object.remove("condition_expression") {
-            object.insert("trigger_condition_expression".to_string(), expression);
-        }
-    } else {
-        object.remove("condition_expression");
-    }
-    if !object.contains_key("trigger_meta_condition") {
-        if let Some(window) = object.remove("window_secs") {
-            let seconds = window
-                .as_i64()
-                .or_else(|| window.as_str().and_then(|value| value.parse().ok()))
-                .unwrap_or_default()
-                .max(0);
-            object.insert(
-                "trigger_meta_condition".to_string(),
-                if seconds == 0 {
-                    json!({"kind":"immediate","window_seconds":0})
-                } else {
-                    json!({"kind":"sustained","window_seconds":seconds})
-                },
-            );
-        }
-    } else {
-        object.remove("window_secs");
-    }
-    object
-        .entry("rule_kind".to_string())
-        .or_insert_with(|| json!("metric"));
-    object
-        .entry("evidence_source".to_string())
-        .or_insert_with(|| json!("telemetry.combined"));
-    rule
-}
-
-fn sha256_text(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 #[cfg(test)]

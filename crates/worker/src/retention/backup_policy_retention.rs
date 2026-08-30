@@ -1,10 +1,15 @@
-use anyhow::{bail, Result};
-use serde_json::json;
+use anyhow::{bail, ensure, Context, Result};
+use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
 use uuid::Uuid;
 use vpsman_object_store::BackupObjectStore;
 
 use crate::actor_authority::actor_authorized;
+use crate::artifact_deletion::{
+    defer_artifact_deletion, enqueue_artifact_deletion, finish_artifact_deletion_in_tx,
+    lock_owned_artifact_deletion_in_tx, spawn_artifact_deletion_heartbeat, ArtifactDeletionOwner,
+    ArtifactDeletionReview,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackupPolicyRetentionPruneConfig {
@@ -46,6 +51,7 @@ pub(crate) struct BackupPolicyRetentionPruneRun {
 #[derive(Debug)]
 struct BackupPolicyRetentionPolicy {
     schedule_id: Uuid,
+    definition_revision: i64,
     actor_id: Option<Uuid>,
     name: String,
     enabled: bool,
@@ -70,8 +76,11 @@ struct BackupPolicyRetentionPruneOutcome {
 #[derive(Debug)]
 struct BackupPolicyRetentionCandidate {
     request_id: Uuid,
-    artifact_id: Uuid,
+    backup_artifact_id: Uuid,
+    server_artifact_id: Option<Uuid>,
     object_key: String,
+    sha256_hex: String,
+    size_bytes: i64,
 }
 
 pub(crate) async fn process_backup_policy_retention_prune(
@@ -80,9 +89,6 @@ pub(crate) async fn process_backup_policy_retention_prune(
 ) -> Result<BackupPolicyRetentionPruneRun> {
     if !config.enabled {
         return Ok(BackupPolicyRetentionPruneRun::default());
-    }
-    if config.delete_objects && !config.dry_run && config.object_store.is_none() {
-        bail!("backup policy prune object deletion requires configured artifact object store");
     }
     let policies = list_backup_policy_retention_candidates(pool, &config).await?;
     let mut outcomes = Vec::new();
@@ -132,6 +138,7 @@ async fn list_backup_policy_retention_candidates(
         .map(|row| {
             Ok(BackupPolicyRetentionPolicy {
                 schedule_id: row.try_get("schedule_id")?,
+                definition_revision: row.try_get("definition_revision")?,
                 actor_id: row.try_get("actor_id")?,
                 name: row.try_get("name")?,
                 enabled: row.try_get("enabled")?,
@@ -146,6 +153,7 @@ fn backup_policy_retention_policies_query() -> &'static str {
     r#"
         SELECT
             schedule.id AS schedule_id,
+            schedule.definition_revision,
             schedule.actor_id,
             schedule.name,
             schedule.enabled,
@@ -193,8 +201,11 @@ async fn prune_backup_policy(
         .map(|row| {
             Ok(BackupPolicyRetentionCandidate {
                 request_id: row.try_get("request_id")?,
-                artifact_id: row.try_get("artifact_id")?,
+                backup_artifact_id: row.try_get("artifact_id")?,
+                server_artifact_id: row.try_get("server_artifact_id")?,
                 object_key: row.try_get("object_key")?,
+                sha256_hex: row.try_get("sha256_hex")?,
+                size_bytes: row.try_get("size_bytes")?,
             })
         })
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
@@ -202,26 +213,32 @@ async fn prune_backup_policy(
     let mut pruned_rows = 0_i64;
     let mut object_delete_errors = Vec::new();
     if !config.dry_run && object_delete_attempted {
-        let object_store = config
-            .object_store
-            .as_ref()
-            .expect("object store checked before pruning");
         for candidate in &candidates {
-            if !mark_backup_artifact_deleting(pool, &candidate.object_key).await? {
-                continue;
-            }
-            match object_store.delete_confirmed(&candidate.object_key).await {
-                Ok(()) => {
-                    pruned_rows += finalize_backup_policy_row_delete(pool, candidate).await?;
-                }
-                Err(error) => {
-                    let error_text = error.to_string();
-                    mark_backup_artifact_delete_failed(pool, &candidate.object_key, &error_text)
-                        .await?;
-                    object_delete_errors.push(format!("{}: {error_text}", candidate.object_key));
-                    break;
-                }
-            }
+            let Some(server_artifact_id) = candidate.server_artifact_id else {
+                object_delete_errors.push(format!(
+                    "{}: server artifact registry entry missing",
+                    candidate.object_key
+                ));
+                break;
+            };
+            enqueue_artifact_deletion(
+                pool,
+                &ArtifactDeletionReview {
+                    artifact_id: server_artifact_id,
+                    object_key: candidate.object_key.clone(),
+                    sha256_hex: candidate.sha256_hex.clone(),
+                    size_bytes: candidate.size_bytes,
+                    source_kind: "backup_policy",
+                    source_id: policy.schedule_id,
+                    source_revision: policy.definition_revision,
+                    source_identity: json!({
+                        "request_id": candidate.request_id,
+                        "backup_artifact_id": candidate.backup_artifact_id,
+                        "object_key": candidate.object_key,
+                    }),
+                },
+            )
+            .await?;
         }
     } else if !config.dry_run && !candidates.is_empty() {
         pruned_rows = prune_backup_policy_rows(pool, &candidates).await?;
@@ -247,6 +264,9 @@ fn backup_policy_retention_candidate_query() -> &'static str {
                 request.id AS request_id,
                 artifact.id AS artifact_id,
                 artifact.object_key,
+                artifact.sha256_hex,
+                artifact.size_bytes,
+                server_artifact.id AS server_artifact_id,
                 artifact.created_at,
                 row_number() OVER (
                     PARTITION BY request.client_id
@@ -254,9 +274,21 @@ fn backup_policy_retention_candidate_query() -> &'static str {
                 ) AS retained_rank
             FROM backup_requests request
             JOIN backup_artifacts artifact ON artifact.id = request.artifact_id
+            LEFT JOIN server_artifacts server_artifact
+              ON server_artifact.object_key = artifact.object_key
+             AND server_artifact.domain = 'backup_artifact'
+             AND server_artifact.sha256_hex = artifact.sha256_hex
+             AND server_artifact.size_bytes = artifact.size_bytes
+             AND server_artifact.status IN ('active', 'deleting', 'delete_failed')
             WHERE request.source_schedule_id = $1
         )
-        SELECT request_id, artifact_id, object_key
+        SELECT
+            request_id,
+            artifact_id,
+            server_artifact_id,
+            object_key,
+            sha256_hex,
+            size_bytes
         FROM ranked
         WHERE retained_rank > $2
           AND created_at < now() - ($3::int * interval '1 day')
@@ -274,7 +306,7 @@ async fn prune_backup_policy_rows(
         .collect::<Vec<_>>();
     let artifact_ids = candidates
         .iter()
-        .map(|candidate| candidate.artifact_id)
+        .map(|candidate| candidate.backup_artifact_id)
         .collect::<Vec<_>>();
     let pruned_rows = sqlx::query_scalar::<_, i64>(
         r#"
@@ -304,14 +336,6 @@ async fn prune_backup_policy_rows(
             USING doomed
             WHERE artifact.id = doomed.artifact_id
             RETURNING artifact.object_key
-        ),
-        marked_artifacts AS (
-            UPDATE server_artifacts artifact
-            SET status = 'deleting'
-            FROM deleted_artifacts deleted
-            WHERE artifact.object_key = deleted.object_key
-              AND artifact.status = 'active'
-            RETURNING artifact.id
         )
         SELECT count(*)::bigint FROM deleted_artifacts
         "#,
@@ -323,51 +347,58 @@ async fn prune_backup_policy_rows(
     Ok(pruned_rows)
 }
 
-async fn mark_backup_artifact_deleting(pool: &PgPool, object_key: &str) -> Result<bool> {
-    let updated = sqlx::query(
-        r#"
-        UPDATE server_artifacts
-        SET status = 'deleting',
-            metadata = metadata - 'delete_error' - 'delete_failed_at'
-        WHERE object_key = $1
-          AND status IN ('active', 'deleting', 'delete_failed')
-        "#,
-    )
-    .bind(object_key)
-    .execute(pool)
-    .await?;
-    Ok(updated.rows_affected() > 0)
-}
-
-async fn mark_backup_artifact_delete_failed(
+pub(crate) async fn delete_backup_policy_artifact(
     pool: &PgPool,
-    object_key: &str,
-    error: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE server_artifacts
-        SET status = 'delete_failed',
-            metadata = metadata || jsonb_build_object(
-                'delete_error', left($2, 1000),
-                'delete_failed_at', now()::text
-            )
-        WHERE object_key = $1
-          AND status IN ('active', 'deleting', 'delete_failed')
-        "#,
-    )
-    .bind(object_key)
-    .bind(error)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn finalize_backup_policy_row_delete(
-    pool: &PgPool,
-    candidate: &BackupPolicyRetentionCandidate,
+    object_store: &BackupObjectStore,
+    owner: &ArtifactDeletionOwner,
 ) -> Result<i64> {
+    ensure!(
+        owner.source_kind == "backup_policy",
+        "artifact deletion source mismatch"
+    );
+    ensure!(
+        owner.source_revision >= 1,
+        "artifact deletion revision invalid"
+    );
+    let (stop_tx, heartbeat) = spawn_artifact_deletion_heartbeat(pool.clone(), owner.clone());
+    let delete_result = object_store.delete_confirmed(&owner.object_key).await;
+    let _ = stop_tx.send(());
+    let still_owned = heartbeat
+        .await
+        .context("artifact deletion heartbeat stopped unexpectedly")??;
+    if !still_owned {
+        bail!("artifact deletion ownership lost");
+    }
+    if let Err(error) = delete_result {
+        let error_text = error.to_string();
+        if !defer_artifact_deletion(pool, owner, &error_text).await? {
+            bail!("artifact deletion ownership lost after object-store failure");
+        }
+        return Err(error);
+    }
+    finalize_backup_policy_artifact_deletion(pool, owner).await
+}
+
+async fn finalize_backup_policy_artifact_deletion(
+    pool: &PgPool,
+    owner: &ArtifactDeletionOwner,
+) -> Result<i64> {
+    let request_id = deletion_identity_uuid(&owner.source_identity, "request_id")?;
+    let backup_artifact_id = deletion_identity_uuid(&owner.source_identity, "backup_artifact_id")?;
+    let reviewed_object_key = owner
+        .source_identity
+        .get("object_key")
+        .and_then(Value::as_str)
+        .context("backup policy deletion object identity missing")?;
+    ensure!(
+        reviewed_object_key == owner.object_key,
+        "backup policy deletion object identity changed"
+    );
     let mut tx = pool.begin().await?;
+    ensure!(
+        lock_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "artifact deletion ownership lost before finalization"
+    );
     let pruned_rows = sqlx::query_scalar::<_, i64>(
         r#"
         WITH doomed AS (
@@ -397,25 +428,43 @@ async fn finalize_backup_policy_row_delete(
         SELECT count(*)::bigint FROM deleted_artifacts
         "#,
     )
-    .bind(candidate.request_id)
-    .bind(candidate.artifact_id)
-    .bind(&candidate.object_key)
+    .bind(request_id)
+    .bind(backup_artifact_id)
+    .bind(&owner.object_key)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
+    let marked = sqlx::query(
         r#"
         UPDATE server_artifacts
         SET status = 'deleted',
             deleted_at = now()
-        WHERE object_key = $1
-          AND status IN ('active', 'deleting', 'delete_failed')
+        WHERE id = $1
+          AND object_key = $2
+          AND status = 'deleting'
         "#,
     )
-    .bind(&candidate.object_key)
+    .bind(owner.artifact_id)
+    .bind(&owner.object_key)
     .execute(&mut *tx)
     .await?;
+    ensure!(
+        marked.rows_affected() == 1,
+        "artifact registry identity changed during finalization"
+    );
+    ensure!(
+        finish_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "artifact deletion ownership lost during finalization"
+    );
     tx.commit().await?;
     Ok(pruned_rows)
+}
+
+fn deletion_identity_uuid(identity: &Value, field: &str) -> Result<Uuid> {
+    let raw = identity
+        .get(field)
+        .and_then(Value::as_str)
+        .with_context(|| format!("backup policy deletion {field} missing"))?;
+    Uuid::parse_str(raw).with_context(|| format!("backup policy deletion {field} invalid"))
 }
 
 async fn insert_retention_actor_revoked_audit(

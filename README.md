@@ -217,7 +217,7 @@ console:
    and install mode under **Access > Gateway sessions**.
 2. Open **Access > VPS identities**.
 3. Choose **Register VPS**.
-4. Keep the next numbered VPS ID (`v-1`, `v-2`, …) or edit it for an imported legacy ID.
+4. Keep the next numbered VPS ID (`v-1`, `v-2`, …) or edit it for an existing imported ID.
 5. Generate a unique Noise keypair for this VPS.
 6. Review and register the public identity.
 7. Review the saved gateway install defaults.
@@ -325,11 +325,11 @@ then places missing values last and breaks ties by VPS name. Stale or warning
 state and unlimited traffic receive no implicit metric-sort rank; **Warnings
 first** remains the explicit status-aware choice.
 
-Accepted high-resolution samples default to 7 days. Authoritative resource,
-network, Ping, system, and reset-safe traffic history is promoted through
-UTC-aligned age tiers, from one-minute recent evidence to daily evidence through
-3,650 days. The API reports the effective source resolution, and charts never
-split a coarse retained bucket into fabricated fine points.
+Accepted high-resolution samples default to 1 day. Authoritative resource,
+network, Ping, and reset-safe traffic history is promoted through UTC-aligned
+age tiers. System metrics write only one-minute source buckets; closed buckets
+are promoted through the same age tiers, and terminal daily history is retained
+through 3,650 days. Charts never fabricate fine points.
 
 **Observability > Ping targets** manages reusable ICMP/TCP definitions, frozen
 VPS assignments, and an explicit primary target for each card.
@@ -392,26 +392,7 @@ Compose deployments keep durable state under their `runtime/` directory:
 - active frontend payload: `runtime/frontend/current`
 - active CLI payload: `runtime/cli/current`
 
-The current canonical database is intentionally fresh-first. Supported
-in-place steps are checksum-pinned: an exact v0.4.6 database applies only
-`0015` through `0020`; the exact v0.4.4 `0001`–`0009` baseline
-may apply `0010` through `0020`, while the exact v0.3.5 `0001`–`0008`
-baseline may apply `0009` through `0020`. Migration `0016` replaces only the
-hourly traffic-ledger refresh function with a narrow per-stream implementation;
-`0017` adds suspension catalog state without rewriting telemetry; and the
-no-transaction `0018` builds one concurrent import-class stream index without
-rewriting retained traffic rows. Current API/worker startup verifies and
-restart-repairs only the exact migration-owned `0018` index, while a wrong
-same-name object fails closed. Migration `0019` replaces only the post-update
-hourly trigger with a fail-closed same-shape fast path; applying it does not
-rewrite retained rows, and any failed proof falls back to the existing exact
-refresh. Migration `0020` removes only the unused `traffic_cycle_usage`
-prototype table and intentionally fails if an external foreign-key dependency
-exists; back up any external consumer before upgrading.
-Drain all nonterminal webhook deliveries, then stop API/application and worker
-writers for the full migration sequence. Review
-[migration compatibility](docs/migration-compatibility.md) before updating any
-deployment.
+API and worker apply the bundled ordinary SQLx migrations to PostgreSQL.
 
 Update an existing deployment:
 
@@ -502,12 +483,6 @@ cargo build --release -p vpsman-agent --target x86_64-unknown-linux-musl
 cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
 ```
 
-Release-gate smoke checks are aggregated by:
-
-```sh
-bash scripts/release-check.sh
-```
-
 More build notes are in [docs/build.md](docs/build.md).
 
 ## Release Assets
@@ -528,20 +503,18 @@ The release workflow publishes:
 `version.json` is the authoritative asset manifest for its immutable release
 tag. It is generated from [version-template.json](version-template.json) and
 stamped with the tag, commit, asset list, and tag-pinned download URLs.
-Tag-triggered releases run the release version gate first, then the reusable
-release quality workflow in
-[.github/workflows/release-quality-gate.yml](.github/workflows/release-quality-gate.yml)
-before any release artifacts or GitHub release are published.
+Tag-triggered releases first validate the version and require a successful
+`main` CI push for the exact tagged commit before publishing any artifacts.
 The workflow refuses to rebuild an existing release or replace its assets and
 detects release-tag movement before publication; repository hosting should also
 protect the `v*` tag namespace. Prerelease tags are marked as prereleases and
 are never promoted to the latest stable release.
-Generated GitHub release notes are the canonical per-version change record; the
+Published GitHub release notes are the canonical per-version change record; the
 project does not maintain a separate rolling changelog.
 
 ## Documentation
 
-- [Development and update maintenance](DEVELOPMENT.md)
+- [Build notes](docs/build.md)
 - [Tutorial index](tutorials/README.md)
 - [Operator quickstart](tutorials/00-operator-quickstart.md)
 - [Local control plane](tutorials/01-local-control-plane.md)
@@ -555,7 +528,6 @@ project does not maintain a separate rolling changelog.
 - [Headless CLI/VTY](tutorials/09-headless-cli-vty.md)
 - [Deploy layout](deploy/README.md)
 - [Production deployment and recovery](docs/production-deployment.md)
-- [Traffic-ledger audit and recovery](docs/traffic-ledger-recovery.md)
 - [Direct gateway agent install](deploy/AGENT_GATEWAY_INSTALL.md)
 - [Target selectors](docs/target-selectors.md)
 - [Operator access scopes](docs/operator-access-scopes.md)

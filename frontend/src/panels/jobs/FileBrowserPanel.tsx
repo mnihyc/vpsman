@@ -96,7 +96,6 @@ type BrowserState = {
   path: string;
   showHidden: boolean;
   targetClientId: string;
-  targetExpression?: string;
 };
 
 type PendingConfirmation = {
@@ -3170,24 +3169,15 @@ function readBrowserState(): BrowserState {
   try {
     const parsed = JSON.parse(
       localStorage.getItem(STORAGE_KEY) ?? "{}",
-    ) as Partial<BrowserState> & { selectedClientId?: string };
+    ) as Partial<BrowserState>;
     const targetClientId =
       typeof parsed.targetClientId === "string" && parsed.targetClientId.trim()
         ? parsed.targetClientId.trim()
-        : typeof parsed.selectedClientId === "string" &&
-            parsed.selectedClientId.trim()
-          ? parsed.selectedClientId.trim()
-          : typeof parsed.targetExpression === "string"
-            ? clientIdFromLegacyFileSelector(parsed.targetExpression)
-            : "";
+        : "";
     return {
       path: typeof parsed.path === "string" ? parsed.path : "/",
       showHidden: Boolean(parsed.showHidden),
       targetClientId,
-      targetExpression:
-        typeof parsed.targetExpression === "string"
-          ? parsed.targetExpression
-          : undefined,
     };
   } catch {
     return { path: "/", showHidden: false, targetClientId: "" };
@@ -3196,14 +3186,4 @@ function readBrowserState(): BrowserState {
 
 function writeBrowserState(state: BrowserState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-}
-
-function clientIdFromLegacyFileSelector(value: string): string {
-  const match = value
-    .trim()
-    .match(/^id:(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s()&|]+))$/i);
-  if (!match) {
-    return "";
-  }
-  return (match[1] ?? match[2] ?? match[3] ?? "").replace(/\\(["'\\])/g, "$1");
 }

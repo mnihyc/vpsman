@@ -332,6 +332,7 @@ test("sign out clears local authentication when server revocation fails", async 
 async function installAuthSessionApiMock(
   page: import("@playwright/test").Page,
 ) {
+  await page.routeWebSocket("**/ws", () => undefined);
   await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -524,7 +525,6 @@ async function installAuthSessionApiMock(
         "fleet_alert_notification_channels",
         "fleet_alert_notifications",
         "fleet_alert_policies",
-        "fleet_alert_states",
         "fleet_alerts",
         "current_policy_alerts",
         "policy_alerts",
@@ -536,6 +536,9 @@ async function installAuthSessionApiMock(
         response[key] = available([]);
       }
       response.current_policy_alerts_truncated = false;
+      response.policy_alerts_truncated = false;
+      response.fleet_alert_notifications_truncated = false;
+      response.webhook_rule_deliveries_truncated = false;
     }
     await route.fulfill({ contentType: "application/json", json: response });
   });
@@ -715,7 +718,10 @@ async function installAuthSessionApiMock(
     "fleet-alert-notifications",
     "operators",
     "operator-sessions",
+    "operator-auth-events",
     "gateway-sessions",
+    "client-key-revocations",
+    "key-lifecycle/report",
     "jobs",
     "agent-update-releases",
     "process-supervisor/inventory",
@@ -755,6 +761,14 @@ async function installAuthSessionApiMock(
                 totp_enabled: false,
                 username: "session-admin",
               }
+            : path === "key-lifecycle/report"
+              ? {
+                  clients: [],
+                  current_key_revoked_count: 0,
+                  direct_identity_client_count: 0,
+                  revocation_count: 0,
+                  suggested_client_id: "v-1",
+                }
             : [],
       });
     });

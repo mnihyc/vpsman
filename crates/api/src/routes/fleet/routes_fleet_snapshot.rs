@@ -1,16 +1,9 @@
-use std::{future::Future, sync::Arc};
-
-use axum::{
-    extract::{Query, State},
-    http::HeaderMap,
-    Json,
-};
-use tokio::sync::Semaphore;
+use std::future::Future;
 
 use crate::{
     error::ApiError,
     model::FleetAlertQuery,
-    model_alert_policies::{PolicyAlertQuery, TrafficAccountingQuery},
+    model_alert_policies::PolicyAlertQuery,
     model_fleet_snapshot::{FleetSnapshotQuery, FleetSnapshotResponse, FleetSnapshotSource},
     security::{
         operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
@@ -19,10 +12,13 @@ use crate::{
     state::AppState,
     unix_now,
 };
+use axum::{
+    extract::{Query, State},
+    http::HeaderMap,
+    Json,
+};
 
 pub(crate) const FLEET_DETAIL_LIMIT: i64 = 200;
-const FLEET_LATEST_TELEMETRY_LIMIT: i64 = 1_000;
-const FLEET_NETWORK_RATE_SNAPSHOT_LIMIT: i64 = 5_000;
 
 pub(crate) async fn fleet_snapshot(
     State(state): State<AppState>,
@@ -41,11 +37,6 @@ pub(crate) async fn fleet_snapshot(
     let events = state.events.clone();
     let response = events
         .singleflight_fleet_snapshot(key, move || async move {
-            let _admission = if mode == "full" {
-                Some(state.events.acquire_heavy_read_permit().await?)
-            } else {
-                None
-            };
             build_fleet_snapshot(&state, &scopes, mode).await
         })
         .await?;
@@ -57,11 +48,10 @@ async fn build_fleet_snapshot(
     scopes: &[String],
     mode: &'static str,
 ) -> Result<FleetSnapshotResponse, ApiError> {
-    let limiter = SnapshotLoadLimiter::new(4);
-    let context = load_snapshot_read_context(state, scopes, mode == "full", &limiter).await;
+    let context = load_snapshot_read_context(state, scopes, mode == "full").await;
     let (live, full) = tokio::join!(
-        load_live_sources(state, scopes, context.agents.clone(), &limiter),
-        load_full_sources(state, scopes, mode == "full", &context, &limiter),
+        load_live_sources(state, scopes, context.agents.clone()),
+        load_full_sources(state, scopes, mode == "full", &context),
     );
 
     let mut response = FleetSnapshotResponse {
@@ -77,62 +67,41 @@ async fn build_fleet_snapshot(
         fleet_alerts_truncated: None,
         fleet_alert_history: None,
         fleet_alert_history_truncated: None,
-        fleet_alert_states: None,
         fleet_alert_policies: None,
         vps_rule_values: None,
         traffic_accounting: None,
         policy_alerts: None,
+        policy_alerts_truncated: None,
         current_policy_alerts: None,
         current_policy_alerts_truncated: None,
         fleet_alert_notification_channels: None,
         fleet_alert_notifications: None,
+        fleet_alert_notifications_truncated: None,
         webhook_rules: None,
         webhook_rule_deliveries: None,
+        webhook_rule_deliveries_truncated: None,
     };
     if let Some(full) = full {
         response.fleet_alerts = Some(full.fleet_alerts);
         response.fleet_alerts_truncated = Some(full.fleet_alerts_truncated);
         response.fleet_alert_history = Some(full.fleet_alert_history);
         response.fleet_alert_history_truncated = Some(full.fleet_alert_history_truncated);
-        response.fleet_alert_states = Some(full.fleet_alert_states);
         response.fleet_alert_policies = Some(full.fleet_alert_policies);
         response.vps_rule_values = Some(full.vps_rule_values);
         response.traffic_accounting = Some(full.traffic_accounting);
         response.policy_alerts = Some(full.policy_alerts);
+        response.policy_alerts_truncated = Some(full.policy_alerts_truncated);
         response.current_policy_alerts = Some(full.current_policy_alerts);
         response.current_policy_alerts_truncated = Some(full.current_policy_alerts_truncated);
         response.fleet_alert_notification_channels = Some(full.fleet_alert_notification_channels);
         response.fleet_alert_notifications = Some(full.fleet_alert_notifications);
+        response.fleet_alert_notifications_truncated =
+            Some(full.fleet_alert_notifications_truncated);
         response.webhook_rules = Some(full.webhook_rules);
         response.webhook_rule_deliveries = Some(full.webhook_rule_deliveries);
+        response.webhook_rule_deliveries_truncated = Some(full.webhook_rule_deliveries_truncated);
     }
     Ok(response)
-}
-
-#[derive(Clone)]
-struct SnapshotLoadLimiter {
-    permits: Arc<Semaphore>,
-}
-
-impl SnapshotLoadLimiter {
-    fn new(max_concurrency: usize) -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(max_concurrency.max(1))),
-        }
-    }
-
-    async fn run<T, F>(&self, future: F) -> T
-    where
-        F: Future<Output = T>,
-    {
-        let permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .expect("fleet snapshot semaphore is never closed");
-        let output = future.await;
-        drop(permit);
-        output
-    }
 }
 
 struct SnapshotReadContext {
@@ -145,11 +114,10 @@ async fn load_snapshot_read_context(
     state: &AppState,
     scopes: &[String],
     include_full: bool,
-    limiter: &SnapshotLoadLimiter,
 ) -> SnapshotReadContext {
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
     let config_read = operator_has_scope(scopes, SCOPE_CONFIG_READ);
-    let agents = load_source_limited("agents", fleet_read, state.repo.list_agents(), limiter).await;
+    let agents = load_source("agents", fleet_read, state.repo.list_agents()).await;
     let vps_rule_values = if include_full && (fleet_read || config_read) {
         let client_ids = agents.data.as_ref().map(|agents| {
             agents
@@ -159,26 +127,20 @@ async fn load_snapshot_read_context(
         });
         Some(match client_ids {
             Some(client_ids) => {
-                load_source_limited(
+                load_source(
                     "vps_rule_values",
                     true,
                     state.repo.list_all_vps_rules_for_clients(&client_ids),
-                    limiter,
                 )
                 .await
             }
-            None => {
-                // Retain source-level failure isolation if the shared agent
-                // read failed transiently: the legacy rule projection gets
-                // one independent opportunity rather than inheriting it.
-                load_source_limited(
-                    "vps_rule_values",
-                    true,
-                    state.repo.list_all_vps_rules(),
-                    limiter,
-                )
-                .await
+            None if fleet_read => {
+                FleetSnapshotSource::unavailable("fleet_snapshot_vps_rule_values_unavailable")
             }
+            // A config-only operator is deliberately not allowed to load the
+            // fleet owner. Rules remain an independently authorized source in
+            // that permission shape; this is not a retry after a failed read.
+            None => load_source("vps_rule_values", true, state.repo.list_all_vps_rules()).await,
         })
     } else {
         None
@@ -236,25 +198,11 @@ pub(crate) async fn load_home_fleet_sources(
 ) -> HomeFleetSources {
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
     let backups_read = operator_has_scope(scopes, SCOPE_BACKUPS_READ);
+    let telemetry_client_ids = visible_agent_ids(&agents);
     let (summary, telemetry_rollups, telemetry_network_rates, fleet_alerts) = tokio::join!(
         load_source("summary", fleet_read, state.repo.fleet_summary()),
-        load_source(
-            "telemetry_rollups",
-            fleet_read,
-            state
-                .repo
-                .list_latest_telemetry_rollups(FLEET_LATEST_TELEMETRY_LIMIT, None, None,),
-        ),
-        load_source(
-            "telemetry_network_rates",
-            fleet_read,
-            state.repo.list_latest_telemetry_network_rates(
-                FLEET_NETWORK_RATE_SNAPSHOT_LIMIT,
-                None,
-                None,
-                None,
-            ),
-        ),
+        load_snapshot_telemetry_rollups(state, fleet_read, telemetry_client_ids.as_deref(),),
+        load_snapshot_telemetry_network_rates(state, fleet_read, telemetry_client_ids.as_deref(),),
         load_home_fleet_alerts(state, fleet_read && backups_read, agents.data.as_deref(),),
     );
     let (fleet_alerts, fleet_alerts_truncated) = fleet_alerts;
@@ -276,6 +224,9 @@ async fn load_home_fleet_alerts(
     if !permitted {
         return (FleetSnapshotSource::unavailable("forbidden"), false);
     }
+    let Some(agents) = agents else {
+        return (FleetSnapshotSource::unavailable("unavailable"), false);
+    };
     let query = FleetAlertQuery {
         limit: Some(FLEET_DETAIL_LIMIT),
         client_id: None,
@@ -284,14 +235,9 @@ async fn load_home_fleet_alerts(
         operator_state: None,
         include_muted: Some(true),
     };
-    let selection = match agents {
-        Some(agents) => {
-            state
-                .list_fleet_alerts_selected_with_visible_agents(query, None, agents)
-                .await
-        }
-        None => state.list_fleet_alerts_selected(query, None).await,
-    };
+    let selection = state
+        .list_fleet_alerts_selected_with_visible_agents(query, None, agents)
+        .await;
     match selection {
         Ok(selection) => (
             FleetSnapshotSource::available(selection.alerts),
@@ -308,9 +254,9 @@ async fn load_live_sources(
     state: &AppState,
     scopes: &[String],
     agents: FleetSnapshotSource<Vec<crate::model::AgentView>>,
-    limiter: &SnapshotLoadLimiter,
 ) -> LiveSources {
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
+    let telemetry_client_ids = visible_agent_ids(&agents);
     let (
         summary,
         agents,
@@ -319,41 +265,12 @@ async fn load_live_sources(
         telemetry_tunnels,
         telemetry_uptimes,
     ) = tokio::join!(
-        load_source_limited("summary", fleet_read, state.repo.fleet_summary(), limiter),
+        load_source("summary", fleet_read, state.repo.fleet_summary()),
         async { agents },
-        load_source_limited(
-            "telemetry_rollups",
-            fleet_read,
-            state
-                .repo
-                .list_latest_telemetry_rollups(FLEET_LATEST_TELEMETRY_LIMIT, None, None,),
-            limiter,
-        ),
-        load_source_limited(
-            "telemetry_network_rates",
-            fleet_read,
-            state.repo.list_latest_telemetry_network_rates(
-                FLEET_NETWORK_RATE_SNAPSHOT_LIMIT,
-                None,
-                None,
-                None,
-            ),
-            limiter,
-        ),
-        load_source_limited(
-            "telemetry_tunnels",
-            fleet_read,
-            state
-                .repo
-                .list_telemetry_tunnels(FLEET_LATEST_TELEMETRY_LIMIT, None, None,),
-            limiter,
-        ),
-        load_source_limited(
-            "telemetry_uptimes",
-            fleet_read,
-            state.repo.list_latest_telemetry_uptimes(),
-            limiter,
-        ),
+        load_snapshot_telemetry_rollups(state, fleet_read, telemetry_client_ids.as_deref(),),
+        load_snapshot_telemetry_network_rates(state, fleet_read, telemetry_client_ids.as_deref(),),
+        load_snapshot_telemetry_tunnels(state, fleet_read, telemetry_client_ids.as_deref()),
+        load_snapshot_telemetry_uptimes(state, fleet_read, telemetry_client_ids.as_deref(),),
     );
     LiveSources {
         summary,
@@ -365,17 +282,118 @@ async fn load_live_sources(
     }
 }
 
+fn visible_agent_ids(
+    agents: &FleetSnapshotSource<Vec<crate::model::AgentView>>,
+) -> Option<Vec<String>> {
+    agents.data.as_ref().map(|agents| {
+        agents
+            .iter()
+            .filter(|agent| agent.is_monitoring_visible())
+            .map(|agent| agent.id.clone())
+            .collect()
+    })
+}
+
+async fn load_snapshot_telemetry_rollups(
+    state: &AppState,
+    permitted: bool,
+    client_ids: Option<&[String]>,
+) -> FleetSnapshotSource<Vec<crate::model::TelemetryRollupView>> {
+    if !permitted {
+        return FleetSnapshotSource::unavailable("operator_scope_insufficient");
+    }
+    let Some(client_ids) = client_ids else {
+        return FleetSnapshotSource::unavailable("fleet_snapshot_telemetry_rollups_unavailable");
+    };
+    load_source(
+        "telemetry_rollups",
+        true,
+        state
+            .repo
+            .list_latest_telemetry_rollups_for_clients(client_ids, None),
+    )
+    .await
+}
+
+async fn load_snapshot_telemetry_network_rates(
+    state: &AppState,
+    permitted: bool,
+    client_ids: Option<&[String]>,
+) -> FleetSnapshotSource<Vec<crate::model::TelemetryNetworkRateView>> {
+    if !permitted {
+        return FleetSnapshotSource::unavailable("operator_scope_insufficient");
+    }
+    let Some(client_ids) = client_ids else {
+        return FleetSnapshotSource::unavailable(
+            "fleet_snapshot_telemetry_network_rates_unavailable",
+        );
+    };
+    load_source(
+        "telemetry_network_rates",
+        true,
+        state
+            .repo
+            .list_latest_telemetry_network_rates_for_clients(client_ids),
+    )
+    .await
+}
+
+async fn load_snapshot_telemetry_uptimes(
+    state: &AppState,
+    permitted: bool,
+    client_ids: Option<&[String]>,
+) -> FleetSnapshotSource<Vec<crate::model::TelemetryUptimeView>> {
+    if !permitted {
+        return FleetSnapshotSource::unavailable("operator_scope_insufficient");
+    }
+    let Some(client_ids) = client_ids else {
+        return FleetSnapshotSource::unavailable("fleet_snapshot_telemetry_uptimes_unavailable");
+    };
+    load_source(
+        "telemetry_uptimes",
+        true,
+        state
+            .repo
+            .list_latest_telemetry_uptimes_for_clients(client_ids),
+    )
+    .await
+}
+
+async fn load_snapshot_telemetry_tunnels(
+    state: &AppState,
+    permitted: bool,
+    client_ids: Option<&[String]>,
+) -> FleetSnapshotSource<Vec<crate::model::TelemetryTunnelView>> {
+    if !permitted {
+        return FleetSnapshotSource::unavailable("operator_scope_insufficient");
+    }
+    let Some(client_ids) = client_ids else {
+        // The declared-tunnel query is deliberately bounded by the already-loaded
+        // visible fleet. If that authoritative universe is unavailable, exposing a
+        // global capped fallback would make a successful source silently incomplete.
+        return FleetSnapshotSource::unavailable("fleet_snapshot_telemetry_tunnels_unavailable");
+    };
+    load_source(
+        "telemetry_tunnels",
+        true,
+        state
+            .repo
+            .list_declared_telemetry_tunnels_for_clients(client_ids),
+    )
+    .await
+}
+
 struct FullSources {
     fleet_alerts: FleetSnapshotSource<Vec<crate::model::FleetAlertView>>,
     fleet_alerts_truncated: bool,
     fleet_alert_history: FleetSnapshotSource<Vec<crate::model::FleetAlertView>>,
     fleet_alert_history_truncated: bool,
-    fleet_alert_states: FleetSnapshotSource<Vec<crate::model_alert_states::FleetAlertStateView>>,
     fleet_alert_policies: FleetSnapshotSource<Vec<crate::model_alert_policies::PolicyGroupRecord>>,
     vps_rule_values: FleetSnapshotSource<Vec<crate::model_alert_policies::VpsRuleValueRecord>>,
     traffic_accounting:
         FleetSnapshotSource<Vec<crate::model_alert_policies::TrafficAccountingRecord>>,
     policy_alerts: FleetSnapshotSource<Vec<crate::model_alert_policies::PolicyAlertRecord>>,
+    policy_alerts_truncated: bool,
     current_policy_alerts: FleetSnapshotSource<Vec<crate::model_alert_policies::PolicyAlertRecord>>,
     current_policy_alerts_truncated: bool,
     fleet_alert_notification_channels: FleetSnapshotSource<
@@ -384,9 +402,11 @@ struct FullSources {
     fleet_alert_notifications: FleetSnapshotSource<
         Vec<crate::model_alert_notifications::FleetAlertNotificationDeliveryView>,
     >,
+    fleet_alert_notifications_truncated: bool,
     webhook_rules: FleetSnapshotSource<Vec<crate::model_webhook_rules::WebhookRuleView>>,
     webhook_rule_deliveries:
         FleetSnapshotSource<Vec<crate::model_webhook_rules::WebhookRuleDeliveryView>>,
+    webhook_rule_deliveries_truncated: bool,
 }
 
 async fn load_full_sources(
@@ -394,7 +414,6 @@ async fn load_full_sources(
     scopes: &[String],
     include: bool,
     context: &SnapshotReadContext,
-    limiter: &SnapshotLoadLimiter,
 ) -> Option<FullSources> {
     if !include {
         return None;
@@ -413,7 +432,6 @@ async fn load_full_sources(
     let (
         fleet_alerts,
         fleet_alert_history,
-        fleet_alert_states,
         fleet_alert_policies,
         traffic_accounting,
         policy_alerts,
@@ -427,15 +445,8 @@ async fn load_full_sources(
             state,
             fleet_read && backups_read,
             context.agents.data.as_deref(),
-            limiter,
         ),
-        load_fleet_alert_history(state, fleet_read && backups_read, limiter),
-        load_source_limited(
-            "fleet_alert_states",
-            fleet_read,
-            state.repo.list_fleet_alert_states(FLEET_DETAIL_LIMIT, None),
-            limiter,
-        ),
+        load_fleet_alert_history(state, fleet_read && backups_read),
         load_fleet_alert_policies_with_context(
             state,
             fleet_read,
@@ -445,7 +456,6 @@ async fn load_full_sources(
                 .vps_rule_values
                 .as_ref()
                 .and_then(|source| source.data.as_deref()),
-            limiter,
         ),
         load_snapshot_traffic_accounting(
             state,
@@ -455,78 +465,72 @@ async fn load_full_sources(
                 .vps_rule_values
                 .as_ref()
                 .and_then(|source| source.data.as_deref()),
-            limiter,
         ),
-        load_source_limited(
+        load_bounded_source(
             "policy_alerts",
             fleet_read,
             state.repo.list_policy_alerts(&PolicyAlertQuery {
-                limit: Some(FLEET_DETAIL_LIMIT),
+                limit: Some(FLEET_DETAIL_LIMIT + 1),
                 client_id: None,
                 severity: None,
                 category: None,
                 policy_group_id: None,
             }),
-            limiter,
         ),
-        load_current_policy_alerts(state, fleet_read, limiter),
-        load_source_limited(
+        load_current_policy_alerts(state, fleet_read),
+        load_source(
             "fleet_alert_notification_channels",
             integrations_read,
-            state.repo.list_fleet_alert_notification_channels(
-                FLEET_DETAIL_LIMIT,
-                None,
-                None,
-                None,
-                None,
-            ),
-            limiter,
+            state.repo.list_all_fleet_alert_notification_channels(),
         ),
-        load_source_limited(
+        load_bounded_source(
             "fleet_alert_notifications",
             integrations_read,
             state.repo.list_fleet_alert_notification_deliveries(
-                FLEET_DETAIL_LIMIT,
+                FLEET_DETAIL_LIMIT + 1,
                 None,
                 None,
                 None,
             ),
-            limiter,
         ),
-        load_source_limited(
+        load_source(
             "webhook_rules",
             integrations_read,
-            state.repo.list_webhook_rules(FLEET_DETAIL_LIMIT, None),
-            limiter,
+            state.repo.list_all_webhook_rules(),
         ),
-        load_source_limited(
+        load_bounded_source(
             "webhook_rule_deliveries",
             integrations_read,
             state
                 .repo
-                .list_webhook_rule_deliveries(FLEET_DETAIL_LIMIT, None, None, None,),
-            limiter,
+                .list_webhook_rule_deliveries(FLEET_DETAIL_LIMIT + 1, None, None, None,),
         ),
     );
     let (fleet_alerts, fleet_alerts_truncated) = fleet_alerts;
     let (fleet_alert_history, fleet_alert_history_truncated) = fleet_alert_history;
+    let (policy_alerts, policy_alerts_truncated) = policy_alerts;
     let (current_policy_alerts, current_policy_alerts_truncated) = current_policy_alerts;
+    let (fleet_alert_notifications, fleet_alert_notifications_truncated) =
+        fleet_alert_notifications;
+    let (webhook_rule_deliveries, webhook_rule_deliveries_truncated) = webhook_rule_deliveries;
     Some(FullSources {
         fleet_alerts,
         fleet_alerts_truncated,
         fleet_alert_history,
         fleet_alert_history_truncated,
-        fleet_alert_states,
         fleet_alert_policies,
         vps_rule_values,
         traffic_accounting,
         policy_alerts,
+        policy_alerts_truncated,
         current_policy_alerts,
         current_policy_alerts_truncated,
         fleet_alert_notification_channels,
         fleet_alert_notifications,
+        fleet_alert_notifications_truncated,
         webhook_rules,
         webhook_rule_deliveries,
+        webhook_rule_deliveries_truncated,
     })
 }
 
@@ -534,11 +538,13 @@ async fn load_current_fleet_alerts(
     state: &AppState,
     permitted: bool,
     agents: Option<&[crate::model::AgentView]>,
-    limiter: &SnapshotLoadLimiter,
 ) -> (FleetSnapshotSource<Vec<crate::model::FleetAlertView>>, bool) {
     if !permitted {
         return (FleetSnapshotSource::unavailable("forbidden"), false);
     }
+    let Some(agents) = agents else {
+        return (FleetSnapshotSource::unavailable("unavailable"), false);
+    };
     let query = FleetAlertQuery {
         limit: Some(FLEET_DETAIL_LIMIT),
         client_id: None,
@@ -547,17 +553,8 @@ async fn load_current_fleet_alerts(
         operator_state: None,
         include_muted: Some(true),
     };
-    let selection = limiter
-        .run(async {
-            match agents {
-                Some(agents) => {
-                    state
-                        .list_fleet_alerts_selected_with_visible_agents(query, None, agents)
-                        .await
-                }
-                None => state.list_fleet_alerts_selected(query, None).await,
-            }
-        })
+    let selection = state
+        .list_fleet_alerts_selected_with_visible_agents(query, None, agents)
         .await;
     match selection {
         Ok(selection) => (
@@ -574,20 +571,19 @@ async fn load_current_fleet_alerts(
 async fn load_fleet_alert_history(
     state: &AppState,
     permitted: bool,
-    limiter: &SnapshotLoadLimiter,
 ) -> (FleetSnapshotSource<Vec<crate::model::FleetAlertView>>, bool) {
     if !permitted {
         return (FleetSnapshotSource::unavailable("forbidden"), false);
     }
-    match limiter
-        .run(state.list_fleet_alert_history(FleetAlertQuery {
+    match state
+        .list_fleet_alert_history(FleetAlertQuery {
             limit: Some(FLEET_DETAIL_LIMIT),
             client_id: None,
             severity: None,
             category: None,
             operator_state: None,
             include_muted: Some(true),
-        }))
+        })
         .await
     {
         Ok(selection) => (
@@ -604,12 +600,11 @@ async fn load_fleet_alert_history(
 async fn load_current_policy_alerts(
     state: &AppState,
     permitted: bool,
-    limiter: &SnapshotLoadLimiter,
 ) -> (
     FleetSnapshotSource<Vec<crate::model_alert_policies::PolicyAlertRecord>>,
     bool,
 ) {
-    let mut source = load_source_limited(
+    let mut source = load_source(
         "current_policy_alerts",
         permitted,
         state.repo.list_policy_alert_candidates(
@@ -625,7 +620,6 @@ async fn load_current_policy_alerts(
             None,
             None,
         ),
-        limiter,
     )
     .await;
     let truncated = source
@@ -644,36 +638,17 @@ async fn load_fleet_alert_policies_with_context(
     allow_vps_rule_selectors: bool,
     agents: Option<&[crate::model::AgentView]>,
     rules: Option<&[crate::model_alert_policies::VpsRuleValueRecord]>,
-    limiter: &SnapshotLoadLimiter,
 ) -> FleetSnapshotSource<Vec<crate::model_alert_policies::PolicyGroupRecord>> {
     let future = async {
-        match (agents, rules) {
-            (Some(agents), Some(rules)) => {
-                state
-                    .repo
-                    .list_fleet_alert_policies_with_context(
-                        FLEET_DETAIL_LIMIT,
-                        allow_vps_rule_selectors,
-                        agents,
-                        rules,
-                    )
-                    .await
-            }
-            _ => {
-                state
-                    .repo
-                    .list_fleet_alert_policies(
-                        FLEET_DETAIL_LIMIT,
-                        None,
-                        None,
-                        None,
-                        allow_vps_rule_selectors,
-                    )
-                    .await
-            }
-        }
+        let (Some(agents), Some(rules)) = (agents, rules) else {
+            return Err(anyhow::anyhow!("fleet_snapshot_policy_context_unavailable"));
+        };
+        state
+            .repo
+            .list_all_fleet_alert_policies_with_context(allow_vps_rule_selectors, agents, rules)
+            .await
     };
-    load_source_limited("fleet_alert_policies", permitted, future, limiter).await
+    load_source("fleet_alert_policies", permitted, future).await
 }
 
 async fn load_snapshot_traffic_accounting(
@@ -681,49 +656,24 @@ async fn load_snapshot_traffic_accounting(
     permitted: bool,
     agents: Option<&[crate::model::AgentView]>,
     rules: Option<&[crate::model_alert_policies::VpsRuleValueRecord]>,
-    limiter: &SnapshotLoadLimiter,
 ) -> FleetSnapshotSource<Vec<crate::model_alert_policies::TrafficAccountingRecord>> {
     let future = async {
-        match (agents, rules) {
-            (Some(agents), Some(rules)) => {
-                state
-                    .repo
-                    .list_snapshot_traffic_accounting_with_context(
-                        agents,
-                        rules,
-                        FLEET_DETAIL_LIMIT,
-                    )
-                    .await
-            }
-            _ => {
-                state
-                    .repo
-                    .list_traffic_accounting(&TrafficAccountingQuery {
-                        selector_expression: None,
-                        client_id: None,
-                        state: None,
-                        limit: Some(FLEET_DETAIL_LIMIT),
-                    })
-                    .await
-            }
-        }
+        let (Some(agents), Some(rules)) = (agents, rules) else {
+            return Err(anyhow::anyhow!(
+                "fleet_snapshot_traffic_context_unavailable"
+            ));
+        };
+        let visible_agents = agents
+            .iter()
+            .filter(|agent| agent.is_monitoring_visible())
+            .cloned()
+            .collect::<Vec<_>>();
+        state
+            .repo
+            .list_traffic_accounting_for_agents_with_rules(&visible_agents, rules)
+            .await
     };
-    load_source_limited("traffic_accounting", permitted, future, limiter).await
-}
-
-async fn load_source_limited<T, F>(
-    source: &'static str,
-    permitted: bool,
-    future: F,
-    limiter: &SnapshotLoadLimiter,
-) -> FleetSnapshotSource<T>
-where
-    F: Future<Output = anyhow::Result<T>>,
-{
-    if !permitted {
-        return FleetSnapshotSource::unavailable("operator_scope_insufficient");
-    }
-    load_source(source, true, limiter.run(future)).await
+    load_source("traffic_accounting", permitted, future).await
 }
 
 async fn load_source<T, F>(
@@ -751,6 +701,25 @@ where
             FleetSnapshotSource::unavailable(format!("fleet_snapshot_{source}_unavailable"))
         }
     }
+}
+
+async fn load_bounded_source<T, F>(
+    source: &'static str,
+    permitted: bool,
+    future: F,
+) -> (FleetSnapshotSource<Vec<T>>, bool)
+where
+    F: Future<Output = anyhow::Result<Vec<T>>>,
+{
+    let mut source = load_source(source, permitted, future).await;
+    let truncated = source
+        .data
+        .as_ref()
+        .is_some_and(|rows| rows.len() > FLEET_DETAIL_LIMIT as usize);
+    if let Some(rows) = source.data.as_mut() {
+        rows.truncate(FLEET_DETAIL_LIMIT as usize);
+    }
+    (source, truncated)
 }
 
 #[cfg(test)]

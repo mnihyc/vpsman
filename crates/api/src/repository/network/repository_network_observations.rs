@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{postgres::PgRow, types::Json as SqlJson, Row};
 use uuid::Uuid;
 use vpsman_common::{
-    tunnel_topology_identity_hash, CommandOutput, JobCommand, OutputStream,
+    tunnel_topology_identity_hash, CommandOutput, JobCommand, OutputStream, TunnelPlan,
     TunnelReachabilityObservation, TunnelReachabilitySource,
 };
 
@@ -31,6 +31,54 @@ const OBSERVATION_COLUMNS: &str = r#"
     received_at::text AS received_at
 "#;
 
+const NETWORK_OBSERVATION_ID_LOCK_HASH_SEED: i64 = 0x4e4f_4253_4944_4c4b;
+
+/// Serializes only writers proposing the same global observation UUID. This
+/// query is deliberately separate from the writer statement: after a waiter
+/// acquires ownership, READ COMMITTED gives that statement a fresh snapshot
+/// containing the winner's registry/latest changes.
+async fn lock_network_observation_ids_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    observation_ids: &[Uuid],
+) -> Result<()> {
+    if observation_ids.is_empty() {
+        return Ok(());
+    }
+    let locked = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH ordered_ids AS MATERIALIZED (
+            SELECT DISTINCT observation_id
+            FROM unnest($1::uuid[]) AS proposed(observation_id)
+            ORDER BY observation_id
+        ), locked_ids AS MATERIALIZED (
+            SELECT pg_advisory_xact_lock(hashtextextended(
+                'vpsman.network_observation.id:' || observation_id::text,
+                $2
+            )) AS acquired
+            FROM ordered_ids
+            ORDER BY observation_id
+        )
+        SELECT count(*)::bigint FROM locked_ids
+        "#,
+    )
+    .bind(observation_ids)
+    .bind(NETWORK_OBSERVATION_ID_LOCK_HASH_SEED)
+    .fetch_one(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        usize::try_from(locked).ok()
+            == Some(
+                observation_ids
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>()
+                    .len()
+            ),
+        "network observation UUID ownership changed while locking"
+    );
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct NetworkObservationFilter {
     pub(crate) start_unix: i64,
@@ -45,71 +93,44 @@ pub(crate) struct NetworkObservationFilter {
     pub(crate) visible_only: bool,
 }
 
-impl NetworkObservationFilter {
-    fn matches(&self, observation: &NetworkObservationView) -> bool {
-        let Some(observed) = observation_timestamp_unix(&observation.observed_at) else {
-            return false;
-        };
-        if observed < self.start_unix || observed > self.end_unix {
-            return false;
+/// The one transaction-frozen plan view shared by tunnel classification and
+/// automatic reachability validation for a claimed telemetry suffix. Only
+/// enabled, undeleted plans for which the projecting client is an endpoint are
+/// present in this map.
+#[derive(Clone, Debug)]
+pub(crate) struct FrozenAutomaticTunnelPlan {
+    plan_name: String,
+    left_client_id: String,
+    right_client_id: String,
+    plan: TunnelPlan,
+    topology_identity_hash: String,
+}
+
+/// One immutable raw-journal envelope in a claimed telemetry suffix. The
+/// original payload ordinal is retained before validation so the compact
+/// automatic locator always addresses the exact JSON array element.
+pub(crate) struct AutomaticTunnelReachabilitySample<'a> {
+    pub(crate) sample_id: Uuid,
+    pub(crate) accepted_seq: i64,
+    pub(crate) observations: &'a [TunnelReachabilityObservation],
+}
+
+impl FrozenAutomaticTunnelPlan {
+    pub(crate) fn new(
+        plan_id: Uuid,
+        plan_name: String,
+        left_client_id: String,
+        right_client_id: String,
+        plan: TunnelPlan,
+    ) -> Self {
+        let topology_identity_hash = tunnel_topology_identity_hash(plan_id, &plan);
+        Self {
+            plan_name,
+            left_client_id,
+            right_client_id,
+            plan,
+            topology_identity_hash,
         }
-        if !self.plan_ids.is_empty()
-            && !observation
-                .plan_id
-                .is_some_and(|plan_id| self.plan_ids.contains(&plan_id))
-        {
-            return false;
-        }
-        if self.client_id.as_deref().is_some_and(|client_id| {
-            observation.client_id != client_id
-                && observation.peer_client_id.as_deref() != Some(client_id)
-        }) {
-            return false;
-        }
-        if self
-            .source
-            .as_deref()
-            .is_some_and(|source| observation.source != source)
-        {
-            return false;
-        }
-        if self
-            .kind
-            .as_deref()
-            .is_some_and(|kind| observation.kind != kind)
-        {
-            return false;
-        }
-        if self.health.as_deref().is_some_and(|health| match health {
-            "healthy" => observation.healthy != Some(true),
-            "unhealthy" => observation.healthy != Some(false),
-            "unknown" => observation.healthy.is_some(),
-            _ => false,
-        }) {
-            return false;
-        }
-        if let Some(search) = self.search.as_deref() {
-            let search = search.to_ascii_lowercase();
-            let haystack = [
-                Some(observation.client_id.as_str()),
-                observation.peer_client_id.as_deref(),
-                observation.plan_name.as_deref(),
-                observation.interface_name.as_deref(),
-                observation.target.as_deref(),
-                observation.reason.as_deref(),
-                Some(observation.kind.as_str()),
-                Some(observation.source.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_ascii_lowercase();
-            if !haystack.contains(&search) {
-                return false;
-            }
-        }
-        true
     }
 }
 
@@ -134,59 +155,6 @@ impl Repository {
         );
 
         match self {
-            Self::Memory(memory) => {
-                let plans = memory.tunnel_plans.read().await;
-                let mut reviewed_plans = HashMap::new();
-                for (plan_id, expected_revision) in targets {
-                    let plan = plans
-                        .iter()
-                        .find(|plan| plan.id == *plan_id && plan.deleted_at.is_none())
-                        .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
-                    anyhow::ensure!(
-                        plan.revision == *expected_revision,
-                        "tunnel_plan_snapshot_stale"
-                    );
-                    reviewed_plans.insert(*plan_id, (plan.name.clone(), plan.revision));
-                }
-
-                let mut cleared_by_plan = targets
-                    .iter()
-                    .map(|(plan_id, _)| (*plan_id, 0_u64))
-                    .collect::<HashMap<_, _>>();
-                let mut observations = memory.network_observations.write().await;
-                observations.retain(|observation| {
-                    let Some(plan_id) = observation
-                        .plan_id
-                        .filter(|plan_id| selected_ids.contains(plan_id))
-                    else {
-                        return true;
-                    };
-                    *cleared_by_plan
-                        .get_mut(&plan_id)
-                        .expect("selected observation plan has a clear counter") += 1;
-                    false
-                });
-                drop(observations);
-
-                let results = targets
-                    .iter()
-                    .map(|(plan_id, _)| {
-                        let (name, reviewed_revision) = &reviewed_plans[plan_id];
-                        TunnelPlanEvidenceClearResult {
-                            plan_id: *plan_id,
-                            name: name.clone(),
-                            reviewed_revision: *reviewed_revision,
-                            cleared_observation_count: cleared_by_plan[plan_id],
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(tunnel_plan_evidence_clear_audit(&results, operator));
-                Ok(results)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let plan_ids = targets
@@ -225,53 +193,81 @@ impl Repository {
                     );
                 }
 
-                let retained_rows = sqlx::query(
-                    r#"
-                    SELECT series.plan_id,
-                           LEAST(
-                               COALESCE(SUM(rollup.sample_count), 0),
-                               9223372036854775807::numeric
-                           )::bigint AS cleared_count
-                    FROM network_observation_rollups rollup
-                    JOIN network_observation_series series ON series.id = rollup.series_id
-                    WHERE series.plan_id = ANY($1::uuid[])
-                    GROUP BY series.plan_id
-                    "#,
-                )
-                .bind(&plan_ids)
-                .fetch_all(&mut *tx)
-                .await?;
                 let rows = sqlx::query(
                     r#"
-                    WITH deleted AS (
-                        DELETE FROM network_observations
+                    WITH target_series AS MATERIALIZED (
+                        SELECT id, plan_id
+                        FROM network_observation_series
                         WHERE plan_id = ANY($1::uuid[])
-                        RETURNING plan_id
+                    ), pending_automatic AS MATERIALIZED (
+                        SELECT locator.id, series.plan_id
+                        FROM network_observations locator
+                        JOIN target_series series
+                          ON series.id = locator.automatic_series_id
+                        JOIN telemetry_samples sample
+                          ON sample.id = locator.automatic_sample_id
+                        JOIN telemetry_minute_materialization_heads head
+                          ON head.client_id = sample.client_id
+                        WHERE locator.source = 'automatic'
+                          AND sample.accepted_seq > head.materialized_seq
+                    ), retained_counts AS MATERIALIZED (
+                        SELECT series.plan_id,
+                               LEAST(
+                                   COALESCE(SUM(rollup.sample_count), 0),
+                                   9223372036854775807::numeric
+                               )::bigint AS cleared_count
+                        FROM network_observation_rollups rollup
+                        JOIN target_series series ON series.id = rollup.series_id
+                        GROUP BY series.plan_id
+                    ), deleted_manual AS (
+                        DELETE FROM network_observations observation
+                        WHERE observation.source = 'manual'
+                          AND observation.plan_id = ANY($1::uuid[])
+                        RETURNING observation.plan_id
+                    ), deleted_automatic AS (
+                        DELETE FROM network_observations observation
+                        USING target_series series
+                        WHERE observation.source = 'automatic'
+                          AND observation.automatic_series_id = series.id
+                        RETURNING observation.id
+                    ), automatic_delete_barrier AS MATERIALIZED (
+                        SELECT count(*) FROM deleted_automatic
+                    ), deleted_series AS (
+                        DELETE FROM network_observation_series series
+                        USING target_series target, automatic_delete_barrier
+                        WHERE series.id = target.id
+                        RETURNING series.id
+                    ), series_delete_barrier AS MATERIALIZED (
+                        SELECT count(*) FROM deleted_series
+                    ), counts AS (
+                        SELECT plan_id, count(*)::bigint AS cleared_count
+                        FROM deleted_manual
+                        GROUP BY plan_id
+                        UNION ALL
+                        SELECT plan_id, count(*)::bigint AS cleared_count
+                        FROM pending_automatic
+                        GROUP BY plan_id
+                        UNION ALL
+                        SELECT plan_id, cleared_count
+                        FROM retained_counts
                     )
-                    SELECT plan_id, COUNT(*)::bigint AS cleared_count
-                    FROM deleted
-                    GROUP BY plan_id
+                    SELECT counts.plan_id,
+                           LEAST(
+                               SUM(counts.cleared_count)::numeric,
+                               9223372036854775807::numeric
+                           )::bigint AS cleared_count
+                    FROM counts
+                    CROSS JOIN series_delete_barrier
+                    GROUP BY counts.plan_id
                     "#,
                 )
                 .bind(&plan_ids)
                 .fetch_all(&mut *tx)
-                .await?;
-                sqlx::query(
-                    "DELETE FROM network_observation_series WHERE plan_id = ANY($1::uuid[])",
-                )
-                .bind(&plan_ids)
-                .execute(&mut *tx)
                 .await?;
                 let mut cleared_by_plan = HashMap::<Uuid, u64>::new();
                 for row in rows {
                     let count = row.try_get::<i64, _>("cleared_count")?;
                     cleared_by_plan.insert(row.try_get("plan_id")?, u64::try_from(count)?);
-                }
-                for row in retained_rows {
-                    let count = u64::try_from(row.try_get::<i64, _>("cleared_count")?)?;
-                    let plan_id = row.try_get("plan_id")?;
-                    let total = cleared_by_plan.entry(plan_id).or_default();
-                    *total = total.saturating_add(count);
                 }
                 let results = targets
                     .iter()
@@ -343,63 +339,6 @@ impl Repository {
     ) -> Result<Vec<NetworkObservationView>> {
         const MAX_FAIR_RESPONSE_ROWS: i64 = 250_000;
         match self {
-            Self::Memory(memory) => {
-                let suspended_clients = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status == "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let active_plan_ids = if filter.visible_only {
-                    memory
-                        .tunnel_plans
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|plan| {
-                            plan.deleted_at.is_none()
-                                && !suspended_clients.contains(&plan.left_client_id)
-                                && !suspended_clients.contains(&plan.right_client_id)
-                        })
-                        .map(|plan| plan.id)
-                        .collect::<HashSet<_>>()
-                } else {
-                    HashSet::new()
-                };
-                let mut rows = memory
-                    .network_observations
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|observation| {
-                        (!filter.visible_only
-                            || (!hidden.contains(&observation.client_id)
-                                && !suspended_clients.contains(&observation.client_id)
-                                && observation.peer_client_id.as_ref().is_none_or(|peer| {
-                                    !hidden.contains(peer) && !suspended_clients.contains(peer)
-                                })
-                                && observation
-                                    .plan_id
-                                    .is_some_and(|plan_id| active_plan_ids.contains(&plan_id))))
-                            && filter.matches(observation)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(compare_network_observations_desc);
-                if fair_per_series {
-                    Ok(limit_observations_fairly(
-                        rows,
-                        filter.limit.max(1) as usize,
-                        MAX_FAIR_RESPONSE_ROWS as usize,
-                    ))
-                } else {
-                    rows.truncate(filter.limit.max(1) as usize);
-                    Ok(rows)
-                }
-            }
             Self::Postgres(pool) if fair_per_series => {
                 let rows = sqlx::query(&format!(
                     r#"
@@ -572,50 +511,6 @@ impl Repository {
             .collect::<Vec<_>>();
         let limit = sample_limit_per_plan_kind_endpoint.max(1);
         let mut rows = match self {
-            Self::Memory(memory) => {
-                let suspended_clients = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status == "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let eligible_plan_ids = plan_topologies
-                    .iter()
-                    .filter(|(_, _, left_client_id, right_client_id)| {
-                        !suspended_clients.contains(left_client_id)
-                            && !suspended_clients.contains(right_client_id)
-                    })
-                    .map(|(plan_id, _, _, _)| *plan_id)
-                    .collect::<HashSet<_>>();
-                let mut rows = memory
-                    .network_observations
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|observation| {
-                        observation
-                            .plan_id
-                            .is_some_and(|plan_id| eligible_plan_ids.contains(&plan_id))
-                            && observation_timestamp_unix(&observation.observed_at).is_some_and(
-                                |observed| observed >= start_unix && observed <= end_unix,
-                            )
-                            && matches!(
-                                observation.kind.as_str(),
-                                "tunnel_reachability" | "network_speed_test" | "network_status"
-                            )
-                            && !suspended_clients.contains(&observation.client_id)
-                            && observation
-                                .peer_client_id
-                                .as_ref()
-                                .is_none_or(|peer| !suspended_clients.contains(peer))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(compare_network_observations_desc);
-                limit_topology_rows(rows, limit)
-            }
             Self::Postgres(pool) => {
                 let query = format!(
                     r#"
@@ -702,14 +597,6 @@ impl Repository {
         filter: &NetworkObservationFilter,
     ) -> Result<Vec<NetworkObservationTrendView>> {
         let mut trends = match self {
-            Self::Memory(_) => {
-                let mut observations_filter = filter.clone();
-                observations_filter.limit = filter.limit.max(1).saturating_mul(2_000).min(250_000);
-                let observations = self
-                    .list_network_observations_filtered(&observations_filter)
-                    .await?;
-                summarize_network_observation_trends(&observations)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(NETWORK_OBSERVATION_TRENDS_QUERY)
                     .bind(filter.start_unix)
@@ -743,7 +630,6 @@ impl Repository {
         limit: i64,
     ) -> Result<Vec<serde_json::Value>> {
         match self {
-            Self::Memory(_) => Ok(Vec::new()),
             Self::Postgres(pool) => sqlx::query(NETWORK_OBSERVATION_ROLLUPS_EXPORT_QUERY)
                 .bind(limit.max(1))
                 .fetch_all(pool)
@@ -789,38 +675,6 @@ impl Repository {
             );
         }
         Ok(true)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_network_observations(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        outputs: &[CommandOutput],
-    ) -> Result<()> {
-        self.record_network_observations_starting_at(job_id, client_id, 0, outputs)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_network_observations_starting_at(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        start_seq: i32,
-        outputs: &[CommandOutput],
-    ) -> Result<()> {
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
-        let mut observations = outputs
-            .iter()
-            .enumerate()
-            .filter_map(|(offset, output)| {
-                let seq = start_seq.checked_add(i32::try_from(offset).ok()?)?;
-                parse_network_observation(job_id, client_id, seq, output, &now)
-            })
-            .collect::<Vec<_>>();
-        self.record_bound_manual_network_observations(job_id, &mut observations)
-            .await
     }
 
     pub(crate) async fn record_persisted_network_observations(
@@ -892,134 +746,15 @@ impl Repository {
         observations: Vec<NetworkObservationView>,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let mut stored = memory.network_observations.write().await;
-                for observation in observations {
-                    if let Some(existing) = stored.iter_mut().find(|existing| {
-                        existing.job_id == observation.job_id
-                            && existing.client_id == observation.client_id
-                            && existing.seq == observation.seq
-                    }) {
-                        *existing = observation;
-                    } else {
-                        stored.push(observation);
-                    }
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let observation_ids = observations
+                    .iter()
+                    .map(|observation| observation.id)
+                    .collect::<Vec<_>>();
+                lock_network_observation_ids_in_tx(&mut tx, &observation_ids).await?;
                 for observation in observations {
-                    insert_network_observation(&mut tx, &observation, true, None).await?;
-                }
-                tx.commit().await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn record_automatic_tunnel_reachability(
-        &self,
-        client_id: &str,
-        observations: &[TunnelReachabilityObservation],
-    ) -> Result<()> {
-        if observations.is_empty() {
-            return Ok(());
-        }
-        let plans = self.list_tunnel_plans().await?;
-        let plans = plans
-            .iter()
-            .map(|plan| (plan.id, plan))
-            .collect::<HashMap<_, _>>();
-        let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
-        let mut accepted = Vec::new();
-        for observation in observations {
-            let Some(plan) = plans.get(&observation.plan_id).copied() else {
-                continue;
-            };
-            let expected_identity = topology_identity_hash_for_plan(plan);
-            let (expected_client, expected_peer) = match observation.endpoint_side {
-                vpsman_common::TunnelEndpointSide::Left => {
-                    (&plan.left_client_id, &plan.right_client_id)
-                }
-                vpsman_common::TunnelEndpointSide::Right => {
-                    (&plan.right_client_id, &plan.left_client_id)
-                }
-            };
-            let expected_target = expected_reachability_target(
-                &plan.plan,
-                observation.endpoint_side,
-                observation.address_family,
-            );
-            if !plan.enabled
-                || observation.source != TunnelReachabilitySource::Automatic
-                || expected_client != client_id
-                || observation.peer_client_id.as_str() != expected_peer.as_str()
-                || observation.interface_name.as_str() != plan.plan.interface_name.as_str()
-                || expected_target != Some(observation.target.as_str())
-                || observation.topology_identity_hash != expected_identity
-                || !observation.values_are_coherent()
-            {
-                continue;
-            }
-            let observed_at = DateTime::from_timestamp(observation.measured_unix as i64, 0)
-                .unwrap_or_else(Utc::now)
-                .to_rfc3339_opts(SecondsFormat::Micros, true);
-            accepted.push(NetworkObservationView {
-                id: observation.id,
-                job_id: None,
-                client_id: client_id.to_string(),
-                seq: None,
-                kind: "tunnel_reachability".to_string(),
-                source: source_label(observation.source).to_string(),
-                role: Some("endpoint".to_string()),
-                plan_id: Some(plan.id),
-                topology_identity_hash: Some(expected_identity),
-                plan_name: Some(plan.name.clone()),
-                interface_name: Some(observation.interface_name.clone()),
-                peer_client_id: Some(observation.peer_client_id.clone()),
-                target: Some(observation.target.clone()),
-                endpoint_side: Some(endpoint_side_label(observation.endpoint_side).to_string()),
-                address_family: Some(address_family_label(observation.address_family).to_string()),
-                stale_after_secs: Some(observation.stale_after_secs as i64),
-                healthy: Some(observation.healthy),
-                transmitted: Some(observation.transmitted as i32),
-                received: Some(observation.received as i32),
-                latency_min_ms: observation.latency_min_ms,
-                latency_avg_ms: observation.latency_avg_ms,
-                latency_max_ms: observation.latency_max_ms,
-                latency_mdev_ms: observation.latency_mdev_ms,
-                packet_loss_ratio: Some(observation.packet_loss_ratio),
-                reason: observation.reason.clone(),
-                throughput_mbps: None,
-                bytes: None,
-                metadata: serde_json::json!({
-                    "type": "tunnel_reachability",
-                    "source": "automatic",
-                }),
-                observed_at,
-                received_at: received_at.clone(),
-            });
-        }
-        match self {
-            Self::Memory(memory) => {
-                let mut stored = memory.network_observations.write().await;
-                for observation in accepted {
-                    if !stored.iter().any(|existing| existing.id == observation.id) {
-                        stored.push(observation);
-                    }
-                }
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                for observation in accepted {
-                    let series_id =
-                        upsert_automatic_observation_series(&mut tx, &observation).await?;
-                    if insert_network_observation(&mut tx, &observation, false, Some(series_id))
-                        .await?
-                    {
-                        upsert_latest_automatic_observation(&mut tx, series_id, &observation)
-                            .await?;
-                    }
+                    insert_network_observation(&mut tx, &observation).await?;
                 }
                 tx.commit().await?;
             }
@@ -1028,9 +763,140 @@ impl Repository {
     }
 }
 
-const NETWORK_OBSERVATION_TRENDS_QUERY: &str = r#"
-WITH raw_evidence AS (
+/// Validates and projects a complete claimed suffix in one statement. The
+/// projector owns only series identity, compact raw locators, and current
+/// state; the independent closed-minute consumer owns all historical rollups.
+pub(crate) async fn record_postgres_automatic_tunnel_reachability_suffix_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    plans: &HashMap<Uuid, FrozenAutomaticTunnelPlan>,
+    samples: &[AutomaticTunnelReachabilitySample<'_>],
+) -> Result<()> {
+    if plans.is_empty() || samples.is_empty() {
+        return Ok(());
+    }
+    let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+    let mut accepted = Vec::new();
+    let mut accepted_ids = Vec::new();
+    for sample in samples {
+        for (zero_based_ordinal, observation) in sample.observations.iter().enumerate() {
+            let Some(plan_snapshot) = plans.get(&observation.plan_id) else {
+                continue;
+            };
+            let (expected_client, expected_peer) = match observation.endpoint_side {
+                vpsman_common::TunnelEndpointSide::Left => (
+                    &plan_snapshot.left_client_id,
+                    &plan_snapshot.right_client_id,
+                ),
+                vpsman_common::TunnelEndpointSide::Right => (
+                    &plan_snapshot.right_client_id,
+                    &plan_snapshot.left_client_id,
+                ),
+            };
+            let expected_target = expected_reachability_target(
+                &plan_snapshot.plan,
+                observation.endpoint_side,
+                observation.address_family,
+            );
+            if observation.source != TunnelReachabilitySource::Automatic
+                || expected_client != client_id
+                || observation.peer_client_id.as_str() != expected_peer.as_str()
+                || observation.interface_name.as_str() != plan_snapshot.plan.interface_name.as_str()
+                || expected_target != Some(observation.target.as_str())
+                || observation.topology_identity_hash != plan_snapshot.topology_identity_hash
+                || !observation.values_are_coherent()
+            {
+                continue;
+            }
+            let payload_ordinal = zero_based_ordinal
+                .checked_add(1)
+                .and_then(|ordinal| i16::try_from(ordinal).ok())
+                .context("automatic reachability payload ordinal is exhausted")?;
+            let observed_at = DateTime::from_timestamp(observation.measured_unix as i64, 0)
+                .context("automatic reachability timestamp is invalid")?
+                .to_rfc3339_opts(SecondsFormat::Micros, true);
+            accepted.push(serde_json::json!({
+                "id": observation.id,
+                "sample_id": sample.sample_id,
+                "accepted_seq": sample.accepted_seq,
+                "payload_ordinal": payload_ordinal,
+                "client_id": client_id,
+                "plan_id": observation.plan_id,
+                "topology_identity_hash": plan_snapshot.topology_identity_hash,
+                "plan_name": plan_snapshot.plan_name,
+                "interface_name": observation.interface_name,
+                "peer_client_id": observation.peer_client_id,
+                "target": observation.target,
+                "endpoint_side": endpoint_side_label(observation.endpoint_side),
+                "address_family": address_family_label(observation.address_family),
+                "stale_after_secs": observation.stale_after_secs,
+                "healthy": observation.healthy,
+                "transmitted": observation.transmitted,
+                "received": observation.received,
+                "latency_min_ms": observation.latency_min_ms,
+                "latency_avg_ms": observation.latency_avg_ms,
+                "latency_max_ms": observation.latency_max_ms,
+                "latency_mdev_ms": observation.latency_mdev_ms,
+                "packet_loss_ratio": observation.packet_loss_ratio,
+                "reason": observation.reason,
+                "observed_at": observed_at,
+                "received_at": received_at,
+            }));
+            accepted_ids.push(observation.id);
+        }
+    }
+    if accepted.is_empty() {
+        return Ok(());
+    }
+    lock_network_observation_ids_in_tx(tx, &accepted_ids).await?;
+    sqlx::query(AUTOMATIC_TUNNEL_REACHABILITY_BATCH_SQL)
+        .bind(SqlJson(&accepted))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) const NETWORK_OBSERVATION_TRENDS_QUERY: &str = r#"
+WITH RECURSIVE automatic_physical_series AS MATERIALIZED (
+    SELECT series.*
+    FROM network_observation_series series
+    WHERE (cardinality($3::uuid[]) = 0 OR series.plan_id = ANY($3::uuid[]))
+      AND ($4::text IS NULL
+           OR series.client_id = $4
+           OR series.peer_client_id = $4)
+      AND ($5::text IS NULL OR $5 = 'automatic')
+      AND ($6::text IS NULL OR $6 = 'tunnel_reachability')
+      AND (
+        NOT $9
+        OR (
+            EXISTS (
+                SELECT 1 FROM visible_clients
+                WHERE id = series.client_id AND status <> 'suspended'
+            )
+            AND EXISTS (
+                SELECT 1 FROM visible_clients
+                WHERE id = series.peer_client_id AND status <> 'suspended'
+            )
+            AND EXISTS (
+                SELECT 1 FROM tunnel_plans plan
+                WHERE plan.id = series.plan_id AND plan.deleted_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM visible_clients endpoint
+                      WHERE endpoint.id = plan.left_client_id
+                        AND endpoint.status = 'suspended'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM visible_clients endpoint
+                      WHERE endpoint.id = plan.right_client_id
+                        AND endpoint.status = 'suspended'
+                  )
+            )
+        )
+      )
+),
+manual_points AS NOT MATERIALIZED (
     SELECT
+        NULL::bigint AS physical_series_id,
         observation.kind,
         observation.plan_id,
         observation.topology_identity_hash,
@@ -1064,6 +930,7 @@ WITH raw_evidence AS (
     FROM network_observations observation
     WHERE observation.observed_at >= to_timestamp($1)
       AND observation.observed_at <= to_timestamp($2)
+      AND observation.source = 'manual'
       AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
       AND ($4::text IS NULL
            OR observation.client_id = $4
@@ -1104,70 +971,129 @@ WITH raw_evidence AS (
         )
       )
 ),
-filtered_rollups AS (
-    SELECT rollup.*, series.plan_id, series.topology_identity_hash,
-           series.plan_name, series.interface_name, series.client_id,
-           series.peer_client_id, series.target
-    FROM network_observation_rollups rollup
-    JOIN network_observation_series series ON series.id = rollup.series_id
-    WHERE rollup.bucket_start <= to_timestamp($2)
-      AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs) > to_timestamp($1)
-      AND (cardinality($3::uuid[]) = 0 OR series.plan_id = ANY($3::uuid[]))
-      AND ($4::text IS NULL OR series.client_id = $4 OR series.peer_client_id = $4)
-      AND ($5::text IS NULL OR $5 = 'automatic')
-      AND ($6::text IS NULL OR $6 = 'tunnel_reachability')
+manual_series AS MATERIALIZED (
+    -- Manual job evidence has no persistent series catalogue. This exact
+    -- distinct pass is deliberately isolated from high-volume automatic
+    -- telemetry; arbitrary reason substring matching cannot be index-seeked
+    -- without changing the schema or its matching semantics.
+    SELECT
+        point.kind,
+        point.plan_id,
+        point.topology_identity_hash,
+        point.interface_name,
+        point.client_id,
+        point.peer_client_id
+    FROM manual_points point
+    GROUP BY point.kind, point.plan_id, point.topology_identity_hash,
+             point.interface_name, point.client_id, point.peer_client_id
+),
+pending_samples AS MATERIALIZED (
+    SELECT sample.id, sample.payload
+    FROM telemetry_minute_materialization_heads head
+    JOIN telemetry_projection_heads projection USING (client_id)
+    JOIN (
+        SELECT DISTINCT client_id
+        FROM automatic_physical_series
+    ) eligible_client USING (client_id)
+    JOIN telemetry_samples sample
+      ON sample.client_id = head.client_id
+     AND sample.accepted_seq > head.materialized_seq
+     AND sample.accepted_seq <= projection.projected_seq
+),
+pending_rows AS MATERIALIZED (
+    SELECT locator.id, series.plan_name, locator.observed_at,
+           series.id AS series_id, series.plan_id,
+           series.topology_identity_hash, series.interface_name,
+           series.client_id, series.peer_client_id, series.target,
+           raw.observation
+    FROM pending_samples sample
+    JOIN network_observations locator
+      ON locator.automatic_sample_id = sample.id
+     AND locator.source = 'automatic'
+    JOIN automatic_physical_series series
+      ON series.id = locator.automatic_series_id
+    CROSS JOIN LATERAL (
+        SELECT sample.payload -> 'tunnel_reachability'
+                     -> (locator.automatic_payload_ordinal::integer - 1)
+                     AS observation
+    ) raw
+    WHERE locator.observed_at >= to_timestamp($1)
+      AND locator.observed_at <= to_timestamp($2)
+      AND raw.observation IS NOT NULL
+      AND (raw.observation ->> 'id')::uuid = locator.id
       AND (
         $7::text IS NULL
-        OR ($7 = 'healthy' AND rollup.health_state = 1)
-        OR ($7 = 'unhealthy' AND rollup.health_state = 0)
-        OR ($7 = 'unknown' AND rollup.health_state = -1)
+        OR ($7 = 'healthy' AND (raw.observation ->> 'healthy')::boolean)
+        OR ($7 = 'unhealthy' AND NOT (raw.observation ->> 'healthy')::boolean)
       )
       AND (
         $8::text IS NULL
         OR concat_ws(' ', series.client_id, series.peer_client_id,
             series.plan_name, series.interface_name, series.target,
-            NULLIF(rollup.reason_key, ''), 'tunnel_reachability', 'automatic')
-            ILIKE '%' || $8 || '%'
-      )
-      AND (
-        NOT $9
-        OR (
-            EXISTS (SELECT 1 FROM visible_clients WHERE id = series.client_id AND status <> 'suspended')
-            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = series.peer_client_id AND status <> 'suspended')
-            AND EXISTS (
-                SELECT 1 FROM tunnel_plans plan
-                WHERE plan.id = series.plan_id AND plan.deleted_at IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM visible_clients endpoint
-                      WHERE endpoint.id=plan.left_client_id
-                        AND endpoint.status = 'suspended'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM visible_clients endpoint
-                      WHERE endpoint.id=plan.right_client_id
-                        AND endpoint.status = 'suspended'
-                  )
-            )
-        )
+            raw.observation ->> 'reason',
+            'tunnel_reachability', 'automatic') ILIKE '%' || $8 || '%'
       )
 ),
-retained_evidence AS (
+pending_fragments AS MATERIALIZED (
     SELECT
+        series_id AS physical_series_id,
         'tunnel_reachability'::text AS kind,
-        rollup.plan_id,
-        rollup.topology_identity_hash,
-        rollup.plan_name,
-        rollup.interface_name,
-        rollup.client_id,
-        rollup.peer_client_id,
+        plan_id, topology_identity_hash, plan_name,
+        interface_name, client_id, peer_client_id,
+        date_bin(
+            interval '1 minute', observed_at,
+            TIMESTAMPTZ '1970-01-01 00:00:00+00'
+        ) AS bucket_start,
+        60::integer AS bucket_secs,
+        FALSE AS retained,
+        count(*)::bigint AS sample_count,
+        1::bigint AS source_bucket_count,
+        60::integer AS effective_resolution_secs,
+        count(*)::bigint AS automatic_count,
+        0::bigint AS manual_count,
+        count(*) FILTER (
+            WHERE (observation ->> 'healthy')::boolean
+        )::bigint AS healthy_count,
+        count(*) FILTER (
+            WHERE NOT (observation ->> 'healthy')::boolean
+        )::bigint AS degraded_count,
+        sum(COALESCE((observation ->> 'latency_avg_ms')::double precision, 0.0))
+            AS latency_sum_ms,
+        count((observation ->> 'latency_avg_ms')::double precision)::bigint
+            AS latency_sample_count,
+        min((observation ->> 'latency_avg_ms')::double precision)
+            AS latency_min_ms,
+        max((observation ->> 'latency_avg_ms')::double precision)
+            AS latency_max_ms,
+        sum((observation ->> 'packet_loss_ratio')::double precision)
+            AS packet_loss_sum_ratio,
+        count((observation ->> 'packet_loss_ratio')::double precision)::bigint
+            AS packet_loss_sample_count,
+        0.0::double precision AS throughput_sum_mbps,
+        0::bigint AS throughput_sample_count,
+        NULL::double precision AS throughput_max_mbps,
+        0::numeric AS bytes_total,
+        max(observed_at) AS latest_observed_at
+    FROM pending_rows
+    GROUP BY series_id, plan_id, topology_identity_hash, plan_name,
+             interface_name, client_id, peer_client_id, bucket_start,
+             (observation ->> 'healthy')::boolean
+),
+retained_fragments AS NOT MATERIALIZED (
+    SELECT
+        rollup.series_id AS physical_series_id,
+        'tunnel_reachability'::text AS kind,
+        series.plan_id,
+        series.topology_identity_hash,
+        series.plan_name,
+        series.interface_name,
+        series.client_id,
+        series.peer_client_id,
         rollup.bucket_start,
         rollup.bucket_secs,
         TRUE AS retained,
         rollup.sample_count,
-        (row_number() OVER (
-            PARTITION BY rollup.series_id, rollup.bucket_secs, rollup.bucket_start
-            ORDER BY rollup.health_state, rollup.reason_key
-        ) = 1)::integer::bigint AS source_bucket_count,
+        1::bigint AS source_bucket_count,
         rollup.bucket_secs AS effective_resolution_secs,
         rollup.sample_count AS automatic_count,
         0::bigint AS manual_count,
@@ -1186,73 +1112,463 @@ retained_evidence AS (
         NULL::double precision AS throughput_max_mbps,
         0::numeric AS bytes_total,
         rollup.latest_observed_at
-    FROM filtered_rollups rollup
+    FROM network_observation_rollups rollup
+    JOIN automatic_physical_series series ON series.id = rollup.series_id
+    WHERE rollup.bucket_start > to_timestamp($1) - interval '1 day'
+      AND rollup.bucket_start <= to_timestamp($2)
+      AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs) > to_timestamp($1)
+      AND (
+        $7::text IS NULL
+        OR ($7 = 'healthy' AND rollup.health_state = 1)
+        OR ($7 = 'unhealthy' AND rollup.health_state = 0)
+        OR ($7 = 'unknown' AND rollup.health_state = -1)
+      )
+      AND (
+        $8::text IS NULL
+        OR concat_ws(' ', series.client_id, series.peer_client_id,
+            series.plan_name, series.interface_name, series.target,
+            rollup.latest_reason, 'tunnel_reachability', 'automatic')
+            ILIKE '%' || $8 || '%'
+      )
 ),
-evidence AS (
-    SELECT * FROM raw_evidence
+series_sources AS (
+    SELECT
+        'tunnel_reachability'::text AS kind,
+        series.plan_id,
+        series.topology_identity_hash,
+        series.interface_name,
+        series.client_id,
+        series.peer_client_id,
+        series.id AS automatic_series_id,
+        FALSE AS has_manual
+    FROM automatic_physical_series series
     UNION ALL
-    SELECT * FROM retained_evidence
+    SELECT
+        manual.kind,
+        manual.plan_id,
+        manual.topology_identity_hash,
+        manual.interface_name,
+        manual.client_id,
+        manual.peer_client_id,
+        NULL::bigint AS automatic_series_id,
+        TRUE AS has_manual
+    FROM manual_series manual
+),
+series_catalog AS MATERIALIZED (
+    SELECT
+        source.kind,
+        source.plan_id,
+        source.topology_identity_hash,
+        source.interface_name,
+        source.client_id,
+        source.peer_client_id,
+        COALESCE(
+            array_agg(DISTINCT source.automatic_series_id)
+                FILTER (WHERE source.automatic_series_id IS NOT NULL),
+            ARRAY[]::bigint[]
+        ) AS automatic_series_ids,
+        bool_or(source.has_manual) AS has_manual
+    FROM series_sources source
+    GROUP BY source.kind, source.plan_id, source.topology_identity_hash,
+             source.interface_name, source.client_id, source.peer_client_id
+),
+series_bounds AS MATERIALIZED (
+    SELECT catalog.*,
+           oldest.bucket_start AS oldest_bucket_start,
+           oldest.bucket_secs AS oldest_bucket_secs,
+           oldest.plan_name AS oldest_plan_name,
+           oldest.latest_observed_at AS oldest_observed_at,
+           latest.bucket_start AS latest_bucket_start,
+           latest.bucket_secs AS latest_bucket_secs,
+           latest.plan_name AS latest_plan_name,
+           latest.latest_observed_at
+    FROM series_catalog catalog
+    CROSS JOIN LATERAL (
+        SELECT retained_candidate.*
+        FROM (
+            SELECT retained.*
+            FROM unnest(catalog.automatic_series_ids) physical(series_id)
+            CROSS JOIN LATERAL (
+                SELECT point.bucket_start, point.bucket_secs,
+                       point.plan_name, point.latest_observed_at
+                FROM retained_fragments point
+                WHERE point.physical_series_id = physical.series_id
+                ORDER BY point.bucket_start, point.bucket_secs,
+                         point.latest_observed_at, point.plan_name
+                LIMIT 1
+            ) retained
+            ORDER BY retained.bucket_start, retained.bucket_secs,
+                     retained.latest_observed_at, retained.plan_name
+            LIMIT 1
+        ) retained_candidate
+        UNION ALL
+        SELECT pending.*
+        FROM (
+            SELECT point.bucket_start, point.bucket_secs,
+                   point.plan_name, point.latest_observed_at
+            FROM pending_fragments point
+            WHERE point.physical_series_id = ANY(catalog.automatic_series_ids)
+            ORDER BY point.bucket_start, point.bucket_secs,
+                     point.latest_observed_at, point.plan_name
+            LIMIT 1
+        ) pending
+        UNION ALL
+        SELECT manual.*
+        FROM (
+            SELECT point.bucket_start, point.bucket_secs,
+                   point.plan_name, point.latest_observed_at
+            FROM manual_points point
+            WHERE catalog.has_manual
+              AND point.kind = catalog.kind
+              AND point.plan_id = catalog.plan_id
+              AND point.topology_identity_hash = catalog.topology_identity_hash
+              AND point.interface_name = catalog.interface_name
+              AND point.client_id = catalog.client_id
+              AND point.peer_client_id = catalog.peer_client_id
+            ORDER BY point.bucket_start, point.latest_observed_at,
+                     point.plan_name
+            LIMIT 1
+        ) manual
+        ORDER BY bucket_start, bucket_secs NULLS FIRST,
+                 latest_observed_at, plan_name
+        LIMIT 1
+    ) oldest
+    CROSS JOIN LATERAL (
+        SELECT retained_candidate.*
+        FROM (
+            SELECT retained.*
+            FROM unnest(catalog.automatic_series_ids) physical(series_id)
+            CROSS JOIN LATERAL (
+                SELECT point.bucket_start, point.bucket_secs,
+                       point.plan_name, point.latest_observed_at
+                FROM retained_fragments point
+                WHERE point.physical_series_id = physical.series_id
+                ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
+                         point.bucket_secs DESC, point.plan_name
+                LIMIT 1
+            ) retained
+            ORDER BY retained.bucket_start DESC,
+                     retained.latest_observed_at DESC,
+                     retained.bucket_secs DESC, retained.plan_name
+            LIMIT 1
+        ) retained_candidate
+        UNION ALL
+        SELECT pending.*
+        FROM (
+            SELECT point.bucket_start, point.bucket_secs,
+                   point.plan_name, point.latest_observed_at
+            FROM pending_fragments point
+            WHERE point.physical_series_id = ANY(catalog.automatic_series_ids)
+            ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
+                     point.bucket_secs DESC, point.plan_name
+            LIMIT 1
+        ) pending
+        UNION ALL
+        SELECT manual.*
+        FROM (
+            SELECT point.bucket_start, point.bucket_secs,
+                   point.plan_name, point.latest_observed_at
+            FROM manual_points point
+            WHERE catalog.has_manual
+              AND point.kind = catalog.kind
+              AND point.plan_id = catalog.plan_id
+              AND point.topology_identity_hash = catalog.topology_identity_hash
+              AND point.interface_name = catalog.interface_name
+              AND point.client_id = catalog.client_id
+              AND point.peer_client_id = catalog.peer_client_id
+            ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
+                     point.plan_name
+            LIMIT 1
+        ) manual
+        ORDER BY bucket_start DESC, latest_observed_at DESC,
+                 bucket_secs DESC NULLS LAST, plan_name
+        LIMIT 1
+    ) latest
+),
+ranked_series AS (
+    SELECT bounds.*,
+           row_number() OVER (
+               ORDER BY bounds.latest_observed_at DESC, bounds.kind,
+                        bounds.plan_id, bounds.topology_identity_hash,
+                        bounds.interface_name, bounds.client_id,
+                        bounds.peer_client_id
+           ) AS series_ordinal,
+           count(*) OVER () AS series_count
+    FROM series_bounds bounds
+),
+budgeted_series AS MATERIALIZED (
+    -- Every series receives one coordinate before any receives a second.
+    -- With room for two, oldest and newest are mandatory; remaining slots are
+    -- uniform interior probes. This is the only allocation compatible with a
+    -- hard global response limit and fair series visibility.
+    SELECT ranked.*,
+           ($10::bigint / ranked.series_count)
+           + CASE
+               WHEN ranked.series_ordinal
+                    <= ($10::bigint % ranked.series_count)
+               THEN 1 ELSE 0
+             END AS series_budget
+    FROM ranked_series ranked
+),
+slot_numbers(slot) AS MATERIALIZED (
+    SELECT 2::bigint
+    WHERE COALESCE(
+        (SELECT max(series_budget) FROM budgeted_series), 0
+    ) >= 3
+    UNION ALL
+    SELECT slot + 1
+    FROM slot_numbers
+    WHERE slot + 1 < (
+        SELECT max(series_budget) FROM budgeted_series
+    )
+),
+endpoint_coordinates AS (
+    SELECT series.series_ordinal,
+           series.latest_bucket_start AS bucket_start,
+           series.latest_bucket_secs AS bucket_secs,
+           series.latest_plan_name AS plan_name
+    FROM budgeted_series series
+    WHERE series.series_budget = 1
+    UNION ALL
+    SELECT series.series_ordinal,
+           series.oldest_bucket_start,
+           series.oldest_bucket_secs,
+           series.oldest_plan_name
+    FROM budgeted_series series
+    WHERE series.series_budget >= 2
+    UNION ALL
+    SELECT series.series_ordinal,
+           series.latest_bucket_start,
+           series.latest_bucket_secs,
+           series.latest_plan_name
+    FROM budgeted_series series
+    WHERE series.series_budget >= 2
+),
+interior_targets AS (
+    SELECT series.*,
+           slot.slot,
+           series.oldest_bucket_start
+             + (series.latest_bucket_start - series.oldest_bucket_start)
+               * ((slot.slot - 1)::double precision
+                  / (series.series_budget - 1)::double precision) AS target_at
+    FROM budgeted_series series
+    JOIN slot_numbers slot ON slot.slot < series.series_budget
+),
+interior_coordinates AS (
+    SELECT target.series_ordinal,
+           nearest.bucket_start,
+           nearest.bucket_secs,
+           nearest.plan_name
+    FROM interior_targets target
+    CROSS JOIN LATERAL (
+        SELECT candidate.*
+        FROM (
+            SELECT retained_before.*
+            FROM (
+                SELECT retained.*
+                FROM unnest(target.automatic_series_ids) physical(series_id)
+                CROSS JOIN LATERAL (
+                    SELECT point.bucket_start, point.bucket_secs,
+                           point.plan_name, point.latest_observed_at
+                    FROM retained_fragments point
+                    WHERE point.physical_series_id = physical.series_id
+                      AND point.bucket_start <= target.target_at
+                    ORDER BY point.bucket_start DESC,
+                             point.latest_observed_at DESC,
+                             point.bucket_secs DESC, point.plan_name
+                    LIMIT 1
+                ) retained
+                ORDER BY retained.bucket_start DESC,
+                         retained.latest_observed_at DESC,
+                         retained.bucket_secs DESC, retained.plan_name
+                LIMIT 1
+            ) retained_before
+            UNION ALL
+            SELECT retained_after.*
+            FROM (
+                SELECT retained.*
+                FROM unnest(target.automatic_series_ids) physical(series_id)
+                CROSS JOIN LATERAL (
+                    SELECT point.bucket_start, point.bucket_secs,
+                           point.plan_name, point.latest_observed_at
+                    FROM retained_fragments point
+                    WHERE point.physical_series_id = physical.series_id
+                      AND point.bucket_start >= target.target_at
+                    ORDER BY point.bucket_start, point.bucket_secs,
+                             point.latest_observed_at, point.plan_name
+                    LIMIT 1
+                ) retained
+                ORDER BY retained.bucket_start, retained.bucket_secs,
+                         retained.latest_observed_at, retained.plan_name
+                LIMIT 1
+            ) retained_after
+            UNION ALL
+            SELECT pending.*
+            FROM (
+                SELECT point.bucket_start, point.bucket_secs,
+                       point.plan_name, point.latest_observed_at
+                FROM pending_fragments point
+                WHERE point.physical_series_id
+                        = ANY(target.automatic_series_ids)
+                  AND point.bucket_start <= target.target_at
+                ORDER BY point.bucket_start DESC,
+                         point.latest_observed_at DESC,
+                         point.bucket_secs DESC, point.plan_name
+                LIMIT 1
+            ) pending
+            UNION ALL
+            SELECT pending.*
+            FROM (
+                SELECT point.bucket_start, point.bucket_secs,
+                       point.plan_name, point.latest_observed_at
+                FROM pending_fragments point
+                WHERE point.physical_series_id
+                        = ANY(target.automatic_series_ids)
+                  AND point.bucket_start >= target.target_at
+                ORDER BY point.bucket_start, point.bucket_secs,
+                         point.latest_observed_at, point.plan_name
+                LIMIT 1
+            ) pending
+            UNION ALL
+            SELECT manual.*
+            FROM (
+                SELECT point.bucket_start, point.bucket_secs,
+                       point.plan_name, point.latest_observed_at
+                FROM manual_points point
+                WHERE target.has_manual
+                  AND point.kind = target.kind
+                  AND point.plan_id = target.plan_id
+                  AND point.topology_identity_hash
+                        = target.topology_identity_hash
+                  AND point.interface_name = target.interface_name
+                  AND point.client_id = target.client_id
+                  AND point.peer_client_id = target.peer_client_id
+                  AND point.bucket_start <= target.target_at
+                ORDER BY point.bucket_start DESC,
+                         point.latest_observed_at DESC, point.plan_name
+                LIMIT 1
+            ) manual
+            UNION ALL
+            SELECT manual.*
+            FROM (
+                SELECT point.bucket_start, point.bucket_secs,
+                       point.plan_name, point.latest_observed_at
+                FROM manual_points point
+                WHERE target.has_manual
+                  AND point.kind = target.kind
+                  AND point.plan_id = target.plan_id
+                  AND point.topology_identity_hash
+                        = target.topology_identity_hash
+                  AND point.interface_name = target.interface_name
+                  AND point.client_id = target.client_id
+                  AND point.peer_client_id = target.peer_client_id
+                  AND point.bucket_start >= target.target_at
+                ORDER BY point.bucket_start, point.latest_observed_at,
+                         point.plan_name
+                LIMIT 1
+            ) manual
+        ) candidate
+        ORDER BY
+            abs(extract(epoch FROM (bucket_start - target.target_at))),
+            bucket_start DESC, latest_observed_at DESC,
+            bucket_secs DESC NULLS LAST, plan_name
+        LIMIT 1
+    ) nearest
+),
+selected_coordinates AS MATERIALIZED (
+    SELECT DISTINCT series_ordinal, bucket_start, bucket_secs, plan_name
+    FROM (
+        SELECT * FROM endpoint_coordinates
+        UNION ALL
+        SELECT * FROM interior_coordinates
+    ) coordinate
+),
+selected_fragments AS MATERIALIZED (
+    SELECT point.*
+    FROM selected_coordinates coordinate
+    JOIN budgeted_series series USING (series_ordinal)
+    JOIN manual_points point
+      ON coordinate.bucket_secs IS NULL
+     AND point.kind = series.kind
+     AND point.plan_id = series.plan_id
+     AND point.topology_identity_hash = series.topology_identity_hash
+     AND point.interface_name = series.interface_name
+     AND point.client_id = series.client_id
+     AND point.peer_client_id = series.peer_client_id
+     AND point.bucket_start = coordinate.bucket_start
+     AND point.plan_name = coordinate.plan_name
+    UNION ALL
+    SELECT point.*
+    FROM selected_coordinates coordinate
+    JOIN budgeted_series series USING (series_ordinal)
+    CROSS JOIN LATERAL unnest(series.automatic_series_ids)
+        physical(series_id)
+    CROSS JOIN LATERAL (
+        -- Health is the final primary-key dimension, so one physical series
+        -- has at most the two complete fragments selected here.
+        SELECT retained.*
+        FROM retained_fragments retained
+        WHERE coordinate.bucket_secs IS NOT NULL
+          AND retained.physical_series_id = physical.series_id
+          AND retained.bucket_start = coordinate.bucket_start
+          AND retained.bucket_secs = coordinate.bucket_secs
+          AND retained.plan_name = coordinate.plan_name
+        LIMIT 2
+    ) point
+    UNION ALL
+    SELECT point.*
+    FROM selected_coordinates coordinate
+    JOIN budgeted_series series USING (series_ordinal)
+    CROSS JOIN LATERAL unnest(series.automatic_series_ids)
+        physical(series_id)
+    CROSS JOIN LATERAL (
+        SELECT pending.*
+        FROM pending_fragments pending
+        WHERE coordinate.bucket_secs IS NOT NULL
+          AND pending.physical_series_id = physical.series_id
+          AND pending.bucket_start = coordinate.bucket_start
+          AND pending.bucket_secs = coordinate.bucket_secs
+          AND pending.plan_name = coordinate.plan_name
+        LIMIT 2
+    ) point
 ),
 summarized AS (
-SELECT
-    kind,
-    plan_id,
-    topology_identity_hash,
-    plan_name,
-    interface_name,
-    client_id,
-    peer_client_id,
-    bucket_start::text AS bucket_start,
-    bucket_secs::bigint AS bucket_secs,
-    BOOL_OR(retained) AS retained,
-    SUM(sample_count)::bigint AS sample_count,
-    CASE WHEN bucket_secs IS NULL
-         THEN SUM(source_bucket_count)
-         ELSE 1
-    END::bigint AS source_bucket_count,
-    MAX(effective_resolution_secs)::bigint AS effective_resolution_secs,
-    SUM(automatic_count)::bigint AS automatic_count,
-    SUM(manual_count)::bigint AS manual_count,
-    SUM(healthy_count)::bigint AS healthy_count,
-    SUM(degraded_count)::bigint AS degraded_count,
-    SUM(latency_sum_ms)::double precision AS latency_sum_ms,
-    SUM(latency_sample_count)::bigint AS latency_sample_count,
-    MIN(latency_min_ms)::double precision AS latency_min_ms,
-    MAX(latency_max_ms)::double precision AS latency_max_ms,
-    SUM(packet_loss_sum_ratio)::double precision AS packet_loss_sum_ratio,
-    SUM(packet_loss_sample_count)::bigint AS packet_loss_sample_count,
-    SUM(throughput_sum_mbps)::double precision AS throughput_sum_mbps,
-    SUM(throughput_sample_count)::bigint AS throughput_sample_count,
-    MAX(throughput_max_mbps)::double precision AS throughput_max_mbps,
-    LEAST(SUM(bytes_total), 9223372036854775807::numeric)::bigint AS bytes_total,
-    MAX(latest_observed_at)::text AS latest_observed_at
-FROM evidence
-GROUP BY kind, plan_id, topology_identity_hash, plan_name, interface_name,
-         client_id, peer_client_id, bucket_start, bucket_secs
-),
-ranked AS (
-    SELECT summarized.*,
-           row_number() OVER (
-               PARTITION BY kind, plan_id, topology_identity_hash,
-                            interface_name, client_id, peer_client_id
-               ORDER BY bucket_start DESC, latest_observed_at DESC
-           ) AS series_rank,
-           COUNT(*) OVER (
-               PARTITION BY kind, plan_id, topology_identity_hash,
-                            interface_name, client_id, peer_client_id
-           ) AS series_points,
-           COUNT(*) OVER () AS total_points,
-           COUNT(*) OVER (
-               PARTITION BY kind, plan_id, topology_identity_hash,
-                            interface_name, client_id, peer_client_id
-           )::numeric / NULLIF(COUNT(*) OVER ()::numeric, 0)
-               AS series_share
-    FROM summarized
-),
-budgeted AS (
-    SELECT ranked.*,
-           GREATEST(2, FLOOR($10 * series_share)::bigint) AS series_budget
-    FROM ranked
+    SELECT
+        kind,
+        plan_id,
+        topology_identity_hash,
+        plan_name,
+        interface_name,
+        client_id,
+        peer_client_id,
+        bucket_start::text AS bucket_start,
+        bucket_secs::bigint AS bucket_secs,
+        bool_or(retained) AS retained,
+        sum(sample_count)::bigint AS sample_count,
+        CASE WHEN bucket_secs IS NULL
+             THEN sum(source_bucket_count)
+             ELSE 1
+        END::bigint AS source_bucket_count,
+        max(effective_resolution_secs)::bigint AS effective_resolution_secs,
+        sum(automatic_count)::bigint AS automatic_count,
+        sum(manual_count)::bigint AS manual_count,
+        sum(healthy_count)::bigint AS healthy_count,
+        sum(degraded_count)::bigint AS degraded_count,
+        sum(latency_sum_ms)::double precision AS latency_sum_ms,
+        sum(latency_sample_count)::bigint AS latency_sample_count,
+        min(latency_min_ms)::double precision AS latency_min_ms,
+        max(latency_max_ms)::double precision AS latency_max_ms,
+        sum(packet_loss_sum_ratio)::double precision AS packet_loss_sum_ratio,
+        sum(packet_loss_sample_count)::bigint AS packet_loss_sample_count,
+        sum(throughput_sum_mbps)::double precision AS throughput_sum_mbps,
+        sum(throughput_sample_count)::bigint AS throughput_sample_count,
+        max(throughput_max_mbps)::double precision AS throughput_max_mbps,
+        LEAST(sum(bytes_total), 9223372036854775807::numeric)::bigint
+            AS bytes_total,
+        max(latest_observed_at)::text AS latest_observed_at
+    FROM selected_fragments
+    GROUP BY kind, plan_id, topology_identity_hash, plan_name, interface_name,
+             client_id, peer_client_id, bucket_start, bucket_secs
 )
 SELECT
     kind, plan_id, topology_identity_hash, plan_name, interface_name,
@@ -1263,15 +1579,8 @@ SELECT
     packet_loss_sum_ratio, packet_loss_sample_count, throughput_sum_mbps,
     throughput_sample_count, throughput_max_mbps, bytes_total,
     latest_observed_at
-FROM budgeted
-WHERE series_rank = 1
-   OR series_rank = series_points
-   OR FLOOR((series_rank - 1)::numeric * (series_budget - 1) / series_points)
-      <> FLOOR((series_rank - 2)::numeric * (series_budget - 1) / series_points)
-ORDER BY
-    CASE WHEN series_rank = 1 OR series_rank = series_points THEN 0 ELSE 1 END,
-    series_rank,
-    latest_observed_at DESC
+FROM summarized
+ORDER BY latest_observed_at DESC, kind, client_id, bucket_start DESC
 LIMIT $10
 "#;
 
@@ -1294,7 +1603,7 @@ SELECT
     ) AS record
 FROM network_observation_rollups rollup
 JOIN network_observation_series series ON series.id = rollup.series_id
-ORDER BY rollup.bucket_start DESC, series.id, rollup.bucket_secs
+ORDER BY rollup.bucket_start DESC, series.id, rollup.bucket_secs, rollup.health_state
 LIMIT $1
 "#;
 
@@ -1333,108 +1642,194 @@ fn network_observation_trend_from_row(
     })
 }
 
-async fn upsert_automatic_observation_series(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    observation: &NetworkObservationView,
-) -> Result<i64> {
-    let plan_id = observation
-        .plan_id
-        .ok_or_else(|| anyhow::anyhow!("automatic reachability plan is missing"))?;
-    let topology_identity_hash =
-        required_observation_field(&observation.topology_identity_hash, "topology identity")?;
-    let endpoint_side = required_observation_field(&observation.endpoint_side, "endpoint side")?;
-    let address_family = required_observation_field(&observation.address_family, "address family")?;
-    sqlx::query(
-        r#"
-        UPDATE network_observation_series
-        SET active = FALSE
-        WHERE plan_id = $1
-          AND client_id = $2
-          AND endpoint_side = $3
-          AND address_family = $4
-          AND topology_identity_hash <> $5
-          AND active = TRUE
-        "#,
+const AUTOMATIC_TUNNEL_REACHABILITY_BATCH_SQL: &str = r#"
+WITH incoming AS MATERIALIZED (
+    SELECT element.input_ordinal::bigint AS input_ordinal, observation.*
+    FROM jsonb_array_elements($1::jsonb)
+        WITH ORDINALITY AS element(value, input_ordinal)
+    CROSS JOIN LATERAL jsonb_to_record(element.value) AS observation (
+        id uuid,
+        sample_id uuid,
+        accepted_seq bigint,
+        payload_ordinal smallint,
+        client_id text,
+        plan_id uuid,
+        topology_identity_hash text,
+        plan_name text,
+        interface_name text,
+        peer_client_id text,
+        target text,
+        endpoint_side text,
+        address_family text,
+        stale_after_secs bigint,
+        healthy boolean,
+        transmitted integer,
+        received integer,
+        latency_min_ms double precision,
+        latency_avg_ms double precision,
+        latency_max_ms double precision,
+        latency_mdev_ms double precision,
+        packet_loss_ratio double precision,
+        reason text,
+        observed_at timestamptz,
+        received_at timestamptz
     )
-    .bind(plan_id)
-    .bind(&observation.client_id)
-    .bind(endpoint_side)
-    .bind(address_family)
-    .bind(topology_identity_hash)
-    .execute(&mut **tx)
-    .await?;
-    let row = sqlx::query(
-        r#"
-        INSERT INTO network_observation_series (
-            plan_id, topology_identity_hash, plan_name, interface_name,
-            client_id, peer_client_id, endpoint_side, address_family, target
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        ON CONFLICT (
-            plan_id, topology_identity_hash, client_id, peer_client_id,
-            endpoint_side, address_family, interface_name, target
-        ) DO UPDATE SET
-            plan_name = EXCLUDED.plan_name,
-            active = TRUE,
-            last_seen_at = now()
-        RETURNING id
-        "#,
+),
+canonical AS MATERIALIZED (
+    SELECT DISTINCT ON (id) incoming.*
+    FROM incoming
+    ORDER BY id, accepted_seq, payload_ordinal, input_ordinal
+),
+novel AS MATERIALIZED (
+    SELECT canonical.*
+    FROM canonical
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM network_observations existing
+        WHERE existing.id = canonical.id
     )
-    .bind(plan_id)
-    .bind(topology_identity_hash)
-    .bind(required_observation_field(
-        &observation.plan_name,
-        "plan name",
-    )?)
-    .bind(required_observation_field(
-        &observation.interface_name,
-        "interface",
-    )?)
-    .bind(&observation.client_id)
-    .bind(required_observation_field(
-        &observation.peer_client_id,
-        "peer client",
-    )?)
-    .bind(endpoint_side)
-    .bind(address_family)
-    .bind(required_observation_field(&observation.target, "target")?)
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok(row.try_get("id")?)
-}
-
-pub(crate) async fn reconcile_postgres_automatic_observation_series_for_client(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-) -> Result<u64> {
-    let result = sqlx::query(
-        r#"
-        UPDATE network_observation_series series
-        SET active = FALSE
-        WHERE series.client_id = $1
-          AND series.active = TRUE
-          AND NOT EXISTS (
-              SELECT 1
-              FROM telemetry_tunnels telemetry
-              JOIN tunnel_plans plan
-                ON plan.id = series.plan_id
-               AND plan.enabled = TRUE
-               AND plan.deleted_at IS NULL
-              WHERE telemetry.client_id = series.client_id
-                AND telemetry.telemetry_plan_id = series.plan_id::text
-                AND telemetry.interface = series.interface_name
-                AND telemetry.telemetry_endpoint_side = series.endpoint_side
-                AND telemetry.telemetry_peer_client_id = series.peer_client_id
-                AND telemetry.latency_monitoring_enabled IS TRUE
-                AND telemetry.latency_primary_family = series.address_family
-                AND telemetry.latency_target = series.target
-          )
-        "#,
+      AND NOT EXISTS (
+        SELECT 1
+        FROM network_observation_latest existing
+        WHERE existing.observation_id = canonical.id
     )
-    .bind(client_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(result.rows_affected())
-}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM network_observations existing
+        WHERE existing.source = 'automatic'
+          AND existing.automatic_sample_id = canonical.sample_id
+          AND existing.automatic_payload_ordinal = canonical.payload_ordinal
+    )
+),
+series_keys AS MATERIALIZED (
+    SELECT DISTINCT ON (
+        plan_id, topology_identity_hash, client_id, peer_client_id,
+        endpoint_side, address_family, interface_name, target
+    )
+        plan_id, topology_identity_hash, plan_name, interface_name,
+        client_id, peer_client_id, endpoint_side, address_family, target
+    FROM novel
+    ORDER BY
+        plan_id, topology_identity_hash, client_id, peer_client_id,
+        endpoint_side, address_family, interface_name, target,
+        accepted_seq DESC, payload_ordinal DESC, input_ordinal DESC
+),
+deactivated AS (
+    UPDATE network_observation_series AS series
+    SET active = FALSE
+    FROM series_keys AS current
+    WHERE series.plan_id = current.plan_id
+      AND series.client_id = current.client_id
+      AND series.endpoint_side = current.endpoint_side
+      AND series.address_family = current.address_family
+      AND series.topology_identity_hash <> current.topology_identity_hash
+      AND series.active IS TRUE
+    RETURNING series.id
+),
+deactivation_barrier AS MATERIALIZED (
+    SELECT count(*)::bigint AS changed FROM deactivated
+),
+upserted_series AS (
+    INSERT INTO network_observation_series (
+        plan_id, topology_identity_hash, plan_name, interface_name,
+        client_id, peer_client_id, endpoint_side, address_family, target
+    )
+    SELECT
+        current.plan_id, current.topology_identity_hash, current.plan_name,
+        current.interface_name, current.client_id, current.peer_client_id,
+        current.endpoint_side, current.address_family, current.target
+    FROM series_keys AS current
+    CROSS JOIN deactivation_barrier
+    ON CONFLICT (
+        plan_id, topology_identity_hash, client_id, peer_client_id,
+        endpoint_side, address_family, interface_name, target
+    ) DO UPDATE SET
+        plan_name = EXCLUDED.plan_name,
+        active = TRUE,
+        last_seen_at = now()
+    RETURNING
+        id, plan_id, topology_identity_hash, client_id, peer_client_id,
+        endpoint_side, address_family, interface_name, target
+),
+resolved AS MATERIALIZED (
+    SELECT novel.*, series.id AS series_id
+    FROM novel
+    JOIN upserted_series AS series
+      ON series.plan_id = novel.plan_id
+     AND series.topology_identity_hash = novel.topology_identity_hash
+     AND series.client_id = novel.client_id
+     AND series.peer_client_id = novel.peer_client_id
+     AND series.endpoint_side = novel.endpoint_side
+     AND series.address_family = novel.address_family
+     AND series.interface_name = novel.interface_name
+     AND series.target = novel.target
+),
+inserted AS (
+    INSERT INTO network_observations (
+        id, source, automatic_series_id, automatic_sample_id,
+        automatic_payload_ordinal, plan_name, metadata,
+        observed_at, received_at
+    )
+    SELECT
+        id, 'automatic', series_id, sample_id, payload_ordinal,
+        plan_name, '{}'::jsonb, observed_at, received_at
+    FROM resolved
+    ON CONFLICT DO NOTHING
+    RETURNING id, automatic_series_id AS series_id
+),
+latest_candidates AS MATERIALIZED (
+    SELECT DISTINCT ON (inserted.series_id)
+        inserted.series_id, resolved.id, resolved.stale_after_secs,
+        resolved.healthy, resolved.transmitted, resolved.received,
+        latency_min_ms, latency_avg_ms, latency_max_ms, latency_mdev_ms,
+        packet_loss_ratio, reason, observed_at, received_at
+    FROM inserted
+    JOIN resolved ON resolved.id = inserted.id
+    ORDER BY inserted.series_id, observed_at DESC, resolved.id DESC
+),
+merged_latest AS (
+    INSERT INTO network_observation_latest (
+        series_id, observation_id, stale_after_secs, healthy,
+        transmitted, received, latency_min_ms, latency_avg_ms,
+        latency_max_ms, latency_mdev_ms, packet_loss_ratio, reason,
+        metadata, observed_at, received_at
+    )
+    SELECT
+        series_id, id, COALESCE(stale_after_secs, 180), healthy,
+        COALESCE(transmitted, 0), COALESCE(received, 0),
+        latency_min_ms, latency_avg_ms, latency_max_ms, latency_mdev_ms,
+        COALESCE(packet_loss_ratio, 1.0), reason,
+        jsonb_build_object('type', 'tunnel_reachability', 'source', 'automatic'),
+        observed_at, received_at
+    FROM latest_candidates
+    ON CONFLICT (series_id) DO UPDATE SET
+        observation_id = EXCLUDED.observation_id,
+        stale_after_secs = EXCLUDED.stale_after_secs,
+        healthy = EXCLUDED.healthy,
+        transmitted = EXCLUDED.transmitted,
+        received = EXCLUDED.received,
+        latency_min_ms = EXCLUDED.latency_min_ms,
+        latency_avg_ms = EXCLUDED.latency_avg_ms,
+        latency_max_ms = EXCLUDED.latency_max_ms,
+        latency_mdev_ms = EXCLUDED.latency_mdev_ms,
+        packet_loss_ratio = EXCLUDED.packet_loss_ratio,
+        reason = EXCLUDED.reason,
+        metadata = EXCLUDED.metadata,
+        observed_at = EXCLUDED.observed_at,
+        received_at = EXCLUDED.received_at,
+        updated_at = now()
+    WHERE (EXCLUDED.observed_at, EXCLUDED.observation_id)
+        > (network_observation_latest.observed_at,
+           network_observation_latest.observation_id)
+    RETURNING series_id
+)
+SELECT
+    (SELECT count(*) FROM deactivated) AS deactivated_series,
+    (SELECT count(*) FROM deactivated)
+        + (SELECT count(*) FROM upserted_series)
+        + (SELECT count(*) FROM inserted)
+        + (SELECT count(*) FROM merged_latest) AS mutation_count
+"#;
 
 pub(crate) async fn deactivate_postgres_automatic_observation_series_for_plan(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1454,36 +1849,46 @@ pub(crate) async fn deactivate_postgres_automatic_observation_series_for_plan(
     .bind(current_topology_identity_hash)
     .execute(&mut **tx)
     .await?;
-    Ok(result.rows_affected())
+    let changed = result.rows_affected();
+    Ok(changed)
 }
 
-fn required_observation_field<'a>(value: &'a Option<String>, name: &str) -> Result<&'a str> {
-    value
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("automatic reachability {name} is missing"))
-}
-
-async fn upsert_latest_automatic_observation(
+/// Manual job evidence remains a value-bearing exact row. Automatic telemetry
+/// uses the sparse locator branch above and never reaches this writer.
+async fn insert_network_observation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    series_id: i64,
     observation: &NetworkObservationView,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO network_observation_latest (
-            series_id, observation_id, stale_after_secs, healthy,
-            transmitted, received, latency_min_ms, latency_avg_ms,
-            latency_max_ms, latency_mdev_ms, packet_loss_ratio, reason,
+        INSERT INTO network_observations (
+            id, job_id, client_id, seq, kind, source, role, plan_id,
+            topology_identity_hash, plan_name, interface_name, peer_client_id,
+            target, endpoint_side, address_family, stale_after_secs, healthy,
+            transmitted, received, latency_min_ms, latency_avg_ms, latency_max_ms,
+            latency_mdev_ms, packet_loss_ratio, reason, throughput_mbps, bytes,
             metadata, observed_at, received_at
-        ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-            to_timestamp($14),to_timestamp($15)
+        ) SELECT
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,to_timestamp($29),to_timestamp($30)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM network_observation_latest latest
+            WHERE latest.observation_id = $1
         )
-        ON CONFLICT (series_id) DO UPDATE SET
-            observation_id = EXCLUDED.observation_id,
+        ON CONFLICT (job_id, client_id, seq)
+            WHERE job_id IS NOT NULL AND seq IS NOT NULL
+        DO UPDATE SET
+            kind = EXCLUDED.kind, source = EXCLUDED.source,
+            role = EXCLUDED.role, plan_id = EXCLUDED.plan_id,
+            topology_identity_hash = EXCLUDED.topology_identity_hash,
+            plan_name = EXCLUDED.plan_name,
+            interface_name = EXCLUDED.interface_name,
+            peer_client_id = EXCLUDED.peer_client_id,
+            target = EXCLUDED.target, endpoint_side = EXCLUDED.endpoint_side,
+            address_family = EXCLUDED.address_family,
             stale_after_secs = EXCLUDED.stale_after_secs,
-            healthy = EXCLUDED.healthy,
-            transmitted = EXCLUDED.transmitted,
+            healthy = EXCLUDED.healthy, transmitted = EXCLUDED.transmitted,
             received = EXCLUDED.received,
             latency_min_ms = EXCLUDED.latency_min_ms,
             latency_avg_ms = EXCLUDED.latency_avg_ms,
@@ -1491,27 +1896,39 @@ async fn upsert_latest_automatic_observation(
             latency_mdev_ms = EXCLUDED.latency_mdev_ms,
             packet_loss_ratio = EXCLUDED.packet_loss_ratio,
             reason = EXCLUDED.reason,
-            metadata = EXCLUDED.metadata,
+            throughput_mbps = EXCLUDED.throughput_mbps,
+            bytes = EXCLUDED.bytes, metadata = EXCLUDED.metadata,
             observed_at = EXCLUDED.observed_at,
-            received_at = EXCLUDED.received_at,
-            updated_at = now()
-        WHERE (EXCLUDED.observed_at, EXCLUDED.observation_id)
-            > (network_observation_latest.observed_at,
-               network_observation_latest.observation_id)
+            received_at = EXCLUDED.received_at
         "#,
     )
-    .bind(series_id)
     .bind(observation.id)
-    .bind(observation.stale_after_secs.unwrap_or(180))
-    .bind(observation.healthy.unwrap_or(false))
-    .bind(observation.transmitted.unwrap_or(0))
-    .bind(observation.received.unwrap_or(0))
+    .bind(observation.job_id)
+    .bind(&observation.client_id)
+    .bind(observation.seq)
+    .bind(&observation.kind)
+    .bind(&observation.source)
+    .bind(&observation.role)
+    .bind(observation.plan_id)
+    .bind(&observation.topology_identity_hash)
+    .bind(&observation.plan_name)
+    .bind(&observation.interface_name)
+    .bind(&observation.peer_client_id)
+    .bind(&observation.target)
+    .bind(&observation.endpoint_side)
+    .bind(&observation.address_family)
+    .bind(observation.stale_after_secs)
+    .bind(observation.healthy)
+    .bind(observation.transmitted)
+    .bind(observation.received)
     .bind(observation.latency_min_ms)
     .bind(observation.latency_avg_ms)
     .bind(observation.latency_max_ms)
     .bind(observation.latency_mdev_ms)
-    .bind(observation.packet_loss_ratio.unwrap_or(1.0))
+    .bind(observation.packet_loss_ratio)
     .bind(&observation.reason)
+    .bind(observation.throughput_mbps)
+    .bind(observation.bytes)
     .bind(SqlJson(&observation.metadata))
     .bind(
         observation_timestamp_unix(&observation.observed_at)
@@ -1524,75 +1941,6 @@ async fn upsert_latest_automatic_observation(
     .execute(&mut **tx)
     .await?;
     Ok(())
-}
-
-async fn insert_network_observation(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    observation: &NetworkObservationView,
-    manual_upsert: bool,
-    automatic_series_id: Option<i64>,
-) -> Result<bool> {
-    let conflict = if manual_upsert {
-        "ON CONFLICT (job_id, client_id, seq) WHERE job_id IS NOT NULL AND seq IS NOT NULL DO UPDATE SET kind = EXCLUDED.kind, source = EXCLUDED.source, role = EXCLUDED.role, plan_id = EXCLUDED.plan_id, topology_identity_hash = EXCLUDED.topology_identity_hash, plan_name = EXCLUDED.plan_name, interface_name = EXCLUDED.interface_name, peer_client_id = EXCLUDED.peer_client_id, target = EXCLUDED.target, endpoint_side = EXCLUDED.endpoint_side, address_family = EXCLUDED.address_family, stale_after_secs = EXCLUDED.stale_after_secs, healthy = EXCLUDED.healthy, transmitted = EXCLUDED.transmitted, received = EXCLUDED.received, latency_min_ms = EXCLUDED.latency_min_ms, latency_avg_ms = EXCLUDED.latency_avg_ms, latency_max_ms = EXCLUDED.latency_max_ms, latency_mdev_ms = EXCLUDED.latency_mdev_ms, packet_loss_ratio = EXCLUDED.packet_loss_ratio, reason = EXCLUDED.reason, throughput_mbps = EXCLUDED.throughput_mbps, bytes = EXCLUDED.bytes, metadata = EXCLUDED.metadata, observed_at = EXCLUDED.observed_at, received_at = EXCLUDED.received_at"
-    } else {
-        "ON CONFLICT (id) DO NOTHING"
-    };
-    let query = format!(
-        r#"
-        INSERT INTO network_observations (
-            id, job_id, client_id, seq, kind, source, role, plan_id,
-            topology_identity_hash, plan_name, interface_name, peer_client_id,
-            target, endpoint_side, address_family, stale_after_secs, healthy,
-            transmitted, received, latency_min_ms, latency_avg_ms, latency_max_ms,
-            latency_mdev_ms, packet_loss_ratio, reason, throughput_mbps, bytes,
-            automatic_series_id, metadata, observed_at, received_at
-        ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,to_timestamp($30),to_timestamp($31)
-        ) {conflict}
-        "#
-    );
-    let result = sqlx::query(&query)
-        .bind(observation.id)
-        .bind(observation.job_id)
-        .bind(&observation.client_id)
-        .bind(observation.seq)
-        .bind(&observation.kind)
-        .bind(&observation.source)
-        .bind(&observation.role)
-        .bind(observation.plan_id)
-        .bind(&observation.topology_identity_hash)
-        .bind(&observation.plan_name)
-        .bind(&observation.interface_name)
-        .bind(&observation.peer_client_id)
-        .bind(&observation.target)
-        .bind(&observation.endpoint_side)
-        .bind(&observation.address_family)
-        .bind(observation.stale_after_secs)
-        .bind(observation.healthy)
-        .bind(observation.transmitted)
-        .bind(observation.received)
-        .bind(observation.latency_min_ms)
-        .bind(observation.latency_avg_ms)
-        .bind(observation.latency_max_ms)
-        .bind(observation.latency_mdev_ms)
-        .bind(observation.packet_loss_ratio)
-        .bind(&observation.reason)
-        .bind(observation.throughput_mbps)
-        .bind(observation.bytes)
-        .bind(automatic_series_id)
-        .bind(SqlJson(&observation.metadata))
-        .bind(
-            observation_timestamp_unix(&observation.observed_at)
-                .unwrap_or_else(|| Utc::now().timestamp()),
-        )
-        .bind(
-            observation_timestamp_unix(&observation.received_at)
-                .unwrap_or_else(|| Utc::now().timestamp()),
-        )
-        .execute(&mut **tx)
-        .await?;
-    Ok(result.rows_affected() > 0)
 }
 
 fn network_observation_from_row(row: PgRow) -> Result<NetworkObservationView, sqlx::Error> {
@@ -1631,6 +1979,7 @@ fn network_observation_from_row(row: PgRow) -> Result<NetworkObservationView, sq
     })
 }
 
+#[cfg(test)]
 fn limit_observations_fairly(
     rows: Vec<NetworkObservationView>,
     limit_per_series: usize,
@@ -1664,34 +2013,6 @@ fn limit_observations_fairly(
         .into_iter()
         .take(total_limit)
         .map(|(_, observation)| observation)
-        .collect()
-}
-
-fn limit_topology_rows(
-    rows: Vec<NetworkObservationView>,
-    limit: usize,
-) -> Vec<NetworkObservationView> {
-    let mut counts = HashMap::<(Uuid, String, String), usize>::new();
-    rows.into_iter()
-        .filter(|observation| {
-            let Some(plan_id) = observation.plan_id else {
-                return false;
-            };
-            let endpoint = observation
-                .endpoint_side
-                .clone()
-                .unwrap_or_else(|| observation.client_id.clone());
-            let key = (plan_id, observation.kind.clone(), endpoint);
-            let count = counts.entry(key).or_default();
-            let allowed = if observation.kind == "network_status" {
-                1
-            } else {
-                limit
-            };
-            let keep = *count < allowed;
-            *count = count.saturating_add(1);
-            keep
-        })
         .collect()
 }
 
@@ -1974,12 +2295,6 @@ fn parse_network_observation(
     })
 }
 
-fn source_label(source: TunnelReachabilitySource) -> &'static str {
-    match source {
-        TunnelReachabilitySource::Automatic => "automatic",
-        TunnelReachabilitySource::Manual => "manual",
-    }
-}
 fn endpoint_side_label(side: vpsman_common::TunnelEndpointSide) -> &'static str {
     match side {
         vpsman_common::TunnelEndpointSide::Left => "left",
@@ -2018,6 +2333,7 @@ fn observation_timestamp_unix(value: &str) -> Option<i64> {
             .map(|value| value.timestamp())
     })
 }
+#[cfg(test)]
 fn compare_network_observations_desc(
     left: &NetworkObservationView,
     right: &NetworkObservationView,

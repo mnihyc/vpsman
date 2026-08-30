@@ -4,11 +4,8 @@ use sqlx::{postgres::PgRow, Row};
 use uuid::Uuid;
 
 use crate::{
-    model::{
-        AuditLogView, AuthContext, JobRolloutTargetView, JobRolloutView, MemoryJobRolloutRecord,
-    },
-    repository::{MemoryState, Repository},
-    unix_now,
+    model::{AuthContext, JobRolloutTargetView, JobRolloutView},
+    repository::Repository,
 };
 
 const ROLLOUT_STATUS_RUNNING: &str = "running";
@@ -20,16 +17,6 @@ const ROLLOUT_PAUSE_CURRENT_BATCH_ASSIGNMENT_MISSING: &str = "current_batch_assi
 impl Repository {
     pub(crate) async fn list_job_rollouts(&self, limit: i64) -> Result<Vec<JobRolloutView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory.job_rollouts.read().await.clone();
-                records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-                records.truncate(limit.clamp(1, 200) as usize);
-                let mut views = Vec::with_capacity(records.len());
-                for record in records {
-                    views.push(memory_rollout_view(memory, &record).await?);
-                }
-                Ok(views)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(&format!(
                     "{} ORDER BY rollout.updated_at DESC, rollout.job_id LIMIT $1",
@@ -49,19 +36,6 @@ impl Repository {
 
     pub(crate) async fn get_job_rollout(&self, job_id: Uuid) -> Result<Option<JobRolloutView>> {
         match self {
-            Self::Memory(memory) => {
-                let record = memory
-                    .job_rollouts
-                    .read()
-                    .await
-                    .iter()
-                    .find(|record| record.job_id == job_id)
-                    .cloned();
-                match record {
-                    Some(record) => Ok(Some(memory_rollout_view(memory, &record).await?)),
-                    None => Ok(None),
-                }
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(&format!(
                     "{} WHERE rollout.job_id = $1",
@@ -86,34 +60,6 @@ impl Repository {
     ) -> Result<JobRolloutView> {
         let reason = normalized_reason(reason, "operator_requested");
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let mut rollouts = memory.job_rollouts.write().await;
-                let rollout = rollouts
-                    .iter_mut()
-                    .find(|rollout| rollout.job_id == job_id)
-                    .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))?;
-                if is_rollout_terminal(&rollout.status) {
-                    bail!("job_rollout_terminal");
-                }
-                if rollout.status == ROLLOUT_STATUS_RUNNING {
-                    rollout.status = ROLLOUT_STATUS_PAUSED.to_string();
-                    rollout.pause_reason = Some(reason.clone());
-                    rollout.updated_at = now.clone();
-                }
-                let record = rollout.clone();
-                drop(rollouts);
-                push_memory_rollout_audit(
-                    memory,
-                    operator,
-                    job_id,
-                    "job.rollout_paused",
-                    &reason,
-                    &now,
-                )
-                .await;
-                memory_rollout_view(memory, &record).await
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let status: Option<String> = sqlx::query_scalar(
@@ -164,38 +110,6 @@ impl Repository {
     ) -> Result<JobRolloutView> {
         let reason = normalized_reason(reason, "operator_confirmed");
         match self {
-            Self::Memory(memory) => {
-                let now_unix = unix_now();
-                let now = now_unix.to_string();
-                let failure_count = memory_rollout_failure_count(memory, job_id).await?;
-                let mut rollouts = memory.job_rollouts.write().await;
-                let rollout = rollouts
-                    .iter_mut()
-                    .find(|rollout| rollout.job_id == job_id)
-                    .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))?;
-                if is_rollout_terminal(&rollout.status) {
-                    bail!("job_rollout_terminal");
-                }
-                if rollout.status == ROLLOUT_STATUS_PAUSED {
-                    rollout.status = ROLLOUT_STATUS_RUNNING.to_string();
-                    rollout.failure_baseline = failure_count;
-                    rollout.pause_reason = None;
-                    rollout.next_batch_unix = now_unix;
-                    rollout.updated_at = now.clone();
-                }
-                let record = rollout.clone();
-                drop(rollouts);
-                push_memory_rollout_audit(
-                    memory,
-                    operator,
-                    job_id,
-                    "job.rollout_resumed",
-                    &reason,
-                    &now,
-                )
-                .await;
-                memory_rollout_view(memory, &record).await
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -264,7 +178,6 @@ impl Repository {
 
     pub(crate) async fn reconcile_job_rollouts(&self, limit: i64) -> Result<usize> {
         match self {
-            Self::Memory(memory) => reconcile_memory_rollouts(memory, limit).await,
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let rows = sqlx::query(
@@ -437,161 +350,6 @@ impl Repository {
     }
 }
 
-async fn reconcile_memory_rollouts(memory: &MemoryState, limit: i64) -> Result<usize> {
-    let targets = memory.job_targets.read().await.clone();
-    let assignments = memory.job_rollout_targets.read().await.clone();
-    let now_unix = unix_now();
-    let now = now_unix.to_string();
-    let mut changed = 0;
-    let mut rollouts = memory.job_rollouts.write().await;
-    for rollout in rollouts
-        .iter_mut()
-        .filter(|rollout| rollout.status == ROLLOUT_STATUS_RUNNING)
-        .take(limit.clamp(1, 500) as usize)
-    {
-        let current_targets = targets
-            .iter()
-            .filter(|target| {
-                target.job_id == rollout.job_id
-                    && assignments.get(&(target.job_id, target.client_id.clone()))
-                        == Some(&rollout.current_batch)
-            })
-            .collect::<Vec<_>>();
-        if current_targets.is_empty() {
-            rollout.status = ROLLOUT_STATUS_PAUSED.to_string();
-            rollout.pause_reason = Some(ROLLOUT_PAUSE_CURRENT_BATCH_ASSIGNMENT_MISSING.to_string());
-            rollout.next_batch_unix = now_unix;
-            rollout.updated_at = now.clone();
-            changed += 1;
-            continue;
-        }
-        if current_targets
-            .iter()
-            .any(|target| target.completed_at.is_none())
-        {
-            continue;
-        }
-        let failure_count = targets
-            .iter()
-            .filter(|target| {
-                target.job_id == rollout.job_id
-                    && target.completed_at.is_some()
-                    && target.status != "completed"
-                    && assignments
-                        .get(&(target.job_id, target.client_id.clone()))
-                        .is_some_and(|batch| *batch <= rollout.current_batch)
-            })
-            .count();
-        let failure_count = u16::try_from(failure_count)?;
-        let next_batch = rollout.current_batch + 1;
-        if next_batch >= rollout.total_batches {
-            rollout.status = ROLLOUT_STATUS_COMPLETED.to_string();
-            rollout.pause_reason = None;
-            rollout.completed_at = Some(now.clone());
-        } else if failure_count.saturating_sub(rollout.failure_baseline)
-            > rollout.policy.max_failures
-        {
-            rollout.status = ROLLOUT_STATUS_PAUSED.to_string();
-            rollout.current_batch = next_batch;
-            rollout.pause_reason = Some("failure_threshold".to_string());
-            rollout.next_batch_unix = now_unix;
-        } else if rollout.current_batch == 0 && rollout.policy.pause_after_canary {
-            rollout.status = ROLLOUT_STATUS_PAUSED.to_string();
-            rollout.current_batch = next_batch;
-            rollout.pause_reason = Some("canary_review".to_string());
-            rollout.next_batch_unix = now_unix;
-        } else {
-            rollout.current_batch = next_batch;
-            rollout.pause_reason = None;
-            rollout.next_batch_unix = now_unix + u64::from(rollout.policy.batch_delay_secs);
-        }
-        rollout.updated_at = now.clone();
-        changed += 1;
-    }
-    Ok(changed)
-}
-
-async fn memory_rollout_view(
-    memory: &MemoryState,
-    record: &MemoryJobRolloutRecord,
-) -> Result<JobRolloutView> {
-    let assignments = memory.job_rollout_targets.read().await;
-    let targets = memory.job_targets.read().await;
-    let mut target_views = targets
-        .iter()
-        .filter(|target| target.job_id == record.job_id)
-        .filter_map(|target| {
-            assignments
-                .get(&(record.job_id, target.client_id.clone()))
-                .copied()
-                .map(|batch_index| JobRolloutTargetView {
-                    client_id: target.client_id.clone(),
-                    batch_index,
-                    status: target.status.clone(),
-                    message: target.message.clone(),
-                })
-        })
-        .collect::<Vec<_>>();
-    target_views.sort_by(|left, right| {
-        left.batch_index
-            .cmp(&right.batch_index)
-            .then_with(|| left.client_id.cmp(&right.client_id))
-    });
-    ensure!(
-        target_views.len()
-            == assignments
-                .keys()
-                .filter(|(job_id, _)| *job_id == record.job_id)
-                .count(),
-        "job_rollout_target_evidence_incomplete"
-    );
-    Ok(JobRolloutView {
-        job_id: record.job_id,
-        status: record.status.clone(),
-        canary_client_ids: record.policy.canary_client_ids.clone(),
-        batch_size: record.policy.batch_size,
-        max_failures: record.policy.max_failures,
-        pause_after_canary: record.policy.pause_after_canary,
-        batch_delay_secs: record.policy.batch_delay_secs,
-        current_batch: record.current_batch,
-        total_batches: record.total_batches,
-        failure_baseline: record.failure_baseline,
-        pause_reason: record.pause_reason.clone(),
-        next_batch_at: record.next_batch_unix.to_string(),
-        created_at: record.created_at.clone(),
-        updated_at: record.updated_at.clone(),
-        completed_at: record.completed_at.clone(),
-        targets: target_views,
-    })
-}
-
-async fn memory_rollout_failure_count(memory: &MemoryState, job_id: Uuid) -> Result<u16> {
-    let current_batch = memory
-        .job_rollouts
-        .read()
-        .await
-        .iter()
-        .find(|rollout| rollout.job_id == job_id)
-        .map(|rollout| rollout.current_batch)
-        .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))?;
-    let assignments = memory.job_rollout_targets.read().await;
-    let targets = memory.job_targets.read().await;
-    u16::try_from(
-        targets
-            .iter()
-            .filter(|target| {
-                target.job_id == job_id
-                    && target.completed_at.is_some()
-                    && target.status != "completed"
-                    && assignments
-                        .get(&(job_id, target.client_id.clone()))
-                        .is_some_and(|batch| *batch <= current_batch)
-            })
-            .count(),
-    )
-    .map_err(Into::into)
-}
-
 fn postgres_rollout_select() -> &'static str {
     r#"
     SELECT
@@ -709,35 +467,6 @@ fn postgres_rollout_view_from_rows(row: PgRow, target_rows: Vec<PgRow>) -> Resul
     })
 }
 
-async fn push_memory_rollout_audit(
-    memory: &MemoryState,
-    operator: &AuthContext,
-    job_id: Uuid,
-    action: &str,
-    reason: &str,
-    now: &str,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: format!("job:{job_id}"),
-        command_hash: None,
-        metadata: json!({
-            "job_id": job_id,
-            "reason": reason,
-            "result": "succeeded",
-            "operator_id": operator.operator.id,
-            "operator_username": operator.operator.username,
-            "operator_role": operator.operator.role,
-            "operator_session_id": operator.audit_session_id(),
-            "origin_kind": "operator_request",
-            "component": "job-rollout-controller",
-        }),
-        created_at: now.to_string(),
-    });
-}
-
 async fn insert_postgres_rollout_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operator: &AuthContext,
@@ -784,7 +513,3 @@ fn normalized_reason(reason: Option<&str>, fallback: &str) -> String {
 fn is_rollout_terminal(status: &str) -> bool {
     matches!(status, ROLLOUT_STATUS_COMPLETED | ROLLOUT_STATUS_ABORTED)
 }
-
-#[cfg(test)]
-#[path = "tests_repository_job_rollouts.rs"]
-mod tests;

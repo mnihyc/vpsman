@@ -1,16 +1,17 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::OnceLock,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tokio::{sync::Notify, time};
 use vpsman_common::{
     create_private_file_new, ensure_private_dir, ensure_private_dir_tree, open_private_file_append,
     open_private_file_read, open_private_file_read_write, CommandOutput, JobCommand, OutputStream,
@@ -37,14 +38,14 @@ const SUPERVISOR_LOG_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
 const SUPERVISOR_LOG_ROTATE_FILES: usize = 3;
 const MONITOR_IDLE_SLEEP_SECS: u64 = 1;
 
-static PROCESS_MONITORS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+static PROCESS_SUPERVISOR_READY: OnceLock<Notify> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ProcessIdentity {
     start_time_ticks: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ProcessRecord {
     name: String,
     argv: Vec<String>,
@@ -78,6 +79,82 @@ struct ProcessRecord {
     limit_evidence: ProcessLimitEvidence,
 }
 
+struct ProcessSupervisorPass {
+    next_check: Option<Duration>,
+    startup_report: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy)]
+enum SupervisorPassKind {
+    Startup,
+    Runtime,
+}
+
+pub(crate) struct ProcessSupervisorConsumer {
+    root: PathBuf,
+    next_check: Option<Duration>,
+}
+
+impl ProcessSupervisorConsumer {
+    pub(crate) async fn prepare() -> Result<(serde_json::Value, Self)> {
+        let root = supervisor_root();
+        let pass_root = root.clone();
+        let pass = tokio::task::spawn_blocking(move || {
+            process_supervisor_pass(&pass_root, SupervisorPassKind::Startup)
+        })
+        .await
+        .context("process supervisor startup consumer task failed")??;
+        let report = pass
+            .startup_report
+            .context("process supervisor startup report missing")?;
+        Ok((
+            report,
+            Self {
+                root,
+                next_check: pass.next_check,
+            },
+        ))
+    }
+
+    pub(crate) fn dormant() -> Self {
+        Self {
+            root: supervisor_root(),
+            next_check: None,
+        }
+    }
+
+    pub(crate) async fn run(mut self) -> Result<()> {
+        loop {
+            let ready = process_supervisor_ready().notified();
+            match self.next_check {
+                Some(delay) => {
+                    tokio::select! {
+                        _ = ready => {}
+                        _ = time::sleep(delay) => {}
+                    }
+                }
+                None => ready.await,
+            }
+
+            let root = self.root.clone();
+            let pass = tokio::task::spawn_blocking(move || {
+                process_supervisor_pass(&root, SupervisorPassKind::Runtime)
+            })
+            .await
+            .context("process supervisor consumer task failed")??;
+            self.next_check = pass.next_check;
+        }
+    }
+}
+
+fn process_supervisor_ready() -> &'static Notify {
+    PROCESS_SUPERVISOR_READY.get_or_init(Notify::new)
+}
+
+fn signal_process_supervisor_consumer() {
+    process_supervisor_ready().notify_one();
+}
+
 pub(crate) async fn execute_process_supervisor_command(
     job_id: uuid::Uuid,
     command: &JobCommand,
@@ -89,14 +166,25 @@ pub(crate) async fn execute_process_supervisor_command(
     execute_at_root(job_id, command, &root, deadline).await
 }
 
-pub(crate) async fn reconcile_supervised_processes_on_start() -> Result<serde_json::Value> {
-    let root = supervisor_root();
-    tokio::task::spawn_blocking(move || reconcile_supervisor_records_at_root(&root)).await?
+#[cfg(test)]
+pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_json::Value> {
+    process_supervisor_pass(root, SupervisorPassKind::Startup)?
+        .startup_report
+        .context("process supervisor startup report missing")
 }
 
-pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_json::Value> {
+#[cfg(test)]
+pub(crate) fn reconcile_supervisor_runtime_records_at_root(root: &Path) -> Result<()> {
+    process_supervisor_pass(root, SupervisorPassKind::Runtime).map(|_| ())
+}
+
+fn process_supervisor_pass(
+    root: &Path,
+    pass_kind: SupervisorPassKind,
+) -> Result<ProcessSupervisorPass> {
     ensure_supervisor_dirs(root)?;
-    rotate_supervisor_logs(root)?;
+    let loaded_records = load_all_records(root)?;
+    rotate_supervisor_record_logs(&loaded_records)?;
     let mut records = Vec::new();
     let mut running = 0_u64;
     let mut restarted = 0_u64;
@@ -104,10 +192,21 @@ pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_
     let mut stopped = 0_u64;
     let mut failed = 0_u64;
     let mut no_retries_remaining = 0_u64;
-    for record in load_all_records(root)? {
+    let mut next_check = None;
+    for record in loaded_records {
         let before_pid = record.pid;
         let before_restart_attempts = record.restart_attempts;
-        let record = reconcile_and_save_record(root, record)?;
+        let record = if matches!(pass_kind, SupervisorPassKind::Startup)
+            || monitor_should_continue(&record)
+        {
+            reconcile_and_save_record(root, record)?
+        } else {
+            record
+        };
+        next_check = minimum_delay(next_check, supervisor_record_delay(&record));
+        if matches!(pass_kind, SupervisorPassKind::Runtime) {
+            continue;
+        }
         match record.status.as_str() {
             "running" => running += 1,
             "restart_pending" => restart_pending += 1,
@@ -132,19 +231,25 @@ pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_
             "restarted": was_restarted,
         }));
     }
-    Ok(serde_json::json!({
-        "type": "process_supervisor_startup_reconcile",
-        "status": "completed",
-        "root": root.display().to_string(),
-        "total": records.len(),
-        "running": running,
-        "restarted": restarted,
-        "restart_pending": restart_pending,
-        "stopped": stopped,
-        "failed": failed,
-        "no_retries_remaining": no_retries_remaining,
-        "processes": records,
-    }))
+    let startup_report = matches!(pass_kind, SupervisorPassKind::Startup).then(|| {
+        serde_json::json!({
+            "type": "process_supervisor_startup_reconcile",
+            "status": "completed",
+            "root": root.display().to_string(),
+            "total": records.len(),
+            "running": running,
+            "restarted": restarted,
+            "restart_pending": restart_pending,
+            "stopped": stopped,
+            "failed": failed,
+            "no_retries_remaining": no_retries_remaining,
+            "processes": records,
+        })
+    });
+    Ok(ProcessSupervisorPass {
+        next_check,
+        startup_report,
+    })
 }
 
 async fn execute_at_root(
@@ -182,7 +287,6 @@ pub(crate) fn execute_blocking_with_deadline(
     deadline: Instant,
 ) -> Result<Vec<CommandOutput>> {
     ensure_supervisor_dirs(root)?;
-    rotate_supervisor_logs(root)?;
     match command {
         JobCommand::ProcessStart {
             name,
@@ -208,7 +312,7 @@ pub(crate) fn execute_blocking_with_deadline(
             ensure_supervisor_deadline(deadline)?;
             let record = start_process(root, name, argv, cwd, env, policy, limits)?;
             save_newly_started_record(root, &record, deadline)?;
-            ensure_restart_monitor(root, name);
+            signal_process_supervisor_consumer();
             Ok(status_outputs(job_id, "process_start", &record))
         }
         JobCommand::ProcessStop { name } => {
@@ -220,6 +324,7 @@ pub(crate) fn execute_blocking_with_deadline(
             apply_stop_observation(&mut record);
             ensure_supervisor_deadline(deadline)?;
             save_record(root, &record)?;
+            signal_process_supervisor_consumer();
             Ok(status_outputs_with_cleanup(
                 job_id,
                 "process_stop",
@@ -252,7 +357,7 @@ pub(crate) fn execute_blocking_with_deadline(
             )?;
             ensure_supervisor_deadline(deadline)?;
             save_newly_started_record(root, &record, deadline)?;
-            ensure_restart_monitor(root, name);
+            signal_process_supervisor_consumer();
             Ok(status_outputs_with_cleanup(
                 job_id,
                 "process_restart",
@@ -581,9 +686,20 @@ fn exit_code_from_wait_status(status: i32) -> i32 {
 }
 
 fn reconcile_and_save_record(root: &Path, record: ProcessRecord) -> Result<ProcessRecord> {
+    let previous = record.clone();
     let record = reconcile_record(root, record)?;
-    save_record(root, &record)?;
-    ensure_restart_monitor(root, &record.name);
+    if record != previous {
+        if record.pid != previous.pid {
+            save_newly_started_record(
+                root,
+                &record,
+                Instant::now()
+                    + Duration::from_secs(record.policy.graceful_stop_secs.clamp(1, 300)),
+            )?;
+        } else {
+            save_record(root, &record)?;
+        }
+    }
     Ok(record)
 }
 
@@ -679,11 +795,6 @@ fn maybe_restart_record(root: &Path, mut record: ProcessRecord) -> Result<Proces
     restarted.last_exit_code = last_exit_code;
     restarted.last_exit_unix = last_exit_unix;
     restarted.last_restart_unix = Some(now);
-    save_newly_started_record(
-        root,
-        &restarted,
-        Instant::now() + Duration::from_secs(record.policy.graceful_stop_secs.clamp(1, 300)),
-    )?;
     Ok(restarted)
 }
 
@@ -695,61 +806,13 @@ fn restart_policy_matches_exit(record: &ProcessRecord) -> bool {
     }
 }
 
-fn ensure_restart_monitor(root: &Path, name: &str) {
-    let Ok(Some(record)) = load_record(root, name) else {
-        return;
-    };
-    if record.policy.restart == ProcessRestartPolicy::Never {
-        return;
+fn supervisor_record_delay(record: &ProcessRecord) -> Option<Duration> {
+    let logs_can_grow = matches!(record.status.as_str(), "running" | "restart_pending")
+        && process_identity_status(record) == RecordIdentityStatus::Verified
+        && process_is_running(record.pid);
+    if !monitor_should_continue(record) && !logs_can_grow {
+        return None;
     }
-    if !matches!(record.status.as_str(), "running" | "restart_pending") {
-        return;
-    }
-    let key = monitor_key(root, name);
-    {
-        let mut active = process_monitors().lock().unwrap();
-        if !active.insert(key.clone()) {
-            return;
-        }
-    }
-    let root = root.to_path_buf();
-    let name = name.to_string();
-    let spawn_result = std::thread::Builder::new()
-        .name(format!("vpsman-process-monitor-{name}"))
-        .spawn({
-            let key = key.clone();
-            move || {
-                run_restart_monitor(&root, &name);
-                process_monitors().lock().unwrap().remove(&key);
-            }
-        });
-    if spawn_result.is_err() {
-        process_monitors().lock().unwrap().remove(&key);
-    }
-}
-
-fn run_restart_monitor(root: &Path, name: &str) {
-    loop {
-        std::thread::sleep(monitor_sleep(root, name));
-        if rotate_supervisor_logs(root).is_err() {
-            break;
-        }
-        let Ok(Some(record)) = load_record(root, name) else {
-            break;
-        };
-        let Ok(record) = reconcile_record(root, record) else {
-            break;
-        };
-        if save_record(root, &record).is_err() || !monitor_should_continue(&record) {
-            break;
-        }
-    }
-}
-
-fn monitor_sleep(root: &Path, name: &str) -> Duration {
-    let Ok(Some(record)) = load_record(root, name) else {
-        return Duration::from_secs(MONITOR_IDLE_SLEEP_SECS);
-    };
     if record.status == "restart_pending" {
         let now = unix_now();
         let remaining = record
@@ -758,26 +821,26 @@ fn monitor_sleep(root: &Path, name: &str) -> Duration {
             .saturating_add(record.policy.restart_backoff_secs)
             .saturating_sub(now);
         if remaining == 0 {
-            Duration::from_millis(100)
+            Some(Duration::from_millis(100))
         } else {
-            Duration::from_secs(remaining.min(MONITOR_IDLE_SLEEP_SECS))
+            Some(Duration::from_secs(remaining.min(MONITOR_IDLE_SLEEP_SECS)))
         }
     } else {
-        Duration::from_secs(MONITOR_IDLE_SLEEP_SECS)
+        Some(Duration::from_secs(MONITOR_IDLE_SLEEP_SECS))
+    }
+}
+
+fn minimum_delay(current: Option<Duration>, candidate: Option<Duration>) -> Option<Duration> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => Some(current.min(candidate)),
+        (Some(current), None) => Some(current),
+        (None, candidate) => candidate,
     }
 }
 
 fn monitor_should_continue(record: &ProcessRecord) -> bool {
     record.policy.restart != ProcessRestartPolicy::Never
         && matches!(record.status.as_str(), "running" | "restart_pending")
-}
-
-fn process_monitors() -> &'static Mutex<BTreeSet<String>> {
-    PROCESS_MONITORS.get_or_init(|| Mutex::new(BTreeSet::new()))
-}
-
-fn monitor_key(root: &Path, name: &str) -> String {
-    format!("{}::{name}", root.to_string_lossy())
 }
 
 fn status_outputs(
@@ -1014,8 +1077,8 @@ fn save_newly_started_record(root: &Path, record: &ProcessRecord, deadline: Inst
     Ok(())
 }
 
-fn rotate_supervisor_logs(root: &Path) -> Result<()> {
-    for record in load_all_records(root)? {
+fn rotate_supervisor_record_logs(records: &[ProcessRecord]) -> Result<()> {
+    for record in records {
         rotate_log_file(Path::new(&record.stdout_log))?;
         rotate_log_file(Path::new(&record.stderr_log))?;
     }

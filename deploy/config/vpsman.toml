@@ -28,7 +28,6 @@ command_output_event_ttl_secs = 86400
 
 [worker]
 tick_secs = 30
-worker_lease_secs = 60
 agent_offline_timeout_secs = 300
 notification_delivery_limit = 25
 notification_retention_days = 90
@@ -37,7 +36,6 @@ notification_webhook_timeout_secs = 5
 webhook_rule_delivery_limit = 25
 webhook_rule_materialize_limit = 100
 webhook_rule_retention_days = 90
-webhook_rule_telemetry_event_retention_days = 7
 webhook_rule_retention_prune_limit = 1000
 webhook_rule_timeout_secs = 5
 backup_policy_prune_enabled = false
@@ -62,6 +60,10 @@ object_region = "us-east-1"
 object_create_bucket = false
 
 [capacity]
+# The API value sizes foreground request capacity. The API also owns one
+# telemetry projector, one dashboard publisher, one dashboard listener,
+# and one dashboard reconciler outside that pool. The worker value sizes its
+# ordinary work pool; telemetry retention owns two more connections.
 api_db_pool = 32
 worker_db_pool = 8
 dispatcher_batch = 128
@@ -70,9 +72,6 @@ gateway_telemetry_in_flight = 8
 
 [timeout]
 max_job_timeout_secs = 3600
-worker_schedule_job_max_timeout_secs = 3600
-agent_offline_secs = 300
-gateway_reconnect_grace_secs = 60
 internal_http_connect_secs = 10
 internal_http_write_secs = 10
 internal_http_read_secs = 15

@@ -10,10 +10,12 @@ use vpsman_common::payload_hash;
 use crate::{
     error::ApiError,
     model_history::{
-        HistoryDomain, HistoryExportQuery, HistoryExportView, HistoryRetentionPolicyView,
-        HistoryRetentionPruneDomainView, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
-        HistoryRetentionPruneResponse, UpsertHistoryRetentionPolicyRequest,
+        HistoryDomain, HistoryExportQuery, HistoryExportView, HistoryRetentionDomain,
+        HistoryRetentionPolicyView, HistoryRetentionPruneDomainView, HistoryRetentionPrunePlan,
+        HistoryRetentionPruneRequest, HistoryRetentionPruneResponse,
+        UpsertHistoryRetentionPolicyRequest,
     },
+    repository_artifact_deletions::ReviewedArtifactDeletionOutcome,
     repository_history::HistoryRetentionObjectCandidate,
     security::{
         operator_has_scope, SCOPE_AUDIT_READ, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ,
@@ -66,7 +68,7 @@ pub(crate) async fn upsert_history_retention_policy(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_HISTORY_WRITE)
         .await?;
-    let domain = parse_history_domain(&request.domain)?;
+    let domain = parse_history_retention_domain(&request.domain)?;
     ensure_history_retention_domain_authority(&operator.operator.scopes, &[domain])?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
@@ -192,7 +194,7 @@ async fn history_retention_prune_plan(
     let requested_domain = request
         .domain
         .as_deref()
-        .map(parse_history_domain)
+        .map(parse_history_retention_domain)
         .transpose()?;
     let policies = state
         .repo
@@ -201,7 +203,7 @@ async fn history_retention_prune_plan(
         .map_err(history_retention_policies_unavailable)?;
     let mut plan = Vec::new();
     for policy in policies {
-        let domain = parse_history_domain(&policy.domain)?;
+        let domain = parse_history_retention_domain(&policy.domain)?;
         if requested_domain.is_some_and(|requested| requested != domain) {
             continue;
         }
@@ -325,58 +327,35 @@ async fn execute_history_retention_prune_plan(
                     ))?;
             } else if !candidates.is_empty() {
                 object_delete_attempted = true;
-                if let Some(store) = state.backup_object_store.as_ref() {
-                    for candidate in &candidates {
-                        let Some(object_key) = candidate.object_key() else {
-                            pruned_rows += state
-                                .repo
-                                .prune_history_retention_object_candidate(candidate)
-                                .await
-                                .map_err(ApiError::internal_mapper(
-                                    "history_retention_prune_failed",
-                                    "History-retention cleanup could not be completed.",
-                                ))?;
-                            continue;
-                        };
-                        if !state
+                for candidate in &candidates {
+                    let Some(object_key) = candidate.object_key() else {
+                        pruned_rows += state
                             .repo
-                            .begin_history_retention_object_delete(candidate)
+                            .prune_history_retention_object_candidate(candidate)
                             .await
                             .map_err(ApiError::internal_mapper(
                                 "history_retention_prune_failed",
                                 "History-retention cleanup could not be completed.",
-                            ))?
-                        {
-                            continue;
+                            ))?;
+                        continue;
+                    };
+                    match state
+                        .reviewed_artifact_deletions
+                        .delete_history_retention_candidate(candidate.clone())
+                        .await
+                        .map_err(ApiError::internal_mapper(
+                            "history_retention_prune_failed",
+                            "History-retention cleanup could not be completed.",
+                        ))? {
+                        ReviewedArtifactDeletionOutcome::NotClaimed => {}
+                        ReviewedArtifactDeletionOutcome::Deleted(rows) => {
+                            object_keys.push(object_key.to_string());
+                            pruned_rows += rows;
                         }
-                        object_keys.push(object_key.to_string());
-                        match store.delete_confirmed(object_key).await {
-                            Ok(()) => {
-                                pruned_rows += state
-                                    .repo
-                                    .finalize_history_retention_object_delete(candidate)
-                                    .await
-                                    .map_err(ApiError::internal_mapper(
-                                        "history_retention_prune_failed",
-                                        "History-retention cleanup could not be completed.",
-                                    ))?;
-                            }
-                            Err(error) => {
-                                let error_text = error.to_string();
-                                state
-                                    .repo
-                                    .mark_history_retention_object_delete_failed(
-                                        candidate,
-                                        &error_text,
-                                    )
-                                    .await
-                                    .map_err(ApiError::internal_mapper(
-                                        "history_retention_prune_failed",
-                                        "History-retention cleanup could not be completed.",
-                                    ))?;
-                                object_delete_errors.push(format!("{object_key}: {error_text}"));
-                                break;
-                            }
+                        ReviewedArtifactDeletionOutcome::DeleteFailed(error) => {
+                            object_keys.push(object_key.to_string());
+                            object_delete_errors.push(format!("{object_key}: {error}"));
+                            break;
                         }
                     }
                 }
@@ -485,14 +464,6 @@ fn history_retention_candidate_hash_keys(
                 "seq": seq,
                 "object_key": object_key,
             }),
-            HistoryRetentionObjectCandidate::BackupArtifact {
-                artifact_id,
-                object_key,
-            } => json!({
-                "type": "backup_artifact",
-                "artifact_id": artifact_id,
-                "object_key": object_key,
-            }),
         })
         .collect()
 }
@@ -528,12 +499,14 @@ pub(crate) async fn export_history(
     let mut exported_domains = Vec::new();
     let mut data = Map::new();
     for domain in selected {
-        let policy = policies
-            .iter()
-            .find(|policy| policy.domain == domain.as_str())
-            .ok_or_else(|| ApiError::bad_request("history_retention_domain_not_found"))?;
-        if !policy.export_enabled {
-            return Err(ApiError::forbidden("history_export_domain_disabled"));
+        if let Some(policy_domain) = history_export_retention_domain(domain) {
+            let policy = policies
+                .iter()
+                .find(|policy| policy.domain == policy_domain.as_str())
+                .ok_or_else(|| ApiError::bad_request("history_retention_domain_not_found"))?;
+            if !policy.export_enabled {
+                return Err(ApiError::forbidden("history_export_domain_disabled"));
+            }
         }
         exported_domains.push(domain.as_str().to_string());
         match domain {
@@ -621,7 +594,7 @@ pub(crate) async fn export_history(
                     domain.as_str().to_string(),
                     json!(state
                         .repo
-                        .list_system_metric_rollups(0, unix_now(), limit)
+                        .list_system_metric_rollups_for_export(limit)
                         .await
                         .map_err(history_export_unavailable)?),
                 );
@@ -733,18 +706,46 @@ fn parse_history_domain(value: &str) -> Result<HistoryDomain, ApiError> {
     HistoryDomain::from_str(value).ok_or_else(|| ApiError::bad_request("invalid_history_domain"))
 }
 
+fn parse_history_retention_domain(value: &str) -> Result<HistoryRetentionDomain, ApiError> {
+    HistoryRetentionDomain::from_str(value)
+        .ok_or_else(|| ApiError::bad_request("invalid_history_retention_domain"))
+}
+
+fn history_export_retention_domain(domain: HistoryDomain) -> Option<HistoryRetentionDomain> {
+    Some(match domain {
+        // Exact raw telemetry has a fixed one-day lifecycle and no mutable
+        // retention policy. Its bounded export remains available.
+        HistoryDomain::TelemetrySamples => return None,
+        // Backup policy owns artifact retention and keep-last semantics. Backup
+        // history remains exportable under backups:read without a second age
+        // policy owning the same rows.
+        HistoryDomain::BackupArtifacts => return None,
+        HistoryDomain::TrafficCounterSamples => HistoryRetentionDomain::TrafficCounterRollups,
+        HistoryDomain::AuditLogs => HistoryRetentionDomain::AuditLogs,
+        HistoryDomain::SystemMetricRollups => HistoryRetentionDomain::SystemMetricRollups,
+        HistoryDomain::TelemetryRollups => HistoryRetentionDomain::TelemetryRollups,
+        HistoryDomain::TelemetryNetworkRates => HistoryRetentionDomain::TelemetryNetworkRates,
+        HistoryDomain::TelemetryPingRollups => HistoryRetentionDomain::TelemetryPingRollups,
+        HistoryDomain::JobOutputs => HistoryRetentionDomain::JobOutputs,
+        HistoryDomain::NetworkObservations => HistoryRetentionDomain::NetworkObservations,
+        HistoryDomain::TopologyHistory => HistoryRetentionDomain::NetworkObservations,
+        HistoryDomain::ClientStatusHistory => HistoryRetentionDomain::ClientStatusHistory,
+        HistoryDomain::GatewaySessions => HistoryRetentionDomain::GatewaySessions,
+    })
+}
+
 fn selected_history_retention_prune_domains(
     value: Option<&str>,
-) -> Result<Vec<HistoryDomain>, ApiError> {
+) -> Result<Vec<HistoryRetentionDomain>, ApiError> {
     match value {
-        Some(value) => Ok(vec![parse_history_domain(value)?]),
-        None => Ok(HistoryDomain::ALL.to_vec()),
+        Some(value) => Ok(vec![parse_history_retention_domain(value)?]),
+        None => Ok(HistoryRetentionDomain::ALL.to_vec()),
     }
 }
 
 fn ensure_history_retention_domain_authority(
     scopes: &[String],
-    domains: &[HistoryDomain],
+    domains: &[HistoryRetentionDomain],
 ) -> Result<(), ApiError> {
     for domain in domains {
         if !operator_has_scope(scopes, history_retention_authority_scope(*domain)) {
@@ -754,21 +755,18 @@ fn ensure_history_retention_domain_authority(
     Ok(())
 }
 
-fn history_retention_authority_scope(domain: HistoryDomain) -> &'static str {
+fn history_retention_authority_scope(domain: HistoryRetentionDomain) -> &'static str {
     match domain {
-        HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
-        HistoryDomain::SystemMetricRollups
-        | HistoryDomain::TelemetrySamples
-        | HistoryDomain::TelemetryRollups
-        | HistoryDomain::TelemetryNetworkRates
-        | HistoryDomain::TrafficCounterSamples
-        | HistoryDomain::ClientStatusHistory
-        | HistoryDomain::GatewaySessions => "inventory:write",
-        HistoryDomain::JobOutputs => "jobs:write",
-        HistoryDomain::BackupArtifacts => "backups:write",
-        HistoryDomain::NetworkObservations
-        | HistoryDomain::TopologyHistory
-        | HistoryDomain::TelemetryPingRollups => "network:write",
+        HistoryRetentionDomain::AuditLogs => SCOPE_AUDIT_READ,
+        HistoryRetentionDomain::SystemMetricRollups
+        | HistoryRetentionDomain::TelemetryRollups
+        | HistoryRetentionDomain::TelemetryNetworkRates
+        | HistoryRetentionDomain::TrafficCounterRollups
+        | HistoryRetentionDomain::ClientStatusHistory
+        | HistoryRetentionDomain::GatewaySessions => "inventory:write",
+        HistoryRetentionDomain::JobOutputs => "jobs:write",
+        HistoryRetentionDomain::NetworkObservations
+        | HistoryRetentionDomain::TelemetryPingRollups => "network:write",
     }
 }
 

@@ -1,17 +1,5 @@
 use super::*;
-use axum::{
-    body::{to_bytes, Body},
-    http::{header::AUTHORIZATION, header::CONTENT_TYPE, Request},
-};
-use tower::ServiceExt;
-
-use crate::{
-    gateway_client::GatewayDispatchClient,
-    model::BootstrapOperatorRequest,
-    model_alert_states::BulkFleetAlertStateItem,
-    repository::{MemoryState, Repository},
-    state::DispatcherRuntimeConfig,
-};
+use crate::model_alert_states::BulkFleetAlertStateItem;
 
 #[test]
 fn condition_parse_errors_include_operator_actionable_detail() {
@@ -225,63 +213,4 @@ fn fleet_alert_bulk_validation_rejects_duplicates_and_overflow() {
     let error = validate_bulk_alert_state_request(&overflow).unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "fleet_alert_state_items_invalid");
-}
-
-#[tokio::test]
-async fn fleet_alert_bulk_route_accepts_more_than_one_hundred_items_in_one_response() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let auth = repo
-        .bootstrap_operator(&BootstrapOperatorRequest {
-            username: "bulk-alert-admin".to_string(),
-            password: "bulk-alert-password-123".to_string(),
-        })
-        .await
-        .unwrap();
-    let (events, _) = crate::state::WsEventBus::new(1);
-    let router = crate::routes::build_router(AppState {
-        repo,
-        events,
-        internal_token: None,
-        gateway: GatewayDispatchClient::default(),
-        backup_object_store: None,
-        update_release_policy: Default::default(),
-        job_output_artifact_min_bytes: 32_768,
-        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
-        require_registered_agent_updates: false,
-        suite_config_path: "config/vpsman.toml".into(),
-        dispatcher_config: DispatcherRuntimeConfig::default(),
-    });
-    let body = serde_json::json!({
-        "action": "acknowledge",
-        "items": (0..101).map(|index| serde_json::json!({
-            "alert_id": format!("alert:route:{index:03}"),
-            "expected_revision": 0,
-        })).collect::<Vec<_>>(),
-        "reason": "reviewed as one batch",
-        "confirmed": true,
-    });
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/fleet-alert-states/bulk")
-                .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let response: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert!(response["batch_id"].as_str().is_some());
-    assert_eq!(response["states"].as_array().unwrap().len(), 101);
-    assert!(response["states"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|state| state["revision"] == 1));
-    assert_eq!(memory.audits.read().await.len(), 101);
 }

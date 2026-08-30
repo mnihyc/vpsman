@@ -118,7 +118,7 @@ export function isActivePolicyAlert(alert: PolicyAlertRecord): boolean {
 export function isCurrentPolicyAlert(alert: PolicyAlertRecord): boolean {
   return (
     isActivePolicyAlert(alert) ||
-    (alert.lifecycle_state === "unknown" && alert.last_confirmed_at !== null)
+    alert.lifecycle_state === "unknown"
   );
 }
 
@@ -246,7 +246,7 @@ function validLifecycleState(
     !Number.isInteger(value.trigger_generation) ||
     (value.trigger_generation as number) <= 0 ||
     !validTimestamp(value.triggered_at) ||
-    !nullableTimestamp(value.last_confirmed_at) ||
+    !validTimestamp(value.last_confirmed_at) ||
     !nullableTimestamp(value.resolved_at) ||
     !nullableString(value.resolution_reason) ||
     !nullableString(value.resolution_note) ||
@@ -270,8 +270,7 @@ function validLifecycleState(
   if (state === "unknown") {
     return recordKind === "condition" &&
       hasNoResolution &&
-      (value.last_confirmed_at === null ||
-        atOrAfter(value.last_confirmed_at, value.triggered_at))
+      atOrAfter(value.last_confirmed_at, value.triggered_at)
       ? state
       : null;
   }

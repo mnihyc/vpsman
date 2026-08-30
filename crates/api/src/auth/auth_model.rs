@@ -54,18 +54,6 @@ impl OperatorRecord {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct OperatorSessionRecord {
-    pub(crate) session_id: Uuid,
-    pub(crate) access_token_hash: String,
-    pub(crate) refresh_token_hash: String,
-    pub(crate) operator_id: Uuid,
-    pub(crate) expires_unix: u64,
-    pub(crate) refresh_expires_unix: u64,
-    pub(crate) created_unix: u64,
-    pub(crate) revoked: bool,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct OperatorPreferences {
     #[serde(default = "default_vps_name_display_mode")]

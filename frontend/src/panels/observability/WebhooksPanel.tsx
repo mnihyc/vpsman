@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import { formatBoundedCount } from "../../constants";
 import { handleTabListKeyDown, tabId } from "../../components/AccessibleTabs";
 import {
   DeliveryPreviewSection,
@@ -43,6 +44,7 @@ type WebhooksPanelProps = {
     request: WebhookRuleRequest,
   ) => Promise<WebhookRuleRecord>;
   webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
+  webhookRuleDeliveriesTruncated: boolean;
   webhookRules: WebhookRuleRecord[];
 };
 
@@ -56,6 +58,7 @@ export function WebhooksPanel({
   onRotateWebhookDeliveryHistory,
   onUpsertWebhookRule,
   webhookRuleDeliveries,
+  webhookRuleDeliveriesTruncated,
   webhookRules,
 }: WebhooksPanelProps) {
   const [activeTab, setActiveTab] = useState<WebhookConfigTab>("rules");
@@ -134,24 +137,33 @@ export function WebhooksPanel({
           />
           <MetricTile
             actionLabel="Deliveries"
-            detail="Queued event webhook rows awaiting processing"
+            detail={`Queued event webhook rows awaiting processing${webhookRuleDeliveriesTruncated ? " in the loaded page" : ""}`}
             label="Queued"
             onAction={openDeliveryEvidence}
-            value={String(queuedDeliveries)}
+            value={formatBoundedCount(
+              queuedDeliveries,
+              webhookRuleDeliveriesTruncated,
+            )}
           />
           <MetricTile
             actionLabel="Open failed deliveries"
-            detail="Failed event webhook deliveries, separate from alert notification failures"
+            detail={`Failed event webhook deliveries in the retained history${webhookRuleDeliveriesTruncated ? " loaded page" : ""}, separate from alert notification failures`}
             label="Failures"
             onAction={openDeliveryEvidence}
-            value={String(failedDeliveries)}
+            value={formatBoundedCount(
+              failedDeliveries,
+              webhookRuleDeliveriesTruncated,
+            )}
           />
           <MetricTile
             actionLabel="History"
-            detail="Retained event webhook delivery rows"
+            detail={`Retained event webhook delivery rows${webhookRuleDeliveriesTruncated ? " in the loaded page" : ""}`}
             label="Deliveries"
             onAction={openDeliveryEvidence}
-            value={String(webhookRuleDeliveries.length)}
+            value={formatBoundedCount(
+              webhookRuleDeliveries.length,
+              webhookRuleDeliveriesTruncated,
+            )}
           />
         </div>
 
@@ -270,6 +282,7 @@ export function WebhooksPanel({
             <WebhookDeliveryHistoryGrid
               deliveries={webhookRuleDeliveries}
               preview={false}
+              rowsTruncated={webhookRuleDeliveriesTruncated}
             />
           </section>
         ) : null}

@@ -53,7 +53,6 @@ use crate::{
     },
     selector_expression::parse_selector_expression,
     state::AppState,
-    util::parse_timestamp_unix,
 };
 
 const SHARE_TOKEN_HEADER: &str = "x-vpsman-share-token";
@@ -64,7 +63,6 @@ const MAX_SHARE_EXPIRY_SECS: u64 = 365 * 24 * 60 * 60;
 const MAX_MONITORING_SELECTOR_BYTES: usize = 4_096;
 const MAX_SHARE_SELECTOR_BYTES: usize = 65_535;
 const MAX_SHARE_TARGETS: usize = 1_000;
-const CURRENT_NETWORK_RATE_MAX_AGE_SECS: u64 = 180;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct MonitoringCardsQuery {
@@ -72,6 +70,24 @@ pub(crate) struct MonitoringCardsQuery {
     pub(crate) limit: Option<usize>,
     pub(crate) offset: Option<usize>,
     pub(crate) include_history: Option<bool>,
+    pub(crate) history_mode: Option<MonitoringCardsHistoryMode>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MonitoringCardsHistoryMode {
+    #[default]
+    PerInterface,
+    SelectedAggregate,
+}
+
+impl MonitoringCardsHistoryMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PerInterface => "per_interface",
+            Self::SelectedAggregate => "selected_aggregate",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -116,6 +132,7 @@ pub(crate) async fn list_monitoring_cards(
     let limit = query.limit.unwrap_or(1_000).clamp(1, 1_000);
     let requested_offset = query.offset.unwrap_or(0);
     let include_history = query.include_history.unwrap_or(true);
+    let history_mode = query.history_mode.unwrap_or_default();
     let key = serde_json::json!({
         "endpoint": "monitoring_cards",
         "auth": crate::state::read_singleflight_auth_key(
@@ -126,18 +143,19 @@ pub(crate) async fn list_monitoring_cards(
         "limit": limit,
         "offset": requested_offset,
         "include_history": include_history,
+        "history_mode": history_mode.as_str(),
     })
     .to_string();
     let events = state.events.clone();
     let response = events
         .singleflight_monitoring_cards(key, move || async move {
-            let _admission = state.events.acquire_heavy_read_permit().await?;
             build_monitoring_cards_page(
                 &state,
                 selector_expression.as_deref(),
                 limit,
                 requested_offset,
                 include_history,
+                history_mode,
             )
             .await
         })
@@ -151,6 +169,7 @@ async fn build_monitoring_cards_page(
     limit: usize,
     requested_offset: usize,
     include_history: bool,
+    history_mode: MonitoringCardsHistoryMode,
 ) -> Result<MonitoringCardsPageView, ApiError> {
     let mut agents = monitoring_agents(state, selector_expression).await?;
     sort_monitoring_agents(&mut agents);
@@ -161,7 +180,13 @@ async fn build_monitoring_cards_page(
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
-    let items = monitoring_cards_for_agents_projection(state, page, include_history).await?;
+    let items = monitoring_cards_for_agents_projection_with_history_mode(
+        state,
+        page,
+        include_history,
+        history_mode,
+    )
+    .await?;
     let consumed = offset.saturating_add(items.len());
     Ok(MonitoringCardsPageView {
         items,
@@ -197,8 +222,13 @@ pub(crate) async fn get_client_monitoring(
     let events = state.events.clone();
     let response = events
         .singleflight_client_monitoring(key, move || async move {
-            let _admission = state.events.acquire_heavy_read_permit().await?;
-            client_monitoring_view(&state, &client_id, &query).await
+            client_monitoring_view(
+                &state,
+                &client_id,
+                &query,
+                CurrentNetworkDetail::SingleVpsDetail,
+            )
+            .await
         })
         .await?;
     Ok(Json(response))
@@ -677,16 +707,7 @@ pub(crate) async fn create_monitoring_share(
         .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
     require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     let resolved = resolve_selector(&state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
-    if resolved.is_empty() {
-        return Err(ApiError::bad_request(
-            "monitoring_share_target_selection_required",
-        ));
-    }
-    if resolved.len() > MAX_SHARE_TARGETS {
-        return Err(ApiError::bad_request(
-            "monitoring_share_target_count_too_large",
-        ));
-    }
+    validate_monitoring_share_targets(&resolved)?;
     let submitted = request
         .target_client_ids
         .iter()
@@ -718,8 +739,6 @@ pub(crate) async fn create_monitoring_share(
         visibility,
         expires_at: now.saturating_add(request.expires_in_secs).to_string(),
         revoked_at: None,
-        revoked_by: None,
-        created_by: Some(operator.operator.id),
         created_at: now.to_string(),
         updated_at: now.to_string(),
     };
@@ -783,11 +802,7 @@ pub(crate) async fn update_monitoring_share(
     validate_monitoring_selector(&selector_expression, MAX_SHARE_SELECTOR_BYTES)?;
     require_monitoring_selector_scope(&operator.operator.scopes, &selector_expression)?;
     let resolved = resolve_selector(&state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
-    if resolved.len() > MAX_SHARE_TARGETS {
-        return Err(ApiError::bad_request(
-            "monitoring_share_target_count_too_large",
-        ));
-    }
+    validate_monitoring_share_targets(&resolved)?;
     let submitted = request
         .target_client_ids
         .iter()
@@ -947,11 +962,7 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
         require_monitoring_selector_scope(&operator.operator.scopes, &share.selector_expression)?;
         let resolved =
             resolve_selector(&state, &share.selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
-        if resolved.len() > MAX_SHARE_TARGETS {
-            return Err(ApiError::bad_request(
-                "monitoring_share_target_count_too_large",
-            ));
-        }
+        validate_monitoring_share_targets(&resolved)?;
         let current = share
             .target_client_ids()
             .into_iter()
@@ -1165,23 +1176,12 @@ pub(crate) async fn public_monitoring_share_data(
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
-    let card_key = serde_json::json!({
-        "endpoint": "public_monitoring_cards",
-        "share_id": share.id,
-        "share_revision": &share.updated_at,
-        "client_ids": page_agents
-            .iter()
-            .map(|agent| agent.id.as_str())
-            .collect::<Vec<_>>(),
-        "offset": offset,
-        "limit": limit,
-    })
-    .to_string();
+    let card_key =
+        public_monitoring_cards_singleflight_key(&share, &page_agents, offset, limit, total);
     let events = state.events.clone();
     let card_state = state.clone();
     let card_page = events
         .singleflight_monitoring_cards(card_key, move || async move {
-            let _admission = card_state.events.acquire_heavy_read_permit().await?;
             let items = monitoring_cards_for_agents(&card_state, page_agents).await?;
             let consumed = offset.saturating_add(items.len());
             Ok(MonitoringCardsPageView {
@@ -1217,23 +1217,22 @@ pub(crate) async fn public_monitoring_share_data(
                 end_unix: query.end_unix,
                 points: query.points,
             };
-            let key = serde_json::json!({
-                "endpoint": "public_monitoring_detail",
-                "share_id": share.id,
-                "share_revision": &share.updated_at,
-                "client_id": &client_id,
-                "client_key": client_key,
-                "window": range_query.window.as_deref(),
-                "start_unix": range_query.start_unix,
-                "end_unix": range_query.end_unix,
-                "points": range_query.points,
-            })
-            .to_string();
+            let key = public_monitoring_detail_singleflight_key(
+                &share,
+                &client_id,
+                client_key,
+                &range_query,
+            );
             let events = state.events.clone();
             let detail_view = events
                 .singleflight_client_monitoring(key, move || async move {
-                    let _admission = state.events.acquire_heavy_read_permit().await?;
-                    client_monitoring_view(&state, &client_id, &range_query).await
+                    client_monitoring_view(
+                        &state,
+                        &client_id,
+                        &range_query,
+                        CurrentNetworkDetail::Hidden,
+                    )
+                    .await
                 })
                 .await?;
             Some(public_monitoring_detail(detail_view, &share)?)
@@ -1252,6 +1251,52 @@ pub(crate) async fn public_monitoring_share_data(
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+fn public_monitoring_cards_singleflight_key(
+    share: &MonitoringShareRecord,
+    page_agents: &[AgentView],
+    offset: usize,
+    limit: usize,
+    total: usize,
+) -> String {
+    serde_json::json!({
+        "endpoint": "public_monitoring_cards",
+        "share_id": share.id,
+        // Definition, target, visibility, extension and revocation mutations
+        // all advance this revision monotonically in both repositories.
+        "share_revision": &share.updated_at,
+        "client_ids": page_agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        "offset": offset,
+        "limit": limit,
+        // A visibility change outside this page can leave its client IDs
+        // unchanged while changing pagination metadata returned with it.
+        "total": total,
+    })
+    .to_string()
+}
+
+fn public_monitoring_detail_singleflight_key(
+    share: &MonitoringShareRecord,
+    client_id: &str,
+    client_key: &str,
+    range_query: &ClientMonitoringQuery,
+) -> String {
+    serde_json::json!({
+        "endpoint": "public_monitoring_detail",
+        "share_id": share.id,
+        "share_revision": &share.updated_at,
+        "client_id": client_id,
+        "client_key": client_key,
+        "window": range_query.window.as_deref(),
+        "start_unix": range_query.start_unix,
+        "end_unix": range_query.end_unix,
+        "points": range_query.points,
+    })
+    .to_string()
 }
 
 async fn monitoring_agents(
@@ -1299,13 +1344,37 @@ pub(crate) async fn monitoring_cards_for_agents(
     state: &AppState,
     agents: Vec<AgentView>,
 ) -> Result<Vec<MonitoringCardView>, ApiError> {
-    monitoring_cards_for_agents_projection(state, agents, true).await
+    // Public cards expose one client-aggregate network series, so aggregate in
+    // PostgreSQL instead of transferring per-interface rows only to fold them
+    // immediately in `public_network_points`.
+    monitoring_cards_for_agents_projection_with_history_mode(
+        state,
+        agents,
+        true,
+        MonitoringCardsHistoryMode::SelectedAggregate,
+    )
+    .await
 }
 
 pub(crate) async fn monitoring_cards_for_agents_projection(
     state: &AppState,
+    agents: Vec<AgentView>,
+    include_history: bool,
+) -> Result<Vec<MonitoringCardView>, ApiError> {
+    monitoring_cards_for_agents_projection_with_history_mode(
+        state,
+        agents,
+        include_history,
+        MonitoringCardsHistoryMode::PerInterface,
+    )
+    .await
+}
+
+async fn monitoring_cards_for_agents_projection_with_history_mode(
+    state: &AppState,
     mut agents: Vec<AgentView>,
     include_history: bool,
+    history_mode: MonitoringCardsHistoryMode,
 ) -> Result<Vec<MonitoringCardView>, ApiError> {
     agents.retain(AgentView::is_monitoring_visible);
     if agents.is_empty() {
@@ -1323,22 +1392,36 @@ pub(crate) async fn monitoring_cards_for_agents_projection(
             "vps_rules_unavailable",
             "VPS display rules could not be loaded.",
         ))?;
-    let network_rate_selection =
-        Repository::network_rate_interface_selection_from_rules(&client_ids, &rules).map_err(
-            ApiError::internal_mapper(
-                "network_interface_selection_unavailable",
-                "Network-interface selection could not be loaded.",
-            ),
-        )?;
+    let network_rate_selection = state
+        .repo
+        .network_rate_interface_selection_from_rules(&client_ids, &rules)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_interface_selection_unavailable",
+            "Network-interface selection could not be loaded.",
+        ))?;
     let history_end = crate::unix_now();
     let history_start = history_end.saturating_sub(15 * 60);
-    let (system_information, resources, resource_history_rows, network_rows) = tokio::join!(
+    let (
+        system_information,
+        resources,
+        projection_pending,
+        resource_history_rows,
+        network_rows,
+        network_history_rows,
+        traffic,
+        primary_ping,
+        primary_ping_history_rows,
+    ) = tokio::join!(
         state
             .repo
             .monitoring_system_information_for_clients(&client_ids),
         state
             .repo
             .list_latest_telemetry_rollups_for_clients(&client_ids, None),
+        state
+            .repo
+            .telemetry_projection_pending_for_clients(&client_ids),
         async {
             if include_history {
                 state
@@ -1358,53 +1441,34 @@ pub(crate) async fn monitoring_cards_for_agents_projection(
         state
             .repo
             .list_latest_telemetry_network_rates_for_selection(&network_rate_selection),
-    );
-    let mut system_information = system_information.map_err(ApiError::internal_mapper(
-        "monitoring_system_information_unavailable",
-        "VPS system information could not be loaded.",
-    ))?;
-    let resources = resources
-        .map_err(ApiError::internal_mapper(
-            "monitoring_resources_unavailable",
-            "VPS resource metrics could not be loaded.",
-        ))?
-        .into_iter()
-        .map(|row| (row.client_id.clone(), row))
-        .collect::<HashMap<_, _>>();
-    let mut resource_history = HashMap::<String, Vec<TelemetryRollupView>>::new();
-    for row in resource_history_rows.map_err(ApiError::internal_mapper(
-        "monitoring_resource_history_unavailable",
-        "VPS resource history could not be loaded.",
-    ))? {
-        resource_history
-            .entry(row.client_id.clone())
-            .or_default()
-            .push(row);
-    }
-    let mut network = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
-    for row in network_rows
-        .map_err(ApiError::internal_mapper(
-            "monitoring_network_rates_unavailable",
-            "VPS network rates could not be loaded.",
-        ))?
-        .into_iter()
-        .filter(|row| network_rate_is_current(row, history_end))
-    {
-        network.entry(row.client_id.clone()).or_default().push(row);
-    }
-    let (network_history_rows, traffic, primary_ping, primary_ping_history_rows) = tokio::join!(
         async {
             if include_history {
-                state
-                    .repo
-                    .list_dashboard_raw_telemetry_network_rates_selected(
-                        16,
-                        history_start,
-                        history_end,
-                        60,
-                        &network_rate_selection,
-                    )
-                    .await
+                match history_mode {
+                    MonitoringCardsHistoryMode::PerInterface => {
+                        state
+                            .repo
+                            .list_dashboard_raw_telemetry_network_rates_selected(
+                                16,
+                                history_start,
+                                history_end,
+                                60,
+                                &network_rate_selection,
+                            )
+                            .await
+                    }
+                    MonitoringCardsHistoryMode::SelectedAggregate => {
+                        state
+                            .repo
+                            .list_monitoring_card_raw_network_history_selected(
+                                16,
+                                history_start,
+                                history_end,
+                                60,
+                                &network_rate_selection,
+                            )
+                            .await
+                    }
+                }
             } else {
                 Ok(Vec::new())
             }
@@ -1430,6 +1494,39 @@ pub(crate) async fn monitoring_cards_for_agents_projection(
             }
         },
     );
+    let mut system_information = system_information.map_err(ApiError::internal_mapper(
+        "monitoring_system_information_unavailable",
+        "VPS system information could not be loaded.",
+    ))?;
+    let resources = resources
+        .map_err(ApiError::internal_mapper(
+            "monitoring_resources_unavailable",
+            "VPS resource metrics could not be loaded.",
+        ))?
+        .into_iter()
+        .map(|row| (row.client_id.clone(), row))
+        .collect::<HashMap<_, _>>();
+    let projection_pending = projection_pending.map_err(ApiError::internal_mapper(
+        "monitoring_projection_pending_unavailable",
+        "VPS telemetry projection status could not be loaded.",
+    ))?;
+    let mut resource_history = HashMap::<String, Vec<TelemetryRollupView>>::new();
+    for row in resource_history_rows.map_err(ApiError::internal_mapper(
+        "monitoring_resource_history_unavailable",
+        "VPS resource history could not be loaded.",
+    ))? {
+        resource_history
+            .entry(row.client_id.clone())
+            .or_default()
+            .push(row);
+    }
+    let mut network = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
+    for row in network_rows.map_err(ApiError::internal_mapper(
+        "monitoring_network_rates_unavailable",
+        "VPS network rates could not be loaded.",
+    ))? {
+        network.entry(row.client_id.clone()).or_default().push(row);
+    }
     let mut network_history = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
     for row in network_history_rows.map_err(ApiError::internal_mapper(
         "monitoring_network_history_unavailable",
@@ -1521,13 +1618,20 @@ pub(crate) async fn monitoring_cards_for_agents_projection(
                     anyhow::anyhow!("traffic projection missing for {client_id}"),
                 )
             })?;
+            let resources = resources.get(&client_id).cloned();
+            let (projection_pending_since, projection_checked_at) = projection_pending
+                .get(&client_id)
+                .cloned()
+                .unwrap_or((None, None));
             Ok(MonitoringCardView {
                 client,
+                projection_pending_since,
+                projection_checked_at,
                 product_name: product_names.remove(&client_id),
                 billing: billing.get(&client_id).cloned(),
                 system_information: system_information.remove(&client_id),
                 port_speed: port_speeds.get(&client_id).cloned(),
-                resources: resources.get(&client_id).cloned(),
+                resources,
                 resource_history: resource_history.remove(&client_id).unwrap_or_default(),
                 network: network.remove(&client_id).unwrap_or_default(),
                 network_history: network_history.remove(&client_id).unwrap_or_default(),
@@ -1611,10 +1715,17 @@ fn monitoring_billing_plan(
     Ok(plan)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CurrentNetworkDetail {
+    Hidden,
+    SingleVpsDetail,
+}
+
 async fn client_monitoring_view(
     state: &AppState,
     client_id: &str,
     query: &ClientMonitoringQuery,
+    current_network_detail: CurrentNetworkDetail,
 ) -> Result<ClientMonitoringView, ApiError> {
     let client_ids = vec![client_id.to_string()];
     let client = state
@@ -1631,18 +1742,26 @@ async fn client_monitoring_view(
     if !client.is_monitoring_visible() {
         return Err(ApiError::not_found("monitoring_client_not_found"));
     }
-    let network_rate_selection = state
-        .repo
-        .network_rate_interface_selection_for_clients(&client_ids)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "network_interface_selection_unavailable",
-            "Network-interface selection could not be loaded.",
-        ))?;
-    let product_name = state
-        .repo
-        .list_vps_rules_for_clients(&client_ids, &[VPS_RULE_KEY_PRODUCT_NAME])
-        .await
+    // These four endpoint inputs are independent after visibility has been
+    // established. Evaluate their errors in the historical order below so
+    // public error codes remain stable if more than one source is unavailable.
+    let (network_rate_selection, product_name, system_information, range) = tokio::join!(
+        state
+            .repo
+            .network_rate_interface_selection_for_clients(&client_ids),
+        state
+            .repo
+            .list_vps_rules_for_clients(&client_ids, &[VPS_RULE_KEY_PRODUCT_NAME]),
+        state
+            .repo
+            .monitoring_system_information_for_clients(&client_ids),
+        monitoring_range(state, &client_ids, query),
+    );
+    let network_rate_selection = network_rate_selection.map_err(ApiError::internal_mapper(
+        "network_interface_selection_unavailable",
+        "Network-interface selection could not be loaded.",
+    ))?;
+    let product_name = product_name
         .map_err(ApiError::internal_mapper(
             "vps_rules_unavailable",
             "VPS display rules could not be loaded.",
@@ -1650,146 +1769,187 @@ async fn client_monitoring_view(
         .into_iter()
         .next()
         .map(|rule| rule.value_raw);
-    let system_information = state
-        .repo
-        .monitoring_system_information_for_clients(&client_ids)
-        .await
+    let system_information = system_information
         .map_err(ApiError::internal_mapper(
             "monitoring_system_information_unavailable",
             "VPS system information could not be loaded.",
         ))?
         .remove(client_id);
-    let range = monitoring_range(state, &client_ids, query).await?;
-    let resources = if range.source == "raw" {
-        state
-            .repo
-            .list_dashboard_raw_telemetry_rollups(
-                range.effective_points,
-                range.start_unix,
-                range.end_unix,
-                range.step_secs,
-                &client_ids,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_resource_history_unavailable",
-                "VPS resource history could not be loaded.",
-            ))?
-    } else {
-        state
-            .repo
-            .list_dashboard_telemetry_rollups(
-                range.effective_points,
-                Some(range.start_unix),
-                Some(range.end_unix),
-                None,
-                range.step_secs,
-                &client_ids,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_resource_history_unavailable",
-                "VPS resource history could not be loaded.",
-            ))?
-    };
-    let network = if range.source == "raw" {
-        state
-            .repo
-            .list_dashboard_raw_telemetry_network_rates_selected(
-                range.effective_points,
-                range.start_unix,
-                range.end_unix,
-                range.step_secs,
-                &network_rate_selection,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_network_history_unavailable",
-                "VPS network history could not be loaded.",
-            ))?
-    } else {
-        state
-            .repo
-            .list_dashboard_telemetry_network_rates_selected(
-                range.effective_points,
-                Some(range.start_unix),
-                Some(range.end_unix),
-                None,
-                range.step_secs,
-                &network_rate_selection,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_network_history_unavailable",
-                "VPS network history could not be loaded.",
-            ))?
-    };
-    let ping = if range.source == "raw" {
-        state
-            .repo
-            .list_raw_ping_results(
-                client_id,
-                Some(range.start_unix),
-                Some(range.end_unix),
-                range.effective_points,
-                range.step_secs,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_ping_history_unavailable",
-                "Ping history could not be loaded.",
-            ))?
-    } else {
-        state
-            .repo
-            .list_ping_rollups(
-                client_id,
-                Some(range.start_unix),
-                Some(range.end_unix),
-                range.effective_points,
-                range.step_secs,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_ping_history_unavailable",
-                "Ping history could not be loaded.",
-            ))?
-    };
-    let traffic =
-        state
-            .repo
-            .get_traffic_accounting(client_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "traffic_accounting_unavailable",
-                "Traffic accounting could not be loaded.",
-            ))?;
-    let traffic_history = state
-        .repo
-        .list_traffic_history(
+    let range = range?;
+
+    // Every history reader receives the validated, output-bounded point count
+    // and time range. The retained readers decode the same unified range
+    // projection; running independent telemetry domains together removes the
+    // serial round-trip floor without widening any returned result.
+    let (
+        resources,
+        network,
+        network_current_detail,
+        tunnel_current_detail,
+        ping,
+        traffic,
+        traffic_history,
+        ping_targets,
+        primary_ping,
+    ) = tokio::join!(
+        async {
+            if range.source == "raw" {
+                state
+                    .repo
+                    .list_dashboard_raw_telemetry_rollups(
+                        range.effective_points,
+                        range.start_unix,
+                        range.end_unix,
+                        range.step_secs,
+                        &client_ids,
+                    )
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "monitoring_resource_history_unavailable",
+                        "VPS resource history could not be loaded.",
+                    ))
+            } else {
+                let projection = state
+                    .repo
+                    .list_projected_telemetry_resource_history(
+                        range.effective_points,
+                        range.start_unix,
+                        range.end_unix,
+                        range.step_secs,
+                        &client_ids,
+                    )
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "monitoring_resource_history_unavailable",
+                        "VPS resource history could not be loaded.",
+                    ))?;
+                if !projection.complete {
+                    return Err(crate::routes_dashboard::dashboard_projection_initializing());
+                }
+                Ok(projection.rows)
+            }
+        },
+        async {
+            if range.source == "raw" {
+                state
+                    .repo
+                    .list_dashboard_raw_telemetry_network_rates_selected(
+                        range.effective_points,
+                        range.start_unix,
+                        range.end_unix,
+                        range.step_secs,
+                        &network_rate_selection,
+                    )
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "monitoring_network_history_unavailable",
+                        "VPS network history could not be loaded.",
+                    ))
+            } else {
+                let projection = state
+                    .repo
+                    .list_projected_telemetry_network_history(
+                        range.effective_points,
+                        range.start_unix,
+                        range.end_unix,
+                        range.step_secs,
+                        &network_rate_selection,
+                    )
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "monitoring_network_history_unavailable",
+                        "VPS network history could not be loaded.",
+                    ))?;
+                if !projection.complete {
+                    return Err(crate::routes_dashboard::dashboard_projection_initializing());
+                }
+                Ok(projection.rows)
+            }
+        },
+        async {
+            match current_network_detail {
+                CurrentNetworkDetail::Hidden => Ok(Vec::new()),
+                CurrentNetworkDetail::SingleVpsDetail => {
+                    state
+                        .repo
+                        .list_latest_telemetry_network_rates_for_vps_detail(client_id)
+                        .await
+                }
+            }
+        },
+        async {
+            match current_network_detail {
+                CurrentNetworkDetail::Hidden => Ok(Vec::new()),
+                CurrentNetworkDetail::SingleVpsDetail => {
+                    state
+                        .repo
+                        .list_telemetry_tunnels_for_vps_detail(client_id)
+                        .await
+                }
+            }
+        },
+        async {
+            if range.source == "raw" {
+                state
+                    .repo
+                    .list_raw_ping_results(
+                        client_id,
+                        Some(range.start_unix),
+                        Some(range.end_unix),
+                        range.effective_points,
+                        range.step_secs,
+                    )
+                    .await
+            } else {
+                state
+                    .repo
+                    .list_ping_rollups(
+                        client_id,
+                        Some(range.start_unix),
+                        Some(range.end_unix),
+                        range.effective_points,
+                        range.step_secs,
+                    )
+                    .await
+            }
+        },
+        state.repo.get_traffic_accounting(client_id),
+        state.repo.list_traffic_history(
             client_id,
             range.start_unix,
             range.end_unix,
             range.step_secs,
-            range.source == "raw" && range.resolutions.traffic == 60,
-        )
-        .await
-        .map_err(ApiError::internal_mapper(
-            "traffic_history_unavailable",
-            "Traffic history could not be loaded.",
-        ))?;
-    let ping_targets = state
-        .repo
-        .current_ping_targets_for_client(client_id)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "monitoring_ping_targets_unavailable",
-            "Assigned Ping targets could not be loaded.",
-        ))?;
-    let primary_ping = state
-        .repo
-        .current_primary_ping_for_clients(&client_ids)
-        .await
+        ),
+        state.repo.current_ping_targets_for_client(client_id),
+        state.repo.current_primary_ping_for_clients(&client_ids),
+    );
+    let resources = resources?;
+    let network = network?;
+    let network_current_detail = network_current_detail.map_err(ApiError::internal_mapper(
+        "monitoring_network_current_detail_unavailable",
+        "Current VPS network detail could not be loaded.",
+    ))?;
+    let tunnel_current_detail = tunnel_current_detail.map_err(ApiError::internal_mapper(
+        "monitoring_tunnel_current_detail_unavailable",
+        "Current VPS tunnel detail could not be loaded.",
+    ))?;
+    let ping = ping.map_err(ApiError::internal_mapper(
+        "monitoring_ping_history_unavailable",
+        "Ping history could not be loaded.",
+    ))?;
+    let traffic = traffic.map_err(ApiError::internal_mapper(
+        "traffic_accounting_unavailable",
+        "Traffic accounting could not be loaded.",
+    ))?;
+    let traffic_history = traffic_history.map_err(ApiError::internal_mapper(
+        "traffic_history_unavailable",
+        "Traffic history could not be loaded.",
+    ))?;
+    let ping_targets = ping_targets.map_err(ApiError::internal_mapper(
+        "monitoring_ping_targets_unavailable",
+        "Assigned Ping targets could not be loaded.",
+    ))?;
+    let primary_ping = primary_ping
         .map_err(ApiError::internal_mapper(
             "monitoring_ping_status_unavailable",
             "Primary Ping status could not be loaded.",
@@ -1804,6 +1964,8 @@ async fn client_monitoring_view(
         range,
         resources,
         network,
+        network_current_detail,
+        tunnel_current_detail,
         traffic,
         traffic_history,
         ping_targets,
@@ -1843,7 +2005,7 @@ async fn monitoring_range(
     let start_unix = match (window, fixed_seconds) {
         (_, Some(seconds)) => end_unix.saturating_sub(seconds),
         ("all", None) => {
-            let mut first = state
+            let telemetry_start = state
                 .repo
                 .dashboard_telemetry_start_unix(client_ids)
                 .await
@@ -1851,6 +2013,9 @@ async fn monitoring_range(
                     "monitoring_history_range_unavailable",
                     "The available monitoring-history range could not be loaded.",
                 ))?;
+            let mut first = crate::routes_dashboard::dashboard_telemetry_start_or_initializing(
+                telemetry_start,
+            )?;
             for client_id in client_ids {
                 if let Some(traffic_start) = state
                     .repo
@@ -1886,25 +2051,12 @@ async fn monitoring_range(
         .saturating_add(59)
         / 60
         * 60;
-    let raw_covers_start = if window == "15m" {
-        true
-    } else if matches!(window, "180d" | "1y" | "all") {
+    let raw_covers_start = if matches!(window, "180d" | "1y" | "all") {
         false
     } else {
-        let raw_retention_days = state
-            .repo
-            .list_history_retention_policies()
-            .await
-            .map_err(ApiError::internal_mapper(
-                "history_retention_policies_unavailable",
-                "History-retention policies could not be loaded.",
-            ))?
-            .into_iter()
-            .find(|policy| policy.domain == "telemetry_samples")
-            .map(|policy| policy.retention_days.max(1) as u64)
-            .unwrap_or(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS as u64);
-        let raw_retention_secs = raw_retention_days.saturating_mul(24 * 60 * 60);
-        let short_window = matches!(window, "1h" | "8h" | "1d" | "7d" | "30d" | "90d")
+        let raw_retention_secs =
+            vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS as u64 * 24 * 60 * 60;
+        let short_window = matches!(window, "15m" | "1h" | "8h" | "1d" | "7d" | "30d" | "90d")
             || (window == "custom" && span <= raw_retention_secs);
         short_window
             && start_unix >= now.saturating_sub(raw_retention_secs)
@@ -1930,8 +2082,10 @@ async fn monitoring_range(
         points as u64,
     );
     let effective_points = aligned_timeline_point_count(start_unix, end_unix, step_secs);
-    let traffic_uses_exact_source =
-        traffic_uses_exact_source(raw_covers_start, now.saturating_sub(start_unix));
+    // Traffic has its own canonical minute ledger and retention frontier. Do
+    // not downgrade it because an unrelated resource, network, or Ping raw
+    // family starts later.
+    let traffic_uses_exact_source = traffic_uses_exact_source(now.saturating_sub(start_unix));
     let traffic_resolution = if traffic_uses_exact_source {
         60
     } else {
@@ -1956,9 +2110,9 @@ async fn monitoring_range(
     })
 }
 
-fn traffic_uses_exact_source(raw_telemetry_covers_start: bool, age_secs: u64) -> bool {
+fn traffic_uses_exact_source(age_secs: u64) -> bool {
     const DAY: u64 = 24 * 60 * 60;
-    raw_telemetry_covers_start && age_secs <= 32 * DAY
+    age_secs <= vpsman_common::TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * DAY
 }
 
 fn retained_resolution_for_age(age_secs: u64) -> u64 {
@@ -1976,13 +2130,11 @@ fn retained_resolution_for_age(age_secs: u64) -> u64 {
 
 fn retained_traffic_resolution_for_age(age_secs: u64) -> u64 {
     const DAY: u64 = 24 * 60 * 60;
-    match age_secs {
-        value if value <= 32 * DAY => 60,
-        value if value <= 91 * DAY => 60 * 60,
-        value if value <= 181 * DAY => 3 * 60 * 60,
-        value if value <= 366 * DAY => 6 * 60 * 60,
-        _ => DAY,
-    }
+    vpsman_common::TRAFFIC_COUNTER_HISTORY_TIERS
+        .iter()
+        .find(|tier| age_secs <= tier.retain_days as u64 * DAY)
+        .map(|tier| tier.bucket_secs as u64)
+        .unwrap_or(DAY)
 }
 
 fn aligned_timeline_point_count(start_unix: u64, end_unix: u64, step_secs: u64) -> i64 {
@@ -2039,6 +2191,7 @@ fn public_monitoring_card(
     share: &MonitoringShareRecord,
 ) -> Result<PublicMonitoringCardView, ApiError> {
     let visibility = &share.visibility;
+    let projected_telemetry_visible = public_visibility_uses_projected_telemetry(visibility);
     let client_key = share
         .public_client_key(&card.client.id)
         .ok_or_else(|| {
@@ -2053,6 +2206,12 @@ fn public_monitoring_card(
         client_key,
         display_name: card.client.display_name,
         status: card.client.status,
+        projection_pending_since: projected_telemetry_visible
+            .then_some(card.projection_pending_since)
+            .flatten(),
+        projection_checked_at: projected_telemetry_visible
+            .then_some(card.projection_checked_at)
+            .flatten(),
         tags: visibility
             .identity_context
             .then(|| public_identity_tags(card.client.tags)),
@@ -2107,6 +2266,14 @@ fn public_monitoring_card(
                 .collect()
         }),
     })
+}
+
+fn public_visibility_uses_projected_telemetry(visibility: &MonitoringShareVisibilityView) -> bool {
+    visibility.system_information
+        || visibility.resources
+        || visibility.network
+        || visibility.traffic
+        || visibility.ping
 }
 
 fn public_billing_plan(plan: BillingPlanView) -> PublicBillingPlanView {
@@ -2258,18 +2425,26 @@ fn public_network_metric(
     rows: &[TelemetryNetworkRateView],
     rate_expected: bool,
 ) -> PublicNetworkMetricView {
+    // Every interface collected in one agent telemetry envelope has the same
+    // rebased latest_observed_at. Older current rows belong to an interface
+    // absent from the newest sample and must not inflate the current sum.
+    let observed_at = rows.iter().map(|row| row.latest_observed_at.as_str()).max();
     PublicNetworkMetricView {
         rate_expected,
-        rx_bps: (!rows.is_empty()).then(|| rows.iter().map(|row| row.rx_bps_avg).sum()),
-        tx_bps: (!rows.is_empty()).then(|| rows.iter().map(|row| row.tx_bps_avg).sum()),
-        observed_at: rows.iter().map(|row| row.updated_at.clone()).max(),
+        rx_bps: observed_at.map(|latest| {
+            rows.iter()
+                .filter(|row| row.latest_observed_at == latest)
+                .map(|row| row.rx_bps_avg)
+                .sum()
+        }),
+        tx_bps: observed_at.map(|latest| {
+            rows.iter()
+                .filter(|row| row.latest_observed_at == latest)
+                .map(|row| row.tx_bps_avg)
+                .sum()
+        }),
+        observed_at: observed_at.map(str::to_string),
     }
-}
-
-fn network_rate_is_current(row: &TelemetryNetworkRateView, now_unix: u64) -> bool {
-    parse_timestamp_unix(&row.latest_observed_at)
-        .map(|effective_at| now_unix.abs_diff(effective_at) <= CURRENT_NETWORK_RATE_MAX_AGE_SECS)
-        .unwrap_or(false)
 }
 
 fn public_network_points(rows: Vec<TelemetryNetworkRateView>) -> Vec<PublicNetworkPointView> {
@@ -2302,6 +2477,7 @@ pub(super) fn public_traffic_metric(
     PublicTrafficMetricView {
         configured,
         reset_day: configured.then_some(row.reset_day).flatten(),
+        reset_hour: configured.then_some(row.reset_hour).flatten(),
         cycle_start: configured.then_some(row.cycle_start).flatten(),
         cycle_end: configured.then_some(row.cycle_end).flatten(),
         rx_bytes: configured.then_some(row.rx_bytes),
@@ -2791,6 +2967,20 @@ fn validate_monitoring_selector(
         || selector_expression.chars().any(char::is_control)
     {
         return Err(ApiError::bad_request("invalid_selector_expression"));
+    }
+    Ok(())
+}
+
+fn validate_monitoring_share_targets(targets: &[String]) -> Result<(), ApiError> {
+    if targets.is_empty() {
+        return Err(ApiError::bad_request(
+            "monitoring_share_target_selection_required",
+        ));
+    }
+    if targets.len() > MAX_SHARE_TARGETS {
+        return Err(ApiError::bad_request(
+            "monitoring_share_target_count_too_large",
+        ));
     }
     Ok(())
 }

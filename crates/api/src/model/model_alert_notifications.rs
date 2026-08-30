@@ -92,6 +92,10 @@ pub(crate) struct FleetAlertNotificationDeliveryView {
     pub(crate) delivered_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) review_preview_hash: Option<String>,
+    /// Request-local outcome for a reviewed process operation. This is never
+    /// persisted as delivery state; normal list and dry-run responses omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) process_outcome: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

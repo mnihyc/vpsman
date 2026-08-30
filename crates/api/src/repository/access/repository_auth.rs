@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::model::*;
-use crate::repository::{MemoryState, OperatorAuthThrottleRecord, Repository};
+use crate::repository::Repository;
 use crate::state::OperatorAuthThrottleConfig;
 use crate::{
     generate_token, hash_operator_password, normalize_operator_scopes, token_hash, unix_now,
@@ -69,7 +69,6 @@ struct AuthThrottleLockout {
 impl Repository {
     pub(crate) async fn operator_count(&self) -> Result<i64> {
         match self {
-            Self::Memory(memory) => Ok(memory.operators.read().await.len() as i64),
             Self::Postgres(pool) => {
                 let row = sqlx::query("SELECT count(*) AS count FROM operators")
                     .fetch_one(pool)
@@ -142,32 +141,6 @@ impl Repository {
             )
         });
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                if !operators.is_empty() {
-                    anyhow::bail!("operator_already_bootstrapped");
-                }
-                operators.push(operator.clone());
-                drop(operators);
-                memory.sessions.write().await.push(OperatorSessionRecord {
-                    session_id: session.session_id,
-                    access_token_hash: session.access_hash.clone(),
-                    refresh_token_hash: session.refresh_hash.clone(),
-                    operator_id: operator.id,
-                    expires_unix: session.expires_unix,
-                    refresh_expires_unix: session.refresh_expires_unix,
-                    created_unix: session.created_unix,
-                    revoked: false,
-                });
-                if let Some(auth_event) = auth_event {
-                    memory
-                        .audits
-                        .write()
-                        .await
-                        .push(auth_event.audit_log_view());
-                }
-                Ok(session.auth_response(operator.view()))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.bootstrap_operator'))")
@@ -206,50 +179,6 @@ impl Repository {
                 tx.commit().await?;
                 Ok(session.auth_response(operator.view()))
             }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn login_operator(
-        &self,
-        request: &LoginRequest,
-    ) -> Result<Option<AuthResponse>> {
-        let Some(operator) = self.operator_by_username(&request.username).await? else {
-            return Ok(None);
-        };
-        if operator.status != "active" {
-            return Ok(None);
-        }
-        if !verify_operator_password(&request.password, &operator.password_hash)? {
-            return Ok(None);
-        }
-        let matched_totp_step = if operator.totp_enabled {
-            let Some(code) = request.totp_code.as_deref() else {
-                return Ok(None);
-            };
-            let Some(secret) = operator.encrypted_totp_secret() else {
-                return Ok(None);
-            };
-            let secret = match crate::auth_totp::decrypt_totp_secret(&request.password, &secret) {
-                Ok(secret) => secret,
-                Err(_) => return Ok(None),
-            };
-            let Some(step) = crate::auth_totp::matching_totp_step(&secret, code, unix_now()) else {
-                return Ok(None);
-            };
-            if operator
-                .totp_last_accepted_step
-                .is_some_and(|last_step| step <= last_step)
-            {
-                return Ok(None);
-            }
-            Some(step)
-        } else {
-            None
-        };
-        match matched_totp_step {
-            Some(step) => self.issue_totp_login_session(&operator, step, None).await,
-            None => self.issue_session(operator.view()).await.map(Some),
         }
     }
 
@@ -542,14 +471,6 @@ impl Repository {
         ip_key: &str,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now();
-                let throttle = memory.operator_auth_throttle.read().await;
-                Ok(
-                    throttle_bucket_locked(&throttle, "username_ip", username_key, now)
-                        || throttle_bucket_locked(&throttle, "ip", ip_key, now),
-                )
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -582,41 +503,6 @@ impl Repository {
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now();
-                let mut buckets = memory.operator_auth_throttle.write().await;
-                let mut lockouts = Vec::new();
-                if let Some(lockout) = record_memory_throttle_failure(
-                    &mut buckets,
-                    "username_ip",
-                    username_key,
-                    throttle.username_failed_attempt_limit,
-                    throttle.failed_attempt_window_secs,
-                    throttle.lockout_secs,
-                    reason.as_str(),
-                    now,
-                ) {
-                    lockouts.push(lockout);
-                }
-                if let Some(lockout) = record_memory_throttle_failure(
-                    &mut buckets,
-                    "ip",
-                    ip_key,
-                    throttle.ip_failed_attempt_limit,
-                    throttle.failed_attempt_window_secs,
-                    throttle.lockout_secs,
-                    reason.as_str(),
-                    now,
-                ) {
-                    lockouts.push(lockout);
-                }
-                drop(buckets);
-                for lockout in lockouts {
-                    record_memory_auth_lockout_audit(memory, &lockout, reason.as_str(), ip_key)
-                        .await;
-                }
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let mut lockouts = Vec::new();
@@ -662,17 +548,6 @@ impl Repository {
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now();
-                let buckets = memory.operator_auth_throttle.read().await;
-                Ok(throttle_bucket_has_recent_failures(
-                    &buckets,
-                    "username_ip",
-                    username_key,
-                    now,
-                    throttle.failed_attempt_window_secs,
-                ))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -701,11 +576,6 @@ impl Repository {
 
     async fn clear_operator_auth_success(&self, username_key: &str) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let mut buckets = memory.operator_auth_throttle.write().await;
-                buckets.remove(&("username_ip".to_string(), username_key.to_string()));
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username_ip' AND scope_key = $1",
@@ -770,9 +640,6 @@ impl Repository {
             cleared_previous_failures,
         );
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(event.audit_log_view());
-            }
             Self::Postgres(pool) => {
                 insert_operator_auth_event(pool, &event).await?;
             }
@@ -786,41 +653,6 @@ impl Repository {
     ) -> Result<Option<AuthResponse>> {
         let refresh_hash = token_hash(refresh_token);
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now();
-                let operators = memory.operators.read().await;
-                let mut sessions = memory.sessions.write().await;
-                let Some(session_index) = sessions.iter().position(|session| {
-                    session.refresh_token_hash == refresh_hash
-                        && !session.revoked
-                        && session.refresh_expires_unix > now
-                }) else {
-                    return Ok(None);
-                };
-                let operator_id = sessions[session_index].operator_id;
-                let Some(operator) = operators
-                    .iter()
-                    .find(|operator| operator.id == operator_id && operator.status == "active")
-                else {
-                    return Ok(None);
-                };
-                let operator = operator.view();
-                let replacement = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
-                sessions[session_index].revoked = true;
-                sessions.push(OperatorSessionRecord {
-                    session_id: replacement.session_id,
-                    access_token_hash: replacement.access_hash.clone(),
-                    refresh_token_hash: replacement.refresh_hash.clone(),
-                    operator_id: operator.id,
-                    expires_unix: replacement.expires_unix,
-                    refresh_expires_unix: replacement.refresh_expires_unix,
-                    created_unix: replacement.created_unix,
-                    revoked: false,
-                });
-                drop(sessions);
-                drop(operators);
-                Ok(Some(replacement.auth_response(operator)))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -886,31 +718,6 @@ impl Repository {
     ) -> Result<Option<AuthContext>> {
         let access_hash = token_hash(access_token);
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now();
-                let sessions = memory.sessions.read().await;
-                let Some(session) = sessions.iter().find(|session| {
-                    session.access_token_hash == access_hash
-                        && !session.revoked
-                        && session.expires_unix > now
-                }) else {
-                    return Ok(None);
-                };
-                let operator_id = session.operator_id;
-                let session_id = session.session_id;
-                drop(sessions);
-                Ok(memory
-                    .operators
-                    .read()
-                    .await
-                    .iter()
-                    .find(|operator| operator.id == operator_id)
-                    .filter(|operator| operator.status == "active")
-                    .map(|operator| AuthContext {
-                        operator: operator.view(),
-                        session_id: Some(session_id),
-                    }))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -966,13 +773,6 @@ impl Repository {
 
     pub(crate) async fn operator_by_id(&self, id: Uuid) -> Result<Option<OperatorRecord>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .operators
-                .read()
-                .await
-                .iter()
-                .find(|operator| operator.id == id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -1034,13 +834,6 @@ impl Repository {
     ) -> Result<Option<OperatorRecord>> {
         let username = username.trim();
         match self {
-            Self::Memory(memory) => Ok(memory
-                .operators
-                .read()
-                .await
-                .iter()
-                .find(|operator| operator.username == username)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -1098,13 +891,6 @@ impl Repository {
 
     pub(crate) async fn list_operators(&self) -> Result<Vec<OperatorView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .operators
-                .read()
-                .await
-                .iter()
-                .map(OperatorRecord::view)
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1199,27 +985,6 @@ impl Repository {
             "component": "operator-admin-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                if memory
-                    .operators
-                    .read()
-                    .await
-                    .iter()
-                    .any(|existing| existing.username == operator.username)
-                {
-                    anyhow::bail!("operator username already exists");
-                }
-                memory.operators.write().await.push(operator.clone());
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor.operator.id),
-                    action: "operator.created".to_string(),
-                    target: format!("operator:{}", operator.id),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 sqlx::query(
@@ -1288,38 +1053,9 @@ impl Repository {
             "component": "operator-admin-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let Some(index) = operators.iter().position(|operator| {
-                    operator.id == operator_id && operator.status != "deleted"
-                }) else {
-                    return Ok(None);
-                };
-                ensure_memory_active_admin_remains(&operators, operator_id, Some(&role), None)?;
-                let operator = operators
-                    .get_mut(index)
-                    .expect("operator index checked before mutation");
-                operator.role = role;
-                operator.scopes = scopes;
-                operator.session_refresh_ttl_secs = session_refresh_ttl_secs;
-                let view = operator.view();
-                drop(operators);
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor.operator.id),
-                    action: "operator.updated".to_string(),
-                    target: format!("operator:{operator_id}"),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(Some(view))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE")
-                    .execute(&mut *tx)
-                    .await?;
+                lock_postgres_active_admin_invariant(&mut tx).await?;
                 let target = sqlx::query(
                     "SELECT status, role FROM operators WHERE id = $1 AND status <> 'deleted' FOR UPDATE",
                 )
@@ -1405,50 +1141,9 @@ impl Repository {
             "component": "operator-admin-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let mut operators = memory.operators.write().await;
-                let Some(index) = operators.iter().position(|operator| {
-                    operator.id == operator_id
-                        && operator.status != "deleted"
-                        && (status != "active" || operator.status == "disabled")
-                }) else {
-                    return Ok(None);
-                };
-                ensure_memory_active_admin_remains(&operators, operator_id, None, Some(status))?;
-                let operator = operators
-                    .get_mut(index)
-                    .expect("operator index checked before mutation");
-                operator.status = status.to_string();
-                if status == "active" {
-                    operator.disabled_at = None;
-                } else if status == "disabled" {
-                    operator.disabled_at = Some(now.clone());
-                } else {
-                    operator.disabled_at = Some(now.clone());
-                    operator.deleted_at = Some(now.clone());
-                }
-                let view = operator.view();
-                drop(operators);
-                if status != "active" {
-                    revoke_memory_operator_sessions(memory, operator_id).await;
-                }
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor.operator.id),
-                    action: action.to_string(),
-                    target: format!("operator:{operator_id}"),
-                    command_hash: None,
-                    metadata,
-                    created_at: now,
-                });
-                Ok(Some(view))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE")
-                    .execute(&mut *tx)
-                    .await?;
+                lock_postgres_active_admin_invariant(&mut tx).await?;
                 let target = sqlx::query(
                     r#"
                     SELECT status, role
@@ -1549,34 +1244,6 @@ impl Repository {
             "component": "operator-admin-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let Some(operator) = operators
-                    .iter_mut()
-                    .find(|operator| operator.id == operator_id && operator.status != "deleted")
-                else {
-                    return Ok(None);
-                };
-                operator.password_hash = password_hash;
-                operator.totp_enabled = false;
-                operator.totp_secret_ciphertext_hex = None;
-                operator.totp_secret_nonce_hex = None;
-                operator.totp_secret_salt_hex = None;
-                operator.totp_last_accepted_step = None;
-                let view = operator.view();
-                drop(operators);
-                revoke_memory_operator_sessions(memory, operator_id).await;
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor.operator.id),
-                    action: "operator.password_reset".to_string(),
-                    target: format!("operator:{operator_id}"),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(Some(view))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -1642,33 +1309,6 @@ impl Repository {
             "component": "operator-admin-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let Some(operator) = operators
-                    .iter_mut()
-                    .find(|operator| operator.id == operator_id && operator.status != "deleted")
-                else {
-                    return Ok(None);
-                };
-                operator.totp_enabled = false;
-                operator.totp_secret_ciphertext_hex = None;
-                operator.totp_secret_nonce_hex = None;
-                operator.totp_secret_salt_hex = None;
-                operator.totp_last_accepted_step = None;
-                let view = operator.view();
-                drop(operators);
-                revoke_memory_operator_sessions(memory, operator_id).await;
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor.operator.id),
-                    action: "operator.totp_cleared".to_string(),
-                    target: format!("operator:{operator_id}"),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(Some(view))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -1732,28 +1372,6 @@ impl Repository {
             "component": "operator-preferences-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let Some(operator) = operators
-                    .iter_mut()
-                    .find(|operator| operator.id == actor.operator.id)
-                else {
-                    anyhow::bail!("operator not found");
-                };
-                operator.preferences = preferences.clone();
-                let view = operator.view();
-                drop(operators);
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(actor.operator.id),
-                    action: "operator.preferences.updated".to_string(),
-                    target: format!("operator:{}", actor.operator.id),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(view)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -1804,30 +1422,6 @@ impl Repository {
     ) -> Result<Vec<OperatorAuthEventView>> {
         let limit = i64::from(query.limit.unwrap_or(100)).clamp(1, 200);
         match self {
-            Self::Memory(memory) => {
-                let audits = memory.audits.read().await;
-                let mut rows = audits
-                    .iter()
-                    .filter(|audit| is_operator_auth_event_action(&audit.action))
-                    .map(operator_auth_event_from_audit)
-                    .collect::<Result<Vec<_>>>()?;
-                rows.retain(|event| {
-                    query
-                        .operator_id
-                        .is_none_or(|operator_id| event.operator_id == Some(operator_id))
-                        && query
-                            .username
-                            .as_ref()
-                            .is_none_or(|username| event.username == username.trim())
-                        && query
-                            .result
-                            .as_ref()
-                            .is_none_or(|result| event.result == result.trim())
-                });
-                rows.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-                rows.truncate(limit as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let operator_id = query.operator_id.map(|id| id.to_string());
                 let rows = sqlx::query(
@@ -1884,35 +1478,6 @@ impl Repository {
     ) -> Result<Vec<OperatorSessionView>> {
         let limit = limit.clamp(1, 200);
         match self {
-            Self::Memory(memory) => {
-                let operators = memory.operators.read().await.clone();
-                let mut sessions = memory
-                    .sessions
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|session| {
-                        let operator = operators
-                            .iter()
-                            .find(|operator| operator.id == session.operator_id)?;
-                        Some(OperatorSessionView {
-                            id: session.session_id,
-                            operator_id: operator.id,
-                            operator_username: operator.username.clone(),
-                            operator_role: operator.role.clone(),
-                            current: session.session_id == current_session_id,
-                            created_at: session.created_unix.to_string(),
-                            expires_at: session.expires_unix.to_string(),
-                            refresh_expires_at: session.refresh_expires_unix.to_string(),
-                            revoked: session.revoked,
-                            revoked_at: None,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                sessions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-                sessions.truncate(limit as usize);
-                Ok(sessions)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1962,34 +1527,6 @@ impl Repository {
         current_session_id: Uuid,
     ) -> Result<Option<OperatorSessionView>> {
         match self {
-            Self::Memory(memory) => {
-                let operators = memory.operators.read().await.clone();
-                let sessions = memory.sessions.read().await;
-                let Some(session) = sessions
-                    .iter()
-                    .find(|session| session.session_id == session_id)
-                else {
-                    return Ok(None);
-                };
-                let Some(operator) = operators
-                    .iter()
-                    .find(|operator| operator.id == session.operator_id)
-                else {
-                    return Ok(None);
-                };
-                Ok(Some(OperatorSessionView {
-                    id: session.session_id,
-                    operator_id: operator.id,
-                    operator_username: operator.username.clone(),
-                    operator_role: operator.role.clone(),
-                    current: session.session_id == current_session_id,
-                    created_at: session.created_unix.to_string(),
-                    expires_at: session.expires_unix.to_string(),
-                    refresh_expires_at: session.refresh_expires_unix.to_string(),
-                    revoked: session.revoked,
-                    revoked_at: None,
-                }))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -2039,20 +1576,6 @@ impl Repository {
             .audit_session_id()
             .context("operator session revoke requires an authenticated session")?;
         match self {
-            Self::Memory(memory) => {
-                let mut sessions = memory.sessions.write().await;
-                let Some(session) = sessions
-                    .iter_mut()
-                    .find(|session| session.session_id == session_id)
-                else {
-                    return Ok(None);
-                };
-                session.revoked = true;
-                drop(sessions);
-                record_session_revoke_audit(memory, session_id, actor).await;
-                self.operator_session_by_id(session_id, current_session_id)
-                    .await
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -2145,40 +1668,6 @@ impl Repository {
     ) -> Result<bool> {
         let access_hash = token_hash(access_token);
         match self {
-            Self::Memory(memory) => {
-                let (session_id, operator_id, newly_revoked) = {
-                    let mut sessions = memory.sessions.write().await;
-                    let Some(session) = sessions
-                        .iter_mut()
-                        .find(|session| session.access_token_hash == access_hash)
-                    else {
-                        return Ok(false);
-                    };
-                    let newly_revoked = !session.revoked;
-                    session.revoked = true;
-                    (session.session_id, session.operator_id, newly_revoked)
-                };
-                if newly_revoked {
-                    let operator_username = memory
-                        .operators
-                        .read()
-                        .await
-                        .iter()
-                        .find(|operator| operator.id == operator_id)
-                        .map(|operator| operator.username.clone())
-                        .unwrap_or_default();
-                    record_session_logout_audit(
-                        memory,
-                        session_id,
-                        operator_id,
-                        &operator_username,
-                        remote_ip,
-                        user_agent,
-                    )
-                    .await;
-                }
-                Ok(true)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -2241,18 +1730,6 @@ impl Repository {
         let session = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
 
         match self {
-            Self::Memory(memory) => {
-                memory.sessions.write().await.push(OperatorSessionRecord {
-                    session_id: session.session_id,
-                    access_token_hash: session.access_hash.clone(),
-                    refresh_token_hash: session.refresh_hash.clone(),
-                    operator_id: operator.id,
-                    expires_unix: session.expires_unix,
-                    refresh_expires_unix: session.refresh_expires_unix,
-                    created_unix: session.created_unix,
-                    revoked: false,
-                });
-            }
             Self::Postgres(pool) => {
                 insert_operator_session(pool, operator.id, &session).await?;
             }
@@ -2267,51 +1744,6 @@ impl Repository {
         context: SuccessfulOperatorAuthContext<'_>,
     ) -> Result<Option<AuthResponse>> {
         match self {
-            Self::Memory(memory) => {
-                let operators = memory.operators.read().await;
-                let Some(operator) = operators.iter().find(|operator| {
-                    operator.id == verified_operator.id
-                        && operator.status == "active"
-                        && !operator.totp_enabled
-                        && operator.password_hash == verified_operator.password_hash
-                }) else {
-                    return Ok(None);
-                };
-                let operator = operator.view();
-                let session = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
-                let mut sessions = memory.sessions.write().await;
-                let mut throttle = memory.operator_auth_throttle.write().await;
-                sessions.push(OperatorSessionRecord {
-                    session_id: session.session_id,
-                    access_token_hash: session.access_hash.clone(),
-                    refresh_token_hash: session.refresh_hash.clone(),
-                    operator_id: operator.id,
-                    expires_unix: session.expires_unix,
-                    refresh_expires_unix: session.refresh_expires_unix,
-                    created_unix: session.created_unix,
-                    revoked: false,
-                });
-                throttle.remove(&("username_ip".to_string(), context.username_key.to_string()));
-                drop(throttle);
-                drop(sessions);
-                drop(operators);
-                let event = PreparedOperatorAuthEvent::new(
-                    Some((
-                        operator.id,
-                        operator.username.as_str(),
-                        operator.role.as_str(),
-                    )),
-                    context.attempted_username,
-                    "success",
-                    None,
-                    context.remote_ip,
-                    context.user_agent,
-                    Some(session.session_id),
-                    context.cleared_previous_failures,
-                );
-                memory.audits.write().await.push(event.audit_log_view());
-                Ok(Some(session.auth_response(operator)))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -2376,62 +1808,6 @@ impl Repository {
     ) -> Result<Option<AuthResponse>> {
         let session = PreparedOperatorSession::new(verified_operator.session_refresh_ttl_secs);
         match self {
-            Self::Memory(memory) => {
-                let mut operators = memory.operators.write().await;
-                let mut sessions = memory.sessions.write().await;
-                let mut throttle = if success_context.is_some() {
-                    Some(memory.operator_auth_throttle.write().await)
-                } else {
-                    None
-                };
-                let Some(operator) = operators.iter_mut().find(|operator| {
-                    operator.id == verified_operator.id
-                        && operator.status == "active"
-                        && operator.totp_enabled
-                        && operator.password_hash == verified_operator.password_hash
-                        && operator.totp_secret_ciphertext_hex
-                            == verified_operator.totp_secret_ciphertext_hex
-                        && operator.totp_secret_nonce_hex == verified_operator.totp_secret_nonce_hex
-                        && operator.totp_secret_salt_hex == verified_operator.totp_secret_salt_hex
-                        && operator
-                            .totp_last_accepted_step
-                            .is_none_or(|last_step| matched_step > last_step)
-                }) else {
-                    return Ok(None);
-                };
-                operator.totp_last_accepted_step = Some(matched_step);
-                let view = operator.view();
-                sessions.push(OperatorSessionRecord {
-                    session_id: session.session_id,
-                    access_token_hash: session.access_hash.clone(),
-                    refresh_token_hash: session.refresh_hash.clone(),
-                    operator_id: operator.id,
-                    expires_unix: session.expires_unix,
-                    refresh_expires_unix: session.refresh_expires_unix,
-                    created_unix: session.created_unix,
-                    revoked: false,
-                });
-                if let (Some(context), Some(throttle)) = (success_context, throttle.as_mut()) {
-                    throttle.remove(&("username_ip".to_string(), context.username_key.to_string()));
-                }
-                drop(throttle);
-                drop(sessions);
-                drop(operators);
-                if let Some(context) = success_context {
-                    let event = PreparedOperatorAuthEvent::new(
-                        Some((view.id, view.username.as_str(), view.role.as_str())),
-                        context.attempted_username,
-                        "success",
-                        None,
-                        context.remote_ip,
-                        context.user_agent,
-                        Some(session.session_id),
-                        context.cleared_previous_failures,
-                    );
-                    memory.audits.write().await.push(event.audit_log_view());
-                }
-                Ok(Some(session.auth_response(view)))
-            }
             Self::Postgres(pool) => {
                 let encrypted = verified_operator
                     .encrypted_totp_secret()
@@ -2546,43 +1922,6 @@ pub(crate) fn postgres_totp_step(row: &sqlx::postgres::PgRow) -> Result<Option<u
         .map_err(Into::into)
 }
 
-async fn revoke_memory_operator_sessions(memory: &MemoryState, operator_id: Uuid) {
-    for session in memory.sessions.write().await.iter_mut() {
-        if session.operator_id == operator_id {
-            session.revoked = true;
-        }
-    }
-}
-
-fn is_operator_auth_event_action(action: &str) -> bool {
-    matches!(
-        action,
-        "operator_auth.login_success"
-            | "operator_auth.login_failure"
-            | "operator_auth.login_throttled"
-    )
-}
-
-fn operator_auth_event_from_audit(audit: &AuditLogView) -> Result<OperatorAuthEventView> {
-    if !is_operator_auth_event_action(&audit.action) {
-        anyhow::bail!("not operator auth event");
-    }
-    Ok(OperatorAuthEventView {
-        id: audit.id,
-        operator_id: json_uuid(&audit.metadata, "operator_id")?,
-        username: json_string(&audit.metadata, "operator_username")
-            .or_else(|| json_string(&audit.metadata, "attempted_username"))
-            .context("operator auth audit missing canonical username")?,
-        result: json_string(&audit.metadata, "result")
-            .context("operator auth audit missing canonical result")?,
-        reason: json_string(&audit.metadata, "reason"),
-        remote_ip: json_string(&audit.metadata, "remote_ip"),
-        user_agent: json_string(&audit.metadata, "user_agent"),
-        session_id: json_uuid(&audit.metadata, "operator_session_id")?,
-        created_at: audit.created_at.clone(),
-    })
-}
-
 fn operator_auth_event_from_row(row: &sqlx::postgres::PgRow) -> Result<OperatorAuthEventView> {
     let metadata: serde_json::Value = row.try_get("metadata")?;
     Ok(OperatorAuthEventView {
@@ -2680,25 +2019,12 @@ impl PreparedOperatorAuthEvent {
             metadata,
         }
     }
-
-    fn audit_log_view(&self) -> AuditLogView {
-        AuditLogView {
-            id: self.id,
-            actor_id: self.actor_id,
-            action: self.action.to_string(),
-            target: self.target.clone(),
-            command_hash: None,
-            metadata: self.metadata.clone(),
-            created_at: unix_now().to_string(),
-        }
-    }
 }
 
 struct PreparedOperatorSession {
     access_token: String,
     refresh_token: String,
     session_id: Uuid,
-    created_unix: u64,
     expires_unix: u64,
     refresh_expires_unix: u64,
     access_hash: String,
@@ -2722,7 +2048,6 @@ impl PreparedOperatorSession {
             access_token,
             refresh_token,
             session_id,
-            created_unix,
             expires_unix,
             refresh_expires_unix,
             access_hash,
@@ -2855,76 +2180,6 @@ fn normalize_auth_throttle_ip(remote_ip: &str) -> String {
     }
 }
 
-fn throttle_bucket_locked(
-    buckets: &std::collections::HashMap<(String, String), OperatorAuthThrottleRecord>,
-    scope_kind: &str,
-    scope_key: &str,
-    now: u64,
-) -> bool {
-    buckets
-        .get(&(scope_kind.to_string(), scope_key.to_string()))
-        .and_then(|bucket| bucket.locked_until_unix)
-        .is_some_and(|locked_until| locked_until > now)
-}
-
-fn throttle_bucket_has_recent_failures(
-    buckets: &std::collections::HashMap<(String, String), OperatorAuthThrottleRecord>,
-    scope_kind: &str,
-    scope_key: &str,
-    now: u64,
-    window_secs: u64,
-) -> bool {
-    buckets
-        .get(&(scope_kind.to_string(), scope_key.to_string()))
-        .is_some_and(|bucket| {
-            bucket.failed_attempts > 0
-                && (now.saturating_sub(bucket.window_started_unix) < window_secs
-                    || bucket
-                        .locked_until_unix
-                        .is_some_and(|locked_until| locked_until > now))
-        })
-}
-
-fn record_memory_throttle_failure(
-    buckets: &mut std::collections::HashMap<(String, String), OperatorAuthThrottleRecord>,
-    scope_kind: &'static str,
-    scope_key: &str,
-    attempt_limit: i64,
-    window_secs: u64,
-    lockout_secs: u64,
-    reason: &str,
-    now: u64,
-) -> Option<AuthThrottleLockout> {
-    let key = (scope_kind.to_string(), scope_key.to_string());
-    let bucket = buckets
-        .entry(key)
-        .or_insert_with(|| OperatorAuthThrottleRecord {
-            window_started_unix: now,
-            ..OperatorAuthThrottleRecord::default()
-        });
-    let was_locked = bucket
-        .locked_until_unix
-        .is_some_and(|locked_until| locked_until > now);
-    if now.saturating_sub(bucket.window_started_unix) >= window_secs {
-        bucket.failed_attempts = 0;
-        bucket.window_started_unix = now;
-        bucket.locked_until_unix = None;
-    }
-    bucket.failed_attempts = bucket.failed_attempts.saturating_add(1);
-    bucket.last_failure_reason = Some(reason.to_string());
-    if bucket.failed_attempts >= attempt_limit {
-        bucket.locked_until_unix = Some(now.saturating_add(lockout_secs));
-    }
-    let is_locked = bucket
-        .locked_until_unix
-        .is_some_and(|locked_until| locked_until > now);
-    (is_locked && !was_locked).then(|| AuthThrottleLockout {
-        scope_kind,
-        scope_key: scope_key.to_string(),
-        failed_attempts: bucket.failed_attempts,
-    })
-}
-
 async fn record_postgres_throttle_failure(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     scope_kind: &'static str,
@@ -3032,23 +2287,6 @@ async fn record_postgres_throttle_failure(
     }))
 }
 
-async fn record_memory_auth_lockout_audit(
-    memory: &crate::repository::MemoryState,
-    lockout: &AuthThrottleLockout,
-    reason: &str,
-    remote_ip: &str,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: None,
-        action: "operator_auth.lockout_created".to_string(),
-        target: "auth:login".to_string(),
-        command_hash: None,
-        metadata: auth_lockout_metadata(lockout, reason, remote_ip),
-        created_at: unix_now().to_string(),
-    });
-}
-
 async fn insert_postgres_auth_lockout_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     lockout: &AuthThrottleLockout,
@@ -3089,32 +2327,6 @@ fn auth_lockout_metadata(
     })
 }
 
-fn ensure_memory_active_admin_remains(
-    operators: &[OperatorRecord],
-    operator_id: Uuid,
-    next_role: Option<&str>,
-    next_status: Option<&str>,
-) -> Result<()> {
-    let Some(operator) = operators.iter().find(|operator| operator.id == operator_id) else {
-        return Ok(());
-    };
-    let active_admin_count = operators
-        .iter()
-        .filter(|operator| is_active_admin(&operator.status, &operator.role))
-        .count();
-    let will_remain_active_admin = is_active_admin(
-        next_status.unwrap_or(operator.status.as_str()),
-        next_role.unwrap_or(operator.role.as_str()),
-    );
-    if is_active_admin(&operator.status, &operator.role)
-        && !will_remain_active_admin
-        && active_admin_count <= 1
-    {
-        anyhow::bail!("last_active_admin_required");
-    }
-    Ok(())
-}
-
 async fn ensure_postgres_active_admin_remains(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     _operator_id: Uuid,
@@ -3142,6 +2354,20 @@ async fn ensure_postgres_active_admin_remains(
     Ok(())
 }
 
+async fn lock_postgres_active_admin_invariant(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    // Only role/status transitions can reduce the active-admin set. Serialize
+    // that exact invariant without blocking unrelated operator credential,
+    // preference, authentication, or TOTP writes.
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('vpsman:operator-active-admin-invariant', 0))",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn is_active_admin(status: &str, role: &str) -> bool {
     status == "active" && role == "admin"
 }
@@ -3160,62 +2386,3 @@ pub(crate) fn parse_operator_preferences(value: serde_json::Value) -> OperatorPr
         .unwrap_or_default()
         .normalized()
 }
-
-async fn record_session_revoke_audit(
-    memory: &crate::repository::MemoryState,
-    session_id: Uuid,
-    actor: &AuthContext,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(actor.operator.id),
-        action: "operator_session.revoked".to_string(),
-        target: format!("operator-session:{session_id}"),
-        command_hash: None,
-        metadata: serde_json::json!({
-            "revoked_operator_session_id": session_id,
-            "operator_id": actor.operator.id,
-            "operator_username": actor.operator.username,
-            "operator_role": actor.operator.role,
-            "operator_session_id": actor.audit_session_id(),
-            "result": "succeeded",
-            "origin_kind": "operator_request",
-            "component": "operator-session-controller",
-        }),
-        created_at: unix_now().to_string(),
-    });
-}
-
-async fn record_session_logout_audit(
-    memory: &crate::repository::MemoryState,
-    session_id: Uuid,
-    operator_id: Uuid,
-    operator_username: &str,
-    remote_ip: &str,
-    user_agent: Option<&str>,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator_id),
-        action: "operator_session.logged_out".to_string(),
-        target: format!("operator-session:{session_id}"),
-        command_hash: None,
-        metadata: serde_json::json!({
-            "operator_id": operator_id,
-            "operator_username": operator_username,
-            "operator_session_id": session_id,
-            "remote_ip": remote_ip,
-            "user_agent": user_agent.unwrap_or(""),
-            "revocation_scope": "current_session",
-            "revoked_access_and_refresh": true,
-            "result": "succeeded",
-            "origin_kind": "operator_request",
-            "component": "operator-session-controller",
-        }),
-        created_at: unix_now().to_string(),
-    });
-}
-
-#[cfg(test)]
-#[path = "tests_repository_auth.rs"]
-mod audit_tests;

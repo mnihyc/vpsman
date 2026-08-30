@@ -64,7 +64,6 @@ pub(crate) enum ChildCleanupPolicy {
     DirectChild,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_child_with_bounded_output(
     command: tokio::process::Command,
     max_timeout_secs: u64,
@@ -122,7 +121,7 @@ pub(crate) async fn run_child_with_input_bounded_output_cancelable(
     .await
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) async fn run_child_with_streaming_output(
     command: tokio::process::Command,
     max_timeout_secs: u64,
@@ -162,7 +161,7 @@ pub(crate) async fn run_child_with_streaming_output_cancelable(
     .await
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) async fn run_pty_with_bounded_output(
     command: tokio::process::Command,
     max_timeout_secs: u64,
@@ -198,7 +197,7 @@ pub(crate) async fn run_pty_with_bounded_output_cancelable(
     .await
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) async fn run_pty_with_streaming_output(
     command: tokio::process::Command,
     max_timeout_secs: u64,

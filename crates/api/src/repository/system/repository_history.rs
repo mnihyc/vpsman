@@ -1,36 +1,39 @@
-use std::{
-    cmp::Reverse,
-    collections::{HashMap, HashSet},
-};
-
 use anyhow::{ensure, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
+use vpsman_server_core::{
+    preview_traffic_terminal_retention, process_traffic_terminal_retention_page,
+};
 
 use crate::{
-    model::{AuditLogView, AuthContext, BackupRequestStatus},
+    model::AuthContext,
     model_alert_policies::{TrafficCounterRollupRecord, TrafficCounterSampleRecord},
     model_history::{
-        HistoryDomain, HistoryRetentionPolicyView, HistoryRetentionPruneOutcome,
+        HistoryRetentionDomain, HistoryRetentionPolicyView, HistoryRetentionPruneOutcome,
         HistoryRetentionPrunePlan, UpsertHistoryRetentionPolicyRequest,
     },
     repository::Repository,
+    repository_artifact_deletions::{
+        finish_owned_artifact_deletion_in_tx, lock_owned_artifact_deletion_in_tx,
+        ArtifactDeletionOwner,
+    },
     unix_now,
 };
+
+const TELEMETRY_RETENTION_WAKE_CHANNEL: &str = "vpsman_telemetry_retention";
 
 impl Repository {
     pub(crate) async fn list_history_retention_policies(
         &self,
     ) -> Result<Vec<HistoryRetentionPolicyView>> {
-        let mut policies = HistoryDomain::ALL
+        let mut policies = HistoryRetentionDomain::ALL
             .iter()
             .copied()
             .map(default_policy)
             .collect::<Vec<_>>();
         let stored = match self {
-            Self::Memory(memory) => memory.history_retention_policies.read().await.clone(),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -76,7 +79,7 @@ impl Repository {
             request.confirmed,
             "history_retention_update_requires_confirmation"
         );
-        let domain = HistoryDomain::from_str(&request.domain)
+        let domain = HistoryRetentionDomain::from_str(&request.domain)
             .ok_or_else(|| anyhow::anyhow!("invalid_history_retention_domain"))?;
         let mut policy = self
             .list_history_retention_policies()
@@ -84,6 +87,8 @@ impl Repository {
             .into_iter()
             .find(|policy| policy.domain == domain.as_str())
             .unwrap_or_else(|| default_policy(domain));
+        let previous_enabled = policy.enabled;
+        let previous_retention_days = policy.retention_days;
         if let Some(retention_days) = request.retention_days {
             ensure!(
                 (domain.minimum_retention_days()..=3650).contains(&retention_days),
@@ -99,6 +104,10 @@ impl Repository {
             policy.prune_limit = prune_limit;
         }
         if let Some(enabled) = request.enabled {
+            ensure!(
+                enabled || domain.supports_disable(),
+                "history_retention_domain_must_remain_enabled"
+            );
             policy.enabled = enabled;
         }
         if let Some(metadata_only) = request.metadata_only {
@@ -119,38 +128,6 @@ impl Repository {
         policy.built_in_default = false;
 
         match self {
-            Self::Memory(memory) => {
-                let mut policies = memory.history_retention_policies.write().await;
-                if let Some(existing) = policies
-                    .iter_mut()
-                    .find(|stored| stored.domain == policy.domain)
-                {
-                    *existing = policy.clone();
-                } else {
-                    policies.push(policy.clone());
-                }
-                memory.audits.write().await.push(history_retention_audit(
-                    "history_retention.policy_updated",
-                    &policy.domain,
-                    operator,
-                    json!({
-                        "domain": &policy.domain,
-                        "retention_days": policy.retention_days,
-                        "prune_limit": policy.prune_limit,
-                        "enabled": policy.enabled,
-                        "metadata_only": policy.metadata_only,
-                        "export_enabled": policy.export_enabled,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "history-retention-controller",
-                    }),
-                    policy.updated_at.clone(),
-                ));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -220,6 +197,26 @@ impl Repository {
                 }))
                 .execute(&mut *tx)
                 .await?;
+                if history_retention_policy_advances_worker_frontier(
+                    domain,
+                    previous_enabled,
+                    previous_retention_days,
+                    policy.enabled,
+                    policy.retention_days,
+                ) {
+                    sqlx::query("SELECT pg_notify($1, $2)")
+                        .bind(TELEMETRY_RETENTION_WAKE_CHANNEL)
+                        .bind(
+                            json!({
+                                "owner": "history_retention",
+                                "effect": "retention_policy_changed",
+                                "domain": domain.as_str(),
+                            })
+                            .to_string(),
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 tx.commit().await?;
             }
         }
@@ -240,252 +237,6 @@ impl Repository {
             });
         }
         match self {
-            Self::Memory(memory) => {
-                let limit = plan.prune_limit as usize;
-                match plan.domain {
-                    HistoryDomain::AuditLogs => {
-                        let matched_rows =
-                            prune_memory_vec(&memory.audits, cutoff_unix, limit, dry_run, |row| {
-                                &row.created_at
-                            })
-                            .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::TelemetrySamples => {
-                        let matched_rows = prune_memory_telemetry_samples(
-                            &memory.telemetry_samples,
-                            &memory.telemetry_ping_source_checks,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                        )
-                        .await;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::TelemetryRollups => {
-                        let matched_rows = prune_memory_bucket_vec(
-                            &memory.telemetry_rollups,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                            |row| &row.bucket_start,
-                            |row| row.bucket_secs,
-                        )
-                        .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::TelemetryNetworkRates => {
-                        let matched_rows = prune_memory_bucket_vec(
-                            &memory.telemetry_network_rates,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                            |row| &row.bucket_start,
-                            |row| row.bucket_secs,
-                        )
-                        .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::TelemetryPingRollups => {
-                        let matched_rows = prune_memory_bucket_vec(
-                            &memory.telemetry_ping_rollups,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                            |row| &row.bucket_start,
-                            |row| row.bucket_secs,
-                        )
-                        .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::TrafficCounterSamples => {
-                        let matched_rows = prune_memory_traffic_history(
-                            &memory.traffic_counter_samples,
-                            &memory.traffic_counter_rollups,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                        )
-                        .await;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::SystemMetricRollups => {
-                        let matched_rows = prune_memory_bucket_vec(
-                            &memory.system_metric_rollups,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                            |row| &row.bucket_start,
-                            |row| row.bucket_secs,
-                        )
-                        .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::JobOutputs => {
-                        let mut rows = memory.job_outputs.write().await;
-                        let mut matched_indices = rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, row)| timestamp_before(&row.created_at, cutoff_unix))
-                            .map(|(index, row)| (index, row.artifact_object_key.clone()))
-                            .take(limit)
-                            .collect::<Vec<_>>();
-                        let object_keys = matched_indices
-                            .iter()
-                            .filter_map(|(_, object_key)| object_key.clone())
-                            .collect::<Vec<_>>();
-                        let matched_rows = matched_indices.len() as i64;
-                        if !dry_run {
-                            matched_indices.sort_unstable_by_key(|(index, _)| Reverse(*index));
-                            for (index, _) in matched_indices {
-                                rows.remove(index);
-                            }
-                        }
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys,
-                        })
-                    }
-                    HistoryDomain::BackupArtifacts => {
-                        let mut rows = memory.backup_artifacts.write().await;
-                        let mut matched_indices = rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, row)| timestamp_before(&row.created_at, cutoff_unix))
-                            .map(|(index, row)| (index, row.object_key.clone()))
-                            .take(limit)
-                            .collect::<Vec<_>>();
-                        let object_keys = matched_indices
-                            .iter()
-                            .map(|(_, object_key)| object_key.clone())
-                            .collect::<Vec<_>>();
-                        let matched_rows = matched_indices.len() as i64;
-                        if !dry_run {
-                            matched_indices.sort_unstable_by_key(|(index, _)| Reverse(*index));
-                            for (index, _) in matched_indices {
-                                rows.remove(index);
-                            }
-                        }
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys,
-                        })
-                    }
-                    HistoryDomain::NetworkObservations => {
-                        let matched_rows = prune_memory_vec(
-                            &memory.network_observations,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                            |row| &row.observed_at,
-                        )
-                        .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::TopologyHistory => {
-                        let mut rows = memory.network_observations.write().await;
-                        let mut matched_indices = rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, row)| {
-                                (row.plan_name.is_some() || row.interface_name.is_some())
-                                    && timestamp_before(&row.observed_at, cutoff_unix)
-                            })
-                            .map(|(index, _)| index)
-                            .take(limit)
-                            .collect::<Vec<_>>();
-                        let matched_rows = matched_indices.len() as i64;
-                        if !dry_run {
-                            matched_indices.sort_unstable_by_key(|index| Reverse(*index));
-                            for index in matched_indices {
-                                rows.remove(index);
-                            }
-                        }
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::ClientStatusHistory => {
-                        let matched_rows = prune_memory_vec(
-                            &memory.client_status_history,
-                            cutoff_unix,
-                            limit,
-                            dry_run,
-                            |row| &row.created_at,
-                        )
-                        .await?;
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                    HistoryDomain::GatewaySessions => {
-                        let mut rows = memory.gateway_sessions.write().await;
-                        let mut matched_indices = rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, row)| row.status != "active")
-                            .filter(|(_, row)| {
-                                timestamp_before(
-                                    row.ended_at.as_deref().unwrap_or(&row.last_seen_at),
-                                    cutoff_unix,
-                                )
-                            })
-                            .map(|(index, _)| index)
-                            .take(limit)
-                            .collect::<Vec<_>>();
-                        let matched_rows = matched_indices.len() as i64;
-                        if !dry_run {
-                            matched_indices.sort_unstable_by_key(|index| Reverse(*index));
-                            for index in matched_indices {
-                                rows.remove(index);
-                            }
-                        }
-                        Ok(HistoryRetentionPruneOutcome {
-                            matched_rows,
-                            pruned_rows: if dry_run { 0 } else { matched_rows },
-                            object_keys: Vec::new(),
-                        })
-                    }
-                }
-            }
             Self::Postgres(pool) => {
                 prune_postgres_history_domain(
                     pool,
@@ -507,37 +258,7 @@ impl Repository {
         if !plan.enabled {
             return Ok(Vec::new());
         }
-        let limit = plan.prune_limit as usize;
         match self {
-            Self::Memory(memory) => match plan.domain {
-                HistoryDomain::JobOutputs => {
-                    let rows = memory.job_outputs.read().await;
-                    Ok(rows
-                        .iter()
-                        .filter(|row| timestamp_before(&row.created_at, cutoff_unix))
-                        .take(limit)
-                        .map(|row| HistoryRetentionObjectCandidate::JobOutput {
-                            job_id: row.job_id,
-                            client_id: row.client_id.clone(),
-                            seq: row.seq,
-                            object_key: row.artifact_object_key.clone(),
-                        })
-                        .collect())
-                }
-                HistoryDomain::BackupArtifacts => {
-                    let rows = memory.backup_artifacts.read().await;
-                    Ok(rows
-                        .iter()
-                        .filter(|row| timestamp_before(&row.created_at, cutoff_unix))
-                        .take(limit)
-                        .map(|row| HistoryRetentionObjectCandidate::BackupArtifact {
-                            artifact_id: row.id,
-                            object_key: row.object_key.clone(),
-                        })
-                        .collect())
-                }
-                _ => Ok(Vec::new()),
-            },
             Self::Postgres(pool) => {
                 list_postgres_history_retention_object_candidates(
                     pool,
@@ -555,39 +276,6 @@ impl Repository {
         candidate: &HistoryRetentionObjectCandidate,
     ) -> Result<i64> {
         match self {
-            Self::Memory(memory) => match candidate {
-                HistoryRetentionObjectCandidate::JobOutput {
-                    job_id,
-                    client_id,
-                    seq,
-                    ..
-                } => {
-                    let mut rows = memory.job_outputs.write().await;
-                    let before = rows.len();
-                    rows.retain(|row| {
-                        row.job_id != *job_id || row.client_id != *client_id || row.seq != *seq
-                    });
-                    Ok((before.saturating_sub(rows.len())) as i64)
-                }
-                HistoryRetentionObjectCandidate::BackupArtifact { artifact_id, .. } => {
-                    {
-                        let mut requests = memory.backup_requests.write().await;
-                        for request in requests
-                            .iter_mut()
-                            .filter(|request| request.artifact_id == Some(*artifact_id))
-                        {
-                            request.artifact_id = None;
-                            request.status = BackupRequestStatus::RequestedMetadataOnly
-                                .as_str()
-                                .to_string();
-                        }
-                    }
-                    let mut rows = memory.backup_artifacts.write().await;
-                    let before = rows.len();
-                    rows.retain(|row| row.id != *artifact_id);
-                    Ok((before.saturating_sub(rows.len())) as i64)
-                }
-            },
             Self::Postgres(pool) => {
                 prune_postgres_history_retention_object_candidate(pool, candidate).await
             }
@@ -607,49 +295,22 @@ impl Repository {
         Ok(pruned_rows)
     }
 
-    pub(crate) async fn begin_history_retention_object_delete(
-        &self,
-        candidate: &HistoryRetentionObjectCandidate,
-    ) -> Result<bool> {
-        let Some(object_key) = candidate.object_key() else {
-            return Ok(false);
-        };
-        match self {
-            Self::Memory(_) => Ok(true),
-            Self::Postgres(pool) => {
-                Repository::mark_server_artifact_deleting_in_pool(pool, object_key).await
-            }
-        }
-    }
-
     pub(crate) async fn finalize_history_retention_object_delete(
         &self,
         candidate: &HistoryRetentionObjectCandidate,
+        owner: &ArtifactDeletionOwner,
     ) -> Result<i64> {
+        ensure!(
+            owner.source_kind == "history_retention"
+                && owner.source_id == candidate.source_id()
+                && owner.source_revision == candidate.source_revision()
+                && owner.source_identity == candidate.deletion_identity()
+                && candidate.object_key() == Some(owner.object_key.as_str()),
+            "history-retention artifact deletion review changed"
+        );
         match self {
-            Self::Memory(_) => {
-                self.prune_history_retention_object_candidate(candidate)
-                    .await
-            }
             Self::Postgres(pool) => {
-                finalize_postgres_history_retention_object_delete(pool, candidate).await
-            }
-        }
-    }
-
-    pub(crate) async fn mark_history_retention_object_delete_failed(
-        &self,
-        candidate: &HistoryRetentionObjectCandidate,
-        error: &str,
-    ) -> Result<()> {
-        let Some(object_key) = candidate.object_key() else {
-            return Ok(());
-        };
-        match self {
-            Self::Memory(_) => Ok(()),
-            Self::Postgres(pool) => {
-                Repository::mark_server_artifact_delete_failed_in_pool(pool, object_key, error)
-                    .await
+                finalize_postgres_history_retention_object_delete(pool, candidate, owner).await
             }
         }
     }
@@ -661,7 +322,6 @@ impl Repository {
         metadata_only: Option<bool>,
         domains: &[serde_json::Value],
     ) -> Result<()> {
-        let now = unix_now().to_string();
         let result = if dry_run {
             "previewed"
         } else if domains.iter().any(|domain| {
@@ -684,15 +344,6 @@ impl Repository {
             "component": "history-retention-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(history_retention_audit(
-                    "history_retention.pruned",
-                    "history_retention",
-                    operator,
-                    metadata,
-                    now,
-                ));
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -721,43 +372,45 @@ impl Repository {
         client_id: Option<&str>,
     ) -> Result<Vec<TrafficCounterSampleRecord>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .traffic_counter_samples
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    right
-                        .observed_unix
-                        .cmp(&left.observed_unix)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.source_kind.cmp(&right.source_kind))
-                        .then_with(|| left.interface.cmp(&right.interface))
-                });
-                rows.truncate(limit.clamp(1, 1000) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH policy_clients AS MATERIALIZED (
+                        SELECT client.id
+                        FROM clients client
+                        WHERE $1::TEXT IS NULL OR client.id = $1
+                    ), resolved_interface_policies AS MATERIALIZED (
+                        SELECT policy.*
+                        FROM public.resolve_telemetry_interface_policies(ARRAY(
+                            SELECT client.id
+                            FROM policy_clients client
+                            ORDER BY client.id
+                        )) policy
+                    )
                     SELECT
-                        client_id,
-                        source_kind,
-                        interface,
-                        observed_at::text AS observed_at,
-                        EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix,
-                        rx_bytes,
-                        tx_bytes,
-                        rx_counter_epoch,
-                        tx_counter_epoch,
-                        sample_source
-                    FROM traffic_counter_samples
-                    WHERE ($1::text IS NULL OR client_id = $1)
-                    ORDER BY observed_at DESC, client_id ASC, source_kind ASC, interface ASC
+                        sample.client_id,
+                        sample.source_kind,
+                        sample.interface,
+                        sample.observed_at::text AS observed_at,
+                        EXTRACT(EPOCH FROM sample.observed_at)::bigint AS observed_unix,
+                        sample.rx_bytes,
+                        sample.tx_bytes,
+                        sample.rx_counter_epoch,
+                        sample.tx_counter_epoch,
+                        sample.sample_source
+                    FROM traffic_counter_samples sample
+                    JOIN resolved_interface_policies policy
+                      ON policy.client_id = sample.client_id
+                    WHERE ($1::text IS NULL OR sample.client_id = $1)
+                      AND public.telemetry_interface_is_admitted_resolved(
+                          policy.admission_mode,
+                          policy.interface_patterns,
+                          policy.managed_tunnel_interfaces,
+                          sample.source_kind,
+                          sample.interface
+                      )
+                    ORDER BY sample.observed_at DESC, sample.client_id ASC,
+                             sample.source_kind ASC, sample.interface ASC
                     LIMIT $2
                     "#,
                 )
@@ -791,44 +444,49 @@ impl Repository {
         client_id: Option<&str>,
     ) -> Result<Vec<TrafficCounterRollupRecord>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .traffic_counter_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    right
-                        .bucket_start_unix
-                        .cmp(&left.bucket_start_unix)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.source_kind.cmp(&right.source_kind))
-                        .then_with(|| left.interface.cmp(&right.interface))
-                });
-                rows.truncate(limit.clamp(1, 1000) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH policy_clients AS MATERIALIZED (
+                        SELECT client.id
+                        FROM clients client
+                        WHERE $1::TEXT IS NULL OR client.id = $1
+                    ), resolved_interface_policies AS MATERIALIZED (
+                        SELECT policy.*
+                        FROM public.resolve_telemetry_interface_policies(ARRAY(
+                            SELECT client.id
+                            FROM policy_clients client
+                            ORDER BY client.id
+                        )) policy
+                    )
                     SELECT
-                        client_id, source_kind, interface, origin_kind,
-                        bucket_start::text AS bucket_start,
-                        extract(epoch FROM bucket_start)::bigint AS bucket_start_unix,
-                        bucket_secs, rx_bytes, tx_bytes,
-                        rx_valid_count, tx_valid_count, any_valid_count,
-                        rx_reset_count, tx_reset_count, any_reset_count,
-                        extract(epoch FROM first_observed_at)::bigint
+                        rollup.client_id, rollup.source_kind, rollup.interface,
+                        rollup.origin_kind,
+                        rollup.bucket_start::text AS bucket_start,
+                        extract(epoch FROM rollup.bucket_start)::bigint
+                            AS bucket_start_unix,
+                        rollup.bucket_secs, rollup.rx_bytes, rollup.tx_bytes,
+                        rollup.rx_valid_count, rollup.tx_valid_count,
+                        rollup.any_valid_count, rollup.rx_reset_count,
+                        rollup.tx_reset_count, rollup.any_reset_count,
+                        extract(epoch FROM rollup.first_observed_at)::bigint
                             AS first_observed_unix,
-                        extract(epoch FROM latest_observed_at)::bigint
+                        extract(epoch FROM rollup.latest_observed_at)::bigint
                             AS latest_observed_unix
-                    FROM traffic_counter_rollups
-                    WHERE ($1::text IS NULL OR client_id = $1)
-                    ORDER BY bucket_start DESC, client_id, source_kind, interface,
-                             origin_kind, bucket_secs
+                    FROM traffic_counter_rollups rollup
+                    JOIN resolved_interface_policies policy
+                      ON policy.client_id = rollup.client_id
+                    WHERE ($1::text IS NULL OR rollup.client_id = $1)
+                      AND public.telemetry_interface_is_admitted_resolved(
+                          policy.admission_mode,
+                          policy.interface_patterns,
+                          policy.managed_tunnel_interfaces,
+                          rollup.source_kind,
+                          rollup.interface
+                      )
+                    ORDER BY rollup.bucket_start DESC, rollup.client_id,
+                             rollup.source_kind, rollup.interface,
+                             rollup.origin_kind, rollup.bucket_secs
                     LIMIT $2
                     "#,
                 )
@@ -870,35 +528,6 @@ impl Repository {
         job_id: Option<Uuid>,
     ) -> Result<Vec<serde_json::Value>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
-                    .filter(|row| job_id.is_none_or(|expected| row.job_id == expected))
-                    .map(|row| {
-                        json!({
-                            "job_id": row.job_id,
-                            "client_id": &row.client_id,
-                            "seq": row.seq,
-                            "stream": &row.stream,
-                            "data_base64": &row.data_base64,
-                            "storage": &row.storage,
-                            "artifact_object_key": &row.artifact_object_key,
-                            "artifact_sha256_hex": &row.artifact_sha256_hex,
-                            "artifact_size_bytes": row.artifact_size_bytes,
-                            "exit_code": row.exit_code,
-                            "done": row.done,
-                            "received_at": &row.received_at,
-                            "created_at": &row.created_at,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                rows.truncate(limit.clamp(1, 200) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -958,28 +587,6 @@ impl Repository {
         client_id: Option<&str>,
     ) -> Result<Vec<serde_json::Value>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .client_status_history
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
-                    .map(|row| {
-                        json!({
-                            "id": row.id,
-                            "client_id": &row.client_id,
-                            "from_status": &row.from_status,
-                            "to_status": &row.to_status,
-                            "reason": &row.reason,
-                            "metadata": &row.metadata,
-                            "created_at": &row.created_at,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                rows.truncate(limit.clamp(1, 200) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1025,30 +632,6 @@ impl Repository {
         client_id: Option<&str>,
     ) -> Result<Vec<serde_json::Value>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .gateway_sessions
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
-                    .map(|row| {
-                        json!({
-                            "id": row.id,
-                            "gateway_id": &row.gateway_id,
-                            "client_id": &row.client_id,
-                            "status": &row.status,
-                            "noise_public_key_hex": &row.noise_public_key_hex,
-                            "started_at": &row.started_at,
-                            "last_seen_at": &row.last_seen_at,
-                            "ended_at": &row.ended_at,
-                            "end_reason": &row.end_reason,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                rows.truncate(limit.clamp(1, 200) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1092,7 +675,28 @@ impl Repository {
     }
 }
 
-fn default_policy(domain: HistoryDomain) -> HistoryRetentionPolicyView {
+fn history_retention_policy_advances_worker_frontier(
+    domain: HistoryRetentionDomain,
+    previous_enabled: bool,
+    previous_retention_days: i32,
+    next_enabled: bool,
+    next_retention_days: i32,
+) -> bool {
+    let worker_owned_domain = matches!(
+        domain,
+        HistoryRetentionDomain::SystemMetricRollups
+            | HistoryRetentionDomain::TelemetryRollups
+            | HistoryRetentionDomain::TelemetryNetworkRates
+            | HistoryRetentionDomain::TelemetryPingRollups
+            | HistoryRetentionDomain::TrafficCounterRollups
+            | HistoryRetentionDomain::NetworkObservations
+    );
+    worker_owned_domain
+        && next_enabled
+        && (!previous_enabled || next_retention_days < previous_retention_days)
+}
+
+fn default_policy(domain: HistoryRetentionDomain) -> HistoryRetentionPolicyView {
     HistoryRetentionPolicyView {
         domain: domain.as_str().to_string(),
         retention_days: domain.default_retention_days(),
@@ -1132,252 +736,52 @@ pub(crate) enum HistoryRetentionObjectCandidate {
         seq: i32,
         object_key: Option<String>,
     },
-    BackupArtifact {
-        artifact_id: Uuid,
-        object_key: String,
-    },
 }
 
 impl HistoryRetentionObjectCandidate {
     pub(crate) fn object_key(&self) -> Option<&str> {
         match self {
             Self::JobOutput { object_key, .. } => object_key.as_deref(),
-            Self::BackupArtifact { object_key, .. } => Some(object_key),
         }
     }
-}
 
-async fn prune_memory_vec<T>(
-    rows: &tokio::sync::RwLock<Vec<T>>,
-    cutoff_unix: u64,
-    limit: usize,
-    dry_run: bool,
-    timestamp: impl Fn(&T) -> &str,
-) -> Result<i64> {
-    let mut rows = rows.write().await;
-    let mut matched_indices = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| timestamp_before(timestamp(row), cutoff_unix))
-        .map(|(index, _)| index)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let matched_rows = matched_indices.len();
-    if !dry_run {
-        matched_indices.sort_unstable_by(|left, right| right.cmp(left));
-        for index in matched_indices {
-            rows.remove(index);
+    pub(crate) fn source_id(&self) -> Uuid {
+        match self {
+            Self::JobOutput { job_id, .. } => *job_id,
         }
     }
-    Ok(matched_rows as i64)
-}
 
-async fn prune_memory_telemetry_samples(
-    samples: &tokio::sync::RwLock<Vec<crate::model::TelemetrySampleView>>,
-    ping_source_checks: &tokio::sync::RwLock<
-        HashMap<crate::repository::MemoryPingSourceCheckKey, u64>,
-    >,
-    cutoff_unix: u64,
-    limit: usize,
-    dry_run: bool,
-) -> i64 {
-    // Match PostgreSQL's compound raw-telemetry lifecycle: samples and Ping
-    // logical identities consume one deterministic batch budget. Holding both
-    // write locks through selection and deletion makes the Memory apply atomic.
-    let mut samples = samples.write().await;
-    let mut ping_source_checks = ping_source_checks.write().await;
-    let mut candidates = samples
-        .iter()
-        .enumerate()
-        .filter_map(|(index, sample)| {
-            let observed_unix = sample.observed_at.parse::<u64>().ok()?;
-            (observed_unix < cutoff_unix).then_some((
-                observed_unix,
-                0_u8,
-                sample.id.to_string(),
-                Some(index),
-                None,
-            ))
-        })
-        .collect::<Vec<_>>();
-    candidates.extend(ping_source_checks.iter().filter_map(|(key, retained_at)| {
-        (*retained_at < cutoff_unix).then_some((
-            *retained_at,
-            1_u8,
-            format!("{}:{}:{}:{}", key.0, key.1, key.2, key.3),
-            None,
-            Some(key.clone()),
-        ))
-    }));
-    candidates.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| left.1.cmp(&right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-    candidates.truncate(limit);
-    let matched_rows = candidates.len() as i64;
-    if !dry_run {
-        let mut sample_indices = candidates
-            .iter()
-            .filter_map(|candidate| candidate.3)
-            .collect::<Vec<_>>();
-        sample_indices.sort_unstable_by_key(|index| Reverse(*index));
-        for index in sample_indices {
-            samples.remove(index);
-        }
-        for key in candidates.into_iter().filter_map(|candidate| candidate.4) {
-            ping_source_checks.remove(&key);
+    pub(crate) fn source_revision(&self) -> i64 {
+        match self {
+            Self::JobOutput { seq, .. } => i64::from(*seq).saturating_add(1).max(1),
         }
     }
-    matched_rows
-}
 
-async fn prune_memory_bucket_vec<T>(
-    rows: &tokio::sync::RwLock<Vec<T>>,
-    cutoff_unix: u64,
-    limit: usize,
-    dry_run: bool,
-    timestamp: impl Fn(&T) -> &str,
-    bucket_secs: impl Fn(&T) -> i32,
-) -> Result<i64> {
-    let mut rows = rows.write().await;
-    let mut matched_indices = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| {
-            timestamp(row).parse::<u64>().is_ok_and(|bucket_start| {
-                bucket_start.saturating_add(bucket_secs(row).max(1) as u64) <= cutoff_unix
-            })
-        })
-        .map(|(index, _)| index)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let matched_rows = matched_indices.len();
-    if !dry_run {
-        matched_indices.sort_unstable_by(|left, right| right.cmp(left));
-        for index in matched_indices {
-            rows.remove(index);
-        }
-    }
-    Ok(matched_rows as i64)
-}
-
-async fn prune_memory_traffic_history(
-    exact_rows: &tokio::sync::RwLock<Vec<TrafficCounterSampleRecord>>,
-    rollup_rows: &tokio::sync::RwLock<Vec<TrafficCounterRollupRecord>>,
-    cutoff_unix: u64,
-    limit: usize,
-    dry_run: bool,
-) -> i64 {
-    let mut exact_rows = exact_rows.write().await;
-    let mut rollup_rows = rollup_rows.write().await;
-    let cutoff_unix = i64::try_from(cutoff_unix).unwrap_or(i64::MAX);
-    let mut baselines = HashMap::<(String, String, String), (i64, usize)>::new();
-    for (index, row) in exact_rows.iter().enumerate() {
-        if row.observed_unix >= cutoff_unix {
-            continue;
-        }
-        let key = (
-            row.client_id.clone(),
-            row.source_kind.clone(),
-            row.interface.clone(),
-        );
-        if baselines
-            .get(&key)
-            .is_none_or(|(observed_unix, _)| row.observed_unix > *observed_unix)
-        {
-            baselines.insert(key, (row.observed_unix, index));
-        }
-    }
-    let protected_indices = baselines
-        .into_values()
-        .map(|(_, index)| index)
-        .collect::<HashSet<_>>();
-    let mut candidates = exact_rows
-        .iter()
-        .enumerate()
-        .filter(|(index, row)| {
-            row.observed_unix < cutoff_unix && !protected_indices.contains(index)
-        })
-        .map(|(index, row)| {
-            (
-                false,
-                index,
-                row.observed_unix,
-                row.client_id.clone(),
-                row.source_kind.clone(),
-                row.interface.clone(),
-                String::new(),
-                0,
-            )
-        })
-        .collect::<Vec<_>>();
-    candidates.extend(
-        rollup_rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row.bucket_start_unix
-                    .saturating_add(i64::from(row.bucket_secs.max(1)))
-                    <= cutoff_unix
-            })
-            .map(|(index, row)| {
-                (
-                    true,
-                    index,
-                    row.bucket_start_unix,
-                    row.client_id.clone(),
-                    row.source_kind.clone(),
-                    row.interface.clone(),
-                    row.origin_kind.clone(),
-                    row.bucket_secs,
-                )
+    pub(crate) fn deletion_identity(&self) -> serde_json::Value {
+        match self {
+            Self::JobOutput {
+                job_id,
+                client_id,
+                seq,
+                object_key,
+            } => json!({
+                "job_id": job_id,
+                "client_id": client_id,
+                "seq": seq,
+                "object_key": object_key,
             }),
-    );
-    candidates.sort_by(|left, right| {
-        left.2
-            .cmp(&right.2)
-            .then_with(|| left.0.cmp(&right.0))
-            .then_with(|| left.3.cmp(&right.3))
-            .then_with(|| left.4.cmp(&right.4))
-            .then_with(|| left.5.cmp(&right.5))
-            .then_with(|| left.6.cmp(&right.6))
-            .then_with(|| left.7.cmp(&right.7))
-    });
-    candidates.truncate(limit);
-    let matched_rows = candidates.len() as i64;
-    if !dry_run {
-        let mut exact_indices = candidates
-            .iter()
-            .filter(|candidate| !candidate.0)
-            .map(|candidate| candidate.1)
-            .collect::<Vec<_>>();
-        exact_indices.sort_unstable_by_key(|index| Reverse(*index));
-        for index in exact_indices {
-            exact_rows.remove(index);
-        }
-        let mut rollup_indices = candidates
-            .iter()
-            .filter(|candidate| candidate.0)
-            .map(|candidate| candidate.1)
-            .collect::<Vec<_>>();
-        rollup_indices.sort_unstable_by_key(|index| Reverse(*index));
-        for index in rollup_indices {
-            rollup_rows.remove(index);
         }
     }
-    matched_rows
 }
 
 async fn list_postgres_history_retention_object_candidates(
     pool: &sqlx::PgPool,
-    domain: HistoryDomain,
+    domain: HistoryRetentionDomain,
     cutoff_unix: u64,
     limit: i32,
 ) -> Result<Vec<HistoryRetentionObjectCandidate>> {
     match domain {
-        HistoryDomain::JobOutputs => {
+        HistoryRetentionDomain::JobOutputs => {
             let rows = sqlx::query(
                 r#"
                 SELECT job_id, client_id, seq, object_key
@@ -1397,29 +801,6 @@ async fn list_postgres_history_retention_object_candidates(
                         job_id: row.try_get("job_id")?,
                         client_id: row.try_get("client_id")?,
                         seq: row.try_get("seq")?,
-                        object_key: row.try_get("object_key")?,
-                    })
-                })
-                .collect()
-        }
-        HistoryDomain::BackupArtifacts => {
-            let rows = sqlx::query(
-                r#"
-                SELECT id AS artifact_id, object_key
-                FROM backup_artifacts
-                WHERE created_at < to_timestamp($1)
-                ORDER BY created_at ASC, id ASC
-                LIMIT $2
-                "#,
-            )
-            .bind(cutoff_unix as i64)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
-            rows.into_iter()
-                .map(|row| {
-                    Ok(HistoryRetentionObjectCandidate::BackupArtifact {
-                        artifact_id: row.try_get("artifact_id")?,
                         object_key: row.try_get("object_key")?,
                     })
                 })
@@ -1447,15 +828,6 @@ async fn prune_postgres_history_retention_object_candidate(
                       AND client_id = $2
                       AND seq = $3
                     RETURNING object_key
-                ),
-                marked_artifacts AS (
-                    UPDATE server_artifacts artifact
-                    SET status = 'deleting'
-                    FROM deleted_outputs deleted
-                    WHERE deleted.object_key IS NOT NULL
-                      AND artifact.object_key = deleted.object_key
-                      AND artifact.status = 'active'
-                    RETURNING artifact.id
                 )
                 SELECT count(*)::bigint FROM deleted_outputs
                 "#,
@@ -1466,50 +838,13 @@ async fn prune_postgres_history_retention_object_candidate(
         .fetch_one(pool)
         .await
         .map_err(Into::into),
-        HistoryRetentionObjectCandidate::BackupArtifact { artifact_id, .. } => {
-            sqlx::query_scalar::<_, i64>(
-                r#"
-                WITH doomed AS (
-                    SELECT artifact.id AS artifact_id, artifact.object_key
-                    FROM backup_artifacts artifact
-                    WHERE artifact.id = $1
-                ),
-                cleared_requests AS (
-                    UPDATE backup_requests request
-                    SET artifact_id = NULL,
-                        status = 'requested_metadata_only'
-                    FROM doomed
-                    WHERE request.artifact_id = doomed.artifact_id
-                    RETURNING request.id
-                ),
-                deleted_artifacts AS (
-                    DELETE FROM backup_artifacts artifact
-                    USING doomed
-                    WHERE artifact.id = doomed.artifact_id
-                    RETURNING artifact.object_key
-                ),
-                marked_artifacts AS (
-                    UPDATE server_artifacts artifact
-                    SET status = 'deleting'
-                    FROM deleted_artifacts deleted
-                    WHERE artifact.object_key = deleted.object_key
-                      AND artifact.status = 'active'
-                    RETURNING artifact.id
-                )
-                SELECT count(*)::bigint FROM deleted_artifacts
-                "#,
-            )
-            .bind(artifact_id)
-            .fetch_one(pool)
-            .await
-            .map_err(Into::into)
-        }
     }
 }
 
 async fn finalize_postgres_history_retention_object_delete(
     pool: &sqlx::PgPool,
     candidate: &HistoryRetentionObjectCandidate,
+    owner: &ArtifactDeletionOwner,
 ) -> Result<i64> {
     match candidate {
         HistoryRetentionObjectCandidate::JobOutput {
@@ -1522,6 +857,10 @@ async fn finalize_postgres_history_retention_object_delete(
                 return prune_postgres_history_retention_object_candidate(pool, candidate).await;
             };
             let mut tx = pool.begin().await?;
+            ensure!(
+                lock_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+                "artifact deletion ownership lost before finalization"
+            );
             let pruned_rows = sqlx::query_scalar::<_, i64>(
                 r#"
                 WITH deleted_outputs AS (
@@ -1541,45 +880,10 @@ async fn finalize_postgres_history_retention_object_delete(
             .bind(object_key)
             .fetch_one(&mut *tx)
             .await?;
-            Repository::mark_server_artifact_deleted_in_tx(&mut tx, object_key).await?;
-            tx.commit().await?;
-            Ok(pruned_rows)
-        }
-        HistoryRetentionObjectCandidate::BackupArtifact {
-            artifact_id,
-            object_key,
-        } => {
-            let mut tx = pool.begin().await?;
-            let pruned_rows = sqlx::query_scalar::<_, i64>(
-                r#"
-                WITH doomed AS (
-                    SELECT artifact.id AS artifact_id, artifact.object_key
-                    FROM backup_artifacts artifact
-                    WHERE artifact.id = $1
-                      AND artifact.object_key = $2
-                ),
-                cleared_requests AS (
-                    UPDATE backup_requests request
-                    SET artifact_id = NULL,
-                        status = 'requested_metadata_only'
-                    FROM doomed
-                    WHERE request.artifact_id = doomed.artifact_id
-                    RETURNING request.id
-                ),
-                deleted_artifacts AS (
-                    DELETE FROM backup_artifacts artifact
-                    USING doomed
-                    WHERE artifact.id = doomed.artifact_id
-                    RETURNING artifact.object_key
-                )
-                SELECT count(*)::bigint FROM deleted_artifacts
-                "#,
-            )
-            .bind(artifact_id)
-            .bind(object_key)
-            .fetch_one(&mut *tx)
-            .await?;
-            Repository::mark_server_artifact_deleted_in_tx(&mut tx, object_key).await?;
+            ensure!(
+                finish_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+                "artifact deletion ownership lost during finalization"
+            );
             tx.commit().await?;
             Ok(pruned_rows)
         }
@@ -1588,13 +892,13 @@ async fn finalize_postgres_history_retention_object_delete(
 
 async fn prune_postgres_history_domain(
     pool: &sqlx::PgPool,
-    domain: HistoryDomain,
+    domain: HistoryRetentionDomain,
     cutoff_unix: u64,
     limit: i32,
     dry_run: bool,
 ) -> Result<HistoryRetentionPruneOutcome> {
     match (domain, dry_run) {
-        (HistoryDomain::AuditLogs, true) => {
+        (HistoryRetentionDomain::AuditLogs, true) => {
             select_id_count(
                 pool,
                 "audit_logs",
@@ -1606,7 +910,7 @@ async fn prune_postgres_history_domain(
             )
             .await
         }
-        (HistoryDomain::AuditLogs, false) => {
+        (HistoryRetentionDomain::AuditLogs, false) => {
             delete_by_id(
                 pool,
                 "audit_logs",
@@ -1618,85 +922,49 @@ async fn prune_postgres_history_domain(
             )
             .await
         }
-        (HistoryDomain::TelemetrySamples, true) => {
-            prune_telemetry_samples(pool, cutoff_unix, limit, true).await
-        }
-        (HistoryDomain::TelemetrySamples, false) => {
-            prune_telemetry_samples(pool, cutoff_unix, limit, false).await
-        }
-        (HistoryDomain::TelemetryRollups, true) => {
+        (HistoryRetentionDomain::TelemetryRollups, true) => {
             prune_telemetry_rollups(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::TelemetryRollups, false) => {
+        (HistoryRetentionDomain::TelemetryRollups, false) => {
             prune_telemetry_rollups(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::TelemetryNetworkRates, true) => {
+        (HistoryRetentionDomain::TelemetryNetworkRates, true) => {
             prune_telemetry_network_rates(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::TelemetryNetworkRates, false) => {
+        (HistoryRetentionDomain::TelemetryNetworkRates, false) => {
             prune_telemetry_network_rates(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::TelemetryPingRollups, true) => {
+        (HistoryRetentionDomain::TelemetryPingRollups, true) => {
             prune_telemetry_ping_rollups(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::TelemetryPingRollups, false) => {
+        (HistoryRetentionDomain::TelemetryPingRollups, false) => {
             prune_telemetry_ping_rollups(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::TrafficCounterSamples, true) => {
-            prune_traffic_history(pool, cutoff_unix, limit, true).await
+        (HistoryRetentionDomain::TrafficCounterRollups, true) => {
+            prune_traffic_rollups(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::TrafficCounterSamples, false) => {
-            prune_traffic_history(pool, cutoff_unix, limit, false).await
+        (HistoryRetentionDomain::TrafficCounterRollups, false) => {
+            prune_traffic_rollups(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::SystemMetricRollups, true) => {
+        (HistoryRetentionDomain::SystemMetricRollups, true) => {
             prune_system_metric_rollups(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::SystemMetricRollups, false) => {
+        (HistoryRetentionDomain::SystemMetricRollups, false) => {
             prune_system_metric_rollups(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::JobOutputs, true) => {
+        (HistoryRetentionDomain::JobOutputs, true) => {
             prune_job_outputs(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::JobOutputs, false) => {
+        (HistoryRetentionDomain::JobOutputs, false) => {
             prune_job_outputs(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::BackupArtifacts, true) => {
-            prune_backup_artifacts(pool, cutoff_unix, limit, true).await
-        }
-        (HistoryDomain::BackupArtifacts, false) => {
-            prune_backup_artifacts(pool, cutoff_unix, limit, false).await
-        }
-        (HistoryDomain::NetworkObservations, true) => {
+        (HistoryRetentionDomain::NetworkObservations, true) => {
             prune_network_observation_history(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::NetworkObservations, false) => {
+        (HistoryRetentionDomain::NetworkObservations, false) => {
             prune_network_observation_history(pool, cutoff_unix, limit, false).await
         }
-        (HistoryDomain::TopologyHistory, true) => {
-            select_id_count(
-                pool,
-                "network_observations",
-                "observed_at",
-                "id",
-                "(plan_name IS NOT NULL OR interface_name IS NOT NULL)",
-                cutoff_unix,
-                limit,
-            )
-            .await
-        }
-        (HistoryDomain::TopologyHistory, false) => {
-            delete_by_id(
-                pool,
-                "network_observations",
-                "observed_at",
-                "id",
-                "(plan_name IS NOT NULL OR interface_name IS NOT NULL)",
-                cutoff_unix,
-                limit,
-            )
-            .await
-        }
-        (HistoryDomain::ClientStatusHistory, true) => {
+        (HistoryRetentionDomain::ClientStatusHistory, true) => {
             select_id_count(
                 pool,
                 "client_status_history",
@@ -1708,7 +976,7 @@ async fn prune_postgres_history_domain(
             )
             .await
         }
-        (HistoryDomain::ClientStatusHistory, false) => {
+        (HistoryRetentionDomain::ClientStatusHistory, false) => {
             delete_by_id(
                 pool,
                 "client_status_history",
@@ -1720,10 +988,10 @@ async fn prune_postgres_history_domain(
             )
             .await
         }
-        (HistoryDomain::GatewaySessions, true) => {
+        (HistoryRetentionDomain::GatewaySessions, true) => {
             prune_gateway_sessions(pool, cutoff_unix, limit, true).await
         }
-        (HistoryDomain::GatewaySessions, false) => {
+        (HistoryRetentionDomain::GatewaySessions, false) => {
             prune_gateway_sessions(pool, cutoff_unix, limit, false).await
         }
     }
@@ -1797,105 +1065,6 @@ async fn delete_by_id(
     })
 }
 
-async fn prune_telemetry_samples(
-    pool: &sqlx::PgPool,
-    cutoff_unix: u64,
-    limit: i32,
-    dry_run: bool,
-) -> Result<HistoryRetentionPruneOutcome> {
-    // Raw resource samples and logical Ping facts share the raw-telemetry
-    // lifecycle and therefore one hard batch limit. A single statement keeps
-    // preview/apply candidate ordering identical and makes mixed-table deletes
-    // atomic; current state and retained rollups are intentionally excluded.
-    let row = sqlx::query(
-        r#"
-        WITH candidates AS MATERIALIZED (
-            SELECT source_kind, source_time, sample_id, series_id, source_checked_unix
-            FROM (
-                SELECT
-                    0::smallint AS source_kind,
-                    sample.observed_at AS source_time,
-                    sample.id AS sample_id,
-                    NULL::bigint AS series_id,
-                    NULL::bigint AS source_checked_unix
-                FROM telemetry_samples sample
-                WHERE sample.observed_at < to_timestamp($1)
-                UNION ALL
-                SELECT
-                    1::smallint AS source_kind,
-                    fact.observed_at AS source_time,
-                    NULL::uuid AS sample_id,
-                    fact.series_id,
-                    fact.source_checked_unix
-                FROM telemetry_ping_facts fact
-                WHERE fact.observed_at < to_timestamp($1)
-            ) eligible
-            ORDER BY source_time ASC, source_kind ASC,
-                     sample_id ASC NULLS LAST,
-                     series_id ASC NULLS LAST,
-                     source_checked_unix ASC NULLS LAST
-            LIMIT $2
-        ),
-        locked_samples AS MATERIALIZED (
-            SELECT sample.id
-            FROM telemetry_samples sample
-            JOIN candidates
-              ON candidates.source_kind = 0
-             AND sample.id = candidates.sample_id
-            WHERE NOT $3
-            FOR UPDATE OF sample SKIP LOCKED
-        ),
-        locked_ping_facts AS MATERIALIZED (
-            SELECT fact.series_id, fact.source_checked_unix
-            FROM telemetry_ping_facts fact
-            JOIN candidates
-              ON candidates.source_kind = 1
-             AND fact.series_id = candidates.series_id
-             AND fact.source_checked_unix = candidates.source_checked_unix
-            WHERE NOT $3
-            FOR UPDATE OF fact SKIP LOCKED
-        ),
-        deleted_samples AS (
-            DELETE FROM telemetry_samples sample
-            USING locked_samples
-            WHERE sample.id = locked_samples.id
-            RETURNING sample.id
-        ),
-        deleted_ping_facts AS (
-            DELETE FROM telemetry_ping_facts fact
-            USING locked_ping_facts
-            WHERE fact.series_id = locked_ping_facts.series_id
-              AND fact.source_checked_unix = locked_ping_facts.source_checked_unix
-            RETURNING fact.series_id
-        ),
-        deleted AS (
-            SELECT id::text AS source_key FROM deleted_samples
-            UNION ALL
-            SELECT series_id::text AS source_key FROM deleted_ping_facts
-        )
-        SELECT
-            CASE WHEN $3
-                THEN (SELECT count(*)::bigint FROM candidates)
-                ELSE (SELECT count(*)::bigint FROM deleted)
-            END AS matched_rows,
-            CASE WHEN $3
-                THEN 0::bigint
-                ELSE (SELECT count(*)::bigint FROM deleted)
-            END AS pruned_rows
-        "#,
-    )
-    .bind(cutoff_unix as i64)
-    .bind(limit)
-    .bind(dry_run)
-    .fetch_one(pool)
-    .await?;
-    Ok(HistoryRetentionPruneOutcome {
-        matched_rows: row.try_get("matched_rows")?,
-        pruned_rows: row.try_get("pruned_rows")?,
-        object_keys: Vec::new(),
-    })
-}
-
 async fn prune_network_observation_history(
     pool: &sqlx::PgPool,
     cutoff_unix: u64,
@@ -1903,9 +1072,9 @@ async fn prune_network_observation_history(
     dry_run: bool,
 ) -> Result<HistoryRetentionPruneOutcome> {
     // One history item is either an exact observation or one physical retained
-    // health/reason component. The shared limit remains a hard upper bound.
-    // Latest active snapshots are not candidates: they represent current state,
-    // not an independently retained history row.
+    // health component. The shared limit remains a hard upper bound. Latest
+    // snapshots and empty inactive-series metadata are current-state lifecycle
+    // rows; their dedicated two-day worker is the sole deletion owner.
     let query = if dry_run {
         r#"
         WITH candidates AS (
@@ -1915,24 +1084,25 @@ async fn prune_network_observation_history(
                        observation.observed_at AS source_time,
                        observation.id::text AS source_key
                 FROM network_observations observation
-                WHERE observation.observed_at < to_timestamp($1)
+                WHERE observation.source = 'manual'
+                  AND observation.observed_at < to_timestamp($1)
                 UNION ALL
                 SELECT 1 AS source_kind,
+                       observation.observed_at AS source_time,
+                       observation.id::text AS source_key
+                FROM network_observations observation
+                WHERE observation.source = 'automatic'
+                  AND observation.observed_at < to_timestamp($1)
+                UNION ALL
+                SELECT 2 AS source_kind,
                        rollup.bucket_start AS source_time,
                        concat_ws(':', rollup.series_id, rollup.bucket_secs,
                            extract(epoch FROM rollup.bucket_start)::bigint,
-                           rollup.health_state, rollup.reason_key) AS source_key
+                           rollup.health_state) AS source_key
                 FROM network_observation_rollups rollup
-                WHERE rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
+                WHERE rollup.bucket_start < to_timestamp($1)
+                  AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
                     <= to_timestamp($1)
-                UNION ALL
-                SELECT 2 AS source_kind,
-                       latest.observed_at AS source_time,
-                       latest.observation_id::text AS source_key
-                FROM network_observation_latest latest
-                JOIN network_observation_series series ON series.id = latest.series_id
-                WHERE series.active = FALSE
-                  AND latest.observed_at < to_timestamp($1)
             ) eligible
             ORDER BY source_time, source_kind, source_key
             LIMIT $2
@@ -1943,7 +1113,7 @@ async fn prune_network_observation_history(
         r#"
         WITH candidates AS MATERIALIZED (
             SELECT source_kind, observation_id, series_id, bucket_secs,
-                   bucket_start, health_state, reason_key
+                   bucket_start, health_state
             FROM (
                 SELECT 0 AS source_kind,
                        observation.observed_at AS source_time,
@@ -1951,121 +1121,78 @@ async fn prune_network_observation_history(
                        NULL::bigint AS series_id,
                        NULL::integer AS bucket_secs,
                        NULL::timestamptz AS bucket_start,
-                       NULL::smallint AS health_state,
-                       NULL::text AS reason_key
+                       NULL::smallint AS health_state
                 FROM network_observations observation
-                WHERE observation.observed_at < to_timestamp($1)
+                WHERE observation.source = 'manual'
+                  AND observation.observed_at < to_timestamp($1)
                 UNION ALL
                 SELECT 1 AS source_kind,
+                       observation.observed_at AS source_time,
+                       observation.id AS observation_id,
+                       NULL::bigint AS series_id,
+                       NULL::integer AS bucket_secs,
+                       NULL::timestamptz AS bucket_start,
+                       NULL::smallint AS health_state
+                FROM network_observations observation
+                WHERE observation.source = 'automatic'
+                  AND observation.observed_at < to_timestamp($1)
+                UNION ALL
+                SELECT 2 AS source_kind,
                        rollup.bucket_start AS source_time,
                        NULL::uuid AS observation_id,
                        rollup.series_id,
                        rollup.bucket_secs,
                        rollup.bucket_start,
-                       rollup.health_state,
-                       rollup.reason_key
+                       rollup.health_state
                 FROM network_observation_rollups rollup
-                WHERE rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
+                WHERE rollup.bucket_start < to_timestamp($1)
+                  AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
                     <= to_timestamp($1)
-                UNION ALL
-                SELECT 2 AS source_kind,
-                       latest.observed_at AS source_time,
-                       NULL::uuid AS observation_id,
-                       latest.series_id,
-                       NULL::integer AS bucket_secs,
-                       NULL::timestamptz AS bucket_start,
-                       NULL::smallint AS health_state,
-                       NULL::text AS reason_key
-                FROM network_observation_latest latest
-                JOIN network_observation_series series ON series.id = latest.series_id
-                WHERE series.active = FALSE
-                  AND latest.observed_at < to_timestamp($1)
             ) eligible
             ORDER BY source_time, source_kind,
                      observation_id, series_id, bucket_secs, bucket_start,
-                     health_state, reason_key
+                     health_state
             LIMIT $2
         ),
-        deleted_exact AS (
+        deleted_manual AS (
             DELETE FROM network_observations observation
             USING candidates
             WHERE candidates.source_kind = 0
               AND observation.id = candidates.observation_id
             RETURNING observation.id
         ),
+        deleted_automatic AS (
+            DELETE FROM network_observations observation
+            USING candidates
+            WHERE candidates.source_kind = 1
+              AND observation.id = candidates.observation_id
+            RETURNING observation.id
+        ),
         deleted_tiered AS (
             DELETE FROM network_observation_rollups rollup
             USING candidates
-            WHERE candidates.source_kind = 1
+            WHERE candidates.source_kind = 2
               AND rollup.series_id = candidates.series_id
               AND rollup.bucket_secs = candidates.bucket_secs
               AND rollup.bucket_start = candidates.bucket_start
               AND rollup.health_state = candidates.health_state
-              AND rollup.reason_key = candidates.reason_key
             RETURNING rollup.series_id
-        ),
-        deleted_inactive_latest AS (
-            DELETE FROM network_observation_latest latest
-            USING candidates
-            WHERE candidates.source_kind = 2
-              AND latest.series_id = candidates.series_id
-            RETURNING latest.series_id
         )
-        SELECT id::text AS source_key FROM deleted_exact
+        SELECT id::text AS source_key
+        FROM deleted_manual
         UNION ALL
-        SELECT series_id::text AS source_key FROM deleted_tiered
+        SELECT id::text AS source_key
+        FROM deleted_automatic
         UNION ALL
-        SELECT series_id::text AS source_key FROM deleted_inactive_latest
+        SELECT series_id::text AS source_key
+        FROM deleted_tiered
         "#
     };
-    let rows = if dry_run {
-        sqlx::query(query)
-            .bind(cutoff_unix as i64)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?
-    } else {
-        let mut tx = pool.begin().await?;
-        let rows = sqlx::query(query)
-            .bind(cutoff_unix as i64)
-            .bind(limit)
-            .fetch_all(&mut *tx)
-            .await?;
-        sqlx::query(
-            r#"
-            WITH candidates AS (
-                SELECT series.id
-                FROM network_observation_series series
-                WHERE series.active = FALSE
-                  AND series.last_seen_at < to_timestamp($1)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM network_observations observation
-                      WHERE observation.automatic_series_id = series.id
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM network_observation_rollups rollup
-                      WHERE rollup.series_id = series.id
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM network_observation_latest latest
-                      WHERE latest.series_id = series.id
-                  )
-                ORDER BY series.last_seen_at, series.id
-                FOR UPDATE OF series SKIP LOCKED
-                LIMIT $2
-            )
-            DELETE FROM network_observation_series series
-            USING candidates
-            WHERE series.id = candidates.id
-            "#,
-        )
+    let rows = sqlx::query(query)
         .bind(cutoff_unix as i64)
         .bind(limit)
-        .execute(&mut *tx)
+        .fetch_all(pool)
         .await?;
-        tx.commit().await?;
-        rows
-    };
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
@@ -2083,7 +1210,8 @@ async fn prune_telemetry_rollups(
         r#"
         SELECT client_id, bucket_secs, bucket_start
         FROM telemetry_rollups
-        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+        WHERE bucket_start < to_timestamp($1)
+          AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
         ORDER BY bucket_start ASC, client_id ASC
         LIMIT $2
         "#
@@ -2092,7 +1220,8 @@ async fn prune_telemetry_rollups(
         WITH doomed AS (
             SELECT client_id, bucket_secs, bucket_start
             FROM telemetry_rollups
-            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+            WHERE bucket_start < to_timestamp($1)
+              AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
             ORDER BY bucket_start ASC, client_id ASC
             LIMIT $2
         )
@@ -2104,11 +1233,25 @@ async fn prune_telemetry_rollups(
         RETURNING rollup.client_id
         "#
     };
-    let rows = sqlx::query(query)
-        .bind(cutoff_unix as i64)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let rows = if dry_run {
+        sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+    } else {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL vpsman.telemetry_history_compaction = 'on'")
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        rows
+    };
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
@@ -2126,7 +1269,8 @@ async fn prune_system_metric_rollups(
         r#"
         SELECT metric, bucket_secs, bucket_start
         FROM system_metric_rollups
-        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1))
+        WHERE bucket_start < to_timestamp($1)
+          AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1))
             <= to_timestamp($1)
         ORDER BY bucket_start ASC, metric ASC
         LIMIT $2
@@ -2136,7 +1280,8 @@ async fn prune_system_metric_rollups(
         WITH doomed AS (
             SELECT metric, bucket_secs, bucket_start
             FROM system_metric_rollups
-            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1))
+            WHERE bucket_start < to_timestamp($1)
+              AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1))
                 <= to_timestamp($1)
             ORDER BY bucket_start ASC, metric ASC
             LIMIT $2
@@ -2149,11 +1294,22 @@ async fn prune_system_metric_rollups(
         RETURNING rollup.metric
         "#
     };
-    let rows = sqlx::query(query)
-        .bind(cutoff_unix as i64)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let rows = if dry_run {
+        sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+    } else {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        rows
+    };
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
@@ -2171,7 +1327,8 @@ async fn prune_telemetry_network_rates(
         r#"
         SELECT client_id, interface, bucket_secs, bucket_start
         FROM telemetry_network_rates
-        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+        WHERE bucket_start < to_timestamp($1)
+          AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
         ORDER BY bucket_start ASC, client_id ASC, interface ASC
         LIMIT $2
         "#
@@ -2180,7 +1337,8 @@ async fn prune_telemetry_network_rates(
         WITH doomed AS (
             SELECT client_id, interface, bucket_secs, bucket_start
             FROM telemetry_network_rates
-            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+            WHERE bucket_start < to_timestamp($1)
+              AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
             ORDER BY bucket_start ASC, client_id ASC, interface ASC
             LIMIT $2
         )
@@ -2193,11 +1351,25 @@ async fn prune_telemetry_network_rates(
         RETURNING rate.client_id
         "#
     };
-    let rows = sqlx::query(query)
-        .bind(cutoff_unix as i64)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let rows = if dry_run {
+        sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+    } else {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL vpsman.telemetry_history_compaction = 'on'")
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        rows
+    };
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
@@ -2215,7 +1387,8 @@ async fn prune_telemetry_ping_rollups(
         r#"
         SELECT series_id, bucket_secs, bucket_start
         FROM telemetry_ping_rollups
-        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+        WHERE bucket_start < to_timestamp($1)
+          AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
         ORDER BY bucket_start ASC, series_id ASC
         LIMIT $2
         "#
@@ -2224,7 +1397,8 @@ async fn prune_telemetry_ping_rollups(
         WITH doomed AS (
             SELECT series_id, bucket_secs, bucket_start
             FROM telemetry_ping_rollups
-            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
+            WHERE bucket_start < to_timestamp($1)
+              AND bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
             ORDER BY bucket_start ASC, series_id ASC
             LIMIT $2
         )
@@ -2248,125 +1422,44 @@ async fn prune_telemetry_ping_rollups(
     })
 }
 
-async fn prune_traffic_history(
+async fn prune_traffic_rollups(
     pool: &sqlx::PgPool,
     cutoff_unix: u64,
     limit: i32,
     dry_run: bool,
 ) -> Result<HistoryRetentionPruneOutcome> {
-    let query = if dry_run {
-        r#"
-        WITH candidates AS (
-            SELECT
-                'exact'::text AS row_kind,
-                sample.ctid AS row_id,
-                sample.observed_at AS sort_at,
-                sample.client_id,
-                sample.source_kind,
-                sample.interface,
-                ''::text AS origin_kind,
-                0::integer AS bucket_secs
-            FROM traffic_counter_samples sample
-            WHERE sample.observed_at < to_timestamp($1)
-              AND EXISTS (
-                  SELECT 1
-                  FROM traffic_counter_samples newer
-                  WHERE newer.client_id = sample.client_id
-                    AND newer.source_kind = sample.source_kind
-                    AND newer.interface = sample.interface
-                    AND newer.observed_at < to_timestamp($1)
-                    AND newer.observed_at > sample.observed_at
-              )
-            UNION ALL
-            SELECT
-                'rollup'::text,
-                rollup.ctid,
-                rollup.bucket_start,
-                rollup.client_id,
-                rollup.source_kind,
-                rollup.interface,
-                rollup.origin_kind,
-                rollup.bucket_secs
-            FROM traffic_counter_rollups rollup
-            WHERE rollup.bucket_start
-                    + make_interval(secs => GREATEST(rollup.bucket_secs, 1))
-                  <= to_timestamp($1)
-        )
-        SELECT row_kind
-        FROM candidates
-        ORDER BY sort_at, row_kind, client_id, source_kind, interface,
-                 origin_kind, bucket_secs
-        LIMIT $2
-        "#
-    } else {
-        r#"
-        WITH candidates AS (
-            SELECT
-                'exact'::text AS row_kind,
-                sample.ctid AS row_id,
-                sample.observed_at AS sort_at,
-                sample.client_id,
-                sample.source_kind,
-                sample.interface,
-                ''::text AS origin_kind,
-                0::integer AS bucket_secs
-            FROM traffic_counter_samples sample
-            WHERE sample.observed_at < to_timestamp($1)
-              AND EXISTS (
-                  SELECT 1
-                  FROM traffic_counter_samples newer
-                  WHERE newer.client_id = sample.client_id
-                    AND newer.source_kind = sample.source_kind
-                    AND newer.interface = sample.interface
-                    AND newer.observed_at < to_timestamp($1)
-                    AND newer.observed_at > sample.observed_at
-              )
-            UNION ALL
-            SELECT
-                'rollup'::text,
-                rollup.ctid,
-                rollup.bucket_start,
-                rollup.client_id,
-                rollup.source_kind,
-                rollup.interface,
-                rollup.origin_kind,
-                rollup.bucket_secs
-            FROM traffic_counter_rollups rollup
-            WHERE rollup.bucket_start
-                    + make_interval(secs => GREATEST(rollup.bucket_secs, 1))
-                  <= to_timestamp($1)
-        ), doomed AS MATERIALIZED (
-            SELECT *
-            FROM candidates
-            ORDER BY sort_at, row_kind, client_id, source_kind, interface,
-                     origin_kind, bucket_secs
-            LIMIT $2
-        ), deleted_exact AS (
-            DELETE FROM traffic_counter_samples sample
-            USING doomed
-            WHERE doomed.row_kind = 'exact'
-              AND sample.ctid = doomed.row_id
-            RETURNING sample.client_id
-        ), deleted_rollups AS (
-            DELETE FROM traffic_counter_rollups rollup
-            USING doomed
-            WHERE doomed.row_kind = 'rollup'
-              AND rollup.ctid = doomed.row_id
-            RETURNING rollup.client_id
-        )
-        SELECT client_id FROM deleted_exact
-        UNION ALL
-        SELECT client_id FROM deleted_rollups
-        "#
-    };
-    let rows = sqlx::query(query)
-        .bind(cutoff_unix as i64)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let cutoff_unix = i64::try_from(cutoff_unix)?;
+    if dry_run {
+        return Ok(HistoryRetentionPruneOutcome {
+            matched_rows: preview_traffic_terminal_retention(pool, cutoff_unix, limit).await?,
+            pruned_rows: 0,
+            object_keys: Vec::new(),
+        });
+    }
+
+    let mut pruned_rows = 0_i64;
+    let mut remaining = limit;
+    while remaining > 0 {
+        let page = process_traffic_terminal_retention_page(pool, cutoff_unix, remaining).await?;
+        if !page.attempted {
+            break;
+        }
+        let page_rows = i64::try_from(page.pruned_rows)?;
+        ensure!(
+            page_rows <= i64::from(remaining),
+            "traffic terminal owner exceeded the request prune limit"
+        );
+        pruned_rows += page_rows;
+        remaining -= i32::try_from(page_rows)?;
+        if page_rows == 0 {
+            // A concurrent client owner was unavailable. Return promptly; the
+            // durable cursor keeps this stream reachable for the next call.
+            break;
+        }
+    }
     Ok(HistoryRetentionPruneOutcome {
-        matched_rows: rows.len() as i64,
-        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        matched_rows: pruned_rows,
+        pruned_rows,
         object_keys: Vec::new(),
     })
 }
@@ -2449,46 +1542,6 @@ async fn prune_job_outputs(
     object_key_outcome(pool, query, cutoff_unix, limit, dry_run).await
 }
 
-async fn prune_backup_artifacts(
-    pool: &sqlx::PgPool,
-    cutoff_unix: u64,
-    limit: i32,
-    dry_run: bool,
-) -> Result<HistoryRetentionPruneOutcome> {
-    let query = if dry_run {
-        r#"
-        SELECT object_key
-        FROM backup_artifacts
-        WHERE created_at < to_timestamp($1)
-        ORDER BY created_at ASC, id ASC
-        LIMIT $2
-        "#
-    } else {
-        r#"
-        WITH doomed AS (
-            SELECT id, object_key
-            FROM backup_artifacts
-            WHERE created_at < to_timestamp($1)
-            ORDER BY created_at ASC, id ASC
-            LIMIT $2
-        ),
-        cleared_requests AS (
-            UPDATE backup_requests request
-            SET artifact_id = NULL,
-                status = 'requested_metadata_only'
-            FROM doomed
-            WHERE request.artifact_id = doomed.id
-            RETURNING request.id
-        )
-        DELETE FROM backup_artifacts artifact
-        USING doomed
-        WHERE artifact.id = doomed.id
-        RETURNING artifact.object_key
-        "#
-    };
-    object_key_outcome(pool, query, cutoff_unix, limit, dry_run).await
-}
-
 async fn object_key_outcome(
     pool: &sqlx::PgPool,
     query: &str,
@@ -2516,27 +1569,130 @@ async fn object_key_outcome(
     })
 }
 
-fn history_retention_audit(
-    action: &str,
-    target: &str,
-    operator: &AuthContext,
-    metadata: serde_json::Value,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: target.to_string(),
-        command_hash: None,
-        metadata,
-        created_at,
-    }
-}
+#[cfg(test)]
+mod dashboard_retention_provenance_contract_tests {
+    use super::*;
 
-fn timestamp_before(value: &str, cutoff_unix: u64) -> bool {
-    value
-        .parse::<u64>()
-        .map(|observed| observed < cutoff_unix)
-        .unwrap_or(false)
+    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, tail) = source.split_once(start).expect("section start");
+        let (body, _) = tail.split_once(end).expect("section end");
+        body
+    }
+
+    #[test]
+    fn explicit_telemetry_prunes_mark_only_applied_resource_and_network_deletes() {
+        let source = include_str!("repository_history.rs");
+        let (runtime, _) = source
+            .split_once("#[cfg(test)]\nmod dashboard_retention_provenance_contract_tests")
+            .expect("history repository test boundary");
+        let marker = "SET LOCAL vpsman.telemetry_history_compaction = 'on'";
+        assert_eq!(runtime.matches(marker).count(), 2);
+
+        for (start, end) in [
+            (
+                "async fn prune_telemetry_rollups(",
+                "async fn prune_system_metric_rollups(",
+            ),
+            (
+                "async fn prune_telemetry_network_rates(",
+                "async fn prune_telemetry_ping_rollups(",
+            ),
+        ] {
+            let body = section(runtime, start, end);
+            let branches = &body[body
+                .find("let rows = if dry_run")
+                .expect("explicit prune execution branches")..];
+            let (dry_run, applied) = branches
+                .split_once("} else {")
+                .expect("separate preview and applied prune branches");
+            assert!(dry_run.contains("let rows = if dry_run"));
+            assert!(dry_run.contains(".fetch_all(pool)"));
+            assert!(!dry_run.contains("pool.begin()"));
+            assert!(!dry_run.contains(marker));
+            assert!(applied.contains("pool.begin().await?"));
+            assert!(applied.contains(marker));
+            assert!(applied.contains(".fetch_all(&mut *tx)"));
+            assert!(applied.contains("tx.commit().await?"));
+        }
+
+        for (start, end) in [
+            (
+                "async fn prune_system_metric_rollups(",
+                "async fn prune_telemetry_network_rates(",
+            ),
+            (
+                "async fn prune_telemetry_ping_rollups(",
+                "async fn prune_traffic_rollups(",
+            ),
+        ] {
+            assert!(!section(runtime, start, end).contains(marker));
+        }
+    }
+
+    #[test]
+    fn retention_policy_wake_is_limited_to_earlier_worker_owned_expiry() {
+        assert!(history_retention_policy_advances_worker_frontier(
+            HistoryRetentionDomain::TelemetryRollups,
+            true,
+            365,
+            true,
+            30,
+        ));
+        assert!(history_retention_policy_advances_worker_frontier(
+            HistoryRetentionDomain::NetworkObservations,
+            false,
+            30,
+            true,
+            30,
+        ));
+        assert!(!history_retention_policy_advances_worker_frontier(
+            HistoryRetentionDomain::TelemetryRollups,
+            true,
+            30,
+            true,
+            365,
+        ));
+        assert!(!history_retention_policy_advances_worker_frontier(
+            HistoryRetentionDomain::TelemetryRollups,
+            true,
+            30,
+            false,
+            30,
+        ));
+        assert!(!history_retention_policy_advances_worker_frontier(
+            HistoryRetentionDomain::AuditLogs,
+            true,
+            365,
+            true,
+            30,
+        ));
+    }
+
+    #[test]
+    fn manual_ping_dependency_prune_uses_the_database_commit_trigger_only() {
+        let source = include_str!("repository_history.rs");
+        let body = section(
+            source,
+            "async fn prune_telemetry_ping_rollups(",
+            "async fn prune_traffic_rollups(",
+        );
+        let (preview, applied) = body
+            .split_once("} else {")
+            .expect("separate preview and applied prune branches");
+        assert!(!preview.contains("ping_rollups_deleted"));
+        assert!(!applied.contains("ping_rollups_deleted"));
+        assert!(!body.contains("pg_notify"));
+
+        let migration = include_str!("../../../../../migrations/0003_telemetry_core.sql");
+        let trigger = migration
+            .split_once("CREATE TRIGGER telemetry_ping_rollups_retention_delete")
+            .unwrap()
+            .1
+            .split_once("CREATE TRIGGER telemetry_samples_retention_delete")
+            .unwrap()
+            .0;
+        assert!(trigger.contains("AFTER DELETE ON public.telemetry_ping_rollups"));
+        assert!(trigger.contains("EXECUTE FUNCTION public.publish_telemetry_retention_effect("));
+        assert!(trigger.contains("'ping_rollups_deleted'"));
+    }
 }

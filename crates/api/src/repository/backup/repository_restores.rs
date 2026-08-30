@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
@@ -7,72 +5,15 @@ use uuid::Uuid;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, BackupRequestView, CreateRestorePlanRequest, ListQuery,
-        RestorePlanStatus, RestorePlanView,
+        AuthContext, BackupRequestView, CreateRestorePlanRequest, ListQuery, RestorePlanStatus,
+        RestorePlanView,
     },
     repository::Repository,
     repository_backups::backup_request_from_row,
-    repository_key_lifecycle::{
-        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
-    },
+    repository_key_lifecycle::require_visible_postgres_clients_in_tx,
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
-
-fn compare_text_or_number(left: &str, right: &str) -> Ordering {
-    match (left.parse::<i128>(), right.parse::<i128>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
-}
-
-fn compare_restore_plan(
-    left: &RestorePlanView,
-    right: &RestorePlanView,
-    sort: Option<&str>,
-) -> Ordering {
-    match sort.unwrap_or("created_at") {
-        "destination_root" | "destination" => left.destination_root.cmp(&right.destination_root),
-        "include_config" | "scope" => left.include_config.cmp(&right.include_config),
-        "paths" => left.paths.len().cmp(&right.paths.len()),
-        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
-        "source_client_id" | "source" => left.source_client_id.cmp(&right.source_client_id),
-        "status" => left.status.cmp(&right.status),
-        "target_client_id" | "target" => left.target_client_id.cmp(&right.target_client_id),
-        _ => compare_text_or_number(&left.created_at, &right.created_at),
-    }
-}
-
-fn restore_plan_matches_search(plan: &RestorePlanView, needle: &str) -> bool {
-    plan.id.to_string().to_ascii_lowercase().contains(needle)
-        || plan
-            .actor_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || plan
-            .source_backup_request_id
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(needle)
-        || plan.source_client_id.to_ascii_lowercase().contains(needle)
-        || plan.target_client_id.to_ascii_lowercase().contains(needle)
-        || plan.status.to_ascii_lowercase().contains(needle)
-        || plan.payload_hash.to_ascii_lowercase().contains(needle)
-        || plan
-            .destination_root
-            .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || plan
-            .note
-            .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || plan
-            .paths
-            .iter()
-            .any(|path| path.to_ascii_lowercase().contains(needle))
-}
 
 fn restore_plan_order_by(sort: Option<&str>, descending: bool) -> &'static str {
     match (sort.unwrap_or("created_at"), descending) {
@@ -96,43 +37,6 @@ fn restore_plan_order_by(sort: Option<&str>, descending: bool) -> &'static str {
 }
 
 impl Repository {
-    #[cfg(test)]
-    pub(crate) async fn list_restore_plans(&self, limit: i64) -> Result<Vec<RestorePlanView>> {
-        match self {
-            Self::Memory(memory) => {
-                let plans = memory.restore_plans.read().await;
-                Ok(plans.iter().rev().take(limit as usize).cloned().collect())
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        source_backup_request_id,
-                        source_client_id,
-                        target_client_id,
-                        paths,
-                        include_config,
-                        destination_root,
-                        status,
-                        payload_hash,
-                        command_scope,
-                        note,
-                        created_at::text AS created_at
-                    FROM restore_plans
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter().map(restore_plan_from_row).collect()
-            }
-        }
-    }
-
     pub(crate) async fn query_restore_plans(
         &self,
         query: &ListQuery,
@@ -140,39 +44,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let mut plans = memory
-                    .restore_plans
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|plan| {
-                        q.as_deref()
-                            .map(|needle| restore_plan_matches_search(plan, needle))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                plans.sort_by(|left, right| {
-                    compare_restore_plan(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    plans.reverse();
-                }
-                Ok(plans
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = restore_plan_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -222,13 +94,6 @@ impl Repository {
 
     pub(crate) async fn find_backup_request(&self, id: Uuid) -> Result<Option<BackupRequestView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_requests
-                .read()
-                .await
-                .iter()
-                .find(|request| request.id == id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -287,22 +152,6 @@ impl Repository {
             created_at: unix_now().to_string(),
         };
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    std::slice::from_ref(&view.target_client_id),
-                    "restore_target_unavailable",
-                )
-                .await?;
-                memory.restore_plans.write().await.push(view.clone());
-                memory.audits.write().await.push(restore_plan_audit(
-                    &view,
-                    request.confirmed,
-                    operator,
-                    unix_now().to_string(),
-                ));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 require_visible_postgres_clients_in_tx(
@@ -370,10 +219,9 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                return Ok(persisted);
+                Ok(persisted)
             }
         }
-        Ok(view)
     }
 
     pub(crate) async fn record_rejected_restore_plan(
@@ -385,17 +233,6 @@ impl Repository {
     ) -> Result<()> {
         let metadata = restore_rejection_metadata(request, payload_hash, operator, reason);
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "restore.rejected_authorization_required".to_string(),
-                    target: format!("client:{}", request.target_client_id),
-                    command_hash: payload_hash.map(ToOwned::to_owned),
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -438,23 +275,6 @@ fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> 
         note: row.try_get("note")?,
         created_at: row.try_get("created_at")?,
     })
-}
-
-fn restore_plan_audit(
-    view: &RestorePlanView,
-    confirmed: bool,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "restore.planned_metadata_only".to_string(),
-        target: format!("restore_plan:{}", view.id),
-        command_hash: Some(view.payload_hash.clone()),
-        metadata: restore_plan_metadata(view, confirmed, operator),
-        created_at,
-    }
 }
 
 fn restore_plan_metadata(

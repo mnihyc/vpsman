@@ -5,10 +5,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub(crate) use vpsman_common::{
-    VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
-    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_PRODUCT_NAME, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
-    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
-    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_INTERFACES,
+    VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+    VPS_RULE_KEY_PRODUCT_NAME, VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+    VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -24,11 +24,6 @@ impl NetworkRateInterfaceSelection {
             all_clients: client_ids.iter().cloned().collect(),
             exact_by_client: BTreeMap::new(),
         }
-    }
-
-    pub(crate) fn select_all(&mut self, client_id: String) {
-        self.exact_by_client.remove(&client_id);
-        self.all_clients.insert(client_id);
     }
 
     pub(crate) fn select_exact(&mut self, client_id: String, interfaces: BTreeSet<String>) {
@@ -183,6 +178,7 @@ pub(crate) struct TrafficAccountingRecord {
     pub(crate) cycle_start: Option<String>,
     pub(crate) cycle_end: Option<String>,
     pub(crate) reset_day: Option<i32>,
+    pub(crate) reset_hour: Option<i32>,
     pub(crate) rx_bytes: i64,
     pub(crate) tx_bytes: i64,
     pub(crate) total_bytes: i64,
@@ -204,7 +200,6 @@ pub(crate) struct TrafficAccountingRecord {
     pub(crate) selector_breakdown: Vec<TrafficAccountingSelectorBreakdown>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TrafficCounterSampleRecord {
     pub(crate) client_id: String,
@@ -219,7 +214,6 @@ pub(crate) struct TrafficCounterSampleRecord {
     pub(crate) sample_source: String,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TrafficCounterRollupRecord {
     pub(crate) client_id: String,
@@ -366,7 +360,7 @@ pub(crate) struct PolicyAlertRecord {
     pub(crate) threshold_value: Option<f64>,
     pub(crate) payload: Value,
     pub(crate) lifecycle_state: String,
-    pub(crate) last_confirmed_at: Option<String>,
+    pub(crate) last_confirmed_at: String,
     pub(crate) resolved_at: Option<String>,
     pub(crate) resolution_reason: Option<String>,
     pub(crate) observed_at: String,

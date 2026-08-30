@@ -2,11 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{
-    model::{AuditLogView, AuthContext},
-    repository::Repository,
-    unix_now,
-};
+use crate::{model::AuthContext, repository::Repository};
 
 impl Repository {
     pub(crate) async fn record_suite_config_update_requested(
@@ -119,17 +115,6 @@ impl Repository {
             metadata["write_error"] = json!(write_error);
         }
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: action.to_string(),
-                    target: "suite_config".to_string(),
-                    command_hash: Some(payload_hash.to_string()),
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -151,7 +136,3 @@ impl Repository {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "tests_repository_suite_config.rs"]
-mod tests;

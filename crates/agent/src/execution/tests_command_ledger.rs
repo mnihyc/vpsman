@@ -35,3 +35,39 @@ async fn command_ledger_records_and_loads_terminal_result() {
     assert_eq!(status["status"], "failed");
     let _ = tokio::fs::remove_dir_all(root).await;
 }
+
+#[tokio::test]
+async fn command_ledger_record_produces_cleanup_for_the_owned_consumer() {
+    let root = std::env::temp_dir().join(format!("vpsman-agent-command-ledger-{}", Uuid::new_v4()));
+    let ledger = CommandLedger::open_at(root.clone()).await.unwrap();
+    let expired_path = root.join(format!("{}.json", Uuid::new_v4()));
+    tokio::fs::write(&expired_path, b"expired").await.unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&expired_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
+        .unwrap();
+
+    ledger
+        .record(Uuid::new_v4(), "b".repeat(64), None, false)
+        .await
+        .unwrap();
+    assert!(
+        expired_path.exists(),
+        "record must not consume global cleanup"
+    );
+
+    let consumer_ledger = ledger.clone();
+    let consumer = tokio::spawn(async move { consumer_ledger.run_cleanup_consumer().await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while expired_path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    consumer.abort();
+    let _ = consumer.await;
+    let _ = tokio::fs::remove_dir_all(root).await;
+}

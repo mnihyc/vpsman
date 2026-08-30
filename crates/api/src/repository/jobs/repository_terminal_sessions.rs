@@ -4,15 +4,11 @@ use chrono::Utc;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Postgres, Row, Transaction};
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashSet},
-};
+use std::cmp::Ordering;
 use uuid::Uuid;
 use vpsman_common::{
-    is_terminal_command_type, is_terminal_session_event, payload_hash, terminal_session_state,
-    TerminalControlAck, TerminalControlAction, TerminalStreamOutput,
-    MAX_TERMINAL_FLOW_WINDOW_BYTES,
+    is_terminal_session_event, payload_hash, terminal_session_state, TerminalControlAck,
+    TerminalControlAction, TerminalStreamOutput, MAX_TERMINAL_FLOW_WINDOW_BYTES,
 };
 use vpsman_server_core::target_status_is_active;
 
@@ -58,129 +54,11 @@ fn terminal_job_statuses(session_state: &str) -> Result<(&'static str, &'static 
     }
 }
 
-#[derive(Debug)]
-enum TerminalReconcileDisposition {
-    Applied { terminal_transitioned: bool },
-    StaleNonterminal { authoritative_status: String },
-}
-
 fn terminal_session_state_for_terminal_status(status: &str) -> (&'static str, &'static str) {
     match status {
         "completed" | "partial_success" => ("closed", "closed"),
         "rejected" | "skipped" => ("rejected", "rejected"),
         _ => ("failed", "failed"),
-    }
-}
-
-fn memory_terminal_reconcile_disposition(
-    job: &crate::model::JobHistoryView,
-    target: &crate::model::JobTargetView,
-    job_status: &str,
-    target_status: &str,
-    terminal: bool,
-) -> Result<Option<String>> {
-    let target_terminal = target.completed_at.is_some() || !target_status_is_active(&target.status);
-    let job_terminal =
-        job.completed_at.is_some() || !matches!(job.status.as_str(), "queued" | "running");
-    if !terminal && (target_terminal || job_terminal) {
-        return Ok(Some(if target_terminal {
-            target.status.clone()
-        } else {
-            job.status.clone()
-        }));
-    }
-    if terminal && target_terminal {
-        anyhow::ensure!(
-            target.status == target_status,
-            "terminal_open_target_terminal_state_conflict"
-        );
-    }
-    if terminal && job_terminal {
-        anyhow::ensure!(
-            job.status == job_status,
-            "terminal_open_job_terminal_state_conflict"
-        );
-    }
-    Ok(None)
-}
-
-fn reconcile_memory_terminal_job_locked(
-    jobs: &mut [crate::model::JobHistoryView],
-    targets: &mut [crate::model::JobTargetView],
-    job_id: Uuid,
-    client_id: &str,
-    session_state: &str,
-    now: &str,
-) -> Result<TerminalReconcileDisposition> {
-    let (job_status, target_status, terminal) = terminal_job_statuses(session_state)?;
-    let job_index = jobs
-        .iter()
-        .position(|job| job.id == job_id && job.command_type == "terminal_open")
-        .context("terminal_open_job_not_found")?;
-    let target_index = targets
-        .iter()
-        .position(|target| target.job_id == job_id && target.client_id == client_id)
-        .context("terminal_open_target_not_found")?;
-    if let Some(authoritative_status) = memory_terminal_reconcile_disposition(
-        &jobs[job_index],
-        &targets[target_index],
-        job_status,
-        target_status,
-        terminal,
-    )? {
-        return Ok(TerminalReconcileDisposition::StaleNonterminal {
-            authoritative_status,
-        });
-    }
-
-    let terminal_transitioned = terminal && jobs[job_index].completed_at.is_none();
-    let target = &mut targets[target_index];
-    target.status = target_status.to_string();
-    if terminal {
-        if target.completed_at.is_none() {
-            target.completed_at = Some(now.to_string());
-        }
-    } else {
-        target.completed_at = None;
-        target.exit_code = None;
-        target.deadline_at = None;
-    }
-
-    let job = &mut jobs[job_index];
-    job.status = job_status.to_string();
-    if terminal {
-        if job.completed_at.is_none() {
-            job.completed_at = Some(now.to_string());
-        }
-    } else {
-        job.completed_at = None;
-    }
-    Ok(TerminalReconcileDisposition::Applied {
-        terminal_transitioned,
-    })
-}
-
-fn normalize_memory_stale_terminal_session(
-    sessions: &mut [TerminalSessionView],
-    job_id: Uuid,
-    client_id: &str,
-    authoritative_status: &str,
-    observed_at: &str,
-) {
-    let (state, last_status) = terminal_session_state_for_terminal_status(authoritative_status);
-    if let Some(session) = sessions.iter_mut().find(|session| {
-        session.job_id == job_id
-            && session.client_id == client_id
-            && matches!(session.state.as_str(), "opening" | "open")
-    }) {
-        session.state = state.to_string();
-        session.last_status = last_status.to_string();
-        session.last_event = "terminal_stream".to_string();
-        session.close_reason = session
-            .close_reason
-            .take()
-            .or_else(|| Some(format!("job_target_{authoritative_status}")));
-        session.observed_at = observed_at.to_string();
     }
 }
 
@@ -297,6 +175,17 @@ async fn normalize_postgres_stale_terminal_session_in_tx(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// The accepted agent-incarnation transition is the authoritative owner of an
+/// old process's active targets. Keep its exact terminal session consistent in
+/// the same transaction, before the matching terminal event can be published.
+pub(crate) async fn mark_postgres_terminal_session_agent_lost_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+) -> Result<()> {
+    normalize_postgres_stale_terminal_session_in_tx(tx, job_id, client_id, "agent_lost").await
 }
 
 fn terminal_control_audit_id(
@@ -518,42 +407,6 @@ async fn apply_postgres_terminal_control_ack_in_tx(
     Ok(())
 }
 
-fn apply_memory_terminal_control_ack(
-    session: &mut TerminalSessionView,
-    action: &TerminalControlAction,
-    ack: &TerminalControlAck,
-    input_seq: Option<u64>,
-    observed_at: &str,
-) {
-    if ack.accepted {
-        session.last_status = ack.status.clone();
-        session.last_event = format!("terminal_{}", action.kind());
-        session.observed_at = observed_at.to_string();
-        match action {
-            TerminalControlAction::Input { .. } => {
-                let input_seq = input_seq.expect("accepted input acknowledgement was validated");
-                session.last_input_seq = session
-                    .last_input_seq
-                    .max(i64::try_from(input_seq).unwrap_or(i64::MAX));
-            }
-            TerminalControlAction::Resize { cols, rows } => {
-                session.cols = Some(i64::from(*cols));
-                session.rows = Some(i64::from(*rows));
-            }
-            TerminalControlAction::Close { reason } => {
-                session.state = "closed".to_string();
-                session.close_reason = reason.clone().or_else(|| Some("operator".to_string()));
-            }
-        }
-    } else if matches!(ack.status.as_str(), "missing" | "failed" | "exited") {
-        session.state = ack.status.clone();
-        session.last_status = ack.status.clone();
-        session.last_event = format!("terminal_{}", action.kind());
-        session.close_reason = Some(ack.message.clone());
-        session.observed_at = observed_at.to_string();
-    }
-}
-
 async fn validate_postgres_terminal_control_target_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
@@ -583,7 +436,7 @@ async fn reconcile_postgres_terminal_job_in_tx(
     job_id: Uuid,
     client_id: &str,
     session_state: &str,
-) -> Result<TerminalReconcileDisposition> {
+) -> Result<()> {
     let (job_status, target_status, terminal) = terminal_job_statuses(session_state)?;
     let locked = lock_postgres_terminal_job_in_tx(tx, job_id, client_id).await?;
     if let Some(authoritative_status) =
@@ -596,9 +449,7 @@ async fn reconcile_postgres_terminal_job_in_tx(
             &authoritative_status,
         )
         .await?;
-        return Ok(TerminalReconcileDisposition::StaleNonterminal {
-            authoritative_status,
-        });
+        return Ok(());
     }
 
     let target_result = sqlx::query(
@@ -649,9 +500,7 @@ async fn reconcile_postgres_terminal_job_in_tx(
             "terminal_open_job_not_found"
         );
     }
-    Ok(TerminalReconcileDisposition::Applied {
-        terminal_transitioned: terminal && locked.job_completed_at.is_none(),
-    })
+    Ok(())
 }
 
 impl Repository {
@@ -663,58 +512,6 @@ impl Repository {
     ) -> Result<Vec<TerminalSessionView>> {
         let limit = limit.clamp(1, 200);
         match self {
-            Self::Memory(memory) => {
-                let command_types = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .map(|job| (job.id, job.command_type.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|output| {
-                        if output.stream != "status" {
-                            return None;
-                        }
-                        if let Some(client_id) = client_id {
-                            if output.client_id != client_id {
-                                return None;
-                            }
-                        }
-                        let command_type = command_types.get(&output.job_id)?;
-                        if !is_terminal_command(command_type) {
-                            return None;
-                        }
-                        Some(TerminalStatusOutput {
-                            job_id: output.job_id,
-                            client_id: output.client_id.clone(),
-                            seq: output.seq,
-                            data: BASE64.decode(&output.data_base64).ok()?,
-                            created_at: output.created_at.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                sort_terminal_outputs_newest(&mut outputs)?;
-                let mut sessions = build_terminal_sessions(outputs, limit, session_id)?;
-                sessions.extend(
-                    memory
-                        .terminal_sessions
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|session| {
-                            client_id.is_none_or(|client_id| session.client_id == client_id)
-                                && session_id
-                                    .is_none_or(|session_id| session.session_id == session_id)
-                        })
-                        .cloned(),
-                );
-                deduplicate_terminal_sessions(sessions, limit)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -769,39 +566,6 @@ impl Repository {
         operator: &AuthContext,
     ) -> std::result::Result<Uuid, ApiError> {
         match self {
-            Self::Memory(memory) => {
-                let sessions = memory.terminal_sessions.read().await;
-                let session = sessions
-                    .iter()
-                    .find(|session| {
-                        session.client_id == client_id && session.session_id == session_id
-                    })
-                    .ok_or_else(|| ApiError::not_found("terminal_session_not_found"))?;
-                if session.state != "open" {
-                    return Err(ApiError::conflict("terminal_session_not_open"));
-                }
-                let job_id = session.job_id;
-                drop(sessions);
-                let jobs = memory.jobs.read().await;
-                let job = jobs
-                    .iter()
-                    .find(|job| job.id == job_id && job.command_type == "terminal_open")
-                    .ok_or_else(|| ApiError::conflict("terminal_session_job_invalid"))?;
-                if job.actor_id != Some(operator.operator.id) {
-                    return Err(ApiError::forbidden("terminal_session_not_owned"));
-                }
-                drop(jobs);
-                let target_active = memory.job_targets.read().await.iter().any(|target| {
-                    target.job_id == job_id
-                        && target.client_id == client_id
-                        && target.completed_at.is_none()
-                        && target_status_is_active(&target.status)
-                });
-                if !target_active {
-                    return Err(ApiError::conflict("terminal_session_job_inactive"));
-                }
-                Ok(job_id)
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -897,107 +661,6 @@ impl Repository {
         });
 
         match self {
-            Self::Memory(memory) => {
-                if !ack.accepted && audit.is_none() && state.is_none() {
-                    return Ok(());
-                }
-                let terminal_transitioned = {
-                    let _terminal_guard = memory.job_terminal_side_effects.lock().await;
-                    // Memory's established overlapping core order is jobs -> targets. Keep the
-                    // terminal session and audit guards after those two so output completion and
-                    // control acknowledgement cannot form an AB/BA cycle.
-                    let mut jobs = memory.jobs.write().await;
-                    let mut targets = memory.job_targets.write().await;
-                    let mut sessions = memory.terminal_sessions.write().await;
-                    let mut audits = memory.audits.write().await;
-
-                    if let Some(audit) = audit.as_ref() {
-                        if let Some(existing) =
-                            audits.iter().find(|existing| existing.id == audit.id)
-                        {
-                            anyhow::ensure!(
-                                terminal_control_audits_match(existing, audit),
-                                "terminal_control_audit_identity_conflict"
-                            );
-                            return Ok(());
-                        }
-                    }
-
-                    let job = jobs
-                        .iter()
-                        .find(|job| job.id == job_id && job.command_type == "terminal_open")
-                        .context("terminal_open_job_not_found")?;
-                    let target = targets
-                        .iter()
-                        .find(|target| target.job_id == job_id && target.client_id == client_id)
-                        .context("terminal_open_target_not_found")?;
-                    let session_index = sessions
-                        .iter()
-                        .position(|session| {
-                            session.client_id == client_id
-                                && session.session_id == ack.session_id
-                                && session.job_id == job_id
-                        })
-                        .context("terminal_session_not_found")?;
-
-                    if let Some(state) = state {
-                        let (job_status, target_status, terminal) = terminal_job_statuses(state)?;
-                        anyhow::ensure!(
-                            memory_terminal_reconcile_disposition(
-                                job,
-                                target,
-                                job_status,
-                                target_status,
-                                terminal,
-                            )?
-                            .is_none(),
-                            "terminal_session_job_inactive"
-                        );
-                    } else {
-                        anyhow::ensure!(
-                            job.completed_at.is_none()
-                                && matches!(job.status.as_str(), "queued" | "running")
-                                && target.completed_at.is_none()
-                                && target_status_is_active(&target.status),
-                            "terminal_session_job_inactive"
-                        );
-                    }
-
-                    let mut next_session = sessions[session_index].clone();
-                    apply_memory_terminal_control_ack(
-                        &mut next_session,
-                        action,
-                        ack,
-                        input_seq,
-                        &now,
-                    );
-                    let terminal_transitioned = if let Some(state) = state {
-                        match reconcile_memory_terminal_job_locked(
-                            &mut jobs,
-                            &mut targets,
-                            job_id,
-                            client_id,
-                            state,
-                            &now,
-                        )? {
-                            TerminalReconcileDisposition::Applied {
-                                terminal_transitioned,
-                            } => terminal_transitioned,
-                            TerminalReconcileDisposition::StaleNonterminal { .. } => false,
-                        }
-                    } else {
-                        false
-                    };
-                    sessions[session_index] = next_session;
-                    if let Some(audit) = audit {
-                        audits.push(audit);
-                    }
-                    terminal_transitioned
-                };
-                if terminal_transitioned {
-                    self.reconcile_memory_job_event_sources(job_id).await?;
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 if let Some(audit) = audit.as_ref() {
@@ -1026,398 +689,18 @@ impl Repository {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn reconcile_terminal_job(
         &self,
         job_id: Uuid,
         client_id: &str,
         session_state: &str,
     ) -> Result<()> {
-        let memory_terminal_transitioned = match self {
-            Self::Memory(memory) => {
-                let now = now_rfc3339();
-                let _terminal_guard = memory.job_terminal_side_effects.lock().await;
-                let mut jobs = memory.jobs.write().await;
-                let mut targets = memory.job_targets.write().await;
-                match reconcile_memory_terminal_job_locked(
-                    &mut jobs,
-                    &mut targets,
-                    job_id,
-                    client_id,
-                    session_state,
-                    &now,
-                )? {
-                    TerminalReconcileDisposition::Applied {
-                        terminal_transitioned,
-                    } => terminal_transitioned,
-                    TerminalReconcileDisposition::StaleNonterminal {
-                        authoritative_status,
-                    } => {
-                        let mut sessions = memory.terminal_sessions.write().await;
-                        normalize_memory_stale_terminal_session(
-                            &mut sessions,
-                            job_id,
-                            client_id,
-                            &authoritative_status,
-                            &now,
-                        );
-                        false
-                    }
-                }
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, session_state)
-                    .await?;
-                tx.commit().await?;
-                false
-            }
-        };
-        if memory_terminal_transitioned {
-            self.reconcile_memory_job_event_sources(job_id).await?;
-        }
+        let Self::Postgres(pool) = self;
+        let mut tx = pool.begin().await?;
+        reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, session_state).await?;
+        tx.commit().await?;
         Ok(())
-    }
-
-    pub(crate) async fn reconcile_terminal_job_by_id(&self, job_id: Uuid) -> Result<()> {
-        let mut session = self.terminal_job_session_state(job_id).await?;
-        let mut core_already_reconciled = false;
-        if session.is_none() {
-            match self {
-                Self::Memory(memory) => {
-                    if let Some(view) = self
-                        .list_terminal_sessions(200, None, None)
-                        .await?
-                        .into_iter()
-                        .find(|session| session.job_id == job_id)
-                    {
-                        let now = now_rfc3339();
-                        let (effective_state, terminal_transitioned) = {
-                            let _terminal_guard = memory.job_terminal_side_effects.lock().await;
-                            let mut jobs = memory.jobs.write().await;
-                            let mut targets = memory.job_targets.write().await;
-                            let mut sessions = memory.terminal_sessions.write().await;
-                            let mut next_sessions = sessions.clone();
-                            upsert_memory_terminal_session(&mut next_sessions, view.clone())?;
-                            let session_index = next_sessions
-                                .iter()
-                                .position(|session| {
-                                    session.client_id == view.client_id
-                                        && session.session_id == view.session_id
-                                })
-                                .context("terminal_session_missing_after_upsert")?;
-                            let effective_state = next_sessions[session_index].state.clone();
-                            let terminal_transitioned = match reconcile_memory_terminal_job_locked(
-                                &mut jobs,
-                                &mut targets,
-                                job_id,
-                                &view.client_id,
-                                &effective_state,
-                                &now,
-                            )? {
-                                TerminalReconcileDisposition::Applied {
-                                    terminal_transitioned,
-                                } => terminal_transitioned,
-                                TerminalReconcileDisposition::StaleNonterminal {
-                                    authoritative_status,
-                                } => {
-                                    normalize_memory_stale_terminal_session(
-                                        &mut next_sessions,
-                                        job_id,
-                                        &view.client_id,
-                                        &authoritative_status,
-                                        &now,
-                                    );
-                                    false
-                                }
-                            };
-                            let effective_state = next_sessions[session_index].state.clone();
-                            *sessions = next_sessions;
-                            (effective_state, terminal_transitioned)
-                        };
-                        if terminal_transitioned {
-                            self.reconcile_memory_job_event_sources(job_id).await?;
-                        }
-                        session = Some((view.client_id, effective_state));
-                        core_already_reconciled = true;
-                    }
-                }
-                Self::Postgres(pool) => {
-                    let client_id: Option<String> = sqlx::query_scalar(
-                        r#"
-                        SELECT client_id
-                        FROM job_targets
-                        WHERE job_id = $1
-                        ORDER BY client_id
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(job_id)
-                    .fetch_optional(pool)
-                    .await?;
-                    if let Some(client_id) = client_id {
-                        self.refresh_terminal_sessions_for_client(&client_id)
-                            .await?;
-                        session = self.terminal_job_session_state(job_id).await?;
-                        core_already_reconciled = true;
-                    }
-                }
-            }
-        }
-        if let Some((client_id, state)) = session {
-            if !core_already_reconciled {
-                self.reconcile_terminal_job(job_id, &client_id, &state)
-                    .await?;
-            }
-            let effective_state = self
-                .terminal_job_session_state(job_id)
-                .await?
-                .map(|(_, state)| state);
-            if effective_state
-                .as_deref()
-                .is_some_and(|state| matches!(state, "opening" | "open"))
-                && self
-                    .terminal_job_agent_incarnation_changed(job_id, &client_id)
-                    .await?
-            {
-                self.mark_terminal_session_missing_and_reconcile(
-                    job_id,
-                    &client_id,
-                    "agent_process_restarted",
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-        Ok(())
-    }
-
-    async fn terminal_job_agent_incarnation_changed(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-    ) -> Result<bool> {
-        match self {
-            Self::Memory(memory) => {
-                let expected = memory
-                    .job_targets
-                    .read()
-                    .await
-                    .iter()
-                    .find(|target| target.job_id == job_id && target.client_id == client_id)
-                    .and_then(|target| target.process_incarnation_id);
-                let actual = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .and_then(|agent| agent.process_incarnation_id);
-                Ok(
-                    matches!((expected, actual), (Some(expected), Some(actual)) if expected != actual),
-                )
-            }
-            Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        target.process_incarnation_id AS expected_process_incarnation_id,
-                        client.process_incarnation_id AS actual_process_incarnation_id
-                    FROM job_targets target
-                    JOIN clients client ON client.id = target.client_id
-                    WHERE target.job_id = $1 AND target.client_id = $2
-                    "#,
-                )
-                .bind(job_id)
-                .bind(client_id)
-                .fetch_optional(pool)
-                .await?;
-                let Some(row) = row else {
-                    return Ok(false);
-                };
-                let expected: Option<Uuid> = row.try_get("expected_process_incarnation_id")?;
-                let actual: Option<Uuid> = row.try_get("actual_process_incarnation_id")?;
-                Ok(
-                    matches!((expected, actual), (Some(expected), Some(actual)) if expected != actual),
-                )
-            }
-        }
-    }
-
-    async fn mark_terminal_session_missing_and_reconcile(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        reason: &str,
-    ) -> Result<()> {
-        match self {
-            Self::Memory(memory) => {
-                let now = now_rfc3339();
-                let terminal_transitioned = {
-                    let _terminal_guard = memory.job_terminal_side_effects.lock().await;
-                    let mut jobs = memory.jobs.write().await;
-                    let mut targets = memory.job_targets.write().await;
-                    let mut sessions = memory.terminal_sessions.write().await;
-                    let session_index = sessions
-                        .iter()
-                        .position(|session| {
-                            session.job_id == job_id && session.client_id == client_id
-                        })
-                        .context("terminal_session_not_found")?;
-                    let job = jobs
-                        .iter()
-                        .find(|job| job.id == job_id && job.command_type == "terminal_open")
-                        .context("terminal_open_job_not_found")?;
-                    let target = targets
-                        .iter()
-                        .find(|target| target.job_id == job_id && target.client_id == client_id)
-                        .context("terminal_open_target_not_found")?;
-                    if matches!(sessions[session_index].state.as_str(), "opening" | "open") {
-                        if let Some(authoritative_status) = memory_terminal_reconcile_disposition(
-                            job, target, "running", "running", false,
-                        )? {
-                            normalize_memory_stale_terminal_session(
-                                &mut sessions,
-                                job_id,
-                                client_id,
-                                &authoritative_status,
-                                &now,
-                            );
-                            false
-                        } else {
-                            let mut next_session = sessions[session_index].clone();
-                            next_session.state = "missing".to_string();
-                            next_session.last_status = "missing".to_string();
-                            next_session.last_event = "terminal_stream".to_string();
-                            next_session.close_reason = Some(reason.to_string());
-                            next_session.observed_at = now.clone();
-                            let transitioned = match reconcile_memory_terminal_job_locked(
-                                &mut jobs,
-                                &mut targets,
-                                job_id,
-                                client_id,
-                                "missing",
-                                &now,
-                            )? {
-                                TerminalReconcileDisposition::Applied {
-                                    terminal_transitioned,
-                                } => terminal_transitioned,
-                                TerminalReconcileDisposition::StaleNonterminal { .. } => false,
-                            };
-                            sessions[session_index] = next_session;
-                            transitioned
-                        }
-                    } else {
-                        match reconcile_memory_terminal_job_locked(
-                            &mut jobs,
-                            &mut targets,
-                            job_id,
-                            client_id,
-                            &sessions[session_index].state,
-                            &now,
-                        )? {
-                            TerminalReconcileDisposition::Applied {
-                                terminal_transitioned,
-                            } => terminal_transitioned,
-                            TerminalReconcileDisposition::StaleNonterminal {
-                                authoritative_status,
-                            } => {
-                                normalize_memory_stale_terminal_session(
-                                    &mut sessions,
-                                    job_id,
-                                    client_id,
-                                    &authoritative_status,
-                                    &now,
-                                );
-                                false
-                            }
-                        }
-                    }
-                };
-                if terminal_transitioned {
-                    self.reconcile_memory_job_event_sources(job_id).await?;
-                }
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                let locked = lock_postgres_terminal_job_in_tx(&mut tx, job_id, client_id).await?;
-                if let Some(authoritative_status) =
-                    postgres_terminal_reconcile_disposition(&locked, "open")?
-                {
-                    normalize_postgres_stale_terminal_session_in_tx(
-                        &mut tx,
-                        job_id,
-                        client_id,
-                        &authoritative_status,
-                    )
-                    .await?;
-                    tx.commit().await?;
-                    return Ok(());
-                }
-                let state: Option<String> = sqlx::query_scalar(
-                    r#"
-                    UPDATE terminal_sessions
-                    SET state = 'missing',
-                        last_status = 'missing',
-                        last_event = 'terminal_stream',
-                        close_reason = $3,
-                        observed_at = now()
-                    WHERE job_id = $1
-                      AND client_id = $2
-                      AND state IN ('opening', 'open')
-                    RETURNING state
-                    "#,
-                )
-                .bind(job_id)
-                .bind(client_id)
-                .bind(reason)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let effective_state = match state {
-                    Some(state) => state,
-                    None => sqlx::query_scalar(
-                        r#"
-                        SELECT state
-                        FROM terminal_sessions
-                        WHERE job_id = $1 AND client_id = $2
-                        FOR UPDATE
-                        "#,
-                    )
-                    .bind(job_id)
-                    .bind(client_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .context("terminal_session_not_found")?,
-                };
-                reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, &effective_state)
-                    .await?;
-                tx.commit().await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn terminal_job_session_state(&self, job_id: Uuid) -> Result<Option<(String, String)>> {
-        match self {
-            Self::Memory(memory) => Ok(memory
-                .terminal_sessions
-                .read()
-                .await
-                .iter()
-                .find(|session| session.job_id == job_id)
-                .map(|session| (session.client_id.clone(), session.state.clone()))),
-            Self::Postgres(pool) => Ok(sqlx::query(
-                r#"
-                SELECT client_id, state
-                FROM terminal_sessions
-                WHERE job_id = $1
-                "#,
-            )
-            .bind(job_id)
-            .fetch_optional(pool)
-            .await?
-            .map(|row| Ok::<_, sqlx::Error>((row.try_get("client_id")?, row.try_get("state")?)))
-            .transpose()?),
-        }
     }
 
     pub(crate) async fn terminal_session_replay(
@@ -1433,31 +716,6 @@ impl Repository {
         let limit = limit.clamp(1, 1000);
         let max_bytes = max_bytes.max(1);
         match self {
-            Self::Memory(memory) => {
-                let mut chunks = memory
-                    .terminal_output_chunks
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|chunk| {
-                        chunk.client_id == client_id
-                            && chunk.session_id == session_id
-                            && chunk.terminal_seq >= from_seq
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                chunks.sort_by_key(|chunk| chunk.terminal_seq);
-                Ok(build_terminal_replay_from_chunks(
-                    client_id,
-                    session_id,
-                    chunks,
-                    from_seq,
-                    limit,
-                    max_bytes,
-                    include_data,
-                    memory_terminal_next_seq(memory, client_id, session_id).await,
-                ))
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1552,7 +810,6 @@ impl Repository {
         let output = TerminalStatusOutput {
             job_id: event.job_id,
             client_id: client_id.to_string(),
-            seq: 0,
             data: event.output.data.clone(),
             created_at: now_rfc3339(),
         };
@@ -1568,108 +825,6 @@ impl Repository {
         let incoming_state = event.state;
         terminal_job_statuses(incoming_state)?;
         match self {
-            Self::Memory(memory) => {
-                let session = TerminalAggregate::new(event).into_view();
-                let now = now_rfc3339();
-                let terminal_transitioned = {
-                    let _terminal_guard = memory.job_terminal_side_effects.lock().await;
-                    let mut jobs = memory.jobs.write().await;
-                    let mut targets = memory.job_targets.write().await;
-                    let mut sessions = memory.terminal_sessions.write().await;
-                    let conflicting_binding = sessions
-                        .iter()
-                        .find(|session| {
-                            session.client_id == client_id && session.session_id == session_id
-                        })
-                        .map(|session| session.job_id)
-                        .is_some_and(|bound_job_id| bound_job_id != job_id);
-                    if conflicting_binding {
-                        if incoming_state != "rejected" {
-                            anyhow::bail!("terminal_session_job_conflict");
-                        }
-                        match reconcile_memory_terminal_job_locked(
-                            &mut jobs,
-                            &mut targets,
-                            job_id,
-                            client_id,
-                            incoming_state,
-                            &now,
-                        )? {
-                            TerminalReconcileDisposition::Applied {
-                                terminal_transitioned,
-                            } => terminal_transitioned,
-                            TerminalReconcileDisposition::StaleNonterminal { .. } => false,
-                        }
-                    } else {
-                        let (job_status, target_status, terminal) =
-                            terminal_job_statuses(incoming_state)?;
-                        let job = jobs
-                            .iter()
-                            .find(|job| job.id == job_id && job.command_type == "terminal_open")
-                            .context("terminal_open_job_not_found")?;
-                        let target = targets
-                            .iter()
-                            .find(|target| target.job_id == job_id && target.client_id == client_id)
-                            .context("terminal_open_target_not_found")?;
-                        if let Some(authoritative_status) = memory_terminal_reconcile_disposition(
-                            job,
-                            target,
-                            job_status,
-                            target_status,
-                            terminal,
-                        )? {
-                            normalize_memory_stale_terminal_session(
-                                &mut sessions,
-                                job_id,
-                                client_id,
-                                &authoritative_status,
-                                &now,
-                            );
-                            false
-                        } else {
-                            let mut next_sessions = sessions.clone();
-                            upsert_memory_terminal_session(&mut next_sessions, session)?;
-                            let effective_state = next_sessions
-                                .iter()
-                                .find(|session| {
-                                    session.client_id == client_id
-                                        && session.session_id == session_id
-                                })
-                                .map(|session| session.state.clone())
-                                .context("terminal_session_missing_after_upsert")?;
-                            let transitioned = match reconcile_memory_terminal_job_locked(
-                                &mut jobs,
-                                &mut targets,
-                                job_id,
-                                client_id,
-                                &effective_state,
-                                &now,
-                            )? {
-                                TerminalReconcileDisposition::Applied {
-                                    terminal_transitioned,
-                                } => terminal_transitioned,
-                                TerminalReconcileDisposition::StaleNonterminal {
-                                    authoritative_status,
-                                } => {
-                                    normalize_memory_stale_terminal_session(
-                                        &mut next_sessions,
-                                        job_id,
-                                        client_id,
-                                        &authoritative_status,
-                                        &now,
-                                    );
-                                    false
-                                }
-                            };
-                            *sessions = next_sessions;
-                            transitioned
-                        }
-                    }
-                };
-                if terminal_transitioned {
-                    self.reconcile_memory_job_event_sources(job_id).await?;
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let bound_job_id: Option<Uuid> = sqlx::query_scalar(
@@ -1722,25 +877,85 @@ impl Repository {
         Ok(())
     }
 
-    pub(crate) async fn record_terminal_command_replay_chunks(
+    /// Projects the bounded PTY replay range authorized by one immutable
+    /// terminal-open status output. PTY outputs do not carry terminal sequence
+    /// numbers themselves; the following status output is their sole mapping
+    /// authority through its exact [output_first_seq, output_next_seq) range.
+    ///
+    /// This is called only by the durable job-output consumer. Request handlers
+    /// persist source output and work, but never scan or rebuild terminal replay.
+    pub(crate) async fn project_terminal_command_replay_from_job_output(
         &self,
-        job_id: Uuid,
-        client_id: &str,
+        output: &JobOutputView,
     ) -> Result<()> {
-        let outputs = self
-            .list_terminal_command_job_outputs(job_id, client_id)
-            .await?;
-        let Some(status) = terminal_replay_status_for_job_outputs(&outputs) else {
+        let Some(status) = parse_terminal_command_replay_status(output) else {
             return Ok(());
         };
-        let Some(first_seq) = status.first_seq else {
+        if self
+            .terminal_job_command_type(output.job_id)
+            .await?
+            .as_deref()
+            != Some("terminal_open")
+        {
+            return Ok(());
+        }
+        let Some(plan) = terminal_command_replay_plan(output.seq, &status)? else {
             return Ok(());
         };
-        let Some(session_id) = status.session_id else {
-            return Ok(());
-        };
+
+        let Self::Postgres(pool) = self;
+        let rows = sqlx::query(
+            r#"
+            SELECT seq, stream, data, created_at::text AS created_at
+            FROM job_outputs
+            WHERE job_id = $1
+              AND client_id = $2
+              AND seq >= $3
+              AND seq < $4
+            ORDER BY seq ASC
+            "#,
+        )
+        .bind(output.job_id)
+        .bind(&output.client_id)
+        .bind(plan.first_job_output_seq)
+        .bind(output.seq)
+        .fetch_all(pool)
+        .await?;
+        anyhow::ensure!(
+            rows.len() == plan.output_count,
+            "terminal_replay_source_range_incomplete"
+        );
+
+        let mut records = Vec::with_capacity(rows.len());
+        for (index, row) in rows.into_iter().enumerate() {
+            let expected_job_output_seq = plan
+                .first_job_output_seq
+                .checked_add(i32::try_from(index).context("terminal replay index overflow")?)
+                .context("terminal replay job-output sequence overflow")?;
+            anyhow::ensure!(
+                row.try_get::<i32, _>("seq")? == expected_job_output_seq
+                    && row.try_get::<String, _>("stream")? == "pty",
+                "terminal_replay_source_range_invalid"
+            );
+            let terminal_seq = plan
+                .first_terminal_seq
+                .checked_add(i64::try_from(index).context("terminal replay index overflow")?)
+                .context("terminal replay sequence overflow")?;
+            records.push(terminal_output_chunk_record(
+                &output.client_id,
+                status.session_id,
+                terminal_seq,
+                output.job_id,
+                row.try_get("data")?,
+                Some(row.try_get("created_at")?),
+            ));
+        }
+
         let retention = TerminalRetentionBounds {
-            retained_first_seq: status.retained_first_seq.unwrap_or(first_seq).max(1),
+            retained_first_seq: status
+                .retained_first_seq
+                .unwrap_or(plan.first_terminal_seq)
+                .max(1),
             retained_bytes: retention_cap_i64(
                 status
                     .retained_bytes
@@ -1750,35 +965,28 @@ impl Repository {
             dropped_chunks: status.dropped_chunks.unwrap_or(0),
             replay_truncated: status.replay_truncated,
         };
-        let mut pty_index = 0_i64;
-        for output in outputs.into_iter().filter(|output| output.stream == "pty") {
-            let terminal_seq = first_seq.saturating_add(pty_index);
-            pty_index = pty_index.saturating_add(1);
-            if terminal_seq < 1
-                || status
-                    .next_seq
-                    .is_some_and(|next_seq| terminal_seq >= next_seq)
+        let mut tx = pool.begin().await?;
+        lock_postgres_terminal_output_identity_in_tx(&mut tx, &output.client_id, status.session_id)
+            .await?;
+        for record in &records {
+            if insert_postgres_terminal_output_chunk_record_in_tx(&mut tx, record).await?
+                == JobOutputWriteResult::DuplicateConflict
             {
-                continue;
-            }
-            let data = BASE64
-                .decode(&output.data_base64)
-                .context("terminal replay job output is not valid base64")?;
-            let record = terminal_output_chunk_record(
-                client_id,
-                session_id,
-                terminal_seq,
-                output.job_id,
-                data,
-                Some(output.created_at),
-            );
-            let result = self
-                .record_terminal_output_chunk_record(record, retention)
-                .await?;
-            if result == JobOutputWriteResult::DuplicateConflict {
+                tx.rollback().await?;
                 anyhow::bail!("terminal_output_sequence_conflict");
             }
         }
+        prune_postgres_terminal_chunks(&mut tx, &output.client_id, status.session_id, retention)
+            .await?;
+        update_postgres_terminal_session_range(
+            &mut tx,
+            &output.client_id,
+            status.session_id,
+            plan.next_terminal_seq,
+            retention,
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1788,96 +996,16 @@ impl Repository {
         retention: TerminalRetentionBounds,
     ) -> Result<JobOutputWriteResult> {
         let result = match self {
-            Self::Memory(memory) => {
-                let mut chunks = memory.terminal_output_chunks.write().await;
-                let existing = chunks.iter().position(|chunk| {
-                    chunk.client_id == record.client_id
-                        && chunk.session_id == record.session_id
-                        && chunk.terminal_seq == record.terminal_seq
-                });
-                let result = match existing {
-                    Some(index) if terminal_output_chunk_matches(&chunks[index], &record) => {
-                        JobOutputWriteResult::DuplicateIdentical
-                    }
-                    Some(_) => JobOutputWriteResult::DuplicateConflict,
-                    None => {
-                        chunks.push(record.clone());
-                        JobOutputWriteResult::Inserted
-                    }
-                };
-                if result != JobOutputWriteResult::DuplicateConflict {
-                    prune_memory_terminal_chunks(
-                        &mut chunks,
-                        &record.client_id,
-                        record.session_id,
-                        retention,
-                    );
-                    drop(chunks);
-                    update_memory_terminal_session_range(memory, &record, retention).await;
-                }
-                result
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let inserted = sqlx::query_scalar::<_, Option<String>>(
-                    r#"
-                    INSERT INTO terminal_output_chunks (
-                        client_id,
-                        session_id,
-                        terminal_seq,
-                        job_id,
-                        data,
-                        size_bytes,
-                        sha256_hex,
-                        created_at
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz)
-                    ON CONFLICT (client_id, session_id, terminal_seq)
-                    DO NOTHING
-                    RETURNING created_at::text
-                    "#,
+                lock_postgres_terminal_output_identity_in_tx(
+                    &mut tx,
+                    &record.client_id,
+                    record.session_id,
                 )
-                .bind(&record.client_id)
-                .bind(record.session_id)
-                .bind(record.terminal_seq)
-                .bind(record.job_id)
-                .bind(&record.data)
-                .bind(record.size_bytes)
-                .bind(&record.sha256_hex)
-                .bind(&record.created_at)
-                .fetch_optional(&mut *tx)
                 .await?;
-                let result = if inserted.flatten().is_some() {
-                    JobOutputWriteResult::Inserted
-                } else {
-                    let existing = sqlx::query(
-                        r#"
-                        SELECT data, size_bytes, sha256_hex, created_at::text AS created_at
-                        FROM terminal_output_chunks
-                        WHERE client_id = $1 AND session_id = $2 AND terminal_seq = $3
-                        "#,
-                    )
-                    .bind(&record.client_id)
-                    .bind(record.session_id)
-                    .bind(record.terminal_seq)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    let existing = TerminalOutputChunkRecord {
-                        client_id: record.client_id.clone(),
-                        session_id: record.session_id,
-                        terminal_seq: record.terminal_seq,
-                        job_id: record.job_id,
-                        data: existing.try_get("data")?,
-                        size_bytes: existing.try_get("size_bytes")?,
-                        sha256_hex: existing.try_get("sha256_hex")?,
-                        created_at: existing.try_get("created_at")?,
-                    };
-                    if terminal_output_chunk_matches(&existing, &record) {
-                        JobOutputWriteResult::DuplicateIdentical
-                    } else {
-                        JobOutputWriteResult::DuplicateConflict
-                    }
-                };
+                let result =
+                    insert_postgres_terminal_output_chunk_record_in_tx(&mut tx, &record).await?;
                 if result == JobOutputWriteResult::DuplicateConflict {
                     tx.rollback().await?;
                     return Ok(JobOutputWriteResult::DuplicateConflict);
@@ -1906,13 +1034,6 @@ impl Repository {
 
     async fn terminal_job_command_type(&self, job_id: Uuid) -> Result<Option<String>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .jobs
-                .read()
-                .await
-                .iter()
-                .find(|job| job.id == job_id)
-                .map(|job| job.command_type.clone())),
             Self::Postgres(pool) => {
                 let command_type = sqlx::query_scalar(
                     r#"
@@ -1929,109 +1050,163 @@ impl Repository {
         }
     }
 
-    async fn list_terminal_command_job_outputs(
+    /// Projects one immutable status output into its exact terminal session.
+    /// The job/target lock already serializes this terminal job, while the
+    /// merge remains monotonic when output work is claimed out of sequence.
+    pub(crate) async fn project_terminal_session_from_job_output(
         &self,
         job_id: Uuid,
         client_id: &str,
-    ) -> Result<Vec<JobOutputView>> {
-        match self {
-            Self::Memory(memory) => {
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                outputs.sort_by_key(|output| output.seq);
-                Ok(outputs)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        job_id,
-                        client_id,
-                        seq,
-                        stream,
-                        data,
-                        storage,
-                        object_key,
-                        data_sha256_hex,
-                        data_size_bytes,
-                        exit_code,
-                        done,
-                        created_at::text AS created_at
-                    FROM job_outputs
-                    WHERE job_id = $1 AND client_id = $2
-                    ORDER BY seq ASC
-                    "#,
-                )
-                .bind(job_id)
-                .bind(client_id)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        let data: Vec<u8> = row.try_get("data")?;
-                        Ok(JobOutputView {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            seq: row.try_get("seq")?,
-                            stream: row.try_get("stream")?,
-                            data_base64: BASE64.encode(data),
-                            storage: row.try_get("storage")?,
-                            artifact_object_key: row.try_get("object_key")?,
-                            artifact_sha256_hex: row.try_get("data_sha256_hex")?,
-                            artifact_size_bytes: row.try_get("data_size_bytes")?,
-                            exit_code: row.try_get("exit_code")?,
-                            done: row.try_get("done")?,
-                            received_at: None,
-                            created_at: row.try_get("created_at")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
-                    .map_err(Into::into)
-            }
-        }
-    }
-
-    pub(crate) async fn refresh_terminal_sessions_for_client(&self, client_id: &str) -> Result<()> {
-        let Self::Postgres(pool) = self else {
+        seq: i32,
+    ) -> Result<()> {
+        let Self::Postgres(pool) = self;
+        let row = sqlx::query(
+            r#"
+            SELECT output.stream, output.data,
+                   output.created_at::text AS created_at,
+                   job.command_type
+            FROM job_outputs output
+            JOIN jobs job ON job.id = output.job_id
+            WHERE output.job_id = $1
+              AND output.client_id = $2
+              AND output.seq = $3
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(seq)
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else {
             return Ok(());
         };
-        let sessions = terminal_sessions_from_outputs(pool, Some(client_id), None, 200).await?;
-        for session in &sessions {
-            let mut tx = pool.begin().await?;
-            let locked =
-                lock_postgres_terminal_job_in_tx(&mut tx, session.job_id, &session.client_id)
+        if row.try_get::<String, _>("stream")? != "status"
+            || row.try_get::<String, _>("command_type")? != "terminal_open"
+        {
+            return Ok(());
+        }
+        let Some(event) = parse_terminal_event(TerminalStatusOutput {
+            job_id,
+            client_id: client_id.to_string(),
+            data: row.try_get("data")?,
+            created_at: row.try_get("created_at")?,
+        }) else {
+            return Ok(());
+        };
+        let session_id = event.session_id;
+        let incoming_state = event.state;
+        terminal_job_statuses(incoming_state)?;
+        let incoming = TerminalAggregate::new(event).into_view();
+        let mut tx = pool.begin().await?;
+        let bound_job_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT job_id
+            FROM terminal_sessions
+            WHERE client_id = $1 AND session_id = $2
+            "#,
+        )
+        .bind(client_id)
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if bound_job_id.is_some_and(|bound_job_id| bound_job_id != job_id) {
+            if incoming_state == "rejected" {
+                reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, incoming_state)
                     .await?;
-            if let Some(authoritative_status) =
-                postgres_terminal_reconcile_disposition(&locked, &session.state)?
-            {
-                normalize_postgres_stale_terminal_session_in_tx(
-                    &mut tx,
-                    session.job_id,
-                    &session.client_id,
-                    &authoritative_status,
-                )
-                .await?;
                 tx.commit().await?;
-                continue;
+                return Ok(());
             }
-            let effective_state = upsert_postgres_terminal_session_in_tx(&mut tx, session).await?;
-            reconcile_postgres_terminal_job_in_tx(
+            anyhow::bail!("terminal_session_job_conflict");
+        }
+        let locked = lock_postgres_terminal_job_in_tx(&mut tx, job_id, client_id).await?;
+        if let Some(authoritative_status) =
+            postgres_terminal_reconcile_disposition(&locked, incoming_state)?
+        {
+            normalize_postgres_stale_terminal_session_in_tx(
                 &mut tx,
-                session.job_id,
-                &session.client_id,
-                &effective_state,
+                job_id,
+                client_id,
+                &authoritative_status,
             )
             .await?;
+            record_terminal_job_output_projection_seq_in_tx(&mut tx, client_id, session_id, seq)
+                .await?;
             tx.commit().await?;
+            return Ok(());
         }
+        let existing =
+            load_postgres_terminal_projection_session_in_tx(&mut tx, client_id, session_id).await?;
+        let projected = match existing {
+            Some((existing, last_job_output_seq)) => {
+                // Sequence is the authoritative order inside this immutable
+                // terminal job stream. Transport timing must not turn a later
+                // event into an older state transition.
+                let sequence_is_current = last_job_output_seq.is_none_or(|current| seq >= current);
+                merge_persisted_terminal_session(existing, incoming, sequence_is_current)?
+            }
+            None => incoming,
+        };
+        let effective_state = upsert_postgres_terminal_session_in_tx(&mut tx, &projected).await?;
+        record_terminal_job_output_projection_seq_in_tx(&mut tx, client_id, session_id, seq)
+            .await?;
+        reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, &effective_state).await?;
+        tx.commit().await?;
         Ok(())
     }
+}
+
+async fn load_postgres_terminal_projection_session_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    session_id: Uuid,
+) -> Result<Option<(TerminalSessionView, Option<i32>)>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            session_id, client_id, job_id, state, last_status, argv, cwd,
+            cols, rows, idle_timeout_secs, flow_window_bytes,
+            output_first_seq, output_next_seq, output_retained_first_seq,
+            output_retained_bytes, output_dropped_bytes,
+            output_dropped_chunks, output_replay_truncated, last_input_seq,
+            close_reason, last_event, last_job_output_seq,
+            opened_at::text AS opened_at, observed_at::text AS observed_at
+        FROM terminal_sessions
+        WHERE client_id = $1 AND session_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|row| {
+        let last_job_output_seq = row.try_get("last_job_output_seq")?;
+        Ok((terminal_session_from_row(row)?, last_job_output_seq))
+    })
+    .transpose()
+}
+
+async fn record_terminal_job_output_projection_seq_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    session_id: Uuid,
+    seq: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE terminal_sessions
+        SET last_job_output_seq = GREATEST(
+            COALESCE(last_job_output_seq, $3), $3
+        )
+        WHERE client_id = $1 AND session_id = $2
+        "#,
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .bind(seq)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2221,50 +1396,6 @@ async fn upsert_postgres_terminal_session_in_tx(
     Ok(existing.try_get("state")?)
 }
 
-async fn terminal_sessions_from_outputs(
-    pool: &PgPool,
-    client_id: Option<&str>,
-    session_id: Option<Uuid>,
-    limit: i64,
-) -> Result<Vec<TerminalSessionView>> {
-    let limit = limit.clamp(1, 200);
-    let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            output.job_id,
-            output.client_id,
-            output.seq,
-            output.data,
-            output.created_at::text AS created_at
-        FROM job_outputs output
-        JOIN jobs job ON job.id = output.job_id
-        WHERE output.stream = 'status'
-          AND job.command_type = 'terminal_open'
-          AND ($2::text IS NULL OR output.client_id = $2)
-        ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
-        LIMIT $1
-        "#,
-    )
-    .bind(scan_limit)
-    .bind(client_id)
-    .fetch_all(pool)
-    .await?;
-    let outputs = rows
-        .into_iter()
-        .map(|row| {
-            Ok(TerminalStatusOutput {
-                job_id: row.try_get("job_id")?,
-                client_id: row.try_get("client_id")?,
-                seq: row.try_get("seq")?,
-                data: row.try_get("data")?,
-                created_at: row.try_get("created_at")?,
-            })
-        })
-        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-    build_terminal_sessions(outputs, limit, session_id)
-}
-
 fn terminal_session_from_row(row: PgRow) -> std::result::Result<TerminalSessionView, sqlx::Error> {
     let argv: SqlJson<Vec<String>> = row.try_get("argv")?;
     Ok(TerminalSessionView {
@@ -2313,7 +1444,6 @@ fn terminal_output_chunk_from_row(
 struct TerminalStatusOutput {
     job_id: Uuid,
     client_id: String,
-    seq: i32,
     data: Vec<u8>,
     created_at: String,
 }
@@ -2338,7 +1468,6 @@ struct TerminalEvent {
     output_dropped_chunks: Option<i64>,
     output_replay_truncated: bool,
     input_seq: Option<i64>,
-    session_exited: bool,
     close_reason: Option<String>,
     event_type: String,
     job_id: Uuid,
@@ -2389,52 +1518,6 @@ impl TerminalAggregate {
         }
     }
 
-    fn merge_older(&mut self, event: TerminalEvent) -> Result<()> {
-        let replacement = (terminal_event_is_terminal(&event)
-            && !terminal_event_is_terminal(&self.latest))
-        .then(|| event.clone());
-        let incoming_range_is_current = event.output_retained_bytes.is_some()
-            && (self.output_retained_bytes.is_none()
-                || event.output_next_seq.is_some_and(|next_seq| {
-                    self.output_next_seq
-                        .is_none_or(|current_seq| next_seq > current_seq)
-                }));
-        let session_exited = self.latest.session_exited || event.session_exited;
-        if self.argv.is_empty() {
-            self.argv = event.argv.clone();
-        }
-        self.cwd = self.cwd.take().or(event.cwd.clone());
-        self.cols = self.cols.or(event.cols);
-        self.rows = self.rows.or(event.rows);
-        self.idle_timeout_secs = self.idle_timeout_secs.or(event.idle_timeout_secs);
-        self.flow_window_bytes = self.flow_window_bytes.or(event.flow_window_bytes);
-        self.output_first_seq = self.output_first_seq.or(event.output_first_seq);
-        self.output_next_seq = max_optional_i64(self.output_next_seq, event.output_next_seq);
-        self.output_retained_first_seq = max_optional_i64(
-            self.output_retained_first_seq,
-            event.output_retained_first_seq,
-        );
-        if incoming_range_is_current {
-            self.output_retained_bytes = event.output_retained_bytes;
-        }
-        self.output_dropped_bytes =
-            max_optional_i64(self.output_dropped_bytes, event.output_dropped_bytes);
-        self.output_dropped_chunks =
-            max_optional_i64(self.output_dropped_chunks, event.output_dropped_chunks);
-        self.output_replay_truncated |= event.output_replay_truncated;
-        self.last_input_seq = max_optional_i64(self.last_input_seq, event.input_seq);
-        self.close_reason = self.close_reason.take().or(event.close_reason.clone());
-        if event.event_type == "terminal_open" {
-            self.opened_at =
-                earliest_timestamp(self.opened_at.take(), Some(event.created_at.clone()))?;
-        }
-        if let Some(replacement) = replacement {
-            self.latest = replacement;
-        }
-        self.latest.session_exited = session_exited;
-        Ok(())
-    }
-
     fn into_view(self) -> TerminalSessionView {
         TerminalSessionView {
             session_id: self.latest.session_id,
@@ -2471,71 +1554,83 @@ fn terminal_state_is_terminal(state: &str) -> bool {
     )
 }
 
-fn terminal_event_is_terminal(event: &TerminalEvent) -> bool {
-    event.session_exited || terminal_state_is_terminal(event.state)
-}
-
 fn terminal_session_is_terminal(session: &TerminalSessionView) -> bool {
     terminal_state_is_terminal(&session.state)
 }
 
-fn sort_terminal_outputs_newest(outputs: &mut [TerminalStatusOutput]) -> Result<()> {
-    for output in outputs.iter() {
-        crate::util::parse_timestamp_utc(&output.created_at)
-            .with_context(|| "terminal source timestamp is invalid")?;
-    }
-    outputs.sort_by(|left, right| {
-        crate::util::parse_timestamp_utc(&right.created_at)
-            .expect("terminal timestamps were validated before sorting")
-            .cmp(
-                &crate::util::parse_timestamp_utc(&left.created_at)
-                    .expect("terminal timestamps were validated before sorting"),
-            )
-            .then_with(|| right.job_id.cmp(&left.job_id))
-            .then_with(|| right.seq.cmp(&left.seq))
-    });
-    Ok(())
-}
+fn merge_persisted_terminal_session(
+    mut existing: TerminalSessionView,
+    incoming: TerminalSessionView,
+    incoming_source_is_current: bool,
+) -> Result<TerminalSessionView> {
+    anyhow::ensure!(
+        existing.client_id == incoming.client_id
+            && existing.session_id == incoming.session_id
+            && existing.job_id == incoming.job_id,
+        "terminal session merge identity mismatch"
+    );
+    let existing_terminal = terminal_session_is_terminal(&existing);
+    let incoming_terminal = terminal_session_is_terminal(&incoming);
+    let advances_terminal = incoming_terminal && !existing_terminal;
+    let preserve_terminal = existing_terminal && !incoming_terminal;
+    let replace_lifecycle = advances_terminal || (!preserve_terminal && incoming_source_is_current);
 
-fn build_terminal_sessions(
-    outputs: Vec<TerminalStatusOutput>,
-    limit: i64,
-    session_filter: Option<Uuid>,
-) -> Result<Vec<TerminalSessionView>> {
-    let mut order = Vec::<(String, Uuid)>::new();
-    let mut aggregates = BTreeMap::<(String, Uuid), TerminalAggregate>::new();
-
-    for output in outputs {
-        let Some(event) = parse_terminal_event(output) else {
-            continue;
-        };
-        if session_filter.is_some_and(|session_id| event.session_id != session_id) {
-            continue;
+    if incoming_source_is_current {
+        if !incoming.argv.is_empty() {
+            existing.argv = incoming.argv.clone();
         }
-        let key = (event.client_id.clone(), event.session_id);
-        if let Some(aggregate) = aggregates.get_mut(&key) {
-            aggregate.merge_older(event)?;
-        } else {
-            order.push(key.clone());
-            aggregates.insert(key, TerminalAggregate::new(event));
+        existing.cwd = incoming.cwd.clone().or(existing.cwd.take());
+        existing.cols = incoming.cols.or(existing.cols);
+        existing.rows = incoming.rows.or(existing.rows);
+        existing.idle_timeout_secs = incoming.idle_timeout_secs.or(existing.idle_timeout_secs);
+        existing.flow_window_bytes = incoming.flow_window_bytes.or(existing.flow_window_bytes);
+    } else {
+        if existing.argv.is_empty() && !incoming.argv.is_empty() {
+            existing.argv = incoming.argv.clone();
         }
+        existing.cwd = existing.cwd.take().or(incoming.cwd.clone());
+        existing.cols = existing.cols.or(incoming.cols);
+        existing.rows = existing.rows.or(incoming.rows);
+        existing.idle_timeout_secs = existing.idle_timeout_secs.or(incoming.idle_timeout_secs);
+        existing.flow_window_bytes = existing.flow_window_bytes.or(incoming.flow_window_bytes);
     }
 
-    let limit = limit.clamp(1, 200) as usize;
-    let mut views = Vec::new();
-    let mut emitted = BTreeSet::new();
-    for key in order {
-        if !emitted.insert(key.clone()) {
-            continue;
-        }
-        if let Some(aggregate) = aggregates.remove(&key) {
-            views.push(aggregate.into_view());
-            if views.len() >= limit {
-                break;
-            }
-        }
+    let incoming_range_is_current = incoming.output_retained_bytes.is_some()
+        && (existing.output_retained_bytes.is_none()
+            || incoming.output_next_seq.is_some_and(|next_seq| {
+                existing
+                    .output_next_seq
+                    .is_none_or(|current_seq| next_seq >= current_seq)
+            }));
+    existing.output_first_seq = existing.output_first_seq.or(incoming.output_first_seq);
+    existing.output_next_seq = max_optional_i64(existing.output_next_seq, incoming.output_next_seq);
+    existing.output_retained_first_seq = max_optional_i64(
+        existing.output_retained_first_seq,
+        incoming.output_retained_first_seq,
+    );
+    if incoming_range_is_current {
+        existing.output_retained_bytes = incoming.output_retained_bytes;
     }
-    Ok(views)
+    existing.output_dropped_bytes =
+        max_optional_i64(existing.output_dropped_bytes, incoming.output_dropped_bytes);
+    existing.output_dropped_chunks = max_optional_i64(
+        existing.output_dropped_chunks,
+        incoming.output_dropped_chunks,
+    );
+    existing.output_replay_truncated |= incoming.output_replay_truncated;
+    existing.last_input_seq = existing.last_input_seq.max(incoming.last_input_seq);
+    existing.opened_at = earliest_timestamp(existing.opened_at.take(), incoming.opened_at)?;
+
+    if replace_lifecycle {
+        existing.state = incoming.state;
+        existing.last_status = incoming.last_status;
+        existing.last_event = incoming.last_event;
+        existing.observed_at = incoming.observed_at;
+        existing.close_reason = incoming.close_reason.or(existing.close_reason);
+    } else if existing.close_reason.is_none() && incoming_terminal {
+        existing.close_reason = incoming.close_reason;
+    }
+    Ok(existing)
 }
 
 fn parse_terminal_event(output: TerminalStatusOutput) -> Option<TerminalEvent> {
@@ -2591,7 +1686,6 @@ fn parse_terminal_event(output: TerminalStatusOutput) -> Option<TerminalEvent> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         input_seq: value.get("input_seq").and_then(json_i64),
-        session_exited,
         close_reason: json_string(&value, "reason"),
         event_type,
         job_id: output.job_id,
@@ -2616,17 +1710,13 @@ fn json_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
 }
 
-fn is_terminal_command(command_type: &str) -> bool {
-    is_terminal_command_type(command_type)
-}
-
 fn is_terminal_status_event(event_type: &str) -> bool {
     is_terminal_session_event(event_type)
 }
 
 #[derive(Clone, Debug)]
 struct TerminalReplayStatus {
-    session_id: Option<Uuid>,
+    session_id: Uuid,
     first_seq: Option<i64>,
     next_seq: Option<i64>,
     retained_first_seq: Option<i64>,
@@ -2634,6 +1724,14 @@ struct TerminalReplayStatus {
     dropped_bytes: Option<i64>,
     dropped_chunks: Option<i64>,
     replay_truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalCommandReplayPlan {
+    first_job_output_seq: i32,
+    first_terminal_seq: i64,
+    next_terminal_seq: i64,
+    output_count: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2721,49 +1819,13 @@ fn build_terminal_replay_from_chunks(
     }
 }
 
-fn terminal_replay_status_for_job_outputs(
-    outputs: &[JobOutputView],
-) -> Option<TerminalReplayStatus> {
-    let mut merged = TerminalReplayStatus {
-        session_id: None,
-        first_seq: None,
-        next_seq: None,
-        retained_first_seq: None,
-        retained_bytes: None,
-        dropped_bytes: None,
-        dropped_chunks: None,
-        replay_truncated: false,
-    };
-    let mut found = false;
-    for status in outputs.iter().filter_map(|output| {
-        if output.stream != "status" {
-            return None;
-        }
-        parse_terminal_replay_status(output)
-    }) {
-        found = true;
-        merged.session_id = merged.session_id.or(status.session_id);
-        merged.first_seq = match (merged.first_seq, status.first_seq) {
-            (Some(current), Some(next)) => Some(current.min(next)),
-            (None, value) | (value, None) => value,
-        };
-        merged.next_seq = match (merged.next_seq, status.next_seq) {
-            (Some(current), Some(next)) => Some(current.max(next)),
-            (None, value) | (value, None) => value,
-        };
-        merged.retained_first_seq = status.retained_first_seq.or(merged.retained_first_seq);
-        merged.retained_bytes = status.retained_bytes.or(merged.retained_bytes);
-        merged.dropped_bytes = status.dropped_bytes.or(merged.dropped_bytes);
-        merged.dropped_chunks = status.dropped_chunks.or(merged.dropped_chunks);
-        merged.replay_truncated |= status.replay_truncated;
+fn parse_terminal_command_replay_status(output: &JobOutputView) -> Option<TerminalReplayStatus> {
+    if output.stream != "status" {
+        return None;
     }
-    found.then_some(merged)
-}
-
-fn parse_terminal_replay_status(output: &JobOutputView) -> Option<TerminalReplayStatus> {
     let data = BASE64.decode(&output.data_base64).ok()?;
     let value = serde_json::from_slice::<Value>(&data).ok()?;
-    if !is_terminal_status_event(value.get("type")?.as_str()?) {
+    if value.get("type")?.as_str()? != "terminal_open" {
         return None;
     }
     let session_id = value
@@ -2771,7 +1833,7 @@ fn parse_terminal_replay_status(output: &JobOutputView) -> Option<TerminalReplay
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())?;
     Some(TerminalReplayStatus {
-        session_id: Some(session_id),
+        session_id,
         first_seq: value.get("output_first_seq").and_then(json_i64),
         next_seq: value.get("output_next_seq").and_then(json_i64),
         retained_first_seq: value.get("output_retained_first_seq").and_then(json_i64),
@@ -2785,27 +1847,38 @@ fn parse_terminal_replay_status(output: &JobOutputView) -> Option<TerminalReplay
     })
 }
 
-async fn memory_terminal_next_seq(
-    memory: &crate::repository::MemoryState,
-    client_id: &str,
-    session_id: Uuid,
-) -> i64 {
-    let session_next = memory
-        .terminal_sessions
-        .read()
-        .await
-        .iter()
-        .find(|session| session.client_id == client_id && session.session_id == session_id)
-        .and_then(|session| session.output_next_seq);
-    let chunk_next = memory
-        .terminal_output_chunks
-        .read()
-        .await
-        .iter()
-        .filter(|chunk| chunk.client_id == client_id && chunk.session_id == session_id)
-        .map(|chunk| chunk.terminal_seq.saturating_add(1))
-        .max();
-    session_next.or(chunk_next).unwrap_or(1).max(1)
+fn terminal_command_replay_plan(
+    status_job_output_seq: i32,
+    status: &TerminalReplayStatus,
+) -> Result<Option<TerminalCommandReplayPlan>> {
+    let (Some(first_terminal_seq), Some(next_terminal_seq)) = (status.first_seq, status.next_seq)
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        first_terminal_seq > 0 && next_terminal_seq >= first_terminal_seq,
+        "terminal_replay_status_range_invalid"
+    );
+    let output_count_i64 = next_terminal_seq - first_terminal_seq;
+    if output_count_i64 == 0 {
+        return Ok(None);
+    }
+    let output_count_i32 = i32::try_from(output_count_i64)
+        .context("terminal replay output count exceeds job-output sequence range")?;
+    let first_job_output_seq = status_job_output_seq
+        .checked_sub(output_count_i32)
+        .context("terminal replay status precedes its declared PTY range")?;
+    anyhow::ensure!(
+        first_job_output_seq >= 0,
+        "terminal_replay_status_precedes_source_range"
+    );
+    Ok(Some(TerminalCommandReplayPlan {
+        first_job_output_seq,
+        first_terminal_seq,
+        next_terminal_seq,
+        output_count: usize::try_from(output_count_i64)
+            .context("terminal replay output count exceeds addressable memory")?,
+    }))
 }
 
 async fn postgres_terminal_next_seq(
@@ -2866,46 +1939,87 @@ fn terminal_output_chunk_matches(
         && left.data == right.data
 }
 
-fn prune_memory_terminal_chunks(
-    chunks: &mut Vec<TerminalOutputChunkRecord>,
+/// Terminal replay and live streaming can carry the same chunk concurrently.
+/// Serialize only that exact client/session identity before either path inserts
+/// or prunes, preventing inverse row-lock order while unrelated sessions remain
+/// fully independent. The advisory identity also covers the first-chunk race
+/// before a terminal_sessions row exists.
+async fn lock_postgres_terminal_output_identity_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     client_id: &str,
     session_id: Uuid,
-    retention: TerminalRetentionBounds,
-) {
-    let mut retained_bytes = 0_i64;
-    let mut retained = HashSet::new();
-    let mut matching = chunks
-        .iter()
-        .filter(|chunk| chunk.client_id == client_id && chunk.session_id == session_id)
-        .map(|chunk| chunk.terminal_seq)
-        .collect::<Vec<_>>();
-    matching.sort_by(|left, right| right.cmp(left));
-    for terminal_seq in matching {
-        if terminal_seq < retention.retained_first_seq {
-            continue;
-        }
-        let Some(size_bytes) = chunks
-            .iter()
-            .find(|chunk| {
-                chunk.client_id == client_id
-                    && chunk.session_id == session_id
-                    && chunk.terminal_seq == terminal_seq
-            })
-            .map(|chunk| chunk.size_bytes.max(0))
-        else {
-            continue;
-        };
-        if retained_bytes.saturating_add(size_bytes) > retention.retained_bytes {
-            continue;
-        }
-        retained_bytes = retained_bytes.saturating_add(size_bytes);
-        retained.insert(terminal_seq);
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "vpsman:terminal-output-projection:{client_id}:{session_id}"
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn insert_postgres_terminal_output_chunk_record_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &TerminalOutputChunkRecord,
+) -> Result<JobOutputWriteResult> {
+    let inserted = sqlx::query_scalar::<_, Option<String>>(
+        r#"
+        INSERT INTO terminal_output_chunks (
+            client_id,
+            session_id,
+            terminal_seq,
+            job_id,
+            data,
+            size_bytes,
+            sha256_hex,
+            created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz)
+        ON CONFLICT (client_id, session_id, terminal_seq)
+        DO NOTHING
+        RETURNING created_at::text
+        "#,
+    )
+    .bind(&record.client_id)
+    .bind(record.session_id)
+    .bind(record.terminal_seq)
+    .bind(record.job_id)
+    .bind(&record.data)
+    .bind(record.size_bytes)
+    .bind(&record.sha256_hex)
+    .bind(&record.created_at)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if inserted.flatten().is_some() {
+        return Ok(JobOutputWriteResult::Inserted);
     }
-    chunks.retain(|chunk| {
-        chunk.client_id != client_id
-            || chunk.session_id != session_id
-            || retained.contains(&chunk.terminal_seq)
-    });
+    let existing = sqlx::query(
+        r#"
+        SELECT data, size_bytes, sha256_hex, created_at::text AS created_at
+        FROM terminal_output_chunks
+        WHERE client_id = $1 AND session_id = $2 AND terminal_seq = $3
+        "#,
+    )
+    .bind(&record.client_id)
+    .bind(record.session_id)
+    .bind(record.terminal_seq)
+    .fetch_one(&mut **tx)
+    .await?;
+    let existing = TerminalOutputChunkRecord {
+        client_id: record.client_id.clone(),
+        session_id: record.session_id,
+        terminal_seq: record.terminal_seq,
+        job_id: record.job_id,
+        data: existing.try_get("data")?,
+        size_bytes: existing.try_get("size_bytes")?,
+        sha256_hex: existing.try_get("sha256_hex")?,
+        created_at: existing.try_get("created_at")?,
+    };
+    Ok(if terminal_output_chunk_matches(&existing, record) {
+        JobOutputWriteResult::DuplicateIdentical
+    } else {
+        JobOutputWriteResult::DuplicateConflict
+    })
 }
 
 async fn prune_postgres_terminal_chunks(
@@ -2943,30 +2057,6 @@ async fn prune_postgres_terminal_chunks(
     Ok(())
 }
 
-async fn update_memory_terminal_session_range(
-    memory: &crate::repository::MemoryState,
-    record: &TerminalOutputChunkRecord,
-    retention: TerminalRetentionBounds,
-) {
-    let mut sessions = memory.terminal_sessions.write().await;
-    if let Some(session) = sessions.iter_mut().find(|session| {
-        session.client_id == record.client_id && session.session_id == record.session_id
-    }) {
-        session.output_first_seq = session.output_first_seq.or(Some(1));
-        session.output_next_seq = Some(
-            session
-                .output_next_seq
-                .unwrap_or(1)
-                .max(record.terminal_seq.saturating_add(1)),
-        );
-        session.output_retained_first_seq = Some(retention.retained_first_seq);
-        session.output_retained_bytes = Some(retention.retained_bytes);
-        session.output_dropped_bytes = Some(retention.dropped_bytes);
-        session.output_dropped_chunks = Some(retention.dropped_chunks);
-        session.output_replay_truncated |= retention.replay_truncated;
-    }
-}
-
 async fn update_postgres_terminal_session_range(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
@@ -3001,7 +2091,8 @@ async fn update_postgres_terminal_session_range(
     Ok(())
 }
 
-fn upsert_memory_terminal_session(
+#[cfg(test)]
+fn upsert_test_terminal_session(
     sessions: &mut Vec<TerminalSessionView>,
     next: TerminalSessionView,
 ) -> Result<()> {
@@ -3078,6 +2169,7 @@ fn max_optional_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     }
 }
 
+#[cfg(test)]
 fn terminal_source_is_at_least_as_new(
     existing: &TerminalSessionView,
     next: &TerminalSessionView,
@@ -3112,37 +2204,6 @@ fn earliest_timestamp(left: Option<String>, right: Option<String>) -> Result<Opt
     }
 }
 
-fn deduplicate_terminal_sessions(
-    mut sessions: Vec<TerminalSessionView>,
-    limit: i64,
-) -> Result<Vec<TerminalSessionView>> {
-    for session in &sessions {
-        crate::util::parse_timestamp_utc(&session.observed_at)
-            .context("terminal source timestamp is invalid")?;
-    }
-    sessions.sort_by(|left, right| {
-        crate::util::parse_timestamp_utc(&right.observed_at)
-            .expect("terminal timestamps were validated before sorting")
-            .cmp(
-                &crate::util::parse_timestamp_utc(&left.observed_at)
-                    .expect("terminal timestamps were validated before sorting"),
-            )
-            .then_with(|| left.client_id.cmp(&right.client_id))
-            .then_with(|| left.session_id.cmp(&right.session_id))
-    });
-    let mut emitted = HashSet::new();
-    let mut deduped = Vec::new();
-    for session in sessions {
-        if emitted.insert((session.client_id.clone(), session.session_id)) {
-            deduped.push(session);
-            if deduped.len() >= limit.clamp(1, 200) as usize {
-                break;
-            }
-        }
-    }
-    Ok(deduped)
-}
-
 fn terminal_seq_i64(value: u64) -> Result<i64> {
     i64::try_from(value).context("terminal sequence exceeds i64 range")
 }
@@ -3170,6 +2231,56 @@ fn retention_cap_i64(value: i64) -> i64 {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod exact_projection_tests {
+    use super::{merge_persisted_terminal_session, TerminalSessionView};
+    use uuid::Uuid;
+
+    fn session(session_id: Uuid, job_id: Uuid, state: &str, next_seq: i64) -> TerminalSessionView {
+        TerminalSessionView {
+            session_id,
+            client_id: "edge-a".to_string(),
+            job_id,
+            state: state.to_string(),
+            last_status: state.to_string(),
+            argv: vec!["/bin/sh".to_string()],
+            cwd: Some("/tmp".to_string()),
+            cols: Some(80),
+            rows: Some(24),
+            idle_timeout_secs: None,
+            flow_window_bytes: None,
+            output_first_seq: Some(1),
+            output_next_seq: Some(next_seq),
+            output_retained_first_seq: Some(1),
+            output_retained_bytes: Some(next_seq),
+            output_dropped_bytes: Some(0),
+            output_dropped_chunks: Some(0),
+            output_replay_truncated: false,
+            last_input_seq: 0,
+            close_reason: (state == "closed").then(|| "exited".to_string()),
+            last_event: state.to_string(),
+            opened_at: Some("2026-08-28T00:00:00Z".to_string()),
+            observed_at: "2026-08-28T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn out_of_order_projection_advances_but_never_reverses_terminal_lifecycle() {
+        let session_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let open = session(session_id, job_id, "open", 10);
+        let delayed_close = session(session_id, job_id, "closed", 8);
+        let closed = merge_persisted_terminal_session(open, delayed_close, false).unwrap();
+        assert_eq!(closed.state, "closed");
+        assert_eq!(closed.output_next_seq, Some(10));
+
+        let newer_open = session(session_id, job_id, "open", 12);
+        let still_closed = merge_persisted_terminal_session(closed, newer_open, true).unwrap();
+        assert_eq!(still_closed.state, "closed");
+        assert_eq!(still_closed.output_next_seq, Some(12));
+    }
 }
 
 #[cfg(test)]

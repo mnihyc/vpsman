@@ -1,11 +1,11 @@
-use anyhow::{ensure, Result};
+use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::{payload_hash, AgentUpdateReleaseStatus};
 
 use crate::{
-    model::{AgentUpdateReleaseView, AuditLogView, AuthContext, CreateAgentUpdateReleaseRequest},
+    model::{AgentUpdateReleaseView, AuthContext, CreateAgentUpdateReleaseRequest},
     repository::Repository,
     unix_now,
 };
@@ -19,14 +19,6 @@ impl Repository {
         let name = name.trim();
         let channel = channel.trim().to_ascii_lowercase();
         match self {
-            Self::Memory(memory) => Ok(memory
-                .agent_update_releases
-                .read()
-                .await
-                .iter()
-                .rev()
-                .find(|release| release.name == name && release.channel == channel)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -65,15 +57,6 @@ impl Repository {
         limit: i64,
     ) -> Result<Vec<AgentUpdateReleaseView>> {
         match self {
-            Self::Memory(memory) => {
-                let releases = memory.agent_update_releases.read().await;
-                Ok(releases
-                    .iter()
-                    .rev()
-                    .take(limit as usize)
-                    .cloned()
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -114,31 +97,6 @@ impl Repository {
     ) -> Result<AgentUpdateReleaseView> {
         let release = agent_update_release_view(request, operator);
         match self {
-            Self::Memory(memory) => {
-                {
-                    let releases = memory.agent_update_releases.read().await;
-                    ensure!(
-                        !releases.iter().any(|stored| {
-                            stored.name == release.name
-                                && stored.version == release.version
-                                && stored.channel == release.channel
-                        }),
-                        "agent_update_release_already_exists"
-                    );
-                }
-                memory
-                    .agent_update_releases
-                    .write()
-                    .await
-                    .push(release.clone());
-                memory.audits.write().await.push(release_audit(
-                    &release,
-                    request,
-                    operator,
-                    release.created_at.clone(),
-                ));
-                Ok(release)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -211,19 +169,6 @@ impl Repository {
     ) -> Result<bool> {
         let artifact_sha256_hex = artifact_sha256_hex.trim().to_ascii_lowercase();
         match self {
-            Self::Memory(memory) => {
-                Ok(memory
-                    .agent_update_releases
-                    .read()
-                    .await
-                    .iter()
-                    .any(|release| {
-                        matches!(
-                            AgentUpdateReleaseStatus::from_storage(&release.status),
-                            Some(AgentUpdateReleaseStatus::PublishedExternal)
-                        ) && release.artifact_sha256_hex == artifact_sha256_hex
-                    }))
-            }
             Self::Postgres(pool) => {
                 let exists: bool = sqlx::query_scalar(
                     r#"
@@ -250,20 +195,6 @@ impl Repository {
     ) -> Result<bool> {
         let artifact_sha256_hex = artifact_sha256_hex.trim().to_ascii_lowercase();
         match self {
-            Self::Memory(memory) => {
-                Ok(memory
-                    .agent_update_releases
-                    .read()
-                    .await
-                    .iter()
-                    .any(|release| {
-                        matches!(
-                            AgentUpdateReleaseStatus::from_storage(&release.status),
-                            Some(AgentUpdateReleaseStatus::PublishedExternal)
-                        ) && release.rollback_artifact_sha256_hex.as_deref()
-                            == Some(artifact_sha256_hex.as_str())
-                    }))
-            }
             Self::Postgres(pool) => {
                 let exists: bool = sqlx::query_scalar(
                     r#"
@@ -341,23 +272,6 @@ fn agent_update_release_view(
             }
         }),
         created_at: unix_now().to_string(),
-    }
-}
-
-fn release_audit(
-    release: &AgentUpdateReleaseView,
-    request: &CreateAgentUpdateReleaseRequest,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "agent_update.release_recorded".to_string(),
-        target: format!("agent_update_release:{}", release.id),
-        command_hash: None,
-        metadata: release_metadata(release, request, operator),
-        created_at,
     }
 }
 

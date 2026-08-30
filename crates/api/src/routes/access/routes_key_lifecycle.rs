@@ -68,8 +68,9 @@ pub(crate) async fn upsert_agent_identity(
         client_id: view.client_id.clone(),
         gateway_id: "identity".to_string(),
     });
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
     post_commit.push(terminal_reconciliation_outcome(
-        state.process_job_terminal_events(500).await,
+        Ok(()),
         if request.replace_existing_key {
             "VPS key rotation"
         } else {
@@ -149,10 +150,8 @@ pub(crate) async fn revoke_current_client_key(
         client_id,
         gateway_id: "key_lifecycle".to_string(),
     });
-    let terminal_reconciliation = terminal_reconciliation_outcome(
-        state.process_job_terminal_events(500).await,
-        "VPS key revocation",
-    );
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
+    let terminal_reconciliation = terminal_reconciliation_outcome(Ok(()), "VPS key revocation");
     Ok((
         StatusCode::CREATED,
         Json(ClientKeyRevocationMutationResponse {

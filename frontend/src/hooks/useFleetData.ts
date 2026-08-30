@@ -4,7 +4,6 @@ import {
   apiGet,
   apiPost,
   apiPostPreview,
-  isHeavyReadAdmissionBusy,
   isApiUnauthorized,
 } from "../api";
 import { emptySummary } from "../constants";
@@ -88,11 +87,11 @@ type FleetSnapshotRecord = {
   fleet_alerts_truncated?: boolean;
   fleet_alert_history?: FleetSnapshotSource<FleetAlertRecord[]>;
   fleet_alert_history_truncated?: boolean;
-  fleet_alert_states?: FleetSnapshotSource<FleetAlertStateRecord[]>;
   fleet_alert_policies?: FleetSnapshotSource<FleetAlertPolicyRecord[]>;
   vps_rule_values?: FleetSnapshotSource<VpsRuleValueRecord[]>;
   traffic_accounting?: FleetSnapshotSource<TrafficAccountingRecord[]>;
   policy_alerts?: FleetSnapshotSource<PolicyAlertRecord[]>;
+  policy_alerts_truncated?: boolean;
   current_policy_alerts?: FleetSnapshotSource<PolicyAlertRecord[]>;
   current_policy_alerts_truncated?: boolean;
   fleet_alert_notification_channels?: FleetSnapshotSource<
@@ -101,8 +100,10 @@ type FleetSnapshotRecord = {
   fleet_alert_notifications?: FleetSnapshotSource<
     FleetAlertNotificationDeliveryRecord[]
   >;
+  fleet_alert_notifications_truncated?: boolean;
   webhook_rules?: FleetSnapshotSource<WebhookRuleRecord[]>;
   webhook_rule_deliveries?: FleetSnapshotSource<WebhookRuleDeliveryRecord[]>;
+  webhook_rule_deliveries_truncated?: boolean;
 };
 
 export function useFleetData(apiToken: string, onUnauthorized: () => void) {
@@ -155,9 +156,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [fleetAlertEventReviewError, setFleetAlertEventReviewError] = useState<
     string | null
   >(null);
-  const [fleetAlertStates, setFleetAlertStates] = useState<
-    FleetAlertStateRecord[]
-  >([]);
   const [fleetAlertPolicies, setFleetAlertPolicies] = useState<
     FleetAlertPolicyRecord[]
   >([]);
@@ -166,6 +164,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     TrafficAccountingRecord[]
   >([]);
   const [policyAlerts, setPolicyAlerts] = useState<PolicyAlertRecord[]>([]);
+  const [policyAlertsTruncated, setPolicyAlertsTruncated] = useState(false);
   const [currentPolicyAlerts, setCurrentPolicyAlerts] = useState<
     PolicyAlertRecord[]
   >([]);
@@ -176,10 +175,14 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [fleetAlertNotifications, setFleetAlertNotifications] = useState<
     FleetAlertNotificationDeliveryRecord[]
   >([]);
+  const [fleetAlertNotificationsTruncated, setFleetAlertNotificationsTruncated] =
+    useState(false);
   const [webhookRules, setWebhookRules] = useState<WebhookRuleRecord[]>([]);
   const [webhookRuleDeliveries, setWebhookRuleDeliveries] = useState<
     WebhookRuleDeliveryRecord[]
   >([]);
+  const [webhookRuleDeliveriesTruncated, setWebhookRuleDeliveriesTruncated] =
+    useState(false);
   const [telemetryRollups, setTelemetryRollups] = useState<
     TelemetryRollupRecord[]
   >([]);
@@ -200,10 +203,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [
     fleetAlertHistoryEvidenceAvailable,
     setFleetAlertHistoryEvidenceAvailable,
-  ] = useState(false);
-  const [
-    fleetAlertStatesEvidenceAvailable,
-    setFleetAlertStatesEvidenceAvailable,
   ] = useState(false);
   const [policyAlertsEvidenceAvailable, setPolicyAlertsEvidenceAvailable] =
     useState(false);
@@ -317,9 +316,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       const fleetAlertHistorySource = requiredSnapshotSource(
         snapshot.fleet_alert_history,
       );
-      const fleetAlertStatesSource = requiredSnapshotSource(
-        snapshot.fleet_alert_states,
-      );
       const fleetAlertPoliciesSource = requiredSnapshotSource(
         snapshot.fleet_alert_policies,
       );
@@ -348,9 +344,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setFleetAlertHistoryEvidenceAvailable(
         sourceAvailable(fleetAlertHistorySource),
       );
-      setFleetAlertStatesEvidenceAvailable(
-        sourceAvailable(fleetAlertStatesSource),
-      );
       setPolicyAlertsEvidenceAvailable(sourceAvailable(policyAlertsSource));
       setCurrentPolicyAlertsEvidenceAvailable(
         sourceAvailable(currentPolicyAlertsSource),
@@ -378,9 +371,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           snapshot.fleet_alert_history_truncated !== false,
         );
       }
-      if (fleetAlertStatesSource.data) {
-        setFleetAlertStates(fleetAlertStatesSource.data);
-      }
       if (fleetAlertPoliciesSource.data) {
         setFleetAlertPolicies(fleetAlertPoliciesSource.data);
       }
@@ -402,6 +392,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
       if (policyAlertsSource.data) {
         setPolicyAlerts(policyAlertsSource.data);
+        setPolicyAlertsTruncated(snapshot.policy_alerts_truncated !== false);
       }
       if (currentPolicyAlertsSource.data) {
         setCurrentPolicyAlerts(currentPolicyAlertsSource.data);
@@ -409,8 +400,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           snapshot.current_policy_alerts_truncated !== false,
         );
       } else {
-        // Missing/unavailable current evidence (including an older API) cannot
-        // retain stale episodes that may since have resolved.
+        // Missing or unavailable current evidence cannot retain stale episodes
+        // that may since have resolved.
         setCurrentPolicyAlerts([]);
         setCurrentPolicyAlertsTruncated(false);
       }
@@ -419,12 +410,18 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
       if (notificationsSource.data) {
         setFleetAlertNotifications(notificationsSource.data);
+        setFleetAlertNotificationsTruncated(
+          snapshot.fleet_alert_notifications_truncated !== false,
+        );
       }
       if (webhookRulesSource.data) {
         setWebhookRules(webhookRulesSource.data);
       }
       if (webhookDeliveriesSource.data) {
         setWebhookRuleDeliveries(webhookDeliveriesSource.data);
+        setWebhookRuleDeliveriesTruncated(
+          snapshot.webhook_rule_deliveries_truncated !== false,
+        );
       }
       publishFleetError(
         "detail",
@@ -433,7 +430,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           [
             ["fleet alerts", fleetAlertsSource],
             ["fleet alert history", fleetAlertHistorySource],
-            ["fleet alert states", fleetAlertStatesSource],
             ["fleet alert policies", fleetAlertPoliciesSource],
             ["VPS rules", vpsRuleValuesSource],
             ["traffic accounting", trafficAccountingSource],
@@ -604,17 +600,19 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             setFleetAlertsTruncated(false);
             setFleetAlertHistory([]);
             setFleetAlertHistoryTruncated(false);
-            setFleetAlertStates([]);
             setFleetAlertPolicies([]);
             setVpsRuleValues([]);
             setTrafficAccounting([]);
             setPolicyAlerts([]);
+            setPolicyAlertsTruncated(false);
             setCurrentPolicyAlerts([]);
             setCurrentPolicyAlertsTruncated(false);
             setFleetAlertNotificationChannels([]);
             setFleetAlertNotifications([]);
+            setFleetAlertNotificationsTruncated(false);
             setWebhookRules([]);
             setWebhookRuleDeliveries([]);
+            setWebhookRuleDeliveriesTruncated(false);
             setTelemetryRollups([]);
             setTelemetryNetworkRates([]);
             setTelemetryTunnels([]);
@@ -622,7 +620,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             setFleetCoreEvidenceAvailable(false);
             setFleetAlertsEvidenceAvailable(false);
             setFleetAlertHistoryEvidenceAvailable(false);
-            setFleetAlertStatesEvidenceAvailable(false);
             setPolicyAlertsEvidenceAvailable(false);
             setCurrentPolicyAlertsEvidenceAvailable(false);
             setConfigPolicyEvidenceAvailable(false);
@@ -635,12 +632,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             error instanceof Error
               ? error.message
               : "Fleet refresh unavailable";
-          if (isHeavyReadAdmissionBusy(error)) {
-            publishFleetError("core", message);
-            publishFleetError("telemetry", message);
-            publishFleetError("detail", message);
-            return;
-          }
           if (coreIsCurrent) {
             setFleetCoreEvidenceAvailable(false);
             publishFleetError("core", message);
@@ -653,7 +644,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             setFleetAlerts([]);
             setFleetAlertsTruncated(false);
             setFleetAlertHistoryEvidenceAvailable(false);
-            setFleetAlertStatesEvidenceAvailable(false);
             setPolicyAlertsEvidenceAvailable(false);
             setCurrentPolicyAlertsEvidenceAvailable(false);
             setConfigPolicyEvidenceAvailable(false);
@@ -1088,9 +1078,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         if (apiTokenRef.current !== apiToken) {
           return response;
         }
-        setFleetAlertStates((current) =>
-          mergeFleetAlertStates(current, response.states),
-        );
         setFleetAlerts((current) =>
           applyFleetAlertStates(current, response.states),
         );
@@ -1494,17 +1481,19 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setFleetAlertEventReviewStarted(false);
     setFleetAlertEventReviewLoading(false);
     setFleetAlertEventReviewError(null);
-    setFleetAlertStates([]);
     setFleetAlertPolicies([]);
     setVpsRuleValues([]);
     setTrafficAccounting([]);
     setPolicyAlerts([]);
+    setPolicyAlertsTruncated(false);
     setCurrentPolicyAlerts([]);
     setCurrentPolicyAlertsTruncated(false);
     setFleetAlertNotificationChannels([]);
     setFleetAlertNotifications([]);
+    setFleetAlertNotificationsTruncated(false);
     setWebhookRules([]);
     setWebhookRuleDeliveries([]);
+    setWebhookRuleDeliveriesTruncated(false);
     setTelemetryRollups([]);
     setTelemetryNetworkRates([]);
     setTelemetryTunnels([]);
@@ -1512,7 +1501,6 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setFleetCoreEvidenceAvailable(false);
     setFleetAlertsEvidenceAvailable(false);
     setFleetAlertHistoryEvidenceAvailable(false);
-    setFleetAlertStatesEvidenceAvailable(false);
     setPolicyAlertsEvidenceAvailable(false);
     setCurrentPolicyAlertsEvidenceAvailable(false);
     setConfigPolicyEvidenceAvailable(false);
@@ -1539,20 +1527,21 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetAlertEventReviewLoading,
     fleetAlertEventReviewError,
     hydrateHomeFleet,
-    fleetAlertStates,
-    fleetAlertStatesEvidenceAvailable,
     fleetAlertPolicies,
     vpsRuleValues,
     trafficAccounting,
     policyAlerts,
+    policyAlertsTruncated,
     policyAlertsEvidenceAvailable,
     currentPolicyAlerts,
     currentPolicyAlertsTruncated,
     currentPolicyAlertsEvidenceAvailable,
     fleetAlertNotificationChannels,
     fleetAlertNotifications,
+    fleetAlertNotificationsTruncated,
     webhookRules,
     webhookRuleDeliveries,
+    webhookRuleDeliveriesTruncated,
     deleteAgents,
     loadFleet,
     loadOlderFleetAlertEvents,
@@ -1672,24 +1661,6 @@ function applyFleetAlertState(
     state_revision: state.revision,
     state_updated_at: state.updated_at,
   };
-}
-
-export function mergeFleetAlertStates(
-  current: FleetAlertStateRecord[],
-  changed: FleetAlertStateRecord[],
-): FleetAlertStateRecord[] {
-  const statesByAlertId = latestFleetAlertStateById(current);
-  for (const state of changed) {
-    const existing = statesByAlertId.get(state.alert_id);
-    if (!existing || state.revision > existing.revision) {
-      statesByAlertId.set(state.alert_id, state);
-    }
-  }
-  return Array.from(statesByAlertId.values()).sort(
-    (left, right) =>
-      right.updated_at.localeCompare(left.updated_at) ||
-      left.alert_id.localeCompare(right.alert_id),
-  );
 }
 
 function latestFleetAlertStateById(

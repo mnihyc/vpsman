@@ -42,43 +42,6 @@ impl Repository {
         command_type: &str,
     ) -> Result<HostJobEvidence> {
         match self {
-            Self::Memory(memory) => {
-                let jobs = memory.jobs.read().await;
-                let targets = memory.job_targets.read().await;
-                let mut attempts = targets
-                    .iter()
-                    .filter(|target| target.client_id == client_id)
-                    .filter_map(|target| {
-                        let job = jobs.iter().find(|job| {
-                            job.id == target.job_id && job.command_type == command_type
-                        })?;
-                        Some((job, target))
-                    })
-                    .collect::<Vec<_>>();
-                attempts.sort_by(|(left_job, left_target), (right_job, right_target)| {
-                    right_target
-                        .completed_at
-                        .as_ref()
-                        .unwrap_or(&right_job.created_at)
-                        .cmp(
-                            left_target
-                                .completed_at
-                                .as_ref()
-                                .unwrap_or(&left_job.created_at),
-                        )
-                        .then_with(|| right_job.id.cmp(&left_job.id))
-                });
-                let attempts = attempts
-                    .into_iter()
-                    .map(|(job, target)| HostJobAttemptView {
-                        job_id: job.id,
-                        status: target.status.clone(),
-                        message: target.message.clone(),
-                        completed_at: target.completed_at.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                Ok(host_job_evidence_from_newest_attempts(&attempts))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -145,6 +108,7 @@ impl Repository {
     }
 }
 
+#[cfg(test)]
 fn host_job_evidence_from_newest_attempts(attempts: &[HostJobAttemptView]) -> HostJobEvidence {
     HostJobEvidence {
         latest_attempt: attempts.first().cloned(),

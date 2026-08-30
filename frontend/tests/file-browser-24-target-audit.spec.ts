@@ -6,9 +6,39 @@ import {
   unlockPrivilegeFromTop,
 } from "./support/consoleNavigation";
 
+const twentyFourTargetAgents = Array.from({ length: 24 }, (_, index) => ({
+  capabilities: {
+    can_apply_process_limits: true,
+    can_attempt_privileged_ops: true,
+    can_manage_runtime_tunnels: true,
+    effective_uid: 0,
+    port_forwarding: {
+      nft_version: "nftables v1.1.3",
+      reason: null,
+      status: "supported",
+    },
+    privilege_mode: "root",
+    unprivileged_hint: null,
+  },
+  display_name: `edge-us-${String(index).padStart(2, "0")}`,
+  id: `a${String(index).padStart(7, "0")}-target-${String(index).padStart(2, "0")}`,
+  last_ip: `198.51.100.${index + 1}`,
+  last_seen_at:
+    index < 22
+      ? "2026-06-27T08:00:00.000Z"
+      : index === 22
+        ? "2026-06-26T08:00:00.000Z"
+        : null,
+  registration_ip: `192.0.2.${index + 1}`,
+  status: index === 22 ? "stale" : index === 23 ? "offline" : "online",
+  tags: ["provider:alpha", "country:US", "edge"],
+}));
+
 test.beforeEach(async ({ page }) => {
-  await installConsoleApiMock(page);
-  await installTwentyFourTargetFileMock(page);
+  await installConsoleApiMock(page, {
+    agentListOverride: twentyFourTargetAgents,
+  });
+  await installTwentyFourTargetFileMock(page, twentyFourTargetAgents);
 });
 
 test("VPS combobox keyboard navigation stays on visible options", async ({
@@ -285,34 +315,13 @@ test("bulk download summary distinguishes file and hierarchy discrepancies", asy
   });
 });
 
-async function installTwentyFourTargetFileMock(page: Page) {
-  await page.addInitScript(() => {
+async function installTwentyFourTargetFileMock(
+  page: Page,
+  agents: typeof twentyFourTargetAgents,
+) {
+  await page.addInitScript((agentsFixture) => {
     const previousFetch = window.fetch.bind(window);
-    const agents = Array.from({ length: 24 }, (_, index) => ({
-      capabilities: {
-        can_apply_process_limits: true,
-        can_attempt_privileged_ops: true,
-        can_manage_runtime_tunnels: true,
-        effective_uid: 0,
-        port_forwarding: {
-          nft_version: "nftables v1.1.3",
-          reason: null,
-          status: "supported",
-        },
-        privilege_mode: "root",
-        unprivileged_hint: null,
-      },
-      display_name: `edge-us-${String(index).padStart(2, "0")}`,
-      id: `a${String(index).padStart(7, "0")}-target-${String(index).padStart(2, "0")}`,
-      last_seen_at:
-        index < 22
-          ? "2026-06-27T08:00:00.000Z"
-          : index === 22
-            ? "2026-06-26T08:00:00.000Z"
-            : null,
-      status: index === 22 ? "stale" : index === 23 ? "offline" : "online",
-      tags: ["provider:alpha", "country:US", "edge"],
-    }));
+    const agents = agentsFixture;
     const jobOutputs: Record<string, unknown[]> = {};
     const jobTargets: Record<string, unknown[]> = {};
     let counter = 0;
@@ -443,9 +452,6 @@ async function installTwentyFourTargetFileMock(page: Page) {
         init?.method ?? (input instanceof Request ? input.method : "GET")
       ).toUpperCase();
 
-      if (pathname === "/api/v1/agents" && method === "GET") {
-        return jsonResponse(agents);
-      }
       if (pathname === "/api/v1/bulk/resolve" && method === "POST") {
         const body = await readJsonBody(input, init);
         const targets = matchingTargets(
@@ -576,7 +582,7 @@ async function installTwentyFourTargetFileMock(page: Page) {
       }
       return previousFetch(input, init);
     };
-  });
+  }, agents);
 }
 
 async function unlockPrivilege(page: Page) {

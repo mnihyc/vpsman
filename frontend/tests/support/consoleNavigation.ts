@@ -4,6 +4,8 @@ import type { ActiveView } from "../../src/types";
 
 const WORKSPACE_ROUTE_READY_TIMEOUT_MS = 60_000;
 const CONSOLE_SHELL_LOAD_ATTEMPTS = 3;
+const CONSOLE_READINESS_SELECTOR =
+  ".shell:visible, #boot-recovery[data-state=error]:visible";
 
 export async function activate(locator: Locator) {
   await expect(locator).toBeVisible({ timeout: 10_000 });
@@ -19,9 +21,8 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
   let startupRecoveryUsed = false;
   for (let attempt = 0; attempt < CONSOLE_SHELL_LOAD_ATTEMPTS; attempt += 1) {
     try {
-      if (
-        await recoverTransientStartupFailure(page, !startupRecoveryUsed)
-      ) {
+      await expect(consoleReadinessLocator(page)).toBeVisible({ timeout });
+      if (await recoverTransientStartupFailure(page, !startupRecoveryUsed)) {
         startupRecoveryUsed = true;
         continue;
       }
@@ -33,24 +34,12 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
           "Console shell is unavailable because the authenticated session was lost",
         );
       }
-      await expect(page.locator(".shell")).toBeVisible({ timeout });
-      return;
+      if (await page.locator(".shell").isVisible()) {
+        return;
+      }
+      throw new Error("Console readiness state could not be classified");
     } catch (error) {
       lastError = error;
-      if (await isOperatorAccessVisible(page)) {
-        if (await loginMockConsoleSession(page)) {
-          return;
-        }
-        throw new Error(
-          "Console shell is unavailable because the authenticated session was lost",
-        );
-      }
-      if (
-        await recoverTransientStartupFailure(page, !startupRecoveryUsed)
-      ) {
-        startupRecoveryUsed = true;
-        continue;
-      }
       if (
         attempt + 1 < CONSOLE_SHELL_LOAD_ATTEMPTS &&
         (await isBlankConsoleDocument(page))
@@ -62,6 +51,19 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function consoleReadinessLocator(page: Page) {
+  return page
+    .locator(CONSOLE_READINESS_SELECTOR)
+    .or(page.getByRole("heading", { exact: true, name: "Sign in" }))
+    .or(
+      page.getByRole("heading", {
+        exact: true,
+        name: "Create first operator",
+      }),
+    )
+    .first();
 }
 
 async function recoverTransientStartupFailure(

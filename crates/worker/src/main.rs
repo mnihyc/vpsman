@@ -1,4 +1,10 @@
-use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
@@ -6,20 +12,24 @@ use clap::Parser;
 use croner::Cron;
 use serde_json::Value;
 use sqlx::{
-    postgres::{PgListener, PgPoolOptions},
+    postgres::{PgConnectOptions, PgListener, PgPoolOptions},
     types::Json as SqlJson,
-    PgPool, Row,
+    Connection, PgConnection, PgPool, Row,
 };
-use tokio::time;
+use tokio::{
+    sync::{mpsc, watch},
+    task::{JoinHandle, JoinSet},
+    time,
+};
 use tracing::{debug, info, warn};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use uuid::Uuid;
 use vpsman_common::{
     encode_json, job_command_operation_type, payload_hash, read_secret_file_ref,
-    AgentCapabilitySnapshot, JobCommand, SuiteConfig, ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS,
-    DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS,
-    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
-    SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    AgentCapabilitySnapshot, JobCommand, SuiteConfig, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
+    SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP, TRAFFIC_COUNTER_HISTORY_TIERS,
 };
 #[cfg(test)]
 use vpsman_common::{
@@ -34,7 +44,12 @@ use vpsman_server_core::{
 };
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
-const TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS: u64 = 60;
+const SQLX_METADATA_SCHEMA: &str = "vpsman_internal";
+const SQLX_METADATA_SCHEMA_LOCK_KEY: i64 = 0x5650_534d_5351_4c58;
+// Lost NOTIFY messages can move an exact cached retention frontier earlier.
+// Reconnect is therefore bounded by the backend catch-up contract; this is
+// transport recovery, not a retention-owner cadence.
+const WORKER_NOTIFICATION_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const OFFLINE_BATCH: usize = 100;
 const OFFLINE_CANDIDATE_SQL: &str = r#"
     SELECT id
@@ -57,6 +72,8 @@ mod alert_event_schedules;
 mod alert_notifications;
 #[path = "runtime/alert_policy_retention.rs"]
 mod alert_policy_retention;
+#[path = "runtime/artifact_deletion.rs"]
+mod artifact_deletion;
 #[path = "retention/backup_policy_retention.rs"]
 mod backup_policy_retention;
 #[path = "runtime/build_info.rs"]
@@ -67,6 +84,8 @@ mod history_retention;
 mod network_observation_retention;
 #[path = "runtime/operational_alerts.rs"]
 mod operational_alerts;
+#[path = "retention/telemetry_minute_materialization.rs"]
+mod telemetry_minute_materialization;
 #[cfg(test)]
 #[path = "runtime/test_support.rs"]
 mod test_support;
@@ -74,29 +93,59 @@ mod test_support;
 mod traffic_retention;
 #[path = "delivery/webhook_rules.rs"]
 mod webhook_rules;
-#[path = "runtime/worker_leases.rs"]
-mod worker_leases;
 
+fn telemetry_retention_pool_options() -> PgPoolOptions {
+    PgPoolOptions::new()
+        .min_connections(0)
+        .max_connections(2)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                // Retention boundaries and durable cursors make these plans
+                // intrinsically parameter-selective. A generic prepared plan
+                // can turn a bounded time seek into a retained-history scan.
+                sqlx::query("SET plan_cache_mode = force_custom_plan")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+}
 use actor_authority::{actor_authorized, actor_authorized_in_tx};
 use alert_event_schedules::process_alert_event_schedules;
 use alert_notifications::{
-    process_alert_notifications, AlertNotificationWorkerConfig, AlertNotificationWorkerRun,
+    process_alert_notifications, process_due_alert_notifications, AlertNotificationWorkerConfig,
+    AlertNotificationWorkerRun,
+};
+use alert_policy_retention::{process_alert_policy_retention, AlertPolicyRetentionConfig};
+use artifact_deletion::{
+    artifact_deletion_completion_signal, claim_artifact_deletion, defer_artifact_deletion,
+    enqueue_artifact_deletion, fail_artifact_deletion, finish_artifact_deletion_in_tx,
+    lock_owned_artifact_deletion_in_tx, publish_artifact_deletion_completion,
+    publish_artifact_deletion_completion_in_tx, spawn_artifact_deletion_heartbeat,
+    wait_for_artifact_deletion_work, ArtifactDeletionOwner, ArtifactDeletionReview,
+    ARTIFACT_DELETION_COMPLETED_CHANNEL,
 };
 use backup_policy_retention::{
-    process_backup_policy_retention_prune, BackupPolicyRetentionPruneConfig,
-    BackupPolicyRetentionPruneRun,
+    delete_backup_policy_artifact, process_backup_policy_retention_prune,
+    BackupPolicyRetentionPruneConfig,
 };
-use history_retention::{process_telemetry_history_retention, TelemetryHistoryRetentionRun};
+use history_retention::{
+    TelemetryHistoryRetentionDrain, TelemetryHistoryRetentionPage,
+    TelemetryHistoryRetentionPageReadiness, TelemetryHistoryRetentionRun,
+    TelemetryHistoryRetentionStep, TELEMETRY_HISTORY_RETENTION_RECOVERY_INTERVAL,
+};
 use operational_alerts::{
     reconcile_agent_status_transition_in_tx, reconcile_scheduled_job_event_sources_in_tx,
-    try_lock_lifecycle,
+};
+use traffic_retention::{
+    process_next_traffic_active_cycle_rebuild, TrafficActiveCycleRebuildOutcome,
 };
 use webhook_rules::{
-    ensure_event_partitions, insert_webhook_event_in_tx,
-    insert_webhook_event_with_provenance_at_in_tx, process_webhook_rules, WebhookRuleWorkerConfig,
-    WebhookRuleWorkerRun,
+    insert_webhook_event_in_tx, insert_webhook_event_with_provenance_at_in_tx,
+    process_due_webhook_deliveries, process_telemetry_webhook_materialization_work,
+    process_webhook_event_materialization_work, process_webhook_periodic_maintenance,
+    process_webhook_rules, WebhookRuleWorkerConfig,
 };
-use worker_leases::acquire_worker_lease;
 
 #[derive(Clone, Debug, Parser)]
 #[command(name = "vpsman-worker", about = "Background scheduler for vpsman")]
@@ -117,10 +166,6 @@ struct Args {
     db_max_connections: u32,
     #[arg(long, env = "VPSMAN_WORKER_ONCE", default_value_t = false)]
     once: bool,
-    #[arg(long, env = "VPSMAN_WORKER_ID")]
-    worker_id: Option<String>,
-    #[arg(long, env = "VPSMAN_WORKER_LEASE_SECS", default_value_t = 60)]
-    worker_lease_secs: i32,
     #[arg(long, env = "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS", default_value_t = 300)]
     agent_offline_timeout_secs: i64,
     #[arg(
@@ -165,12 +210,6 @@ struct Args {
         default_value_t = 90
     )]
     webhook_rule_retention_days: i64,
-    #[arg(
-        long,
-        env = "VPSMAN_WORKER_WEBHOOK_RULE_TELEMETRY_EVENT_RETENTION_DAYS",
-        default_value_t = 7
-    )]
-    webhook_rule_telemetry_event_retention_days: i64,
     #[arg(
         long,
         env = "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_PRUNE_LIMIT",
@@ -252,18 +291,1374 @@ struct Args {
 #[derive(Clone)]
 struct WorkerRuntimeConfig {
     tick_secs: u64,
-    worker_lease_secs: i32,
     agent_offline_timeout_secs: i64,
     alert_notification_config: AlertNotificationWorkerConfig,
+    alert_policy_retention_config: AlertPolicyRetentionConfig,
     webhook_rule_config: WebhookRuleWorkerConfig,
     backup_policy_prune_config: BackupPolicyRetentionPruneConfig,
     schedule_dispatch_config: ScheduleDispatchConfig,
     backup_object_store: BackupObjectStore,
 }
 
-#[derive(Clone, Copy)]
-struct ArtifactObjectStores<'a> {
-    backup: &'a BackupObjectStore,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerLoopWake {
+    TelemetryProjectionWork,
+    TrafficActiveCycleRebuildWork,
+    WebhookWork,
+    AlertNotificationWork,
+    ArtifactDeletionCompletion,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct TelemetryProjectionWakeScope {
+    client_ids: Vec<String>,
+    global: bool,
+}
+
+#[derive(Debug, Default)]
+struct PendingTelemetryProjectionWakes {
+    client_ids: HashSet<String>,
+    global: bool,
+}
+
+struct WorkerNotificationPump {
+    task: JoinHandle<Result<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TelemetryRetentionNotification {
+    ProjectionMinute {
+        ready_at_unix: i64,
+        sample_prune_ready_at_unix: Option<i64>,
+    },
+    OrdinaryRollupPublished {
+        domain: TelemetryRetentionRollupDomain,
+        due_event_ready_at_unix: Option<i64>,
+    },
+    DueSpanPublished(TelemetryDueSpanWake),
+    Effect(TelemetryRetentionEffect),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TelemetryDueSpanWake {
+    domain: TelemetryRetentionRollupDomain,
+    source_bucket_secs: i32,
+    destination_bucket_secs: i32,
+    due_at_unix: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum TelemetryRetentionRollupDomain {
+    Resource,
+    NetworkRate,
+    Ping,
+    SystemMetric,
+    NetworkObservation,
+}
+
+impl TelemetryRetentionRollupDomain {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "telemetry_rollups" => Some(Self::Resource),
+            "telemetry_network_rates" => Some(Self::NetworkRate),
+            "telemetry_ping_rollups" => Some(Self::Ping),
+            "system_metric_rollups" => Some(Self::SystemMetric),
+            "network_observation_rollups" => Some(Self::NetworkObservation),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resource => "telemetry_rollups",
+            Self::NetworkRate => "telemetry_network_rates",
+            Self::Ping => "telemetry_ping_rollups",
+            Self::SystemMetric => "system_metric_rollups",
+            Self::NetworkObservation => "network_observation_rollups",
+        }
+    }
+
+    fn supports_edge(self, source_bucket_secs: i32, destination_bucket_secs: i32) -> bool {
+        match self {
+            Self::NetworkObservation => network_observation_retention::NETWORK_OBSERVATION_TIERS
+                .iter()
+                .any(|&(_, source, destination)| {
+                    source == source_bucket_secs && destination == destination_bucket_secs
+                }),
+            _ => vpsman_common::TELEMETRY_HISTORY_TIERS
+                .windows(2)
+                .any(|tiers| {
+                    tiers[0].bucket_secs == source_bucket_secs
+                        && tiers[1].bucket_secs == destination_bucket_secs
+                }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum TelemetryRetentionPolicyDomain {
+    Resource,
+    NetworkRate,
+    Ping,
+    SystemMetric,
+    NetworkObservation,
+    TrafficCounter,
+}
+
+impl TelemetryRetentionPolicyDomain {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "telemetry_rollups" => Some(Self::Resource),
+            "telemetry_network_rates" => Some(Self::NetworkRate),
+            "telemetry_ping_rollups" => Some(Self::Ping),
+            "system_metric_rollups" => Some(Self::SystemMetric),
+            "network_observations" => Some(Self::NetworkObservation),
+            "traffic_counter_rollups" => Some(Self::TrafficCounter),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resource => "telemetry_rollups",
+            Self::NetworkRate => "telemetry_network_rates",
+            Self::Ping => "telemetry_ping_rollups",
+            Self::SystemMetric => "system_metric_rollups",
+            Self::NetworkObservation => "network_observations",
+            Self::TrafficCounter => "traffic_counter_rollups",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TelemetryRetentionEffect {
+    CoreMinuteFrontierAdvanced,
+    TrafficMinuteFrontierAdvanced,
+    PingFactsPublished,
+    PingFactsDeleted,
+    PingCurrentDeleted,
+    TelemetrySamplesDeleted,
+    SamplePruneFrontierAdvanced,
+    NetworkObservationHistoryPublished,
+    NetworkObservationSeriesDeactivated,
+    NetworkObservationLatestDeleted,
+    TrafficSamplesPublished,
+    TrafficRollupPublished {
+        bucket_secs: i32,
+    },
+    RetentionPolicyChanged {
+        domain: TelemetryRetentionPolicyDomain,
+    },
+    PingTopologyChanged,
+    PingRollupsDeleted,
+    NetworkObservationHistoryDeleted,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct TelemetryRetentionWakeScope {
+    projection_minute_ready_at_unix: Option<i64>,
+    due_event_ready_at_unix: Option<i64>,
+    ordinary_rollup_domains: Vec<TelemetryRetentionRollupDomain>,
+    due_spans: Vec<TelemetryDueSpanWake>,
+    core_minute_frontier_advanced: bool,
+    traffic_minute_frontier_advanced: bool,
+    ping_facts_published: bool,
+    ping_facts_deleted: bool,
+    ping_current_deleted: bool,
+    telemetry_samples_deleted: bool,
+    sample_prune_ready_at_unix: Option<i64>,
+    sample_prune_frontier_advanced: bool,
+    network_observation_history_published: bool,
+    network_observation_series_deactivated: bool,
+    traffic_samples_published: bool,
+    traffic_rollup_bucket_secs: Vec<i32>,
+    retention_policy_domains: Vec<TelemetryRetentionPolicyDomain>,
+    ping_topology_changed: bool,
+    ping_rollups_deleted: bool,
+    network_observation_history_deleted: bool,
+    network_observation_latest_deleted: bool,
+    recover_external_writer_frontiers: bool,
+}
+
+#[derive(Debug, Default)]
+struct PendingTelemetryRetentionWakes {
+    projection_minute_ready_at_unix: Option<i64>,
+    due_event_ready_at_unix: Option<i64>,
+    ordinary_rollup_domains: HashSet<TelemetryRetentionRollupDomain>,
+    due_spans: Vec<TelemetryDueSpanWake>,
+    core_minute_frontier_advanced: bool,
+    traffic_minute_frontier_advanced: bool,
+    ping_facts_published: bool,
+    ping_facts_deleted: bool,
+    ping_current_deleted: bool,
+    telemetry_samples_deleted: bool,
+    sample_prune_ready_at_unix: Option<i64>,
+    sample_prune_frontier_advanced: bool,
+    network_observation_history_published: bool,
+    network_observation_series_deactivated: bool,
+    traffic_samples_published: bool,
+    traffic_rollup_bucket_secs: HashSet<i32>,
+    retention_policy_domains: HashSet<TelemetryRetentionPolicyDomain>,
+    ping_topology_changed: bool,
+    ping_rollups_deleted: bool,
+    network_observation_history_deleted: bool,
+    network_observation_latest_deleted: bool,
+    recover_external_writer_frontiers: bool,
+}
+
+#[derive(Clone)]
+struct TelemetryRetentionWakeSender {
+    wake_tx: mpsc::Sender<()>,
+    pending: Arc<Mutex<PendingTelemetryRetentionWakes>>,
+}
+
+struct TelemetryRetentionWakeReceiver {
+    wake_rx: mpsc::Receiver<()>,
+    pending: Arc<Mutex<PendingTelemetryRetentionWakes>>,
+}
+
+#[derive(Clone)]
+struct WorkerWakeSenders {
+    telemetry_projection_tx: mpsc::Sender<()>,
+    telemetry_projection_pending: Arc<Mutex<PendingTelemetryProjectionWakes>>,
+    traffic_active_cycle_rebuild_tx: mpsc::Sender<()>,
+    webhook_event_tx: mpsc::Sender<()>,
+    webhook_delivery_tx: mpsc::Sender<()>,
+    alert_notification_tx: mpsc::Sender<()>,
+    telemetry_retention: TelemetryRetentionWakeSender,
+}
+
+struct WorkerWakeReceivers {
+    telemetry_projection_rx: mpsc::Receiver<()>,
+    telemetry_projection_pending: Arc<Mutex<PendingTelemetryProjectionWakes>>,
+    traffic_active_cycle_rebuild_rx: mpsc::Receiver<()>,
+    webhook_event_rx: mpsc::Receiver<()>,
+    webhook_delivery_rx: mpsc::Receiver<()>,
+    alert_notification_rx: mpsc::Receiver<()>,
+}
+
+impl WorkerNotificationPump {
+    fn spawn(mut listener: PgListener, senders: WorkerWakeSenders) -> Self {
+        let task_telemetry_projection_pending = Arc::clone(&senders.telemetry_projection_pending);
+        let task = tokio::spawn(async move {
+            loop {
+                let notification = listener
+                    .recv()
+                    .await
+                    .context("worker notification listener receive failed")?;
+                debug!(
+                    channel = notification.channel(),
+                    payload = notification.payload(),
+                    "PostgreSQL notification woke worker"
+                );
+                if !queue_telemetry_retention_notification(
+                    &senders.telemetry_retention,
+                    notification.channel(),
+                    notification.payload(),
+                ) {
+                    return Ok(());
+                }
+                let queued =
+                    match notification_work_owner(notification.channel(), notification.payload()) {
+                        Some(WorkerLoopWake::TelemetryProjectionWork) => {
+                            queue_telemetry_projection_wake(
+                                &task_telemetry_projection_pending,
+                                &senders.telemetry_projection_tx,
+                                notification.payload(),
+                            )
+                        }
+                        Some(WorkerLoopWake::TrafficActiveCycleRebuildWork) => {
+                            coalesce_worker_wake(&senders.traffic_active_cycle_rebuild_tx)
+                        }
+                        Some(WorkerLoopWake::WebhookWork) => {
+                            let event_open = coalesce_worker_wake(&senders.webhook_event_tx);
+                            let delivery_open = coalesce_worker_wake(&senders.webhook_delivery_tx);
+                            event_open && delivery_open
+                        }
+                        Some(WorkerLoopWake::AlertNotificationWork) => {
+                            coalesce_worker_wake(&senders.alert_notification_tx)
+                        }
+                        Some(WorkerLoopWake::ArtifactDeletionCompletion) => {
+                            publish_artifact_deletion_completion();
+                            true
+                        }
+                        _ => continue,
+                    };
+                if !queued {
+                    return Ok(());
+                }
+            }
+        });
+        Self { task }
+    }
+}
+
+fn telemetry_retention_wake_channel(
+) -> (TelemetryRetentionWakeSender, TelemetryRetentionWakeReceiver) {
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(PendingTelemetryRetentionWakes::default()));
+    (
+        TelemetryRetentionWakeSender {
+            wake_tx,
+            pending: Arc::clone(&pending),
+        },
+        TelemetryRetentionWakeReceiver { wake_rx, pending },
+    )
+}
+
+fn worker_wake_channels(
+    telemetry_retention: TelemetryRetentionWakeSender,
+) -> (WorkerWakeSenders, WorkerWakeReceivers) {
+    // Tokens are process-local latency hints. Exact durable rows remain the
+    // authority, and every receiver also performs periodic database recovery.
+    let (telemetry_projection_tx, telemetry_projection_rx) = mpsc::channel(1);
+    let telemetry_projection_pending =
+        Arc::new(Mutex::new(PendingTelemetryProjectionWakes::default()));
+    let (traffic_active_cycle_rebuild_tx, traffic_active_cycle_rebuild_rx) = mpsc::channel(1);
+    let (webhook_event_tx, webhook_event_rx) = mpsc::channel(1);
+    let (webhook_delivery_tx, webhook_delivery_rx) = mpsc::channel(1);
+    let (alert_notification_tx, alert_notification_rx) = mpsc::channel(1);
+    (
+        WorkerWakeSenders {
+            telemetry_projection_tx,
+            telemetry_projection_pending: Arc::clone(&telemetry_projection_pending),
+            traffic_active_cycle_rebuild_tx,
+            webhook_event_tx,
+            webhook_delivery_tx,
+            alert_notification_tx,
+            telemetry_retention,
+        },
+        WorkerWakeReceivers {
+            telemetry_projection_rx,
+            telemetry_projection_pending,
+            traffic_active_cycle_rebuild_rx,
+            webhook_event_rx,
+            webhook_delivery_rx,
+            alert_notification_rx,
+        },
+    )
+}
+
+fn parse_telemetry_retention_notification(
+    channel: &str,
+    payload: &str,
+) -> Option<TelemetryRetentionNotification> {
+    let payload = serde_json::from_str::<Value>(payload).ok()?;
+    match channel {
+        "vpsman_telemetry_projection"
+            if payload.get("owner").is_none()
+                && payload
+                    .get("client_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|client_id| !client_id.is_empty())
+                && payload
+                    .get("projected_seq")
+                    .and_then(Value::as_i64)
+                    .is_some() =>
+        {
+            let ready_at_unix = payload
+                .get("retention_minute_ready_at_unix")
+                .and_then(Value::as_i64)?;
+            DateTime::<Utc>::from_timestamp(ready_at_unix, 0)?;
+            let sample_prune_ready_at_unix = match payload.get("sample_prune_ready_at_unix") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let ready_at_unix = value.as_i64()?;
+                    DateTime::<Utc>::from_timestamp(ready_at_unix, 0)?;
+                    Some(ready_at_unix)
+                }
+            };
+            Some(TelemetryRetentionNotification::ProjectionMinute {
+                ready_at_unix,
+                sample_prune_ready_at_unix,
+            })
+        }
+        "vpsman_telemetry_retention"
+            if payload.get("owner").and_then(Value::as_str) == Some("history_retention")
+                && payload.get("effect").and_then(Value::as_str)
+                    == Some("ordinary_rollup_published") =>
+        {
+            let domain = TelemetryRetentionRollupDomain::parse(
+                payload.get("domain").and_then(Value::as_str)?,
+            )?;
+            let due_event_ready_at_unix = match payload.get("ready_at_unix") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let ready_at_unix = value.as_i64()?;
+                    DateTime::<Utc>::from_timestamp(ready_at_unix, 0)?;
+                    Some(ready_at_unix)
+                }
+            };
+            Some(TelemetryRetentionNotification::OrdinaryRollupPublished {
+                domain,
+                due_event_ready_at_unix,
+            })
+        }
+        "vpsman_telemetry_retention"
+            if payload.get("owner").and_then(Value::as_str) == Some("history_retention")
+                && payload.get("effect").and_then(Value::as_str) == Some("due_span_published") =>
+        {
+            let domain = TelemetryRetentionRollupDomain::parse(
+                payload.get("domain").and_then(Value::as_str)?,
+            )?;
+            let source_bucket_secs =
+                i32::try_from(payload.get("source_bucket_secs").and_then(Value::as_i64)?).ok()?;
+            let destination_bucket_secs = i32::try_from(
+                payload
+                    .get("destination_bucket_secs")
+                    .and_then(Value::as_i64)?,
+            )
+            .ok()?;
+            domain
+                .supports_edge(source_bucket_secs, destination_bucket_secs)
+                .then_some(())?;
+            let due_at_unix = payload.get("due_at_unix").and_then(Value::as_i64)?;
+            DateTime::<Utc>::from_timestamp(due_at_unix, 0)?;
+            Some(TelemetryRetentionNotification::DueSpanPublished(
+                TelemetryDueSpanWake {
+                    domain,
+                    source_bucket_secs,
+                    destination_bucket_secs,
+                    due_at_unix,
+                },
+            ))
+        }
+        "vpsman_telemetry_retention"
+            if payload.get("owner").and_then(Value::as_str) == Some("history_retention") =>
+        {
+            let effect = match payload.get("effect").and_then(Value::as_str)? {
+                "core_minute_frontier_advanced" => {
+                    TelemetryRetentionEffect::CoreMinuteFrontierAdvanced
+                }
+                "traffic_minute_frontier_advanced" => {
+                    TelemetryRetentionEffect::TrafficMinuteFrontierAdvanced
+                }
+                "ping_facts_published" => TelemetryRetentionEffect::PingFactsPublished,
+                "ping_facts_deleted" => TelemetryRetentionEffect::PingFactsDeleted,
+                "ping_current_deleted" => TelemetryRetentionEffect::PingCurrentDeleted,
+                "telemetry_samples_deleted" => TelemetryRetentionEffect::TelemetrySamplesDeleted,
+                "sample_prune_frontier_advanced" => {
+                    TelemetryRetentionEffect::SamplePruneFrontierAdvanced
+                }
+                "network_observation_history_published" => {
+                    TelemetryRetentionEffect::NetworkObservationHistoryPublished
+                }
+                "network_observation_series_deactivated" => {
+                    TelemetryRetentionEffect::NetworkObservationSeriesDeactivated
+                }
+                "traffic_samples_published" => TelemetryRetentionEffect::TrafficSamplesPublished,
+                "traffic_rollup_published" => {
+                    let bucket_secs =
+                        i32::try_from(payload.get("bucket_secs").and_then(Value::as_i64)?).ok()?;
+                    TRAFFIC_COUNTER_HISTORY_TIERS
+                        .iter()
+                        .any(|tier| tier.bucket_secs == bucket_secs)
+                        .then_some(TelemetryRetentionEffect::TrafficRollupPublished {
+                            bucket_secs,
+                        })?
+                }
+                "retention_policy_changed" => TelemetryRetentionEffect::RetentionPolicyChanged {
+                    domain: TelemetryRetentionPolicyDomain::parse(
+                        payload.get("domain").and_then(Value::as_str)?,
+                    )?,
+                },
+                "ping_topology_changed" => TelemetryRetentionEffect::PingTopologyChanged,
+                "ping_rollups_deleted" => TelemetryRetentionEffect::PingRollupsDeleted,
+                "network_observation_history_deleted" => {
+                    TelemetryRetentionEffect::NetworkObservationHistoryDeleted
+                }
+                "network_observation_latest_deleted" => {
+                    TelemetryRetentionEffect::NetworkObservationLatestDeleted
+                }
+                _ => return None,
+            };
+            Some(TelemetryRetentionNotification::Effect(effect))
+        }
+        _ => None,
+    }
+}
+
+fn merge_earliest_unix(current: &mut Option<i64>, candidate: i64) {
+    *current = Some(current.map_or(candidate, |current| current.min(candidate)));
+}
+
+fn queue_telemetry_retention_notification(
+    sender: &TelemetryRetentionWakeSender,
+    channel: &str,
+    payload: &str,
+) -> bool {
+    let Some(notification) = parse_telemetry_retention_notification(channel, payload) else {
+        return true;
+    };
+    queue_telemetry_retention_notification_effect(sender, notification)
+}
+
+fn queue_telemetry_retention_effect(
+    sender: &TelemetryRetentionWakeSender,
+    effect: TelemetryRetentionEffect,
+) -> bool {
+    let mut pending = match sender.pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match effect {
+        TelemetryRetentionEffect::CoreMinuteFrontierAdvanced => {
+            pending.core_minute_frontier_advanced = true;
+        }
+        TelemetryRetentionEffect::TrafficMinuteFrontierAdvanced => {
+            pending.traffic_minute_frontier_advanced = true;
+        }
+        TelemetryRetentionEffect::PingFactsPublished => {
+            pending.ping_facts_published = true;
+        }
+        TelemetryRetentionEffect::PingFactsDeleted => {
+            pending.ping_facts_deleted = true;
+        }
+        TelemetryRetentionEffect::PingCurrentDeleted => {
+            pending.ping_current_deleted = true;
+        }
+        TelemetryRetentionEffect::TelemetrySamplesDeleted => {
+            pending.telemetry_samples_deleted = true;
+        }
+        TelemetryRetentionEffect::SamplePruneFrontierAdvanced => {
+            pending.sample_prune_frontier_advanced = true;
+        }
+        TelemetryRetentionEffect::NetworkObservationHistoryPublished => {
+            pending.network_observation_history_published = true;
+        }
+        TelemetryRetentionEffect::NetworkObservationSeriesDeactivated => {
+            pending.network_observation_series_deactivated = true;
+        }
+        TelemetryRetentionEffect::TrafficSamplesPublished => {
+            pending.traffic_samples_published = true;
+        }
+        TelemetryRetentionEffect::TrafficRollupPublished { bucket_secs } => {
+            pending.traffic_rollup_bucket_secs.insert(bucket_secs);
+        }
+        TelemetryRetentionEffect::RetentionPolicyChanged { domain } => {
+            pending.retention_policy_domains.insert(domain);
+        }
+        TelemetryRetentionEffect::PingTopologyChanged => {
+            pending.ping_topology_changed = true;
+        }
+        TelemetryRetentionEffect::PingRollupsDeleted => {
+            pending.ping_rollups_deleted = true;
+        }
+        TelemetryRetentionEffect::NetworkObservationHistoryDeleted => {
+            pending.network_observation_history_deleted = true;
+        }
+        TelemetryRetentionEffect::NetworkObservationLatestDeleted => {
+            pending.network_observation_latest_deleted = true;
+        }
+    }
+    coalesce_worker_wake(&sender.wake_tx)
+}
+
+fn queue_telemetry_retention_notification_effect(
+    sender: &TelemetryRetentionWakeSender,
+    notification: TelemetryRetentionNotification,
+) -> bool {
+    if let TelemetryRetentionNotification::Effect(effect) = notification {
+        return queue_telemetry_retention_effect(sender, effect);
+    }
+    let mut pending = match sender.pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match notification {
+        TelemetryRetentionNotification::ProjectionMinute {
+            ready_at_unix,
+            sample_prune_ready_at_unix,
+        } => {
+            merge_earliest_unix(&mut pending.projection_minute_ready_at_unix, ready_at_unix);
+            if let Some(sample_prune_ready_at_unix) = sample_prune_ready_at_unix {
+                merge_earliest_unix(
+                    &mut pending.sample_prune_ready_at_unix,
+                    sample_prune_ready_at_unix,
+                );
+            }
+        }
+        TelemetryRetentionNotification::OrdinaryRollupPublished {
+            domain,
+            due_event_ready_at_unix,
+        } => {
+            pending.ordinary_rollup_domains.insert(domain);
+            if let Some(ready_at_unix) = due_event_ready_at_unix {
+                merge_earliest_unix(&mut pending.due_event_ready_at_unix, ready_at_unix);
+            }
+        }
+        TelemetryRetentionNotification::DueSpanPublished(candidate) => {
+            if let Some(existing) = pending.due_spans.iter_mut().find(|existing| {
+                existing.domain == candidate.domain
+                    && existing.source_bucket_secs == candidate.source_bucket_secs
+                    && existing.destination_bucket_secs == candidate.destination_bucket_secs
+            }) {
+                existing.due_at_unix = existing.due_at_unix.min(candidate.due_at_unix);
+            } else {
+                pending.due_spans.push(candidate);
+            }
+        }
+        TelemetryRetentionNotification::Effect(_) => {
+            unreachable!("typed retention effects return before deadline merging")
+        }
+    }
+    coalesce_worker_wake(&sender.wake_tx)
+}
+
+fn queue_telemetry_retention_external_writer_recovery(
+    sender: &TelemetryRetentionWakeSender,
+) -> bool {
+    let mut pending = match sender.pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    pending.recover_external_writer_frontiers = true;
+    coalesce_worker_wake(&sender.wake_tx)
+}
+
+fn take_telemetry_retention_wake_scope(
+    pending: &Mutex<PendingTelemetryRetentionWakes>,
+) -> TelemetryRetentionWakeScope {
+    let mut pending = match pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let pending = std::mem::take(&mut *pending);
+    let mut traffic_rollup_bucket_secs = pending
+        .traffic_rollup_bucket_secs
+        .into_iter()
+        .collect::<Vec<_>>();
+    traffic_rollup_bucket_secs.sort_unstable();
+    let mut ordinary_rollup_domains = pending
+        .ordinary_rollup_domains
+        .into_iter()
+        .collect::<Vec<_>>();
+    ordinary_rollup_domains.sort_unstable();
+    let mut due_spans = pending.due_spans;
+    due_spans.sort_unstable_by_key(|span| {
+        (
+            span.domain,
+            span.source_bucket_secs,
+            span.destination_bucket_secs,
+        )
+    });
+    let mut retention_policy_domains = pending
+        .retention_policy_domains
+        .into_iter()
+        .collect::<Vec<_>>();
+    retention_policy_domains.sort_unstable();
+    TelemetryRetentionWakeScope {
+        projection_minute_ready_at_unix: pending.projection_minute_ready_at_unix,
+        due_event_ready_at_unix: pending.due_event_ready_at_unix,
+        ordinary_rollup_domains,
+        due_spans,
+        core_minute_frontier_advanced: pending.core_minute_frontier_advanced,
+        traffic_minute_frontier_advanced: pending.traffic_minute_frontier_advanced,
+        ping_facts_published: pending.ping_facts_published,
+        ping_facts_deleted: pending.ping_facts_deleted,
+        ping_current_deleted: pending.ping_current_deleted,
+        telemetry_samples_deleted: pending.telemetry_samples_deleted,
+        sample_prune_ready_at_unix: pending.sample_prune_ready_at_unix,
+        sample_prune_frontier_advanced: pending.sample_prune_frontier_advanced,
+        network_observation_history_published: pending.network_observation_history_published,
+        network_observation_series_deactivated: pending.network_observation_series_deactivated,
+        traffic_samples_published: pending.traffic_samples_published,
+        traffic_rollup_bucket_secs,
+        retention_policy_domains,
+        ping_topology_changed: pending.ping_topology_changed,
+        ping_rollups_deleted: pending.ping_rollups_deleted,
+        network_observation_history_deleted: pending.network_observation_history_deleted,
+        network_observation_latest_deleted: pending.network_observation_latest_deleted,
+        recover_external_writer_frontiers: pending.recover_external_writer_frontiers,
+    }
+}
+
+fn notification_work_owner(channel: &str, payload: &str) -> Option<WorkerLoopWake> {
+    match (channel, payload) {
+        ("vpsman_telemetry_projection", _) => Some(WorkerLoopWake::TelemetryProjectionWork),
+        ("vpsman_traffic_active_cycle_rebuild", _) => {
+            Some(WorkerLoopWake::TrafficActiveCycleRebuildWork)
+        }
+        ("webhook_events", "alert_notification") => Some(WorkerLoopWake::AlertNotificationWork),
+        ("webhook_events", _) => Some(WorkerLoopWake::WebhookWork),
+        (ARTIFACT_DELETION_COMPLETED_CHANNEL, _) => {
+            Some(WorkerLoopWake::ArtifactDeletionCompletion)
+        }
+        _ => None,
+    }
+}
+
+fn queue_telemetry_projection_wake(
+    pending: &Mutex<PendingTelemetryProjectionWakes>,
+    wake_tx: &mpsc::Sender<()>,
+    payload: &str,
+) -> bool {
+    let payload = serde_json::from_str::<Value>(payload).ok();
+    // Dashboard resident publications share this PostgreSQL channel with the
+    // canonical telemetry projector, but own no webhook cursor work.
+    if payload
+        .as_ref()
+        .and_then(|payload| payload.get("owner"))
+        .and_then(Value::as_str)
+        == Some("dashboard")
+    {
+        return true;
+    }
+    let client_id = payload
+        .as_ref()
+        .filter(|payload| {
+            payload
+                .get("projected_seq")
+                .and_then(Value::as_i64)
+                .is_some()
+        })
+        .and_then(|payload| payload.get("client_id"))
+        .and_then(Value::as_str)
+        .filter(|client_id| !client_id.is_empty())
+        .map(str::to_owned);
+    let mut pending = match pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match client_id {
+        Some(client_id) => {
+            pending.client_ids.insert(client_id);
+        }
+        None => pending.global = true,
+    }
+    coalesce_worker_wake(wake_tx)
+}
+
+fn take_telemetry_projection_wake_scope(
+    pending: &Mutex<PendingTelemetryProjectionWakes>,
+) -> TelemetryProjectionWakeScope {
+    let mut pending = match pending.lock() {
+        Ok(pending) => pending,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut client_ids = pending.client_ids.drain().collect::<Vec<_>>();
+    client_ids.sort();
+    TelemetryProjectionWakeScope {
+        client_ids,
+        global: std::mem::take(&mut pending.global),
+    }
+}
+
+fn telemetry_projection_scope_for_wake(
+    pending: &Mutex<PendingTelemetryProjectionWakes>,
+    periodic: bool,
+) -> Option<TelemetryProjectionWakeScope> {
+    let pending_scope = take_telemetry_projection_wake_scope(pending);
+    (!periodic).then_some(pending_scope)
+}
+
+fn coalesce_worker_wake(wake_tx: &mpsc::Sender<()>) -> bool {
+    match wake_tx.try_send(()) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => true,
+        Err(mpsc::error::TrySendError::Closed(())) => false,
+    }
+}
+
+#[cfg(test)]
+mod worker_wake_owner_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn notification_burst_has_one_pending_wake_token() {
+        let (wake_tx, mut wake_rx) = mpsc::channel(1);
+        for _ in 0..120 {
+            assert!(coalesce_worker_wake(&wake_tx));
+        }
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        assert!(matches!(
+            wake_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(wake_rx);
+        assert!(!coalesce_worker_wake(&wake_tx));
+    }
+
+    #[tokio::test]
+    async fn telemetry_projection_mailbox_losslessly_coalesces_exact_clients() {
+        let pending = Mutex::new(PendingTelemetryProjectionWakes::default());
+        let (wake_tx, mut wake_rx) = mpsc::channel(1);
+        for payload in [
+            r#"{"client_id":"client-b","generation":4,"projected_seq":7}"#,
+            r#"{"client_id":"client-a","generation":3,"projected_seq":6}"#,
+            r#"{"client_id":"client-b","generation":4,"projected_seq":8}"#,
+        ] {
+            assert!(queue_telemetry_projection_wake(&pending, &wake_tx, payload));
+        }
+        assert_eq!(wake_rx.recv().await, Some(()));
+        assert_eq!(
+            take_telemetry_projection_wake_scope(&pending),
+            TelemetryProjectionWakeScope {
+                client_ids: vec!["client-a".to_string(), "client-b".to_string()],
+                global: false,
+            }
+        );
+        assert!(matches!(
+            wake_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        assert!(queue_telemetry_projection_wake(
+            &pending,
+            &wake_tx,
+            r#"{"owner":"dashboard","client_id":"client-c","revision":9}"#,
+        ));
+        assert!(matches!(
+            wake_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            take_telemetry_projection_wake_scope(&pending),
+            TelemetryProjectionWakeScope::default()
+        );
+
+        assert!(queue_telemetry_projection_wake(
+            &pending,
+            &wake_tx,
+            "unrecognized-payload"
+        ));
+        assert_eq!(wake_rx.recv().await, Some(()));
+        assert_eq!(
+            take_telemetry_projection_wake_scope(&pending),
+            TelemetryProjectionWakeScope {
+                client_ids: Vec::new(),
+                global: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_wake_burst_preserves_each_earliest_owner_deadline() {
+        let (wake_tx, mut wake_rx) = telemetry_retention_wake_channel();
+        for (channel, payload) in [
+            (
+                "vpsman_telemetry_projection",
+                r#"{"client_id":"client-a","projected_seq":1,"retention_minute_ready_at_unix":180,"sample_prune_ready_at_unix":250}"#,
+            ),
+            (
+                "vpsman_telemetry_projection",
+                r#"{"client_id":"client-b","projected_seq":2,"retention_minute_ready_at_unix":120,"sample_prune_ready_at_unix":150}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ordinary_rollup_published","domain":"system_metric_rollups","ready_at_unix":600}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ordinary_rollup_published","domain":"telemetry_rollups","ready_at_unix":300}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ordinary_rollup_published","domain":"network_observation_rollups"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"due_span_published","domain":"telemetry_rollups","source_bucket_secs":60,"destination_bucket_secs":300,"due_at_unix":900}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"due_span_published","domain":"telemetry_rollups","source_bucket_secs":60,"destination_bucket_secs":300,"due_at_unix":800}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"core_minute_frontier_advanced"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"traffic_minute_frontier_advanced"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ping_facts_published"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ping_facts_deleted"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ping_current_deleted"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"telemetry_samples_deleted"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"network_observation_history_published"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"network_observation_series_deactivated"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"traffic_samples_published"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"traffic_rollup_published","bucket_secs":86400}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"traffic_rollup_published","bucket_secs":3600}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"retention_policy_changed","domain":"network_observations"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"retention_policy_changed","domain":"telemetry_rollups"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ping_topology_changed"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ping_rollups_deleted"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"network_observation_history_deleted"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"network_observation_latest_deleted"}"#,
+            ),
+        ] {
+            assert!(queue_telemetry_retention_notification(
+                &wake_tx, channel, payload
+            ));
+        }
+        assert!(queue_telemetry_retention_external_writer_recovery(&wake_tx));
+        assert_eq!(wake_rx.wake_rx.recv().await, Some(()));
+        assert_eq!(
+            take_telemetry_retention_wake_scope(&wake_rx.pending),
+            TelemetryRetentionWakeScope {
+                projection_minute_ready_at_unix: Some(120),
+                due_event_ready_at_unix: Some(300),
+                ordinary_rollup_domains: vec![
+                    TelemetryRetentionRollupDomain::Resource,
+                    TelemetryRetentionRollupDomain::SystemMetric,
+                    TelemetryRetentionRollupDomain::NetworkObservation,
+                ],
+                due_spans: vec![TelemetryDueSpanWake {
+                    domain: TelemetryRetentionRollupDomain::Resource,
+                    source_bucket_secs: 60,
+                    destination_bucket_secs: 300,
+                    due_at_unix: 800,
+                }],
+                core_minute_frontier_advanced: true,
+                traffic_minute_frontier_advanced: true,
+                ping_facts_published: true,
+                ping_facts_deleted: true,
+                ping_current_deleted: true,
+                telemetry_samples_deleted: true,
+                sample_prune_ready_at_unix: Some(150),
+                network_observation_history_published: true,
+                network_observation_series_deactivated: true,
+                traffic_samples_published: true,
+                traffic_rollup_bucket_secs: vec![3_600, 86_400],
+                retention_policy_domains: vec![
+                    TelemetryRetentionPolicyDomain::Resource,
+                    TelemetryRetentionPolicyDomain::NetworkObservation,
+                ],
+                ping_topology_changed: true,
+                ping_rollups_deleted: true,
+                network_observation_history_deleted: true,
+                network_observation_latest_deleted: true,
+                recover_external_writer_frontiers: true,
+                ..TelemetryRetentionWakeScope::default()
+            }
+        );
+        assert!(matches!(
+            wake_rx.wake_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn retention_wake_reconnect_loss_recovery_is_bounded_by_backend_catch_up() {
+        assert!(WORKER_NOTIFICATION_RECONNECT_DELAY <= Duration::from_secs(5));
+        let source = include_str!("main.rs");
+        let (_, listener) = source
+            .rsplit_once("async fn run_worker_notification_listener")
+            .expect("worker notification listener");
+        let (listener, _) = listener
+            .split_once("async fn run_schedule_lane")
+            .expect("worker notification listener boundary");
+        assert!(listener.contains("wait_for_worker_notification_reconnect"));
+        assert!(!listener.contains("wait_for_worker_cycle("));
+    }
+
+    #[test]
+    fn retention_wake_parser_excludes_dashboard_and_malformed_hints() {
+        assert_eq!(
+            parse_telemetry_retention_notification(
+                "vpsman_telemetry_projection",
+                r#"{"client_id":"client-a","projected_seq":7,"retention_minute_ready_at_unix":120,"sample_prune_ready_at_unix":240}"#,
+            ),
+            Some(TelemetryRetentionNotification::ProjectionMinute {
+                ready_at_unix: 120,
+                sample_prune_ready_at_unix: Some(240),
+            })
+        );
+        assert_eq!(
+            parse_telemetry_retention_notification(
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ordinary_rollup_published","domain":"system_metric_rollups","ready_at_unix":300}"#,
+            ),
+            Some(TelemetryRetentionNotification::OrdinaryRollupPublished {
+                domain: TelemetryRetentionRollupDomain::SystemMetric,
+                due_event_ready_at_unix: Some(300),
+            })
+        );
+        assert_eq!(
+            parse_telemetry_retention_notification(
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ordinary_rollup_published","domain":"network_observation_rollups"}"#,
+            ),
+            Some(TelemetryRetentionNotification::OrdinaryRollupPublished {
+                domain: TelemetryRetentionRollupDomain::NetworkObservation,
+                due_event_ready_at_unix: None,
+            })
+        );
+        assert_eq!(
+            parse_telemetry_retention_notification(
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"traffic_rollup_published","bucket_secs":21600}"#,
+            ),
+            Some(TelemetryRetentionNotification::Effect(
+                TelemetryRetentionEffect::TrafficRollupPublished {
+                    bucket_secs: 21_600,
+                }
+            ))
+        );
+        assert_eq!(
+            parse_telemetry_retention_notification(
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"retention_policy_changed","domain":"system_metric_rollups"}"#,
+            ),
+            Some(TelemetryRetentionNotification::Effect(
+                TelemetryRetentionEffect::RetentionPolicyChanged {
+                    domain: TelemetryRetentionPolicyDomain::SystemMetric,
+                }
+            ))
+        );
+        for (channel, payload) in [
+            (
+                "vpsman_telemetry_projection",
+                r#"{"owner":"dashboard","client_id":"client-a","revision":1}"#,
+            ),
+            (
+                "vpsman_telemetry_projection",
+                r#"{"client_id":"client-a","projected_seq":7}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"traffic_rollup_published","bucket_secs":42}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"retention_policy_changed","domain":"telemetry_samples"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"ordinary_rollup_published","domain":"traffic_counter_rollups"}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","effect":"due_span_published","domain":"telemetry_rollups","source_bucket_secs":60,"destination_bucket_secs":86400,"due_at_unix":300}"#,
+            ),
+            (
+                "vpsman_telemetry_retention",
+                r#"{"owner":"history_retention","phase":"due_event_coalescing","ready_at_unix":300}"#,
+            ),
+            ("vpsman_telemetry_retention", "not-json"),
+        ] {
+            assert_eq!(
+                parse_telemetry_retention_notification(channel, payload),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_wake_page_boundary_consumes_external_effect_during_continuous_work() {
+        let (wake_tx, mut wake_rx) = telemetry_retention_wake_channel();
+        let mut drain = TelemetryHistoryRetentionDrain::new(Duration::from_secs(60));
+        let mut applied_after_page = None;
+
+        for page in 0..64 {
+            if page == 17 {
+                assert!(queue_telemetry_retention_effect(
+                    &wake_tx,
+                    TelemetryRetentionEffect::PingTopologyChanged,
+                ));
+            }
+            match apply_ready_telemetry_retention_wake(&mut drain, &mut wake_rx) {
+                TelemetryRetentionWakePoll::Applied => {
+                    applied_after_page = Some(page);
+                    break;
+                }
+                TelemetryRetentionWakePoll::Empty => {}
+                TelemetryRetentionWakePoll::Closed => panic!("retention wake mailbox closed"),
+            }
+        }
+
+        assert_eq!(applied_after_page, Some(17));
+        assert!(matches!(
+            wake_rx.wake_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            take_telemetry_retention_wake_scope(&wake_rx.pending),
+            TelemetryRetentionWakeScope::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn periodic_projection_recovery_consumes_only_its_covered_hint_scope() {
+        let pending = Mutex::new(PendingTelemetryProjectionWakes::default());
+        let (wake_tx, mut wake_rx) = mpsc::channel(1);
+        assert!(queue_telemetry_projection_wake(
+            &pending,
+            &wake_tx,
+            r#"{"client_id":"covered","projected_seq":1}"#,
+        ));
+
+        assert_eq!(telemetry_projection_scope_for_wake(&pending, true), None);
+
+        // The already-buffered token may be selected after the global drain,
+        // but new commits still populate a fresh exact scope behind it.
+        assert!(queue_telemetry_projection_wake(
+            &pending,
+            &wake_tx,
+            r#"{"client_id":"fresh","projected_seq":2}"#,
+        ));
+        assert_eq!(wake_rx.recv().await, Some(()));
+        assert_eq!(
+            telemetry_projection_scope_for_wake(&pending, false),
+            Some(TelemetryProjectionWakeScope {
+                client_ids: vec!["fresh".to_string()],
+                global: false,
+            })
+        );
+    }
+
+    #[test]
+    fn notification_channels_wake_only_their_durable_work_owner() {
+        assert_eq!(
+            notification_work_owner("vpsman_telemetry_projection", "client-a"),
+            Some(WorkerLoopWake::TelemetryProjectionWork)
+        );
+        assert_eq!(
+            notification_work_owner("vpsman_traffic_active_cycle_rebuild", "ready"),
+            Some(WorkerLoopWake::TrafficActiveCycleRebuildWork)
+        );
+        assert_eq!(
+            notification_work_owner("webhook_events", "alert_notification"),
+            Some(WorkerLoopWake::AlertNotificationWork)
+        );
+        assert_eq!(
+            notification_work_owner("webhook_events", "alert_lifecycle"),
+            Some(WorkerLoopWake::WebhookWork)
+        );
+        assert_eq!(
+            notification_work_owner(ARTIFACT_DELETION_COMPLETED_CHANNEL, "source-id"),
+            Some(WorkerLoopWake::ArtifactDeletionCompletion)
+        );
+        assert_eq!(
+            notification_work_owner("vpsman_telemetry_retention", "due"),
+            None
+        );
+        assert_eq!(notification_work_owner("unrelated", "event"), None);
+    }
+
+    #[test]
+    fn event_paths_exclude_every_periodic_owner() {
+        let webhook = include_str!("delivery/webhook_rules.rs");
+        let (_, telemetry_path) = webhook
+            .split_once("pub(crate) async fn process_telemetry_webhook_materialization_work")
+            .expect("telemetry webhook owner");
+        let (telemetry_path, _) = telemetry_path
+            .split_once("pub(crate) async fn process_webhook_event_materialization_work")
+            .expect("telemetry webhook owner boundary");
+        assert!(telemetry_path.contains("drain_telemetry_projection_events"));
+        assert!(!telemetry_path.contains("process_queued_deliveries"));
+        for unrelated_owner in [
+            "project_alert_lifecycle_events",
+            "process_webhook_events",
+            "webhook_event_materialization_pending",
+            "materialize_interval_events",
+            "drain_webhook_retention",
+            "prune_webhook_events",
+        ] {
+            assert!(
+                !telemetry_path.contains(unrelated_owner),
+                "{unrelated_owner}"
+            );
+        }
+
+        let (_, event_path) = webhook
+            .split_once("pub(crate) async fn process_webhook_event_materialization_work")
+            .expect("webhook event owner");
+        let (event_path, _) = event_path
+            .split_once("async fn webhook_event_materialization_pending")
+            .expect("webhook event owner boundary");
+        assert!(!event_path.contains("process_queued_deliveries"));
+        for periodic_owner in [
+            "materialize_interval_events",
+            "prune_webhook_events",
+            "prune_deliveries",
+        ] {
+            assert!(!event_path.contains(periodic_owner), "{periodic_owner}");
+        }
+
+        let (_, delivery_path) = webhook
+            .split_once("pub(crate) async fn process_due_webhook_deliveries")
+            .expect("webhook delivery owner");
+        let (delivery_path, _) = delivery_path
+            .split_once("async fn drain_webhook_retention")
+            .expect("webhook delivery owner boundary");
+        assert!(delivery_path.contains("process_queued_deliveries"));
+        assert!(!delivery_path.contains("process_webhook_events"));
+        assert!(!delivery_path.contains("drain_telemetry_projection_events"));
+
+        let notifications = include_str!("delivery/alert_notifications.rs");
+        let (_, event_path) = notifications
+            .split_once("pub(crate) async fn process_due_alert_notifications")
+            .expect("alert-notification event owner");
+        let (event_path, _) = event_path
+            .split_once("pub(crate) async fn drain_alert_notification_retention")
+            .expect("alert-notification event owner boundary");
+        assert!(!event_path.contains("prune_deliveries"));
+    }
+
+    #[test]
+    fn worker_orchestration_has_fixed_independent_consumer_lanes() {
+        let worker = include_str!("main.rs");
+        let (_, orchestration) = worker
+            .rsplit_once("async fn run_worker_loop")
+            .expect("worker orchestration");
+        let (orchestration, _) = orchestration
+            .split_once("async fn run_worker_config_publisher")
+            .expect("worker orchestration boundary");
+        assert!(orchestration.contains("watch::channel(startup_runtime_config.clone())"));
+        assert!(orchestration.contains("JoinSet<(&'static str, Result<()>)>"));
+        for lane in [
+            "run_schedule_lane",
+            "run_alert_notification_lane",
+            "run_webhook_maintenance_lane",
+            "run_webhook_event_materialization_lane",
+            "run_telemetry_webhook_materialization_lane",
+            "run_traffic_active_cycle_rebuild_lane",
+            "run_webhook_delivery_lane",
+            "run_alert_policy_retention_lane",
+            "run_client_session_maintenance_lane",
+            "run_artifact_producer_lane",
+            "run_artifact_deletion_lane",
+        ] {
+            assert!(orchestration.contains(lane), "missing fixed lane {lane}");
+        }
+        assert!(!orchestration.contains("process_due_webhook_deliveries("));
+        assert!(!orchestration.contains("process_telemetry_webhook_materialization_work("));
+        assert!(!orchestration.contains("deliver_webhook("));
+    }
+
+    #[test]
+    fn durable_work_owners_call_their_resource_specific_consumers() {
+        let worker = include_str!("main.rs");
+
+        let telemetry_start = worker
+            .rfind("async fn run_telemetry_webhook_materialization_lane")
+            .expect("telemetry queue owner");
+        let telemetry = &worker[telemetry_start..];
+        let telemetry = &telemetry[..telemetry
+            .find("async fn run_webhook_delivery_lane")
+            .expect("telemetry queue owner boundary")];
+        assert!(telemetry.contains("process_telemetry_webhook_materialization_work"));
+        assert!(telemetry.contains("coalesce_worker_wake(&webhook_delivery_tx)"));
+        assert!(!telemetry.contains("process_due_webhook_deliveries"));
+
+        let traffic_start = worker
+            .rfind("async fn run_traffic_active_cycle_rebuild_lane")
+            .expect("traffic active-cycle owner");
+        let traffic = &worker[traffic_start..];
+        let traffic = &traffic[..traffic
+            .find("async fn run_alert_policy_retention_lane")
+            .expect("traffic active-cycle owner boundary")];
+        assert!(traffic.contains("process_next_traffic_active_cycle_rebuild"));
+        assert!(traffic.contains("TrafficActiveCycleRebuildOutcome::Published"));
+        assert!(traffic.contains("TrafficActiveCycleRebuildOutcome::Deferred"));
+        assert!(traffic.contains("tokio::task::yield_now().await"));
+
+        for (owner, boundary, processor) in [
+            (
+                "async fn run_webhook_event_materialization_lane",
+                "async fn run_telemetry_webhook_materialization_lane",
+                "process_webhook_event_materialization_work",
+            ),
+            (
+                "async fn run_webhook_delivery_lane",
+                "async fn run_alert_policy_retention_lane",
+                "process_due_webhook_deliveries",
+            ),
+            (
+                "async fn process_alert_notification_work",
+                "struct TelemetryRetentionSchedulerControl",
+                "process_due_alert_notifications",
+            ),
+            (
+                "async fn process_artifact_cleanup_jobs",
+                "async fn mark_artifact_cleanup_job_failed",
+                "claim_artifact_cleanup_job",
+            ),
+            (
+                "async fn process_due_schedule_work",
+                "async fn process_due_schedules",
+                "process_alert_event_schedules",
+            ),
+        ] {
+            let owner_start = worker.rfind(owner).expect("durable owner");
+            let owner = &worker[owner_start..];
+            let owner = &owner[..owner.find(boundary).expect("durable owner boundary")];
+            assert!(owner.contains(processor));
+        }
+
+        let alert_policy_retention = include_str!("runtime/alert_policy_retention.rs");
+        assert!(!alert_policy_retention.contains("pg_advisory"));
+        assert!(alert_policy_retention.contains("FROM alert_policy_lifecycle_meta"));
+        assert!(alert_policy_retention.contains("FOR UPDATE OF lifecycle SKIP LOCKED"));
+
+        let retention_start = worker
+            .rfind("async fn process_telemetry_history_retention_page")
+            .expect("retention owner");
+        let retention = &worker[retention_start..];
+        let retention = &retention[..retention
+            .find("async fn process_telemetry_history_retention_drain")
+            .expect("retention owner boundary")];
+        assert!(retention.contains("drain.prepare_page(pool)"));
+        assert!(retention.contains("drain.process_page(pool)"));
+        let backup = include_str!("retention/backup_policy_retention.rs");
+        assert!(backup.contains("enqueue_artifact_deletion"));
+        assert!(!backup.contains("claim_artifact_deletion"));
+        let deletion_start = worker
+            .rfind("async fn process_next_artifact_deletion_intent")
+            .expect("artifact deletion consumer");
+        let deletion = &worker[deletion_start..];
+        let deletion = &deletion[..deletion
+            .find("async fn consume_manual_artifact_deletion")
+            .expect("artifact deletion consumer boundary")];
+        assert!(deletion.contains("claim_artifact_deletion(pool, None"));
+        assert!(deletion.contains("delete_backup_policy_artifact"));
+    }
 }
 
 impl WorkerRuntimeConfig {
@@ -273,7 +1668,6 @@ impl WorkerRuntimeConfig {
             .or_else(|| Some(backup_object_store.clone()));
         Ok(Self {
             tick_secs: args.tick_secs.max(1),
-            worker_lease_secs: args.worker_lease_secs,
             agent_offline_timeout_secs: args.agent_offline_timeout_secs,
             alert_notification_config: AlertNotificationWorkerConfig::new(
                 args.notification_delivery_limit,
@@ -281,11 +1675,11 @@ impl WorkerRuntimeConfig {
                 args.notification_retention_prune_limit,
                 args.notification_webhook_timeout_secs,
             ),
+            alert_policy_retention_config: AlertPolicyRetentionConfig::default(),
             webhook_rule_config: WebhookRuleWorkerConfig::new(
                 args.webhook_rule_delivery_limit,
                 args.webhook_rule_materialize_limit,
                 args.webhook_rule_retention_days,
-                args.webhook_rule_telemetry_event_retention_days,
                 args.webhook_rule_retention_prune_limit,
                 args.webhook_rule_timeout_secs,
             )?,
@@ -339,23 +1733,10 @@ impl Args {
             config.worker.tick_secs,
         );
         apply_bool_default(&mut self.once, "VPSMAN_WORKER_ONCE", config.worker.once);
-        apply_opt_string(
-            &mut self.worker_id,
-            "VPSMAN_WORKER_ID",
-            config.worker.worker_id.as_deref(),
-        );
-        apply_i32_default(
-            &mut self.worker_lease_secs,
-            "VPSMAN_WORKER_LEASE_SECS",
-            config.worker.worker_lease_secs,
-        );
         apply_i64_default(
             &mut self.agent_offline_timeout_secs,
             "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS",
-            config
-                .worker
-                .agent_offline_timeout_secs
-                .or(config.timeout.agent_offline_secs),
+            config.worker.agent_offline_timeout_secs,
         );
         apply_i64_default(
             &mut self.notification_delivery_limit,
@@ -391,11 +1772,6 @@ impl Args {
             &mut self.webhook_rule_retention_days,
             "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_DAYS",
             config.worker.webhook_rule_retention_days,
-        );
-        apply_i64_default(
-            &mut self.webhook_rule_telemetry_event_retention_days,
-            "VPSMAN_WORKER_WEBHOOK_RULE_TELEMETRY_EVENT_RETENTION_DAYS",
-            config.worker.webhook_rule_telemetry_event_retention_days,
         );
         apply_i64_default(
             &mut self.webhook_rule_retention_prune_limit,
@@ -476,10 +1852,7 @@ impl Args {
         apply_u64_default(
             &mut self.schedule_job_max_timeout_secs,
             "VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS",
-            config
-                .worker
-                .schedule_job_max_timeout_secs
-                .or(config.timeout.worker_schedule_job_max_timeout_secs),
+            config.worker.schedule_job_max_timeout_secs,
         );
         apply_u64_default(
             &mut self.max_job_timeout_secs,
@@ -622,14 +1995,6 @@ fn apply_i64_default(target: &mut i64, env_name: &str, value: Option<i64>) {
     }
 }
 
-fn apply_i32_default(target: &mut i32, env_name: &str, value: Option<i32>) {
-    if env_absent(env_name) {
-        if let Some(value) = value {
-            *target = value;
-        }
-    }
-}
-
 fn apply_bool_default(target: &mut bool, env_name: &str, value: Option<bool>) {
     if !*target && env_absent(env_name) {
         if let Some(value) = value {
@@ -663,76 +2028,59 @@ async fn main() -> Result<()> {
         "worker build metadata"
     );
     let Some(postgres_url) = args.postgres_url.as_deref() else {
-        warn!("VPSMAN_POSTGRES_URL is not configured; worker cannot process durable queues");
         if args.once {
             bail!("VPSMAN_POSTGRES_URL is required when --once is used");
         }
-        let mut ticker = time::interval(Duration::from_secs(args.tick_secs.max(1)));
-        loop {
-            ticker.tick().await;
-            warn!("worker tick skipped: PostgreSQL is not configured");
-        }
+        bail!("VPSMAN_POSTGRES_URL is required; worker cannot process durable queues");
     };
-    let db_max_connections = args.db_max_connections.clamp(2, 256);
-    if args.db_max_connections < 2 {
-        warn!(
-            requested = args.db_max_connections,
-            effective = db_max_connections,
-            "worker requires two PostgreSQL connections while a task lease is held"
-        );
-    }
+    // Independent lanes never retain a pool connection while doing external
+    // I/O. One connection is therefore valid; larger configured pools provide
+    // real cross-lane database concurrency rather than a correctness fence.
+    let db_max_connections = args.db_max_connections.clamp(1, 256);
     let pool = connect_postgres(postgres_url, &args.migrations_dir, db_max_connections).await?;
-    let worker_id = args
-        .worker_id
-        .clone()
-        .unwrap_or_else(|| format!("vpsman-worker-{}-{}", std::process::id(), Uuid::new_v4()));
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
         let runtime_config = WorkerRuntimeConfig::from_args(&args)?;
-        let schedules_processed = process_due_schedules_if_leader(
-            &pool,
-            25,
-            &worker_id,
-            runtime_config.worker_lease_secs,
-            &runtime_config.schedule_dispatch_config,
-        )
-        .await?;
-        let alert_notifications = process_alert_notifications_if_leader(
-            &pool,
-            runtime_config.alert_notification_config,
-            &worker_id,
-            runtime_config.worker_lease_secs,
-        )
-        .await?;
-        let webhook_rules = process_webhook_rules_if_leader(
-            &pool,
-            runtime_config.webhook_rule_config,
-            &worker_id,
-            runtime_config.worker_lease_secs,
-        )
-        .await?;
-        let backup_policy_prune = process_backup_policy_retention_prune_if_leader(
+        let schedules_processed =
+            process_due_schedule_work(&pool, 25, &runtime_config.schedule_dispatch_config).await?;
+        let alert_notifications =
+            process_alert_notification_work(&pool, runtime_config.alert_notification_config, true)
+                .await?;
+        let webhook_rules =
+            process_webhook_rules(&pool, runtime_config.webhook_rule_config).await?;
+        let alert_policy_retention =
+            process_alert_policy_retention(&pool, runtime_config.alert_policy_retention_config)
+                .await?;
+        let backup_policy_prune = process_backup_policy_retention_prune(
             &pool,
             runtime_config.backup_policy_prune_config.clone(),
-            &worker_id,
-            runtime_config.worker_lease_secs,
         )
         .await?;
-        let telemetry_retention = process_telemetry_history_retention_if_leader(
-            &pool,
-            &worker_id,
-            runtime_config.worker_lease_secs,
-        )
-        .await?;
-        let artifact_cleanup = process_artifact_cleanup_jobs_if_leader(
-            &pool,
-            ArtifactObjectStores {
-                backup: &runtime_config.backup_object_store,
-            },
-            &worker_id,
-            runtime_config.worker_lease_secs,
-        )
-        .await?;
+        let mut backup_artifact_deletions = 0_u64;
+        while process_next_artifact_deletion_intent(&pool, &runtime_config.backup_object_store)
+            .await?
+        {
+            backup_artifact_deletions = backup_artifact_deletions.saturating_add(1);
+            tokio::task::yield_now().await;
+        }
+        let telemetry_retention = process_telemetry_history_retention_drain(&pool).await?;
+        let mut traffic_active_cycle_rebuilds = 0_u64;
+        let mut traffic_active_cycle_rebuild_failures = 0_u64;
+        loop {
+            match process_next_traffic_active_cycle_rebuild(&pool).await? {
+                TrafficActiveCycleRebuildOutcome::Current => break,
+                TrafficActiveCycleRebuildOutcome::Published => {
+                    traffic_active_cycle_rebuilds = traffic_active_cycle_rebuilds.saturating_add(1);
+                }
+                TrafficActiveCycleRebuildOutcome::Deferred { client_id, error } => {
+                    traffic_active_cycle_rebuild_failures =
+                        traffic_active_cycle_rebuild_failures.saturating_add(1);
+                    warn!(%client_id, %error, "deferred traffic active-cycle rule projection");
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        let artifact_cleanup = process_artifact_cleanup_jobs(&pool).await?;
         info!(
             schedules_processed,
             alert_notification_processed = alert_notifications.processed,
@@ -740,48 +2088,40 @@ async fn main() -> Result<()> {
             alert_notification_failed = alert_notifications.failed,
             alert_notification_pruned = alert_notifications.pruned,
             webhook_rule_materialized = webhook_rules.materialized,
-            webhook_rule_legacy_manual_events_skipped = webhook_rules.legacy_manual_events_skipped,
             webhook_rule_processed = webhook_rules.processed,
             webhook_rule_delivered = webhook_rules.delivered,
             webhook_rule_failed = webhook_rules.failed,
             webhook_rule_pruned = webhook_rules.pruned,
-            alert_policy_evidence_receipts_pruned = webhook_rules
-                .alert_policy_retention
-                .evidence_receipts_pruned,
-            alert_policy_evidence_pruned = webhook_rules.alert_policy_retention.evidence_pruned,
-            alert_lifecycle_events_pruned =
-                webhook_rules.alert_policy_retention.lifecycle_events_pruned,
+            alert_policy_evidence_receipts_pruned = alert_policy_retention.evidence_receipts_pruned,
+            alert_policy_evidence_pruned = alert_policy_retention.evidence_pruned,
+            alert_lifecycle_events_pruned = alert_policy_retention.lifecycle_events_pruned,
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
             backup_policy_prune_matched = backup_policy_prune.matched_rows,
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
+            backup_artifact_deletions,
+            telemetry_core_minute_source_rows = telemetry_retention.core_minute_source_rows,
+            telemetry_core_minute_derived_rows = telemetry_retention.core_minute_derived_rows,
+            traffic_minute_source_rows = telemetry_retention.traffic_minute_source_rows,
+            traffic_minute_derived_rows = telemetry_retention.traffic_minute_derived_rows,
             telemetry_samples_pruned = telemetry_retention.samples_pruned,
             telemetry_resource_spans_merged = telemetry_retention.resource_spans_merged,
-            telemetry_resource_promotion_conflicts =
-                telemetry_retention.resource_promotion_conflicts,
             telemetry_rollups_pruned = telemetry_retention.rollups_pruned,
             telemetry_network_rate_spans_merged = telemetry_retention.network_rate_spans_merged,
-            telemetry_network_rate_promotion_conflicts =
-                telemetry_retention.network_rate_promotion_conflicts,
             telemetry_network_rates_pruned = telemetry_retention.network_rates_pruned,
             telemetry_ping_spans_merged = telemetry_retention.ping_spans_merged,
-            telemetry_ping_promotion_conflicts = telemetry_retention.ping_promotion_conflicts,
             telemetry_ping_rollups_pruned = telemetry_retention.ping_rollups_pruned,
             telemetry_ping_facts_pruned = telemetry_retention.ping_facts_pruned,
-            system_metric_spans_merged = telemetry_retention.system_metric_spans_merged,
-            system_metric_promotion_conflicts =
-                telemetry_retention.system_metric_promotion_conflicts,
+            telemetry_ping_current_pruned = telemetry_retention.ping_current_pruned,
+            telemetry_ping_series_pruned = telemetry_retention.ping_series_pruned,
             system_metric_rollups_pruned = telemetry_retention.system_metric_rollups_pruned,
             traffic_counter_samples_pruned = telemetry_retention.traffic_counter_samples_pruned,
             traffic_raw_rows_promoted = telemetry_retention.traffic_raw_rows_promoted,
             traffic_rollup_rows_promoted = telemetry_retention.traffic_rollup_rows_promoted,
             traffic_rollup_rows_pruned = telemetry_retention.traffic_rollup_rows_pruned,
-            traffic_promotion_conflicts = telemetry_retention.traffic_promotion_conflicts,
             network_observation_source_rows_promoted =
                 telemetry_retention.network_observation_source_rows_promoted,
             network_observation_destination_rows_written =
                 telemetry_retention.network_observation_destination_rows_written,
-            network_observation_destination_conflicts =
-                telemetry_retention.network_observation_destination_conflicts,
             network_observation_expired_exact_rows_pruned =
                 telemetry_retention.network_observation_expired_exact_rows_pruned,
             network_observation_expired_rollup_rows_pruned =
@@ -790,296 +2130,671 @@ async fn main() -> Result<()> {
                 telemetry_retention.network_observation_inactive_latest_pruned,
             network_observation_inactive_series_pruned =
                 telemetry_retention.network_observation_inactive_series_pruned,
+            traffic_active_cycle_rebuilds,
+            traffic_active_cycle_rebuild_failures,
             artifact_cleanup_jobs = artifact_cleanup.jobs,
+            artifact_cleanup_failed_jobs = artifact_cleanup.failed_jobs,
             artifact_cleanup_deleted = artifact_cleanup.deleted_rows,
             "worker once completed"
         );
         return Ok(());
     }
 
-    let mut current_tick_secs = args.tick_secs.max(1);
-    let mut ticker = time::interval(Duration::from_secs(current_tick_secs));
-    let mut last_offline_check = tokio::time::Instant::now();
-    let mut last_telemetry_retention_check = tokio::time::Instant::now()
-        - Duration::from_secs(TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS);
-    let mut webhook_listener = match connect_webhook_listener(postgres_url).await {
-        Ok(listener) => Some(listener),
-        Err(error) => {
-            warn!(%error, "failed to start webhook event listener; polling fallback remains active");
-            None
-        }
+    // Retention keeps a dedicated pool so bounded history work cannot consume
+    // the ordinary workflow's minimum connection budget. Every retention page
+    // now claims its exact durable owner; there is no outer lease connection.
+    let telemetry_retention_pool = telemetry_retention_pool_options()
+        .connect(postgres_url)
+        .await
+        .context("failed to connect telemetry retention scheduler to PostgreSQL")?;
+    let (telemetry_retention_wake_tx, telemetry_retention_wake_rx) =
+        telemetry_retention_wake_channel();
+    let mut telemetry_retention_scheduler = TelemetryRetentionScheduler::spawn(
+        telemetry_retention_pool,
+        TELEMETRY_HISTORY_RETENTION_RECOVERY_INTERVAL,
+        telemetry_retention_wake_rx,
+    );
+    let worker_result = tokio::select! {
+        result = run_worker_loop(
+            &pool,
+            postgres_url,
+            &base_args,
+            &args,
+            telemetry_retention_wake_tx,
+        ) => result,
+        result = telemetry_retention_scheduler.wait_for_unexpected_exit() => result,
     };
+    let scheduler_result = telemetry_retention_scheduler.shutdown().await;
+    scheduler_result?;
+    worker_result
+}
+
+async fn run_worker_loop(
+    pool: &PgPool,
+    postgres_url: &str,
+    base_args: &Args,
+    args: &Args,
+    telemetry_retention_wake: TelemetryRetentionWakeSender,
+) -> Result<()> {
+    let startup_runtime_config = WorkerRuntimeConfig::from_args(args)?;
+    let (runtime_config_tx, runtime_config_rx) = watch::channel(startup_runtime_config.clone());
+    let (wake_senders, wake_receivers) = worker_wake_channels(telemetry_retention_wake);
+    let WorkerWakeReceivers {
+        telemetry_projection_rx,
+        telemetry_projection_pending,
+        traffic_active_cycle_rebuild_rx,
+        webhook_event_rx,
+        webhook_delivery_rx,
+        alert_notification_rx,
+    } = wake_receivers;
+
+    // These are fixed consumers, not per-wake tasks. A slow external target
+    // can occupy only the durable queue that owns it; database producers and
+    // unrelated owners continue independently. Process-local watches and wake
+    // tokens affect latency only because every lane periodically rediscovers
+    // its committed work in PostgreSQL.
+    let mut lanes: JoinSet<(&'static str, Result<()>)> = JoinSet::new();
+
+    let config_base_args = base_args.clone();
+    lanes.spawn(async move {
+        (
+            "runtime-config-publisher",
+            run_worker_config_publisher(
+                config_base_args,
+                startup_runtime_config,
+                runtime_config_tx,
+            )
+            .await,
+        )
+    });
+
+    let listener_postgres_url = postgres_url.to_string();
+    let listener_runtime_config_rx = runtime_config_rx.clone();
+    let listener_wake_senders = wake_senders.clone();
+    lanes.spawn(async move {
+        (
+            "postgres-notification-listener",
+            run_worker_notification_listener(
+                listener_postgres_url,
+                listener_runtime_config_rx,
+                listener_wake_senders,
+            )
+            .await,
+        )
+    });
+
+    let schedule_pool = pool.clone();
+    let schedule_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "schedule-materialization",
+            run_schedule_lane(schedule_pool, schedule_runtime_config_rx).await,
+        )
+    });
+
+    let alert_pool = pool.clone();
+    let alert_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "alert-notification-delivery",
+            run_alert_notification_lane(alert_pool, alert_runtime_config_rx, alert_notification_rx)
+                .await,
+        )
+    });
+
+    let webhook_maintenance_pool = pool.clone();
+    let webhook_maintenance_runtime_config_rx = runtime_config_rx.clone();
+    let webhook_maintenance_event_tx = wake_senders.webhook_event_tx.clone();
+    lanes.spawn(async move {
+        (
+            "webhook-periodic-maintenance",
+            run_webhook_maintenance_lane(
+                webhook_maintenance_pool,
+                webhook_maintenance_runtime_config_rx,
+                webhook_maintenance_event_tx,
+            )
+            .await,
+        )
+    });
+
+    let webhook_event_pool = pool.clone();
+    let webhook_event_runtime_config_rx = runtime_config_rx.clone();
+    let webhook_event_delivery_tx = wake_senders.webhook_delivery_tx.clone();
+    lanes.spawn(async move {
+        (
+            "webhook-event-materialization",
+            run_webhook_event_materialization_lane(
+                webhook_event_pool,
+                webhook_event_runtime_config_rx,
+                webhook_event_rx,
+                webhook_event_delivery_tx,
+            )
+            .await,
+        )
+    });
+
+    let telemetry_webhook_pool = pool.clone();
+    let telemetry_webhook_runtime_config_rx = runtime_config_rx.clone();
+    let telemetry_webhook_delivery_tx = wake_senders.webhook_delivery_tx.clone();
+    lanes.spawn(async move {
+        (
+            "telemetry-webhook-materialization",
+            run_telemetry_webhook_materialization_lane(
+                telemetry_webhook_pool,
+                telemetry_webhook_runtime_config_rx,
+                telemetry_projection_rx,
+                telemetry_projection_pending,
+                telemetry_webhook_delivery_tx,
+            )
+            .await,
+        )
+    });
+
+    let traffic_active_cycle_pool = pool.clone();
+    let traffic_active_cycle_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "traffic-active-cycle-rebuild",
+            run_traffic_active_cycle_rebuild_lane(
+                traffic_active_cycle_pool,
+                traffic_active_cycle_runtime_config_rx,
+                traffic_active_cycle_rebuild_rx,
+            )
+            .await,
+        )
+    });
+
+    let webhook_delivery_pool = pool.clone();
+    let webhook_delivery_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "webhook-delivery",
+            run_webhook_delivery_lane(
+                webhook_delivery_pool,
+                webhook_delivery_runtime_config_rx,
+                webhook_delivery_rx,
+            )
+            .await,
+        )
+    });
+
+    let alert_retention_pool = pool.clone();
+    let alert_retention_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "alert-policy-retention",
+            run_alert_policy_retention_lane(
+                alert_retention_pool,
+                alert_retention_runtime_config_rx,
+            )
+            .await,
+        )
+    });
+
+    let client_maintenance_pool = pool.clone();
+    let client_maintenance_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "client-session-maintenance",
+            run_client_session_maintenance_lane(
+                client_maintenance_pool,
+                client_maintenance_runtime_config_rx,
+            )
+            .await,
+        )
+    });
+
+    let artifact_pool = pool.clone();
+    let artifact_runtime_config_rx = runtime_config_rx.clone();
+    lanes.spawn(async move {
+        (
+            "artifact-intent-production",
+            run_artifact_producer_lane(artifact_pool, artifact_runtime_config_rx).await,
+        )
+    });
+
+    let artifact_deletion_pool = pool.clone();
+    lanes.spawn(async move {
+        (
+            "artifact-object-deletion",
+            run_artifact_deletion_lane(artifact_deletion_pool, runtime_config_rx).await,
+        )
+    });
+
+    let Some(joined) = lanes.join_next().await else {
+        bail!("worker has no active consumer lanes");
+    };
+    let (lane, result) = joined.context("worker consumer lane task failed")?;
+    match result {
+        Ok(()) => bail!("worker consumer lane {lane} exited unexpectedly"),
+        Err(error) => Err(error).with_context(|| format!("worker consumer lane {lane} failed")),
+    }
+}
+
+async fn run_worker_config_publisher(
+    base_args: Args,
+    startup_runtime_config: WorkerRuntimeConfig,
+    runtime_config_tx: watch::Sender<WorkerRuntimeConfig>,
+) -> Result<()> {
+    let mut tick_secs = startup_runtime_config.tick_secs;
+    let mut ticker = time::interval(Duration::from_secs(tick_secs));
     loop {
-        let mut webhook_listener_failed = false;
-        if let Some(listener) = webhook_listener.as_mut() {
-            tokio::select! {
-                _ = ticker.tick() => {}
-                notification = listener.recv() => {
-                    match notification {
-                        Ok(notification) => {
-                            debug!(
-                                channel = notification.channel(),
-                                payload = notification.payload(),
-                                "webhook event notification woke worker"
-                            );
-                        }
-                        Err(error) => {
-                            warn!(%error, "webhook event listener failed; returning to polling fallback");
-                            webhook_listener_failed = true;
-                        }
-                    }
-                }
-            }
-            if webhook_listener_failed {
-                webhook_listener = None;
-            }
-        } else {
-            ticker.tick().await;
-            match connect_webhook_listener(postgres_url).await {
-                Ok(listener) => {
-                    info!("webhook event listener reconnected");
-                    webhook_listener = Some(listener);
-                }
-                Err(error) => debug!(%error, "webhook event listener reconnect failed"),
-            }
-        }
+        ticker.tick().await;
         let runtime_config = match load_worker_runtime_config(&base_args) {
             Ok(config) => config,
             Err(error) => {
                 warn!(%error, "failed to hot-reload worker suite config; using startup runtime config");
-                match WorkerRuntimeConfig::from_args(&args) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        warn!(%error, "failed to build startup worker runtime config");
-                        continue;
-                    }
-                }
+                startup_runtime_config.clone()
             }
         };
-        if runtime_config.tick_secs != current_tick_secs {
-            current_tick_secs = runtime_config.tick_secs;
-            ticker = time::interval(Duration::from_secs(current_tick_secs));
-            info!(
-                tick_secs = current_tick_secs,
-                "worker tick interval hot-reloaded"
-            );
+        runtime_config_tx.send_replace(runtime_config.clone());
+        if runtime_config.tick_secs != tick_secs {
+            tick_secs = runtime_config.tick_secs;
+            let duration = Duration::from_secs(tick_secs);
+            ticker = time::interval_at(tokio::time::Instant::now() + duration, duration);
+            info!(tick_secs, "worker tick interval hot-reloaded");
         }
-        match process_due_schedules_if_leader(
-            &pool,
-            25,
-            &worker_id,
-            runtime_config.worker_lease_secs,
-            &runtime_config.schedule_dispatch_config,
-        )
+    }
+}
+
+async fn wait_for_worker_cycle(
+    runtime_config_rx: &mut watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<WorkerRuntimeConfig> {
+    runtime_config_rx
+        .changed()
         .await
-        {
-            Ok(processed) => {
-                if processed > 0 {
-                    info!(processed, "processed due schedules");
+        .context("worker runtime config publisher stopped")?;
+    Ok(runtime_config_rx.borrow_and_update().clone())
+}
+
+async fn wait_for_worker_cycle_or_hint(
+    runtime_config_rx: &mut watch::Receiver<WorkerRuntimeConfig>,
+    hint_rx: &mut mpsc::Receiver<()>,
+) -> Result<(WorkerRuntimeConfig, bool)> {
+    tokio::select! {
+        changed = runtime_config_rx.changed() => {
+            changed.context("worker runtime config publisher stopped")?;
+            Ok((runtime_config_rx.borrow_and_update().clone(), true))
+        }
+        hint = hint_rx.recv() => {
+            hint.context("worker wake channel stopped")?;
+            Ok((runtime_config_rx.borrow().clone(), false))
+        }
+    }
+}
+
+async fn run_worker_notification_listener(
+    postgres_url: String,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    wake_senders: WorkerWakeSenders,
+) -> Result<()> {
+    loop {
+        match connect_worker_notification_listener(&postgres_url).await {
+            Ok(listener) => {
+                // A live listener observes only future commits. Recover only
+                // the named frontiers owned by commit notifications. Durable
+                // rows remain authoritative when a disconnect loses hints.
+                if !queue_telemetry_retention_external_writer_recovery(
+                    &wake_senders.telemetry_retention,
+                ) {
+                    return Ok(());
+                }
+                publish_artifact_deletion_completion();
+                runtime_config_rx.borrow_and_update();
+                info!("worker PostgreSQL notification listener connected");
+                let pump = WorkerNotificationPump::spawn(listener, wake_senders.clone());
+                match pump.task.await {
+                    Ok(Ok(())) => debug!("worker PostgreSQL notification listener stopped"),
+                    Ok(Err(error)) => {
+                        warn!(%error, "worker PostgreSQL notification listener failed; periodic recovery remains active");
+                    }
+                    Err(error) => {
+                        warn!(%error, "worker PostgreSQL notification listener task failed; periodic recovery remains active");
+                    }
                 }
             }
+            Err(error) => {
+                debug!(%error, "worker PostgreSQL notification listener connect failed; periodic recovery remains active");
+            }
+        }
+        wait_for_worker_notification_reconnect(&mut runtime_config_rx).await?;
+    }
+}
+
+async fn wait_for_worker_notification_reconnect(
+    runtime_config_rx: &mut watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<()> {
+    tokio::select! {
+        _ = time::sleep(WORKER_NOTIFICATION_RECONNECT_DELAY) => Ok(()),
+        changed = runtime_config_rx.changed() => {
+            changed.context("worker runtime config publisher stopped")?;
+            runtime_config_rx.borrow_and_update();
+            Ok(())
+        }
+    }
+}
+
+async fn run_schedule_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<()> {
+    loop {
+        let runtime_config = wait_for_worker_cycle(&mut runtime_config_rx).await?;
+        match process_due_schedule_work(&pool, 25, &runtime_config.schedule_dispatch_config).await {
+            Ok(processed) if processed > 0 => info!(processed, "processed due schedules"),
+            Ok(_) => {}
             Err(error) => warn!(%error, "failed to process due schedules"),
         }
-        match process_alert_notifications_if_leader(
+    }
+}
+
+async fn run_alert_notification_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    mut hint_rx: mpsc::Receiver<()>,
+) -> Result<()> {
+    loop {
+        let (runtime_config, periodic) =
+            wait_for_worker_cycle_or_hint(&mut runtime_config_rx, &mut hint_rx).await?;
+        match process_alert_notification_work(
             &pool,
             runtime_config.alert_notification_config,
-            &worker_id,
-            runtime_config.worker_lease_secs,
+            periodic,
         )
         .await
         {
-            Ok(run) => {
-                if run.processed > 0 || run.pruned > 0 {
-                    info!(
-                        processed = run.processed,
-                        delivered = run.delivered,
-                        failed = run.failed,
-                        pruned = run.pruned,
-                        "processed fleet alert notifications"
-                    );
-                }
-            }
+            Ok(run) if run.processed > 0 || run.pruned > 0 => info!(
+                processed = run.processed,
+                delivered = run.delivered,
+                failed = run.failed,
+                pruned = run.pruned,
+                "processed fleet alert notifications"
+            ),
+            Ok(_) => {}
             Err(error) => warn!(%error, "failed to process fleet alert notifications"),
         }
-        match process_webhook_rules_if_leader(
-            &pool,
-            runtime_config.webhook_rule_config,
-            &worker_id,
-            runtime_config.worker_lease_secs,
-        )
-        .await
+    }
+}
+
+async fn run_webhook_maintenance_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    webhook_event_tx: mpsc::Sender<()>,
+) -> Result<()> {
+    loop {
+        let runtime_config = wait_for_worker_cycle(&mut runtime_config_rx).await?;
+        match process_webhook_periodic_maintenance(&pool, runtime_config.webhook_rule_config).await
         {
             Ok(run) => {
-                if run.materialized > 0
-                    || run.legacy_manual_events_skipped > 0
-                    || run.processed > 0
-                    || run.pruned > 0
-                    || run.alert_policy_retention.evidence_pruned > 0
-                    || run.alert_policy_retention.lifecycle_events_pruned > 0
-                {
+                if run.materialized > 0 {
+                    ensure!(
+                        coalesce_worker_wake(&webhook_event_tx),
+                        "webhook event materialization lane stopped"
+                    );
+                }
+                if run.materialized > 0 || run.pruned > 0 {
                     info!(
                         materialized = run.materialized,
-                        legacy_manual_events_skipped = run.legacy_manual_events_skipped,
-                        processed = run.processed,
-                        delivered = run.delivered,
-                        failed = run.failed,
                         pruned = run.pruned,
-                        alert_policy_evidence_receipts_pruned =
-                            run.alert_policy_retention.evidence_receipts_pruned,
-                        alert_policy_evidence_pruned = run.alert_policy_retention.evidence_pruned,
-                        alert_lifecycle_events_pruned =
-                            run.alert_policy_retention.lifecycle_events_pruned,
-                        "processed webhook rules"
+                        "processed webhook periodic maintenance"
                     );
                 }
             }
-            Err(error) => warn!(%error, "failed to process webhook rules"),
+            Err(error) => warn!(%error, "failed to process webhook periodic maintenance"),
         }
-        match process_backup_policy_retention_prune_if_leader(
+    }
+}
+
+async fn run_webhook_event_materialization_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    mut hint_rx: mpsc::Receiver<()>,
+    webhook_delivery_tx: mpsc::Sender<()>,
+) -> Result<()> {
+    loop {
+        let (runtime_config, _) =
+            wait_for_worker_cycle_or_hint(&mut runtime_config_rx, &mut hint_rx).await?;
+        match process_webhook_event_materialization_work(&pool, runtime_config.webhook_rule_config)
+            .await
+        {
+            Ok(run) => {
+                if run.materialized > 0 {
+                    ensure!(
+                        coalesce_worker_wake(&webhook_delivery_tx),
+                        "webhook delivery lane stopped"
+                    );
+                    info!(
+                        materialized = run.materialized,
+                        "materialized webhook event deliveries"
+                    );
+                }
+            }
+            Err(error) => warn!(%error, "failed to materialize webhook events"),
+        }
+    }
+}
+
+async fn run_telemetry_webhook_materialization_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    mut hint_rx: mpsc::Receiver<()>,
+    pending: Arc<Mutex<PendingTelemetryProjectionWakes>>,
+    webhook_delivery_tx: mpsc::Sender<()>,
+) -> Result<()> {
+    loop {
+        let (runtime_config, periodic) =
+            wait_for_worker_cycle_or_hint(&mut runtime_config_rx, &mut hint_rx).await?;
+        // A periodic global recovery owns every cursor committed when its
+        // drain begins. Consume the coalesced exact scope at that same
+        // boundary so its still-buffered hint becomes a no-op rather than a
+        // second, already-covered database pass. A projection committed
+        // during/after this drain records a fresh scope and remains wakeable.
+        let scope = telemetry_projection_scope_for_wake(&pending, periodic);
+        let client_ids = match scope.as_ref() {
+            None | Some(TelemetryProjectionWakeScope { global: true, .. }) => &[][..],
+            Some(scope) if !scope.client_ids.is_empty() => scope.client_ids.as_slice(),
+            Some(_) => continue,
+        };
+        match process_telemetry_webhook_materialization_work(
+            &pool,
+            runtime_config.webhook_rule_config,
+            client_ids,
+        )
+        .await
+        {
+            Ok(run) => {
+                if run.materialized > 0 {
+                    ensure!(
+                        coalesce_worker_wake(&webhook_delivery_tx),
+                        "webhook delivery lane stopped"
+                    );
+                    info!(
+                        materialized = run.materialized,
+                        "materialized telemetry webhook deliveries"
+                    );
+                }
+            }
+            Err(error) => warn!(%error, "failed to materialize telemetry webhook deliveries"),
+        }
+    }
+}
+
+async fn run_webhook_delivery_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    mut hint_rx: mpsc::Receiver<()>,
+) -> Result<()> {
+    loop {
+        let (runtime_config, _) =
+            wait_for_worker_cycle_or_hint(&mut runtime_config_rx, &mut hint_rx).await?;
+        match process_due_webhook_deliveries(&pool, runtime_config.webhook_rule_config).await {
+            Ok(run) if run.processed > 0 => info!(
+                processed = run.processed,
+                delivered = run.delivered,
+                failed = run.failed,
+                "processed webhook deliveries"
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "failed to process webhook deliveries"),
+        }
+    }
+}
+
+async fn run_traffic_active_cycle_rebuild_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+    mut hint_rx: mpsc::Receiver<()>,
+) -> Result<()> {
+    loop {
+        let _ = wait_for_worker_cycle_or_hint(&mut runtime_config_rx, &mut hint_rx).await?;
+        let mut rebuilt = 0_u64;
+        let mut deferred = 0_u64;
+        loop {
+            match process_next_traffic_active_cycle_rebuild(&pool).await? {
+                TrafficActiveCycleRebuildOutcome::Current => break,
+                TrafficActiveCycleRebuildOutcome::Published => {
+                    rebuilt = rebuilt.saturating_add(1);
+                }
+                TrafficActiveCycleRebuildOutcome::Deferred { client_id, error } => {
+                    deferred = deferred.saturating_add(1);
+                    warn!(%client_id, %error, "deferred traffic active-cycle rule projection");
+                }
+            }
+            // Yield between independent client owners without delaying any
+            // already-due work or imposing a throughput ceiling.
+            tokio::task::yield_now().await;
+        }
+        if rebuilt > 0 || deferred > 0 {
+            info!(
+                rebuilt,
+                deferred, "processed traffic active-cycle rule projections"
+            );
+        }
+    }
+}
+
+async fn run_alert_policy_retention_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<()> {
+    loop {
+        let runtime_config = wait_for_worker_cycle(&mut runtime_config_rx).await?;
+        match process_alert_policy_retention(&pool, runtime_config.alert_policy_retention_config)
+            .await
+        {
+            Ok(run) if run.evidence_pruned > 0 || run.lifecycle_events_pruned > 0 => info!(
+                evidence_receipts_pruned = run.evidence_receipts_pruned,
+                evidence_pruned = run.evidence_pruned,
+                lifecycle_events_pruned = run.lifecycle_events_pruned,
+                "processed alert policy retention"
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "failed to process alert policy retention"),
+        }
+    }
+}
+
+async fn run_client_session_maintenance_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<()> {
+    let mut last_offline_check = tokio::time::Instant::now();
+    loop {
+        let runtime_config = wait_for_worker_cycle(&mut runtime_config_rx).await?;
+        if last_offline_check.elapsed() < Duration::from_secs(60) {
+            continue;
+        }
+        match drain_offline_agents(&pool, runtime_config.agent_offline_timeout_secs).await {
+            Ok(count) if count > 0 => info!(count, "detected offline agents"),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "failed to detect offline agents"),
+        }
+        // This is idle/retry cadence from the completed drain, not a cap on
+        // already-due per-client transitions.
+        last_offline_check = tokio::time::Instant::now();
+        match expire_stale_gateway_sessions(&pool, runtime_config.agent_offline_timeout_secs).await
+        {
+            Ok(count) if count > 0 => info!(count, "expired stale gateway sessions"),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "failed to expire stale gateway sessions"),
+        }
+    }
+}
+
+async fn run_artifact_producer_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<()> {
+    loop {
+        let runtime_config = wait_for_worker_cycle(&mut runtime_config_rx).await?;
+        match process_backup_policy_retention_prune(
             &pool,
             runtime_config.backup_policy_prune_config.clone(),
-            &worker_id,
-            runtime_config.worker_lease_secs,
         )
         .await
         {
-            Ok(run) => {
-                if run.matched_rows > 0 || run.pruned_rows > 0 {
-                    info!(
-                        policies_scanned = run.policies_scanned,
-                        matched_rows = run.matched_rows,
-                        pruned_rows = run.pruned_rows,
-                        "processed backup policy retention prune"
-                    );
-                }
-            }
+            Ok(run) if run.matched_rows > 0 || run.pruned_rows > 0 => info!(
+                policies_scanned = run.policies_scanned,
+                matched_rows = run.matched_rows,
+                pruned_rows = run.pruned_rows,
+                "processed backup policy retention prune"
+            ),
+            Ok(_) => {}
             Err(error) => warn!(%error, "failed to process backup policy retention prune"),
         }
-        if last_telemetry_retention_check.elapsed()
-            >= Duration::from_secs(TELEMETRY_HISTORY_RETENTION_INTERVAL_SECS)
-        {
-            last_telemetry_retention_check = tokio::time::Instant::now();
-            match process_telemetry_history_retention_if_leader(
-                &pool,
-                &worker_id,
-                runtime_config.worker_lease_secs,
-            )
-            .await
-            {
-                Ok(run) => {
-                    if run.samples_pruned > 0
-                        || run.resource_spans_merged > 0
-                        || run.resource_promotion_conflicts > 0
-                        || run.rollups_pruned > 0
-                        || run.network_rate_spans_merged > 0
-                        || run.network_rate_promotion_conflicts > 0
-                        || run.network_rates_pruned > 0
-                        || run.ping_spans_merged > 0
-                        || run.ping_promotion_conflicts > 0
-                        || run.ping_rollups_pruned > 0
-                        || run.ping_facts_pruned > 0
-                        || run.system_metric_spans_merged > 0
-                        || run.system_metric_promotion_conflicts > 0
-                        || run.system_metric_rollups_pruned > 0
-                        || run.traffic_counter_samples_pruned > 0
-                        || run.traffic_raw_rows_promoted > 0
-                        || run.traffic_rollup_rows_promoted > 0
-                        || run.traffic_rollup_rows_pruned > 0
-                        || run.traffic_promotion_conflicts > 0
-                        || run.network_observation_source_rows_promoted > 0
-                        || run.network_observation_destination_rows_written > 0
-                        || run.network_observation_destination_conflicts > 0
-                        || run.network_observation_expired_exact_rows_pruned > 0
-                        || run.network_observation_expired_rollup_rows_pruned > 0
-                        || run.network_observation_inactive_latest_pruned > 0
-                        || run.network_observation_inactive_series_pruned > 0
-                    {
-                        info!(
-                            telemetry_samples_pruned = run.samples_pruned,
-                            telemetry_resource_spans_merged = run.resource_spans_merged,
-                            telemetry_resource_promotion_conflicts =
-                                run.resource_promotion_conflicts,
-                            telemetry_rollups_pruned = run.rollups_pruned,
-                            telemetry_network_rate_spans_merged = run.network_rate_spans_merged,
-                            telemetry_network_rate_promotion_conflicts =
-                                run.network_rate_promotion_conflicts,
-                            telemetry_network_rates_pruned = run.network_rates_pruned,
-                            telemetry_ping_spans_merged = run.ping_spans_merged,
-                            telemetry_ping_promotion_conflicts = run.ping_promotion_conflicts,
-                            telemetry_ping_rollups_pruned = run.ping_rollups_pruned,
-                            telemetry_ping_facts_pruned = run.ping_facts_pruned,
-                            system_metric_spans_merged = run.system_metric_spans_merged,
-                            system_metric_promotion_conflicts =
-                                run.system_metric_promotion_conflicts,
-                            system_metric_rollups_pruned = run.system_metric_rollups_pruned,
-                            traffic_counter_samples_pruned = run.traffic_counter_samples_pruned,
-                            traffic_raw_rows_promoted = run.traffic_raw_rows_promoted,
-                            traffic_rollup_rows_promoted = run.traffic_rollup_rows_promoted,
-                            traffic_rollup_rows_pruned = run.traffic_rollup_rows_pruned,
-                            traffic_promotion_conflicts = run.traffic_promotion_conflicts,
-                            network_observation_source_rows_promoted =
-                                run.network_observation_source_rows_promoted,
-                            network_observation_destination_rows_written =
-                                run.network_observation_destination_rows_written,
-                            network_observation_destination_conflicts =
-                                run.network_observation_destination_conflicts,
-                            network_observation_expired_exact_rows_pruned =
-                                run.network_observation_expired_exact_rows_pruned,
-                            network_observation_expired_rollup_rows_pruned =
-                                run.network_observation_expired_rollup_rows_pruned,
-                            network_observation_inactive_latest_pruned =
-                                run.network_observation_inactive_latest_pruned,
-                            network_observation_inactive_series_pruned =
-                                run.network_observation_inactive_series_pruned,
-                            "processed telemetry history retention"
-                        );
-                    }
-                }
-                Err(error) => warn!(%error, "failed to process telemetry history retention"),
-            }
-        }
-        match process_artifact_cleanup_jobs_if_leader(
-            &pool,
-            ArtifactObjectStores {
-                backup: &runtime_config.backup_object_store,
-            },
-            &worker_id,
-            runtime_config.worker_lease_secs,
-        )
-        .await
-        {
-            Ok(run) => {
-                if run.jobs > 0 || run.deleted_rows > 0 {
-                    info!(
-                        jobs = run.jobs,
-                        deleted_rows = run.deleted_rows,
-                        deleted_bytes = run.deleted_bytes,
-                        "processed artifact cleanup jobs"
-                    );
-                }
-            }
+        match process_artifact_cleanup_jobs(&pool).await {
+            Ok(run) if run.jobs > 0 || run.deleted_rows > 0 => info!(
+                jobs = run.jobs,
+                failed_jobs = run.failed_jobs,
+                deleted_rows = run.deleted_rows,
+                deleted_bytes = run.deleted_bytes,
+                "processed artifact cleanup jobs"
+            ),
+            Ok(_) => {}
             Err(error) => warn!(%error, "failed to process artifact cleanup jobs"),
         }
-        if last_offline_check.elapsed() >= Duration::from_secs(60) {
-            last_offline_check = tokio::time::Instant::now();
-            match detect_offline_agents(&pool, runtime_config.agent_offline_timeout_secs).await {
-                Ok(count) => {
-                    if count > 0 {
-                        info!(count, "detected offline agents");
-                    }
-                }
-                Err(error) => warn!(%error, "failed to detect offline agents"),
-            }
-            match expire_stale_gateway_sessions(&pool, runtime_config.agent_offline_timeout_secs)
+    }
+}
+
+async fn run_artifact_deletion_lane(
+    pool: PgPool,
+    mut runtime_config_rx: watch::Receiver<WorkerRuntimeConfig>,
+) -> Result<()> {
+    loop {
+        let runtime_config = runtime_config_rx.borrow().clone();
+        let mut deleted = 0_u64;
+        loop {
+            match process_next_artifact_deletion_intent(&pool, &runtime_config.backup_object_store)
                 .await
             {
-                Ok(count) => {
-                    if count > 0 {
-                        info!(count, "expired stale gateway sessions");
-                    }
+                Ok(true) => {
+                    deleted = deleted.saturating_add(1);
+                    tokio::task::yield_now().await;
                 }
-                Err(error) => warn!(%error, "failed to expire stale gateway sessions"),
+                Ok(false) => break,
+                Err(error) if error.is::<ClaimedArtifactDeletionError>() => {
+                    warn!(%error, "artifact deletion consumer deferred or failed owned work");
+                    // The exact intent retains a lease or has already moved to
+                    // its durable retry/terminal state. Continue with later
+                    // independent owners in this wake without changing that
+                    // intent's retry delay.
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => {
+                    warn!(%error, "artifact deletion consumer could not claim work");
+                    break;
+                }
             }
+        }
+        if deleted > 0 {
+            info!(deleted, "consumed durable artifact deletions");
+        }
+        tokio::select! {
+            changed = runtime_config_rx.changed() => {
+                changed.context("worker runtime config publisher stopped")?;
+                runtime_config_rx.borrow_and_update();
+            }
+            _ = wait_for_artifact_deletion_work() => {}
         }
     }
 }
@@ -1096,10 +2811,6 @@ async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Resu
             tx.rollback().await?;
             break;
         };
-        if !try_lock_lifecycle(&mut tx).await? {
-            tx.rollback().await?;
-            break;
-        }
         sqlx::query_scalar::<_, String>(
             r#"
             UPDATE clients
@@ -1186,31 +2897,66 @@ async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Resu
     Ok(transitioned)
 }
 
+async fn drain_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Result<u64> {
+    let mut transitioned = 0_u64;
+    loop {
+        let page = detect_offline_agents(pool, offline_timeout_secs).await?;
+        transitioned = transitioned
+            .checked_add(page)
+            .context("offline transition count overflow")?;
+        if page < OFFLINE_BATCH as u64 {
+            return Ok(transitioned);
+        }
+        // OFFLINE_BATCH bounds one scheduler page of short per-client
+        // transactions, not the already-due clients handled in this pass.
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn expire_stale_gateway_sessions(pool: &PgPool, offline_timeout_secs: i64) -> Result<u64> {
-    let rows = sqlx::query(
-        r#"
-        UPDATE gateway_sessions session
-        SET
-            status = 'expired',
-            last_seen_at = now(),
-            ended_at = COALESCE(session.ended_at, now()),
-            end_reason = COALESCE(session.end_reason, 'agent_offline_timeout')
-        FROM clients client
-        WHERE session.client_id = client.id
-          AND session.status = 'active'
-          AND (
-            client.hidden_at IS NOT NULL
-            OR client.status IN ('offline', 'disconnected')
-            OR client.last_seen_at IS NULL
-            OR client.last_seen_at < now() - make_interval(secs => $1)
-          )
-        RETURNING session.id
-        "#,
-    )
-    .bind(offline_timeout_secs as f64)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.len() as u64)
+    let mut expired = 0_u64;
+    loop {
+        let rows = sqlx::query(
+            r#"
+            WITH candidate AS (
+                SELECT session.id
+                FROM gateway_sessions session
+                JOIN clients client ON client.id = session.client_id
+                WHERE session.status = 'active'
+                  AND (
+                    client.hidden_at IS NOT NULL
+                    OR client.status IN ('offline', 'disconnected')
+                    OR client.last_seen_at IS NULL
+                    OR client.last_seen_at < now() - make_interval(secs => $1)
+                  )
+                ORDER BY session.last_seen_at, session.id
+                FOR UPDATE OF session SKIP LOCKED
+                LIMIT $2
+            )
+            UPDATE gateway_sessions session
+            SET
+                status = 'expired',
+                last_seen_at = now(),
+                ended_at = COALESCE(session.ended_at, now()),
+                end_reason = COALESCE(session.end_reason, 'agent_offline_timeout')
+            FROM candidate
+            WHERE session.id = candidate.id
+            RETURNING session.id
+            "#,
+        )
+        .bind(offline_timeout_secs as f64)
+        .bind(OFFLINE_BATCH as i64)
+        .fetch_all(pool)
+        .await?;
+        let page = rows.len() as u64;
+        expired = expired
+            .checked_add(page)
+            .context("expired gateway session count overflow")?;
+        if page < OFFLINE_BATCH as u64 {
+            return Ok(expired);
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn connect_postgres(
@@ -1218,110 +2964,479 @@ async fn connect_postgres(
     migrations_dir: &std::path::Path,
     max_connections: u32,
 ) -> Result<PgPool> {
+    let connect_options = PgConnectOptions::from_str(postgres_url)
+        .context("failed to parse the PostgreSQL connection URL")?;
+    migrate_postgres_database(&connect_options, migrations_dir).await?;
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
-        .connect(postgres_url)
+        .connect_with(connect_options.clone().options([("search_path", "public")]))
         .await
         .context("failed to connect to PostgreSQL")?;
-    vpsman_server_core::run_postgres_migrations(&pool, migrations_dir).await?;
     Ok(pool)
 }
 
-async fn connect_webhook_listener(postgres_url: &str) -> Result<PgListener> {
+async fn migrate_postgres_database(
+    connect_options: &PgConnectOptions,
+    migrations_dir: &std::path::Path,
+) -> Result<()> {
+    let mut migration_connection = PgConnection::connect_with(connect_options)
+        .await
+        .context("failed to open the dedicated PostgreSQL migration connection")?;
+
+    // This transaction-scoped owner exists only to make first creation of the
+    // SQLx metadata schema deterministic when API and worker start together.
+    // SQLx owns its separate database migration lock after this transaction.
+    let mut schema_transaction = migration_connection
+        .begin()
+        .await
+        .context("failed to begin the SQLx metadata schema transaction")?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SQLX_METADATA_SCHEMA_LOCK_KEY)
+        .execute(&mut *schema_transaction)
+        .await
+        .context("failed to acquire the SQLx metadata schema owner")?;
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS vpsman_internal AUTHORIZATION CURRENT_USER")
+        .execute(&mut *schema_transaction)
+        .await
+        .context("failed to provision the SQLx metadata schema")?;
+    schema_transaction
+        .commit()
+        .await
+        .context("failed to commit the SQLx metadata schema transaction")?;
+
+    sqlx::query("SET search_path TO vpsman_internal, public")
+        .execute(&mut migration_connection)
+        .await
+        .context("failed to select the private SQLx metadata schema")?;
+    let (current_schema, owned_by_current_user): (String, bool) = sqlx::query_as(
+        r#"
+        SELECT
+            current_schema(),
+            namespace.nspowner = (
+                SELECT role.oid FROM pg_roles role WHERE role.rolname = current_user
+            )
+        FROM pg_namespace namespace
+        WHERE namespace.nspname = $1
+        "#,
+    )
+    .bind(SQLX_METADATA_SCHEMA)
+    .fetch_one(&mut migration_connection)
+    .await
+    .context("failed to verify the private SQLx metadata schema")?;
+    ensure!(
+        current_schema == SQLX_METADATA_SCHEMA && owned_by_current_user,
+        "private SQLx metadata schema is not the current role-owned schema"
+    );
+
+    sqlx::migrate::Migrator::new(migrations_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load migrations from {}",
+                migrations_dir.display()
+            )
+        })?
+        .run(&mut migration_connection)
+        .await
+        .context("failed to run PostgreSQL migrations")?;
+    migration_connection
+        .close()
+        .await
+        .context("failed to close the dedicated PostgreSQL migration connection")?;
+    Ok(())
+}
+
+async fn connect_worker_notification_listener(postgres_url: &str) -> Result<PgListener> {
     let mut listener = PgListener::connect(postgres_url)
         .await
-        .context("failed to connect PostgreSQL webhook listener")?;
+        .context("failed to connect PostgreSQL worker notification listener")?;
     listener
         .listen("webhook_events")
         .await
         .context("failed to listen for webhook_events notifications")?;
+    listener
+        .listen("vpsman_telemetry_projection")
+        .await
+        .context("failed to listen for vpsman_telemetry_projection notifications")?;
+    listener
+        .listen("vpsman_telemetry_retention")
+        .await
+        .context("failed to listen for vpsman_telemetry_retention notifications")?;
+    listener
+        .listen("vpsman_traffic_active_cycle_rebuild")
+        .await
+        .context("failed to listen for traffic active-cycle rebuild notifications")?;
+    listener
+        .listen(ARTIFACT_DELETION_COMPLETED_CHANNEL)
+        .await
+        .context("failed to listen for artifact deletion completion notifications")?;
     Ok(listener)
 }
 
-async fn process_webhook_rules_if_leader(
-    pool: &PgPool,
-    config: WebhookRuleWorkerConfig,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<WebhookRuleWorkerRun> {
-    let Some(lease) = acquire_worker_lease(pool, "webhook_rules", worker_id, lease_secs).await?
-    else {
-        debug!(
-            worker_id,
-            "skipped webhook rules because another worker holds the lease"
-        );
-        return Ok(WebhookRuleWorkerRun::default());
-    };
-    let result = process_webhook_rules(pool, config).await;
-    lease.finish().await?;
-    result
-}
-
-async fn process_alert_notifications_if_leader(
+async fn process_alert_notification_work(
     pool: &PgPool,
     config: AlertNotificationWorkerConfig,
-    worker_id: &str,
-    lease_secs: i32,
+    include_periodic_maintenance: bool,
 ) -> Result<AlertNotificationWorkerRun> {
-    let Some(lease) =
-        acquire_worker_lease(pool, "alert_notifications", worker_id, lease_secs).await?
-    else {
-        debug!(
-            worker_id,
-            "skipped fleet alert notifications because another worker holds the lease"
-        );
-        return Ok(AlertNotificationWorkerRun::default());
-    };
-    let result = process_alert_notifications(pool, config).await;
-    lease.finish().await?;
-    result
-}
-
-async fn process_backup_policy_retention_prune_if_leader(
-    pool: &PgPool,
-    config: BackupPolicyRetentionPruneConfig,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<BackupPolicyRetentionPruneRun> {
-    if !config.enabled {
-        return Ok(BackupPolicyRetentionPruneRun::default());
+    if !include_periodic_maintenance {
+        // Due delivery rows carry their own send lease and are claimed with
+        // SKIP LOCKED, so event wakes may drain independently.
+        return process_due_alert_notifications(pool, config).await;
     }
-    let Some(lease) =
-        acquire_worker_lease(pool, "backup_policy_retention_prune", worker_id, lease_secs).await?
-    else {
-        debug!(
-            worker_id,
-            "skipped backup policy retention prune because another worker holds the lease"
-        );
-        return Ok(BackupPolicyRetentionPruneRun::default());
-    };
-    let result = process_backup_policy_retention_prune(pool, config).await;
-    lease.finish().await?;
-    result
+    // Terminal delivery retention cannot overlap an active send, while due
+    // sends are atomically claimed by their own durable delivery leases.
+    process_alert_notifications(pool, config).await
 }
 
-async fn process_telemetry_history_retention_if_leader(
-    pool: &PgPool,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<TelemetryHistoryRetentionRun> {
-    let Some(lease) =
-        acquire_worker_lease(pool, "telemetry_history_retention", worker_id, lease_secs).await?
-    else {
-        debug!(
-            worker_id,
-            "skipped telemetry history retention because another worker holds the lease"
+#[derive(Clone, Copy)]
+struct TelemetryRetentionSchedulerControl {
+    shutdown: bool,
+}
+
+struct TelemetryRetentionScheduler {
+    control_tx: watch::Sender<TelemetryRetentionSchedulerControl>,
+    task: Option<JoinHandle<()>>,
+    pool: PgPool,
+}
+
+impl TelemetryRetentionScheduler {
+    fn spawn(
+        pool: PgPool,
+        recovery_interval: Duration,
+        wake_rx: TelemetryRetentionWakeReceiver,
+    ) -> Self {
+        let (control_tx, control_rx) =
+            watch::channel(TelemetryRetentionSchedulerControl { shutdown: false });
+        let task_pool = pool.clone();
+        let task = tokio::spawn(run_telemetry_retention_scheduler(
+            task_pool,
+            recovery_interval,
+            control_rx,
+            wake_rx,
+        ));
+        Self {
+            control_tx,
+            task: Some(task),
+            pool,
+        }
+    }
+
+    async fn wait_for_unexpected_exit(&mut self) -> Result<()> {
+        let task_result = self
+            .task
+            .as_mut()
+            .context("telemetry retention scheduler task is not running")?
+            .await;
+        self.task = None;
+        unexpected_telemetry_retention_scheduler_exit(task_result)
+    }
+
+    async fn shutdown(mut self) -> Result<()> {
+        self.control_tx
+            .send_modify(|control| control.shutdown = true);
+        let task_result = if let Some(task) = self.task.take() {
+            Some(task.await)
+        } else {
+            None
+        };
+        self.pool.close().await;
+        if let Some(task_result) = task_result {
+            task_result.context("telemetry retention scheduler task failed")?;
+        }
+        Ok(())
+    }
+}
+
+fn unexpected_telemetry_retention_scheduler_exit(
+    task_result: std::result::Result<(), tokio::task::JoinError>,
+) -> Result<()> {
+    task_result.context("telemetry retention scheduler task failed")?;
+    bail!("telemetry retention scheduler exited unexpectedly")
+}
+
+#[derive(Debug)]
+enum TelemetryRetentionPageState {
+    MoreWork,
+    CurrentUntil(Instant),
+    OwnerFailed(anyhow::Error),
+}
+
+async fn run_telemetry_retention_scheduler(
+    pool: PgPool,
+    recovery_interval: Duration,
+    mut control_rx: watch::Receiver<TelemetryRetentionSchedulerControl>,
+    mut wake_rx: TelemetryRetentionWakeReceiver,
+) {
+    let mut drain = TelemetryHistoryRetentionDrain::new(recovery_interval);
+    loop {
+        if control_rx.borrow().shutdown {
+            return;
+        }
+
+        let page = process_telemetry_history_retention_page(&pool, &mut drain).await;
+        match apply_ready_telemetry_retention_wake(&mut drain, &mut wake_rx) {
+            TelemetryRetentionWakePoll::Applied => continue,
+            TelemetryRetentionWakePoll::Closed => return,
+            TelemetryRetentionWakePoll::Empty => {}
+        }
+        let deadline = match page {
+            Ok(TelemetryRetentionPageState::MoreWork) => {
+                // Transactions stay bounded to one exact durable owner, while
+                // overdue owners remain work-conserving and fairly rotated.
+                tokio::task::yield_now().await;
+                continue;
+            }
+            Ok(TelemetryRetentionPageState::CurrentUntil(deadline)) => {
+                log_telemetry_history_retention_run(drain.take_run());
+                deadline
+            }
+            Ok(TelemetryRetentionPageState::OwnerFailed(error)) => {
+                warn!(
+                    error = %format!("{error:#}"),
+                    "one telemetry retention owner failed; other owners remain runnable"
+                );
+                tokio::task::yield_now().await;
+                continue;
+            }
+            Err(error) => {
+                warn!(%error, "failed to process telemetry history retention");
+                log_telemetry_history_retention_run(drain.take_run());
+                Instant::now() + recovery_interval
+            }
+        };
+
+        // Control changes wake this task but cannot postpone the per-owner
+        // proof deadline. There is no delay between pages while any owner is
+        // StillDue or its Current proof has expired.
+        loop {
+            tokio::select! {
+                _ = time::sleep_until(time::Instant::from_std(deadline)) => break,
+                changed = control_rx.changed() => {
+                    if changed.is_err() || control_rx.borrow().shutdown {
+                        return;
+                    }
+                }
+                wake = wake_rx.wake_rx.recv() => {
+                    if wake.is_none() {
+                        return;
+                    }
+                    apply_telemetry_retention_wake_scope(
+                        &mut drain,
+                        take_telemetry_retention_wake_scope(&wake_rx.pending),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TelemetryRetentionWakePoll {
+    Applied,
+    Empty,
+    Closed,
+}
+
+fn apply_ready_telemetry_retention_wake(
+    drain: &mut TelemetryHistoryRetentionDrain,
+    wake_rx: &mut TelemetryRetentionWakeReceiver,
+) -> TelemetryRetentionWakePoll {
+    match wake_rx.wake_rx.try_recv() {
+        Ok(()) => {
+            apply_telemetry_retention_wake_scope(
+                drain,
+                take_telemetry_retention_wake_scope(&wake_rx.pending),
+            );
+            TelemetryRetentionWakePoll::Applied
+        }
+        Err(mpsc::error::TryRecvError::Empty) => TelemetryRetentionWakePoll::Empty,
+        Err(mpsc::error::TryRecvError::Disconnected) => TelemetryRetentionWakePoll::Closed,
+    }
+}
+
+fn telemetry_retention_database_at(ready_at_unix: i64) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(ready_at_unix, 0)
+        .expect("retention notification timestamp was validated before queueing")
+}
+
+fn apply_telemetry_retention_wake_scope(
+    drain: &mut TelemetryHistoryRetentionDrain,
+    scope: TelemetryRetentionWakeScope,
+) {
+    if scope.recover_external_writer_frontiers {
+        drain.recover_external_writer_frontiers();
+    }
+    if let Some(ready_at_unix) = scope.projection_minute_ready_at_unix {
+        drain.notify_projection_minute_ready_at(telemetry_retention_database_at(ready_at_unix));
+    }
+    if let Some(ready_at_unix) = scope.due_event_ready_at_unix {
+        drain.notify_due_events_ready_at(telemetry_retention_database_at(ready_at_unix));
+    }
+    for domain in scope.ordinary_rollup_domains {
+        drain
+            .notify_ordinary_rollup_published_now(domain.as_str())
+            .expect("validated ordinary-rollup domain must have a typed prune consumer");
+    }
+    for span in scope.due_spans {
+        drain
+            .notify_due_span_published_at(
+                span.domain.as_str(),
+                span.source_bucket_secs,
+                span.destination_bucket_secs,
+                telemetry_retention_database_at(span.due_at_unix),
+            )
+            .expect("validated due-span publication must have one typed promotion consumer");
+    }
+    if scope.core_minute_frontier_advanced {
+        drain.notify_core_minute_frontier_advanced_now();
+    }
+    if scope.traffic_minute_frontier_advanced {
+        drain.notify_traffic_minute_frontier_advanced_now();
+    }
+    if scope.ping_facts_published {
+        drain.notify_ping_facts_published_now();
+    }
+    if scope.ping_facts_deleted {
+        drain.notify_ping_facts_deleted_now();
+    }
+    if scope.ping_current_deleted {
+        drain.notify_ping_current_deleted_now();
+    }
+    if scope.telemetry_samples_deleted {
+        drain.notify_telemetry_samples_deleted_now();
+    }
+    if let Some(ready_at_unix) = scope.sample_prune_ready_at_unix {
+        drain.notify_sample_prune_ready_at(telemetry_retention_database_at(ready_at_unix));
+    }
+    if scope.sample_prune_frontier_advanced {
+        drain.notify_sample_prune_now();
+    }
+    if scope.network_observation_history_published {
+        drain.notify_manual_network_observation_now();
+    }
+    if scope.network_observation_series_deactivated {
+        drain.notify_network_observation_series_deactivated_now();
+    }
+    if scope.traffic_samples_published {
+        drain
+            .notify_traffic_samples_published_now()
+            .expect("traffic-sample publication must have a typed raw-promotion consumer");
+    }
+    for bucket_secs in scope.traffic_rollup_bucket_secs {
+        drain
+            .notify_traffic_rollup_published(bucket_secs)
+            .expect("validated traffic-rollup wake width must have a typed retention consumer");
+    }
+    for domain in scope.retention_policy_domains {
+        drain
+            .notify_retention_policy_changed_now(domain.as_str())
+            .expect("validated retention-policy wake domain must have a typed expiry owner");
+    }
+    if scope.ping_topology_changed {
+        drain.notify_ping_topology_changed_now();
+    }
+    if scope.ping_rollups_deleted {
+        drain
+            .notify_ping_rollups_deleted_now()
+            .expect("ping-rollup deletion effect must have a typed Ping-current consumer");
+    }
+    if scope.network_observation_history_deleted {
+        drain
+            .notify_network_observation_history_deleted_now()
+            .expect("network-observation deletion effect must have a typed series consumer");
+    }
+    if scope.network_observation_latest_deleted {
+        drain
+            .notify_network_observation_latest_deleted_now()
+            .expect("network-observation latest deletion must have a typed series consumer");
+    }
+}
+
+fn log_telemetry_history_retention_run(run: TelemetryHistoryRetentionRun) {
+    if run.has_activity() {
+        info!(
+            telemetry_core_minute_source_rows = run.core_minute_source_rows,
+            telemetry_core_minute_derived_rows = run.core_minute_derived_rows,
+            traffic_minute_source_rows = run.traffic_minute_source_rows,
+            traffic_minute_derived_rows = run.traffic_minute_derived_rows,
+            telemetry_samples_pruned = run.samples_pruned,
+            telemetry_resource_spans_merged = run.resource_spans_merged,
+            telemetry_rollups_pruned = run.rollups_pruned,
+            telemetry_network_rate_spans_merged = run.network_rate_spans_merged,
+            telemetry_network_rates_pruned = run.network_rates_pruned,
+            telemetry_ping_spans_merged = run.ping_spans_merged,
+            telemetry_ping_rollups_pruned = run.ping_rollups_pruned,
+            telemetry_ping_facts_pruned = run.ping_facts_pruned,
+            telemetry_ping_current_pruned = run.ping_current_pruned,
+            telemetry_ping_series_pruned = run.ping_series_pruned,
+            system_metric_rollups_pruned = run.system_metric_rollups_pruned,
+            traffic_counter_samples_pruned = run.traffic_counter_samples_pruned,
+            traffic_raw_rows_promoted = run.traffic_raw_rows_promoted,
+            traffic_rollup_rows_promoted = run.traffic_rollup_rows_promoted,
+            traffic_rollup_rows_pruned = run.traffic_rollup_rows_pruned,
+            network_observation_source_rows_promoted = run.network_observation_source_rows_promoted,
+            network_observation_destination_rows_written =
+                run.network_observation_destination_rows_written,
+            network_observation_expired_exact_rows_pruned =
+                run.network_observation_expired_exact_rows_pruned,
+            network_observation_expired_rollup_rows_pruned =
+                run.network_observation_expired_rollup_rows_pruned,
+            network_observation_inactive_latest_pruned =
+                run.network_observation_inactive_latest_pruned,
+            network_observation_inactive_series_pruned =
+                run.network_observation_inactive_series_pruned,
+            "processed telemetry history retention"
         );
-        return Ok(TelemetryHistoryRetentionRun::default());
-    };
-    let result = process_telemetry_history_retention(pool).await;
-    lease.finish().await?;
-    result
+    }
+}
+
+async fn process_telemetry_history_retention_page(
+    pool: &PgPool,
+    drain: &mut TelemetryHistoryRetentionDrain,
+) -> Result<TelemetryRetentionPageState> {
+    if let TelemetryHistoryRetentionStep::CurrentUntil(deadline) = drain.next_step() {
+        return Ok(TelemetryRetentionPageState::CurrentUntil(deadline));
+    }
+    if let TelemetryHistoryRetentionPageReadiness::NoWork(page) = drain.prepare_page(pool).await? {
+        return Ok(match page {
+            TelemetryHistoryRetentionPage::MoreWork => TelemetryRetentionPageState::MoreWork,
+            TelemetryHistoryRetentionPage::CurrentUntil(deadline) => {
+                TelemetryRetentionPageState::CurrentUntil(deadline)
+            }
+            TelemetryHistoryRetentionPage::OwnerFailed(error) => {
+                TelemetryRetentionPageState::OwnerFailed(error)
+            }
+        });
+    }
+    match drain.process_page(pool).await? {
+        TelemetryHistoryRetentionPage::MoreWork => Ok(TelemetryRetentionPageState::MoreWork),
+        TelemetryHistoryRetentionPage::CurrentUntil(deadline) => {
+            Ok(TelemetryRetentionPageState::CurrentUntil(deadline))
+        }
+        TelemetryHistoryRetentionPage::OwnerFailed(error) => {
+            Ok(TelemetryRetentionPageState::OwnerFailed(error))
+        }
+    }
+}
+
+async fn process_telemetry_history_retention_drain(
+    pool: &PgPool,
+) -> Result<TelemetryHistoryRetentionRun> {
+    let mut drain = TelemetryHistoryRetentionDrain::default();
+    loop {
+        match process_telemetry_history_retention_page(pool, &mut drain).await? {
+            TelemetryRetentionPageState::MoreWork => tokio::task::yield_now().await,
+            TelemetryRetentionPageState::OwnerFailed(error) => return Err(error),
+            TelemetryRetentionPageState::CurrentUntil(_) => return Ok(drain.finish()),
+        }
+    }
 }
 
 #[derive(Default)]
 struct ArtifactCleanupRun {
     jobs: i64,
+    failed_jobs: i64,
     deleted_rows: i64,
     deleted_bytes: i64,
     tombstoned_rows: i64,
@@ -1329,66 +3444,394 @@ struct ArtifactCleanupRun {
     skipped_rows: i64,
 }
 
+impl ArtifactCleanupRun {
+    fn merge(&mut self, page: Self) {
+        self.jobs = self.jobs.saturating_add(page.jobs);
+        self.failed_jobs = self.failed_jobs.saturating_add(page.failed_jobs);
+        self.deleted_rows = self.deleted_rows.saturating_add(page.deleted_rows);
+        self.deleted_bytes = self.deleted_bytes.saturating_add(page.deleted_bytes);
+        self.tombstoned_rows = self.tombstoned_rows.saturating_add(page.tombstoned_rows);
+        self.tombstoned_bytes = self.tombstoned_bytes.saturating_add(page.tombstoned_bytes);
+        self.skipped_rows = self.skipped_rows.saturating_add(page.skipped_rows);
+    }
+}
+
 struct ArtifactCleanupJob {
     id: Uuid,
     created_by: Option<Uuid>,
     metadata: Value,
+    lease_id: Uuid,
+}
+
+#[derive(Clone, Copy)]
+struct ArtifactCleanupRoundFrontier {
+    created_at: DateTime<Utc>,
+    id: Uuid,
 }
 
 struct ArtifactCleanupCandidate {
     id: Uuid,
     domain: String,
     object_key: String,
+    sha256_hex: String,
     size_bytes: i64,
     status: String,
     backup_artifact_id: Option<Uuid>,
     identity_matches_review: bool,
 }
 
-async fn process_artifact_cleanup_jobs_if_leader(
-    pool: &PgPool,
-    object_stores: ArtifactObjectStores<'_>,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<ArtifactCleanupRun> {
-    let Some(lease) =
-        acquire_worker_lease(pool, "artifact_cleanup_jobs", worker_id, lease_secs).await?
-    else {
-        debug!(
-            worker_id,
-            "skipped artifact cleanup jobs because another worker holds the lease"
-        );
-        return Ok(ArtifactCleanupRun::default());
-    };
-    let result = process_artifact_cleanup_jobs(pool, object_stores).await;
-    lease.finish().await?;
-    result
+const ARTIFACT_CLEANUP_JOB_LEASE_SECS: i32 = 30;
+const ARTIFACT_CLEANUP_JOB_RENEW_SECS: u64 = 10;
+
+#[derive(Debug)]
+struct ClaimedArtifactDeletionError(anyhow::Error);
+
+impl std::fmt::Display for ClaimedArtifactDeletionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
 }
 
-async fn process_artifact_cleanup_jobs(
+impl std::error::Error for ClaimedArtifactDeletionError {}
+
+async fn process_next_artifact_deletion_intent(
     pool: &PgPool,
-    object_stores: ArtifactObjectStores<'_>,
-) -> Result<ArtifactCleanupRun> {
-    let expired = expire_stale_artifact_cleanup_jobs(pool).await?;
-    let Some(job) = claim_artifact_cleanup_job(pool).await? else {
-        return Ok(ArtifactCleanupRun {
-            jobs: expired,
-            ..ArtifactCleanupRun::default()
-        });
+    object_store: &BackupObjectStore,
+) -> Result<bool> {
+    let Some(owner) = claim_artifact_deletion(pool, None, None, None).await? else {
+        return Ok(false);
     };
+    let result = match owner.source_kind.as_str() {
+        "backup_policy" => delete_backup_policy_artifact(pool, object_store, &owner)
+            .await
+            .map(|_| ()),
+        "manual_cleanup" => consume_manual_artifact_deletion(pool, object_store, &owner).await,
+        "history_retention" => consume_history_artifact_deletion(pool, object_store, &owner).await,
+        source_kind => {
+            let error = format!("unsupported artifact deletion source {source_kind}");
+            ensure!(
+                defer_artifact_deletion(pool, &owner, &error).await?,
+                "artifact deletion ownership lost while deferring unsupported source"
+            );
+            Err(anyhow::anyhow!(error))
+        }
+    };
+    // This is a latency hint for a producer waiting on its exact durable
+    // target. The intent/target rows remain the completion authority.
+    publish_artifact_deletion_completion();
+    if let Err(error) = result {
+        return Err(ClaimedArtifactDeletionError(error).into());
+    }
+    Ok(true)
+}
+
+async fn consume_manual_artifact_deletion(
+    pool: &PgPool,
+    object_store: &BackupObjectStore,
+    owner: &ArtifactDeletionOwner,
+) -> Result<()> {
+    let Some((job, candidate)) = load_owned_manual_artifact_deletion(pool, owner).await? else {
+        let status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM server_jobs WHERE id = $1")
+                .bind(owner.source_id)
+                .fetch_optional(pool)
+                .await?;
+        if status
+            .as_deref()
+            .is_some_and(|status| matches!(status, "completed" | "failed" | "canceled"))
+        {
+            ensure!(
+                fail_artifact_deletion(pool, owner, "artifact cleanup source job is terminal")
+                    .await?,
+                "artifact deletion ownership lost while closing terminal source"
+            );
+        } else {
+            ensure!(
+                defer_artifact_deletion(pool, owner, "artifact cleanup producer is not active")
+                    .await?,
+                "artifact deletion ownership lost while awaiting source producer"
+            );
+        }
+        return Ok(());
+    };
+
+    match delete_artifact_cleanup_object(pool, object_store, &job, &candidate, owner).await {
+        Ok(ArtifactCleanupDisposition::Deleted) => Ok(()),
+        Ok(_) => bail!("manual artifact deletion returned an invalid disposition"),
+        Err(error) => {
+            let message = error.to_string();
+            let mut tx = pool.begin().await?;
+            let marked = sqlx::query(
+                r#"
+                WITH target AS (
+                    UPDATE server_job_artifact_cleanup_targets target
+                    SET outcome = 'skipped',
+                        outcome_reason = 'object_store_delete_failed',
+                        processed_at = now()
+                    FROM server_jobs job
+                    WHERE target.server_job_id = $1
+                      AND target.artifact_id = $2
+                      AND target.outcome = 'pending'
+                      AND job.id = target.server_job_id
+                      AND job.status = 'running'
+                      AND job.lease_id = $3
+                      AND job.lease_until > now()
+                    RETURNING target.server_job_id
+                )
+                UPDATE server_jobs job
+                SET error = left($4, 1000)
+                FROM target
+                WHERE job.id = target.server_job_id
+                  AND job.status = 'running'
+                  AND job.lease_id = $3
+                "#,
+            )
+            .bind(job.id)
+            .bind(candidate.id)
+            .bind(job.lease_id)
+            .bind(&message)
+            .execute(&mut *tx)
+            .await?;
+            ensure!(
+                marked.rows_affected() == 1,
+                "artifact cleanup ownership lost while publishing deletion failure"
+            );
+            publish_artifact_deletion_completion_in_tx(&mut tx, job.id).await?;
+            tx.commit().await?;
+            Err(error)
+        }
+    }
+}
+
+async fn load_owned_manual_artifact_deletion(
+    pool: &PgPool,
+    owner: &ArtifactDeletionOwner,
+) -> Result<Option<(ArtifactCleanupJob, ArtifactCleanupCandidate)>> {
+    ensure!(
+        owner.source_kind == "manual_cleanup" && owner.source_revision == 1,
+        "manual artifact deletion source identity invalid"
+    );
+    let row = sqlx::query(
+        r#"
+        SELECT
+            job.created_by,
+            job.metadata,
+            job.lease_id,
+            target.domain,
+            target.object_key,
+            target.sha256_hex,
+            target.size_bytes,
+            COALESCE(artifact.status, 'missing') AS status,
+            artifact.backup_artifact_id,
+            artifact.id IS NOT NULL
+              AND artifact.domain = target.domain
+              AND artifact.object_key = target.object_key
+              AND artifact.sha256_hex = target.sha256_hex
+              AND artifact.size_bytes = target.size_bytes AS identity_matches_review
+        FROM server_jobs job
+        JOIN server_job_artifact_cleanup_targets target
+          ON target.server_job_id = job.id
+         AND target.artifact_id = $2
+         AND target.outcome = 'pending'
+        LEFT JOIN server_artifacts artifact ON artifact.id = target.artifact_id
+        WHERE job.id = $1
+          AND job.status = 'running'
+          AND job.lease_until > now()
+        "#,
+    )
+    .bind(owner.source_id)
+    .bind(owner.artifact_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        let job = ArtifactCleanupJob {
+            id: owner.source_id,
+            created_by: row.try_get("created_by")?,
+            metadata: row.try_get("metadata")?,
+            lease_id: row.try_get("lease_id")?,
+        };
+        let candidate = ArtifactCleanupCandidate {
+            id: owner.artifact_id,
+            domain: row.try_get("domain")?,
+            object_key: row.try_get("object_key")?,
+            sha256_hex: row.try_get("sha256_hex")?,
+            size_bytes: row.try_get("size_bytes")?,
+            status: row.try_get("status")?,
+            backup_artifact_id: row.try_get("backup_artifact_id")?,
+            identity_matches_review: row.try_get("identity_matches_review")?,
+        };
+        let expected_identity = serde_json::json!({
+            "server_job_id": job.id,
+            "artifact_id": candidate.id,
+            "domain": candidate.domain,
+            "object_key": candidate.object_key,
+            "sha256_hex": candidate.sha256_hex,
+            "size_bytes": candidate.size_bytes,
+        });
+        ensure!(
+            owner.source_identity == expected_identity,
+            "manual artifact deletion reviewed identity changed"
+        );
+        Ok((job, candidate))
+    })
+    .transpose()
+}
+
+async fn consume_history_artifact_deletion(
+    pool: &PgPool,
+    object_store: &BackupObjectStore,
+    owner: &ArtifactDeletionOwner,
+) -> Result<()> {
+    let job_id = artifact_deletion_identity_uuid(&owner.source_identity, "job_id")?;
+    let client_id = artifact_deletion_identity_str(&owner.source_identity, "client_id")?;
+    let seq = artifact_deletion_identity_i64(&owner.source_identity, "seq")?;
+    ensure!(
+        owner.source_id == job_id
+            && owner.source_revision == seq.saturating_add(1).max(1)
+            && owner
+                .source_identity
+                .get("object_key")
+                .and_then(Value::as_str)
+                == Some(owner.object_key.as_str()),
+        "history artifact deletion source identity changed"
+    );
+
+    let (heartbeat_stop, heartbeat) =
+        spawn_artifact_deletion_heartbeat(pool.clone(), owner.clone());
+    let deletion = delete_object_key_confirmed(object_store, &owner.object_key).await;
+    let _ = heartbeat_stop.send(());
+    ensure!(
+        heartbeat
+            .await
+            .context("artifact deletion heartbeat stopped unexpectedly")??,
+        "artifact deletion ownership lost"
+    );
+    if let Err(error) = deletion {
+        ensure!(
+            defer_artifact_deletion(pool, owner, &error.to_string()).await?,
+            "history artifact deletion ownership lost after object-store failure"
+        );
+        return Err(error);
+    }
+
+    let seq = i32::try_from(seq).context("history artifact deletion sequence invalid")?;
+    let mut tx = pool.begin().await?;
+    ensure!(
+        lock_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "history artifact deletion ownership lost before finalization"
+    );
+    sqlx::query(
+        r#"
+        DELETE FROM job_outputs
+        WHERE job_id = $1 AND client_id = $2 AND seq = $3 AND object_key = $4
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .bind(seq)
+    .bind(&owner.object_key)
+    .execute(&mut *tx)
+    .await?;
+    let marked = sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleted', deleted_at = now()
+        WHERE id = $1 AND object_key = $2 AND status = 'deleting'
+        "#,
+    )
+    .bind(owner.artifact_id)
+    .bind(&owner.object_key)
+    .execute(&mut *tx)
+    .await?;
+    ensure!(
+        marked.rows_affected() == 1,
+        "history artifact registry identity changed"
+    );
+    ensure!(
+        finish_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "history artifact deletion ownership lost during finalization"
+    );
+    tx.commit().await?;
+    Ok(())
+}
+
+fn artifact_deletion_identity_uuid(identity: &Value, field: &str) -> Result<Uuid> {
+    Uuid::parse_str(artifact_deletion_identity_str(identity, field)?)
+        .with_context(|| format!("artifact deletion {field} invalid"))
+}
+
+fn artifact_deletion_identity_str<'a>(identity: &'a Value, field: &str) -> Result<&'a str> {
+    identity
+        .get(field)
+        .and_then(Value::as_str)
+        .with_context(|| format!("artifact deletion {field} missing"))
+}
+
+fn artifact_deletion_identity_i64(identity: &Value, field: &str) -> Result<i64> {
+    identity
+        .get(field)
+        .and_then(Value::as_i64)
+        .with_context(|| format!("artifact deletion {field} missing"))
+}
+
+async fn process_artifact_cleanup_jobs(pool: &PgPool) -> Result<ArtifactCleanupRun> {
+    let Some(frontier) = artifact_cleanup_round_frontier(pool).await? else {
+        return Ok(ArtifactCleanupRun::default());
+    };
+    let mut run = ArtifactCleanupRun::default();
+    loop {
+        let page = process_next_artifact_cleanup_job(pool, frontier).await?;
+        if page.jobs == 0 {
+            return Ok(run);
+        }
+        run.merge(page);
+        // One job is one externally visible owner. Yield between owners but
+        // drain the finite round immediately instead of imposing one job per
+        // shared worker tick.
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn process_next_artifact_cleanup_job(
+    pool: &PgPool,
+    frontier: ArtifactCleanupRoundFrontier,
+) -> Result<ArtifactCleanupRun> {
+    let Some(job) = claim_artifact_cleanup_job_through(pool, Some(frontier)).await? else {
+        return Ok(ArtifactCleanupRun::default());
+    };
+    let (heartbeat_stop, heartbeat) =
+        spawn_artifact_cleanup_job_heartbeat(pool.clone(), job.id, job.lease_id);
     for required_scope in artifact_cleanup_job_required_scopes(&job.metadata)? {
         if !actor_authorized(pool, job.created_by, "operator", &[required_scope]).await? {
-            mark_artifact_cleanup_job_failed(pool, job.id, "actor_authority_revoked").await?;
+            let _ = heartbeat_stop.send(true);
+            ensure!(
+                heartbeat
+                    .await
+                    .context("artifact cleanup heartbeat stopped unexpectedly")??,
+                "artifact cleanup ownership lost"
+            );
+            ensure!(
+                mark_artifact_cleanup_job_failed(pool, &job, "actor_authority_revoked").await?,
+                "artifact cleanup ownership lost"
+            );
             return Ok(ArtifactCleanupRun {
-                jobs: expired + 1,
+                jobs: 1,
+                failed_jobs: 1,
                 ..ArtifactCleanupRun::default()
             });
         }
     }
-    let result = run_artifact_cleanup_job(pool, object_stores, &job).await;
+    let result = run_artifact_cleanup_job(pool, &job).await;
+    let _ = heartbeat_stop.send(true);
+    ensure!(
+        heartbeat
+            .await
+            .context("artifact cleanup heartbeat stopped unexpectedly")??,
+        "artifact cleanup ownership lost"
+    );
     match result {
         Ok(run) => {
-            sqlx::query(
+            let completed = sqlx::query(
                 r#"
                 UPDATE server_jobs
                 SET
@@ -1401,8 +3844,13 @@ async fn process_artifact_cleanup_jobs(
                         'skipped_count', $7::bigint
                     ),
                     completed_at = now(),
-                    error = NULL
+                    error = NULL,
+                    lease_id = NULL,
+                    lease_until = NULL
                 WHERE id = $1
+                  AND status = $8
+                  AND lease_id = $9
+                  AND lease_until > now()
                 "#,
             )
             .bind(job.id)
@@ -1412,96 +3860,45 @@ async fn process_artifact_cleanup_jobs(
             .bind(run.tombstoned_rows)
             .bind(run.tombstoned_bytes)
             .bind(run.skipped_rows)
+            .bind(SERVER_JOB_STATUS_RUNNING)
+            .bind(job.lease_id)
             .execute(pool)
             .await?;
-            Ok(ArtifactCleanupRun {
-                jobs: expired + 1,
-                ..run
-            })
+            ensure!(
+                completed.rows_affected() == 1,
+                "artifact cleanup ownership lost during completion"
+            );
+            Ok(ArtifactCleanupRun { jobs: 1, ..run })
         }
         Err(error) => {
-            sqlx::query(
-                r#"
-                UPDATE server_jobs
-                SET
-                    status = $2,
-                    error = $3,
-                    completed_at = now()
-                WHERE id = $1
-                "#,
-            )
-            .bind(job.id)
-            .bind(SERVER_JOB_STATUS_FAILED)
-            .bind(error.to_string())
-            .execute(pool)
-            .await?;
-            Err(error)
+            ensure!(
+                mark_artifact_cleanup_job_failed(pool, &job, &error.to_string()).await?,
+                "artifact cleanup ownership lost during failure"
+            );
+            warn!(job_id = %job.id, %error, "artifact cleanup job failed");
+            Ok(ArtifactCleanupRun {
+                jobs: 1,
+                failed_jobs: 1,
+                ..ArtifactCleanupRun::default()
+            })
         }
     }
 }
 
-async fn expire_stale_artifact_cleanup_jobs(pool: &PgPool) -> Result<i64> {
-    let result = sqlx::query(
-        r#"
-        UPDATE server_jobs
-        SET
-            status = $3,
-            error = 'artifact_cleanup_running_timeout',
-            completed_at = now(),
-            metadata = metadata || jsonb_build_object(
-                'running_timeout_secs', $4::bigint
-            )
-        WHERE job_type = $1
-          AND status = $2
-          AND started_at IS NOT NULL
-          AND started_at <= now() - ($4::bigint * interval '1 second')
-        "#,
-    )
-    .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
-    .bind(SERVER_JOB_STATUS_RUNNING)
-    .bind(SERVER_JOB_STATUS_FAILED)
-    .bind(ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() as i64)
-}
-
-async fn mark_artifact_cleanup_job_failed(pool: &PgPool, job_id: Uuid, error: &str) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE server_jobs
-        SET
-            status = $2,
-            error = $3,
-            completed_at = now()
-        WHERE id = $1
-        "#,
-    )
-    .bind(job_id)
-    .bind(SERVER_JOB_STATUS_FAILED)
-    .bind(error)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactCleanupJob>> {
+async fn artifact_cleanup_round_frontier(
+    pool: &PgPool,
+) -> Result<Option<ArtifactCleanupRoundFrontier>> {
     let row = sqlx::query(
         r#"
-        WITH claimed AS (
-            SELECT id
-            FROM server_jobs
-            WHERE job_type = $1
-              AND status = $2
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE server_jobs job
-        SET status = $3, started_at = now()
-        FROM claimed
-        WHERE job.id = claimed.id
-        RETURNING job.id, job.created_by, job.metadata
+        SELECT created_at, id
+        FROM server_jobs
+        WHERE job_type=$1
+          AND (
+                (status=$2 AND next_attempt_at <= now())
+                OR (status=$3 AND lease_until <= now())
+              )
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
         "#,
     )
     .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
@@ -1510,13 +3907,150 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
+        Ok(ArtifactCleanupRoundFrontier {
+            created_at: row.try_get("created_at")?,
+            id: row.try_get("id")?,
+        })
+    })
+    .transpose()
+}
+
+async fn mark_artifact_cleanup_job_failed(
+    pool: &PgPool,
+    job: &ArtifactCleanupJob,
+    error: &str,
+) -> Result<bool> {
+    let failed = sqlx::query(
+        r#"
+        UPDATE server_jobs
+        SET
+            status = $2,
+            error = $3,
+            completed_at = now(),
+            lease_id = NULL,
+            lease_until = NULL
+        WHERE id = $1
+          AND status = $4
+          AND lease_id = $5
+        "#,
+    )
+    .bind(job.id)
+    .bind(SERVER_JOB_STATUS_FAILED)
+    .bind(error)
+    .bind(SERVER_JOB_STATUS_RUNNING)
+    .bind(job.lease_id)
+    .execute(pool)
+    .await?;
+    Ok(failed.rows_affected() == 1)
+}
+
+#[cfg(test)]
+async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactCleanupJob>> {
+    claim_artifact_cleanup_job_through(pool, None).await
+}
+
+async fn claim_artifact_cleanup_job_through(
+    pool: &PgPool,
+    frontier: Option<ArtifactCleanupRoundFrontier>,
+) -> Result<Option<ArtifactCleanupJob>> {
+    let lease_id = Uuid::new_v4();
+    let row = sqlx::query(
+        r#"
+        WITH claimed AS (
+            SELECT id
+            FROM server_jobs
+            WHERE job_type = $1
+              AND (
+                (status = $2 AND next_attempt_at <= now())
+                OR (status = $3 AND lease_until <= now())
+              )
+              AND (
+                    $6::timestamptz IS NULL
+                    OR (created_at, id) <= ($6, $7)
+                  )
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE server_jobs job
+        SET status = $3,
+            started_at = COALESCE(job.started_at, now()),
+            lease_id = $4,
+            lease_until = now() + ($5::int * interval '1 second'),
+            attempt_count = job.attempt_count + 1,
+            error = NULL,
+            metadata = CASE
+                WHEN job.status = $3 THEN job.metadata || jsonb_build_object(
+                    'owner_recovered_at', now()::text
+                )
+                ELSE job.metadata
+            END
+        FROM claimed
+        WHERE job.id = claimed.id
+        RETURNING job.id, job.created_by, job.metadata, job.lease_id
+        "#,
+    )
+    .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
+    .bind(SERVER_JOB_STATUS_QUEUED)
+    .bind(SERVER_JOB_STATUS_RUNNING)
+    .bind(lease_id)
+    .bind(ARTIFACT_CLEANUP_JOB_LEASE_SECS)
+    .bind(frontier.map(|frontier| frontier.created_at))
+    .bind(frontier.map(|frontier| frontier.id))
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
         Ok(ArtifactCleanupJob {
             id: row.try_get("id")?,
             created_by: row.try_get("created_by")?,
             metadata: row.try_get("metadata")?,
+            lease_id: row.try_get("lease_id")?,
         })
     })
     .transpose()
+}
+
+fn spawn_artifact_cleanup_job_heartbeat(
+    pool: PgPool,
+    job_id: Uuid,
+    lease_id: Uuid,
+) -> (watch::Sender<bool>, JoinHandle<Result<bool>>) {
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut ticker = time::interval(Duration::from_secs(ARTIFACT_CLEANUP_JOB_RENEW_SECS));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        return Ok(true);
+                    }
+                }
+                _ = ticker.tick() => {
+                    let renewed = sqlx::query(
+                        r#"
+                        UPDATE server_jobs
+                        SET lease_until = now() + ($3::int * interval '1 second')
+                        WHERE id = $1
+                          AND status = 'running'
+                          AND lease_id = $2
+                          AND lease_until > now()
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(lease_id)
+                    .bind(ARTIFACT_CLEANUP_JOB_LEASE_SECS)
+                    .execute(&pool)
+                    .await?;
+                    if renewed.rows_affected() != 1 {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    });
+    (stop_tx, task)
 }
 
 fn artifact_cleanup_job_required_scopes(metadata: &Value) -> Result<Vec<&'static str>> {
@@ -1544,42 +4078,94 @@ fn artifact_cleanup_job_required_scopes(metadata: &Value) -> Result<Vec<&'static
 
 async fn run_artifact_cleanup_job(
     pool: &PgPool,
-    object_stores: ArtifactObjectStores<'_>,
     job: &ArtifactCleanupJob,
 ) -> Result<ArtifactCleanupRun> {
-    let candidates = artifact_cleanup_targets(pool, job.id).await?;
-    validate_artifact_cleanup_candidate_sizes(&candidates)?;
-    let mut run = ArtifactCleanupRun::default();
-    for candidate in &candidates {
-        if !candidate.identity_matches_review
-            || !matches!(
-                candidate.status.as_str(),
-                "creating" | "active" | "deleting" | "delete_failed"
-            )
-        {
-            run.skipped_rows += 1;
-            persist_artifact_cleanup_progress(pool, job.id, &run).await?;
-            continue;
+    let mut run = load_artifact_cleanup_progress(pool, job.id).await?;
+    loop {
+        ensure_artifact_cleanup_job_owner_healthy(pool, job).await?;
+        // Register before observing the durable target frontier so a fast
+        // consumer completion cannot be lost between the query and wait.
+        let completed = artifact_deletion_completion_signal().notified();
+        tokio::pin!(completed);
+        completed.as_mut().enable();
+
+        let candidates = artifact_cleanup_targets(pool, job.id).await?;
+        validate_artifact_cleanup_candidate_sizes(&candidates)?;
+        if candidates.is_empty() {
+            return load_artifact_cleanup_progress(pool, job.id).await;
         }
-        match apply_artifact_cleanup_candidate(pool, object_stores, candidate).await? {
-            ArtifactCleanupDisposition::Deleted => {
-                run.deleted_rows += 1;
-                run.deleted_bytes = run
-                    .deleted_bytes
-                    .checked_add(candidate.size_bytes)
-                    .context("artifact cleanup deleted byte total overflow")?;
+        let mut waiting_for_consumer = false;
+        for candidate in &candidates {
+            if !candidate.identity_matches_review
+                || !matches!(
+                    candidate.status.as_str(),
+                    "creating" | "active" | "deleting" | "delete_failed"
+                )
+            {
+                ensure!(
+                    mark_artifact_cleanup_target_outcome(
+                        pool,
+                        job,
+                        candidate.id,
+                        "skipped",
+                        "reviewed_identity_no_longer_eligible",
+                    )
+                    .await?,
+                    "artifact cleanup ownership lost while skipping target"
+                );
+                run.skipped_rows += 1;
+                persist_artifact_cleanup_progress(pool, job, &run).await?;
+                continue;
             }
-            ArtifactCleanupDisposition::Tombstoned => {
-                run.tombstoned_rows += 1;
-                run.tombstoned_bytes = run
-                    .tombstoned_bytes
-                    .checked_add(candidate.size_bytes)
-                    .context("artifact cleanup tombstoned byte total overflow")?;
+            match apply_artifact_cleanup_candidate(pool, job, candidate).await? {
+                ArtifactCleanupDisposition::Pending => waiting_for_consumer = true,
+                ArtifactCleanupDisposition::Deleted => {
+                    run.deleted_rows += 1;
+                    run.deleted_bytes = run
+                        .deleted_bytes
+                        .checked_add(candidate.size_bytes)
+                        .context("artifact cleanup deleted byte total overflow")?;
+                }
+                ArtifactCleanupDisposition::Tombstoned => {
+                    run.tombstoned_rows += 1;
+                    run.tombstoned_bytes =
+                        run.tombstoned_bytes
+                            .checked_add(candidate.size_bytes)
+                            .context("artifact cleanup tombstoned byte total overflow")?;
+                }
+                ArtifactCleanupDisposition::Skipped => run.skipped_rows += 1,
             }
+            persist_artifact_cleanup_progress(pool, job, &run).await?;
         }
-        persist_artifact_cleanup_progress(pool, job.id, &run).await?;
+        if waiting_for_consumer {
+            completed.await;
+        }
     }
-    Ok(run)
+}
+
+async fn ensure_artifact_cleanup_job_owner_healthy(
+    pool: &PgPool,
+    job: &ArtifactCleanupJob,
+) -> Result<()> {
+    let error = sqlx::query_scalar::<_, Option<String>>(
+        r#"
+        SELECT error
+        FROM server_jobs
+        WHERE id = $1
+          AND status = 'running'
+          AND lease_id = $2
+          AND lease_until > now()
+        "#,
+    )
+    .bind(job.id)
+    .bind(job.lease_id)
+    .fetch_optional(pool)
+    .await?
+    .context("artifact cleanup ownership lost")?;
+    if let Some(error) = error {
+        bail!("{error}");
+    }
+    Ok(())
 }
 
 fn validate_artifact_cleanup_candidate_sizes(
@@ -1601,12 +4187,71 @@ fn validate_artifact_cleanup_candidate_sizes(
     Ok(())
 }
 
+async fn load_artifact_cleanup_progress(pool: &PgPool, job_id: Uuid) -> Result<ArtifactCleanupRun> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            count(*) FILTER (WHERE outcome = 'deleted')::bigint AS deleted_rows,
+            COALESCE(sum(size_bytes) FILTER (WHERE outcome = 'deleted'), 0)::bigint AS deleted_bytes,
+            count(*) FILTER (WHERE outcome = 'tombstoned')::bigint AS tombstoned_rows,
+            COALESCE(sum(size_bytes) FILTER (WHERE outcome = 'tombstoned'), 0)::bigint AS tombstoned_bytes,
+            count(*) FILTER (WHERE outcome = 'skipped')::bigint AS skipped_rows
+        FROM server_job_artifact_cleanup_targets
+        WHERE server_job_id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(ArtifactCleanupRun {
+        deleted_rows: row.try_get("deleted_rows")?,
+        deleted_bytes: row.try_get("deleted_bytes")?,
+        tombstoned_rows: row.try_get("tombstoned_rows")?,
+        tombstoned_bytes: row.try_get("tombstoned_bytes")?,
+        skipped_rows: row.try_get("skipped_rows")?,
+        ..ArtifactCleanupRun::default()
+    })
+}
+
+async fn mark_artifact_cleanup_target_outcome(
+    pool: &PgPool,
+    job: &ArtifactCleanupJob,
+    artifact_id: Uuid,
+    outcome: &str,
+    reason: &str,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE server_job_artifact_cleanup_targets target
+        SET outcome = $3,
+            outcome_reason = $4,
+            processed_at = now()
+        FROM server_jobs job
+        WHERE target.server_job_id = $1
+          AND target.artifact_id = $2
+          AND target.outcome = 'pending'
+          AND job.id = target.server_job_id
+          AND job.status = 'running'
+          AND job.lease_id = $5
+          AND job.lease_until > now()
+        "#,
+    )
+    .bind(job.id)
+    .bind(artifact_id)
+    .bind(outcome)
+    .bind(reason)
+    .bind(job.lease_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
 async fn persist_artifact_cleanup_progress(
     pool: &PgPool,
-    job_id: Uuid,
+    job: &ArtifactCleanupJob,
     run: &ArtifactCleanupRun,
 ) -> Result<()> {
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE server_jobs
         SET deleted_count = $2,
@@ -1617,254 +4262,367 @@ async fn persist_artifact_cleanup_progress(
                 'skipped_count', $6::bigint
             )
         WHERE id = $1
+          AND status = $7
+          AND lease_id = $8
+          AND lease_until > now()
         "#,
     )
-    .bind(job_id)
+    .bind(job.id)
     .bind(run.deleted_rows)
     .bind(run.deleted_bytes)
     .bind(run.tombstoned_rows)
     .bind(run.tombstoned_bytes)
     .bind(run.skipped_rows)
+    .bind(SERVER_JOB_STATUS_RUNNING)
+    .bind(job.lease_id)
     .execute(pool)
     .await?;
+    ensure!(
+        updated.rows_affected() == 1,
+        "artifact cleanup ownership lost while persisting progress"
+    );
     Ok(())
 }
 
 enum ArtifactCleanupDisposition {
+    Pending,
     Deleted,
     Tombstoned,
+    Skipped,
 }
 
 async fn apply_artifact_cleanup_candidate(
     pool: &PgPool,
-    object_stores: ArtifactObjectStores<'_>,
+    job: &ArtifactCleanupJob,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
+    if candidate.status == "creating" {
+        ensure!(
+            mark_artifact_cleanup_target_outcome(
+                pool,
+                job,
+                candidate.id,
+                "skipped",
+                "artifact_creation_owned_by_producer",
+            )
+            .await?,
+            "artifact cleanup ownership lost while skipping reservation"
+        );
+        return Ok(ArtifactCleanupDisposition::Skipped);
+    }
+    if candidate.domain == "backup_artifact"
+        && backup_artifact_is_referenced(pool, candidate.backup_artifact_id, &candidate.object_key)
+            .await?
+    {
+        return tombstone_server_artifact(pool, job, candidate, "backup_reference_protected").await;
+    }
+    if !matches!(
+        candidate.domain.as_str(),
+        "job_output" | "file_transfer_handoff" | "file_transfer_source" | "backup_artifact"
+    ) {
+        return tombstone_server_artifact(pool, job, candidate, "unsupported_artifact_domain")
+            .await;
+    }
+    let inserted = enqueue_artifact_deletion(
+        pool,
+        &ArtifactDeletionReview {
+            artifact_id: candidate.id,
+            object_key: candidate.object_key.clone(),
+            sha256_hex: candidate.sha256_hex.clone(),
+            size_bytes: candidate.size_bytes,
+            source_kind: "manual_cleanup",
+            source_id: job.id,
+            source_revision: 1,
+            source_identity: serde_json::json!({
+                "server_job_id": job.id,
+                "artifact_id": candidate.id,
+                "domain": candidate.domain,
+                "object_key": candidate.object_key,
+                "sha256_hex": candidate.sha256_hex,
+                "size_bytes": candidate.size_bytes,
+            }),
+        },
+    )
+    .await?;
+    let owned_by_job = inserted
+        || sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM server_artifact_deletion_intents
+                WHERE artifact_id = $1
+                  AND source_kind = 'manual_cleanup'
+                  AND source_id = $2
+            )
+            "#,
+        )
+        .bind(candidate.id)
+        .bind(job.id)
+        .fetch_one(pool)
+        .await?;
+    if !owned_by_job {
+        ensure!(
+            mark_artifact_cleanup_target_outcome(
+                pool,
+                job,
+                candidate.id,
+                "skipped",
+                "artifact_deletion_owned_elsewhere",
+            )
+            .await?,
+            "artifact cleanup ownership lost while skipping owned target"
+        );
+        return Ok(ArtifactCleanupDisposition::Skipped);
+    }
+    Ok(ArtifactCleanupDisposition::Pending)
+}
+
+async fn delete_artifact_cleanup_object(
+    pool: &PgPool,
+    object_store: &BackupObjectStore,
+    job: &ArtifactCleanupJob,
+    candidate: &ArtifactCleanupCandidate,
+    owner: &ArtifactDeletionOwner,
+) -> Result<ArtifactCleanupDisposition> {
+    let (heartbeat_stop, heartbeat) =
+        spawn_artifact_deletion_heartbeat(pool.clone(), owner.clone());
+    let delete_result = delete_object_key_confirmed(object_store, &candidate.object_key).await;
+    let _ = heartbeat_stop.send(());
+    ensure!(
+        heartbeat
+            .await
+            .context("artifact deletion heartbeat stopped unexpectedly")??,
+        "artifact deletion ownership lost"
+    );
+    if let Err(error) = delete_result {
+        ensure!(
+            fail_artifact_deletion(pool, owner, &error.to_string()).await?,
+            "artifact deletion ownership lost after object-store failure"
+        );
+        return Err(error);
+    }
+    finalize_artifact_cleanup_deletion(pool, job, candidate, owner).await?;
+    Ok(ArtifactCleanupDisposition::Deleted)
+}
+
+async fn lock_artifact_cleanup_job_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job: &ArtifactCleanupJob,
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM server_jobs
+            WHERE id = $1
+              AND status = 'running'
+              AND lease_id = $2
+              AND lease_until > now()
+            FOR UPDATE
+        )
+        "#,
+    )
+    .bind(job.id)
+    .bind(job.lease_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn finalize_artifact_cleanup_deletion(
+    pool: &PgPool,
+    job: &ArtifactCleanupJob,
+    candidate: &ArtifactCleanupCandidate,
+    owner: &ArtifactDeletionOwner,
+) -> Result<()> {
+    ensure!(
+        owner.source_kind == "manual_cleanup",
+        "artifact deletion source mismatch"
+    );
+    ensure!(
+        owner.source_id == job.id,
+        "artifact deletion source owner mismatch"
+    );
+    let mut tx = pool.begin().await?;
+    ensure!(
+        lock_artifact_cleanup_job_in_tx(&mut tx, job).await?,
+        "artifact cleanup ownership lost before finalization"
+    );
+    ensure!(
+        lock_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "artifact deletion ownership lost before finalization"
+    );
     match candidate.domain.as_str() {
-        "job_output" => delete_job_output_artifact(pool, object_stores.backup, candidate).await,
-        "file_transfer_handoff" => {
-            delete_unreferenced_server_artifact(pool, object_stores.backup, candidate).await
+        "job_output" => {
+            sqlx::query(
+                r#"
+                UPDATE job_outputs
+                SET storage = 'artifact_deleted', object_key = NULL
+                WHERE object_key = $1
+                "#,
+            )
+            .bind(&candidate.object_key)
+            .execute(&mut *tx)
+            .await?;
         }
         "file_transfer_source" => {
-            delete_file_transfer_source_artifact(pool, object_stores.backup, candidate).await
+            sqlx::query("DELETE FROM file_transfer_source_artifacts WHERE object_key = $1")
+                .bind(&candidate.object_key)
+                .execute(&mut *tx)
+                .await?;
         }
         "backup_artifact" => {
-            if backup_artifact_is_referenced(
-                pool,
-                candidate.backup_artifact_id,
-                &candidate.object_key,
-            )
-            .await?
-            {
-                tombstone_server_artifact(pool, candidate.id).await
+            let deleted = if let Some(backup_artifact_id) = candidate.backup_artifact_id {
+                sqlx::query(
+                    r#"
+                    DELETE FROM backup_artifacts artifact
+                    WHERE artifact.id = $1
+                      AND artifact.object_key = $2
+                      AND NOT EXISTS (
+                          SELECT 1 FROM backup_requests request
+                          WHERE request.artifact_id = artifact.id
+                      )
+                    "#,
+                )
+                .bind(backup_artifact_id)
+                .bind(&candidate.object_key)
+                .execute(&mut *tx)
+                .await?
             } else {
-                delete_backup_artifact(pool, object_stores.backup, candidate).await
-            }
+                sqlx::query(
+                    r#"
+                    DELETE FROM backup_artifacts artifact
+                    WHERE artifact.object_key = $1
+                      AND NOT EXISTS (
+                          SELECT 1 FROM backup_requests request
+                          WHERE request.artifact_id = artifact.id
+                      )
+                    "#,
+                )
+                .bind(&candidate.object_key)
+                .execute(&mut *tx)
+                .await?
+            };
+            ensure!(
+                deleted.rows_affected() <= 1,
+                "backup artifact registry identity is not unique"
+            );
         }
-        _ => tombstone_server_artifact(pool, candidate.id).await,
+        "file_transfer_handoff" => {}
+        _ => bail!("artifact cleanup domain invalid during finalization"),
     }
-}
-
-async fn delete_job_output_artifact(
-    pool: &PgPool,
-    object_store: &BackupObjectStore,
-    candidate: &ArtifactCleanupCandidate,
-) -> Result<ArtifactCleanupDisposition> {
-    let mut tx = pool.begin().await?;
-    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
-        tx.rollback().await?;
-        return Ok(ArtifactCleanupDisposition::Tombstoned);
-    }
-    tx.commit().await?;
-    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
-        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
-        return Err(error);
-    }
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        r#"
-        UPDATE job_outputs
-        SET storage = 'artifact_deleted', object_key = NULL
-        WHERE object_key = $1
-        "#,
-    )
-    .bind(&candidate.object_key)
-    .execute(&mut *tx)
-    .await?;
-    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-    tx.commit().await?;
-    Ok(ArtifactCleanupDisposition::Deleted)
-}
-
-async fn delete_unreferenced_server_artifact(
-    pool: &PgPool,
-    object_store: &BackupObjectStore,
-    candidate: &ArtifactCleanupCandidate,
-) -> Result<ArtifactCleanupDisposition> {
-    let mut tx = pool.begin().await?;
-    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
-        tx.rollback().await?;
-        return Ok(ArtifactCleanupDisposition::Tombstoned);
-    }
-    tx.commit().await?;
-    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
-        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
-        return Err(error);
-    }
-    let mut tx = pool.begin().await?;
-    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-    tx.commit().await?;
-    Ok(ArtifactCleanupDisposition::Deleted)
-}
-
-async fn delete_file_transfer_source_artifact(
-    pool: &PgPool,
-    object_store: &BackupObjectStore,
-    candidate: &ArtifactCleanupCandidate,
-) -> Result<ArtifactCleanupDisposition> {
-    let mut tx = pool.begin().await?;
-    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
-        tx.rollback().await?;
-        return Ok(ArtifactCleanupDisposition::Tombstoned);
-    }
-    tx.commit().await?;
-    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
-        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
-        return Err(error);
-    }
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        r#"
-        DELETE FROM file_transfer_source_artifacts
-        WHERE object_key = $1
-        "#,
-    )
-    .bind(&candidate.object_key)
-    .execute(&mut *tx)
-    .await?;
-    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-    tx.commit().await?;
-    Ok(ArtifactCleanupDisposition::Deleted)
-}
-
-async fn delete_backup_artifact(
-    pool: &PgPool,
-    object_store: &BackupObjectStore,
-    candidate: &ArtifactCleanupCandidate,
-) -> Result<ArtifactCleanupDisposition> {
-    let mut tx = pool.begin().await?;
-    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
-        tx.rollback().await?;
-        return Ok(ArtifactCleanupDisposition::Tombstoned);
-    }
-    tx.commit().await?;
-    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
-        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
-        return Err(error);
-    }
-    let mut tx = pool.begin().await?;
-    if let Some(backup_artifact_id) = candidate.backup_artifact_id {
-        sqlx::query(
-            r#"
-            DELETE FROM backup_artifacts
-            WHERE id = $1
-            "#,
-        )
-        .bind(backup_artifact_id)
-        .execute(&mut *tx)
-        .await?;
-    } else {
-        sqlx::query(
-            r#"
-            DELETE FROM backup_artifacts
-            WHERE object_key = $1
-            "#,
-        )
-        .bind(&candidate.object_key)
-        .execute(&mut *tx)
-        .await?;
-    }
-    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-    tx.commit().await?;
-    Ok(ArtifactCleanupDisposition::Deleted)
-}
-
-async fn mark_server_artifact_deleting(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    artifact_id: Uuid,
-) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        UPDATE server_artifacts
-        SET status = 'deleting',
-            metadata = metadata - 'delete_error' - 'delete_failed_at'
-        WHERE id = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
-        "#,
-    )
-    .bind(artifact_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-async fn mark_server_artifact_deleted(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    artifact_id: Uuid,
-) -> Result<()> {
-    sqlx::query(
+    let marked = sqlx::query(
         r#"
         UPDATE server_artifacts
         SET status = 'deleted', deleted_at = now()
         WHERE id = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+          AND object_key = $2
+          AND sha256_hex = $3
+          AND size_bytes = $4
+          AND status = 'deleting'
         "#,
     )
-    .bind(artifact_id)
-    .execute(&mut **tx)
+    .bind(candidate.id)
+    .bind(&candidate.object_key)
+    .bind(&candidate.sha256_hex)
+    .bind(candidate.size_bytes)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
-}
-
-async fn mark_server_artifact_delete_failed(
-    pool: &PgPool,
-    artifact_id: Uuid,
-    error: &str,
-) -> Result<()> {
-    sqlx::query(
+    ensure!(
+        marked.rows_affected() == 1,
+        "artifact registry identity changed"
+    );
+    let target = sqlx::query(
         r#"
-        UPDATE server_artifacts
-        SET status = 'delete_failed',
-            metadata = metadata || jsonb_build_object(
-                'delete_error', left($2, 1000),
-                'delete_failed_at', now()::text
-            )
-        WHERE id = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+        UPDATE server_job_artifact_cleanup_targets
+        SET outcome = 'deleted', outcome_reason = NULL, processed_at = now()
+        WHERE server_job_id = $1
+          AND artifact_id = $2
+          AND outcome = 'pending'
         "#,
     )
-    .bind(artifact_id)
-    .bind(error)
-    .execute(pool)
+    .bind(job.id)
+    .bind(candidate.id)
+    .execute(&mut *tx)
     .await?;
+    ensure!(
+        target.rows_affected() == 1,
+        "artifact cleanup target already resolved"
+    );
+    ensure!(
+        finish_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "artifact deletion ownership lost during finalization"
+    );
+    publish_artifact_deletion_completion_in_tx(&mut tx, job.id).await?;
+    tx.commit().await?;
     Ok(())
 }
 
 async fn tombstone_server_artifact(
     pool: &PgPool,
-    artifact_id: Uuid,
+    job: &ArtifactCleanupJob,
+    candidate: &ArtifactCleanupCandidate,
+    reason: &str,
 ) -> Result<ArtifactCleanupDisposition> {
-    sqlx::query(
+    let mut tx = pool.begin().await?;
+    ensure!(
+        lock_artifact_cleanup_job_in_tx(&mut tx, job).await?,
+        "artifact cleanup ownership lost while tombstoning"
+    );
+    let marked = sqlx::query(
         r#"
-        UPDATE server_artifacts
+        UPDATE server_artifacts artifact
         SET status = 'tombstoned', tombstoned_at = now()
-        WHERE id = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+        WHERE artifact.id = $1
+          AND artifact.object_key = $2
+          AND artifact.sha256_hex = $3
+          AND artifact.size_bytes = $4
+          AND artifact.status IN ('active', 'delete_failed')
+          AND NOT EXISTS (
+              SELECT 1 FROM server_artifact_deletion_intents intent
+              WHERE intent.artifact_id = artifact.id
+          )
         "#,
     )
-    .bind(artifact_id)
-    .execute(pool)
+    .bind(candidate.id)
+    .bind(&candidate.object_key)
+    .bind(&candidate.sha256_hex)
+    .bind(candidate.size_bytes)
+    .execute(&mut *tx)
     .await?;
+    if marked.rows_affected() != 1 {
+        tx.rollback().await?;
+        ensure!(
+            mark_artifact_cleanup_target_outcome(
+                pool,
+                job,
+                candidate.id,
+                "skipped",
+                "artifact_deletion_owned_elsewhere",
+            )
+            .await?,
+            "artifact cleanup ownership lost while skipping tombstone"
+        );
+        return Ok(ArtifactCleanupDisposition::Skipped);
+    }
+    let target = sqlx::query(
+        r#"
+        UPDATE server_job_artifact_cleanup_targets
+        SET outcome = 'tombstoned', outcome_reason = $3, processed_at = now()
+        WHERE server_job_id = $1
+          AND artifact_id = $2
+          AND outcome = 'pending'
+        "#,
+    )
+    .bind(job.id)
+    .bind(candidate.id)
+    .bind(reason)
+    .execute(&mut *tx)
+    .await?;
+    ensure!(
+        target.rows_affected() == 1,
+        "artifact cleanup target already resolved"
+    );
+    tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Tombstoned)
 }
 
@@ -1904,6 +4662,7 @@ async fn artifact_cleanup_targets(
             target.artifact_id AS id,
             COALESCE(artifact.domain, target.domain) AS domain,
             COALESCE(artifact.object_key, target.object_key) AS object_key,
+            COALESCE(artifact.sha256_hex, target.sha256_hex) AS sha256_hex,
             COALESCE(artifact.size_bytes, target.size_bytes) AS size_bytes,
             COALESCE(artifact.status, 'missing') AS status,
             artifact.backup_artifact_id,
@@ -1917,6 +4676,7 @@ async fn artifact_cleanup_targets(
         FROM server_job_artifact_cleanup_targets target
         LEFT JOIN server_artifacts artifact ON artifact.id = target.artifact_id
         WHERE target.server_job_id = $1
+          AND target.outcome = 'pending'
         ORDER BY target.created_at ASC, target.artifact_id ASC
         LIMIT $2
         "#,
@@ -1932,6 +4692,7 @@ async fn artifact_cleanup_targets(
                 id: row.try_get("id")?,
                 domain: row.try_get("domain")?,
                 object_key: row.try_get("object_key")?,
+                sha256_hex: row.try_get("sha256_hex")?,
                 size_bytes: row.try_get("size_bytes")?,
                 status: row.try_get("status")?,
                 backup_artifact_id: row.try_get("backup_artifact_id")?,
@@ -1961,28 +4722,18 @@ async fn delete_object_key_confirmed(
         .with_context(|| format!("failed to delete object {object_key}"))
 }
 
-async fn process_due_schedules_if_leader(
+async fn process_due_schedule_work(
     pool: &PgPool,
     limit: i64,
-    worker_id: &str,
-    lease_secs: i32,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
-    let Some(lease) = acquire_worker_lease(pool, "schedules", worker_id, lease_secs).await? else {
-        debug!(
-            worker_id,
-            "skipped due schedules because another worker holds the lease"
-        );
-        return Ok(0);
-    };
-    let result = async {
-        let event_jobs = process_alert_event_schedules(pool, limit, dispatch_config).await?;
-        let cron_jobs = process_due_schedules(pool, limit, dispatch_config).await?;
-        Ok(event_jobs + cron_jobs)
-    }
-    .await;
-    lease.finish().await?;
-    result
+    // Lifecycle consumption owns its cursor row, event receipts own a scoped
+    // advisory lock, and cron materialization reclaims each due schedule row.
+    // These independent durable owners make a fleet-wide scheduler lock both
+    // redundant and needlessly serializing.
+    let event_jobs = process_alert_event_schedules(pool, limit, dispatch_config).await?;
+    let cron_jobs = process_due_schedules(pool, limit, dispatch_config).await?;
+    Ok(event_jobs + cron_jobs)
 }
 
 async fn process_due_schedules(
@@ -1990,52 +4741,61 @@ async fn process_due_schedules(
     limit: i64,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
-    ensure_event_partitions(pool).await?;
-    let mut tx = pool.begin().await?;
-    let due_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM schedules
-        WHERE enabled = TRUE
-          AND deleted_at IS NULL
-          AND trigger_kind = 'cron'
-          AND next_run_at <= now()
-          AND (deferred_until IS NULL OR deferred_until <= now())
-        "#,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT id
-        FROM schedules
-        WHERE enabled = TRUE
-          AND deleted_at IS NULL
-          AND trigger_kind = 'cron'
-          AND next_run_at <= now()
-          AND (deferred_until IS NULL OR deferred_until <= now())
-        ORDER BY next_run_at, id
-        LIMIT $1
-        FOR UPDATE SKIP LOCKED
-        "#,
-    )
-    .bind(limit.clamp(1, 100))
-    .fetch_all(&mut *tx)
-    .await?;
-    if due_count > 0 || !rows.is_empty() {
-        info!(due_count, selected = rows.len(), "scanned due schedules");
-    }
-    let schedule_ids = rows
-        .into_iter()
-        .map(|row| row.try_get("id").map_err(Into::into))
-        .collect::<Result<Vec<Uuid>>>()?;
-    tx.commit().await?;
+    let round_started_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await?;
+    process_due_schedules_through(pool, limit, dispatch_config, round_started_at).await
+}
 
+async fn process_due_schedules_through(
+    pool: &PgPool,
+    limit: i64,
+    dispatch_config: &ScheduleDispatchConfig,
+    round_started_at: DateTime<Utc>,
+) -> Result<usize> {
+    let page_limit = limit.clamp(1, 100);
     let mut materialized = 0_usize;
-    for schedule_id in schedule_ids {
-        materialized += process_due_schedule(pool, schedule_id, dispatch_config).await?;
+    loop {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT id
+            FROM schedules
+            WHERE enabled = TRUE
+              AND deleted_at IS NULL
+              AND trigger_kind = 'cron'
+              AND created_at <= $2
+              AND next_run_at <= $2
+              AND (deferred_until IS NULL OR deferred_until <= $2)
+            ORDER BY next_run_at, id
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(page_limit)
+        .bind(round_started_at)
+        .fetch_all(&mut *tx)
+        .await?;
+        let selected = rows.len();
+        let schedule_ids = rows
+            .into_iter()
+            .map(|row| row.try_get("id").map_err(Into::into))
+            .collect::<Result<Vec<Uuid>>>()?;
+        tx.commit().await?;
+
+        if selected > 0 {
+            info!(selected, "claimed due schedule page");
+        }
+        for schedule_id in schedule_ids {
+            materialized += process_due_schedule(pool, schedule_id, dispatch_config).await?;
+        }
+        if selected < page_limit as usize {
+            return Ok(materialized);
+        }
+        // The page controls transaction/lock footprint only. Continue until
+        // indexed due work is empty instead of waiting for another 30s cycle.
+        tokio::task::yield_now().await;
     }
-    Ok(materialized)
 }
 
 async fn process_due_schedule(
@@ -2043,6 +4803,7 @@ async fn process_due_schedule(
     schedule_id: Uuid,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
+    let mut claimed_definition_revision = None;
     let result: Result<usize> = async {
         let mut tx = pool.begin().await?;
         let Some(row) = sqlx::query(
@@ -2106,13 +4867,15 @@ async fn process_due_schedule(
                 return Ok(0);
             }
         };
+        let definition_revision = row.try_get("definition_revision")?;
+        claimed_definition_revision = Some(definition_revision);
         let schedule = DueSchedule {
             id,
             actor_id,
             actor_username,
             actor_role,
             name,
-            definition_revision: row.try_get("definition_revision")?,
+            definition_revision,
             trigger_kind: "cron".to_string(),
             operation,
             selector_expression: row.try_get("selector_expression")?,
@@ -2159,7 +4922,10 @@ async fn process_due_schedule(
     match result {
         Ok(processed) => Ok(processed),
         Err(error) => {
-            record_schedule_failure(pool, schedule_id, &error.to_string()).await?;
+            if let Some(definition_revision) = claimed_definition_revision {
+                record_schedule_failure(pool, schedule_id, definition_revision, &error.to_string())
+                    .await?;
+            }
             Ok(0)
         }
     }
@@ -2623,7 +5389,6 @@ async fn load_schedule_target_capabilities(
         FROM clients
         WHERE id = ANY($1)
         ORDER BY id
-        FOR UPDATE
         "#,
     )
     .bind(targets.to_vec())
@@ -3206,7 +5971,12 @@ async fn advance_schedule_after_materialization(
     Ok(())
 }
 
-async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) -> Result<()> {
+async fn record_schedule_failure(
+    pool: &PgPool,
+    schedule_id: Uuid,
+    definition_revision: i64,
+    error: &str,
+) -> Result<()> {
     let bounded_error = truncate_schedule_error(error);
     let mut tx = pool.begin().await?;
     let row = sqlx::query(
@@ -3225,6 +5995,10 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
             END,
             updated_at = now()
         WHERE id = $1
+          AND definition_revision = $3
+          AND enabled = TRUE
+          AND deleted_at IS NULL
+          AND trigger_kind = 'cron'
         RETURNING
             id,
             actor_id,
@@ -3238,6 +6012,7 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
     )
     .bind(schedule_id)
     .bind(&bounded_error)
+    .bind(definition_revision)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {

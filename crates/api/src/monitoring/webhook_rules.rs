@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::collections::{HashMap, HashSet};
-use tracing::warn;
+use std::collections::HashMap;
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
@@ -29,6 +28,7 @@ use crate::{
 };
 
 const WEBHOOK_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
+const WEBHOOK_PROCESS_OUTCOME_SKIPPED_CURRENT_OWNER: &str = "skipped_current_owner";
 const WEBHOOK_DELIVERY_TIMEOUT_SECS: i64 = 5;
 const WEBHOOK_DELIVERY_LEASE_MARGIN_SECS: i64 = 60;
 const MAX_WEBHOOK_ERROR_BYTES: usize = 1024;
@@ -249,77 +249,84 @@ impl AppState {
                 })
                 .collect());
         }
-        let delivery_ids = deliveries
-            .iter()
-            .map(|delivery| delivery.id)
-            .collect::<Vec<_>>();
-        let expected_ids = delivery_ids.iter().copied().collect::<HashSet<_>>();
-        let lease_id = Uuid::new_v4();
-        let lease_secs = delivery_lease_secs(delivery_ids.len());
-        let claimed_deliveries = self
-            .repo
-            .claim_webhook_rule_deliveries_for_process(&delivery_ids, lease_id, lease_secs)
-            .await?;
-        let claimed_ids = claimed_deliveries
-            .iter()
-            .map(|delivery| delivery.id)
-            .collect::<HashSet<_>>();
-        anyhow::ensure!(
-            claimed_ids == expected_ids,
-            "webhook_rule_process_claim_mismatch"
-        );
+        let lease_secs = delivery_lease_secs();
         let mut processed = Vec::new();
-        for delivery in claimed_deliveries {
+        for requested_delivery in deliveries {
+            let delivery_id = requested_delivery.id;
+            let lease_id = Uuid::new_v4();
+            let Some(delivery) = self
+                .repo
+                .claim_webhook_rule_delivery_for_process(delivery_id, lease_id, lease_secs)
+                .await?
+            else {
+                // The automatic oldest-first consumer owns this exact row (or
+                // it already left the reviewed status). Keep durable state
+                // untouched and make the request-local skip explicit.
+                let mut skipped = requested_delivery;
+                skipped.process_outcome =
+                    Some(WEBHOOK_PROCESS_OUTCOME_SKIPPED_CURRENT_OWNER.to_string());
+                processed.push(skipped);
+                continue;
+            };
+            anyhow::ensure!(
+                delivery.id == delivery_id,
+                "webhook_rule_process_claim_mismatch"
+            );
             if !self.repo.webhook_rule_enabled(delivery.rule_id).await? {
-                processed.push(
-                    self.repo
-                        .cancel_claimed_webhook_rule_delivery(
-                            delivery.id,
-                            lease_id,
-                            "webhook rule disabled",
-                            None,
-                        )
-                        .await?,
-                );
+                let canceled = self
+                    .repo
+                    .cancel_claimed_webhook_rule_delivery(
+                        delivery.id,
+                        lease_id,
+                        "webhook rule disabled",
+                    )
+                    .await?;
+                self.repo
+                    .record_webhook_rule_process_audit(std::slice::from_ref(&canceled), operator)
+                    .await?;
+                processed.push(canceled);
                 continue;
             }
             let actor_authorized = self
                 .webhook_delivery_actor_authorized(delivery.actor_id)
                 .await?;
-            let (result, mut send_guard) = if actor_authorized {
-                let mut send_guard = self
+            let (result, eligibility_revision) = if actor_authorized {
+                let send_eligibility = self
                     .repo
                     .begin_webhook_rule_alert_send(delivery.id, lease_id)
                     .await?;
-                if !send_guard.is_deliverable() {
-                    let cancellation_reason = send_guard.cancellation_reason();
+                if !send_eligibility.is_deliverable() {
+                    let cancellation_reason = send_eligibility.cancellation_reason();
                     let canceled = if let Some(reason) = cancellation_reason {
                         Some(
                             self.repo
-                                .cancel_claimed_webhook_rule_delivery(
-                                    delivery.id,
-                                    lease_id,
-                                    reason,
-                                    Some(&mut send_guard),
-                                )
+                                .cancel_claimed_webhook_rule_delivery(delivery.id, lease_id, reason)
                                 .await,
                         )
                     } else {
                         None
                     };
-                    if let Err(error) = send_guard.release().await {
-                        warn!(
-                            delivery_id = %delivery.id,
-                            error = %error,
-                            "failed to release webhook alert suspension fence"
-                        );
-                    }
                     if let Some(canceled) = canceled {
-                        processed.push(canceled?);
+                        let canceled = canceled?;
+                        self.repo
+                            .record_webhook_rule_process_audit(
+                                std::slice::from_ref(&canceled),
+                                operator,
+                            )
+                            .await?;
+                        processed.push(canceled);
+                    } else {
+                        let mut skipped = delivery;
+                        skipped.process_outcome =
+                            Some(WEBHOOK_PROCESS_OUTCOME_SKIPPED_CURRENT_OWNER.to_string());
+                        processed.push(skipped);
                     }
                     continue;
                 }
-                (deliver_webhook_rule(&delivery).await, Some(send_guard))
+                (
+                    deliver_webhook_rule(&delivery).await,
+                    send_eligibility.revision(),
+                )
             } else {
                 (Err(anyhow::anyhow!("actor_authority_revoked")), None)
             };
@@ -355,24 +362,13 @@ impl AppState {
                     status,
                     error.as_deref(),
                     next_attempt_after_secs,
-                    send_guard.as_mut(),
+                    eligibility_revision,
                 )
-                .await;
-            if let Some(send_guard) = send_guard {
-                if let Err(error) = send_guard.release().await {
-                    warn!(
-                        delivery_id = %delivery.id,
-                        error = %error,
-                        "failed to release webhook alert suspension fence"
-                    );
-                }
-            }
-            processed.push(completion?);
-        }
-        if !dry_run && !processed.is_empty() {
-            self.repo
-                .record_webhook_rule_process_audit(&processed, operator)
                 .await?;
+            self.repo
+                .record_webhook_rule_process_audit(std::slice::from_ref(&completion), operator)
+                .await?;
+            processed.push(completion);
         }
         Ok(processed)
     }
@@ -656,10 +652,8 @@ pub(crate) async fn deliver_webhook_rule(delivery: &WebhookRuleDeliveryView) -> 
     .context("webhook delivery timed out")?
 }
 
-fn delivery_lease_secs(delivery_count: usize) -> i64 {
-    i64::try_from(delivery_count)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(WEBHOOK_DELIVERY_TIMEOUT_SECS)
+fn delivery_lease_secs() -> i64 {
+    WEBHOOK_DELIVERY_TIMEOUT_SECS
         .saturating_add(WEBHOOK_DELIVERY_LEASE_MARGIN_SECS)
         .max(WEBHOOK_DELIVERY_LEASE_MARGIN_SECS)
 }

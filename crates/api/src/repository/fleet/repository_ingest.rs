@@ -1,41 +1,51 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    panic::AssertUnwindSafe,
+    sync::OnceLock,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
+use futures_util::FutureExt;
 use serde_json::Value;
-use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
-use tokio::sync::RwLock;
-use tracing::debug;
+use sqlx::{postgres::PgPoolOptions, types::Json as SqlJson, PgPool, Postgres, Row, Transaction};
+#[cfg(test)]
+use tokio::task::JoinError;
+use tokio::{
+    sync::{watch, Notify},
+    task::JoinHandle,
+};
+use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{
-    AgentHello, AgentMetrics, AgentUpdateHeartbeat, GatewayAgentHelloIngest,
-    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, JobCommand,
-    RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
+    ordinal_admission_mask_has_exact_shape, projected_telemetry_tunnel_identity,
+    structurally_valid_projected_telemetry_tunnel, AgentMetrics, AgentUpdateHeartbeat,
+    GatewayAgentHelloIngest, GatewayTelemetryIngest, JobCommand, NetworkInterfacePolicy,
+    NetworkInterfaceSource, ProjectedTelemetryTunnelIdentity,
+    DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
 };
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED, TARGET_STATUS_FAILED};
 
-use crate::model::{
-    AgentView, ClientStatusHistoryView, TelemetryNetworkRateView, TelemetryRollupView,
-    TelemetrySampleView, TelemetryTunnelAdapterHealthView, TelemetryTunnelView,
+use crate::model_alert_policies::{AlertPolicyRuleKind, TrafficAccountingRecord};
+use crate::repository::Repository;
+use crate::repository_agent_update_lifecycle::record_agent_update_heartbeat_in_tx;
+use crate::repository_alert_policies::{
+    advance_projected_traffic_accounting_frontier, load_projected_traffic_accounting_context_in_tx,
+    rebase_projected_traffic_accounting_frontier_in_tx,
+    refresh_projected_traffic_accounting_durable_streams_in_tx, ProjectedTrafficAccountingContext,
+    ProjectedTrafficAccountingFrontier, ProjectedTrafficCounter, ProjectedTrafficCounterOverlay,
+    TrafficStreamIdentity,
 };
-use crate::model_alert_policies::{
-    AlertPolicyRuleKind, TrafficAccountingRecord, TrafficCounterSampleRecord,
-};
-use crate::model_webhook_rules::WebhookEventCandidate;
-use crate::repository::{Repository, TelemetryIngestWatermark, TelemetryIngestWatermarks};
-use crate::repository_agent_update_lifecycle::{
-    prevalidate_memory_agent_update_heartbeat_audit, record_agent_update_heartbeat_in_tx,
-};
-use crate::repository_alert_policies::postgres_traffic_accounting_snapshot_in_tx;
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
     enqueue_target_terminal_event_in_tx, finish_jobs_in_tx_and_reconcile_event_sources,
 };
 use crate::repository_key_lifecycle::public_key_sha256_hex;
-use crate::repository_monitoring::{accepted_postgres_ping_results, upsert_postgres_ping_results};
-use crate::repository_network_observations::reconcile_postgres_automatic_observation_series_for_client;
-use crate::repository_network_traffic_import::{
-    is_intentional_vnstat_import_boundary, lock_postgres_traffic_counter_streams,
+use crate::repository_monitoring::accepted_postgres_ping_results;
+use crate::repository_network_observations::{
+    record_postgres_automatic_tunnel_reachability_suffix_in_tx, AutomaticTunnelReachabilitySample,
+    FrozenAutomaticTunnelPlan,
 };
 use crate::repository_operational_alerts::{
     mark_postgres_tunnel_alerts_unknown_for_clients_in_tx,
@@ -43,12 +53,25 @@ use crate::repository_operational_alerts::{
     reconcile_postgres_tunnel_alerts_for_clients_in_tx,
 };
 use crate::repository_policy_lifecycle::{
-    record_policy_evidence_in_tx, record_policy_scope_revision_evidence_for_clients_in_tx,
-    PolicyEvidenceFact,
+    load_policy_evidence_rule_set_in_tx, materialize_policy_evidence_baseline_in_tx,
+    record_policy_evidence_with_rule_set_in_tx, PolicyEvidenceFact, PolicyEvidenceRuleSet,
 };
+use crate::repository_port_forwarding::record_postgres_port_forward_runtime_snapshot_in_tx;
+use crate::repository_telemetry_policy_activation::{
+    claim_telemetry_policy_activation_generation_in_tx,
+    enqueue_telemetry_policy_activation_sample_in_tx, wake_telemetry_policy_activation,
+    wake_telemetry_policy_activation_after_projection,
+};
+use crate::repository_terminal_sessions::mark_postgres_terminal_session_agent_lost_in_tx;
 use crate::security::constant_time_eq;
+const TELEMETRY_PROJECTOR_IDLE_POLL: Duration = Duration::from_secs(1);
+const CURRENT_PING_LOSS_WINDOW_SECS: i64 = 15 * 60;
 
-const TELEMETRY_BUCKET_SECS: i32 = 60;
+static TELEMETRY_PROJECTOR_WAKE: OnceLock<Notify> = OnceLock::new();
+
+fn telemetry_projector_wake() -> &'static Notify {
+    TELEMETRY_PROJECTOR_WAKE.get_or_init(Notify::new)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TelemetryRecordOutcome {
@@ -171,7 +194,9 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                     .execute(&mut **tx)
                     .await?;
                     if updated.rows_affected() == 0 {
-                        anyhow::bail!("agent_update_activation_heartbeat_terminal_cas_lost:{job_id}:{target_client_id}");
+                        anyhow::bail!(
+                            "agent_update_activation_heartbeat_terminal_cas_lost:{job_id}:{target_client_id}"
+                        );
                     }
                     sqlx::query(
                         r#"
@@ -283,7 +308,9 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                 .execute(&mut **tx)
                 .await?;
                 if updated.rows_affected() == 0 {
-                    anyhow::bail!("agent_update_activation_heartbeat_terminal_cas_lost:{job_id}:{target_client_id}");
+                    anyhow::bail!(
+                        "agent_update_activation_heartbeat_terminal_cas_lost:{job_id}:{target_client_id}"
+                    );
                 }
                 sqlx::query(
                     r#"
@@ -396,6 +423,7 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
         if updated.rows_affected() == 0 {
             continue;
         }
+        mark_postgres_terminal_session_agent_lost_in_tx(tx, job_id, &target_client_id).await?;
         sqlx::query(
             r#"
             INSERT INTO audit_logs (
@@ -433,6 +461,47 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
     Ok(affected_job_ids)
 }
 
+#[cfg(test)]
+mod agent_incarnation_terminal_ownership_tests {
+    #[test]
+    fn accepted_incarnation_transition_terminalizes_exact_session_before_publication() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, transition) = source
+            .split_once("async fn mark_old_incarnation_targets_agent_lost_in_tx")
+            .expect("agent incarnation transition");
+        let (transition, _) = transition
+            .split_once("impl Repository")
+            .expect("agent incarnation transition boundary");
+        let generic_terminal = transition
+            .split_once("let (message, reason) = if operation_decode_failed")
+            .expect("generic old-incarnation terminalization")
+            .1;
+
+        let target_terminal = generic_terminal
+            .find("SET status = 'agent_lost'")
+            .expect("target terminalization");
+        let session_terminal = generic_terminal
+            .find("mark_postgres_terminal_session_agent_lost_in_tx")
+            .expect("exact terminal-session terminalization");
+        let event_publication = generic_terminal
+            .find("enqueue_target_terminal_event_in_tx")
+            .expect("durable terminal-event publication");
+        let job_finish = generic_terminal
+            .find("finish_jobs_in_tx_and_reconcile_event_sources")
+            .expect("job finalization");
+
+        assert!(target_terminal < session_terminal);
+        assert!(session_terminal < event_publication);
+        assert!(event_publication < job_finish);
+        assert_eq!(
+            generic_terminal
+                .matches("mark_postgres_terminal_session_agent_lost_in_tx")
+                .count(),
+            1
+        );
+    }
+}
+
 impl Repository {
     pub(crate) async fn validate_agent_public_key(
         &self,
@@ -447,30 +516,6 @@ impl Repository {
         }
         let provided_fingerprint = public_key_sha256_hex(&provided);
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let current_key_matches = memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .get(client_id)
-                    .is_some_and(|expected| constant_time_eq(expected, &provided));
-                let key_revoked = memory
-                    .client_key_revocations
-                    .read()
-                    .await
-                    .iter()
-                    .any(|record| record.public_key_sha256_hex == provided_fingerprint);
-                let identity_active = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .is_some_and(|agent| !matches!(agent.status.as_str(), "revoked" | "deleted"));
-                let hidden = memory.hidden_clients.read().await.contains(client_id);
-                Ok(current_key_matches && !key_revoked && identity_active && !hidden)
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -502,8 +547,7 @@ impl Repository {
 
     pub(crate) async fn upsert_agent_hello(&self, event: &GatewayAgentHelloIngest) -> Result<bool> {
         let update_heartbeat = event.hello.update_heartbeat.clone();
-        let mut accepted_hello = true;
-        let session_event = agent_hello_session_event(event);
+        let accepted_hello;
         let authenticated_public_key =
             hex::decode(&event.noise_public_key_hex).with_context(|| {
                 format!("invalid noise public key hex for {}", event.hello.client_id)
@@ -512,189 +556,7 @@ impl Repository {
             return Ok(false);
         }
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden = memory
-                    .hidden_clients
-                    .read()
-                    .await
-                    .contains(&event.hello.client_id);
-                let fingerprint = public_key_sha256_hex(&authenticated_public_key);
-                let current_key_matches = memory
-                    .client_public_keys
-                    .read()
-                    .await
-                    .get(&event.hello.client_id)
-                    .is_some_and(|expected| constant_time_eq(expected, &authenticated_public_key));
-                let key_revoked = memory
-                    .client_key_revocations
-                    .read()
-                    .await
-                    .iter()
-                    .any(|record| record.public_key_sha256_hex == fingerprint);
-                let identity_active = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == event.hello.client_id)
-                    .is_some_and(|agent| !matches!(agent.status.as_str(), "revoked" | "deleted"));
-                let credential_accepted = current_key_matches && !key_revoked && identity_active;
-                if !hidden && credential_accepted {
-                    if let Some(heartbeat) = update_heartbeat.as_ref() {
-                        prevalidate_memory_agent_update_heartbeat_audit(
-                            memory,
-                            &event.hello.client_id,
-                            heartbeat,
-                        )
-                        .await?;
-                    }
-                    let prior = {
-                        let agents = memory.agents.read().await;
-                        agents
-                            .iter()
-                            .find(|agent| agent.id == event.hello.client_id)
-                            .map(|agent| {
-                                (
-                                    agent.status.clone(),
-                                    agent.internal_build_number,
-                                    agent.stale_reason.clone(),
-                                    agent.process_incarnation_id,
-                                )
-                            })
-                    };
-                    let prior_session_is_same =
-                        memory.gateway_sessions.read().await.iter().any(|session| {
-                            session.id == event.gateway_session_id
-                                && session.client_id == event.hello.client_id
-                                && session.status == "active"
-                        });
-                    upsert_memory_agent_with_remote_ip(
-                        &memory.agents,
-                        &event.hello,
-                        event.remote_ip.as_deref(),
-                    )
-                    .await;
-                    memory
-                        .agent_suspensions
-                        .write()
-                        .await
-                        .remove(&event.hello.client_id);
-                    memory.client_system_facts.write().await.insert(
-                        event.hello.client_id.clone(),
-                        crate::model::ClientSystemFactsRecord {
-                            os_release: event.hello.os_release.clone(),
-                            architecture: event.hello.arch.clone(),
-                            cpu_model: event.hello.cpu_model.clone(),
-                            kernel_release: event.hello.kernel_release.clone(),
-                            virtualization: event.hello.virtualization.clone(),
-                            reported_at: crate::unix_now().to_string(),
-                        },
-                    );
-                    crate::repository_gateway_sessions::expire_memory_active_other_sessions(
-                        memory,
-                        &event.hello.client_id,
-                        event.gateway_session_id,
-                    )
-                    .await;
-                    crate::repository_gateway_sessions::upsert_memory_gateway_session(
-                        memory,
-                        &session_event,
-                        "active",
-                        None,
-                    )
-                    .await;
-                    if let Some((prior_status, prior_build, stale_reason, prior_process)) = prior {
-                        let resulting_status = memory
-                            .agents
-                            .read()
-                            .await
-                            .iter()
-                            .find(|agent| agent.id == event.hello.client_id)
-                            .map(|agent| agent.status.clone())
-                            .unwrap_or(prior_status.clone());
-                        if prior_status != resulting_status {
-                            let reason = if prior_status == "suspended" {
-                                "agent_online_auto_unsuspend"
-                            } else if prior_status == "never" {
-                                "agent_first_connection"
-                            } else if prior_status == "stale" {
-                                "agent_reconnected_with_changed_internal_build"
-                            } else {
-                                "agent_reconnected"
-                            };
-                            let now = crate::unix_now().to_string();
-                            let metadata = serde_json::json!({
-                                "from_status": &prior_status,
-                                "to_status": &resulting_status,
-                                "reason": reason,
-                                "stale_reason": stale_reason,
-                                "previous_internal_build_number": prior_build,
-                                "internal_build_number": event.hello.internal_build_number,
-                                "gateway_id": &event.gateway_id,
-                                "result": &resulting_status,
-                                "origin_kind": "gateway_ingest",
-                                "component": "agent-ingest",
-                            });
-                            memory.client_status_history.write().await.push(
-                                ClientStatusHistoryView {
-                                    id: Uuid::new_v4(),
-                                    client_id: event.hello.client_id.clone(),
-                                    from_status: Some(prior_status.clone()),
-                                    to_status: resulting_status.clone(),
-                                    reason: reason.to_string(),
-                                    metadata: metadata.clone(),
-                                    created_at: now.clone(),
-                                },
-                            );
-                            memory
-                                .audits
-                                .write()
-                                .await
-                                .push(crate::model::AuditLogView {
-                                    id: Uuid::new_v4(),
-                                    actor_id: None,
-                                    action: format!("agent.status_{resulting_status}"),
-                                    target: format!("client:{}", event.hello.client_id),
-                                    command_hash: None,
-                                    metadata: metadata.clone(),
-                                    created_at: now,
-                                });
-                            self.record_client_status_webhook_event(
-                                &event.hello.client_id,
-                                Some(&prior_status),
-                                &resulting_status,
-                                reason,
-                                metadata,
-                            )
-                            .await?;
-                        } else if !prior_session_is_same
-                            || prior_process != Some(event.hello.process_incarnation_id)
-                        {
-                            self.mark_memory_tunnel_alerts_unknown_for_clients(
-                                std::slice::from_ref(&event.hello.client_id),
-                                &Utc::now().to_rfc3339(),
-                            )
-                            .await?;
-                        }
-                    }
-                    if let Some(heartbeat) = update_heartbeat.as_ref() {
-                        debug!(
-                            client_id = %event.hello.client_id,
-                            activation_job_id = %heartbeat.activation_job_id,
-                            sha256_hex = %heartbeat.sha256_hex,
-                            "recording agent update heartbeat"
-                        );
-                        self.record_agent_update_heartbeat(&event.hello.client_id, heartbeat)
-                            .await?;
-                    }
-                } else {
-                    accepted_hello = false;
-                }
-            }
             Self::Postgres(pool) => {
-                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
-                    .await?;
                 let mut tx = pool.begin().await?;
                 let prior = sqlx::query(
                     r#"
@@ -970,213 +832,18 @@ impl Repository {
         &self,
         event: &GatewayTelemetryIngest,
     ) -> Result<TelemetryRecordOutcome> {
+        validate_deferred_telemetry_constraints(&event.telemetry.metrics)?;
         let mut received_metrics = event.telemetry.metrics.clone();
         let reported_observed_unix = received_metrics.observed_unix;
-        let received_unix = crate::unix_now();
-        let mut ping_source_checked_unix = Vec::with_capacity(received_metrics.ping_results.len());
-        for result in &mut received_metrics.ping_results {
-            let source_checked_unix = result.checked_unix;
-            let check_age = reported_observed_unix.saturating_sub(result.checked_unix);
-            result.checked_unix = received_unix.saturating_sub(check_age);
-            // The source timestamp is the stable identity of a logical probe.
-            // The rebased timestamp remains the trusted chart timestamp, but it
-            // can move by a second when an unchanged cached result is received
-            // again with different transport latency.
-            ping_source_checked_unix.push(source_checked_unix);
-        }
-        for observation in &mut received_metrics.tunnel_reachability {
-            let measurement_age = reported_observed_unix.saturating_sub(observation.measured_unix);
-            observation.measured_unix = received_unix.saturating_sub(measurement_age);
-        }
-        received_metrics.observed_unix = received_unix;
-        let swap = validated_swap_sample(&received_metrics)?;
-        let record_result: Result<TelemetryRecordOutcome> = match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                if memory
-                    .hidden_clients
-                    .read()
-                    .await
-                    .contains(&event.telemetry.client_id)
-                {
-                    return Ok(TelemetryRecordOutcome::GatewaySessionNotActive);
-                }
-                let active_identity = memory.agents.read().await.iter().any(|agent| {
-                    agent.id == event.telemetry.client_id
-                        && !matches!(agent.status.as_str(), "revoked" | "deleted")
-                        && agent.process_incarnation_id == Some(event.process_incarnation_id)
-                });
-                let active_session = memory.gateway_sessions.read().await.iter().any(|session| {
-                    session.gateway_id == event.gateway_id
-                        && session.client_id == event.telemetry.client_id
-                        && session.id == event.gateway_session_id
-                        && session.status == "active"
-                });
-                if !active_identity || !active_session {
-                    return Ok(TelemetryRecordOutcome::GatewaySessionNotActive);
-                }
-                match claim_memory_telemetry_sequence(
-                    &memory.telemetry_ingest_watermarks,
-                    &event.telemetry.client_id,
-                    event.gateway_session_id,
-                    event.process_incarnation_id,
-                    event.telemetry_seq,
-                )
-                .await
-                {
-                    TelemetrySequenceClaim::Accepted => {}
-                    TelemetrySequenceClaim::Duplicate => {
-                        drop(_key_lifecycle_guard);
-                        self.record_automatic_tunnel_reachability(
-                            &event.telemetry.client_id,
-                            &received_metrics.tunnel_reachability,
-                        )
-                        .await?;
-                        self.record_port_forward_runtime_from_telemetry(
-                            &event.telemetry.client_id,
-                            &received_metrics,
-                        )
-                        .await?;
-                        self.record_telemetry_webhook_event(event).await?;
-                        return Ok(TelemetryRecordOutcome::AcceptedDuplicate);
-                    }
-                    TelemetrySequenceClaim::Stale => {
-                        return Ok(TelemetryRecordOutcome::AcceptedStale)
-                    }
-                }
-                let telemetry_agent_status = touch_memory_agent_from_telemetry(
-                    &memory.agents,
-                    &event.telemetry.client_id,
-                    event.remote_ip.as_deref(),
-                )
-                .await;
-                let (accepted_ping_results, accepted_ping_source_checked_unix) = self
-                    .accepted_ping_results_memory(
-                        &event.telemetry.client_id,
-                        received_metrics.observed_unix,
-                        &received_metrics.ping_results,
-                        &ping_source_checked_unix,
-                    )
-                    .await?;
-                received_metrics.ping_results = accepted_ping_results;
-                upsert_memory_telemetry_sample(
-                    &memory.telemetry_samples,
-                    Uuid::new_v4(),
-                    &event.telemetry.client_id,
-                    &received_metrics,
-                )
-                .await?;
-                upsert_memory_telemetry_rollup(
-                    &memory.telemetry_rollups,
-                    &event.telemetry.client_id,
-                    &received_metrics,
-                    swap,
-                )
-                .await;
-                upsert_memory_traffic_counter_samples(
-                    &memory.traffic_counter_samples,
-                    &event.telemetry.client_id,
-                    &received_metrics,
-                )
-                .await;
-                upsert_memory_telemetry_network_rates(
-                    &memory.telemetry_network_rates,
-                    &memory.traffic_counter_samples,
-                    &event.telemetry.client_id,
-                    &received_metrics,
-                )
-                .await;
-                self.record_ping_results_memory(
-                    &event.telemetry.client_id,
-                    received_metrics.observed_unix,
-                    &received_metrics.ping_results,
-                    &accepted_ping_source_checked_unix,
-                )
-                .await?;
-                let mut tunnels = memory.telemetry_tunnels.write().await;
-                tunnels.retain(|record| record.client_id != event.telemetry.client_id);
-                tunnels.extend(received_metrics.tunnels.iter().filter_map(|tunnel| {
-                    telemetry_tunnel_view(
-                        &event.telemetry.client_id,
-                        received_metrics.observed_unix,
-                        tunnel,
-                    )
-                }));
-                drop(tunnels);
-                if let Some((status, status_changed, prior_status)) = telemetry_agent_status {
-                    let observed_at = Utc::now().to_rfc3339();
-                    if prior_status == "suspended" {
-                        memory
-                            .agent_suspensions
-                            .write()
-                            .await
-                            .remove(&event.telemetry.client_id);
-                        let metadata = serde_json::json!({
-                            "from_status": "suspended",
-                            "to_status": "online",
-                            "reason": "agent_online_auto_unsuspend",
-                            "gateway_id": &event.gateway_id,
-                            "result": "online",
-                            "origin_kind": "gateway_ingest",
-                            "component": "agent-ingest",
-                        });
-                        memory
-                            .client_status_history
-                            .write()
-                            .await
-                            .push(ClientStatusHistoryView {
-                                id: Uuid::new_v4(),
-                                client_id: event.telemetry.client_id.clone(),
-                                from_status: Some("suspended".to_string()),
-                                to_status: "online".to_string(),
-                                reason: "agent_online_auto_unsuspend".to_string(),
-                                metadata: metadata.clone(),
-                                created_at: observed_at.clone(),
-                            });
-                        memory
-                            .audits
-                            .write()
-                            .await
-                            .push(crate::model::AuditLogView {
-                                id: Uuid::new_v4(),
-                                actor_id: None,
-                                action: "agent.status_online".to_string(),
-                                target: format!("client:{}", event.telemetry.client_id),
-                                command_hash: None,
-                                metadata: metadata.clone(),
-                                created_at: observed_at.clone(),
-                            });
-                        self.record_client_status_webhook_event(
-                            &event.telemetry.client_id,
-                            Some("suspended"),
-                            "online",
-                            "agent_online_auto_unsuspend",
-                            metadata,
-                        )
-                        .await?;
-                    }
-                    if status_changed {
-                        self.reconcile_memory_client_status_alert_transition(
-                            &event.telemetry.client_id,
-                            &status,
-                            &observed_at,
-                        )
-                        .await?;
-                    } else {
-                        self.reconcile_memory_agent_alert_transition(
-                            &event.telemetry.client_id,
-                            &status,
-                            &observed_at,
-                        )
-                        .await?;
-                    }
-                }
-                self.reconcile_memory_tunnel_alerts_for_clients(std::slice::from_ref(
-                    &event.telemetry.client_id,
-                ))
-                .await?;
-                Ok(TelemetryRecordOutcome::Recorded)
-            }
+        let ping_source_checked_unix = received_metrics
+            .ping_results
+            .iter()
+            .map(|result| result.checked_unix)
+            .collect::<Vec<_>>();
+        // Any value accepted into the canonical queue must be projectable;
+        // otherwise its contiguous per-client cursor could never advance.
+        validated_swap_sample(&received_metrics)?;
+        match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let visible_client = sqlx::query(
@@ -1187,12 +854,12 @@ impl Repository {
                       ON session.client_id = client.id
                     WHERE client.id = $1
                       AND client.hidden_at IS NULL
-                      AND client.status <> 'revoked'
+                      AND client.status NOT IN ('revoked', 'suspended')
                       AND client.process_incarnation_id = $2
                       AND session.gateway_id = $3
                       AND session.id = $4
                       AND session.status = 'active'
-                    FOR UPDATE OF client, session
+                    FOR NO KEY UPDATE OF client
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
@@ -1210,17 +877,8 @@ impl Repository {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
                         tx.commit().await?;
-                        self.record_automatic_tunnel_reachability(
-                            &event.telemetry.client_id,
-                            &received_metrics.tunnel_reachability,
-                        )
-                        .await?;
-                        self.record_port_forward_runtime_from_telemetry(
-                            &event.telemetry.client_id,
-                            &received_metrics,
-                        )
-                        .await?;
-                        self.record_telemetry_webhook_event(event).await?;
+                        // Replays never bypass the canonical sample's
+                        // projector and expose only adapter-owned subsets.
                         return Ok(TelemetryRecordOutcome::AcceptedDuplicate);
                     }
                     TelemetrySequenceClaim::Stale => {
@@ -1228,6 +886,55 @@ impl Repository {
                         return Ok(TelemetryRecordOutcome::AcceptedStale);
                     }
                 }
+                let telemetry_policy_activation_generation =
+                    claim_telemetry_policy_activation_generation_in_tx(&mut tx).await?;
+                // This exact head update is the canonical acceptance clock as
+                // well as the sequence owner.  The already-held client lock
+                // serializes normal routes, while GREATEST also preserves the
+                // invariant across a wall-clock step or any future route that
+                // reaches this owner directly.  Consecutive samples may share
+                // a second and remain ordered by accepted_seq, but their
+                // natural UTC minute can never move backward.
+                let accepted = sqlx::query(
+                    r#"
+                    WITH locked_head AS MATERIALIZED (
+                        SELECT client_id
+                        FROM telemetry_projection_heads
+                        WHERE client_id = $1
+                        FOR NO KEY UPDATE
+                    )
+                    UPDATE telemetry_projection_heads AS head
+                    SET accepted_seq = head.accepted_seq + 1,
+                        accepted_at = GREATEST(
+                            head.accepted_at, clock_timestamp()
+                        ),
+                        projection_retry_at = NULL
+                    FROM locked_head
+                    WHERE head.client_id = locked_head.client_id
+                    RETURNING head.accepted_seq,
+                              floor(extract(epoch FROM head.accepted_at))::bigint
+                                AS accepted_unix
+                    "#,
+                )
+                .bind(&event.telemetry.client_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let accepted_seq: i64 = accepted.try_get("accepted_seq")?;
+                let received_unix = u64::try_from(accepted.try_get::<i64, _>("accepted_unix")?)
+                    .context("canonical telemetry acceptance timestamp is before Unix epoch")?;
+                for result in &mut received_metrics.ping_results {
+                    let check_age = reported_observed_unix.saturating_sub(result.checked_unix);
+                    result.checked_unix = received_unix.saturating_sub(check_age);
+                    // The source timestamp is the stable identity of a logical
+                    // probe. The rebased timestamp remains the trusted chart
+                    // timestamp and follows the canonical acceptance clock.
+                }
+                for observation in &mut received_metrics.tunnel_reachability {
+                    let measurement_age =
+                        reported_observed_unix.saturating_sub(observation.measured_unix);
+                    observation.measured_unix = received_unix.saturating_sub(measurement_age);
+                }
+                received_metrics.observed_unix = received_unix;
                 let (accepted_ping_results, accepted_ping_source_checked_unix) =
                     accepted_postgres_ping_results(
                         &mut tx,
@@ -1238,60 +945,34 @@ impl Repository {
                     )
                     .await?;
                 received_metrics.ping_results = accepted_ping_results;
-                lock_postgres_traffic_counter_streams(&mut tx, &event.telemetry.client_id).await?;
                 let metrics = &received_metrics;
                 let sample_id = Uuid::new_v4();
                 upsert_postgres_telemetry_sample(
                     &mut tx,
                     sample_id,
-                    &event.telemetry.client_id,
-                    metrics,
-                )
-                .await?;
-                insert_postgres_telemetry_counter_facts(
-                    &mut tx,
-                    sample_id,
-                    &event.telemetry.client_id,
-                    metrics,
-                )
-                .await?;
-                insert_postgres_telemetry_ping_facts(
-                    &mut tx,
-                    sample_id,
-                    &event.telemetry.client_id,
+                    accepted_seq,
+                    event,
                     metrics,
                     &accepted_ping_source_checked_unix,
                 )
                 .await?;
-                upsert_postgres_telemetry_rollup(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    metrics,
-                    swap,
-                )
-                .await?;
-                upsert_postgres_traffic_counter_samples(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    metrics,
-                )
-                .await?;
-                upsert_postgres_telemetry_network_rates(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    metrics,
-                )
-                .await?;
-                upsert_postgres_ping_results(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    metrics.observed_unix,
-                    &metrics.ping_results,
-                    &accepted_ping_source_checked_unix,
-                )
-                .await?;
-                upsert_postgres_telemetry_tunnels(&mut tx, &event.telemetry.client_id, metrics)
-                    .await?;
+                let telemetry_policy_activation_queued =
+                    if let Some(generation) = telemetry_policy_activation_generation {
+                        enqueue_telemetry_policy_activation_sample_in_tx(
+                            &mut tx,
+                            generation,
+                            &event.telemetry.client_id,
+                            accepted_seq,
+                            sample_id,
+                        )
+                        .await?
+                    } else {
+                        false
+                    };
+                // Liveness is part of acceptance, not the deferred telemetry
+                // projection.  The route clears its suspension fence as soon
+                // as this method returns, so heartbeat/status/IP and the
+                // corresponding status transition must already be committed.
                 let resulting_status: String = sqlx::query_scalar(
                     r#"
                     UPDATE clients
@@ -1299,11 +980,7 @@ impl Repository {
                         status = CASE WHEN status = 'stale' THEN status ELSE 'online' END,
                         registration_ip = COALESCE(registration_ip, $2::inet),
                         last_ip = COALESCE($2::inet, last_ip),
-                        last_seen_at = now(),
-                        suspended_at = NULL,
-                        suspended_by = NULL,
-                        suspended_reason = NULL,
-                        suspended_from_status = NULL
+                        last_seen_at = now()
                     WHERE id = $1 AND hidden_at IS NULL
                       AND status <> 'revoked'
                     RETURNING status
@@ -1313,19 +990,10 @@ impl Repository {
                 .bind(event.remote_ip.as_deref())
                 .fetch_one(&mut *tx)
                 .await?;
-                if prior_client_status == "suspended" && resulting_status == "online" {
-                    record_client_status_transition_in_tx(
-                        &mut tx,
-                        &event.telemetry.client_id,
-                        Some("suspended"),
-                        "online",
-                        "agent_online_auto_unsuspend",
-                        serde_json::json!({"gateway_id": &event.gateway_id}),
-                        "gateway_ingest",
-                        "agent-ingest",
-                    )
-                    .await?;
-                } else {
+                if telemetry_status_requires_agent_reconciliation(
+                    &prior_client_status,
+                    &resulting_status,
+                ) {
                     reconcile_postgres_agent_alert_transition_in_tx(
                         &mut tx,
                         &event.telemetry.client_id,
@@ -1333,305 +1001,2280 @@ impl Repository {
                     )
                     .await?;
                 }
-                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
-                    &mut tx,
-                    std::slice::from_ref(&event.telemetry.client_id),
-                )
-                .await?;
-                let observed_at = Utc
-                    .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
-                    .single()
-                    .context("telemetry observed timestamp is invalid")?;
-                let traffic = postgres_traffic_accounting_snapshot_in_tx(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    observed_at,
-                )
-                .await?;
-                record_combined_telemetry_policy_evidence_in_tx(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    event.gateway_session_id,
-                    event.process_incarnation_id,
-                    event.telemetry_seq,
-                    sample_id,
-                    reported_observed_unix,
-                    metrics,
-                    &traffic,
-                )
-                .await?;
                 tx.commit().await?;
+                // The committed head/raw cursor is the work authority. This
+                // process-local signal only avoids an otherwise idle poll;
+                // startup and every other API replica discover the same owner
+                // directly from PostgreSQL.
+                telemetry_projector_wake().notify_one();
+                if telemetry_policy_activation_queued {
+                    wake_telemetry_policy_activation();
+                }
                 Ok(TelemetryRecordOutcome::Recorded)
             }
-        };
-        let outcome = record_result?;
-        if outcome != TelemetryRecordOutcome::Recorded {
-            return Ok(outcome);
         }
-        self.record_automatic_tunnel_reachability(
-            &event.telemetry.client_id,
-            &received_metrics.tunnel_reachability,
-        )
-        .await?;
-        self.record_port_forward_runtime_from_telemetry(
-            &event.telemetry.client_id,
-            &received_metrics,
-        )
-        .await?;
-        self.record_telemetry_webhook_event(event).await?;
-        Ok(TelemetryRecordOutcome::Recorded)
     }
 
     #[cfg(test)]
     pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<bool> {
-        Ok(self.record_telemetry_outcome(event).await? == TelemetryRecordOutcome::Recorded)
+        let outcome = self.record_telemetry_outcome(event).await?;
+        if outcome == TelemetryRecordOutcome::Recorded {
+            // Tests request synchronous projection through this helper.
+            // Production callers use `record_telemetry_outcome` and retain the
+            // deliberately asynchronous projection boundary.
+            self.project_pending_telemetry(1).await?;
+        }
+        Ok(outcome == TelemetryRecordOutcome::Recorded)
     }
 
-    pub(crate) async fn repair_combined_telemetry_policy_evidence(
-        &self,
-        _limit: i64,
-    ) -> Result<usize> {
-        // Accepted PostgreSQL telemetry and its immutable neutral evidence are
-        // one transaction. Reconstructing a missing fact from the current
-        // watermark/latest sample would bind an old source identity to newer
-        // metrics or traffic. Only missing evaluator receipts are repairable.
-        Ok(0)
-    }
-
-    async fn record_port_forward_runtime_from_telemetry(
-        &self,
-        client_id: &str,
-        metrics: &vpsman_common::AgentMetrics,
-    ) -> Result<()> {
-        if let Some(snapshot) = metrics.port_forwarding.as_ref() {
-            let mut snapshot = snapshot.clone();
-            snapshot.observed_unix = metrics.observed_unix;
-            self.record_port_forward_runtime_snapshot(client_id, &snapshot)
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn record_telemetry_webhook_event(&self, event: &GatewayTelemetryIngest) -> Result<()> {
-        let metrics = &event.telemetry.metrics;
-        let mut predicates = vec!["telemetry.rollup".to_string()];
-        if !metrics.networks.is_empty() {
-            predicates.push("telemetry.network_rate".to_string());
-        }
-        if !metrics.tunnels.is_empty() {
-            predicates.push("telemetry.tunnel".to_string());
-        }
-        if !metrics.tunnel_reachability.is_empty() {
-            predicates.push("network.reachability".to_string());
-        }
-        predicates.sort();
-        predicates.dedup();
-        let disk = persistent_disk_totals(metrics);
-        let (network_rx, network_tx) = network_telemetry_totals(metrics);
-        let event_id = format!(
-            "telemetry:{}:{}:{}:{}",
-            event.telemetry.client_id,
-            event.gateway_session_id,
-            event.process_incarnation_id,
-            event.telemetry_seq
-        );
-        self.record_webhook_event(WebhookEventCandidate {
-            kind: "telemetry.rollup".to_string(),
-            event_id: event_id.clone(),
-            event_predicates: predicates.clone(),
-            subject_client_ids: vec![event.telemetry.client_id.clone()],
-            actor_id: None,
-            payload: serde_json::json!({
-                "event": {
-                    "kind": "telemetry.rollup",
-                    "id": &event_id,
-                    "predicates": &predicates,
-                },
-                "telemetry": {
-                    "client_id": &event.telemetry.client_id,
-                    "gateway_id": &event.gateway_id,
-                    "observed_unix": metrics.observed_unix,
-                    "hostname": &metrics.hostname,
-                    "uptime_secs": metrics.uptime_secs,
-                    "disk_collection_available": disk.is_some(),
-                    "disk_total_bytes": disk.map(|(total, _)| total),
-                    "disk_available_bytes": disk.map(|(_, available)| available),
-                    "network_rx_bytes": network_rx,
-                    "network_tx_bytes": network_tx,
-                    "network_count": metrics.networks.len(),
-                    "tunnel_count": metrics.tunnels.len(),
-                    "networks": &metrics.networks,
-                    "tunnels": &metrics.tunnels,
-                },
-            }),
-        })
-        .await?;
-        Ok(())
+    /// Advances the visible telemetry cursor. One transaction-scoped exact-next
+    /// owner captures and atomically projects its complete oldest natural UTC
+    /// minute. Every sample still reaches its ordered domain algorithms, while
+    /// each bounded owner publishes one final generation. Webhooks consume
+    /// their independent cursor from the same canonical samples.
+    #[cfg(test)]
+    pub(crate) async fn project_pending_telemetry(&self, limit: usize) -> Result<usize> {
+        Ok(self.project_pending_telemetry_page(limit).await?.completed)
     }
 
     #[cfg(test)]
-    pub(crate) async fn mark_agent_stale(
+    async fn project_pending_telemetry_page(
         &self,
-        client_id: &str,
-        reason: &str,
-        metadata: serde_json::Value,
-    ) -> Result<()> {
-        match self {
-            Self::Memory(memory) => {
-                let mut agents = memory.agents.write().await;
-                if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
-                    if matches!(agent.status.as_str(), "suspended" | "revoked" | "deleted") {
-                        return Ok(());
-                    }
-                    if agent.status != "stale" {
-                        let from_status = agent.status.clone();
-                        agent.status = "stale".to_string();
-                        agent.stale_since = Some(crate::unix_now().to_string());
-                        agent.stale_reason = Some(reason.to_string());
-                        let webhook_metadata = serde_json::json!({
-                            "reason": reason,
-                            "details": metadata,
-                        });
-                        drop(agents);
-                        memory
-                            .audits
-                            .write()
-                            .await
-                            .push(crate::model::AuditLogView {
-                                id: Uuid::new_v4(),
-                                actor_id: None,
-                                action: "agent.status_stale".to_string(),
-                                target: format!("client:{client_id}"),
-                                command_hash: None,
-                                    metadata: serde_json::json!({
-                                        "from_status": from_status,
-                                        "to_status": "stale",
-                                        "reason": reason,
-                                        "details": webhook_metadata.get("details").cloned().unwrap_or(serde_json::Value::Null),
-                                        "result": "stale",
-                                        "origin_kind": "control_plane",
-                                        "component": "agent-status-tracker",
-                                    }),
-                                    created_at: crate::unix_now().to_string(),
-                                });
-                        self.record_client_status_webhook_event(
-                            client_id,
-                            Some(&from_status),
-                            "stale",
-                            reason,
-                            webhook_metadata,
-                        )
-                        .await?;
-                    }
-                }
-                Ok(())
-            }
-            Self::Postgres(pool) => {
-                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
-                    .await?;
-                let mut tx = pool.begin().await?;
-                let prior = sqlx::query(
-                    r#"
-                    SELECT status, internal_build_number
-                    FROM visible_clients
-                    WHERE id = $1 AND status NOT IN ('suspended', 'revoked')
-                    FOR UPDATE
-                    "#,
-                )
-                .bind(client_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let Some(prior) = prior else {
-                    tx.commit().await?;
-                    return Ok(());
-                };
-                let from_status: String = prior.try_get("status")?;
-                let internal_build_number =
-                    prior.try_get::<i64, _>("internal_build_number")?.max(1);
-                sqlx::query(
-                    r#"
-                    UPDATE clients
-                    SET
-                        status = 'stale',
-                        stale_since = COALESCE(stale_since, now()),
-                        stale_reason = $2,
-                        stale_build_number = COALESCE(stale_build_number, internal_build_number)
-                    WHERE id = $1 AND hidden_at IS NULL AND status <> 'suspended'
-                    "#,
-                )
-                .bind(client_id)
-                .bind(reason)
-                .execute(&mut *tx)
-                .await?;
-                if from_status != "stale" {
-                    let metadata = serde_json::json!({
-                        "reason": reason,
-                        "internal_build_number": internal_build_number,
-                        "details": metadata,
-                    });
-                    record_client_status_transition_in_tx(
-                        &mut tx,
-                        client_id,
-                        Some(&from_status),
-                        "stale",
-                        reason,
-                        metadata,
-                        "control_plane",
-                        "agent-status-tracker",
-                    )
-                    .await?;
-                }
-                tx.commit().await?;
-                Ok(())
+        limit: usize,
+    ) -> Result<TelemetryProjectionPage> {
+        let pool = match self {
+            Self::Postgres(pool) => pool,
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        project_pending_telemetry_page_on_postgres(pool, &shutdown, limit).await
+    }
+}
+
+#[derive(Debug)]
+struct StoredTelemetryProjection {
+    id: Uuid,
+    accepted_seq: i64,
+    accepted_at: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+    metrics: AgentMetrics,
+    gateway_session_id: Uuid,
+    process_incarnation_id: Uuid,
+    telemetry_seq: u64,
+    reported_observed_unix: u64,
+}
+
+fn telemetry_minute_ready_at_unix(observed_at: DateTime<Utc>) -> Result<i64> {
+    observed_at
+        .timestamp()
+        .div_euclid(60)
+        .checked_add(1)
+        .and_then(|minute| minute.checked_mul(60))
+        .context("telemetry natural-minute deadline is exhausted")
+}
+
+/// One sample's immutable admission decision. Plan-current tunnel identity is
+/// classified once from plan rows locked by the client projection transaction;
+/// every derived network consumer receives this same ordinal decision.
+#[derive(Debug)]
+pub(crate) struct ProjectedNetworkAdmission {
+    network_admitted: Vec<bool>,
+    tunnel_admitted: Vec<bool>,
+    current_tunnel: Vec<bool>,
+}
+
+impl ProjectedNetworkAdmission {
+    fn network_mask(&self) -> Vec<u8> {
+        pack_ordinal_admission_mask(self.network_admitted.iter().copied())
+    }
+
+    fn tunnel_mask(&self) -> Vec<u8> {
+        pack_ordinal_admission_mask(self.tunnel_admitted.iter().copied())
+    }
+
+    pub(crate) fn network_admitted(&self, ordinal: usize) -> bool {
+        self.network_admitted.get(ordinal).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn tunnel_admitted(&self, ordinal: usize) -> bool {
+        self.tunnel_admitted.get(ordinal).copied().unwrap_or(false)
+    }
+
+    fn tunnel_is_current(&self, ordinal: usize) -> bool {
+        self.current_tunnel.get(ordinal).copied().unwrap_or(false)
+    }
+}
+
+fn projected_traffic_counter_overlay(
+    observed_at: DateTime<Utc>,
+    metrics: &AgentMetrics,
+    admission: &ProjectedNetworkAdmission,
+) -> ProjectedTrafficCounterOverlay {
+    let mut counters = metrics
+        .networks
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, _)| admission.network_admitted(*ordinal))
+        .map(|(_, network)| ProjectedTrafficCounter {
+            source_kind: "host".to_string(),
+            interface: network.interface.clone(),
+            rx_bytes: u64_to_i64(network.rx_bytes),
+            tx_bytes: u64_to_i64(network.tx_bytes),
+            sample_source: "agent_networks".to_string(),
+        })
+        .chain(
+            metrics
+                .tunnels
+                .iter()
+                .enumerate()
+                .filter(|(ordinal, _)| admission.tunnel_admitted(*ordinal))
+                .map(|(_, tunnel)| ProjectedTrafficCounter {
+                    source_kind: "tunnel".to_string(),
+                    interface: tunnel.interface.clone(),
+                    rx_bytes: u64_to_i64(tunnel.rx_bytes),
+                    tx_bytes: u64_to_i64(tunnel.tx_bytes),
+                    sample_source: tunnel
+                        .traffic_source
+                        .clone()
+                        .unwrap_or_else(|| "runtime_tunnel".to_string()),
+                }),
+        )
+        .collect::<Vec<_>>();
+    counters.sort_unstable_by(|left, right| {
+        (&left.source_kind, &left.interface).cmp(&(&right.source_kind, &right.interface))
+    });
+    ProjectedTrafficCounterOverlay {
+        observed_at,
+        counters,
+    }
+}
+
+fn projected_traffic_counter_overlay_from_masks(
+    metrics: &AgentMetrics,
+    network_admission_mask: &[u8],
+    tunnel_admission_mask: &[u8],
+) -> Result<ProjectedTrafficCounterOverlay> {
+    anyhow::ensure!(
+        ordinal_admission_mask_has_exact_shape(network_admission_mask, metrics.networks.len())
+            && ordinal_admission_mask_has_exact_shape(tunnel_admission_mask, metrics.tunnels.len(),),
+        "policy traffic replay has an incomplete admission mask"
+    );
+    let mask_bit = |mask: &[u8], ordinal: usize| {
+        mask.get(ordinal / 8)
+            .is_some_and(|byte| byte & (1_u8 << (ordinal % 8)) != 0)
+    };
+    let observed_at = Utc
+        .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
+        .single()
+        .context("telemetry observed timestamp is invalid")?;
+    let mut counters = metrics
+        .networks
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, _)| mask_bit(network_admission_mask, *ordinal))
+        .map(|(_, network)| ProjectedTrafficCounter {
+            source_kind: "host".to_string(),
+            interface: network.interface.clone(),
+            rx_bytes: u64_to_i64(network.rx_bytes),
+            tx_bytes: u64_to_i64(network.tx_bytes),
+            sample_source: "agent_networks".to_string(),
+        })
+        .chain(
+            metrics
+                .tunnels
+                .iter()
+                .enumerate()
+                .filter(|(ordinal, _)| mask_bit(tunnel_admission_mask, *ordinal))
+                .map(|(_, tunnel)| ProjectedTrafficCounter {
+                    source_kind: "tunnel".to_string(),
+                    interface: tunnel.interface.clone(),
+                    rx_bytes: u64_to_i64(tunnel.rx_bytes),
+                    tx_bytes: u64_to_i64(tunnel.tx_bytes),
+                    sample_source: tunnel
+                        .traffic_source
+                        .clone()
+                        .unwrap_or_else(|| "runtime_tunnel".to_string()),
+                }),
+        )
+        .collect::<Vec<_>>();
+    counters.sort_unstable_by(|left, right| {
+        (&left.source_kind, &left.interface).cmp(&(&right.source_kind, &right.interface))
+    });
+    Ok(ProjectedTrafficCounterOverlay {
+        observed_at,
+        counters,
+    })
+}
+
+fn projected_traffic_streams(
+    overlay: &ProjectedTrafficCounterOverlay,
+) -> HashSet<TrafficStreamIdentity> {
+    overlay
+        .counters
+        .iter()
+        .map(|counter| (counter.source_kind.clone(), counter.interface.clone()))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TelemetryProjectionPage {
+    claimed: usize,
+    completed: usize,
+    contended: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TelemetryProjectionClaim {
+    client_id: String,
+    after_seq: i64,
+    through_seq: i64,
+    published_generation: i64,
+}
+
+enum TelemetryProjectionClaimAttempt {
+    Claimed(TelemetryProjectionClaim),
+    Contended,
+    Idle,
+}
+
+#[cfg(test)]
+async fn resolve_telemetry_projection_task(
+    outcome: std::result::Result<Result<TelemetryProjectionPage>, JoinError>,
+) -> Result<TelemetryProjectionPage> {
+    match outcome {
+        Ok(outcome) => outcome,
+        Err(join_error) => {
+            // The exact-next immutable raw-journal row is transaction-scoped. A
+            // panic or process loss rolls back all derived writes and releases
+            // that owner without a durable lease-repair write or expiry.
+            warn!(%join_error, "deferred telemetry projection task panicked; transaction rolled back");
+            Ok(TelemetryProjectionPage::default())
+        }
+    }
+}
+
+#[cfg(test)]
+async fn project_pending_telemetry_page_on_postgres(
+    control_pool: &PgPool,
+    shutdown: &watch::Receiver<bool>,
+    limit: usize,
+) -> Result<TelemetryProjectionPage> {
+    let mut page = TelemetryProjectionPage::default();
+    for _ in 0..limit.max(1) {
+        if telemetry_projector_shutdown_requested(shutdown) {
+            break;
+        }
+        let projection_pool = control_pool.clone();
+        let projection =
+            tokio::spawn(
+                async move { project_next_visible_telemetry_suffix(&projection_pool).await },
+            );
+        let attempt = resolve_telemetry_projection_task(projection.await).await?;
+        page.claimed = page.claimed.saturating_add(attempt.claimed);
+        page.completed = page.completed.saturating_add(attempt.completed);
+        page.contended |= attempt.contended;
+        if !telemetry_projection_page_should_continue(attempt) {
+            break;
+        }
+    }
+    Ok(page)
+}
+
+#[derive(Clone)]
+enum TelemetryProjectorRuntime {
+    Postgres { control_pool: PgPool },
+}
+
+impl TelemetryProjectorRuntime {
+    fn new(repo: Repository) -> Self {
+        match repo {
+            Repository::Postgres(pool) => {
+                let control_options = (*pool.connect_options())
+                    .clone()
+                    .application_name("vpsman-api-telemetry-projector-control");
+                let control_pool = PgPoolOptions::new()
+                    // One work-conserving owner is the correctness and
+                    // performance baseline. It drains every ready client
+                    // immediately; no parallel worker may conceal excess
+                    // per-client SQL or minute-boundary work.
+                    .max_connections(1)
+                    .connect_lazy_with(control_options);
+                Self::Postgres { control_pool }
             }
         }
     }
 
-    pub(crate) async fn record_client_status_webhook_event(
-        &self,
-        client_id: &str,
-        from_status: Option<&str>,
-        to_status: &str,
-        reason: &str,
-        metadata: serde_json::Value,
-    ) -> Result<()> {
-        self.reconcile_memory_client_status_alert_transition(
+    async fn project_page(&self) -> Result<TelemetryProjectionPage> {
+        match self {
+            Self::Postgres { control_pool } => {
+                project_next_visible_telemetry_suffix(control_pool).await
+            }
+        }
+    }
+
+    async fn close(&self) {
+        match self {
+            Self::Postgres { control_pool } => control_pool.close().await,
+        }
+    }
+}
+
+fn telemetry_projection_page_did_work(page: TelemetryProjectionPage) -> bool {
+    page.claimed > 0
+}
+
+fn telemetry_projection_page_should_continue(page: TelemetryProjectionPage) -> bool {
+    page.claimed > 0 || page.contended
+}
+
+#[cfg(test)]
+#[test]
+fn failed_claimed_projection_page_remains_work_conserving() {
+    let failed_owner = TelemetryProjectionPage {
+        claimed: 1,
+        completed: 0,
+        contended: false,
+    };
+    assert!(telemetry_projection_page_did_work(failed_owner));
+    assert!(telemetry_projection_page_should_continue(failed_owner));
+    assert!(telemetry_projection_page_should_continue(
+        TelemetryProjectionPage {
+            contended: true,
+            ..TelemetryProjectionPage::default()
+        }
+    ));
+    assert!(!telemetry_projection_page_did_work(
+        TelemetryProjectionPage::default()
+    ));
+    assert!(!telemetry_projection_page_should_continue(
+        TelemetryProjectionPage::default()
+    ));
+}
+
+pub(crate) struct TelemetryProjectorTask {
+    shutdown: watch::Sender<bool>,
+    handles: Vec<JoinHandle<()>>,
+    runtime: TelemetryProjectorRuntime,
+}
+
+impl TelemetryProjectorTask {
+    pub(crate) fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
+
+    pub(crate) async fn wait_for_unexpected_exit(&mut self) -> Result<()> {
+        let (result, worker_index, remaining) =
+            futures_util::future::select_all(self.handles.iter_mut()).await;
+        drop(remaining);
+        drop(self.handles.swap_remove(worker_index));
+        match result {
+            Ok(()) => {
+                anyhow::bail!("telemetry projector worker {worker_index} exited unexpectedly")
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("telemetry projector worker {worker_index} failed")),
+        }
+    }
+
+    async fn join(mut self) -> Result<()> {
+        let mut first_join_error = None;
+        for handle in self.handles.drain(..) {
+            if let Err(error) = handle.await {
+                if first_join_error.is_none() {
+                    first_join_error = Some(error);
+                }
+            }
+        }
+        self.runtime.close().await;
+        match first_join_error {
+            Some(error) => Err(error).context("telemetry projector task failed"),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) async fn shutdown(self) -> Result<()> {
+        self.request_shutdown();
+        self.join().await
+    }
+}
+
+fn telemetry_projector_shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn telemetry_projector_shutdown_signal(shutdown: &mut watch::Receiver<bool>) {
+    while !telemetry_projector_shutdown_requested(shutdown) {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn run_telemetry_projector_worker(
+    worker_index: usize,
+    runtime: TelemetryProjectorRuntime,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if telemetry_projector_shutdown_requested(&shutdown) {
+            break;
+        }
+        let outcome = AssertUnwindSafe(runtime.project_page())
+            .catch_unwind()
+            .await;
+        let continue_immediately = match outcome {
+            Ok(Ok(page)) if telemetry_projection_page_did_work(page) => {
+                debug!(
+                    worker_index,
+                    claimed = page.claimed,
+                    completed = page.completed,
+                    "projected exact telemetry natural-minute owner"
+                );
+                true
+            }
+            Ok(Ok(page)) => telemetry_projection_page_should_continue(page),
+            Ok(Err(error)) => {
+                warn!(worker_index, %error, "telemetry projector discovery failed");
+                false
+            }
+            Err(_) => {
+                warn!(worker_index, "telemetry projector transaction panicked");
+                false
+            }
+        };
+        if continue_immediately {
+            continue;
+        }
+        // Notify is only a latency accelerator. A stored permit closes the
+        // query-to-wait race, while the bounded poll makes committed work from
+        // another process or a crashed predecessor discoverable at startup and
+        // across every API replica.
+        tokio::select! {
+            biased;
+            _ = telemetry_projector_shutdown_signal(&mut shutdown) => break,
+            _ = telemetry_projector_wake().notified() => {}
+            _ = tokio::time::sleep(TELEMETRY_PROJECTOR_IDLE_POLL) => {}
+        }
+    }
+}
+
+pub(crate) fn spawn_telemetry_projector(repo: Repository) -> TelemetryProjectorTask {
+    let runtime = TelemetryProjectorRuntime::new(repo);
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let handles = vec![tokio::spawn(run_telemetry_projector_worker(
+        0,
+        runtime.clone(),
+        shutdown_rx,
+    ))];
+    TelemetryProjectorTask {
+        shutdown,
+        handles,
+        runtime,
+    }
+}
+
+async fn try_claim_telemetry_projection_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<TelemetryProjectionClaimAttempt> {
+    // The partial visible-pending index has this exact order. The query returns
+    // one durable owner instead of materializing the ready fleet, and then the
+    // immutable exact-next raw row is the transaction-scoped client lock.
+    // SKIP LOCKED lets another API replica continue to a healthy due client;
+    // a failed client's retry timestamp therefore cannot hide later owners.
+    let candidate = sqlx::query(
+        r#"
+        SELECT head.client_id, sample.accepted_seq AS owner_seq
+        FROM telemetry_projection_heads head
+        JOIN telemetry_samples sample
+          ON sample.client_id = head.client_id
+         AND sample.accepted_seq = head.projected_seq + 1
+        WHERE head.projected_seq < head.accepted_seq
+          AND COALESCE(head.projection_retry_at, '-infinity'::timestamptz)
+                <= clock_timestamp()
+        ORDER BY COALESCE(head.projected_at, '-infinity'::timestamptz),
+                 head.client_id
+        LIMIT 1
+        FOR UPDATE OF sample SKIP LOCKED
+        "#,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(candidate) = candidate else {
+        return Ok(TelemetryProjectionClaimAttempt::Idle);
+    };
+    let client_id: String = candidate.try_get("client_id")?;
+    let owner_seq: i64 = candidate.try_get("owner_seq")?;
+
+    // The raw journal row is the immutable client owner and intentionally
+    // survives projection through the bounded raw-retention window. A
+    // concurrent projector may therefore commit after this statement took its
+    // READ COMMITTED snapshot and before it acquired that surviving row. Read
+    // the head again in a new statement snapshot after owning the row; only the
+    // fresh exact-next row authorizes projection. The head itself remains
+    // unlocked so acceptance can keep advancing accepted_seq during projection.
+    let Some((projected_seq, through_seq, published_generation)) =
+        revalidate_telemetry_projection_owner_in_tx(tx, &client_id, owner_seq).await?
+    else {
+        return Ok(TelemetryProjectionClaimAttempt::Contended);
+    };
+    Ok(TelemetryProjectionClaimAttempt::Claimed(
+        TelemetryProjectionClaim {
             client_id,
-            to_status,
-            &Utc::now().to_rfc3339(),
+            after_seq: projected_seq,
+            through_seq,
+            published_generation,
+        },
+    ))
+}
+
+pub(crate) async fn revalidate_telemetry_projection_owner_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    owner_seq: i64,
+) -> Result<Option<(i64, i64, i64)>> {
+    let fresh = sqlx::query(
+        r#"
+        SELECT
+            head.projected_seq,
+            COALESCE((
+                SELECT later.accepted_seq - 1
+                FROM telemetry_samples later
+                WHERE later.client_id = head.client_id
+                  AND later.accepted_seq > first_sample.accepted_seq
+                  AND later.accepted_seq <= head.accepted_seq
+                  AND date_trunc('minute', later.observed_at)
+                        IS DISTINCT FROM
+                      date_trunc('minute', first_sample.observed_at)
+                ORDER BY later.accepted_seq
+                LIMIT 1
+            ), head.accepted_seq) AS through_seq,
+            head.published_generation
+        FROM telemetry_projection_heads head
+        JOIN telemetry_samples first_sample
+          ON first_sample.client_id = head.client_id
+         AND first_sample.accepted_seq = head.projected_seq + 1
+        WHERE head.client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(fresh) = fresh else {
+        return Ok(None);
+    };
+    let projected_seq: i64 = fresh.try_get("projected_seq")?;
+    let exact_next = projected_seq
+        .checked_add(1)
+        .context("telemetry projection cursor is exhausted")?;
+    if owner_seq != exact_next {
+        return Ok(None);
+    }
+    Ok(Some((
+        projected_seq,
+        fresh.try_get("through_seq")?,
+        fresh.try_get("published_generation")?,
+    )))
+}
+
+async fn load_telemetry_projection_suffix_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    after_seq: i64,
+    through_seq: i64,
+) -> Result<Vec<StoredTelemetryProjection>> {
+    anyhow::ensure!(
+        through_seq > after_seq,
+        "telemetry projection suffix fence is empty"
+    );
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            sample.id,
+            sample.accepted_seq,
+            sample.accepted_at,
+            sample.observed_at,
+            sample.payload,
+            sample.source_gateway_session_id,
+            sample.source_process_incarnation_id,
+            sample.source_telemetry_seq,
+            sample.reported_observed_unix,
+            sample.ping_source_checked_unix
+        FROM telemetry_samples sample
+        WHERE sample.client_id = $1
+          AND sample.accepted_seq > $2
+          AND sample.accepted_seq <= $3
+        ORDER BY sample.accepted_seq
+        FOR SHARE OF sample
+        "#,
+    )
+    .bind(client_id)
+    .bind(after_seq)
+    .bind(through_seq)
+    .fetch_all(&mut **tx)
+    .await?;
+    let expected_len = through_seq
+        .checked_sub(after_seq)
+        .context("telemetry projection suffix sequence is exhausted")?;
+    let actual_len = i64::try_from(rows.len())
+        .context("telemetry projection suffix cardinality is exhausted")?;
+    anyhow::ensure!(
+        actual_len == expected_len,
+        "telemetry projection source sequence is not contiguous"
+    );
+    let mut samples = Vec::with_capacity(rows.len());
+    for (offset, row) in rows.into_iter().enumerate() {
+        let offset =
+            i64::try_from(offset).context("telemetry projection suffix offset is exhausted")?;
+        let expected_seq = after_seq
+            .checked_add(offset)
+            .and_then(|value| value.checked_add(1))
+            .context("telemetry projection suffix sequence is exhausted")?;
+        let accepted_seq: i64 = row.try_get("accepted_seq")?;
+        anyhow::ensure!(
+            accepted_seq == expected_seq,
+            "telemetry projection source sequence is not contiguous"
+        );
+        let metrics: SqlJson<AgentMetrics> = row.try_get("payload")?;
+        let gateway_session_id: Uuid = row.try_get("source_gateway_session_id")?;
+        let process_incarnation_id: Uuid = row.try_get("source_process_incarnation_id")?;
+        let telemetry_seq: i64 = row.try_get("source_telemetry_seq")?;
+        let reported_observed_unix: i64 = row.try_get("reported_observed_unix")?;
+        let ping_source_checked_unix = row
+            .try_get::<Vec<i64>, _>("ping_source_checked_unix")?
+            .into_iter()
+            .map(|value| u64::try_from(value).context("negative ping source timestamp"))
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            ping_source_checked_unix.len() == metrics.0.ping_results.len(),
+            "telemetry projection ping source cardinality mismatch"
+        );
+        samples.push(StoredTelemetryProjection {
+            id: row.try_get("id")?,
+            accepted_seq,
+            accepted_at: row.try_get("accepted_at")?,
+            observed_at: row.try_get("observed_at")?,
+            metrics: metrics.0,
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq: u64::try_from(telemetry_seq)
+                .context("negative telemetry projection source sequence")?,
+            reported_observed_unix: u64::try_from(reported_observed_unix)
+                .context("negative telemetry projection reported observed time")?,
+        });
+    }
+    Ok(samples)
+}
+
+/// Publishes the bounded, user-facing Ping current state from the same exact
+/// client prefix that advances `telemetry_projection_heads`. Ping series are
+/// logical identities needed by both the raw suffix and retained history, so
+/// they become visible atomically with that prefix. The natural-minute worker
+/// remains the sole owner of facts and rollups.
+async fn project_ping_current_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    after_seq: i64,
+    through_seq: i64,
+) -> Result<()> {
+    anyhow::ensure!(
+        through_seq > after_seq,
+        "Ping current projection suffix is empty"
+    );
+
+    sqlx::query(
+        r#"
+        WITH expanded AS MATERIALIZED (
+            SELECT
+                sample.client_id,
+                (ping.value ->> 'target_id')::UUID AS target_id,
+                (ping.value ->> 'generation')::BIGINT AS generation
+            FROM telemetry_samples sample
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(sample.payload -> 'ping_results') = 'array'
+                    THEN sample.payload -> 'ping_results' ELSE '[]'::JSONB END
+            ) ping(value)
+            WHERE sample.client_id = $1
+              AND sample.accepted_seq > $2
+              AND sample.accepted_seq <= $3
+        )
+        INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+        SELECT DISTINCT expanded.client_id,
+               expanded.target_id,
+               expanded.generation
+        FROM expanded
+        JOIN ping_targets target ON target.id = expanded.target_id
+        ORDER BY expanded.client_id, expanded.target_id, expanded.generation
+        ON CONFLICT (client_id, target_id, generation) DO NOTHING
+        "#,
+    )
+    .bind(client_id)
+    .bind(after_seq)
+    .bind(through_seq)
+    .execute(&mut **tx)
+    .await?;
+
+    // Retained facts cover the already-closed prefix and the raw suffix covers
+    // every projected sample after the independent core-minute cursor, plus
+    // the currently claimed prefix through `through_seq`. Canonicalizing on
+    // the stable source check identity makes a raw correction shadow its
+    // retained predecessor exactly as `telemetry_ping_points` does. The only
+    // retained range read is the indexed 900-second window of a touched series;
+    // no fleet or historical range is scanned.
+    sqlx::query(
+        r#"
+        WITH core_frontier AS MATERIALIZED (
+            SELECT minute.materialized_seq
+            FROM telemetry_minute_materialization_heads minute
+            WHERE minute.client_id = $1
+        ), expanded AS NOT MATERIALIZED (
+            SELECT
+                sample.id AS evidence_id,
+                sample.client_id,
+                sample.accepted_seq,
+                sample.accepted_at,
+                ping.ordinality,
+                sample.ping_source_checked_unix[ping.ordinality]
+                    AS source_checked_unix,
+                (ping.value ->> 'target_id')::UUID AS target_id,
+                (ping.value ->> 'generation')::BIGINT AS generation,
+                (ping.value ->> 'checked_unix')::BIGINT AS checked_unix,
+                ping.value ->> 'status' AS status,
+                (ping.value ->> 'latency_avg_ms')::DOUBLE PRECISION
+                    AS latency_avg_ms,
+                (ping.value ->> 'loss_ratio')::DOUBLE PRECISION AS loss_ratio,
+                ping.value ->> 'reason' AS reason
+            FROM core_frontier
+            JOIN telemetry_samples sample
+              ON sample.client_id = $1
+             AND sample.accepted_seq > core_frontier.materialized_seq
+             AND sample.accepted_seq <= $3
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(sample.payload -> 'ping_results') = 'array'
+                    THEN sample.payload -> 'ping_results' ELSE '[]'::JSONB END
+            ) WITH ORDINALITY ping(value, ordinality)
+            WHERE ping.ordinality <= cardinality(
+                sample.ping_source_checked_unix
+            )
+        ), raw_evidence AS MATERIALIZED (
+            SELECT series.id AS series_id, expanded.*
+            FROM expanded
+            JOIN ping_targets target
+              ON target.id = expanded.target_id
+             AND target.enabled
+             AND target.generation = expanded.generation
+            JOIN ping_target_assignments assignment
+              ON assignment.target_id = expanded.target_id
+             AND assignment.client_id = expanded.client_id
+            JOIN telemetry_ping_series series
+              ON series.client_id = expanded.client_id
+             AND series.target_id = expanded.target_id
+             AND series.generation = expanded.generation
+            WHERE expanded.source_checked_unix > 0
+              AND expanded.checked_unix > 0
+        ), claimed_canonical AS MATERIALIZED (
+            SELECT DISTINCT ON (series_id, source_checked_unix)
+                   raw.*
+            FROM raw_evidence raw
+            WHERE raw.accepted_seq > $2
+            ORDER BY series_id, source_checked_unix,
+                     accepted_seq DESC, ordinality DESC
+        ), predecessor_candidates AS MATERIALIZED (
+            SELECT
+                fact.series_id,
+                fact.source_checked_unix,
+                fact.checked_unix,
+                fact.status,
+                fact.latency_avg_ms,
+                fact.loss_ratio,
+                fact.reason,
+                0::INTEGER AS source_priority,
+                0::BIGINT AS accepted_seq,
+                0::BIGINT AS ordinality
+            FROM claimed_canonical claimed
+            JOIN telemetry_ping_facts fact
+              ON fact.series_id = claimed.series_id
+             AND fact.source_checked_unix = claimed.source_checked_unix
+            UNION ALL
+            SELECT
+                raw.series_id,
+                raw.source_checked_unix,
+                raw.checked_unix,
+                raw.status,
+                raw.latency_avg_ms,
+                raw.loss_ratio,
+                raw.reason,
+                1::INTEGER AS source_priority,
+                raw.accepted_seq,
+                raw.ordinality
+            FROM claimed_canonical claimed
+            JOIN raw_evidence raw
+              ON raw.series_id = claimed.series_id
+             AND raw.source_checked_unix = claimed.source_checked_unix
+             AND raw.accepted_seq <= $2
+        ), predecessor AS MATERIALIZED (
+            SELECT DISTINCT ON (series_id, source_checked_unix) *
+            FROM predecessor_candidates
+            ORDER BY series_id, source_checked_unix,
+                     source_priority DESC, accepted_seq DESC, ordinality DESC
+        ), touched AS MATERIALIZED (
+            SELECT DISTINCT claimed.series_id
+            FROM claimed_canonical claimed
+            LEFT JOIN predecessor prior
+              ON prior.series_id = claimed.series_id
+             AND prior.source_checked_unix = claimed.source_checked_unix
+            WHERE prior.series_id IS NULL
+               OR ROW(
+                    prior.checked_unix, prior.status, prior.latency_avg_ms,
+                    prior.loss_ratio, prior.reason
+                  ) IS DISTINCT FROM ROW(
+                    claimed.checked_unix, claimed.status,
+                    claimed.latency_avg_ms, claimed.loss_ratio, claimed.reason
+                  )
+        ), window_bounds AS MATERIALIZED (
+            SELECT
+                touched.series_id,
+                GREATEST(
+                    COALESCE(
+                        extract(epoch FROM current.latest_checked_at)::BIGINT,
+                        0
+                    ),
+                    COALESCE(max(raw.checked_unix), 0)
+                ) AS latest_checked_unix
+            FROM touched
+            LEFT JOIN telemetry_ping_current current
+              ON current.series_id = touched.series_id
+            LEFT JOIN raw_evidence raw
+              ON raw.series_id = touched.series_id
+            GROUP BY touched.series_id, current.latest_checked_at
+        ), evidence AS MATERIALIZED (
+            SELECT
+                fact.series_id,
+                fact.evidence_id,
+                0::BIGINT AS accepted_seq,
+                fact.observed_at AS accepted_at,
+                0::BIGINT AS ordinality,
+                fact.source_checked_unix,
+                fact.checked_unix,
+                fact.status,
+                fact.latency_avg_ms,
+                fact.loss_ratio,
+                fact.reason,
+                0::INTEGER AS source_priority
+            FROM window_bounds bounds
+            JOIN telemetry_ping_facts fact
+              ON fact.series_id = bounds.series_id
+             AND fact.checked_unix
+                    >= bounds.latest_checked_unix - ($4::BIGINT - 1)
+             AND fact.checked_unix <= bounds.latest_checked_unix
+            UNION ALL
+            SELECT
+                raw.series_id,
+                raw.evidence_id,
+                raw.accepted_seq,
+                raw.accepted_at,
+                raw.ordinality,
+                raw.source_checked_unix,
+                raw.checked_unix,
+                raw.status,
+                raw.latency_avg_ms,
+                raw.loss_ratio,
+                raw.reason,
+                1::INTEGER AS source_priority
+            FROM raw_evidence raw
+            JOIN touched USING (series_id)
+        ), canonical AS MATERIALIZED (
+            SELECT DISTINCT ON (series_id, source_checked_unix) *
+            FROM evidence
+            ORDER BY series_id, source_checked_unix,
+                     source_priority DESC, accepted_seq DESC, ordinality DESC
+        ), effective_bounds AS MATERIALIZED (
+            SELECT series_id, max(checked_unix) AS latest_checked_unix
+            FROM canonical
+            GROUP BY series_id
+        ), windowed AS MATERIALIZED (
+            SELECT canonical.*
+            FROM canonical
+            JOIN effective_bounds USING (series_id)
+            WHERE canonical.checked_unix
+                    >= effective_bounds.latest_checked_unix - ($4::BIGINT - 1)
+              AND canonical.checked_unix <= effective_bounds.latest_checked_unix
+        ), summarized AS (
+            SELECT
+                series_id,
+                (array_agg(status ORDER BY checked_unix DESC,
+                    source_checked_unix DESC, source_priority DESC,
+                    accepted_seq DESC, ordinality DESC))[1] AS latest_status,
+                (array_agg(latency_avg_ms ORDER BY checked_unix DESC,
+                    source_checked_unix DESC, source_priority DESC,
+                    accepted_seq DESC, ordinality DESC))[1] AS latency_avg_ms,
+                avg(loss_ratio)::DOUBLE PRECISION AS rolling_loss_ratio,
+                (array_agg(left(reason, 512) ORDER BY checked_unix DESC,
+                    source_checked_unix DESC, source_priority DESC,
+                    accepted_seq DESC, ordinality DESC))[1] AS latest_reason,
+                to_timestamp(max(checked_unix)) AS latest_checked_at
+            FROM windowed
+            GROUP BY series_id
+        )
+        INSERT INTO telemetry_ping_current AS current (
+            series_id, latest_status, latency_avg_ms,
+            rolling_loss_ratio, latest_reason, latest_checked_at, updated_at
+        )
+        SELECT series_id, latest_status, latency_avg_ms,
+               rolling_loss_ratio, latest_reason, latest_checked_at,
+               clock_timestamp()
+        FROM summarized
+        ON CONFLICT (series_id) DO UPDATE SET
+            latest_status = EXCLUDED.latest_status,
+            latency_avg_ms = EXCLUDED.latency_avg_ms,
+            rolling_loss_ratio = EXCLUDED.rolling_loss_ratio,
+            latest_reason = EXCLUDED.latest_reason,
+            latest_checked_at = EXCLUDED.latest_checked_at,
+            updated_at = clock_timestamp()
+        WHERE ROW(
+            current.latest_status,
+            current.latency_avg_ms,
+            current.rolling_loss_ratio,
+            current.latest_reason,
+            current.latest_checked_at
+        ) IS DISTINCT FROM ROW(
+            EXCLUDED.latest_status,
+            EXCLUDED.latency_avg_ms,
+            EXCLUDED.rolling_loss_ratio,
+            EXCLUDED.latest_reason,
+            EXCLUDED.latest_checked_at
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(after_seq)
+    .bind(through_seq)
+    .bind(CURRENT_PING_LOSS_WINDOW_SECS)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn projected_ping_target_ids(samples: &[StoredTelemetryProjection]) -> Result<Vec<Uuid>> {
+    let mut target_ids = HashSet::new();
+    for sample in samples {
+        for result in &sample.metrics.ping_results {
+            target_ids.insert(
+                Uuid::parse_str(&result.target_id)
+                    .context("projected Ping target identity is not a UUID")?,
+            );
+        }
+    }
+    let mut target_ids = target_ids.into_iter().collect::<Vec<_>>();
+    target_ids.sort_unstable();
+    Ok(target_ids)
+}
+
+async fn lock_projected_ping_targets_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    target_ids: &[Uuid],
+) -> Result<()> {
+    if target_ids.is_empty() {
+        return Ok(());
+    }
+    let locked_ids = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT target.id
+        FROM ping_targets target
+        WHERE target.id = ANY($1::UUID[])
+        ORDER BY target.id
+        FOR SHARE OF target
+        "#,
+    )
+    .bind(target_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    debug_assert!(locked_ids.windows(2).all(|pair| pair[0] < pair[1]));
+    Ok(())
+}
+
+async fn policy_traffic_minute_cursor_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(
+        r#"
+        SELECT materialized_seq
+        FROM traffic_counter_minute_heads
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn load_policy_traffic_frontier_state_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    projected_seq: i64,
+) -> Result<(i64, Option<ProjectedTrafficAccountingFrontier>)> {
+    let row = sqlx::query(
+        r#"
+        SELECT policy_traffic_materialized_seq, policy_traffic_frontier
+        FROM telemetry_projection_heads
+        WHERE client_id = $1
+          AND projected_seq = $2
+        "#,
+    )
+    .bind(client_id)
+    .bind(projected_seq)
+    .fetch_one(&mut **tx)
+    .await
+    .context("active policy traffic frontier lost its projection owner")?;
+    Ok((
+        row.try_get("policy_traffic_materialized_seq")?,
+        row.try_get::<Option<SqlJson<ProjectedTrafficAccountingFrontier>>, _>(
+            "policy_traffic_frontier",
+        )?
+        .map(|frontier| frontier.0),
+    ))
+}
+
+async fn load_policy_traffic_replay_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    after_seq: i64,
+    through_seq: i64,
+) -> Result<Vec<ProjectedTrafficCounterOverlay>> {
+    anyhow::ensure!(
+        through_seq >= after_seq,
+        "policy traffic replay cursor is inverted"
+    );
+    if through_seq == after_seq {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT accepted_seq, payload,
+               network_admission_mask, tunnel_admission_mask
+        FROM telemetry_samples
+        WHERE client_id = $1
+          AND accepted_seq > $2
+          AND accepted_seq <= $3
+        ORDER BY accepted_seq
+        FOR SHARE
+        "#,
+    )
+    .bind(client_id)
+    .bind(after_seq)
+    .bind(through_seq)
+    .fetch_all(&mut **tx)
+    .await?;
+    let expected = usize::try_from(through_seq - after_seq)
+        .context("policy traffic replay cardinality is exhausted")?;
+    anyhow::ensure!(
+        rows.len() == expected,
+        "policy traffic replay source sequence is not contiguous"
+    );
+    rows.into_iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let offset =
+                i64::try_from(offset).context("policy traffic replay offset is exhausted")?;
+            anyhow::ensure!(
+                row.try_get::<i64, _>("accepted_seq")?
+                    == after_seq
+                        .checked_add(offset)
+                        .and_then(|seq| seq.checked_add(1))
+                        .context("policy traffic replay sequence is exhausted")?,
+                "policy traffic replay source sequence is not contiguous"
+            );
+            let metrics = row.try_get::<SqlJson<AgentMetrics>, _>("payload")?.0;
+            projected_traffic_counter_overlay_from_masks(
+                &metrics,
+                &row.try_get::<Vec<u8>, _>("network_admission_mask")?,
+                &row.try_get::<Vec<u8>, _>("tunnel_admission_mask")?,
+            )
+        })
+        .collect()
+}
+
+async fn rebase_policy_traffic_frontier_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    context: &mut ProjectedTrafficAccountingContext,
+    client_id: &str,
+    through_seq: i64,
+    as_of: DateTime<Utc>,
+    metrics: &AgentMetrics,
+    projected_streams: &HashSet<TrafficStreamIdentity>,
+) -> Result<(
+    i64,
+    TrafficAccountingRecord,
+    ProjectedTrafficAccountingFrontier,
+)> {
+    // The minute cursor and its normalized stream rows commit atomically but
+    // are read at READ COMMITTED statement boundaries.  Retry only if that
+    // exact cursor advances across the snapshot/replay reads; no stream lock or
+    // fleet-wide owner is introduced.
+    loop {
+        let materialized_seq = policy_traffic_minute_cursor_in_tx(tx, client_id).await?;
+        anyhow::ensure!(
+            materialized_seq <= through_seq,
+            "policy traffic minute cursor is ahead of projected telemetry"
+        );
+        refresh_projected_traffic_accounting_durable_streams_in_tx(tx, context).await?;
+        let overlays =
+            load_policy_traffic_replay_in_tx(tx, client_id, materialized_seq, through_seq).await?;
+        let (traffic, frontier) = rebase_projected_traffic_accounting_frontier_in_tx(
+            tx,
+            context,
+            as_of,
+            metrics,
+            projected_streams,
+            &overlays,
         )
         .await?;
-        let event_id = format!(
-            "vps.status_changed:{client_id}:{to_status}:{}",
-            Uuid::new_v4()
-        );
-        self.record_webhook_event(WebhookEventCandidate {
-            kind: "vps.status_changed".to_string(),
-            event_id,
-            event_predicates: vec![
-                format!("vps.status.{to_status}"),
-                format!("vps.status.become_{to_status}"),
-            ],
-            subject_client_ids: vec![client_id.to_string()],
-            payload: serde_json::json!({
-                "event": {
-                    "kind": "vps.status_changed",
-                    "from_status": from_status,
-                    "to_status": to_status,
-                    "reason": reason,
-                },
-                "vps_status": {
-                    "client_id": client_id,
-                    "from_status": from_status,
-                    "to_status": to_status,
-                    "reason": reason,
-                    "metadata": metadata,
-                }
-            }),
-            actor_id: None,
-        })
+        if policy_traffic_minute_cursor_in_tx(tx, client_id).await? == materialized_seq {
+            return Ok((materialized_seq, traffic, frontier));
+        }
+    }
+}
+
+async fn project_next_visible_telemetry_suffix(
+    pool: &sqlx::PgPool,
+) -> Result<TelemetryProjectionPage> {
+    let mut tx = pool.begin().await?;
+    let claim = match try_claim_telemetry_projection_in_tx(&mut tx).await? {
+        TelemetryProjectionClaimAttempt::Claimed(claim) => claim,
+        TelemetryProjectionClaimAttempt::Contended => {
+            tx.rollback().await?;
+            return Ok(TelemetryProjectionPage {
+                contended: true,
+                ..TelemetryProjectionPage::default()
+            });
+        }
+        TelemetryProjectionClaimAttempt::Idle => {
+            tx.rollback().await?;
+            return Ok(TelemetryProjectionPage::default());
+        }
+    };
+    sqlx::query("SAVEPOINT telemetry_projection_attempt")
+        .execute(&mut *tx)
         .await?;
-        Ok(())
+    match project_claimed_telemetry_suffix_in_tx(&mut tx, &claim).await {
+        Ok(()) => {
+            sqlx::query("RELEASE SAVEPOINT telemetry_projection_attempt")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            wake_telemetry_policy_activation_after_projection();
+            Ok(TelemetryProjectionPage {
+                claimed: 1,
+                completed: 1,
+                contended: false,
+            })
+        }
+        Err(error) => {
+            // Roll back every derived row while retaining the exact-next
+            // raw-journal owner. The failure marker is therefore ordered against
+            // every other projector and additionally CAS-guards the captured
+            // projected cursor.
+            sqlx::query("ROLLBACK TO SAVEPOINT telemetry_projection_attempt")
+                .execute(&mut *tx)
+                .await?;
+            record_failed_telemetry_projection_in_tx(&mut tx, &claim, &error).await?;
+            sqlx::query("RELEASE SAVEPOINT telemetry_projection_attempt")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            warn!(client_id = %claim.client_id, %error, "deferred telemetry projection failed");
+            Ok(TelemetryProjectionPage {
+                claimed: 1,
+                completed: 0,
+                contended: false,
+            })
+        }
+    }
+}
+
+async fn project_claimed_telemetry_suffix_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &TelemetryProjectionClaim,
+) -> Result<()> {
+    let client_id = &claim.client_id;
+    let samples =
+        load_telemetry_projection_suffix_in_tx(tx, client_id, claim.after_seq, claim.through_seq)
+            .await?;
+    let latest_sample = samples
+        .iter()
+        .max_by_key(|sample| (sample.observed_at, sample.accepted_seq))
+        .context("telemetry projection suffix is empty")?;
+    let retention_minute_ready_at_unix = samples
+        .iter()
+        .try_fold(None, |earliest, sample| {
+            let ready_at = telemetry_minute_ready_at_unix(sample.observed_at)?;
+            Ok::<_, anyhow::Error>(Some(
+                earliest.map_or(ready_at, |earliest: i64| earliest.min(ready_at)),
+            ))
+        })?
+        .context("telemetry projection suffix has no natural-minute deadline")?;
+    let network_interface_policy = load_network_interface_policy_in_tx(tx, client_id).await?;
+    let current_tunnel_plans =
+        load_current_tunnel_plan_snapshot_in_tx(tx, client_id, &samples).await?;
+    let network_admission = samples
+        .iter()
+        .map(|sample| {
+            classify_projected_network_admission(
+                &sample.metrics,
+                &network_interface_policy,
+                &current_tunnel_plans.endpoints,
+                &current_tunnel_plans.managed_endpoint_interfaces,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Canonical acceptance is already synchronously durable. Everything below,
+    // including the projected cursor and NOTIFY, is one replayable client-prefix
+    // transaction: a crash keeps the whole suffix or none of it.
+    sqlx::query("SET LOCAL synchronous_commit = OFF")
+        .execute(&mut **tx)
+        .await?;
+    let published_generation = claim
+        .published_generation
+        .checked_add(1)
+        .context("telemetry projection generation is exhausted")?;
+    sqlx::query("SELECT set_config('vpsman.telemetry_published_generation', $1, TRUE)")
+        .bind(published_generation.to_string())
+        .execute(&mut **tx)
+        .await?;
+    // Raw envelopes keep the complete reported interface vector for the
+    // bounded detail window. Publish their per-interface admission masks for
+    // the complete claimed suffix in one setwise update before advancing the
+    // projected cursor.
+    update_projected_network_admission_masks_in_tx(tx, &samples, &network_admission).await?;
+    // Ping current state is a live projection, not a closed-minute rollup.
+    // Exact target SHARE locks serialize this suffix only with topology
+    // mutations of the same identities. The following READ COMMITTED
+    // statements then see the committed generation/assignment boundary and
+    // cannot resurrect current rows after a removal. Suffixes without Ping
+    // evidence pay no topology query.
+    let ping_target_ids = projected_ping_target_ids(&samples)?;
+    if !ping_target_ids.is_empty() {
+        lock_projected_ping_targets_in_tx(tx, &ping_target_ids).await?;
+        project_ping_current_in_tx(tx, client_id, claim.after_seq, claim.through_seq).await?;
+    }
+    // Automatic tunnel current state shares the same low-latency projection
+    // boundary. Validate and publish the complete suffix setwise; only compact
+    // raw locators are written here and the closed-minute consumer owns its
+    // historical aggregates.
+    let automatic_reachability_samples = samples
+        .iter()
+        .map(|sample| AutomaticTunnelReachabilitySample {
+            sample_id: sample.id,
+            accepted_seq: sample.accepted_seq,
+            observations: &sample.metrics.tunnel_reachability,
+        })
+        .collect::<Vec<_>>();
+    record_postgres_automatic_tunnel_reachability_suffix_in_tx(
+        tx,
+        client_id,
+        &current_tunnel_plans.automatic_reachability,
+        &automatic_reachability_samples,
+    )
+    .await?;
+    // Alert policies consume the already-owned canonical projection. The one
+    // rule-load statement also applies the effective activation generation;
+    // pending first-enable work therefore adds no evidence/accounting writes.
+    let telemetry_policy_rules =
+        load_policy_evidence_rule_set_in_tx(tx, "telemetry.combined").await?;
+    let mut policy_traffic_context = if telemetry_policy_rules.is_empty() {
+        None
+    } else {
+        Some(
+            load_projected_traffic_accounting_context_in_tx(
+                tx,
+                client_id,
+                &current_tunnel_plans.managed_endpoint_interfaces,
+            )
+            .await?,
+        )
+    };
+    // Disabled policy projection never reads or deserializes stale frontier
+    // state.  Its already-required final head update clears that non-business
+    // cache, so a later enable rebuilds from the authoritative minute/raw
+    // owners.
+    let (mut policy_traffic_materialized_seq, mut policy_traffic_frontier) =
+        if policy_traffic_context.is_some() {
+            load_policy_traffic_frontier_state_in_tx(tx, client_id, claim.after_seq).await?
+        } else {
+            (0, None)
+        };
+    if policy_traffic_context.is_some() {
+        let current_materialized_seq = policy_traffic_minute_cursor_in_tx(tx, client_id).await?;
+        if current_materialized_seq != policy_traffic_materialized_seq {
+            policy_traffic_materialized_seq = current_materialized_seq;
+            policy_traffic_frontier = None;
+        }
+    }
+    for (sample, admission) in samples.iter().zip(&network_admission) {
+        sqlx::query("SELECT set_config('vpsman.telemetry_accepted_at', $1, TRUE)")
+            .bind(sample.accepted_at.to_rfc3339())
+            .execute(&mut **tx)
+            .await?;
+        // Resource, Ping, and traffic/network histories are independent
+        // natural-minute consumers of this immutable projected journal. The
+        // projector publishes their source and never acquires their cursor or
+        // derived-row owners.
+        let tunnel_alert_revision = upsert_postgres_telemetry_tunnels(
+            tx,
+            client_id,
+            &sample.metrics,
+            admission,
+            sample.accepted_at,
+        )
+        .await?;
+        if let Some(snapshot) = sample.metrics.port_forwarding.as_ref() {
+            let mut snapshot = snapshot.clone();
+            snapshot.observed_unix = sample.metrics.observed_unix;
+            record_postgres_port_forward_runtime_snapshot_in_tx(tx, client_id, &snapshot).await?;
+        }
+
+        // Plan mutations own tunnel alert source entry/exit. A client with no
+        // current endpoint has no valid tunnel.adapter/tunnel.traffic identity,
+        // so the normal sample path must not repeat an empty reconciliation.
+        if tunnel_alert_revision && !current_tunnel_plans.endpoints.is_empty() {
+            reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                tx,
+                std::slice::from_ref(&client_id.to_string()),
+            )
+            .await?;
+        }
+
+        if !telemetry_policy_rules.is_empty() {
+            let observed_at = Utc
+                .timestamp_opt(sample.metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
+                .single()
+                .context("telemetry observed timestamp is invalid")?;
+            let traffic_overlay =
+                projected_traffic_counter_overlay(observed_at, &sample.metrics, admission);
+            let projected_streams = projected_traffic_streams(&traffic_overlay);
+            let policy_traffic_context = policy_traffic_context
+                .as_mut()
+                .context("active telemetry policy has no traffic context")?;
+            let advanced = policy_traffic_frontier
+                .as_ref()
+                .map(|frontier| {
+                    advance_projected_traffic_accounting_frontier(
+                        &*policy_traffic_context,
+                        observed_at,
+                        &sample.metrics,
+                        &projected_streams,
+                        &traffic_overlay,
+                        frontier,
+                    )
+                })
+                .transpose()?
+                .flatten();
+            let (traffic, next_frontier) = if let Some(advanced) = advanced {
+                advanced
+            } else {
+                let (materialized_seq, traffic, frontier) = rebase_policy_traffic_frontier_in_tx(
+                    tx,
+                    policy_traffic_context,
+                    client_id,
+                    sample.accepted_seq,
+                    observed_at,
+                    &sample.metrics,
+                    &projected_streams,
+                )
+                .await?;
+                policy_traffic_materialized_seq = materialized_seq;
+                (traffic, frontier)
+            };
+            policy_traffic_frontier = Some(next_frontier);
+            record_combined_telemetry_policy_evidence_in_tx(
+                tx,
+                client_id,
+                sample.gateway_session_id,
+                sample.process_incarnation_id,
+                sample.telemetry_seq,
+                sample.id,
+                sample.reported_observed_unix,
+                &sample.metrics,
+                &traffic,
+                &telemetry_policy_rules,
+            )
+            .await?;
+        }
+    }
+
+    let (committed_generation, sample_prune_ready_at_unix): (i64, Option<i64>) = sqlx::query_as(
+        r#"
+        WITH prior_current AS MATERIALIZED (
+            SELECT
+                current_sample.id AS sample_id,
+                current_sample.observed_at,
+                current_sample.accepted_seq
+            FROM telemetry_projection_heads head
+            LEFT JOIN telemetry_samples current_sample
+              ON current_sample.id = head.latest_projected_sample_id
+             AND current_sample.client_id = head.client_id
+            WHERE head.client_id = $1
+        )
+        UPDATE telemetry_projection_heads AS head
+        SET projected_seq = $3,
+            latest_projected_sample_id = CASE
+                WHEN prior_current.sample_id IS NULL
+                  OR (prior_current.observed_at, prior_current.accepted_seq)
+                        < ($5::timestamptz, $6::bigint)
+                THEN $7
+                ELSE head.latest_projected_sample_id
+            END,
+            published_generation = $4,
+            projected_at = clock_timestamp(),
+            projection_retry_at = NULL,
+            projection_attempts = 0,
+            projection_error = NULL,
+            policy_traffic_materialized_seq = CASE WHEN $8::boolean
+                THEN $9 ELSE 0 END,
+            policy_traffic_frontier = CASE WHEN $8::boolean
+                THEN $10 ELSE NULL::jsonb END
+        FROM prior_current
+        WHERE head.client_id = $1
+          AND head.projected_seq = $2
+          AND head.accepted_seq >= $3
+        RETURNING
+            head.published_generation,
+            CASE
+                WHEN prior_current.sample_id IS NOT NULL
+                 AND head.latest_projected_sample_id
+                        IS DISTINCT FROM prior_current.sample_id
+                THEN ceil(extract(epoch FROM (
+                    prior_current.observed_at
+                        + make_interval(days => $11)
+                        + interval '1 microsecond'
+                )))::bigint
+                ELSE NULL::bigint
+            END AS sample_prune_ready_at_unix
+        "#,
+    )
+    .bind(client_id)
+    .bind(claim.after_seq)
+    .bind(claim.through_seq)
+    .bind(published_generation)
+    .bind(latest_sample.observed_at)
+    .bind(latest_sample.accepted_seq)
+    .bind(latest_sample.id)
+    .bind(policy_traffic_context.is_some())
+    .bind(policy_traffic_materialized_seq)
+    .bind(
+        policy_traffic_frontier
+            .as_ref()
+            .map(|frontier| SqlJson(frontier.clone())),
+    )
+    .bind(DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS)
+    .fetch_one(&mut **tx)
+    .await?;
+    let notification = serde_json::json!({
+        "client_id": client_id,
+        "generation": committed_generation,
+        "projected_seq": claim.through_seq,
+        "retention_minute_ready_at_unix": retention_minute_ready_at_unix,
+        "sample_prune_ready_at_unix": sample_prune_ready_at_unix,
+    })
+    .to_string();
+    sqlx::query("SELECT pg_notify('vpsman_telemetry_projection', $1)")
+        .bind(notification)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn load_network_interface_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+) -> Result<NetworkInterfacePolicy> {
+    let stored = sqlx::query_scalar::<_, SqlJson<Value>>(
+        r#"
+        SELECT value_json
+        FROM vps_rule_values
+        WHERE client_id = $1
+          AND key = 'network.interfaces'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    NetworkInterfacePolicy::from_rule_json(stored.as_ref().map(|value| &value.0))
+        .map_err(anyhow::Error::msg)
+}
+
+#[derive(Debug, Default)]
+struct CurrentTunnelPlanSnapshot {
+    endpoints: HashSet<ProjectedTelemetryTunnelIdentity>,
+    managed_endpoint_interfaces: HashSet<String>,
+    automatic_reachability: HashMap<Uuid, FrozenAutomaticTunnelPlan>,
+}
+
+fn referenced_tunnel_plan_ids(samples: &[StoredTelemetryProjection]) -> Vec<Uuid> {
+    let mut plan_ids = samples
+        .iter()
+        .flat_map(|sample| {
+            sample
+                .metrics
+                .tunnels
+                .iter()
+                .filter_map(|tunnel| tunnel.plan_id.as_deref())
+                .filter_map(|plan_id| Uuid::parse_str(plan_id.trim()).ok())
+                .chain(
+                    sample
+                        .metrics
+                        .tunnel_reachability
+                        .iter()
+                        .map(|observation| observation.plan_id),
+                )
+        })
+        .collect::<Vec<_>>();
+    plan_ids.sort_unstable();
+    plan_ids.dedup();
+    plan_ids
+}
+
+async fn load_current_tunnel_plan_snapshot_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    samples: &[StoredTelemetryProjection],
+) -> Result<CurrentTunnelPlanSnapshot> {
+    let plan_ids = referenced_tunnel_plan_ids(samples);
+    load_current_tunnel_plan_snapshot_for_ids_in_tx(tx, client_id, &plan_ids).await
+}
+
+async fn load_current_tunnel_plan_snapshot_for_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    plan_ids: &[Uuid],
+) -> Result<CurrentTunnelPlanSnapshot> {
+    // The projection client is key-share-locked before any plan. This remains
+    // compatible with telemetry acceptance's NO KEY UPDATE liveness write,
+    // while plan mutations take endpoint-client UPDATE locks before plan rows.
+    // That preserves their lock order instead of forming a client/plan
+    // inversion. Plan SHARE blocks
+    // every identity-defining update (including non-key fields such as
+    // enabled/name/kind/plan/endpoints) until this projection commits. The
+    // predicate is the union of every current endpoint owned by this client
+    // and the caller's sorted referenced IDs. The former is the authority for
+    // absent/default host-interface collision admission; the latter also
+    // stabilizes rejected evidence. UUID order gives concurrent multi-plan
+    // suffixes one deterministic plan-lock order.
+    let rows = sqlx::query(
+        r#"
+        WITH projection_client AS MATERIALIZED (
+            SELECT client.id
+            FROM clients client
+            WHERE client.id = $2
+            FOR KEY SHARE OF client
+        ), selected_plan_ids AS MATERIALIZED (
+            SELECT requested.plan_id AS id
+            FROM projection_client
+            CROSS JOIN unnest($1::UUID[]) requested(plan_id)
+            UNION
+            SELECT plan.id
+            FROM projection_client
+            JOIN tunnel_plans plan
+              ON plan.left_client_id = projection_client.id
+            WHERE plan.enabled IS TRUE
+              AND plan.deleted_at IS NULL
+            UNION
+            SELECT plan.id
+            FROM projection_client
+            JOIN tunnel_plans plan
+              ON plan.right_client_id = projection_client.id
+            WHERE plan.enabled IS TRUE
+              AND plan.deleted_at IS NULL
+        )
+        SELECT
+            plan.id,
+            plan.name,
+            plan.kind,
+            plan.enabled,
+            plan.deleted_at IS NULL AS not_deleted,
+            plan.plan,
+            plan.left_client_id,
+            plan.right_client_id
+        FROM selected_plan_ids selected
+        JOIN tunnel_plans plan ON plan.id = selected.id
+        ORDER BY plan.id
+        FOR SHARE OF plan
+        "#,
+    )
+    .bind(plan_ids)
+    .bind(client_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut snapshot = CurrentTunnelPlanSnapshot {
+        endpoints: HashSet::with_capacity(rows.len().saturating_mul(2)),
+        managed_endpoint_interfaces: HashSet::with_capacity(rows.len()),
+        automatic_reachability: HashMap::with_capacity(rows.len()),
+    };
+    for row in rows {
+        let plan_id: Uuid = row.try_get("id")?;
+        let plan_name: String = row.try_get("name")?;
+        let kind: String = row.try_get("kind")?;
+        let plan = row
+            .try_get::<SqlJson<vpsman_common::TunnelPlan>, _>("plan")?
+            .0;
+        let interface = plan.interface_name.clone();
+        let left_client_id: String = row.try_get("left_client_id")?;
+        let right_client_id: String = row.try_get("right_client_id")?;
+        let current_endpoint = row.try_get::<bool, _>("enabled")?
+            && row.try_get::<bool, _>("not_deleted")?
+            && (left_client_id == client_id || right_client_id == client_id);
+        if !current_endpoint {
+            continue;
+        }
+        snapshot
+            .managed_endpoint_interfaces
+            .insert(interface.clone());
+        if left_client_id == client_id {
+            snapshot.endpoints.insert(ProjectedTelemetryTunnelIdentity {
+                plan_id,
+                plan_name: plan_name.clone(),
+                interface: interface.clone(),
+                kind: kind.clone(),
+                endpoint_side: "left".to_string(),
+                peer_client_id: right_client_id.clone(),
+            });
+        }
+        if right_client_id == client_id {
+            snapshot.endpoints.insert(ProjectedTelemetryTunnelIdentity {
+                plan_id,
+                plan_name: plan_name.clone(),
+                interface: interface.clone(),
+                kind: kind.clone(),
+                endpoint_side: "right".to_string(),
+                peer_client_id: left_client_id.clone(),
+            });
+        }
+        snapshot.automatic_reachability.insert(
+            plan_id,
+            FrozenAutomaticTunnelPlan::new(
+                plan_id,
+                plan_name,
+                left_client_id,
+                right_client_id,
+                plan,
+            ),
+        );
+    }
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+pub(crate) async fn lock_current_tunnel_plan_snapshot_for_test(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    plan_ids: &[Uuid],
+) -> Result<usize> {
+    let mut plan_ids = plan_ids.to_vec();
+    plan_ids.sort_unstable();
+    plan_ids.dedup();
+    Ok(
+        load_current_tunnel_plan_snapshot_for_ids_in_tx(tx, client_id, &plan_ids)
+            .await?
+            .automatic_reachability
+            .len(),
+    )
+}
+
+fn classify_projected_network_admission(
+    metrics: &AgentMetrics,
+    policy: &NetworkInterfacePolicy,
+    current_plan_endpoints: &HashSet<ProjectedTelemetryTunnelIdentity>,
+    managed_endpoint_interfaces: &HashSet<String>,
+) -> ProjectedNetworkAdmission {
+    let current_tunnel = metrics
+        .tunnels
+        .iter()
+        .map(|tunnel| {
+            projected_telemetry_tunnel_identity(tunnel)
+                .is_some_and(|identity| current_plan_endpoints.contains(&identity))
+        })
+        .collect::<Vec<_>>();
+    let network_admitted = metrics
+        .networks
+        .iter()
+        .map(|network| {
+            valid_telemetry_name(&network.interface)
+                && admitted_network_interface(
+                    policy,
+                    NetworkInterfaceSource::Host,
+                    &network.interface,
+                    managed_endpoint_interfaces,
+                )
+        })
+        .collect();
+    let tunnel_admitted = metrics
+        .tunnels
+        .iter()
+        .zip(&current_tunnel)
+        .map(|(tunnel, current)| {
+            *current
+                && admitted_network_interface(
+                    policy,
+                    NetworkInterfaceSource::Tunnel,
+                    &tunnel.interface,
+                    managed_endpoint_interfaces,
+                )
+        })
+        .collect();
+    ProjectedNetworkAdmission {
+        network_admitted,
+        tunnel_admitted,
+        current_tunnel,
+    }
+}
+
+async fn update_projected_network_admission_masks_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    samples: &[StoredTelemetryProjection],
+    admission: &[ProjectedNetworkAdmission],
+) -> Result<()> {
+    anyhow::ensure!(
+        samples.len() == admission.len(),
+        "telemetry projection admission suffix length mismatch"
+    );
+    let sample_ids = samples.iter().map(|sample| sample.id).collect::<Vec<_>>();
+    let stored_network_admission_masks = admission
+        .iter()
+        .map(ProjectedNetworkAdmission::network_mask)
+        .collect::<Vec<_>>();
+    let stored_tunnel_admission_masks = admission
+        .iter()
+        .map(ProjectedNetworkAdmission::tunnel_mask)
+        .collect::<Vec<_>>();
+    let updated = sqlx::query(
+        r#"
+        WITH desired AS MATERIALIZED (
+            SELECT sample_id, network_admission_mask, tunnel_admission_mask
+            FROM UNNEST(
+                $1::UUID[], $2::BYTEA[], $3::BYTEA[]
+            ) AS row(
+                sample_id, network_admission_mask, tunnel_admission_mask
+            )
+        )
+        UPDATE telemetry_samples sample
+        SET network_admission_mask = desired.network_admission_mask,
+            tunnel_admission_mask = desired.tunnel_admission_mask
+        FROM desired
+        WHERE sample.id = desired.sample_id
+        "#,
+    )
+    .bind(&sample_ids)
+    .bind(&stored_network_admission_masks)
+    .bind(&stored_tunnel_admission_masks)
+    .execute(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        updated.rows_affected() == samples.len() as u64,
+        "telemetry projection admission-mask suffix lost a canonical sample"
+    );
+    Ok(())
+}
+
+async fn record_failed_telemetry_projection_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &TelemetryProjectionClaim,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE telemetry_projection_heads
+        SET projection_attempts = projection_attempts + 1,
+            projection_retry_at = clock_timestamp() + interval '1 second',
+            projection_error = left($3, 2048)
+        WHERE client_id = $1 AND projected_seq = $2
+        "#,
+    )
+    .bind(&claim.client_id)
+    .bind(claim.after_seq)
+    .bind(format!("{error:#}"))
+    .execute(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        updated.rows_affected() == 1,
+        "telemetry projection failure cursor changed outside its client owner"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod telemetry_acceptance_clock_tests {
+    #[test]
+    fn canonical_time_is_chosen_by_the_sequence_owner_after_the_client_lock() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, acceptance) = source
+            .split_once("pub(crate) async fn record_telemetry_outcome")
+            .expect("telemetry acceptance path");
+        let (acceptance, _) = acceptance
+            .split_once("#[cfg(test)]\n    pub(crate) async fn record_telemetry")
+            .expect("telemetry acceptance boundary");
+        let client_lock = acceptance
+            .find("FOR NO KEY UPDATE OF client")
+            .expect("exact client acceptance lock");
+        let head_owner = acceptance
+            .find("WITH locked_head AS MATERIALIZED")
+            .expect("materialized telemetry-head owner");
+        let head_lock = head_owner
+            + acceptance[head_owner..]
+                .find("FOR NO KEY UPDATE")
+                .expect("exact telemetry-head lock");
+        let head_clock = head_lock
+            + acceptance[head_lock..]
+                .find("head.accepted_at, clock_timestamp()")
+                .expect("post-lock monotonic exact-head clock");
+        let timestamp_rebase = acceptance
+            .find("received_metrics.observed_unix = received_unix")
+            .expect("telemetry timestamp rebase");
+        assert!(
+            client_lock < head_owner
+                && head_owner < head_lock
+                && head_lock < head_clock
+                && head_clock < timestamp_rebase
+        );
+        assert!(!acceptance[..client_lock].contains("unix_now()"));
+    }
+}
+
+#[cfg(test)]
+mod telemetry_projector_scheduler_tests {
+    #[test]
+    fn projected_observation_wakes_at_its_exact_next_utc_minute() {
+        for (observed_unix, expected_ready_unix) in [(60, 120), (119, 120), (120, 180)] {
+            let observed_at = chrono::DateTime::<chrono::Utc>::from_timestamp(observed_unix, 0)
+                .expect("test timestamp");
+            assert_eq!(
+                super::telemetry_minute_ready_at_unix(observed_at).unwrap(),
+                expected_ready_unix
+            );
+        }
+    }
+
+    #[test]
+    fn durable_exact_owner_drives_the_single_worker_without_a_ready_fleet_scan() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, runtime) = source
+            .split_once("impl TelemetryProjectorRuntime")
+            .expect("telemetry projector runtime");
+        let (runtime, _) = runtime
+            .split_once("fn telemetry_projection_page_did_work")
+            .expect("telemetry projector runtime boundary");
+        assert!(runtime.contains("project_next_visible_telemetry_suffix(control_pool)"));
+        assert!(!runtime.contains("recoverable_telemetry_projection_clients"));
+        assert!(runtime.contains(".max_connections(1)"));
+        let (_, scheduler) = source
+            .split_once("async fn run_telemetry_projector_worker")
+            .expect("telemetry projector scheduler");
+        let (scheduler, _) = scheduler
+            .split_once("async fn try_claim_telemetry_projection_in_tx")
+            .expect("telemetry projector scheduler boundary");
+        assert!(!scheduler.contains("0..TELEMETRY_PROJECTOR_WORKERS"));
+        assert_eq!(
+            scheduler.matches("run_telemetry_projector_worker(").count(),
+            1
+        );
+        assert!(scheduler.contains("runtime.clone()"));
+        assert!(scheduler.contains("runtime.project_page()"));
+        assert!(scheduler.contains("telemetry_projector_wake().notified()"));
+        assert!(scheduler.contains("tokio::time::sleep(TELEMETRY_PROJECTOR_IDLE_POLL)"));
+        assert!(!scheduler.contains("run_telemetry_projector_recovery"));
+        assert!(!scheduler.contains("fetch_all"));
+        assert!(!scheduler.contains("VecDeque"));
+        assert!(!scheduler.contains("tokio::task::yield_now().await"));
+        assert!(!scheduler.contains("work_elapsed"));
+        assert!(!scheduler.contains("cooldown"));
+    }
+
+    #[test]
+    fn indexed_discovery_locks_one_exact_next_raw_owner_and_skips_failures() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, claim) = source
+            .split_once("async fn try_claim_telemetry_projection_in_tx")
+            .expect("telemetry projection claim");
+        let (claim, _) = claim
+            .split_once("async fn load_telemetry_projection_suffix_in_tx")
+            .expect("telemetry projection claim boundary");
+        assert!(claim.contains("head.projected_seq < head.accepted_seq"));
+        assert!(claim.contains("sample.accepted_seq = head.projected_seq + 1"));
+        assert!(!claim.contains("JOIN LATERAL"));
+        assert!(claim.contains("ORDER BY COALESCE(head.projected_at, '-infinity'::timestamptz)"));
+        assert!(claim.contains("head.client_id\n        LIMIT 1"));
+        assert!(claim.contains("FOR UPDATE OF sample SKIP LOCKED"));
+        assert!(
+            claim.find("LIMIT 1").expect("one-owner result bound")
+                < claim
+                    .find("FOR UPDATE OF sample SKIP LOCKED")
+                    .expect("outer exact-row owner")
+        );
+        assert!(claim.contains("head.projection_retry_at"));
+        assert_eq!(claim.matches(".fetch_optional(&mut **tx)").count(), 2);
+        assert!(!claim.contains(".fetch_all("));
+        assert!(claim.contains("revalidate_telemetry_projection_owner_in_tx"));
+        assert!(claim.contains("owner_seq != exact_next"));
+        assert!(claim.contains("TelemetryProjectionClaimAttempt::Contended"));
+        assert!(!claim.contains("pg_try_advisory_xact_lock"));
+        assert!(!claim.contains("FOR UPDATE OF head"));
+        assert!(!claim.contains("UPDATE telemetry_projection_heads"));
+        assert!(!claim.contains("projection_lease"));
+
+        let migration = include_str!("../../../../../migrations/0003_telemetry_core.sql");
+        assert!(migration.contains("CREATE INDEX telemetry_projection_heads_visible_pending_idx"));
+        assert!(migration.contains(
+            "(COALESCE(projected_at, '-infinity'::timestamp with time zone), client_id)"
+        ));
+        assert!(migration.contains("WHERE (projected_seq < accepted_seq)"));
+    }
+
+    #[test]
+    fn a_claim_fence_is_the_complete_oldest_natural_utc_minute() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, revalidation) = source
+            .split_once("pub(crate) async fn revalidate_telemetry_projection_owner_in_tx")
+            .expect("projection owner revalidation");
+        let (revalidation, _) = revalidation
+            .split_once("async fn load_telemetry_projection_suffix_in_tx")
+            .expect("projection owner revalidation boundary");
+        assert!(revalidation.contains("first_sample.accepted_seq = head.projected_seq + 1"));
+        assert!(revalidation.contains("date_trunc('minute', later.observed_at)"));
+        assert!(revalidation.contains("date_trunc('minute', first_sample.observed_at)"));
+        assert!(revalidation.contains("IS DISTINCT FROM"));
+        assert!(revalidation.contains("ORDER BY later.accepted_seq"));
+        assert!(revalidation.contains("LIMIT 1"));
+        assert!(revalidation.contains("), head.accepted_seq) AS through_seq"));
+        assert!(!revalidation.contains("batch"));
+        assert!(!revalidation.contains("suffix_limit"));
+    }
+
+    #[test]
+    fn a_stale_head_snapshot_never_claims_or_records_a_failure() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, projection) = source
+            .split_once("async fn project_next_visible_telemetry_suffix")
+            .expect("telemetry projection transaction");
+        let (projection, _) = projection
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("telemetry projection transaction boundary");
+        let retry = projection
+            .split_once("TelemetryProjectionClaimAttempt::Contended")
+            .expect("contended projection branch")
+            .1;
+        let retry = retry
+            .split_once("TelemetryProjectionClaimAttempt::Idle")
+            .expect("contended projection boundary")
+            .0;
+        assert!(retry.contains("tx.rollback().await?"));
+        assert!(retry.contains("contended: true"));
+        assert!(!retry.contains("record_failed_telemetry_projection_in_tx"));
+    }
+
+    #[test]
+    fn raw_samples_are_the_only_ordered_projection_journal() {
+        let migration = include_str!("../../../../../migrations/0003_telemetry_core.sql");
+        assert!(migration.contains("CREATE UNIQUE INDEX telemetry_samples_client_accepted_seq_idx"));
+        assert!(migration.contains("(client_id, accepted_seq)"));
+        assert!(migration.contains("accepted_seq bigint NOT NULL"));
+        assert!(!migration.contains("WHERE (accepted_seq IS NOT NULL)"));
+        assert!(migration.contains(
+            "telemetry_samples_client_latest_idx ON public.telemetry_samples USING btree (client_id, observed_at DESC, accepted_seq DESC)"
+        ));
+        assert!(migration.contains(
+            "telemetry_samples_retention_idx ON public.telemetry_samples USING btree (observed_at)"
+        ));
+    }
+
+    #[test]
+    fn a_failed_projection_rolls_back_derived_rows_but_records_one_owned_retry() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, orchestration) = source
+            .split_once("async fn project_next_visible_telemetry_suffix")
+            .expect("projection orchestration");
+        let (orchestration, _) = orchestration
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("projection orchestration boundary");
+        assert!(orchestration.contains("SAVEPOINT telemetry_projection_attempt"));
+        assert!(orchestration.contains("ROLLBACK TO SAVEPOINT telemetry_projection_attempt"));
+        assert!(orchestration.contains("record_failed_telemetry_projection_in_tx"));
+        assert!(orchestration.contains("tx.commit().await?"));
+
+        let (_, failure) = source
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("failed projection recorder");
+        let (failure, _) = failure
+            .split_once("#[cfg(test)]")
+            .expect("failed projection recorder boundary");
+        assert!(failure.contains("projection_retry_at = clock_timestamp() + interval '1 second'"));
+        assert!(failure.contains("client_id = $1 AND projected_seq = $2"));
+        assert!(failure.contains("updated.rows_affected() == 1"));
+    }
+
+    #[test]
+    fn one_atomic_suffix_preserves_order_and_publishes_once() {
+        let source = include_str!("repository_ingest.rs");
+        let (production, _) = source
+            .split_once("#[cfg(test)]\nmod telemetry_projector_scheduler_tests")
+            .expect("telemetry projector production boundary");
+        assert_eq!(
+            production
+                .matches("SET LOCAL synchronous_commit = OFF")
+                .count(),
+            1,
+            "canonical acceptance and failure recording must remain synchronous"
+        );
+        let (_, projection) = source
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("telemetry projection function");
+        let (projection, _) = projection
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("telemetry projection function boundary");
+        assert!(projection
+            .contains("for (sample, admission) in samples.iter().zip(&network_admission)"));
+        assert!(projection.contains("SET LOCAL synchronous_commit = OFF"));
+        assert!(projection.contains("UPDATE telemetry_projection_heads AS head"));
+        assert!(projection.contains("head.projected_seq = $2"));
+        assert!(projection.contains(".bind(claim.through_seq)"));
+        assert!(projection.contains("\"retention_minute_ready_at_unix\""));
+        assert!(projection.contains("WITH prior_current AS MATERIALIZED"));
+        assert!(projection.contains("head.latest_projected_sample_id"));
+        assert!(projection.contains("\"sample_prune_ready_at_unix\""));
+        assert!(projection.contains("+ make_interval(days => $11)"));
+        assert!(projection.contains("pg_notify('vpsman_telemetry_projection'"));
+        assert_eq!(
+            projection
+                .matches("UPDATE telemetry_projection_heads AS head")
+                .count(),
+            1
+        );
+        assert_eq!(
+            projection
+                .matches("pg_notify('vpsman_telemetry_projection'")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn telemetry_policy_consumer_is_loaded_once_and_absence_skips_its_hot_path() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, projection) = source
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("telemetry projection function");
+        let (projection, _) = projection
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("telemetry projection function boundary");
+        let load = projection
+            .find("load_policy_evidence_rule_set_in_tx(tx, \"telemetry.combined\")")
+            .expect("telemetry policy rule-set load");
+        let sample_loop = projection
+            .find("for (sample, admission) in samples.iter().zip(&network_admission)")
+            .expect("telemetry projection sample loop");
+        let empty_guard = projection
+            .find("if !telemetry_policy_rules.is_empty()")
+            .expect("telemetry policy empty-set guard");
+        let accounting = projection
+            .find("advance_projected_traffic_accounting_frontier(")
+            .expect("telemetry policy traffic frontier");
+        let overlay = projection
+            .find("projected_traffic_counter_overlay(observed_at")
+            .expect("typed current-event traffic overlay");
+        let evidence = projection
+            .find("record_combined_telemetry_policy_evidence_in_tx(")
+            .expect("combined telemetry policy evidence");
+
+        assert_eq!(
+            projection
+                .matches("load_policy_evidence_rule_set_in_tx(tx, \"telemetry.combined\")")
+                .count(),
+            1
+        );
+        assert!(!projection.contains("lock_postgres_traffic_counter_streams"));
+        assert!(load < sample_loop);
+        assert!(sample_loop < empty_guard);
+        assert!(empty_guard < overlay);
+        assert!(overlay < accounting);
+        assert!(empty_guard < accounting);
+        assert!(accounting < evidence);
+    }
+
+    #[test]
+    fn disabled_policy_projection_never_reads_a_frontier_and_clears_it_atomically() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, revalidate) = source
+            .split_once("pub(crate) async fn revalidate_telemetry_projection_owner_in_tx")
+            .expect("projection owner revalidation");
+        let (revalidate, _) = revalidate
+            .split_once("async fn load_telemetry_projection_suffix_in_tx")
+            .expect("projection owner revalidation boundary");
+        assert!(!revalidate.contains("policy_traffic_frontier"));
+        assert!(!revalidate.contains("policy_traffic_materialized_seq"));
+
+        let (_, projection) = source
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("telemetry projection function");
+        let (projection, _) = projection
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("telemetry projection function boundary");
+        let context_guard = projection
+            .find("if telemetry_policy_rules.is_empty()")
+            .expect("active policy context guard");
+        let frontier_read = projection
+            .find("load_policy_traffic_frontier_state_in_tx")
+            .expect("active policy frontier read");
+        assert!(context_guard < frontier_read);
+        assert!(projection.contains("THEN $9 ELSE 0 END"));
+        assert!(projection.contains("THEN $10 ELSE NULL::jsonb END"));
+    }
+
+    #[test]
+    fn policy_traffic_frontier_rebases_under_a_stable_minute_cursor_and_commits_with_cas() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, rebase) = source
+            .split_once("async fn rebase_policy_traffic_frontier_in_tx")
+            .expect("policy traffic rebase");
+        let (rebase, _) = rebase
+            .split_once("async fn project_next_visible_telemetry_suffix")
+            .expect("policy traffic rebase boundary");
+        assert_eq!(
+            rebase.matches("policy_traffic_minute_cursor_in_tx").count(),
+            2
+        );
+        assert!(rebase.contains("refresh_projected_traffic_accounting_durable_streams_in_tx"));
+        assert!(rebase.contains("load_policy_traffic_replay_in_tx"));
+        assert!(rebase.contains("rebase_projected_traffic_accounting_frontier_in_tx"));
+
+        let (_, projection) = source
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("telemetry projection function");
+        let (projection, _) = projection
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("telemetry projection function boundary");
+        assert!(projection.contains("policy_traffic_materialized_seq = CASE"));
+        assert!(projection.contains("policy_traffic_frontier = CASE"));
+        assert!(projection.contains("head.projected_seq = $2"));
+        assert_eq!(
+            projection
+                .matches("UPDATE telemetry_projection_heads AS head")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn tunnel_alert_revision_gates_projection_for_a_current_endpoint() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, projection) = source
+            .split_once("async fn project_claimed_telemetry_suffix_in_tx")
+            .expect("telemetry projection function");
+        let (projection, _) = projection
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("telemetry projection function boundary");
+        let cleanup = projection
+            .find("upsert_postgres_telemetry_tunnels(")
+            .expect("tunnel telemetry cleanup");
+        let endpoint_guard = projection
+            .find("if tunnel_alert_revision && !current_tunnel_plans.endpoints.is_empty()")
+            .expect("authoritative tunnel revision and current endpoint guard");
+        let reconcile = projection
+            .find("reconcile_postgres_tunnel_alerts_for_clients_in_tx(")
+            .expect("tunnel alert reconciliation");
+
+        assert!(cleanup < endpoint_guard);
+        assert!(endpoint_guard < reconcile);
+        assert_eq!(
+            projection
+                .matches("reconcile_postgres_tunnel_alerts_for_clients_in_tx(")
+                .count(),
+            1
+        );
+        assert!(!projection.contains("'effect', 'network_observation_series_deactivated'"));
+
+        let (_, upsert) = source
+            .rsplit_once("\nasync fn upsert_postgres_telemetry_tunnels(\n")
+            .expect("tunnel current-state owner");
+        let (upsert, _) = upsert
+            .split_once("\nfn persistent_disk_totals")
+            .expect("tunnel current-state owner boundary");
+        assert!(upsert.contains("), reconciled_series AS ("));
+        assert!(upsert.contains("UPDATE network_observation_series series"));
+        assert!(!upsert.contains("pg_notify"));
+        let (_, alert_revision) = upsert
+            .split_once("), alert_revision AS MATERIALIZED (")
+            .expect("alert revision start");
+        let (alert_revision, _) = alert_revision
+            .split_once("), upserted AS (")
+            .expect("alert revision boundary");
+        for authoritative_field in [
+            "stored.traffic_checked_unix",
+            "stored.traffic_status",
+            "stored.traffic_reason",
+            "stored.adapter_health ->> 'checked_unix'",
+            "stored.adapter_health ->> 'success'",
+            "stored.adapter_health ->> 'reason'",
+            "stored.telemetry_runtime_evidence_identity_hash",
+            "client.operational_alert_tunnel_boundary_at",
+            "plan.operational_alert_runtime_boundary_at",
+        ] {
+            assert!(alert_revision.contains(authoritative_field));
+        }
+        for non_alert_field in [
+            "stored.rx_bytes",
+            "stored.tx_bytes",
+            "stored.operstate",
+            "stored.latency_avg_ms",
+            "stored.packet_loss_ratio",
+        ] {
+            assert!(!alert_revision.contains(non_alert_field));
+        }
+    }
+
+    #[test]
+    fn acceptance_owns_client_liveness_but_not_the_gateway_session() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, acceptance) = source
+            .split_once("pub(crate) async fn record_telemetry_outcome")
+            .expect("telemetry acceptance function");
+        let (acceptance, _) = acceptance
+            .split_once("#[cfg(test)]\n    pub(crate) async fn record_telemetry")
+            .expect("telemetry acceptance function boundary");
+        // This transaction changes client liveness later, so it owns that
+        // exact row from validation through the status transition. The
+        // gateway session is validation-only: committed expiry is rejected,
+        // while an already-admitted request may finish and refresh its route.
+        // A committed suspension fails the same exact predicate, so telemetry
+        // cannot implicitly undo the operator-owned lifecycle transition.
+        assert!(acceptance.contains("client.status NOT IN ('revoked', 'suspended')"));
+        assert!(acceptance.contains("FOR NO KEY UPDATE OF client"));
+        assert!(!acceptance.contains("FOR NO KEY UPDATE OF client, session"));
+        assert!(!acceptance.contains("FOR NO KEY UPDATE OF session"));
+        assert!(!acceptance.contains("FOR UPDATE OF client, session"));
+        assert!(!acceptance.contains("pg_advisory_xact_lock(hashtextextended"));
+        assert!(!acceptance.contains("pg_notify("));
+
+        let (_, owner) = source
+            .split_once("async fn try_claim_telemetry_projection_in_tx")
+            .expect("telemetry projection owner");
+        let (owner, _) = owner
+            .split_once("async fn load_telemetry_projection_suffix_in_tx")
+            .expect("telemetry projection owner boundary");
+        assert!(owner.contains("FOR UPDATE OF sample SKIP LOCKED"));
+        assert!(!owner.contains("pg_try_advisory_xact_lock"));
+        assert!(!owner.contains("FOR UPDATE OF head"));
+        assert!(!owner.contains("SELECT TRUE FROM clients"));
+
+        let port_forwarding = include_str!("../network/repository_port_forwarding.rs");
+        let (_, lifecycle_owner) = port_forwarding
+            .split_once("pub(crate) async fn lock_postgres_port_forward_client")
+            .expect("port-forward client owner");
+        let (lifecycle_owner, _) = lifecycle_owner
+            .split_once("pub(crate) async fn postgres_port_forwarding_blocks_agent_delete")
+            .expect("port-forward client owner boundary");
+        assert!(lifecycle_owner.contains("pg_advisory_xact_lock(hashtextextended($1, 0))"));
+
+        let inventory = include_str!("repository_inventory.rs");
+        assert!(inventory.contains("lock_postgres_port_forward_client(&mut tx, client_id)"));
     }
 }
 
@@ -1642,35 +3285,26 @@ enum TelemetrySequenceClaim {
     Stale,
 }
 
-async fn claim_memory_telemetry_sequence(
-    watermarks: &TelemetryIngestWatermarks,
-    client_id: &str,
-    gateway_session_id: Uuid,
-    process_incarnation_id: Uuid,
-    telemetry_seq: u64,
-) -> TelemetrySequenceClaim {
-    let mut watermarks = watermarks.write().await;
-    if let Some(watermark) = watermarks.get(client_id) {
-        if watermark.gateway_session_id == gateway_session_id
-            && watermark.process_incarnation_id == process_incarnation_id
-        {
-            if watermark.telemetry_seq == telemetry_seq {
-                return TelemetrySequenceClaim::Duplicate;
-            }
-            if watermark.telemetry_seq > telemetry_seq {
-                return TelemetrySequenceClaim::Stale;
-            }
-        }
+fn telemetry_status_requires_agent_reconciliation(
+    prior_status: &str,
+    resulting_status: &str,
+) -> bool {
+    prior_status != resulting_status
+}
+
+#[cfg(test)]
+mod telemetry_status_reconciliation_tests {
+    use super::telemetry_status_requires_agent_reconciliation;
+
+    #[test]
+    fn unchanged_status_skips_agent_reconciliation_but_transition_requires_it() {
+        assert!(!telemetry_status_requires_agent_reconciliation(
+            "online", "online"
+        ));
+        assert!(telemetry_status_requires_agent_reconciliation(
+            "offline", "online"
+        ));
     }
-    watermarks.insert(
-        client_id.to_string(),
-        TelemetryIngestWatermark {
-            gateway_session_id,
-            process_incarnation_id,
-            telemetry_seq,
-        },
-    );
-    TelemetrySequenceClaim::Accepted
 }
 
 async fn claim_postgres_telemetry_sequence(
@@ -1738,39 +3372,19 @@ async fn claim_postgres_telemetry_sequence(
     })
 }
 
-async fn upsert_memory_telemetry_sample(
-    samples: &Arc<RwLock<Vec<TelemetrySampleView>>>,
-    id: Uuid,
-    client_id: &str,
-    metrics: &AgentMetrics,
-) -> Result<()> {
-    let observed_at = metrics.observed_unix.to_string();
-    let sample = TelemetrySampleView {
-        id,
-        client_id: client_id.to_string(),
-        observed_at: observed_at.clone(),
-        cpu_load_1: metrics.cpu.load.one,
-        memory_total_bytes: u64_to_i64(metrics.memory.total_bytes),
-        memory_available_bytes: u64_to_i64(metrics.memory.available_bytes),
-        payload: serde_json::to_value(metrics)?,
-    };
-    samples.write().await.push(sample);
-    Ok(())
-}
-
 async fn upsert_postgres_telemetry_sample(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    client_id: &str,
+    accepted_seq: i64,
+    source_event: &GatewayTelemetryIngest,
     metrics: &AgentMetrics,
+    ping_source_checked_unix: &[u64],
 ) -> Result<()> {
     let disk = persistent_disk_totals(metrics);
-    let (network_rx, network_tx) = network_telemetry_totals(metrics);
-    /*
-     * The historical PostgreSQL raw projection treated a missing connection
-     * snapshot as the saturated BIGINT sentinel. Retain that observable value
-     * in the typed projection instead of silently converting it to zero.
-     */
+    // Acceptance retains the complete bounded raw envelope. The projector
+    // stamps its per-interface admission masks before advancing visibility.
+    // The saturated BIGINT sentinel keeps an unavailable connection snapshot
+    // distinct from an observed zero in the non-null typed columns.
     let tcp_sockets = metrics
         .connections
         .as_ref()
@@ -1798,11 +3412,17 @@ async fn upsert_postgres_telemetry_sample(
             swap_available_bytes,
             disk_total_bytes,
             disk_available_bytes,
-            network_rx_bytes,
-            network_tx_bytes,
             tcp_sockets,
             udp_sockets,
-            payload
+            payload,
+            accepted_seq,
+            accepted_at,
+            source_gateway_id,
+            source_gateway_session_id,
+            source_process_incarnation_id,
+            source_telemetry_seq,
+            reported_observed_unix,
+            ping_source_checked_unix
         ) VALUES (
             $1,
             $2,
@@ -1822,12 +3442,18 @@ async fn upsert_postgres_telemetry_sample(
             $16,
             $17,
             $18,
-            $19
+            clock_timestamp(),
+            $19,
+            $20,
+            $21,
+            $22,
+            $23,
+            $24
         )
         "#,
     )
     .bind(id)
-    .bind(client_id)
+    .bind(&source_event.telemetry.client_id)
     .bind(metrics.observed_unix as f64)
     .bind(metrics.cpu.utilization_ratio)
     .bind(i32::from(metrics.cpu.cores))
@@ -1840,1053 +3466,26 @@ async fn upsert_postgres_telemetry_sample(
     .bind(metrics.memory.swap_available_bytes.map(u64_to_i64))
     .bind(disk.map(|(total, _)| total))
     .bind(disk.map(|(_, available)| available))
-    .bind(network_rx)
-    .bind(network_tx)
     .bind(tcp_sockets)
     .bind(udp_sockets)
     .bind(SqlJson(metrics))
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn insert_postgres_telemetry_counter_facts(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    sample_id: Uuid,
-    client_id: &str,
-    metrics: &AgentMetrics,
-) -> Result<()> {
-    let mut source_kinds = Vec::with_capacity(metrics.networks.len() + metrics.tunnels.len());
-    let mut ordinals = Vec::with_capacity(source_kinds.capacity());
-    let mut interfaces = Vec::with_capacity(source_kinds.capacity());
-    let mut rx_bytes = Vec::with_capacity(source_kinds.capacity());
-    let mut tx_bytes = Vec::with_capacity(source_kinds.capacity());
-
-    for (ordinal, network) in metrics.networks.iter().enumerate() {
-        source_kinds.push("host");
-        ordinals.push(i32::try_from(ordinal).unwrap_or(i32::MAX));
-        interfaces.push(network.interface.as_str());
-        rx_bytes.push(u64_to_i64(network.rx_bytes));
-        tx_bytes.push(u64_to_i64(network.tx_bytes));
-    }
-    for (ordinal, tunnel) in metrics.tunnels.iter().enumerate() {
-        source_kinds.push("tunnel");
-        ordinals.push(i32::try_from(ordinal).unwrap_or(i32::MAX));
-        interfaces.push(tunnel.interface.as_str());
-        rx_bytes.push(u64_to_i64(tunnel.rx_bytes));
-        tx_bytes.push(u64_to_i64(tunnel.tx_bytes));
-    }
-    if source_kinds.is_empty() {
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO telemetry_counter_facts (
-            sample_id,
-            client_id,
-            observed_at,
-            source_kind,
-            ordinal,
-            interface,
-            rx_bytes,
-            tx_bytes
-        )
-        SELECT
-            $1,
-            $2,
-            to_timestamp($3::double precision),
-            fact.source_kind,
-            fact.ordinal,
-            fact.interface,
-            fact.rx_bytes,
-            fact.tx_bytes
-        FROM UNNEST(
-            $4::TEXT[],
-            $5::INTEGER[],
-            $6::TEXT[],
-            $7::BIGINT[],
-            $8::BIGINT[]
-        ) AS fact(source_kind, ordinal, interface, rx_bytes, tx_bytes)
-        "#,
-    )
-    .bind(sample_id)
-    .bind(client_id)
-    .bind(metrics.observed_unix as f64)
-    .bind(&source_kinds)
-    .bind(&ordinals)
-    .bind(&interfaces)
-    .bind(&rx_bytes)
-    .bind(&tx_bytes)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn insert_postgres_telemetry_ping_facts(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    sample_id: Uuid,
-    client_id: &str,
-    metrics: &AgentMetrics,
-    source_checked_unix: &[u64],
-) -> Result<()> {
-    if metrics.ping_results.is_empty() {
-        return Ok(());
-    }
-
-    let ordinals = metrics
-        .ping_results
-        .iter()
-        .enumerate()
-        .map(|(ordinal, _)| i32::try_from(ordinal).unwrap_or(i32::MAX))
-        .collect::<Vec<_>>();
-    let target_ids = metrics
-        .ping_results
-        .iter()
-        .map(|result| Uuid::parse_str(result.target_id.trim()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let generations = metrics
-        .ping_results
-        .iter()
-        .map(|result| u64_to_i64(result.generation))
-        .collect::<Vec<_>>();
-    let checked_unix = metrics
-        .ping_results
-        .iter()
-        .map(|result| u64_to_i64(result.checked_unix))
-        .collect::<Vec<_>>();
-    let source_checked_unix = source_checked_unix
-        .iter()
-        .copied()
-        .map(u64_to_i64)
-        .collect::<Vec<_>>();
-    let statuses = metrics
-        .ping_results
-        .iter()
-        .map(|result| result.status.as_str())
-        .collect::<Vec<_>>();
-    let latency_avg_ms = metrics
-        .ping_results
-        .iter()
-        .map(|result| result.latency_avg_ms)
-        .collect::<Vec<_>>();
-    let loss_ratios = metrics
-        .ping_results
-        .iter()
-        .map(|result| result.loss_ratio)
-        .collect::<Vec<_>>();
-    let reasons = metrics
-        .ping_results
-        .iter()
-        .map(|result| result.reason.as_deref())
-        .collect::<Vec<_>>();
-
-    sqlx::query(
-        r#"
-        INSERT INTO telemetry_ping_series (client_id, target_id, generation)
-        SELECT DISTINCT $1, fact.target_id, fact.generation
-        FROM UNNEST($2::UUID[], $3::BIGINT[]) AS fact(target_id, generation)
-        ON CONFLICT (client_id, target_id, generation) DO NOTHING
-        "#,
-    )
-    .bind(client_id)
-    .bind(&target_ids)
-    .bind(&generations)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO telemetry_ping_facts (
-            series_id,
-            observed_at,
-            evidence_id,
-            source_checked_unix,
-            checked_unix,
-            status,
-            latency_avg_ms,
-            loss_ratio,
-            reason
-        )
-        SELECT
-            series.id,
-            to_timestamp($3::double precision),
-            $1,
-            fact.source_checked_unix,
-            fact.checked_unix,
-            fact.status,
-            fact.latency_avg_ms,
-            fact.loss_ratio,
-            fact.reason
-        FROM (
-            SELECT DISTINCT ON (target_id, generation, source_checked_unix) *
-            FROM UNNEST(
-                $4::INTEGER[],
-                $5::UUID[],
-                $6::BIGINT[],
-                $7::BIGINT[],
-                $8::BIGINT[],
-                $9::TEXT[],
-                $10::DOUBLE PRECISION[],
-                $11::DOUBLE PRECISION[],
-                $12::TEXT[]
-            ) AS input(
-                ordinal,
-                target_id,
-                generation,
-                source_checked_unix,
-                checked_unix,
-                status,
-                latency_avg_ms,
-                loss_ratio,
-                reason
-            )
-            ORDER BY target_id, generation, source_checked_unix, ordinal DESC
-        ) fact
-        JOIN telemetry_ping_series series
-          ON series.client_id = $2
-         AND series.target_id = fact.target_id
-         AND series.generation = fact.generation
-        WHERE fact.checked_unix <= floor($3::double precision)::bigint + 300
-          AND floor($3::double precision)::bigint - fact.checked_unix <= 3900
-        ON CONFLICT (series_id, source_checked_unix) DO UPDATE SET
-            evidence_id = EXCLUDED.evidence_id,
-            status = EXCLUDED.status,
-            latency_avg_ms = EXCLUDED.latency_avg_ms,
-            loss_ratio = EXCLUDED.loss_ratio,
-            reason = EXCLUDED.reason
-        "#,
-    )
-    .bind(sample_id)
-    .bind(client_id)
-    .bind(metrics.observed_unix as f64)
-    .bind(&ordinals)
-    .bind(&target_ids)
-    .bind(&generations)
-    .bind(&source_checked_unix)
-    .bind(&checked_unix)
-    .bind(&statuses)
-    .bind(&latency_avg_ms)
-    .bind(&loss_ratios)
-    .bind(&reasons)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn upsert_memory_telemetry_rollup(
-    rollups: &Arc<RwLock<Vec<TelemetryRollupView>>>,
-    client_id: &str,
-    metrics: &AgentMetrics,
-    swap: Option<(i64, i64)>,
-) {
-    let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
-    let observed_at = metrics.observed_unix.to_string();
-    let disk = persistent_disk_totals(metrics).filter(|(total, _)| *total > 0);
-    let (network_rx, network_tx) = network_telemetry_totals(metrics);
-    let memory_total = u64_to_i64(metrics.memory.total_bytes);
-    let memory_available = u64_to_i64(metrics.memory.available_bytes);
-    let memory_used_ratio = resource_used_ratio_or_zero(memory_total, memory_available);
-    let disk_used_ratio = disk.map(|(total, available)| resource_used_ratio(total, available));
-    let positive_swap = swap.filter(|(total, _)| *total > 0);
-    let mut rollups = rollups.write().await;
-    if let Some(rollup) = rollups.iter_mut().find(|rollup| {
-        rollup.client_id == client_id
-            && rollup.bucket_secs == TELEMETRY_BUCKET_SECS
-            && rollup.bucket_start == bucket_start
-    }) {
-        let current_count = rollup.sample_count.max(1);
-        rollup.sample_count = rollup.sample_count.saturating_add(1);
-        if let Some(cpu_usage) = metrics.cpu.utilization_ratio {
-            let usage_count = rollup.cpu_usage_sample_count.max(0);
-            rollup.cpu_usage_avg = Some(match rollup.cpu_usage_avg {
-                Some(current) if usage_count > 0 => {
-                    weighted_avg_f64(current, usage_count, cpu_usage)
-                }
-                _ => cpu_usage,
-            });
-            rollup.cpu_usage_max = Some(
-                rollup
-                    .cpu_usage_max
-                    .map_or(cpu_usage, |current| current.max(cpu_usage)),
-            );
-            rollup.cpu_usage_sample_count = usage_count.saturating_add(1);
-        }
-        rollup.cpu_cores_max = rollup.cpu_cores_max.max(i32::from(metrics.cpu.cores));
-        rollup.cpu_load_1_avg =
-            weighted_avg_f64(rollup.cpu_load_1_avg, current_count, metrics.cpu.load.one);
-        rollup.cpu_load_1_max = rollup.cpu_load_1_max.max(metrics.cpu.load.one);
-        rollup.cpu_load_5_avg =
-            weighted_avg_f64(rollup.cpu_load_5_avg, current_count, metrics.cpu.load.five);
-        rollup.cpu_load_5_max = rollup.cpu_load_5_max.max(metrics.cpu.load.five);
-        rollup.cpu_load_15_avg = weighted_avg_f64(
-            rollup.cpu_load_15_avg,
-            current_count,
-            metrics.cpu.load.fifteen,
-        );
-        rollup.cpu_load_15_max = rollup.cpu_load_15_max.max(metrics.cpu.load.fifteen);
-        rollup.memory_total_bytes_max = rollup.memory_total_bytes_max.max(memory_total);
-        rollup.memory_available_bytes_avg = weighted_avg_i64(
-            rollup.memory_available_bytes_avg,
-            current_count,
-            memory_available,
-        );
-        rollup.memory_available_bytes_min = rollup.memory_available_bytes_min.min(memory_available);
-        rollup.memory_used_ratio_avg = weighted_avg_f64(
-            rollup.memory_used_ratio_avg,
-            current_count,
-            memory_used_ratio,
-        );
-        rollup.memory_used_ratio_max = rollup.memory_used_ratio_max.max(memory_used_ratio);
-        if let Some((swap_total, swap_available)) = swap {
-            let swap_count = rollup.swap_sample_count.max(0);
-            rollup.swap_total_bytes_max = Some(
-                rollup
-                    .swap_total_bytes_max
-                    .map_or(swap_total, |current| current.max(swap_total)),
-            );
-            if swap_total == 0 {
-                if swap_count == 0 {
-                    rollup.swap_available_bytes_avg = Some(0);
-                    rollup.swap_available_bytes_min = Some(0);
-                    rollup.swap_used_ratio_avg = None;
-                    rollup.swap_used_ratio_max = None;
-                }
-            } else {
-                let swap_used_ratio = resource_used_ratio(swap_total, swap_available);
-                rollup.swap_available_bytes_avg = Some(match rollup.swap_available_bytes_avg {
-                    Some(current) if swap_count > 0 => {
-                        weighted_avg_i64(current, swap_count, swap_available)
-                    }
-                    _ => swap_available,
-                });
-                rollup.swap_available_bytes_min = Some(match rollup.swap_available_bytes_min {
-                    Some(current) if swap_count > 0 => current.min(swap_available),
-                    _ => swap_available,
-                });
-                rollup.swap_used_ratio_avg = Some(match rollup.swap_used_ratio_avg {
-                    Some(current) if swap_count > 0 => {
-                        weighted_avg_f64(current, swap_count, swap_used_ratio)
-                    }
-                    _ => swap_used_ratio,
-                });
-                rollup.swap_used_ratio_max = Some(
-                    rollup
-                        .swap_used_ratio_max
-                        .map_or(swap_used_ratio, |current| current.max(swap_used_ratio)),
-                );
-                rollup.swap_sample_count = swap_count.saturating_add(1);
-            }
-        }
-        if let (Some((disk_total, disk_available)), Some(disk_used_ratio)) = (disk, disk_used_ratio)
-        {
-            let disk_count = rollup.disk_sample_count.max(0);
-            rollup.disk_total_bytes_max = if disk_count == 0 {
-                disk_total
-            } else {
-                rollup.disk_total_bytes_max.max(disk_total)
-            };
-            rollup.disk_available_bytes_avg = if disk_count == 0 {
-                disk_available
-            } else {
-                weighted_avg_i64(rollup.disk_available_bytes_avg, disk_count, disk_available)
-            };
-            rollup.disk_available_bytes_min = if disk_count == 0 {
-                disk_available
-            } else {
-                rollup.disk_available_bytes_min.min(disk_available)
-            };
-            rollup.disk_used_ratio_avg = if disk_count == 0 {
-                disk_used_ratio
-            } else {
-                weighted_avg_f64(rollup.disk_used_ratio_avg, disk_count, disk_used_ratio)
-            };
-            rollup.disk_used_ratio_max = if disk_count == 0 {
-                disk_used_ratio
-            } else {
-                rollup.disk_used_ratio_max.max(disk_used_ratio)
-            };
-            rollup.disk_sample_count = disk_count.saturating_add(1);
-        }
-        rollup.network_rx_bytes_max = rollup.network_rx_bytes_max.max(network_rx);
-        rollup.network_tx_bytes_max = rollup.network_tx_bytes_max.max(network_tx);
-        if let Some(connections) = metrics.connections.as_ref() {
-            rollup.connections_sample_count = rollup.connections_sample_count.saturating_add(1);
-            if rollup
-                .connections_observed_at
-                .as_deref()
-                .map(parse_unix)
-                .is_none_or(|stored| metrics.observed_unix >= stored)
-            {
-                rollup.tcp_sockets_latest = Some(u64_to_i64(connections.tcp));
-                rollup.udp_sockets_latest = Some(u64_to_i64(connections.udp));
-                rollup.connections_observed_at = Some(observed_at.clone());
-            }
-        }
-        if metrics.observed_unix >= parse_unix(&rollup.latest_observed_at) {
-            rollup.latest_observed_at = observed_at.clone();
-        }
-        rollup.updated_at = observed_at;
-        return;
-    }
-
-    rollups.push(TelemetryRollupView {
-        client_id: client_id.to_string(),
-        bucket_start,
-        bucket_secs: TELEMETRY_BUCKET_SECS,
-        sample_count: 1,
-        cpu_usage_sample_count: i32::from(metrics.cpu.utilization_ratio.is_some()),
-        cpu_usage_avg: metrics.cpu.utilization_ratio,
-        cpu_usage_max: metrics.cpu.utilization_ratio,
-        cpu_cores_max: i32::from(metrics.cpu.cores),
-        cpu_load_1_avg: metrics.cpu.load.one,
-        cpu_load_1_max: metrics.cpu.load.one,
-        cpu_load_5_avg: metrics.cpu.load.five,
-        cpu_load_5_max: metrics.cpu.load.five,
-        cpu_load_15_avg: metrics.cpu.load.fifteen,
-        cpu_load_15_max: metrics.cpu.load.fifteen,
-        memory_total_bytes_max: memory_total,
-        memory_available_bytes_avg: memory_available,
-        memory_available_bytes_min: memory_available,
-        memory_used_ratio_avg: memory_used_ratio,
-        memory_used_ratio_max: memory_used_ratio,
-        swap_sample_count: i32::from(positive_swap.is_some()),
-        swap_total_bytes_max: swap.map(|(total, _)| total),
-        swap_available_bytes_avg: swap.map(|(_, available)| available),
-        swap_available_bytes_min: swap.map(|(_, available)| available),
-        swap_used_ratio_avg: positive_swap
-            .map(|(total, available)| resource_used_ratio(total, available)),
-        swap_used_ratio_max: positive_swap
-            .map(|(total, available)| resource_used_ratio(total, available)),
-        disk_sample_count: i32::from(disk.is_some()),
-        disk_total_bytes_max: disk.map_or(0, |(total, _)| total),
-        disk_available_bytes_avg: disk.map_or(0, |(_, available)| available),
-        disk_available_bytes_min: disk.map_or(0, |(_, available)| available),
-        disk_used_ratio_avg: disk_used_ratio.unwrap_or(0.0),
-        disk_used_ratio_max: disk_used_ratio.unwrap_or(0.0),
-        network_rx_bytes_max: network_rx,
-        network_tx_bytes_max: network_tx,
-        connections_sample_count: i32::from(metrics.connections.is_some()),
-        tcp_sockets_latest: metrics
-            .connections
-            .as_ref()
-            .map(|connections| u64_to_i64(connections.tcp)),
-        udp_sockets_latest: metrics
-            .connections
-            .as_ref()
-            .map(|connections| u64_to_i64(connections.udp)),
-        connections_observed_at: metrics.connections.as_ref().map(|_| observed_at.clone()),
-        latest_observed_at: observed_at.clone(),
-        updated_at: observed_at,
-    });
-}
-
-async fn upsert_memory_telemetry_network_rates(
-    rates: &Arc<RwLock<Vec<TelemetryNetworkRateView>>>,
-    traffic_samples: &Arc<RwLock<Vec<TrafficCounterSampleRecord>>>,
-    client_id: &str,
-    metrics: &AgentMetrics,
-) {
-    let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
-    let observed_at = metrics.observed_unix.to_string();
-    let bucket_unix = bucket_start_unix(metrics.observed_unix) as i64;
-    let epochs_by_interface = traffic_samples
-        .read()
-        .await
-        .iter()
-        .filter(|sample| {
-            sample.client_id == client_id
-                && sample.source_kind == "host"
-                && sample.observed_unix == bucket_unix
-        })
-        .map(|sample| {
-            (
-                sample.interface.clone(),
-                (sample.rx_counter_epoch, sample.tx_counter_epoch),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let mut rates = rates.write().await;
-    for network in metrics
-        .networks
-        .iter()
-        .filter(|network| valid_telemetry_name(&network.interface))
-    {
-        let Some(&(rx_counter_epoch, tx_counter_epoch)) =
-            epochs_by_interface.get(&network.interface)
-        else {
-            continue;
-        };
-        let rx_bytes = u64_to_i64(network.rx_bytes);
-        let tx_bytes = u64_to_i64(network.tx_bytes);
-        if let Some(rate) = rates.iter_mut().find(|rate| {
-            rate.client_id == client_id
-                && rate.interface == network.interface
-                && rate.bucket_secs == TELEMETRY_BUCKET_SECS
-                && rate.bucket_start == bucket_start
-        }) {
-            let current_count = rate.sample_count.max(1);
-            rate.sample_count = rate.sample_count.saturating_add(1);
-            rate.rx_bytes_avg = weighted_avg_i64(rate.rx_bytes_avg, current_count, rx_bytes);
-            rate.tx_bytes_avg = weighted_avg_i64(rate.tx_bytes_avg, current_count, tx_bytes);
-            rate.rx_bytes_last = rx_bytes;
-            rate.tx_bytes_last = tx_bytes;
-            rate.rx_counter_epoch = rx_counter_epoch;
-            rate.tx_counter_epoch = tx_counter_epoch;
-            rate.latest_observed_at = observed_at.clone();
-            rate.rx_bytes_delta = 0;
-            rate.tx_bytes_delta = 0;
-            rate.rx_bps_avg = 0.0;
-            rate.tx_bps_avg = 0.0;
-            rate.updated_at = observed_at.clone();
-            continue;
-        }
-
-        rates.push(TelemetryNetworkRateView {
-            client_id: client_id.to_string(),
-            interface: network.interface.clone(),
-            bucket_start: bucket_start.clone(),
-            bucket_secs: TELEMETRY_BUCKET_SECS,
-            sample_count: 1,
-            rx_bytes_avg: rx_bytes,
-            tx_bytes_avg: tx_bytes,
-            rx_bytes_last: rx_bytes,
-            tx_bytes_last: tx_bytes,
-            rx_counter_epoch,
-            tx_counter_epoch,
-            latest_observed_at: observed_at.clone(),
-            rx_bytes_delta: 0,
-            tx_bytes_delta: 0,
-            rx_bps_avg: 0.0,
-            tx_bps_avg: 0.0,
-            updated_at: observed_at.clone(),
-        });
-    }
-}
-
-async fn upsert_memory_traffic_counter_samples(
-    samples: &Arc<RwLock<Vec<TrafficCounterSampleRecord>>>,
-    client_id: &str,
-    metrics: &AgentMetrics,
-) {
-    let bucket_unix = bucket_start_unix(metrics.observed_unix);
-    let observed_at = Utc
-        .timestamp_opt(bucket_unix as i64, 0)
-        .single()
-        .map(|value| value.to_rfc3339())
-        .unwrap_or_else(|| bucket_unix.to_string());
-    let mut samples = samples.write().await;
-    for network in metrics
-        .networks
-        .iter()
-        .filter(|network| valid_telemetry_name(&network.interface))
-    {
-        upsert_memory_traffic_counter(
-            &mut samples,
-            TrafficCounterSampleRecord {
-                client_id: client_id.to_string(),
-                source_kind: "host".to_string(),
-                interface: network.interface.clone(),
-                observed_at: observed_at.clone(),
-                observed_unix: bucket_unix as i64,
-                rx_bytes: u64_to_i64(network.rx_bytes),
-                tx_bytes: u64_to_i64(network.tx_bytes),
-                rx_counter_epoch: 0,
-                tx_counter_epoch: 0,
-                sample_source: "agent_networks".to_string(),
-            },
-        );
-    }
-    for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
-        upsert_memory_traffic_counter(
-            &mut samples,
-            TrafficCounterSampleRecord {
-                client_id: client_id.to_string(),
-                source_kind: "tunnel".to_string(),
-                interface: tunnel.interface.clone(),
-                observed_at: observed_at.clone(),
-                observed_unix: bucket_unix as i64,
-                rx_bytes: u64_to_i64(tunnel.rx_bytes),
-                tx_bytes: u64_to_i64(tunnel.tx_bytes),
-                rx_counter_epoch: 0,
-                tx_counter_epoch: 0,
-                sample_source: tunnel
-                    .traffic_source
-                    .clone()
-                    .unwrap_or_else(|| "runtime_tunnel".to_string()),
-            },
-        );
-    }
-}
-
-fn upsert_memory_traffic_counter(
-    samples: &mut Vec<TrafficCounterSampleRecord>,
-    mut sample: TrafficCounterSampleRecord,
-) {
-    if let Some(stored) = samples.iter_mut().find(|stored| {
-        stored.client_id == sample.client_id
-            && stored.source_kind == sample.source_kind
-            && stored.interface == sample.interface
-            && stored.observed_unix == sample.observed_unix
-    }) {
-        let source_boundary =
-            is_intentional_vnstat_import_boundary(&stored.sample_source, &sample.sample_source);
-        sample.rx_counter_epoch = stored.rx_counter_epoch
-            + i64::from(sample.rx_bytes < stored.rx_bytes || source_boundary);
-        sample.tx_counter_epoch = stored.tx_counter_epoch
-            + i64::from(sample.tx_bytes < stored.tx_bytes || source_boundary);
-        *stored = sample;
-    } else {
-        if let Some(previous) = samples
+    .bind(accepted_seq)
+    .bind(&source_event.gateway_id)
+    .bind(source_event.gateway_session_id)
+    .bind(source_event.process_incarnation_id)
+    .bind(u64_to_i64(source_event.telemetry_seq))
+    .bind(u64_to_i64(source_event.telemetry.metrics.observed_unix))
+    .bind(
+        ping_source_checked_unix
             .iter()
-            .filter(|stored| {
-                stored.client_id == sample.client_id
-                    && stored.source_kind == sample.source_kind
-                    && stored.interface == sample.interface
-                    && stored.observed_unix < sample.observed_unix
-            })
-            .max_by_key(|stored| stored.observed_unix)
-        {
-            let source_boundary = is_intentional_vnstat_import_boundary(
-                &previous.sample_source,
-                &sample.sample_source,
-            );
-            sample.rx_counter_epoch = previous.rx_counter_epoch
-                + i64::from(sample.rx_bytes < previous.rx_bytes || source_boundary);
-            sample.tx_counter_epoch = previous.tx_counter_epoch
-                + i64::from(sample.tx_bytes < previous.tx_bytes || source_boundary);
-        }
-        samples.push(sample);
-    }
-}
-
-pub(crate) async fn upsert_postgres_telemetry_rollup(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-    metrics: &AgentMetrics,
-    swap: Option<(i64, i64)>,
-) -> Result<()> {
-    let disk = persistent_disk_totals(metrics).filter(|(total, _)| *total > 0);
-    let disk_sample_count = i32::from(disk.is_some());
-    let disk_total = disk.map_or(0, |(total, _)| total);
-    let disk_available = disk.map_or(0, |(_, available)| available);
-    let (network_rx, network_tx) = network_telemetry_totals(metrics);
-    let positive_swap = swap.filter(|(total, _)| *total > 0);
-    sqlx::query(
-        r#"
-        INSERT INTO telemetry_rollups (
-            client_id,
-            bucket_start,
-            bucket_secs,
-            sample_count,
-            cpu_usage_sample_count,
-            cpu_usage_sum,
-            cpu_usage_avg,
-            cpu_usage_max,
-            cpu_cores_max,
-            cpu_load_1_avg,
-            cpu_load_1_sum,
-            cpu_load_1_max,
-            cpu_load_5_avg,
-            cpu_load_5_sum,
-            cpu_load_5_max,
-            cpu_load_15_avg,
-            cpu_load_15_sum,
-            cpu_load_15_max,
-            memory_total_bytes_max,
-            memory_available_bytes_avg,
-            memory_available_bytes_sum,
-            memory_available_bytes_min,
-            memory_used_ratio_avg,
-            memory_used_ratio_sum,
-            memory_used_ratio_max,
-            swap_sample_count,
-            swap_total_bytes_max,
-            swap_available_bytes_avg,
-            swap_available_bytes_sum,
-            swap_available_bytes_min,
-            swap_used_ratio_avg,
-            swap_used_ratio_sum,
-            swap_used_ratio_max,
-            disk_total_bytes_max,
-            disk_available_bytes_avg,
-            disk_available_bytes_sum,
-            disk_available_bytes_min,
-            disk_used_ratio_avg,
-            disk_used_ratio_sum,
-            disk_used_ratio_max,
-            network_rx_bytes_max,
-            network_tx_bytes_max,
-            connections_sample_count,
-            tcp_sockets_latest,
-            udp_sockets_latest,
-            connections_observed_at,
-            latest_observed_at,
-            updated_at,
-            disk_sample_count
-        )
-        VALUES (
-            $1,
-            to_timestamp($2::double precision),
-            $3,
-            1,
-            $4,
-            COALESCE($5, 0),
-            $5,
-            $6,
-            $7,
-            $8,
-            $8,
-            $8,
-            $9,
-            $9,
-            $9,
-            $10,
-            $10,
-            $10,
-            $11,
-            $12,
-            $12::numeric,
-            $12,
-            $13,
-            $13,
-            $13,
-            $14,
-            $15,
-            $16,
-            COALESCE($16, 0)::numeric,
-            $16,
-            $17,
-            COALESCE($17, 0),
-            $17,
-            $18,
-            $19,
-            $19::numeric,
-            $19,
-            $20,
-            $20,
-            $20,
-            $21,
-            $22,
-            $23,
-            $24,
-            $25,
-            CASE WHEN $26::double precision IS NULL
-                THEN NULL
-                ELSE to_timestamp($26::double precision)
-            END,
-            to_timestamp($27::double precision),
-            now(),
-            $28
-        )
-        ON CONFLICT (client_id, bucket_secs, bucket_start) DO UPDATE SET
-            sample_count = telemetry_rollups.sample_count + EXCLUDED.sample_count,
-            cpu_usage_sample_count = telemetry_rollups.cpu_usage_sample_count
-                + EXCLUDED.cpu_usage_sample_count,
-            cpu_usage_sum = telemetry_rollups.cpu_usage_sum + EXCLUDED.cpu_usage_sum,
-            cpu_usage_avg = CASE
-                WHEN telemetry_rollups.cpu_usage_sample_count + EXCLUDED.cpu_usage_sample_count = 0
-                    THEN NULL
-                ELSE (telemetry_rollups.cpu_usage_sum + EXCLUDED.cpu_usage_sum) / (
-                    telemetry_rollups.cpu_usage_sample_count
-                    + EXCLUDED.cpu_usage_sample_count
-                )::double precision
-            END,
-            cpu_usage_max = CASE
-                WHEN telemetry_rollups.cpu_usage_max IS NULL THEN EXCLUDED.cpu_usage_max
-                WHEN EXCLUDED.cpu_usage_max IS NULL THEN telemetry_rollups.cpu_usage_max
-                ELSE GREATEST(telemetry_rollups.cpu_usage_max, EXCLUDED.cpu_usage_max)
-            END,
-            cpu_cores_max = GREATEST(telemetry_rollups.cpu_cores_max, EXCLUDED.cpu_cores_max),
-            cpu_load_1_sum = telemetry_rollups.cpu_load_1_sum + EXCLUDED.cpu_load_1_sum,
-            cpu_load_1_avg = (telemetry_rollups.cpu_load_1_sum + EXCLUDED.cpu_load_1_sum)
-                / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
-            cpu_load_1_max = GREATEST(telemetry_rollups.cpu_load_1_max, EXCLUDED.cpu_load_1_max),
-            cpu_load_5_sum = telemetry_rollups.cpu_load_5_sum + EXCLUDED.cpu_load_5_sum,
-            cpu_load_5_avg = (telemetry_rollups.cpu_load_5_sum + EXCLUDED.cpu_load_5_sum)
-                / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
-            cpu_load_5_max = GREATEST(telemetry_rollups.cpu_load_5_max, EXCLUDED.cpu_load_5_max),
-            cpu_load_15_sum = telemetry_rollups.cpu_load_15_sum + EXCLUDED.cpu_load_15_sum,
-            cpu_load_15_avg = (telemetry_rollups.cpu_load_15_sum + EXCLUDED.cpu_load_15_sum)
-                / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
-            cpu_load_15_max = GREATEST(telemetry_rollups.cpu_load_15_max, EXCLUDED.cpu_load_15_max),
-            memory_total_bytes_max = GREATEST(
-                telemetry_rollups.memory_total_bytes_max,
-                EXCLUDED.memory_total_bytes_max
-            ),
-            memory_available_bytes_sum = telemetry_rollups.memory_available_bytes_sum
-                + EXCLUDED.memory_available_bytes_sum,
-            memory_available_bytes_avg = round((
-                telemetry_rollups.memory_available_bytes_sum
-                + EXCLUDED.memory_available_bytes_sum
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
-            memory_available_bytes_min = LEAST(
-                telemetry_rollups.memory_available_bytes_min,
-                EXCLUDED.memory_available_bytes_min
-            ),
-            memory_used_ratio_sum = telemetry_rollups.memory_used_ratio_sum
-                + EXCLUDED.memory_used_ratio_sum,
-            memory_used_ratio_avg = (
-                telemetry_rollups.memory_used_ratio_sum + EXCLUDED.memory_used_ratio_sum
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
-            memory_used_ratio_max = GREATEST(
-                telemetry_rollups.memory_used_ratio_max,
-                EXCLUDED.memory_used_ratio_max
-            ),
-            swap_sample_count = telemetry_rollups.swap_sample_count
-                + EXCLUDED.swap_sample_count,
-            swap_total_bytes_max = CASE
-                WHEN telemetry_rollups.swap_total_bytes_max IS NULL
-                    THEN EXCLUDED.swap_total_bytes_max
-                WHEN EXCLUDED.swap_total_bytes_max IS NULL
-                    THEN telemetry_rollups.swap_total_bytes_max
-                ELSE GREATEST(
-                    telemetry_rollups.swap_total_bytes_max,
-                    EXCLUDED.swap_total_bytes_max
-                )
-            END,
-            swap_available_bytes_sum = telemetry_rollups.swap_available_bytes_sum
-                + EXCLUDED.swap_available_bytes_sum,
-            swap_available_bytes_avg = CASE
-                WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
-                    THEN CASE
-                        WHEN telemetry_rollups.swap_total_bytes_max IS NULL
-                            AND EXCLUDED.swap_total_bytes_max IS NULL
-                            THEN NULL
-                        ELSE 0
-                    END
-                ELSE round((
-                    telemetry_rollups.swap_available_bytes_sum
-                    + EXCLUDED.swap_available_bytes_sum
-                ) / (
-                    telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count
-                )::numeric)::bigint
-            END,
-            swap_available_bytes_min = CASE
-                WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
-                    THEN CASE
-                        WHEN telemetry_rollups.swap_total_bytes_max IS NULL
-                            AND EXCLUDED.swap_total_bytes_max IS NULL
-                            THEN NULL
-                        ELSE 0
-                    END
-                WHEN telemetry_rollups.swap_sample_count = 0
-                    THEN EXCLUDED.swap_available_bytes_min
-                WHEN EXCLUDED.swap_sample_count = 0
-                    THEN telemetry_rollups.swap_available_bytes_min
-                ELSE LEAST(
-                    telemetry_rollups.swap_available_bytes_min,
-                    EXCLUDED.swap_available_bytes_min
-                )
-            END,
-            swap_used_ratio_sum = telemetry_rollups.swap_used_ratio_sum
-                + EXCLUDED.swap_used_ratio_sum,
-            swap_used_ratio_avg = CASE
-                WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
-                    THEN NULL
-                ELSE (telemetry_rollups.swap_used_ratio_sum + EXCLUDED.swap_used_ratio_sum) / (
-                    telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count
-                )::double precision
-            END,
-            swap_used_ratio_max = CASE
-                WHEN telemetry_rollups.swap_used_ratio_max IS NULL
-                    THEN EXCLUDED.swap_used_ratio_max
-                WHEN EXCLUDED.swap_used_ratio_max IS NULL
-                    THEN telemetry_rollups.swap_used_ratio_max
-                ELSE GREATEST(
-                    telemetry_rollups.swap_used_ratio_max,
-                    EXCLUDED.swap_used_ratio_max
-                )
-            END,
-            disk_total_bytes_max = CASE
-                WHEN telemetry_rollups.disk_sample_count = 0
-                    THEN EXCLUDED.disk_total_bytes_max
-                WHEN EXCLUDED.disk_sample_count = 0
-                    THEN telemetry_rollups.disk_total_bytes_max
-                ELSE GREATEST(
-                    telemetry_rollups.disk_total_bytes_max,
-                    EXCLUDED.disk_total_bytes_max
-                )
-            END,
-            disk_available_bytes_sum =
-                CASE WHEN telemetry_rollups.disk_sample_count > 0
-                    THEN telemetry_rollups.disk_available_bytes_sum ELSE 0 END
-                + CASE WHEN EXCLUDED.disk_sample_count > 0
-                    THEN EXCLUDED.disk_available_bytes_sum ELSE 0 END,
-            disk_sample_count = telemetry_rollups.disk_sample_count
-                + EXCLUDED.disk_sample_count,
-            disk_available_bytes_avg = CASE
-                WHEN telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count = 0
-                    THEN 0
-                ELSE round((
-                    CASE WHEN telemetry_rollups.disk_sample_count > 0
-                        THEN telemetry_rollups.disk_available_bytes_sum ELSE 0 END
-                    + CASE WHEN EXCLUDED.disk_sample_count > 0
-                        THEN EXCLUDED.disk_available_bytes_sum ELSE 0 END
-                ) / (
-                    telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count
-                )::numeric)::bigint
-            END,
-            disk_available_bytes_min = CASE
-                WHEN telemetry_rollups.disk_sample_count = 0
-                    THEN EXCLUDED.disk_available_bytes_min
-                WHEN EXCLUDED.disk_sample_count = 0
-                    THEN telemetry_rollups.disk_available_bytes_min
-                ELSE LEAST(
-                    telemetry_rollups.disk_available_bytes_min,
-                    EXCLUDED.disk_available_bytes_min
-                )
-            END,
-            disk_used_ratio_sum =
-                CASE WHEN telemetry_rollups.disk_sample_count > 0
-                    THEN telemetry_rollups.disk_used_ratio_sum ELSE 0 END
-                + CASE WHEN EXCLUDED.disk_sample_count > 0
-                    THEN EXCLUDED.disk_used_ratio_sum ELSE 0 END,
-            disk_used_ratio_avg = CASE
-                WHEN telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count = 0
-                    THEN 0
-                ELSE (
-                    CASE WHEN telemetry_rollups.disk_sample_count > 0
-                        THEN telemetry_rollups.disk_used_ratio_sum ELSE 0 END
-                    + CASE WHEN EXCLUDED.disk_sample_count > 0
-                        THEN EXCLUDED.disk_used_ratio_sum ELSE 0 END
-                ) / (
-                    telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count
-                )::double precision
-            END,
-            disk_used_ratio_max = CASE
-                WHEN telemetry_rollups.disk_sample_count = 0
-                    THEN EXCLUDED.disk_used_ratio_max
-                WHEN EXCLUDED.disk_sample_count = 0
-                    THEN telemetry_rollups.disk_used_ratio_max
-                ELSE GREATEST(
-                    telemetry_rollups.disk_used_ratio_max,
-                    EXCLUDED.disk_used_ratio_max
-                )
-            END,
-            network_rx_bytes_max = GREATEST(
-                telemetry_rollups.network_rx_bytes_max,
-                EXCLUDED.network_rx_bytes_max
-            ),
-            network_tx_bytes_max = GREATEST(
-                telemetry_rollups.network_tx_bytes_max,
-                EXCLUDED.network_tx_bytes_max
-            ),
-            connections_sample_count = telemetry_rollups.connections_sample_count
-                + EXCLUDED.connections_sample_count,
-            tcp_sockets_latest = CASE
-                WHEN EXCLUDED.connections_observed_at IS NULL
-                    THEN telemetry_rollups.tcp_sockets_latest
-                WHEN telemetry_rollups.connections_observed_at IS NULL
-                    OR EXCLUDED.connections_observed_at >= telemetry_rollups.connections_observed_at
-                    THEN EXCLUDED.tcp_sockets_latest
-                ELSE telemetry_rollups.tcp_sockets_latest
-            END,
-            udp_sockets_latest = CASE
-                WHEN EXCLUDED.connections_observed_at IS NULL
-                    THEN telemetry_rollups.udp_sockets_latest
-                WHEN telemetry_rollups.connections_observed_at IS NULL
-                    OR EXCLUDED.connections_observed_at >= telemetry_rollups.connections_observed_at
-                    THEN EXCLUDED.udp_sockets_latest
-                ELSE telemetry_rollups.udp_sockets_latest
-            END,
-            connections_observed_at = CASE
-                WHEN telemetry_rollups.connections_observed_at IS NULL
-                    THEN EXCLUDED.connections_observed_at
-                WHEN EXCLUDED.connections_observed_at IS NULL
-                    THEN telemetry_rollups.connections_observed_at
-                ELSE GREATEST(
-                    telemetry_rollups.connections_observed_at,
-                    EXCLUDED.connections_observed_at
-                )
-            END,
-            latest_observed_at = GREATEST(
-                telemetry_rollups.latest_observed_at,
-                EXCLUDED.latest_observed_at
-            ),
-            updated_at = now()
-        "#,
+            .copied()
+            .map(u64_to_i64)
+            .collect::<Vec<_>>(),
     )
-    .bind(client_id)
-    .bind(bucket_start_unix(metrics.observed_unix) as f64)
-    .bind(TELEMETRY_BUCKET_SECS)
-    .bind(i32::from(metrics.cpu.utilization_ratio.is_some()))
-    .bind(metrics.cpu.utilization_ratio)
-    .bind(metrics.cpu.utilization_ratio)
-    .bind(i32::from(metrics.cpu.cores))
-    .bind(metrics.cpu.load.one)
-    .bind(metrics.cpu.load.five)
-    .bind(metrics.cpu.load.fifteen)
-    .bind(u64_to_i64(metrics.memory.total_bytes))
-    .bind(u64_to_i64(metrics.memory.available_bytes))
-    .bind(resource_used_ratio_or_zero(
-        u64_to_i64(metrics.memory.total_bytes),
-        u64_to_i64(metrics.memory.available_bytes),
-    ))
-    .bind(i32::from(positive_swap.is_some()))
-    .bind(swap.map(|(total, _)| total))
-    .bind(swap.map(|(_, available)| available))
-    .bind(positive_swap.map(|(total, available)| resource_used_ratio(total, available)))
-    .bind(disk_total)
-    .bind(disk_available)
-    .bind(resource_used_ratio_or_zero(disk_total, disk_available))
-    .bind(network_rx)
-    .bind(network_tx)
-    .bind(i32::from(metrics.connections.is_some()))
-    .bind(
-        metrics
-            .connections
-            .as_ref()
-            .map(|connections| u64_to_i64(connections.tcp)),
-    )
-    .bind(
-        metrics
-            .connections
-            .as_ref()
-            .map(|connections| u64_to_i64(connections.udp)),
-    )
-    .bind(
-        metrics
-            .connections
-            .as_ref()
-            .map(|_| metrics.observed_unix as f64),
-    )
-    .bind(metrics.observed_unix as f64)
-    .bind(disk_sample_count)
     .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"
-        DELETE FROM telemetry_resource_latest latest
-        USING telemetry_rollups source
-        WHERE source.client_id = $1
-          AND source.bucket_secs = $2
-          AND source.bucket_start = to_timestamp($3::double precision)
-          AND latest.client_id = source.client_id
-          AND latest.latest_observed_at <= source.latest_observed_at
-        "#,
-    )
-    .bind(client_id)
-    .bind(TELEMETRY_BUCKET_SECS)
-    .bind(bucket_start_unix(metrics.observed_unix) as f64)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO telemetry_resource_latest
-        SELECT source.* FROM telemetry_rollups source
-        WHERE source.client_id = $1
-          AND source.bucket_secs = $2
-          AND source.bucket_start = to_timestamp($3::double precision)
-        ON CONFLICT (client_id) DO NOTHING
-        "#,
-    )
-    .bind(client_id)
-    .bind(TELEMETRY_BUCKET_SECS)
-    .bind(bucket_start_unix(metrics.observed_unix) as f64)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    .await
+    .map(|_| ())
+    .map_err(Into::into)
 }
 
 fn validated_swap_sample(metrics: &AgentMetrics) -> Result<Option<(i64, i64)>> {
@@ -2903,240 +3502,333 @@ fn validated_swap_sample(metrics: &AgentMetrics) -> Result<Option<(i64, i64)>> {
     }
 }
 
-async fn upsert_postgres_telemetry_network_rates(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-    metrics: &AgentMetrics,
-) -> Result<()> {
-    for network in metrics
-        .networks
-        .iter()
-        .filter(|network| valid_telemetry_name(&network.interface))
-    {
-        sqlx::query(
-            r#"
-            INSERT INTO telemetry_network_rates (
-                client_id,
-                interface,
-                bucket_start,
-                bucket_secs,
-                sample_count,
-                rx_bytes_sum,
-                tx_bytes_sum,
-                rx_bytes_avg,
-                tx_bytes_avg,
-                rx_bytes_last,
-                tx_bytes_last,
-                rx_counter_epoch,
-                tx_counter_epoch,
-                latest_observed_at,
-                updated_at
-            )
-            SELECT
-                $1,
-                $2,
-                to_timestamp($3::double precision),
-                $4,
-                1,
-                $5::numeric,
-                $6::numeric,
-                $5,
-                $6,
-                $5,
-                $6,
-                sample.rx_counter_epoch,
-                sample.tx_counter_epoch,
-                to_timestamp($7::double precision),
-                now()
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = $1
-              AND sample.source_kind = 'host'
-              AND sample.interface = $2
-              AND sample.observed_at = to_timestamp($3::double precision)
-            ON CONFLICT (client_id, interface, bucket_secs, bucket_start) DO UPDATE SET
-                sample_count = telemetry_network_rates.sample_count + EXCLUDED.sample_count,
-                rx_bytes_sum = telemetry_network_rates.rx_bytes_sum + EXCLUDED.rx_bytes_sum,
-                tx_bytes_sum = telemetry_network_rates.tx_bytes_sum + EXCLUDED.tx_bytes_sum,
-                rx_bytes_avg = round((telemetry_network_rates.rx_bytes_sum
-                    + EXCLUDED.rx_bytes_sum)
-                    / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
-                tx_bytes_avg = round((telemetry_network_rates.tx_bytes_sum
-                    + EXCLUDED.tx_bytes_sum)
-                    / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
-                rx_bytes_last = EXCLUDED.rx_bytes_last,
-                tx_bytes_last = EXCLUDED.tx_bytes_last,
-                rx_counter_epoch = EXCLUDED.rx_counter_epoch,
-                tx_counter_epoch = EXCLUDED.tx_counter_epoch,
-                latest_observed_at = GREATEST(
-                    telemetry_network_rates.latest_observed_at,
-                    EXCLUDED.latest_observed_at
-                ),
-                updated_at = now()
-            "#,
-        )
-        .bind(client_id)
-        .bind(&network.interface)
-        .bind(bucket_start_unix(metrics.observed_unix) as f64)
-        .bind(TELEMETRY_BUCKET_SECS)
-        .bind(u64_to_i64(network.rx_bytes))
-        .bind(u64_to_i64(network.tx_bytes))
-        .bind(metrics.observed_unix as f64)
-        .execute(&mut **tx)
-        .await?;
+#[cfg(test)]
+mod minute_telemetry_owner_contract_tests {
+    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, tail) = source.split_once(start).expect("section start");
+        let (section, _) = tail.split_once(end).expect("section end");
+        section
     }
-    Ok(())
-}
 
-async fn upsert_postgres_traffic_counter_samples(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-    metrics: &AgentMetrics,
-) -> Result<()> {
-    for network in metrics
-        .networks
-        .iter()
-        .filter(|network| valid_telemetry_name(&network.interface))
-    {
-        insert_traffic_counter_sample(
-            tx,
-            client_id,
-            "host",
-            &network.interface,
-            metrics.observed_unix,
-            u64_to_i64(network.rx_bytes),
-            u64_to_i64(network.tx_bytes),
-            "agent_networks",
-        )
-        .await?;
+    #[test]
+    fn projector_publishes_raw_source_without_owning_minute_derivations() {
+        let source = include_str!("repository_ingest.rs");
+        let projection = section(
+            source,
+            "async fn project_claimed_telemetry_suffix_in_tx",
+            "async fn load_network_interface_policy_in_tx",
+        );
+        assert!(projection.contains("update_projected_network_admission_masks_in_tx"));
+        assert!(projection.contains("project_ping_current_in_tx"));
+        assert!(projection.contains("upsert_postgres_telemetry_tunnels"));
+        assert!(projection.contains("projected_traffic_counter_overlay"));
+        for obsolete_owner in [
+            "upsert_postgres_telemetry_rollup(",
+            "insert_postgres_telemetry_ping_facts(",
+            "materialize_postgres_ping_fact_changes(",
+            "upsert_postgres_traffic_counter_samples(",
+            "upsert_postgres_telemetry_network_rates_with_policy(",
+            "lock_postgres_traffic_counter_streams(",
+        ] {
+            assert!(!projection.contains(obsolete_owner));
+        }
     }
-    for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
-        let sample_source = tunnel.traffic_source.as_deref().unwrap_or("runtime_tunnel");
-        insert_traffic_counter_sample(
-            tx,
-            client_id,
-            "tunnel",
-            &tunnel.interface,
-            metrics.observed_unix,
-            u64_to_i64(tunnel.rx_bytes),
-            u64_to_i64(tunnel.tx_bytes),
-            sample_source,
-        )
-        .await?;
-    }
-    Ok(())
-}
 
-async fn insert_traffic_counter_sample(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-    source_kind: &str,
-    interface: &str,
-    observed_unix: u64,
-    rx_bytes: i64,
-    tx_bytes: i64,
-    sample_source: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        WITH previous AS (
-            SELECT rx_counter_epoch, tx_counter_epoch, rx_bytes, tx_bytes, sample_source
-            FROM traffic_counter_samples
-            WHERE client_id = $1
-              AND source_kind = $2
-              AND interface = $3
-              AND observed_at <= date_trunc(
-                    'minute', to_timestamp($4::double precision)
-              )
-            ORDER BY observed_at DESC
-            LIMIT 1
-        )
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at, rx_bytes, tx_bytes,
-            rx_counter_epoch, tx_counter_epoch, sample_source
-        )
-        SELECT
-            $1, $2, $3,
-            date_trunc('minute', to_timestamp($4::double precision)),
-            $5,
-            $6,
-            COALESCE(previous.rx_counter_epoch, 0)
-                + CASE
-                    WHEN $5 < previous.rx_bytes THEN 1
-                    WHEN previous.sample_source LIKE 'vnstat_import:%'
-                     AND $7 NOT LIKE 'vnstat_import:%' THEN 1
-                    ELSE 0
-                  END,
-            COALESCE(previous.tx_counter_epoch, 0)
-                + CASE
-                    WHEN $6 < previous.tx_bytes THEN 1
-                    WHEN previous.sample_source LIKE 'vnstat_import:%'
-                     AND $7 NOT LIKE 'vnstat_import:%' THEN 1
-                    ELSE 0
-                  END,
-            $7
-        FROM (SELECT 1) seed
-        LEFT JOIN previous ON TRUE
-        ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET
-            rx_bytes = EXCLUDED.rx_bytes,
-            tx_bytes = EXCLUDED.tx_bytes,
-            rx_counter_epoch = CASE
-                WHEN EXCLUDED.rx_bytes < traffic_counter_samples.rx_bytes
-                  OR (
-                    traffic_counter_samples.sample_source LIKE 'vnstat_import:%'
-                    AND EXCLUDED.sample_source NOT LIKE 'vnstat_import:%'
-                  )
-                THEN traffic_counter_samples.rx_counter_epoch + 1
-                ELSE GREATEST(
-                    traffic_counter_samples.rx_counter_epoch,
-                    EXCLUDED.rx_counter_epoch
-                )
-            END,
-            tx_counter_epoch = CASE
-                WHEN EXCLUDED.tx_bytes < traffic_counter_samples.tx_bytes
-                  OR (
-                    traffic_counter_samples.sample_source LIKE 'vnstat_import:%'
-                    AND EXCLUDED.sample_source NOT LIKE 'vnstat_import:%'
-                  )
-                THEN traffic_counter_samples.tx_counter_epoch + 1
-                ELSE GREATEST(
-                    traffic_counter_samples.tx_counter_epoch,
-                    EXCLUDED.tx_counter_epoch
-                )
-            END,
-            sample_source = EXCLUDED.sample_source,
-            inbound_promoted = FALSE
-        "#,
-    )
-    .bind(client_id)
-    .bind(source_kind)
-    .bind(interface)
-    .bind(observed_unix as f64)
-    .bind(rx_bytes)
-    .bind(tx_bytes)
-    .bind(sample_source)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    #[test]
+    fn projector_ping_current_is_one_bounded_exact_client_owner() {
+        let source = include_str!("repository_ingest.rs");
+        let current = section(
+            source,
+            "async fn project_ping_current_in_tx",
+            "async fn policy_traffic_minute_cursor_in_tx",
+        );
+        assert!(current.contains("INSERT INTO telemetry_ping_series"));
+        assert!(current.contains("INSERT INTO telemetry_ping_current AS current"));
+        assert!(current.contains("sample.client_id = $1"));
+        assert!(current.contains("sample.accepted_seq > core_frontier.materialized_seq"));
+        assert!(current.contains("sample.accepted_seq <= $3"));
+        assert!(current.contains("raw.accepted_seq > $2"));
+        assert!(current.contains("claimed_canonical AS MATERIALIZED"));
+        assert!(current.contains("predecessor_candidates AS MATERIALIZED"));
+        assert!(current.contains("raw.accepted_seq <= $2"));
+        assert!(current.contains("prior.series_id IS NULL"));
+        assert!(current.contains("prior.checked_unix, prior.status, prior.latency_avg_ms,"));
+        assert!(current.contains("fact.series_id = bounds.series_id"));
+        assert!(current.contains("bounds.latest_checked_unix - ($4::BIGINT - 1)"));
+        assert!(current.contains("DISTINCT ON (series_id, source_checked_unix)"));
+        assert!(current.contains("current.latest_status,"));
+        assert!(current.contains("EXCLUDED.latest_status,"));
+        assert!(!current.contains("telemetry_ping_rollups"));
+    }
+
+    #[test]
+    fn ping_projection_serializes_exact_topology_and_revalidates_current_membership() {
+        let source = include_str!("repository_ingest.rs");
+        let projection = section(
+            source,
+            "async fn project_claimed_telemetry_suffix_in_tx",
+            "async fn load_network_interface_policy_in_tx",
+        );
+        let identities = projection
+            .find("let ping_target_ids = projected_ping_target_ids(&samples)")
+            .expect("in-memory exact Ping identities");
+        let nonempty = projection
+            .find("if !ping_target_ids.is_empty()")
+            .expect("empty Ping suffix fast path");
+        let target_lock = projection
+            .find("lock_projected_ping_targets_in_tx")
+            .expect("exact topology lock");
+        let current = projection
+            .find("project_ping_current_in_tx")
+            .expect("Ping current projection");
+        assert!(identities < nonempty && nonempty < target_lock && target_lock < current);
+
+        let ping = section(
+            source,
+            "async fn project_ping_current_in_tx",
+            "async fn policy_traffic_minute_cursor_in_tx",
+        );
+        let lock = section(
+            source,
+            "async fn lock_projected_ping_targets_in_tx",
+            "async fn policy_traffic_minute_cursor_in_tx",
+        );
+        assert!(lock.contains("target.id = ANY($1::UUID[])"));
+        assert!(lock.contains("ORDER BY target.id"));
+        assert!(lock.contains("FOR SHARE OF target"));
+        assert_eq!(lock.matches("sqlx::query_scalar").count(), 1);
+        assert_eq!(ping.matches("AND target.enabled").count(), 1);
+        assert_eq!(
+            ping.matches("AND target.generation = expanded.generation")
+                .count(),
+            1
+        );
+        assert_eq!(
+            ping.matches("JOIN ping_target_assignments assignment")
+                .count(),
+            1
+        );
+
+        let topology = include_str!("repository_monitoring.rs");
+        let topology_lock = section(
+            topology,
+            "async fn lock_postgres_ping_targets",
+            "async fn lock_postgres_ping_clients",
+        );
+        assert!(topology_lock.contains("ORDER BY id"));
+        assert!(topology_lock.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn natural_minute_consumers_own_ping_and_network_history() {
+        let worker_source =
+            include_str!("../../../../worker/src/retention/telemetry_minute_materialization.rs");
+        let (worker, _) = worker_source
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("natural-minute worker production boundary");
+        assert!(worker.contains("INSERT INTO telemetry_ping_facts"));
+        assert!(worker.contains("INSERT INTO telemetry_ping_rollups"));
+        assert!(!worker.contains("INSERT INTO telemetry_ping_series"));
+        assert!(!worker.contains("INSERT INTO telemetry_ping_current"));
+        assert!(worker.contains("INSERT INTO traffic_counter_samples"));
+        assert!(worker
+            .contains("UPDATE {head} head\n        SET materialized_seq = claims.through_seq"));
+        assert!(!worker.contains("telemetry_ping_active"));
+        assert!(!worker.contains("telemetry_resource_active"));
+    }
 }
 
 async fn upsert_postgres_telemetry_tunnels(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
     metrics: &AgentMetrics,
-) -> Result<()> {
-    sqlx::query("DELETE FROM telemetry_tunnels WHERE client_id = $1")
-        .bind(client_id)
-        .execute(&mut **tx)
-        .await?;
+    admission: &ProjectedNetworkAdmission,
+    accepted_at: DateTime<Utc>,
+) -> Result<bool> {
+    let tunnels = metrics
+        .tunnels
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, tunnel)| {
+            admission
+                .tunnel_is_current(ordinal)
+                .then_some((tunnel, admission.tunnel_admitted(ordinal)))
+        })
+        .map(|(tunnel, counters_admitted_at_projection)| {
+            let telemetry_plan_id = tunnel
+                .plan_id
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .context("validated tunnel lost its canonical plan identity")?;
+            Ok(serde_json::json!({
+                "interface": &tunnel.interface,
+                "kind": &tunnel.kind,
+                "ownership_mode": &tunnel.ownership_mode,
+                "mutation_policy": &tunnel.mutation_policy,
+                "source": &tunnel.source,
+                "operstate": &tunnel.operstate,
+                "mtu": tunnel.mtu.map(u64_to_i64),
+                "link_type": tunnel.link_type,
+                "address": &tunnel.address,
+                "rx_bytes": u64_to_i64(tunnel.rx_bytes),
+                "tx_bytes": u64_to_i64(tunnel.tx_bytes),
+                "counters_admitted_at_projection": counters_admitted_at_projection,
+                "traffic_source": &tunnel.traffic_source,
+                "traffic_status": &tunnel.traffic_status,
+                "traffic_reason": &tunnel.traffic_reason,
+                "traffic_checked_unix": tunnel.traffic_checked_unix.map(u64_to_i64),
+                "telemetry_plan_id": telemetry_plan_id,
+                "telemetry_topology_identity_hash": &tunnel.topology_identity_hash,
+                "telemetry_plan_name": &tunnel.plan_name,
+                "telemetry_plan_runtime_manager": &tunnel.plan_runtime_manager,
+                "telemetry_endpoint_side": &tunnel.endpoint_side,
+                "telemetry_peer_client_id": &tunnel.peer_client_id,
+                "adapter_health": tunnel
+                    .adapter_health
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+                "latency_monitoring_enabled": tunnel.latency_monitoring_enabled,
+                "latency_status": &tunnel.latency_status,
+                "latency_reason": &tunnel.latency_reason,
+                "latency_primary_family": &tunnel.latency_primary_family,
+                "latency_target": &tunnel.latency_target,
+                "latency_checked_unix": tunnel.latency_checked_unix.map(u64_to_i64),
+                "latency_avg_ms": tunnel.latency_avg_ms,
+                "packet_loss_ratio": tunnel.packet_loss_ratio,
+                "latency_healthy_windows": tunnel.latency_healthy_windows.map(i32::from),
+                "latency_missed_windows": tunnel.latency_missed_windows.map(i32::from),
+                "telemetry_runtime_evidence_identity_hash":
+                    &tunnel.runtime_evidence_identity_hash,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
-        let adapter_health = tunnel
-            .adapter_health
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()?;
-        sqlx::query(
-            r#"
+    let row = sqlx::query(
+        r#"
+            WITH incoming AS MATERIALIZED (
+                SELECT *
+                FROM jsonb_to_recordset($3::JSONB) AS item(
+                    interface TEXT,
+                    kind TEXT,
+                    ownership_mode TEXT,
+                    mutation_policy TEXT,
+                    source TEXT,
+                    operstate TEXT,
+                    mtu BIGINT,
+                    link_type BIGINT,
+                    address TEXT,
+                    rx_bytes BIGINT,
+                    tx_bytes BIGINT,
+                    counters_admitted_at_projection BOOLEAN,
+                    traffic_source TEXT,
+                    traffic_status TEXT,
+                    traffic_reason TEXT,
+                    traffic_checked_unix BIGINT,
+                    telemetry_plan_id UUID,
+                    telemetry_topology_identity_hash TEXT,
+                    telemetry_plan_name TEXT,
+                    telemetry_plan_runtime_manager TEXT,
+                    telemetry_endpoint_side TEXT,
+                    telemetry_peer_client_id TEXT,
+                    adapter_health JSONB,
+                    latency_monitoring_enabled BOOLEAN,
+                    latency_status TEXT,
+                    latency_reason TEXT,
+                    latency_primary_family TEXT,
+                    latency_target TEXT,
+                    latency_checked_unix BIGINT,
+                    latency_avg_ms DOUBLE PRECISION,
+                    packet_loss_ratio DOUBLE PRECISION,
+                    latency_healthy_windows INTEGER,
+                    latency_missed_windows INTEGER,
+                    telemetry_runtime_evidence_identity_hash TEXT
+                )
+            ), alert_revision AS MATERIALIZED (
+                SELECT COALESCE(bool_or(
+                    stored.interface IS NULL
+                    OR ROW(
+                        stored.telemetry_plan_id,
+                        stored.telemetry_topology_identity_hash,
+                        stored.telemetry_runtime_evidence_identity_hash,
+                        stored.telemetry_plan_runtime_manager,
+                        stored.telemetry_endpoint_side,
+                        stored.telemetry_peer_client_id
+                    ) IS DISTINCT FROM ROW(
+                        incoming.telemetry_plan_id,
+                        incoming.telemetry_topology_identity_hash,
+                        incoming.telemetry_runtime_evidence_identity_hash,
+                        incoming.telemetry_plan_runtime_manager,
+                        incoming.telemetry_endpoint_side,
+                        incoming.telemetry_peer_client_id
+                    )
+                    OR ROW(
+                        stored.traffic_checked_unix,
+                        stored.traffic_status,
+                        CASE
+                            WHEN stored.traffic_status = 'ok'
+                            THEN 'Tunnel interface counters are healthy'
+                            WHEN stored.traffic_status IS NULL
+                            THEN 'Tunnel traffic counter evidence is unavailable'
+                            ELSE COALESCE(
+                                stored.traffic_reason,
+                                'tunnel interface counters are not reporting ok'
+                            )
+                        END
+                    ) IS DISTINCT FROM ROW(
+                        incoming.traffic_checked_unix,
+                        incoming.traffic_status,
+                        CASE
+                            WHEN incoming.traffic_status = 'ok'
+                            THEN 'Tunnel interface counters are healthy'
+                            WHEN incoming.traffic_status IS NULL
+                            THEN 'Tunnel traffic counter evidence is unavailable'
+                            ELSE COALESCE(
+                                incoming.traffic_reason,
+                                'tunnel interface counters are not reporting ok'
+                            )
+                        END
+                    )
+                    OR ROW(
+                        NULLIF(stored.adapter_health ->> 'checked_unix', '')::BIGINT,
+                        (stored.adapter_health ->> 'success')::BOOLEAN,
+                        CASE (stored.adapter_health ->> 'success')::BOOLEAN
+                            WHEN TRUE THEN 'Tunnel adapter status is healthy'
+                            WHEN FALSE THEN COALESCE(
+                                stored.adapter_health ->> 'reason',
+                                'adapter command did not report healthy status'
+                            )
+                            ELSE 'Tunnel adapter health evidence is unavailable'
+                        END
+                    ) IS DISTINCT FROM ROW(
+                        NULLIF(incoming.adapter_health ->> 'checked_unix', '')::BIGINT,
+                        (incoming.adapter_health ->> 'success')::BOOLEAN,
+                        CASE (incoming.adapter_health ->> 'success')::BOOLEAN
+                            WHEN TRUE THEN 'Tunnel adapter status is healthy'
+                            WHEN FALSE THEN COALESCE(
+                                incoming.adapter_health ->> 'reason',
+                                'adapter command did not report healthy status'
+                            )
+                            ELSE 'Tunnel adapter health evidence is unavailable'
+                        END
+                    )
+                    OR (
+                        stored.updated_at <= client.operational_alert_tunnel_boundary_at
+                        AND $4::TIMESTAMPTZ > client.operational_alert_tunnel_boundary_at
+                    )
+                    OR (
+                        plan.id IS NOT NULL
+                        AND stored.updated_at <= plan.operational_alert_runtime_boundary_at
+                        AND $4::TIMESTAMPTZ > plan.operational_alert_runtime_boundary_at
+                    )
+                ), FALSE) AS changed
+                FROM incoming
+                LEFT JOIN telemetry_tunnels stored
+                  ON stored.client_id = $1
+                 AND stored.interface = incoming.interface
+                JOIN clients client ON client.id = $1
+                LEFT JOIN tunnel_plans plan ON plan.id = incoming.telemetry_plan_id
+            ), upserted AS (
             INSERT INTO telemetry_tunnels (
                 client_id,
                 observed_at,
@@ -3151,6 +3843,7 @@ async fn upsert_postgres_telemetry_tunnels(
                 address,
                 rx_bytes,
                 tx_bytes,
+                counters_admitted_at_projection,
                 traffic_source,
                 traffic_status,
                 traffic_reason,
@@ -3175,168 +3868,130 @@ async fn upsert_postgres_telemetry_tunnels(
                 telemetry_runtime_evidence_identity_hash,
                 updated_at
             )
-            VALUES (
+            SELECT
                 $1,
                 to_timestamp($2::double precision),
-                $3,
-                $4,
-                $5,
-                $6,
-                $7,
-                $8,
-                $9,
-                $10,
-                $11,
-                $12,
-                $13,
-                $14,
-                $15,
-                $16,
-                $17,
-                $18,
-                $19,
-                $20,
-                $21,
-                $22,
-                $23,
-                $24,
-                $25,
-                $26,
-                $27,
-                $28,
-                $29,
-                $30,
-                $31,
-                $32,
-                $33,
-                $34,
-                $35,
-                clock_timestamp()
+                incoming.interface,
+                incoming.kind,
+                incoming.ownership_mode,
+                incoming.mutation_policy,
+                incoming.source,
+                incoming.operstate,
+                incoming.mtu,
+                incoming.link_type,
+                incoming.address,
+                incoming.rx_bytes,
+                incoming.tx_bytes,
+                incoming.counters_admitted_at_projection,
+                incoming.traffic_source,
+                incoming.traffic_status,
+                incoming.traffic_reason,
+                incoming.traffic_checked_unix,
+                incoming.telemetry_plan_id,
+                incoming.telemetry_topology_identity_hash,
+                incoming.telemetry_plan_name,
+                incoming.telemetry_plan_runtime_manager,
+                incoming.telemetry_endpoint_side,
+                incoming.telemetry_peer_client_id,
+                incoming.adapter_health,
+                incoming.latency_monitoring_enabled,
+                incoming.latency_status,
+                incoming.latency_reason,
+                incoming.latency_primary_family,
+                incoming.latency_target,
+                incoming.latency_checked_unix,
+                incoming.latency_avg_ms,
+                incoming.packet_loss_ratio,
+                incoming.latency_healthy_windows,
+                incoming.latency_missed_windows,
+                incoming.telemetry_runtime_evidence_identity_hash,
+                $4::TIMESTAMPTZ
+            FROM incoming
+            ORDER BY incoming.interface
+            ON CONFLICT (client_id, interface) DO UPDATE SET
+                observed_at = EXCLUDED.observed_at,
+                kind = EXCLUDED.kind,
+                ownership_mode = EXCLUDED.ownership_mode,
+                mutation_policy = EXCLUDED.mutation_policy,
+                source = EXCLUDED.source,
+                operstate = EXCLUDED.operstate,
+                mtu = EXCLUDED.mtu,
+                link_type = EXCLUDED.link_type,
+                address = EXCLUDED.address,
+                rx_bytes = EXCLUDED.rx_bytes,
+                tx_bytes = EXCLUDED.tx_bytes,
+                counters_admitted_at_projection =
+                    EXCLUDED.counters_admitted_at_projection,
+                traffic_source = EXCLUDED.traffic_source,
+                traffic_status = EXCLUDED.traffic_status,
+                traffic_reason = EXCLUDED.traffic_reason,
+                traffic_checked_unix = EXCLUDED.traffic_checked_unix,
+                telemetry_plan_id = EXCLUDED.telemetry_plan_id,
+                telemetry_topology_identity_hash =
+                    EXCLUDED.telemetry_topology_identity_hash,
+                telemetry_plan_name = EXCLUDED.telemetry_plan_name,
+                telemetry_plan_runtime_manager =
+                    EXCLUDED.telemetry_plan_runtime_manager,
+                telemetry_endpoint_side = EXCLUDED.telemetry_endpoint_side,
+                telemetry_peer_client_id = EXCLUDED.telemetry_peer_client_id,
+                adapter_health = EXCLUDED.adapter_health,
+                latency_monitoring_enabled = EXCLUDED.latency_monitoring_enabled,
+                latency_status = EXCLUDED.latency_status,
+                latency_reason = EXCLUDED.latency_reason,
+                latency_primary_family = EXCLUDED.latency_primary_family,
+                latency_target = EXCLUDED.latency_target,
+                latency_checked_unix = EXCLUDED.latency_checked_unix,
+                latency_avg_ms = EXCLUDED.latency_avg_ms,
+                packet_loss_ratio = EXCLUDED.packet_loss_ratio,
+                latency_healthy_windows = EXCLUDED.latency_healthy_windows,
+                latency_missed_windows = EXCLUDED.latency_missed_windows,
+                telemetry_runtime_evidence_identity_hash =
+                    EXCLUDED.telemetry_runtime_evidence_identity_hash,
+                updated_at = EXCLUDED.updated_at
+            RETURNING interface
+            ), deleted AS (
+                DELETE FROM telemetry_tunnels stored
+                WHERE stored.client_id = $1
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM incoming
+                      WHERE incoming.interface = stored.interface
+                )
+                RETURNING stored.interface
+            ), reconciled_series AS (
+                UPDATE network_observation_series series
+                SET active = FALSE
+                WHERE series.client_id = $1
+                  AND series.active IS TRUE
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM incoming
+                      WHERE incoming.telemetry_plan_id = series.plan_id
+                        AND incoming.interface = series.interface_name
+                        AND incoming.telemetry_endpoint_side = series.endpoint_side
+                        AND incoming.telemetry_peer_client_id = series.peer_client_id
+                        AND incoming.latency_monitoring_enabled IS TRUE
+                        AND incoming.latency_primary_family = series.address_family
+                        AND incoming.latency_target = series.target
+                  )
+                RETURNING series.id
             )
-            "#,
-        )
-        .bind(client_id)
-        .bind(metrics.observed_unix as f64)
-        .bind(&tunnel.interface)
-        .bind(&tunnel.kind)
-        .bind(&tunnel.ownership_mode)
-        .bind(&tunnel.mutation_policy)
-        .bind(&tunnel.source)
-        .bind(&tunnel.operstate)
-        .bind(tunnel.mtu.map(u64_to_i64))
-        .bind(tunnel.link_type)
-        .bind(&tunnel.address)
-        .bind(u64_to_i64(tunnel.rx_bytes))
-        .bind(u64_to_i64(tunnel.tx_bytes))
-        .bind(&tunnel.traffic_source)
-        .bind(&tunnel.traffic_status)
-        .bind(&tunnel.traffic_reason)
-        .bind(tunnel.traffic_checked_unix.map(u64_to_i64))
-        .bind(&tunnel.plan_id)
-        .bind(&tunnel.topology_identity_hash)
-        .bind(&tunnel.plan_name)
-        .bind(&tunnel.plan_runtime_manager)
-        .bind(&tunnel.endpoint_side)
-        .bind(&tunnel.peer_client_id)
-        .bind(adapter_health)
-        .bind(tunnel.latency_monitoring_enabled)
-        .bind(&tunnel.latency_status)
-        .bind(&tunnel.latency_reason)
-        .bind(&tunnel.latency_primary_family)
-        .bind(&tunnel.latency_target)
-        .bind(tunnel.latency_checked_unix.map(u64_to_i64))
-        .bind(tunnel.latency_avg_ms)
-        .bind(tunnel.packet_loss_ratio)
-        .bind(tunnel.latency_healthy_windows.map(i32::from))
-        .bind(tunnel.latency_missed_windows.map(i32::from))
-        .bind(&tunnel.runtime_evidence_identity_hash)
-        .execute(&mut **tx)
-        .await?;
-    }
-    reconcile_postgres_automatic_observation_series_for_client(tx, client_id).await?;
-    Ok(())
-}
-
-fn telemetry_tunnel_view(
-    client_id: &str,
-    observed_unix: u64,
-    tunnel: &RuntimeTunnelStat,
-) -> Option<TelemetryTunnelView> {
-    if !valid_tunnel(tunnel) {
-        return None;
-    }
-    Some(TelemetryTunnelView {
-        client_id: client_id.to_string(),
-        observed_at: observed_unix.to_string(),
-        accepted_at: Utc::now().to_rfc3339(),
-        interface: tunnel.interface.clone(),
-        kind: tunnel.kind.clone(),
-        ownership_mode: tunnel.ownership_mode.clone(),
-        mutation_policy: tunnel.mutation_policy.clone(),
-        plan_id: tunnel
-            .plan_id
-            .as_deref()
-            .and_then(|value| Uuid::parse_str(value).ok()),
-        topology_identity_hash: tunnel.topology_identity_hash.clone(),
-        runtime_evidence_identity_hash: tunnel.runtime_evidence_identity_hash.clone(),
-        plan_name: tunnel.plan_name.clone(),
-        plan_runtime_manager: tunnel.plan_runtime_manager.clone(),
-        endpoint_side: tunnel.endpoint_side.clone(),
-        peer_client_id: tunnel.peer_client_id.clone(),
-        source: tunnel.source.clone(),
-        operstate: tunnel.operstate.clone(),
-        mtu: tunnel.mtu.map(u64_to_i64),
-        link_type: tunnel.link_type,
-        address: tunnel.address.clone(),
-        rx_bytes: u64_to_i64(tunnel.rx_bytes),
-        tx_bytes: u64_to_i64(tunnel.tx_bytes),
-        traffic_source: tunnel.traffic_source.clone(),
-        traffic_status: tunnel.traffic_status.clone(),
-        traffic_reason: tunnel.traffic_reason.clone(),
-        traffic_checked_unix: tunnel.traffic_checked_unix.map(u64_to_i64),
-        adapter_health: tunnel.adapter_health.as_ref().map(adapter_health_view),
-        latency_monitoring_enabled: tunnel.latency_monitoring_enabled,
-        latency_status: tunnel.latency_status.clone(),
-        latency_reason: tunnel.latency_reason.clone(),
-        latency_primary_family: tunnel.latency_primary_family.clone(),
-        latency_target: tunnel.latency_target.clone(),
-        latency_checked_unix: tunnel.latency_checked_unix.map(u64_to_i64),
-        latency_avg_ms: tunnel.latency_avg_ms,
-        packet_loss_ratio: tunnel.packet_loss_ratio,
-        latency_healthy_windows: tunnel.latency_healthy_windows.map(i32::from),
-        latency_missed_windows: tunnel.latency_missed_windows.map(i32::from),
-    })
-}
-
-fn agent_hello_session_event(event: &GatewayAgentHelloIngest) -> GatewaySessionLifecycleIngest {
-    GatewaySessionLifecycleIngest {
-        gateway_id: event.gateway_id.clone(),
-        client_id: event.hello.client_id.clone(),
-        session_id: event.gateway_session_id,
-        noise_public_key_hex: Some(event.noise_public_key_hex.clone()),
-        remote_ip: event.remote_ip.clone(),
-        agent_version: Some(event.hello.agent_version.clone()),
-        reason: None,
-    }
-}
-
-fn adapter_health_view(
-    health: &RuntimeTunnelAdapterHealthStat,
-) -> TelemetryTunnelAdapterHealthView {
-    TelemetryTunnelAdapterHealthView {
-        status: health.status.clone(),
-        checked_unix: u64_to_i64(health.checked_unix),
-        configured: health.configured,
-        success: health.success,
-        exit_code: health.exit_code,
-        reason: health.reason.clone(),
-        duration_ms: u64_to_i64(health.duration_ms),
-        command_sha256_hex: health.command_sha256_hex.clone(),
-        timed_out: health.timed_out,
-        output_truncated: health.output_truncated,
-        stdout_sha256_hex: health.stdout_sha256_hex.clone(),
-        stderr_sha256_hex: health.stderr_sha256_hex.clone(),
-    }
+            SELECT
+                (SELECT count(*) FROM upserted),
+                (SELECT count(*) FROM deleted),
+                (
+                    (SELECT changed FROM alert_revision)
+                    OR EXISTS (SELECT 1 FROM deleted)
+                ) AS alert_revision
+        "#,
+    )
+    .bind(client_id)
+    .bind(metrics.observed_unix as f64)
+    .bind(SqlJson(tunnels))
+    .bind(accepted_at)
+    .fetch_one(&mut **tx)
+    .await?;
+    row.try_get("alert_revision").map_err(Into::into)
 }
 
 fn persistent_disk_totals(metrics: &AgentMetrics) -> Option<(i64, i64)> {
@@ -3348,10 +4003,218 @@ fn persistent_disk_totals(metrics: &AgentMetrics) -> Option<(i64, i64)> {
     Some((disk_total, disk_available))
 }
 
-fn network_telemetry_totals(metrics: &AgentMetrics) -> (i64, i64) {
-    let network_rx = sum_u64(metrics.networks.iter().map(|network| network.rx_bytes));
-    let network_tx = sum_u64(metrics.networks.iter().map(|network| network.tx_bytes));
-    (network_rx, network_tx)
+/// Packs admission by reported-vector ordinal. PostgreSQL `get_bit(bytea, n)`
+/// numbers bits least-significant-first within each byte, so ordinal `n` maps
+/// to byte `n / 8`, bit `n % 8`.
+fn pack_ordinal_admission_mask(admission: impl ExactSizeIterator<Item = bool>) -> Vec<u8> {
+    let mut mask = vec![0_u8; admission.len().div_ceil(8)];
+    for (ordinal, admitted) in admission.enumerate() {
+        if admitted {
+            mask[ordinal / 8] |= 1_u8 << (ordinal % 8);
+        }
+    }
+    mask
+}
+
+#[cfg(test)]
+fn network_admission_masks(
+    metrics: &AgentMetrics,
+    policy: &NetworkInterfacePolicy,
+    current_plan_endpoints: &HashSet<ProjectedTelemetryTunnelIdentity>,
+    managed_endpoint_interfaces: &HashSet<String>,
+) -> (Vec<u8>, Vec<u8>) {
+    let admission = classify_projected_network_admission(
+        metrics,
+        policy,
+        current_plan_endpoints,
+        managed_endpoint_interfaces,
+    );
+    (admission.network_mask(), admission.tunnel_mask())
+}
+
+#[cfg(test)]
+mod network_admission_mask_tests {
+    use super::{network_admission_masks, pack_ordinal_admission_mask};
+    use std::collections::HashSet;
+    use vpsman_common::{
+        projected_telemetry_tunnel_identity, AgentMetrics, NetworkInterfacePolicy, NetworkStat,
+        RuntimeTunnelStat,
+    };
+
+    fn valid_tunnel(interface: &str) -> RuntimeTunnelStat {
+        RuntimeTunnelStat {
+            interface: interface.to_string(),
+            kind: "wireguard".to_string(),
+            ownership_mode: "managed".to_string(),
+            mutation_policy: "managed".to_string(),
+            source: "runtime".to_string(),
+            plan_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+            plan_name: Some("mask-test".to_string()),
+            endpoint_side: Some("left".to_string()),
+            peer_client_id: Some("mask-test-peer".to_string()),
+            ..RuntimeTunnelStat::default()
+        }
+    }
+
+    #[test]
+    fn ordinal_masks_are_lsb_first_and_cover_partial_final_bytes() {
+        let mask = pack_ordinal_admission_mask(
+            [
+                true, false, false, true, false, false, false, true, false, true,
+            ]
+            .into_iter(),
+        );
+        assert_eq!(mask, vec![0x89, 0x02]);
+    }
+
+    #[test]
+    fn current_tunnel_with_128_byte_plan_name_receives_nonzero_admission_bit() {
+        let mut metrics = AgentMetrics {
+            tunnels: vec![valid_tunnel("wg0")],
+            ..AgentMetrics::default()
+        };
+        metrics.tunnels[0].plan_name = Some("p".repeat(128));
+        let current_plan_endpoints = metrics
+            .tunnels
+            .iter()
+            .filter_map(projected_telemetry_tunnel_identity)
+            .collect::<HashSet<_>>();
+        let managed_endpoint_interfaces = HashSet::from(["wg0".to_string()]);
+        assert_eq!(
+            network_admission_masks(
+                &metrics,
+                &NetworkInterfacePolicy::All,
+                &current_plan_endpoints,
+                &managed_endpoint_interfaces,
+            )
+            .1,
+            vec![0x01]
+        );
+
+        metrics.tunnels[0].plan_name = Some("p".repeat(129));
+        assert!(projected_telemetry_tunnel_identity(&metrics.tunnels[0]).is_none());
+    }
+
+    #[test]
+    fn projected_masks_share_one_setwise_update() {
+        let source = include_str!("repository_ingest.rs");
+        let (_, update) = source
+            .split_once("async fn update_projected_network_admission_masks_in_tx")
+            .expect("projected network update");
+        let (update, _) = update
+            .split_once("async fn record_failed_telemetry_projection_in_tx")
+            .expect("projected network update boundary");
+        assert_eq!(update.matches("UPDATE telemetry_samples sample").count(), 1);
+        for assignment in [
+            "network_admission_mask = desired.network_admission_mask",
+            "tunnel_admission_mask = desired.tunnel_admission_mask",
+        ] {
+            assert!(update.contains(assignment), "missing {assignment}");
+        }
+        assert!(update.contains("$2::BYTEA[], $3::BYTEA[]"));
+        assert!(update.contains("updated.rows_affected() == samples.len() as u64"));
+    }
+
+    #[test]
+    fn masks_preserve_policy_validity_and_default_tunnel_collision() {
+        let network_names = [
+            "eth0", "docker0", "wlan0", "ens3", "veth0", "wg0", "wg4", "w7", "eth8", "br9",
+        ];
+        let tunnel_names = [
+            "wg0", "tun1", "wg2", "tun3", "wg4", "tun5", "tun6", "tun7", "wg8",
+        ];
+        let mut metrics = AgentMetrics {
+            networks: network_names
+                .into_iter()
+                .map(|interface| NetworkStat {
+                    interface: interface.to_string(),
+                    rx_bytes: 1,
+                    tx_bytes: 1,
+                })
+                .collect(),
+            tunnels: tunnel_names.into_iter().map(valid_tunnel).collect(),
+            ..AgentMetrics::default()
+        };
+        // Invalid projected tunnel evidence remains present in the reported
+        // vector and receives no tunnel bit. The current plan still hides its
+        // same-named host wg4 under default admission, independent of the
+        // malformed runtime row.
+        metrics.tunnels[4].plan_id = None;
+        let current_plan_endpoints = metrics
+            .tunnels
+            .iter()
+            .filter_map(projected_telemetry_tunnel_identity)
+            .collect::<HashSet<_>>();
+        let managed_endpoint_interfaces = tunnel_names
+            .into_iter()
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+
+        let default = network_admission_masks(
+            &metrics,
+            &NetworkInterfacePolicy::DefaultPhysical,
+            &current_plan_endpoints,
+            &managed_endpoint_interfaces,
+        );
+        assert_eq!(default.0, vec![0x8d, 0x01]);
+        assert_eq!(default.1, vec![0x00, 0x00]);
+
+        let all = network_admission_masks(
+            &metrics,
+            &NetworkInterfacePolicy::All,
+            &current_plan_endpoints,
+            &managed_endpoint_interfaces,
+        );
+        assert_eq!(all.0, vec![0xff, 0x03]);
+        assert_eq!(all.1, vec![0xef, 0x01]);
+
+        let patterns = network_admission_masks(
+            &metrics,
+            &NetworkInterfacePolicy::Patterns(vec!["eth*".to_string(), "wg*".to_string()]),
+            &current_plan_endpoints,
+            &managed_endpoint_interfaces,
+        );
+        assert_eq!(patterns.0, vec![0x61, 0x01]);
+        assert_eq!(patterns.1, vec![0x05, 0x01]);
+
+        // A malformed or absent runtime row receives no tunnel bit, while the
+        // plan-owned interface remains a host collision under the default.
+        let stale_endpoints = current_plan_endpoints
+            .iter()
+            .filter(|identity| identity.interface != "wg0")
+            .cloned()
+            .collect::<HashSet<_>>();
+        let stale_default = network_admission_masks(
+            &metrics,
+            &NetworkInterfacePolicy::DefaultPhysical,
+            &stale_endpoints,
+            &managed_endpoint_interfaces,
+        );
+        assert_eq!(stale_default.0, vec![0x8d, 0x01]);
+        assert_eq!(stale_default.1, vec![0x00, 0x00]);
+    }
+}
+
+/// Applies the single generic network-byte admission policy. Runtime tunnel
+/// lifecycle remains independent; only its byte telemetry is gated here.
+/// Under the absent/default policy, a host name that is also the identity of a
+/// managed runtime tunnel is rejected even when it begins with `w`.
+pub(crate) fn admitted_network_interface(
+    policy: &NetworkInterfacePolicy,
+    source: NetworkInterfaceSource,
+    interface: &str,
+    current_tunnel_interfaces: &HashSet<String>,
+) -> bool {
+    if !policy.matches(source, interface) {
+        return false;
+    }
+    if *policy == NetworkInterfacePolicy::DefaultPhysical
+        && source == NetworkInterfaceSource::Host
+        && current_tunnel_interfaces.contains(interface)
+    {
+        return false;
+    }
+    true
 }
 
 async fn record_combined_telemetry_policy_evidence_in_tx(
@@ -3364,57 +4227,204 @@ async fn record_combined_telemetry_policy_evidence_in_tx(
     reported_observed_unix: u64,
     metrics: &AgentMetrics,
     traffic: &TrafficAccountingRecord,
+    rule_set: &PolicyEvidenceRuleSet,
 ) -> Result<()> {
-    let observed_at = Utc
-        .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
-        .single()
-        .context("telemetry observed timestamp is invalid")?;
-    record_policy_evidence_in_tx(
+    record_policy_evidence_with_rule_set_in_tx(
         tx,
-        PolicyEvidenceFact {
-            source_kind: "telemetry.combined".to_string(),
-            source_event_id: format!(
-                "telemetry.combined:{gateway_session_id}:{process_incarnation_id}:{telemetry_seq}"
-            ),
-            fact_kind: AlertPolicyRuleKind::Metric,
-            natural_key: client_id.to_string(),
-            confirmation_bucket_key: client_id.to_string(),
-            subject_client_id: Some(client_id.to_string()),
-            target_kind: "client".to_string(),
-            target_id: client_id.to_string(),
-            source_status: if traffic.state == "ok" {
-                "complete".to_string()
-            } else {
-                "incomplete".to_string()
-            },
-            // Metric completeness is field-local: absent CPU utilization,
-            // quota, or a reset-safe traffic cycle becomes a missing JSON
-            // leaf and therefore Kleene Unknown only for expressions that
-            // reference that fact.
-            complete: true,
-            // The lifecycle recorder replaces this with the canonical subject
-            // snapshot while the telemetry transaction still owns the client.
-            subject_snapshot: serde_json::json!({}),
-            payload: combined_metric_evidence_payload(
-                metrics,
-                traffic,
-                gateway_session_id,
-                process_incarnation_id,
-                telemetry_seq,
-                telemetry_sample_id,
-                reported_observed_unix,
-            ),
-            observed_at,
-            state_started_at: Some(observed_at),
-            causation_id: None,
-            schedule_lineage: Vec::new(),
-        },
+        combined_telemetry_policy_fact(
+            client_id,
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq,
+            telemetry_sample_id,
+            reported_observed_unix,
+            metrics,
+            traffic,
+        )?,
+        rule_set,
     )
     .await
     .map(|_| ())
 }
 
-fn combined_metric_evidence_payload(
+fn combined_telemetry_policy_fact(
+    client_id: &str,
+    gateway_session_id: Uuid,
+    process_incarnation_id: Uuid,
+    telemetry_seq: u64,
+    telemetry_sample_id: Uuid,
+    reported_observed_unix: u64,
+    metrics: &AgentMetrics,
+    traffic: &TrafficAccountingRecord,
+) -> Result<PolicyEvidenceFact> {
+    let observed_at = Utc
+        .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
+        .single()
+        .context("telemetry observed timestamp is invalid")?;
+    Ok(PolicyEvidenceFact {
+        source_kind: "telemetry.combined".to_string(),
+        source_event_id: format!(
+            "telemetry.combined:{gateway_session_id}:{process_incarnation_id}:{telemetry_seq}"
+        ),
+        fact_kind: AlertPolicyRuleKind::Metric,
+        natural_key: client_id.to_string(),
+        confirmation_bucket_key: client_id.to_string(),
+        subject_client_id: Some(client_id.to_string()),
+        target_kind: "client".to_string(),
+        target_id: client_id.to_string(),
+        source_status: if traffic.state == "ok" {
+            "complete".to_string()
+        } else {
+            "incomplete".to_string()
+        },
+        // Metric completeness is field-local: absent CPU utilization, quota,
+        // or a reset-safe traffic cycle becomes a missing JSON leaf and thus
+        // Kleene Unknown only for expressions that reference that fact.
+        complete: true,
+        // The lifecycle recorder replaces this with the canonical subject
+        // snapshot while the telemetry transaction still owns the client.
+        subject_snapshot: serde_json::json!({}),
+        payload: combined_metric_evidence_payload(
+            metrics,
+            traffic,
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq,
+            telemetry_sample_id,
+            reported_observed_unix,
+        ),
+        observed_at,
+        state_started_at: Some(observed_at),
+        causation_id: None,
+        schedule_lineage: Vec::new(),
+    })
+}
+
+/// Reconstructs the policy-facing traffic input for one exact projected
+/// sample.  Activation and preview share this read-only cursor-fenced path, so
+/// both see the same open-minute prefix as live evidence without taking a
+/// traffic-stream lock or creating a second durable history owner.
+pub(crate) async fn reconstruct_projected_policy_traffic_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    target_accepted_seq: i64,
+    metrics: &AgentMetrics,
+    network_admission_mask: &[u8],
+    tunnel_admission_mask: &[u8],
+) -> Result<TrafficAccountingRecord> {
+    let observed_at = Utc
+        .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
+        .single()
+        .context("projected policy traffic timestamp is invalid")?;
+    let target_overlay = projected_traffic_counter_overlay_from_masks(
+        metrics,
+        network_admission_mask,
+        tunnel_admission_mask,
+    )?;
+    let projected_streams = projected_traffic_streams(&target_overlay);
+    let mut plan_ids = metrics
+        .tunnels
+        .iter()
+        .filter_map(|tunnel| tunnel.plan_id.as_deref())
+        .filter_map(|plan_id| Uuid::parse_str(plan_id.trim()).ok())
+        .chain(
+            metrics
+                .tunnel_reachability
+                .iter()
+                .map(|observation| observation.plan_id),
+        )
+        .collect::<Vec<_>>();
+    plan_ids.sort_unstable();
+    plan_ids.dedup();
+    let current_tunnel_plans =
+        load_current_tunnel_plan_snapshot_for_ids_in_tx(tx, client_id, &plan_ids).await?;
+    let mut traffic_context = load_projected_traffic_accounting_context_in_tx(
+        tx,
+        client_id,
+        &current_tunnel_plans.managed_endpoint_interfaces,
+    )
+    .await?;
+    let (_, traffic, _) = rebase_policy_traffic_frontier_in_tx(
+        tx,
+        &mut traffic_context,
+        client_id,
+        target_accepted_seq,
+        observed_at,
+        metrics,
+        &projected_streams,
+    )
+    .await?;
+    Ok(traffic)
+}
+
+/// Materializes the exact immutable accepted sample owned by one activation
+/// work row.  Projection has already published its admission masks before the
+/// work becomes claimable; no history/fleet scan and no rule evaluation occurs
+/// inside this exact client owner.
+pub(crate) async fn materialize_combined_telemetry_policy_baseline_sample_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    target_accepted_seq: i64,
+    target_sample_id: Uuid,
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        SELECT sample.payload,
+               sample.source_gateway_session_id,
+               sample.source_process_incarnation_id,
+               sample.source_telemetry_seq,
+               sample.reported_observed_unix,
+               sample.network_admission_mask,
+               sample.tunnel_admission_mask
+        FROM telemetry_samples sample
+        JOIN telemetry_projection_heads head ON head.client_id=sample.client_id
+        WHERE sample.id=$1
+          AND sample.client_id=$2
+          AND sample.accepted_seq=$3
+          AND head.projected_seq>=sample.accepted_seq
+        "#,
+    )
+    .bind(target_sample_id)
+    .bind(client_id)
+    .bind(target_accepted_seq)
+    .fetch_one(&mut **tx)
+    .await
+    .context("telemetry policy activation sample is not projected")?;
+    let metrics = row.try_get::<SqlJson<AgentMetrics>, _>("payload")?.0;
+    let gateway_session_id: Uuid = row.try_get("source_gateway_session_id")?;
+    let process_incarnation_id: Uuid = row.try_get("source_process_incarnation_id")?;
+    let telemetry_seq = u64::try_from(row.try_get::<i64, _>("source_telemetry_seq")?)
+        .context("negative telemetry policy activation source sequence")?;
+    let reported_observed_unix = u64::try_from(row.try_get::<i64, _>("reported_observed_unix")?)
+        .context("negative telemetry policy activation reported time")?;
+    let network_admission_mask: Vec<u8> = row.try_get("network_admission_mask")?;
+    let tunnel_admission_mask: Vec<u8> = row.try_get("tunnel_admission_mask")?;
+    let traffic = reconstruct_projected_policy_traffic_in_tx(
+        tx,
+        client_id,
+        target_accepted_seq,
+        &metrics,
+        &network_admission_mask,
+        &tunnel_admission_mask,
+    )
+    .await?;
+    materialize_policy_evidence_baseline_in_tx(
+        tx,
+        combined_telemetry_policy_fact(
+            client_id,
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq,
+            target_sample_id,
+            reported_observed_unix,
+            &metrics,
+            &traffic,
+        )?,
+    )
+    .await
+}
+
+pub(crate) fn combined_metric_evidence_payload(
     metrics: &AgentMetrics,
     traffic: &TrafficAccountingRecord,
     gateway_session_id: Uuid,
@@ -3476,72 +4486,40 @@ fn combined_metric_evidence_payload(
     })
 }
 
-fn weighted_avg_f64(current_avg: f64, current_count: i32, next_value: f64) -> f64 {
-    let current_count = current_count.max(1) as f64;
-    ((current_avg * current_count) + next_value) / (current_count + 1.0)
-}
-
-fn weighted_avg_i64(current_avg: i64, current_count: i32, next_value: i64) -> i64 {
-    let current_count = i128::from(current_count.max(1));
-    let numerator = i128::from(current_avg) * current_count + i128::from(next_value);
-    let denominator = current_count + 1;
-    ((numerator + denominator / 2) / denominator).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
-        as i64
-}
-
-fn resource_used_ratio(total: i64, available: i64) -> f64 {
-    debug_assert!(total > 0);
-    (total.saturating_sub(available).max(0) as f64 / total.max(1) as f64).clamp(0.0, 1.0)
-}
-
-fn resource_used_ratio_or_zero(total: i64, available: i64) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        resource_used_ratio(total, available)
-    }
-}
-
-fn bucket_start_unix(observed_unix: u64) -> u64 {
-    observed_unix / TELEMETRY_BUCKET_SECS as u64 * TELEMETRY_BUCKET_SECS as u64
-}
-
-fn parse_unix(value: &str) -> u64 {
-    value.parse::<u64>().unwrap_or(0)
-}
-
-fn valid_tunnel(tunnel: &RuntimeTunnelStat) -> bool {
-    valid_telemetry_name(&tunnel.interface)
-        && valid_telemetry_name(&tunnel.kind)
-        && tunnel
-            .plan_id
-            .as_deref()
-            .is_some_and(|value| Uuid::parse_str(value).is_ok())
-        && tunnel
-            .topology_identity_hash
-            .as_deref()
-            .is_none_or(|value| {
-                value.len() == 64
-                    && value
-                        .as_bytes()
-                        .iter()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-            })
-        && tunnel
-            .runtime_evidence_identity_hash
-            .as_deref()
-            .is_none_or(|value| {
-                value.len() == 64
-                    && value
-                        .as_bytes()
-                        .iter()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-            })
-        && tunnel
-            .plan_name
-            .as_deref()
-            .is_some_and(valid_telemetry_name)
-        && matches!(tunnel.endpoint_side.as_deref(), Some("left" | "right"))
+fn validate_deferred_telemetry_constraints(metrics: &AgentMetrics) -> Result<()> {
+    let mut network_interfaces = HashSet::new();
+    anyhow::ensure!(
+        metrics
+            .networks
+            .iter()
+            .all(|network| network_interfaces.insert(network.interface.as_str())),
+        "telemetry networks contain a duplicate interface"
+    );
+    let mut interfaces = HashSet::new();
+    anyhow::ensure!(
+        metrics
+            .tunnels
+            .iter()
+            .filter(|tunnel| structurally_valid_projected_telemetry_tunnel(tunnel))
+            .all(|tunnel| interfaces.insert(tunnel.interface.as_str())),
+        "telemetry tunnels contain a duplicate projected interface"
+    );
+    anyhow::ensure!(
+        metrics
+            .port_forwarding
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.rules.len() <= vpsman_common::MAX_PORT_FORWARD_RULES),
+        "port_forward_runtime_too_many_rules"
+    );
+    anyhow::ensure!(
+        metrics.tunnel_reachability.iter().all(|observation| {
+            observation.stale_after_secs <= i64::MAX as u64
+                && observation.transmitted <= i32::MAX as u32
+                && observation.received <= i32::MAX as u32
+        }),
+        "tunnel reachability counters exceed durable PostgreSQL representation"
+    );
+    Ok(())
 }
 
 fn valid_telemetry_name(value: &str) -> bool {
@@ -3610,7 +4588,6 @@ pub(crate) async fn record_client_status_transition_in_tx(
         tx, client_id, to_status,
     )
     .await?;
-    record_policy_scope_revision_evidence_for_clients_in_tx(tx, &[client_id.to_string()]).await?;
     mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(tx, &[client_id.to_string()]).await?;
     insert_client_status_webhook_event_in_tx(
         tx,
@@ -3657,7 +4634,6 @@ pub(crate) async fn insert_client_status_webhook_event_in_tx(
         }
     });
     let occurred_at = Utc::now();
-    crate::repository_webhook_rules::ensure_webhook_event_partition_in_tx(tx, occurred_at).await?;
     sqlx::query(
         r#"
         INSERT INTO webhook_events (
@@ -3686,254 +4662,4 @@ pub(crate) async fn insert_client_status_webhook_event_in_tx(
         .execute(&mut **tx)
         .await?;
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) async fn upsert_memory_agent(agents: &Arc<RwLock<Vec<AgentView>>>, hello: &AgentHello) {
-    upsert_memory_agent_with_remote_ip(agents, hello, None).await;
-}
-
-pub(crate) async fn upsert_memory_agent_with_remote_ip(
-    agents: &Arc<RwLock<Vec<AgentView>>>,
-    hello: &AgentHello,
-    remote_ip: Option<&str>,
-) {
-    let mut agents = agents.write().await;
-    let now = crate::unix_now().to_string();
-    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == hello.client_id) {
-        if agent.status != "stale"
-            || (!hello.agent_version.is_empty()
-                && agent.internal_build_number != hello.internal_build_number)
-        {
-            agent.status = "online".to_string();
-            agent.stale_since = None;
-            agent.stale_reason = None;
-        }
-        if agent.registration_ip.is_none() {
-            agent.registration_ip = remote_ip.map(str::to_string);
-        }
-        if let Some(remote_ip) = remote_ip {
-            agent.last_ip = Some(remote_ip.to_string());
-        }
-        agent.last_seen_at = Some(now);
-        if !hello.agent_version.is_empty() {
-            agent.internal_build_number = hello.internal_build_number.max(1);
-        }
-        agent.process_incarnation_id = Some(hello.process_incarnation_id);
-        agent.arch = (!hello.arch.trim().is_empty()).then(|| hello.arch.clone());
-        agent.capabilities = hello.capabilities.clone();
-        return;
-    }
-    agents.push(AgentView {
-        id: hello.client_id.clone(),
-        display_name: hello.client_id.clone(),
-        status: "online".to_string(),
-        tags: Vec::new(),
-        registration_ip: remote_ip.map(str::to_string),
-        last_ip: remote_ip.map(str::to_string),
-        last_seen_at: Some(now),
-        arch: (!hello.arch.trim().is_empty()).then(|| hello.arch.clone()),
-        internal_build_number: hello.internal_build_number.max(1),
-        process_incarnation_id: Some(hello.process_incarnation_id),
-        stale_since: None,
-        stale_reason: None,
-        capabilities: hello.capabilities.clone(),
-    });
-}
-
-async fn touch_memory_agent_from_telemetry(
-    agents: &Arc<RwLock<Vec<AgentView>>>,
-    client_id: &str,
-    remote_ip: Option<&str>,
-) -> Option<(String, bool, String)> {
-    let mut agents = agents.write().await;
-    let agent = agents.iter_mut().find(|agent| agent.id == client_id)?;
-    let previous_status = agent.status.clone();
-    if agent.status != "stale" {
-        agent.status = "online".to_string();
-        agent.stale_since = None;
-        agent.stale_reason = None;
-    }
-    if agent.registration_ip.is_none() {
-        agent.registration_ip = remote_ip.map(str::to_string);
-    }
-    if let Some(remote_ip) = remote_ip {
-        agent.last_ip = Some(remote_ip.to_string());
-    }
-    agent.last_seen_at = Some(crate::unix_now().to_string());
-    Some((
-        agent.status.clone(),
-        agent.status != previous_status,
-        previous_status,
-    ))
-}
-
-#[cfg(test)]
-mod agent_hello_heartbeat_tests {
-    use super::*;
-    use crate::repository::MemoryState;
-    use vpsman_common::AgentCapabilitySnapshot;
-
-    #[tokio::test]
-    async fn memory_heartbeat_identity_conflict_precedes_hello_mutation_and_replay_is_exact() {
-        let memory = MemoryState::default();
-        let repo = Repository::Memory(memory.clone());
-        let client_id = "memory-heartbeat-atomic";
-        let public_key = vec![0x71; 32];
-        let prior_process_incarnation_id = Uuid::new_v4();
-        let process_incarnation_id = Uuid::new_v4();
-        memory
-            .client_public_keys
-            .write()
-            .await
-            .insert(client_id.to_string(), public_key.clone());
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: client_id.to_string(),
-                process_incarnation_id: prior_process_incarnation_id,
-                agent_version: "before-heartbeat".to_string(),
-                internal_build_number: 1,
-                os_release: "before-os".to_string(),
-                arch: "x86_64".to_string(),
-                cpu_model: None,
-                kernel_release: None,
-                virtualization: None,
-                update_heartbeat: None,
-                capabilities: AgentCapabilitySnapshot::default(),
-            },
-        )
-        .await;
-
-        let heartbeat = AgentUpdateHeartbeat {
-            activation_job_id: Uuid::new_v4(),
-            sha256_hex: "aa".repeat(32),
-            marker_unix: 100,
-            observed_unix: 101,
-        };
-        repo.record_agent_update_heartbeat(client_id, &heartbeat)
-            .await
-            .unwrap();
-        let heartbeat_audit_id = {
-            let mut audits = memory.audits.write().await;
-            let audit = audits
-                .iter_mut()
-                .find(|audit| audit.action == "agent_update.heartbeat_observed")
-                .expect("seeded heartbeat audit");
-            audit.command_hash = Some("forced-collision".to_string());
-            audit.id
-        };
-        let event = GatewayAgentHelloIngest {
-            gateway_id: "memory-heartbeat-gateway".to_string(),
-            gateway_session_id: Uuid::new_v4(),
-            remote_ip: Some("203.0.113.71".to_string()),
-            noise_public_key_hex: hex::encode(&public_key),
-            hello: AgentHello {
-                client_id: client_id.to_string(),
-                process_incarnation_id,
-                agent_version: "after-heartbeat".to_string(),
-                internal_build_number: 7,
-                os_release: "after-os".to_string(),
-                arch: "aarch64".to_string(),
-                cpu_model: Some("test-cpu".to_string()),
-                kernel_release: Some("test-kernel".to_string()),
-                virtualization: Some("test-vm".to_string()),
-                update_heartbeat: Some(heartbeat),
-                capabilities: AgentCapabilitySnapshot::default(),
-            },
-        };
-
-        let conflict = repo.upsert_agent_hello(&event).await.unwrap_err();
-        assert!(conflict
-            .to_string()
-            .contains("agent_update_heartbeat_identity_conflict"));
-        let agent = memory.agents.read().await[0].clone();
-        assert_eq!(agent.internal_build_number, 1);
-        assert_eq!(
-            agent.process_incarnation_id,
-            Some(prior_process_incarnation_id)
-        );
-        assert!(memory.client_system_facts.read().await.is_empty());
-        assert!(memory.gateway_sessions.read().await.is_empty());
-        assert!(memory.client_status_history.read().await.is_empty());
-        assert!(memory.webhook_events.read().await.is_empty());
-        assert_eq!(memory.audits.read().await.len(), 1);
-
-        memory
-            .audits
-            .write()
-            .await
-            .iter_mut()
-            .find(|audit| audit.id == heartbeat_audit_id)
-            .expect("seeded heartbeat audit")
-            .command_hash = None;
-        assert!(repo.upsert_agent_hello(&event).await.unwrap());
-        assert!(repo.upsert_agent_hello(&event).await.unwrap());
-        let agent = memory.agents.read().await[0].clone();
-        assert_eq!(agent.internal_build_number, 7);
-        assert_eq!(agent.process_incarnation_id, Some(process_incarnation_id));
-        assert_eq!(memory.client_system_facts.read().await.len(), 1);
-        assert_eq!(memory.gateway_sessions.read().await.len(), 1);
-        assert_eq!(
-            memory
-                .audits
-                .read()
-                .await
-                .iter()
-                .filter(|audit| audit.action == "agent_update.heartbeat_observed")
-                .count(),
-            1
-        );
-    }
-}
-
-#[cfg(test)]
-mod disk_presence_tests {
-    use super::*;
-    use vpsman_common::{DiskStat, DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1};
-
-    #[tokio::test]
-    async fn memory_disk_rollup_replaces_uncounted_legacy_capacity() {
-        let rollups = Arc::new(RwLock::new(Vec::new()));
-        let legacy = AgentMetrics {
-            observed_unix: 60,
-            disks: vec![DiskStat {
-                mountpoint: "/legacy".to_string(),
-                total_bytes: 999,
-                available_bytes: 1,
-            }],
-            ..AgentMetrics::default()
-        };
-        upsert_memory_telemetry_rollup(&rollups, "disk-presence", &legacy, None).await;
-        {
-            let mut rows = rollups.write().await;
-            rows[0].disk_total_bytes_max = 999;
-            rows[0].disk_available_bytes_avg = 1;
-            rows[0].disk_available_bytes_min = 1;
-            rows[0].disk_used_ratio_avg = 0.999;
-            rows[0].disk_used_ratio_max = 0.999;
-        }
-
-        let valid = AgentMetrics {
-            observed_unix: 61,
-            disks: vec![DiskStat {
-                mountpoint: "/".to_string(),
-                total_bytes: 100,
-                available_bytes: 25,
-            }],
-            disk_collection_available: Some(true),
-            disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
-            ..AgentMetrics::default()
-        };
-        upsert_memory_telemetry_rollup(&rollups, "disk-presence", &valid, None).await;
-
-        let rows = rollups.read().await;
-        assert_eq!(rows[0].sample_count, 2);
-        assert_eq!(rows[0].disk_sample_count, 1);
-        assert_eq!(rows[0].disk_total_bytes_max, 100);
-        assert_eq!(rows[0].disk_available_bytes_avg, 25);
-        assert_eq!(rows[0].disk_available_bytes_min, 25);
-        assert_eq!(rows[0].disk_used_ratio_avg, 0.75);
-        assert_eq!(rows[0].disk_used_ratio_max, 0.75);
-    }
 }

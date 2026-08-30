@@ -163,8 +163,10 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
 }
 
 fn validate_plan_identity(input: &TunnelPlanInput) -> Result<(), NetworkPlanError> {
-    let name = input.name.trim();
-    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+    if input.name.trim().is_empty()
+        || input.name.len() > 128
+        || input.name.chars().any(char::is_control)
+    {
         return Err(NetworkPlanError::InvalidPlanIdentity);
     }
     if input.left_client_id.trim().is_empty()

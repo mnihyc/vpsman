@@ -478,13 +478,6 @@ test("webhook suggestions expose only the generic alert lifecycle predicates", (
   ]);
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.triggered");
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.resolved");
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.open");
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain(
-    "alert.policy_triggered",
-  );
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_resolved");
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_reached");
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.state:open");
   for (const category of ALERT_EVENT_CATEGORIES) {
     expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain(
       `alert.category:${category}`,
@@ -500,32 +493,6 @@ test("webhook suggestions expose only the generic alert lifecycle predicates", (
     expect(SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS).toContain(
       `alert.severity:${severity}`,
     );
-  }
-});
-
-test("retired alert and policy-rule expressions fail with canonical guidance", () => {
-  for (const [expression, canonical] of [
-    ["alert.open", "alert.triggered"],
-    ["alert.policy_reached", "alert.triggered"],
-    ["alert.policy_triggered", "alert.triggered"],
-    ["alert.policy_resolved", "alert.resolved"],
-    ["event.kind = alert.policy_reached", "alert.triggered"],
-    [
-      "event.kind in [alert.triggered, alert.policy_resolved]",
-      "alert.resolved",
-    ],
-    ["alert.state:open", "alert.lifecycle_state"],
-    [
-      "policy_rule.condition_expression = failed",
-      "policy_rule.trigger_condition_expression",
-    ],
-    [
-      "policy_rule.window_secs:300",
-      "policy_rule.trigger_meta_condition.window_seconds",
-    ],
-  ] as const) {
-    const parsed = parseSearchExpression(expression);
-    expect(parsed.error, expression).toContain(canonical);
   }
 });
 

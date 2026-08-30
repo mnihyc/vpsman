@@ -82,7 +82,6 @@ pub(crate) struct PortForwardRuleRecord {
     pub(crate) deleted_reason: Option<String>,
     pub(crate) removal_confirmed_at: Option<String>,
     pub(crate) forgotten_at: Option<String>,
-    pub(crate) forgotten_by: Option<Uuid>,
     pub(crate) forget_reason: Option<String>,
 }
 

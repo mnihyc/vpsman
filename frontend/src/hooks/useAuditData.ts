@@ -1,5 +1,11 @@
 import { useCallback, useRef, useState } from "react";
-import { apiGet, apiPost, buildListPath, isApiUnauthorized } from "../api";
+import {
+  apiGet,
+  apiPost,
+  buildListPath,
+  isApiUnauthorized,
+  LatestReadConsumer,
+} from "../api";
 import { HISTORY_DETAIL_LIMIT } from "../constants";
 import {
   snapshotSourceAvailable,
@@ -25,6 +31,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditEvidenceAvailable, setAuditEvidenceAvailable] = useState(false);
   const auditLoadGeneration = useRef(0);
+  const auditLoadConsumer = useRef(new LatestReadConsumer());
   const historyExportLoadGeneration = useRef(0);
   const historyPruneMutationGeneration = useRef(0);
   const currentApiToken = useRef(apiToken);
@@ -55,60 +62,70 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, handleAuditUnauthorized],
   );
 
-  const loadAudits = useCallback(async () => {
+  const loadAudits = useCallback((): Promise<void> => {
     if (currentApiToken.current !== apiToken) {
-      return;
+      return Promise.resolve();
     }
     const generation = auditLoadGeneration.current + 1;
     auditLoadGeneration.current = generation;
     setAuditLoading(true);
     setAuditError(null);
-    try {
-      const [auditResult, retentionResult] = await Promise.allSettled([
-        apiGet<AuditLogRecord[]>(buildListPath("/api/v1/audit", { limit: HISTORY_DETAIL_LIMIT, sort: "created_at", dir: "desc" }), apiToken),
-        apiGet<HistoryRetentionPolicyRecord[]>("/api/v1/history/retention-policies", apiToken),
-      ]);
-      if (
-        auditLoadGeneration.current !== generation ||
-        currentApiToken.current !== apiToken
-      ) {
-        return;
+    return auditLoadConsumer.current.enqueue(async () => {
+      try {
+        const [auditResult, retentionResult] = await Promise.allSettled([
+          apiGet<AuditLogRecord[]>(
+            buildListPath("/api/v1/audit", {
+              limit: HISTORY_DETAIL_LIMIT,
+              sort: "created_at",
+              dir: "desc",
+            }),
+            apiToken,
+          ),
+          apiGet<HistoryRetentionPolicyRecord[]>(
+            "/api/v1/history/retention-policies",
+            apiToken,
+          ),
+        ]);
+        if (
+          auditLoadGeneration.current !== generation ||
+          currentApiToken.current !== apiToken
+        ) {
+          return;
+        }
+        const results = [auditResult, retentionResult];
+        if (
+          results.some(
+            (result) =>
+              result.status === "rejected" &&
+              isApiUnauthorized(result.reason),
+          )
+        ) {
+          onUnauthorized();
+          setAuditEvidenceAvailable(false);
+          setAudits([]);
+          setAuditsTruncated(false);
+          setHistoryRetentionPolicies([]);
+          setAuditError("Operator login required");
+          return;
+        }
+        if (auditResult.status === "fulfilled") {
+          setAudits(auditResult.value);
+          setAuditsTruncated(auditResult.value.length >= HISTORY_DETAIL_LIMIT);
+        }
+        setAuditEvidenceAvailable(auditResult.status === "fulfilled");
+        if (retentionResult.status === "fulfilled") {
+          setHistoryRetentionPolicies(retentionResult.value);
+        }
+        setAuditError(unavailableAuditSources([auditResult, retentionResult]));
+      } finally {
+        if (
+          auditLoadGeneration.current === generation &&
+          currentApiToken.current === apiToken
+        ) {
+          setAuditLoading(false);
+        }
       }
-      const results = [auditResult, retentionResult];
-      if (
-        results.some(
-          (result) =>
-            result.status === "rejected" &&
-            isApiUnauthorized(result.reason),
-        )
-      ) {
-        onUnauthorized();
-        setAuditEvidenceAvailable(false);
-        setAudits([]);
-        setAuditsTruncated(false);
-        setHistoryRetentionPolicies([]);
-        setAuditError("Operator login required");
-        return;
-      }
-      if (auditResult.status === "fulfilled") {
-        setAudits(auditResult.value);
-        setAuditsTruncated(auditResult.value.length >= HISTORY_DETAIL_LIMIT);
-      }
-      setAuditEvidenceAvailable(auditResult.status === "fulfilled");
-      if (retentionResult.status === "fulfilled") {
-        setHistoryRetentionPolicies(retentionResult.value);
-      }
-      setAuditError(
-        unavailableAuditSources([auditResult, retentionResult]),
-      );
-    } finally {
-      if (
-        auditLoadGeneration.current === generation &&
-        currentApiToken.current === apiToken
-      ) {
-        setAuditLoading(false);
-      }
-    }
+    });
   }, [apiToken, onUnauthorized]);
 
   const beginHomeAuditHydration = useCallback(
@@ -257,6 +274,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
 
   const clearAudits = useCallback(() => {
     auditLoadGeneration.current += 1;
+    auditLoadConsumer.current.discardPending();
     historyExportLoadGeneration.current += 1;
     historyPruneMutationGeneration.current += 1;
     currentApiToken.current = "";

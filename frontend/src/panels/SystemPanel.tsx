@@ -405,7 +405,7 @@ const suiteConfigSections: ConfigSectionSpec[] = [
   },
   {
     description:
-      "Worker cadence, leases, schedule timeout, and offline reconciliation.",
+      "Worker cadence, schedule timeout, and offline reconciliation.",
     id: "worker",
     title: "Worker",
     fields: [
@@ -415,14 +415,6 @@ const suiteConfigSections: ConfigSectionSpec[] = [
         kind: "number",
         label: "Tick seconds",
         path: "worker.tick_secs",
-        rule: "seconds, 1 or greater",
-      },
-      {
-        defaultValue: "60",
-        help: "Lease duration for worker ownership. Too short can cause churn; too long delays failover.",
-        kind: "number",
-        label: "Worker lease seconds",
-        path: "worker.worker_lease_secs",
         rule: "seconds, 1 or greater",
       },
       {
@@ -445,13 +437,13 @@ const suiteConfigSections: ConfigSectionSpec[] = [
   },
   {
     description:
-      "Control-plane pool, dispatch, and gateway telemetry admission limits.",
+      "Control-plane database pool, dispatch, and gateway telemetry admission limits.",
     id: "capacity",
     title: "Capacity",
     fields: [
       {
         defaultValue: "32",
-        help: "API database connection pool. Increase only with database capacity and operator concurrency in mind.",
+        help: "Maximum foreground API database connections. PostgreSQL capacity must also include four API-owned background connections: one sample projector, one dashboard publisher, one dashboard listener, and one dashboard reconciler.",
         kind: "number",
         label: "API DB pool",
         path: "capacity.api_db_pool",
@@ -459,7 +451,7 @@ const suiteConfigSections: ConfigSectionSpec[] = [
       },
       {
         defaultValue: "8",
-        help: "Worker database connection pool for schedules, telemetry, and background reconciliation.",
+        help: "Maximum ordinary worker database connections. PostgreSQL capacity must also include two worker-owned telemetry-retention connections.",
         kind: "number",
         label: "Worker DB pool",
         path: "capacity.worker_db_pool",
@@ -603,14 +595,6 @@ const suiteConfigSections: ConfigSectionSpec[] = [
         kind: "number",
         label: "Internal HTTP read seconds",
         path: "timeout.internal_http_read_secs",
-        rule: "seconds, 1 or greater",
-      },
-      {
-        defaultValue: "300",
-        help: "Timeout used by dashboard and worker capacity logic for agent-offline interpretation.",
-        kind: "number",
-        label: "Agent offline seconds",
-        path: "timeout.agent_offline_secs",
         rule: "seconds, 1 or greater",
       },
     ],
@@ -4473,11 +4457,11 @@ function SystemDashboardPanel({
             <SystemPostureTile
               detail={
                 dashboard
-                  ? `${dashboard.current.db_pool.in_use_connections} of ${dashboard.current.db_pool.max_connections} connections in use; warn at 70%, critical at 85%.`
-                  : "Database pool evidence is unavailable."
+                  ? `${dashboard.current.db_pool.in_use_connections} of ${dashboard.current.db_pool.max_connections} foreground API connections in use; warn at 70%, critical at 85%.`
+                  : "Foreground database pool evidence is unavailable."
               }
               icon={<Database size={18} />}
-              label="Database"
+              label="Foreground database"
               tone={dbTone}
               value={
                 dbPressurePercent === null
@@ -4733,7 +4717,7 @@ function SystemCapacityPanel({
   const selectedConfiguredLimit =
     activeSubsystem === "database"
       ? {
-          label: "DB pool ceiling",
+          label: "Foreground DB pool ceiling",
           value: dashboard
             ? `${dashboard.current.db_pool.max_connections} connections`
             : "Unknown",
@@ -4769,9 +4753,9 @@ function SystemCapacityPanel({
         }
         badgeTone={dbTone}
         icon={<Database size={18} />}
-        insight="Database capacity compares active usage with configured pool ceilings; sustained pressure above 70% needs pool review."
+        insight="Foreground database capacity compares active usage with its configured ceiling; PostgreSQL capacity must also include four API-owned background connections and two worker-owned retention connections."
         title="Database capacity"
-        subtitle="DB pool pressure and configured API/worker limits."
+        subtitle="Foreground DB pressure and configured API/worker limits."
         metrics={[
           {
             label: "API DB pool",
@@ -4786,13 +4770,13 @@ function SystemCapacityPanel({
               : "Unknown",
           },
           {
-            label: "In use",
+            label: "Foreground in use",
             value: dashboard
               ? String(dashboard.current.db_pool.in_use_connections)
               : "Unknown",
           },
           {
-            label: "Open",
+            label: "Foreground open",
             value: dashboard
               ? String(dashboard.current.db_pool.open_connections)
               : "Unknown",
@@ -4997,7 +4981,7 @@ function SystemCapacityPanel({
       ? [
           {
             detail:
-              "Current database usage compared with the dashboard pool ceiling.",
+              "Current foreground API database usage compared with its pool ceiling.",
             label: "Pool pressure",
             tone: dbTone,
             value:
@@ -5020,7 +5004,8 @@ function SystemCapacityPanel({
               : "Unknown",
           },
           {
-            detail: "Suite Config owns the API and worker DB pool limits.",
+            detail:
+              "Suite Config owns the foreground/on-demand API ceiling and ordinary worker pool limit; dedicated telemetry owners add four API and two worker connections.",
             label: "Config owner",
             tone: "info",
             value: "System / Suite config",

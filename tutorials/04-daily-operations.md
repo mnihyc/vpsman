@@ -157,39 +157,37 @@ For daily 20+ VPS operation, this is the preferred browser pattern:
 
 ## History Retention And Export
 
-History retention policies are managed by domain. This includes audit logs,
-system metrics, accepted high-resolution telemetry samples, minute-derived
-resource/network/Ping history, authoritative minute-derived traffic counters,
-job outputs, backup artifacts, network/topology history, client lifecycle
-history, and ended gateway sessions.
+History retention policies are managed by retained-history domain. Exact
+resource, network, Ping, traffic, and automatic-reachability evidence has a
+fixed one-day lifecycle; it is not an operator retention policy.
 
-`telemetry_samples` defaults to 7 days for realtime and short-range queries.
-`telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
-the traffic-history and `network_observations` domains default to a 3,650-day
-final horizon. `topology_history` remains a separate 180-day graph-history
-policy. Exact traffic
-counter endpoints are retained for 32 days; their reset-safe transition
-aggregates are the authoritative older source. The running worker applies those
-policies in bounded leased batches.
+`telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`,
+`traffic_counter_rollups`, and `network_observations` default to a 3,650-day
+final horizon. Topology graph and trend exports are derived from the unified
+network-observation lifecycle. High-volume serving domains remain enabled while
+collection continues.
+The running worker processes durable natural owners in bounded transactions;
+the bounds limit lock and write bursts, while ready work drains immediately.
 Before pruning, the worker transactionally promotes settled monitoring history
 through fixed UTC-aligned age tiers: 1 minute through 2 days, 5 minutes through
 8 days, 30 minutes through 31 days, 1 hour through 91 days, 3 hours through 181
 days, 6 hours through 366 days, and 1 day through 3,650 days. Traffic counters
-remain exact minute endpoints for at least 32 days and retain one pre-cutoff
-baseline per VPS/source/interface stream so active monthly accounting remains
-exact; older traffic transitions use the 1-hour-and-coarser tiers. The UI labels
+retain exact minute endpoints for one day plus the current partial hour and
+one sequencing predecessor. Completed older hours remain lossless through day
+91 before the 3-hour-and-coarser tiers; the final traffic horizon cannot be
+configured below 32 days because every monthly reset cycle must remain
+reconstructable. The UI labels
 the effective source resolution and does not invent fine points from coarse
 history.
 
-Automatic declared-tunnel reachability remains exact for 2 days, then follows
+Automatic declared-tunnel reachability remains exact for 1 day, then follows
 the retained monitoring tiers. Its separately retained latest endpoint state
 continues to drive topology and OSPF decisions. Manual probes, speed tests, and
 network-status evidence are not folded into automatic reachability rollups.
 
-A stored policy override can disable automatic pruning, set its batch limit,
-or shorten the final horizon; the canonical promotion boundaries remain fixed
-so every reader has one predictable tier contract. A longer saved raw-sample
-policy is honored. For automatic reachability, the configured prune limit is
+A stored policy override can set the batch limit or final horizon for supported
+retained domains; canonical promotion boundaries and exact one-day lifecycles
+remain fixed. For automatic reachability, the configured prune limit is
 one total terminal-history row budget shared by exact and rollup deletion in a
 worker pass; fixed tier promotion and inactive-current lifecycle cleanup are
 separate from that terminal budget. Other domains remain explicit maintenance workflows. Use
@@ -221,11 +219,13 @@ cargo run -p vpsctl -- history-retention-prune \
 
 Webhook-rule event and delivery retention honors
 `webhook_rule_retention_days` from the worker config exactly; the shipped
-default is 90 days. Processed high-frequency `telemetry.rollup` source events
-use the separate `webhook_rule_telemetry_event_retention_days` setting, which
-defaults to 7 days. Unprocessed source events are never removed by that shorter
-policy. Permanent webhook delivery failures remain visible until the general
-retention age and then prune with their linked delivery alert evidence.
+default is 90 days. Telemetry webhooks are materialized directly from the
+bounded canonical-sample cursor, so they do not create a second source-event
+retention domain. Permanent webhook delivery failures remain visible until the
+general retention age and then prune with their linked delivery alert evidence.
+Resolved alert lifecycle history remains for 90 days. Endpoint result limits
+bound each response without shortening stored history; current and unresolved
+episodes are not retention candidates.
 
 For object-backed domains, keep `--metadata-only false` only when the API has
 object storage configured and the retained blobs should be deleted together
@@ -435,11 +435,10 @@ cargo run -p vpsctl -- schedule-create \
 
 Use `--catch-up-policy skip_missed` to ignore missed runs, `run_once` to work
 through missed intervals one worker pass at a time, or `run_all_limited` with
-`--catch-up-limit <1-25>` for bounded backlog materialization. Keep a stable
-`--worker-id` for repeated `vpsman-worker --once` runs in the same smoke or
-maintenance script so the worker can renew its singleton leases. Current
-singleton leases cover schedules, alert notifications, monitoring-history
-compaction/pruning, and other worker-owned maintenance tasks.
+`--catch-up-limit <1-25>` for bounded backlog materialization.
+`vpsman-worker --once` performs one bounded scheduler pass and requires no
+persistent worker identity. Schedules, alert delivery, and telemetry
+maintenance use independent durable owners or row claims.
 
 Inspect schedules and their due-run history:
 
@@ -463,8 +462,7 @@ VPS remains visible and selector-resolvable; it is unavailable for dispatch
 until a new key is assigned.
 
 Manual **Apply now** runs use the same schedule job timeout source as the
-worker: `worker.schedule_job_max_timeout_secs`, then legacy
-`timeout.worker_schedule_job_max_timeout_secs`, then the 30 second default. The
+worker: `worker.schedule_job_max_timeout_secs`, then the 30 second default. The
 server-issued job timeout is authoritative for scheduled and Apply now jobs.
 
 Submitted and scheduled jobs enter the durable queue first. As soon as the

@@ -3,8 +3,14 @@ use uuid::Uuid;
 
 // Accepted raw telemetry samples support realtime and short-range inspection.
 // Tiered rollups are the authoritative long-term historical source.
-pub const DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS: i32 = 7;
+pub const DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS: i32 = 1;
 pub const DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS: i32 = 3_650;
+pub const TRAFFIC_COUNTER_RAW_RETENTION_DAYS: i32 = DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS;
+// Keep the configurable final observation horizon at least as long as the
+// fixed exact inspection copy. Rollup fragments may be retained longer, but
+// never disappear while they are the only copy of an automatic observation.
+pub const MIN_NETWORK_OBSERVATION_ROLLUP_RETENTION_DAYS: i32 =
+    DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS;
 pub const DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT: i32 = 10_000;
 pub const DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT: i32 = 5_000;
 pub const TELEMETRY_HISTORY_TIERS: [HistoryTier; 7] = [
@@ -15,6 +21,12 @@ pub const TELEMETRY_HISTORY_TIERS: [HistoryTier; 7] = [
     HistoryTier::new(3 * 60 * 60, 181),
     HistoryTier::new(6 * 60 * 60, 366),
     HistoryTier::new(24 * 60 * 60, 3_650),
+];
+pub const TRAFFIC_COUNTER_HISTORY_TIERS: [HistoryTier; 4] = [
+    TELEMETRY_HISTORY_TIERS[3],
+    TELEMETRY_HISTORY_TIERS[4],
+    TELEMETRY_HISTORY_TIERS[5],
+    TELEMETRY_HISTORY_TIERS[6],
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,9 +43,9 @@ impl HistoryTier {
         }
     }
 }
-// Monthly traffic cycles span at most 31 days; the extra day keeps retention
-// strictly behind the active cycle boundary.
-pub const MIN_TRAFFIC_COUNTER_RETENTION_DAYS: i32 = 32;
+// The operator policy controls the final traffic-rollup horizon, not exact
+// samples. Keep one complete maximum-length monthly cycle reconstructable.
+pub const MIN_TRAFFIC_COUNTER_ROLLUP_RETENTION_DAYS: i32 = 32;
 pub const MAX_TELEMETRY_DISKS: usize = 256;
 pub const DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1: &str = "persistent_block_filesystems_v1";
 pub const MAX_TELEMETRY_NETWORKS: usize = 512;
@@ -176,6 +188,100 @@ pub struct RuntimeTunnelStat {
     pub latency_healthy_windows: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_missed_windows: Option<u8>,
+}
+
+/// Canonical reported endpoint identity. A structurally plausible tunnel is
+/// not current merely because it carries a UUID: projection must match this
+/// complete tuple against the enabled, undeleted plan endpoint owned by the
+/// client transaction.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct ProjectedTelemetryTunnelIdentity {
+    pub plan_id: Uuid,
+    pub plan_name: String,
+    pub interface: String,
+    pub kind: String,
+    pub endpoint_side: String,
+    pub peer_client_id: String,
+}
+
+/// Checks only whether a reported runtime-tunnel observation has structurally
+/// plausible projection metadata. This deliberately preserves the broader
+/// ingest/duplicate-validation predicate: a missing peer can still make the
+/// complete normalized identity below unavailable. Structural validity never
+/// makes the observation current; callers must match the complete tuple to an
+/// enabled, undeleted plan endpoint.
+pub fn structurally_valid_projected_telemetry_tunnel(tunnel: &RuntimeTunnelStat) -> bool {
+    valid_projected_telemetry_name(&tunnel.interface)
+        && valid_projected_telemetry_name(&tunnel.kind)
+        && tunnel
+            .plan_id
+            .as_deref()
+            .is_some_and(|value| Uuid::parse_str(value).is_ok())
+        && tunnel
+            .topology_identity_hash
+            .as_deref()
+            .is_none_or(valid_lower_hex_sha256)
+        && tunnel
+            .runtime_evidence_identity_hash
+            .as_deref()
+            .is_none_or(valid_lower_hex_sha256)
+        && tunnel
+            .plan_name
+            .as_deref()
+            .is_some_and(valid_projected_telemetry_plan_name)
+        && matches!(tunnel.endpoint_side.as_deref(), Some("left" | "right"))
+}
+
+/// Normalizes every reported field that participates in the plan-current
+/// identity. Callers still must match the returned tuple to the current plan
+/// endpoint; this function deliberately performs no database inference.
+pub fn projected_telemetry_tunnel_identity(
+    tunnel: &RuntimeTunnelStat,
+) -> Option<ProjectedTelemetryTunnelIdentity> {
+    structurally_valid_projected_telemetry_tunnel(tunnel).then_some(())?;
+    Some(ProjectedTelemetryTunnelIdentity {
+        plan_id: Uuid::parse_str(tunnel.plan_id.as_deref()?).ok()?,
+        plan_name: tunnel.plan_name.clone()?,
+        interface: tunnel.interface.clone(),
+        kind: tunnel.kind.clone(),
+        endpoint_side: tunnel.endpoint_side.clone()?,
+        peer_client_id: tunnel.peer_client_id.clone()?,
+    })
+}
+
+/// Returns whether an ordinal admission mask is the one exact encoding for a
+/// vector of `item_count` entries. Bits are numbered least-significant-first;
+/// consequently, every unused high bit in the final byte must remain zero.
+///
+/// Consumers must reject the complete vector when this returns `false`. A
+/// truncated mask is not a partially usable prefix and an oversized mask is
+/// not a forward-compatibility envelope.
+pub fn ordinal_admission_mask_has_exact_shape(mask: &[u8], item_count: usize) -> bool {
+    if mask.len() != item_count.div_ceil(8) {
+        return false;
+    }
+    let final_byte_bits = item_count % 8;
+    final_byte_bits == 0
+        || mask.last().is_some_and(|byte| {
+            let allowed_bits = ((1_u16 << final_byte_bits) - 1) as u8;
+            byte & !allowed_bits == 0
+        })
+}
+
+fn valid_projected_telemetry_name(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+}
+
+fn valid_projected_telemetry_plan_name(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+}
+
+fn valid_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
 fn default_runtime_tunnel_mutation_policy() -> String {

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use axum::{
     extract::{Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use chrono::{DateTime, TimeZone, Utc};
@@ -24,6 +24,11 @@ use crate::{
         OperatorPreferences, TelemetryNetworkRateView, TelemetryRollupView,
     },
     model_alert_policies::NetworkRateInterfaceSelection,
+    repository_telemetry_rollups::{
+        DashboardTelemetryNetworkProjection, DashboardTelemetryResourceProjection,
+        DashboardTelemetryStart, DashboardTelemetryTrafficPoint,
+        DashboardTelemetryTrafficProjection,
+    },
     state::AppState,
     unix_now,
     util::timestamp_in_optional_bounds,
@@ -37,8 +42,6 @@ const DASHBOARD_MAX_CUSTOM_RANGE_SECS: u64 = 365 * 24 * 60 * 60;
 const DASHBOARD_TOP_CLUSTERS: usize = 8;
 const DASHBOARD_TOP_ALERTS: usize = 5;
 const DASHBOARD_TOP_DEGRADED: usize = 5;
-const NETWORK_SNAPSHOT_COHERENCE_SECS: u64 = 180;
-const DASHBOARD_MAX_NETWORK_POINTS: usize = 80;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct DashboardOverviewQuery {
@@ -120,6 +123,8 @@ struct TrafficClientAggregate {
 struct TrafficBucketAggregate {
     rx_bytes: i64,
     tx_bytes: i64,
+    rx_present: bool,
+    tx_present: bool,
 }
 
 #[derive(Default)]
@@ -321,7 +326,6 @@ pub(crate) async fn dashboard_overview(
     let events = state.events.clone();
     let response = events
         .singleflight_dashboard_overview(key, move || async move {
-            let _admission = state.events.acquire_heavy_read_permit().await?;
             let request = prepare_dashboard_overview(&query, unix_now())?;
             build_dashboard_overview(
                 &state,
@@ -476,16 +480,17 @@ async fn build_dashboard_overview(
         ),
         async {
             if range.mode == "all" {
+                let telemetry_start = state
+                    .repo
+                    .dashboard_telemetry_start_unix(&scoped_client_id_list)
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "dashboard_history_range_unavailable",
+                        "The available dashboard-history range could not be loaded.",
+                    ))?;
+                let start_unix = dashboard_telemetry_start_or_initializing(telemetry_start)?;
                 Ok::<DashboardRange, ApiError>(DashboardRange {
-                    start_unix: state
-                        .repo
-                        .dashboard_telemetry_start_unix(&scoped_client_id_list)
-                        .await
-                        .map_err(ApiError::internal_mapper(
-                            "dashboard_history_range_unavailable",
-                            "The available dashboard-history range could not be loaded.",
-                        ))?
-                        .unwrap_or(range.end_unix),
+                    start_unix: start_unix.unwrap_or(range.end_unix),
                     ..range
                 })
             } else {
@@ -509,13 +514,36 @@ async fn build_dashboard_overview(
     let telemetry_range = telemetry_range?;
     let network_rate_selection = network_rate_selection?;
     let chart_step_secs = dashboard_chart_step_secs(&telemetry_range, chart_points);
-    let (rollups, network_rates, running_jobs, backup_requests) = tokio::join!(
+    let mut resource_curve_clients = scoped_agents
+        .iter()
+        .filter(|agent| {
+            !preferences
+                .dashboard_curve_exclusions
+                .iter()
+                .any(|selector| agent_matches_curve_exclusion(agent, selector))
+        })
+        .collect::<Vec<_>>();
+    resource_curve_clients.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    let resource_curve_client_ids = resource_curve_clients
+        .into_iter()
+        .map(|agent| agent.id.clone())
+        .collect::<Vec<_>>();
+    let mut network_clients = scoped_agents.iter().collect::<Vec<_>>();
+    network_clients.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    let network_client_ids_in_label_order = network_clients
+        .into_iter()
+        .map(|agent| agent.id.clone())
+        .collect::<Vec<_>>();
+    let (rollups, network_rates, traffic, running_jobs, backup_requests) = tokio::join!(
         load_dashboard_rollups(
             state,
             &telemetry_range,
             chart_step_secs,
             chart_points,
             &scoped_client_id_list,
+            resource_metric,
+            &resource_curve_client_ids,
+            preferences.dashboard_resource_top_limit as usize,
         ),
         load_dashboard_network_rates(
             state,
@@ -523,6 +551,15 @@ async fn build_dashboard_overview(
             chart_step_secs,
             chart_points,
             &network_rate_selection,
+        ),
+        load_dashboard_traffic(
+            state,
+            &telemetry_range,
+            chart_step_secs,
+            chart_points,
+            &scoped_client_id_list,
+            &network_client_ids_in_label_order,
+            preferences.dashboard_network_top_limit as usize,
         ),
         async {
             state
@@ -550,8 +587,17 @@ async fn build_dashboard_overview(
                 ))
         },
     );
-    let rollups = rollups?;
-    let network_rates = network_rates?;
+    let resource_projection = rollups?;
+    let rollups = resource_projection.rollups;
+    let network_projection = network_rates?;
+    let traffic_projection = traffic?;
+    let projected_fleet_network_rates = network_projection.fleet_rates;
+    let projected_latest_network_rates = network_projection.latest_rates;
+    let network_rates = network_projection.rates;
+    let fleet_network_rates = projected_fleet_network_rates
+        .as_deref()
+        .unwrap_or(&network_rates);
+    let network_interfaces_by_rate = network_projection.interfaces_by_rate;
     let mut running_jobs = running_jobs?;
     let mut backup_requests = backup_requests?;
     let running_jobs_truncated = running_jobs.len() > DASHBOARD_LIMIT as usize;
@@ -560,9 +606,15 @@ async fn build_dashboard_overview(
         running_job_targets_by_client(state, &running_jobs, &scoped_client_id_list).await?;
     let backups_truncated = backup_requests.len() > DASHBOARD_LIMIT as usize;
     backup_requests.truncate(DASHBOARD_LIMIT as usize);
-    let latest_rollups = latest_rollups_by_client(&rollups);
-    let latest_rates = coherent_latest_rates(latest_rates_by_client_interface(&network_rates));
-    let latest_rates_by_client = network_by_client(latest_rates.values());
+    let latest_rollups = latest_rollups_by_client(&resource_projection.latest_rollups);
+    // Current evidence is supplied independently from retained history. An
+    // empty generation is meaningful (for example, a newer sample omitted all
+    // selected interfaces) and must not fall back to an older chart point.
+    let latest_rates = coherent_latest_rates(latest_rates_by_client_interface(
+        &projected_latest_network_rates,
+    ));
+    let latest_rates_by_client =
+        network_by_client(latest_rates.values(), &network_interfaces_by_rate);
     let alert_counts_by_client = alert_counts_by_client(&alerts);
     let active_alert_count = alerts
         .iter()
@@ -573,14 +625,10 @@ async fn build_dashboard_overview(
         .filter(|agent| is_degraded_agent_status(&agent.status))
         .count();
 
-    let effective_range = effective_dashboard_range(
-        range,
-        &rollups,
-        &network_rates,
-        &alerts,
-        &backup_requests,
-        &running_jobs,
-    );
+    // The selected telemetry owners alone define the All range. Operational
+    // lists are independently capped presentation data and must never move a
+    // telemetry chart boundary.
+    let effective_range = telemetry_range;
     let chart_step_secs = dashboard_chart_step_secs(&effective_range, chart_points);
 
     let operations = build_operations(
@@ -604,7 +652,8 @@ async fn build_dashboard_overview(
         preferences,
     })?;
     let network = build_network(
-        &network_rates,
+        fleet_network_rates,
+        &traffic_projection,
         &latest_rates_by_client,
         &agents_by_id,
         preferences.dashboard_network_top_limit as usize,
@@ -617,7 +666,7 @@ async fn build_dashboard_overview(
         alerts: &alerts,
         backups: &backup_requests,
         running_jobs: &running_jobs,
-        network_rates: &network_rates,
+        network_rates: fleet_network_rates,
         alert_counts_by_client: &alert_counts_by_client,
         running_job_targets: &running_job_targets,
         network_by_client: &latest_rates_by_client,
@@ -951,39 +1000,36 @@ async fn load_dashboard_rollups(
     chart_step_secs: u64,
     chart_points: u32,
     client_ids: &[String],
-) -> Result<Vec<TelemetryRollupView>, ApiError> {
-    if dashboard_uses_raw_samples(range) {
-        return state
-            .repo
-            .list_dashboard_raw_telemetry_rollups(
-                i64::from(chart_points),
-                range.start_unix,
-                range.end_unix,
-                chart_step_secs as i32,
-                client_ids,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "dashboard_resource_history_unavailable",
-                "Dashboard resource history could not be loaded.",
-            ));
-    }
+    resource_metric: DashboardResourceMetric,
+    curve_client_ids_in_label_order: &[String],
+    curve_top_limit: usize,
+) -> Result<DashboardTelemetryResourceProjection, ApiError> {
     let bounded_range = telemetry_query_bounds(range);
-    state
-        .repo
-        .list_dashboard_telemetry_rollups(
+    let mut projection = state
+        .dashboard_telemetry
+        .resource_projection(
             i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
-            None,
             chart_step_secs as i32,
             client_ids,
+            resource_metric.as_str(),
+            curve_client_ids_in_label_order,
+            curve_top_limit,
         )
-        .await
         .map_err(ApiError::internal_mapper(
             "dashboard_resource_history_unavailable",
             "Dashboard resource history could not be loaded.",
-        ))
+        ))?;
+    projection.latest_rollups = state
+        .repo
+        .list_latest_telemetry_rollups_for_clients(client_ids, None)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_resource_current_unavailable",
+            "Current resource telemetry could not be loaded.",
+        ))?;
+    Ok(projection)
 }
 
 async fn load_dashboard_network_rates(
@@ -992,43 +1038,78 @@ async fn load_dashboard_network_rates(
     chart_step_secs: u64,
     chart_points: u32,
     selection: &NetworkRateInterfaceSelection,
-) -> Result<Vec<TelemetryNetworkRateView>, ApiError> {
-    if dashboard_uses_raw_samples(range) {
-        return state
-            .repo
-            .list_dashboard_raw_telemetry_network_rates_selected(
-                i64::from(chart_points),
-                range.start_unix,
-                range.end_unix,
-                chart_step_secs as i32,
-                selection,
-            )
-            .await
-            .map_err(ApiError::internal_mapper(
-                "dashboard_network_history_unavailable",
-                "Dashboard network history could not be loaded.",
-            ));
-    }
+) -> Result<DashboardTelemetryNetworkProjection, ApiError> {
     let bounded_range = telemetry_query_bounds(range);
-    state
-        .repo
-        .list_dashboard_telemetry_network_rates_selected(
+    let mut projection = state
+        .dashboard_telemetry
+        .network_projection(
             i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
-            None,
             chart_step_secs as i32,
             selection,
         )
-        .await
         .map_err(ApiError::internal_mapper(
             "dashboard_network_history_unavailable",
             "Dashboard network history could not be loaded.",
+        ))?;
+    projection.latest_rates = state
+        .repo
+        .list_latest_telemetry_network_rates_for_selection(selection)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_network_current_unavailable",
+            "Current network telemetry could not be loaded.",
+        ))?;
+    Ok(projection)
+}
+
+async fn load_dashboard_traffic(
+    state: &AppState,
+    range: &DashboardRange,
+    chart_step_secs: u64,
+    chart_points: u32,
+    client_ids: &[String],
+    client_ids_in_label_order: &[String],
+    top_limit: usize,
+) -> Result<DashboardTelemetryTrafficProjection, ApiError> {
+    let bounded_range = telemetry_query_bounds(range);
+    state
+        .dashboard_telemetry
+        .traffic_projection(
+            i64::from(chart_points),
+            bounded_range.0,
+            bounded_range.1,
+            chart_step_secs as i32,
+            client_ids,
+            client_ids_in_label_order,
+            top_limit,
+        )
+        .map_err(ApiError::internal_mapper(
+            "dashboard_traffic_history_unavailable",
+            "Dashboard traffic history could not be loaded.",
         ))
 }
 
-fn dashboard_uses_raw_samples(range: &DashboardRange) -> bool {
-    range.window.is_some_and(|window| window.label == "15m")
+pub(crate) fn dashboard_projection_initializing() -> ApiError {
+    ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "dashboard_projection_initializing",
+        error: anyhow::anyhow!("dashboard_projection_initializing"),
+        public_message: Some(
+            "Dashboard history is initializing. Retry this query shortly.".to_string(),
+        ),
+    }
+}
+
+pub(crate) fn dashboard_telemetry_start_or_initializing(
+    telemetry_start: DashboardTelemetryStart,
+) -> Result<Option<u64>, ApiError> {
+    if telemetry_start.complete {
+        Ok(telemetry_start.start_unix)
+    } else {
+        Err(dashboard_projection_initializing())
+    }
 }
 
 fn telemetry_query_bounds(range: &DashboardRange) -> (Option<u64>, Option<u64>) {
@@ -1050,49 +1131,6 @@ fn dashboard_chart_step_secs(range: &DashboardRange, chart_points: u32) -> u64 {
 fn round_up_to_minute(value: u64) -> u64 {
     let minute = DASHBOARD_MIN_CHART_STEP_SECS;
     value.saturating_add(minute - 1) / minute * minute
-}
-
-fn effective_dashboard_range(
-    range: DashboardRange,
-    rollups: &[TelemetryRollupView],
-    network_rates: &[TelemetryNetworkRateView],
-    alerts: &[FleetAlertView],
-    backups: &[BackupRequestView],
-    jobs: &[JobHistoryView],
-) -> DashboardRange {
-    if range.mode != "all" {
-        return range;
-    }
-
-    let earliest = rollups
-        .iter()
-        .filter_map(|rollup| parse_timestamp_unix(&rollup.bucket_start))
-        .chain(
-            network_rates
-                .iter()
-                .filter_map(|rate| parse_timestamp_unix(&rate.bucket_start)),
-        )
-        .chain(
-            alerts
-                .iter()
-                .filter_map(|alert| parse_timestamp_unix(&alert.lifecycle.triggered_at)),
-        )
-        .chain(
-            backups
-                .iter()
-                .filter_map(|backup| parse_timestamp_unix(&backup.created_at)),
-        )
-        .chain(
-            jobs.iter()
-                .filter_map(|job| parse_timestamp_unix(&job.created_at)),
-        )
-        .min()
-        .unwrap_or(range.end_unix);
-
-    DashboardRange {
-        start_unix: earliest.min(range.end_unix),
-        ..range
-    }
 }
 
 async fn running_job_targets_by_client(
@@ -1390,7 +1428,8 @@ fn build_resource_curve(
 }
 
 fn build_network(
-    rates: &[TelemetryNetworkRateView],
+    fleet_rates: &[TelemetryNetworkRateView],
+    traffic_projection: &DashboardTelemetryTrafficProjection,
     latest_rates_by_client: &HashMap<String, NetworkClientAggregate>,
     agents_by_id: &HashMap<String, AgentView>,
     top_limit: usize,
@@ -1400,7 +1439,7 @@ fn build_network(
     let mut speed_by_step = BTreeMap::<u64, BTreeMap<String, NetworkBucketAggregate>>::new();
     let mut traffic_by_step = BTreeMap::<u64, TrafficBucketAggregate>::new();
     let mut traffic_by_client = HashMap::<String, TrafficClientAggregate>::new();
-    for rate in rates {
+    for rate in fleet_rates {
         let bucket = chart_bucket(&rate.bucket_start, range, chart_step_secs);
         let raw_bucket_key = rate.bucket_start.clone();
         let speed_entry = speed_by_step
@@ -1410,22 +1449,33 @@ fn build_network(
             .or_default();
         speed_entry.rx_bps += rate.rx_bps_avg.max(0.0);
         speed_entry.tx_bps += rate.tx_bps_avg.max(0.0);
-
-        let rx_bytes = rate.rx_bytes_delta.max(0);
-        let tx_bytes = rate.tx_bytes_delta.max(0);
-        let traffic_entry = traffic_by_step.entry(bucket).or_default();
-        traffic_entry.rx_bytes += rx_bytes;
-        traffic_entry.tx_bytes += tx_bytes;
-
-        let client_entry = traffic_by_client.entry(rate.client_id.clone()).or_default();
-        client_entry.rx_bytes += rx_bytes;
-        client_entry.tx_bytes += tx_bytes;
-        client_entry.interfaces.insert(rate.interface.clone());
-        let client_bucket = client_entry.points.entry(bucket).or_default();
-        client_bucket.rx_bytes += rx_bytes;
-        client_bucket.tx_bytes += tx_bytes;
     }
-    let mut points = speed_by_step
+
+    for point in &traffic_projection.fleet_points {
+        let bucket = chart_bucket(&point.bucket_start, range, chart_step_secs);
+        merge_traffic_point(traffic_by_step.entry(bucket).or_default(), point);
+    }
+
+    for point in &traffic_projection.client_points {
+        let bucket = chart_bucket(&point.bucket_start, range, chart_step_secs);
+        let client_entry = traffic_by_client
+            .entry(point.client_id.clone())
+            .or_default();
+        if let Some(rx_bytes) = point.rx_bytes {
+            client_entry.rx_bytes = client_entry.rx_bytes.saturating_add(rx_bytes);
+        }
+        if let Some(tx_bytes) = point.tx_bytes {
+            client_entry.tx_bytes = client_entry.tx_bytes.saturating_add(tx_bytes);
+        }
+        if let Some(interfaces) = traffic_projection
+            .interfaces_by_client
+            .get(&point.client_id)
+        {
+            client_entry.interfaces.extend(interfaces.iter().cloned());
+        }
+        merge_traffic_point(client_entry.points.entry(bucket).or_default(), point);
+    }
+    let points = speed_by_step
         .into_iter()
         .map(|(bucket_start, raw_buckets)| {
             let sample_count = raw_buckets.len().max(1) as f64;
@@ -1441,20 +1491,14 @@ fn build_network(
             }
         })
         .collect::<Vec<_>>();
-    if points.len() > DASHBOARD_MAX_NETWORK_POINTS {
-        points.drain(0..points.len() - DASHBOARD_MAX_NETWORK_POINTS);
-    }
-    let mut traffic_points = traffic_by_step
+    let traffic_points = traffic_by_step
         .into_iter()
         .map(|(bucket_start, traffic)| DashboardTrafficPointView {
             bucket_start: unix_to_rfc3339(bucket_start),
-            rx_bytes: traffic.rx_bytes,
-            tx_bytes: traffic.tx_bytes,
+            rx_bytes: traffic.rx_present.then_some(traffic.rx_bytes),
+            tx_bytes: traffic.tx_present.then_some(traffic.tx_bytes),
         })
         .collect::<Vec<_>>();
-    if traffic_points.len() > DASHBOARD_MAX_NETWORK_POINTS {
-        traffic_points.drain(0..traffic_points.len() - DASHBOARD_MAX_NETWORK_POINTS);
-    }
 
     let rx_bps = latest_rates_by_client
         .values()
@@ -1488,8 +1532,11 @@ fn build_network(
             .then_with(|| left.label.cmp(&right.label))
     });
     top_clients.truncate(top_limit);
-    let mut traffic_series = build_traffic_series(traffic_by_client, agents_by_id);
-    traffic_series.truncate(top_limit);
+    let traffic_series = build_traffic_series(
+        traffic_by_client,
+        agents_by_id,
+        &traffic_projection.client_ids_in_rank_order,
+    );
     let traffic_top_clients = traffic_series
         .iter()
         .map(|series| DashboardTrafficClientView {
@@ -1513,9 +1560,24 @@ fn build_network(
     }
 }
 
+fn merge_traffic_point(
+    aggregate: &mut TrafficBucketAggregate,
+    point: &DashboardTelemetryTrafficPoint,
+) {
+    if let Some(rx_bytes) = point.rx_bytes {
+        aggregate.rx_bytes = aggregate.rx_bytes.saturating_add(rx_bytes.max(0));
+        aggregate.rx_present = true;
+    }
+    if let Some(tx_bytes) = point.tx_bytes {
+        aggregate.tx_bytes = aggregate.tx_bytes.saturating_add(tx_bytes.max(0));
+        aggregate.tx_present = true;
+    }
+}
+
 fn build_traffic_series(
     traffic_by_client: HashMap<String, TrafficClientAggregate>,
     agents_by_id: &HashMap<String, AgentView>,
+    client_ids_in_rank_order: &[String],
 ) -> Vec<DashboardTrafficSeriesView> {
     let mut series = traffic_by_client
         .into_iter()
@@ -1527,8 +1589,8 @@ fn build_traffic_series(
                 .into_iter()
                 .map(|(bucket_start, point)| DashboardTrafficPointView {
                     bucket_start: unix_to_rfc3339(bucket_start),
-                    rx_bytes: point.rx_bytes,
-                    tx_bytes: point.tx_bytes,
+                    rx_bytes: point.rx_present.then_some(point.rx_bytes),
+                    tx_bytes: point.tx_present.then_some(point.tx_bytes),
                 })
                 .collect::<Vec<_>>();
             DashboardTrafficSeriesView {
@@ -1545,11 +1607,14 @@ fn build_traffic_series(
             }
         })
         .collect::<Vec<_>>();
+    let ranks = client_ids_in_rank_order
+        .iter()
+        .enumerate()
+        .map(|(rank, client_id)| (client_id.as_str(), rank))
+        .collect::<HashMap<_, _>>();
     series.sort_by(|left, right| {
-        right
-            .rx_bytes
-            .saturating_add(right.tx_bytes)
-            .cmp(&left.rx_bytes.saturating_add(left.tx_bytes))
+        ranks[&left.client_id.as_str()]
+            .cmp(&ranks[&right.client_id.as_str()])
             .then_with(|| left.label.cmp(&right.label))
     });
     series
@@ -1990,7 +2055,7 @@ fn coherent_latest_rates(
 ) -> HashMap<(String, String), TelemetryNetworkRateView> {
     let mut latest_by_client = HashMap::<String, u64>::new();
     for rate in rates.values() {
-        let observed = timestamp_sort_key(&rate.bucket_start);
+        let observed = timestamp_sort_key(&rate.latest_observed_at);
         latest_by_client
             .entry(rate.client_id.clone())
             .and_modify(|latest| *latest = (*latest).max(observed))
@@ -2001,21 +2066,27 @@ fn coherent_latest_rates(
             .get(&rate.client_id)
             .copied()
             .unwrap_or_default();
-        latest.saturating_sub(timestamp_sort_key(&rate.bucket_start))
-            <= NETWORK_SNAPSHOT_COHERENCE_SECS
+        timestamp_sort_key(&rate.latest_observed_at) == latest
     });
     rates
 }
 
 fn network_by_client<'a>(
     rates: impl Iterator<Item = &'a TelemetryNetworkRateView>,
+    interfaces_by_rate: &HashMap<(String, String), Vec<String>>,
 ) -> HashMap<String, NetworkClientAggregate> {
     let mut by_client = HashMap::<String, NetworkClientAggregate>::new();
     for rate in rates {
         let entry = by_client.entry(rate.client_id.clone()).or_default();
         entry.rx_bps += rate.rx_bps_avg.max(0.0);
         entry.tx_bps += rate.tx_bps_avg.max(0.0);
-        entry.interfaces.insert(rate.interface.clone());
+        if let Some(interfaces) =
+            interfaces_by_rate.get(&(rate.client_id.clone(), rate.bucket_start.clone()))
+        {
+            entry.interfaces.extend(interfaces.iter().cloned());
+        } else {
+            entry.interfaces.insert(rate.interface.clone());
+        }
     }
     by_client
 }

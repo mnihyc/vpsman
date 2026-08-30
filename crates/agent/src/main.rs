@@ -96,6 +96,7 @@ mod update_activation;
 use anyhow::Result;
 use clap::Parser;
 use cli::{load_config, Args, Command};
+use port_forwarding::PortForwardingConsumer;
 use runtime::run_agent;
 use telemetry::{collect_metrics_for_config, TelemetryRuntimeState};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -119,9 +120,15 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Run { endpoint } => run_agent(config, args.config, endpoint).await,
         Command::Once => {
+            let (port_forwarding, consumer) = PortForwardingConsumer::channel();
+            let consumer = tokio::spawn(consumer.run());
+            port_forwarding.probe().await?;
             let mut runtime_state = TelemetryRuntimeState::default();
-            let metrics = collect_metrics_for_config(&config, &mut runtime_state).await?;
+            let metrics =
+                collect_metrics_for_config(&config, &mut runtime_state, &port_forwarding).await?;
             println!("{}", serde_json::to_string_pretty(&metrics)?);
+            drop(port_forwarding);
+            consumer.await??;
             Ok(())
         }
     }

@@ -1,6 +1,6 @@
 use super::{
     clear_runtime_tunnel_credentials, operator_dispatch_error, redact_runtime_tunnel_credentials,
-    runtime_config_reload_reason, runtime_config_version_after,
+    runtime_config_reload_reason,
 };
 use crate::error::ApiError;
 use vpsman_common::{AgentConfig, RuntimeConfigReconcileResource, RuntimeConfigReconcileScope};
@@ -13,14 +13,6 @@ fn scope(
         authoritative,
         resources: resources.iter().copied().collect(),
     }
-}
-
-#[test]
-fn runtime_config_versions_are_strictly_monotonic_above_the_persisted_floor() {
-    let first = runtime_config_version_after(100).unwrap();
-    let second = runtime_config_version_after(first).unwrap();
-    assert!(first > 100);
-    assert!(second > first);
 }
 
 #[test]

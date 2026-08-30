@@ -102,11 +102,11 @@ and assignment evidence remain readable through `network:read`.
 
 History retention writes require `history:write` plus authority for the selected
 domain. Audit retention requires `audit:read`; job-output retention requires
-`jobs:write`; backup-artifact retention requires `backups:write`; network
-observation and topology retention require `network:write`; telemetry and
-system rollups, accepted high-resolution telemetry, long-term resource,
-network, and Ping history, authoritative traffic counters, client lifecycle,
-and gateway session retention require `inventory:write`.
+`jobs:write`; network-observation and topology retention require
+`network:write`; telemetry and system rollups, accepted high-resolution
+telemetry, long-term resource, network, and Ping history, authoritative traffic
+counters, client lifecycle, and gateway session retention require
+`inventory:write`.
 
 ## Suspended VPS Boundary
 

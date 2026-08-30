@@ -1,8 +1,8 @@
 mod tests {
     use crate::command_worker::{CommandCancelToken, CommandCanceled};
     use crate::executor::{
-        execute_job_command, execute_job_command_with_config_and_output_sink,
-        execute_job_command_with_output_sink,
+        acquire_file_transfer_session_owner, execute_job_command,
+        execute_job_command_with_config_and_output_sink, execute_job_command_with_output_sink,
     };
     use crate::file_download::{
         execute_file_transfer_download_chunk, execute_file_transfer_download_start,
@@ -10,7 +10,10 @@ mod tests {
     use crate::file_push::{
         execute_file_transfer_abort, execute_file_transfer_chunk, execute_file_transfer_start,
     };
-    use crate::terminal::{control_terminal_session, execute_terminal_command_with_stream_sink};
+    use crate::terminal::{
+        control_terminal_session, execute_terminal_command_with_stream_sink,
+        terminal_session_is_registered,
+    };
     use std::{io::Cursor, os::unix::fs::PermissionsExt, time::Duration};
     use tokio::sync::mpsc;
     use vpsman_common::{
@@ -20,6 +23,48 @@ mod tests {
         FilePushChunk, JobCommand, OutputStream, RuntimeTunnelCommand, TerminalControlAck,
         TerminalControlAction, TerminalControlRequest, TerminalStreamOutput,
     };
+
+    #[tokio::test]
+    async fn file_transfer_session_owner_serializes_only_the_exact_session_and_cleans_up() {
+        let session_id = uuid::Uuid::new_v4();
+        let other_session_id = uuid::Uuid::new_v4();
+        let first = acquire_file_transfer_session_owner(session_id).await;
+
+        let same_session = tokio::spawn(acquire_file_transfer_session_owner(session_id));
+        tokio::task::yield_now().await;
+        assert!(!same_session.is_finished());
+
+        let other_session = tokio::time::timeout(
+            Duration::from_secs(1),
+            acquire_file_transfer_session_owner(other_session_id),
+        )
+        .await
+        .expect("an unrelated transfer session must not wait");
+        drop(other_session);
+
+        drop(first);
+        let same_session = tokio::time::timeout(Duration::from_secs(1), same_session)
+            .await
+            .expect("the next exact-session command must run after its owner releases")
+            .expect("exact-session owner task must complete");
+        drop(same_session);
+
+        // A canceled waiter must not retain a registry entry or prevent a
+        // later exact-session command from acquiring normally.
+        let first = acquire_file_transfer_session_owner(session_id).await;
+        let waiting = tokio::spawn(acquire_file_transfer_session_owner(session_id));
+        tokio::task::yield_now().await;
+        waiting.abort();
+        let _ = waiting.await;
+        drop(first);
+        let final_owner = tokio::time::timeout(
+            Duration::from_secs(1),
+            acquire_file_transfer_session_owner(session_id),
+        )
+        .await
+        .expect("a canceled waiter must not leak exact-session ownership");
+        drop(final_owner);
+    }
 
     #[tokio::test]
     async fn execute_argv_command_captures_output_and_status() {
@@ -466,7 +511,13 @@ mod tests {
         .unwrap();
         assert_eq!(terminal_open_status_payload(&outputs)["status"], "opened");
 
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while terminal_session_is_registered(session_id).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle terminal session was not removed");
         let input = issue_terminal_control(
             session_id,
             TerminalControlAction::Input {

@@ -211,9 +211,9 @@ restore-plans
 migration-run <restore_plan_uuid> --archive-transfer-session-id <completed_upload_session_uuid> --confirmed
 agent-update-releases --limit 10
 agent-update-release-latest --name vpsman-agent --channel stable
-agent-update-release-record --name vpsman-agent --version 0.1.1 --artifact-url https://github.com/<owner>/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/<owner>/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed
+agent-update-release-record --name vpsman-agent --version X.Y.Z --artifact-url https://github.com/<owner>/vpsman/releases/download/vX.Y.Z/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/<owner>/vpsman/releases/download/vA.B.C/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed
 agent-update-check --version-url https://github.com/<owner>/vpsman/releases/latest/download/version.json tag:edge --confirmed
-agent-update --artifact-url https://github.com/<owner>/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> tag:edge --confirmed
+agent-update --artifact-url https://github.com/<owner>/vpsman/releases/download/vX.Y.Z/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> tag:edge --confirmed
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
@@ -276,7 +276,9 @@ and keep `vpsman-worker` running for automatic queued delivery and retention
 pruning. Worker notification flags mirror environment variables, so scripts can
 set delivery limit, retention days, prune limit, and webhook timeout without
 editing code. Webhook-rule retention uses the configured day count directly
-within the 1-3650 day range; the shipped default is 90 days.
+within the 1-3650 day range; the shipped default is 90 days. Resolved alert
+history remains for 90 days; endpoint result limits do not shorten stored
+history, and current or unresolved episodes are not retention candidates.
 
 This mirrors the panel workflow and keeps browser and headless operations
 consistent.

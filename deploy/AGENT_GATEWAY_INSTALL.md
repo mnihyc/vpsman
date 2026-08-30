@@ -11,7 +11,7 @@ install tokens.
 Generate or obtain these values before running the installer on a VPS:
 
 - `VPSMAN_AGENT_CLIENT_ID`: stable client ID. New panel registrations default to
-  a prefixed numerical ID such as `v-1042`; imported legacy string IDs remain
+  a prefixed numerical ID such as `v-1042`; existing imported string IDs remain
   supported.
 - `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX`: the unique agent Noise private key for
   this VPS. Do not copy one VPS keypair to another VPS.

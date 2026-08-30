@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
 use sha2::Digest;
 use tokio::{
@@ -50,31 +49,16 @@ struct RollbackSnapshot {
     mode: u32,
 }
 
+#[derive(Debug)]
 struct DecodedBackupArchive {
     client_id: String,
     files: Vec<DecodedBackupFile>,
 }
 
+#[derive(Debug)]
 struct DecodedBackupFile {
     entry: BackupFileEntry,
     data: Vec<u8>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LegacyBackupArchive {
-    format: String,
-    client_id: String,
-    files: Vec<LegacyBackupFileEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LegacyBackupFileEntry {
-    path: String,
-    source: BackupFileSource,
-    mode: u32,
-    size_bytes: u64,
-    sha256_hex: String,
-    data_base64: String,
 }
 
 pub(crate) struct RestoreCommandInput<'a> {
@@ -316,48 +300,7 @@ async fn archive_bytes_from_source(
 }
 
 fn decode_backup_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {
-    if bytes.first() == Some(&b'{') {
-        return decode_legacy_json_archive(bytes);
-    }
     decode_tar_archive(bytes)
-}
-
-fn decode_legacy_json_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {
-    let archive: LegacyBackupArchive =
-        serde_json::from_slice(bytes).context("legacy restore archive JSON is invalid")?;
-    if archive.format != "vpsman.backup_archive.v1" {
-        anyhow::bail!("restore archive format is invalid");
-    }
-    let files = archive
-        .files
-        .into_iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let data = BASE64_STANDARD
-                .decode(&entry.data_base64)
-                .with_context(|| {
-                    format!("restore archive entry {} has invalid base64", entry.path)
-                })?;
-            let decoded = BackupFileEntry {
-                path: entry.path,
-                source: entry.source,
-                tar_path: format!("legacy/{index:04}.bin"),
-                mode: entry.mode,
-                size_bytes: entry.size_bytes,
-                sha256_hex: entry.sha256_hex,
-                mtime_unix: None,
-            };
-            validate_restore_entry_payload(&decoded, &data)?;
-            Ok(DecodedBackupFile {
-                entry: decoded,
-                data,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(DecodedBackupArchive {
-        client_id: archive.client_id,
-        files,
-    })
 }
 
 fn decode_tar_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {

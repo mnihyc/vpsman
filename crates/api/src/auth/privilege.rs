@@ -10,11 +10,8 @@ use uuid::Uuid;
 use vpsman_common::PrivilegeAssertion;
 
 use crate::{
-    gateway_client::GatewayControlResponseError,
-    model::{AuditLogView, AuthContext},
-    repository::Repository,
-    state::AppState,
-    unix_now, ApiError,
+    gateway_client::GatewayControlResponseError, model::AuthContext, repository::Repository,
+    state::AppState, ApiError,
 };
 
 pub(crate) use vpsman_common::{
@@ -98,17 +95,6 @@ impl Repository {
             "reason": reason,
         });
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: PRIVILEGE_UNLOCK_ACTION.to_string(),
-                    target: "access/privilege-vault".to_string(),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"

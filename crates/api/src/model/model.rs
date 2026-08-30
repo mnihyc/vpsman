@@ -35,7 +35,7 @@ pub(crate) struct FleetAlertLifecycleView {
     pub(crate) state: String,
     pub(crate) trigger_generation: i64,
     pub(crate) triggered_at: String,
-    pub(crate) last_confirmed_at: Option<String>,
+    pub(crate) last_confirmed_at: String,
     pub(crate) resolved_at: Option<String>,
     pub(crate) resolution_reason: Option<String>,
     pub(crate) resolution_note: Option<String>,
@@ -87,12 +87,11 @@ pub(crate) struct OperationalAlertEpisodeRecord {
     pub(crate) evidence: serde_json::Value,
     pub(crate) lifecycle_state: String,
     pub(crate) triggered_at: String,
-    pub(crate) last_confirmed_at: Option<String>,
+    pub(crate) last_confirmed_at: String,
     pub(crate) resolved_at: Option<String>,
     pub(crate) resolution_reason: Option<String>,
     pub(crate) resolution_note: Option<String>,
     pub(crate) resolution_actor_id: Option<Uuid>,
-    pub(crate) backfilled: bool,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
 }
@@ -210,19 +209,6 @@ pub(crate) struct AgentSuspensionMutationResult {
     pub(crate) resolved_alert_count: usize,
 }
 
-/// Host facts reported once per accepted agent session. These are kept apart
-/// from telemetry so unchanged identity evidence is not duplicated in every
-/// sample.
-#[derive(Clone, Debug)]
-pub(crate) struct ClientSystemFactsRecord {
-    pub(crate) os_release: String,
-    pub(crate) architecture: String,
-    pub(crate) cpu_model: Option<String>,
-    pub(crate) kernel_release: Option<String>,
-    pub(crate) virtualization: Option<String>,
-    pub(crate) reported_at: String,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct DeleteAgentRequest {
     #[serde(default)]
@@ -290,17 +276,6 @@ pub(crate) struct GatewaySessionView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ClientStatusHistoryView {
-    pub(crate) id: Uuid,
-    pub(crate) client_id: String,
-    pub(crate) from_status: Option<String>,
-    pub(crate) to_status: String,
-    pub(crate) reason: String,
-    pub(crate) metadata: serde_json::Value,
-    pub(crate) created_at: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub(crate) struct TelemetryRollupView {
     pub(crate) client_id: String,
     pub(crate) bucket_start: String,
@@ -333,8 +308,6 @@ pub(crate) struct TelemetryRollupView {
     pub(crate) disk_available_bytes_min: i64,
     pub(crate) disk_used_ratio_avg: f64,
     pub(crate) disk_used_ratio_max: f64,
-    pub(crate) network_rx_bytes_max: i64,
-    pub(crate) network_tx_bytes_max: i64,
     pub(crate) connections_sample_count: i32,
     pub(crate) tcp_sockets_latest: Option<i64>,
     pub(crate) udp_sockets_latest: Option<i64>,
@@ -370,14 +343,6 @@ pub(crate) struct TelemetryNetworkRateView {
     pub(crate) sample_count: i32,
     pub(crate) rx_bytes_avg: i64,
     pub(crate) tx_bytes_avg: i64,
-    #[serde(skip_serializing)]
-    pub(crate) rx_bytes_last: i64,
-    #[serde(skip_serializing)]
-    pub(crate) tx_bytes_last: i64,
-    #[serde(skip_serializing)]
-    pub(crate) rx_counter_epoch: i64,
-    #[serde(skip_serializing)]
-    pub(crate) tx_counter_epoch: i64,
     #[serde(skip_serializing)]
     pub(crate) latest_observed_at: String,
     pub(crate) rx_bytes_delta: i64,
@@ -424,8 +389,8 @@ pub(crate) struct TelemetryTunnelView {
     pub(crate) mtu: Option<i64>,
     pub(crate) link_type: Option<i64>,
     pub(crate) address: Option<String>,
-    pub(crate) rx_bytes: i64,
-    pub(crate) tx_bytes: i64,
+    pub(crate) rx_bytes: Option<i64>,
+    pub(crate) tx_bytes: Option<i64>,
     pub(crate) traffic_source: Option<String>,
     pub(crate) traffic_status: Option<String>,
     pub(crate) traffic_reason: Option<String>,
@@ -1485,21 +1450,6 @@ pub(crate) struct JobRolloutView {
     pub(crate) updated_at: String,
     pub(crate) completed_at: Option<String>,
     pub(crate) targets: Vec<JobRolloutTargetView>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct MemoryJobRolloutRecord {
-    pub(crate) job_id: Uuid,
-    pub(crate) status: String,
-    pub(crate) policy: JobRolloutPolicy,
-    pub(crate) current_batch: u16,
-    pub(crate) total_batches: u16,
-    pub(crate) failure_baseline: u16,
-    pub(crate) pause_reason: Option<String>,
-    pub(crate) next_batch_unix: u64,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-    pub(crate) completed_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

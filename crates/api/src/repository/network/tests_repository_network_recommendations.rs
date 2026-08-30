@@ -1,7 +1,11 @@
-use super::{compare_optional_timestamps_desc, current_reachability_windows};
-use crate::model::NetworkObservationView;
+use super::{
+    automatic_evidence_ready, compare_optional_timestamps_desc, current_reachability_windows,
+    update_plan_status,
+};
+use crate::model::{NetworkObservationView, NetworkOspfRecommendationView};
 use std::cmp::Ordering;
 use uuid::Uuid;
+use vpsman_common::OspfControlMode;
 
 #[test]
 fn recommendation_ordering_handles_mixed_timestamp_formats_and_missing_evidence() {
@@ -83,6 +87,96 @@ fn hourly_reachability_can_satisfy_the_ten_window_bound() {
             .unwrap()
             > 10_800
     );
+}
+
+#[test]
+fn ospf_eligibility_keeps_endpoint_loss_and_initial_cost_gates_distinct() {
+    let mut recommendation = ospf_recommendation();
+    assert_eq!(
+        update_plan_status(
+            &recommendation,
+            true,
+            false,
+            true,
+            "verified",
+            20,
+            OspfControlMode::Reviewed,
+            5,
+            2,
+            2,
+        ),
+        "needs_adapter_status"
+    );
+
+    recommendation.confidence = "no_recent_observations".to_string();
+    recommendation.latency_avg_ms = None;
+    recommendation.latest_observed_at = None;
+    assert_eq!(
+        update_plan_status(
+            &recommendation,
+            true,
+            true,
+            false,
+            "verified",
+            0,
+            OspfControlMode::Reviewed,
+            5,
+            2,
+            0,
+        ),
+        "review_planned_baseline"
+    );
+
+    recommendation.confidence = "latency_only".to_string();
+    recommendation.latency_avg_ms = Some(12.0);
+    recommendation.latest_observed_at = Some("2026-08-25T00:00:00Z".to_string());
+    recommendation.degraded_count = 1;
+    assert_eq!(
+        update_plan_status(
+            &recommendation,
+            true,
+            true,
+            true,
+            "verified",
+            20,
+            OspfControlMode::Reviewed,
+            5,
+            2,
+            0,
+        ),
+        "review_degraded"
+    );
+
+    recommendation.degraded_count = 0;
+    assert!(!automatic_evidence_ready(&recommendation, 2, 2));
+    recommendation.packet_loss_avg_ratio = Some(0.0);
+    assert!(automatic_evidence_ready(&recommendation, 2, 2));
+}
+
+fn ospf_recommendation() -> NetworkOspfRecommendationView {
+    NetworkOspfRecommendationView {
+        recommendation_id: "ospf-test".to_string(),
+        plan_id: Uuid::nil(),
+        plan_name: "ospf-test".to_string(),
+        interface_name: "tun-test".to_string(),
+        left_client_id: "left".to_string(),
+        right_client_id: "right".to_string(),
+        configured_bandwidth_mbps: 100,
+        effective_bandwidth_mbps: 100,
+        plan_ospf_cost: 10,
+        recommended_ospf_cost: 30,
+        cost_delta: 20,
+        latency_avg_ms: Some(12.0),
+        packet_loss_avg_ratio: None,
+        throughput_avg_mbps: None,
+        throughput_max_mbps: None,
+        sample_count: 2,
+        degraded_count: 0,
+        latest_observed_at: Some("2026-08-25T00:00:00Z".to_string()),
+        confidence: "latency_only".to_string(),
+        reason: "test".to_string(),
+        evidence_summary: "test".to_string(),
+    }
 }
 
 fn reachability_observation(

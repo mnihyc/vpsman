@@ -1,27 +1,19 @@
-use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_server_core::is_backup_operation;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, BackupRequestStatus, BackupRequestView, CreateBackupRequest,
-        JobOutputView, ListQuery,
+        AuthContext, BackupRequestStatus, BackupRequestView, CreateBackupRequest, JobOutputView,
+        ListQuery,
     },
     repository::Repository,
-    repository_key_lifecycle::{
-        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
-    },
+    repository_key_lifecycle::require_visible_postgres_clients_in_tx,
     unix_now,
-    util::{
-        compare_timestamps_desc, limit_or_default, offset_or_default, search_pattern,
-        sort_descending, timestamp_in_optional_bounds,
-    },
+    util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
 
 const MAX_BACKUP_SCHEDULE_LINEAGE: usize = 16;
@@ -51,78 +43,6 @@ impl BackupRequestSourceLink {
         );
         Ok(())
     }
-
-    fn matches(&self, request: &BackupRequestView) -> bool {
-        request.source_job_id == self.job_id
-            && request.source_schedule_id == self.schedule_id
-            && request.causation_id == self.causation_id
-            && request.schedule_lineage == self.schedule_lineage
-    }
-}
-
-fn compare_text_or_number(left: &str, right: &str) -> Ordering {
-    match (left.parse::<i128>(), right.parse::<i128>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
-}
-
-fn compare_backup_request(
-    left: &BackupRequestView,
-    right: &BackupRequestView,
-    sort: Option<&str>,
-) -> Ordering {
-    match sort.unwrap_or("created_at") {
-        "artifact_id" | "artifact" => left.artifact_id.cmp(&right.artifact_id),
-        "client_id" | "client" => left.client_id.cmp(&right.client_id),
-        "include_config" | "scope" => left.include_config.cmp(&right.include_config),
-        "paths" => left.paths.len().cmp(&right.paths.len()),
-        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
-        "command_scope" => left.command_scope.cmp(&right.command_scope),
-        "status" => left.status.cmp(&right.status),
-        _ => compare_text_or_number(&left.created_at, &right.created_at),
-    }
-}
-
-fn backup_request_matches_search(request: &BackupRequestView, needle: &str) -> bool {
-    request.id.to_string().to_ascii_lowercase().contains(needle)
-        || request
-            .actor_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || request.client_id.to_ascii_lowercase().contains(needle)
-        || request.status.to_ascii_lowercase().contains(needle)
-        || request.payload_hash.to_ascii_lowercase().contains(needle)
-        || request.command_scope.to_ascii_lowercase().contains(needle)
-        || request
-            .artifact_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || request
-            .source_job_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || request
-            .source_schedule_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || request
-            .causation_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || request
-            .schedule_lineage
-            .iter()
-            .any(|id| id.to_string().to_ascii_lowercase().contains(needle))
-        || request
-            .note
-            .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || request
-            .paths
-            .iter()
-            .any(|path| path.to_ascii_lowercase().contains(needle))
 }
 
 fn backup_request_order_by(sort: Option<&str>, descending: bool) -> &'static str {
@@ -147,52 +67,6 @@ fn backup_request_order_by(sort: Option<&str>, descending: bool) -> &'static str
 }
 
 impl Repository {
-    #[cfg(test)]
-    pub(crate) async fn list_backup_requests(&self, limit: i64) -> Result<Vec<BackupRequestView>> {
-        match self {
-            Self::Memory(memory) => {
-                let requests = memory.backup_requests.read().await;
-                Ok(requests
-                    .iter()
-                    .rev()
-                    .take(limit as usize)
-                    .cloned()
-                    .collect())
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        client_id,
-                        paths,
-                        include_config,
-                        follow_symlinks,
-                        missing_path_policy,
-                        status,
-                        payload_hash,
-                        command_scope,
-                        artifact_id,
-                        source_job_id,
-                        source_schedule_id,
-                        causation_id,
-                        schedule_lineage,
-                        note,
-                        created_at::text AS created_at
-                    FROM backup_requests
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter().map(backup_request_from_row).collect()
-            }
-        }
-    }
-
     pub(crate) async fn list_dashboard_backup_requests(
         &self,
         client_ids: &[String],
@@ -207,33 +81,6 @@ impl Repository {
         // so count saturation can be disclosed instead of shown as exact.
         let limit = limit.clamp(1, 201);
         match self {
-            Self::Memory(memory) => {
-                let client_ids = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let mut requests = memory
-                    .backup_requests
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|request| {
-                        client_ids.contains(request.client_id.as_str())
-                            && timestamp_in_optional_bounds(
-                                &request.created_at,
-                                Some(start_unix),
-                                Some(end_unix),
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                requests.sort_by(|left, right| {
-                    compare_timestamps_desc(&left.created_at, &right.created_at)
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                requests.truncate(limit as usize);
-                Ok(requests)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -281,39 +128,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let mut requests = memory
-                    .backup_requests
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|request| {
-                        q.as_deref()
-                            .map(|needle| backup_request_matches_search(request, needle))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                requests.sort_by(|left, right| {
-                    compare_backup_request(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    requests.reverse();
-                }
-                Ok(requests
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = backup_request_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -418,24 +233,6 @@ impl Repository {
         };
         let requires_live_target = status == BackupRequestStatus::RequestedMetadataOnly;
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                if requires_live_target {
-                    require_visible_memory_clients(
-                        memory,
-                        std::slice::from_ref(&view.client_id),
-                        "backup_target_unavailable",
-                    )
-                    .await?;
-                }
-                memory.backup_requests.write().await.push(view.clone());
-                memory.audits.write().await.push(backup_request_audit(
-                    &view,
-                    request.confirmed,
-                    operator,
-                    unix_now().to_string(),
-                ));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 if requires_live_target {
@@ -515,10 +312,9 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                return Ok(persisted);
+                Ok(persisted)
             }
         }
-        Ok(view)
     }
 
     pub(crate) async fn attach_backup_request_source(
@@ -528,13 +324,6 @@ impl Repository {
     ) -> Result<Option<BackupRequestView>> {
         source.validate()?;
         match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_requests
-                .read()
-                .await
-                .iter()
-                .find(|request| request.id == backup_request_id && source.matches(request))
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -584,20 +373,6 @@ impl Repository {
     ) -> Result<Option<BackupRequestView>> {
         source.validate()?;
         match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_requests
-                .read()
-                .await
-                .iter()
-                .rev()
-                .find(|request| {
-                    request.client_id == client_id
-                        && request.payload_hash == payload_hash
-                        && request.artifact_id.is_none()
-                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
-                        && source.matches(request)
-                })
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -652,20 +427,6 @@ impl Repository {
         source_job_id: Uuid,
     ) -> Result<Option<BackupRequestView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_requests
-                .read()
-                .await
-                .iter()
-                .rev()
-                .find(|request| {
-                    request.client_id == client_id
-                        && request.payload_hash == payload_hash
-                        && request.source_job_id == Some(source_job_id)
-                        && request.artifact_id.is_none()
-                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
-                })
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -716,17 +477,6 @@ impl Repository {
     ) -> Result<()> {
         let metadata = backup_rejection_metadata(request, payload_hash, operator, reason);
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "backup.rejected_authorization_required".to_string(),
-                    target: format!("client:{}", request.client_id),
-                    command_hash: Some(payload_hash.to_string()),
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -793,54 +543,6 @@ impl Repository {
             anyhow::bail!("invalid backup request terminal execution status");
         }
         match self {
-            Self::Memory(memory) => {
-                let mut requests = memory.backup_requests.write().await;
-                let mut audits = memory.audits.write().await;
-                let Some(request) = requests.iter_mut().rev().find(|request| {
-                    request.client_id == client_id
-                        && request.source_job_id == Some(job_id)
-                        && request.artifact_id.is_none()
-                        && matches!(
-                            request.status.as_str(),
-                            "requested_metadata_only" | "execution_failed" | "execution_canceled"
-                        )
-                }) else {
-                    return Ok(None);
-                };
-                if request.status != BackupRequestStatus::RequestedMetadataOnly.as_str()
-                    && request.status != status.as_str()
-                {
-                    return Ok(None);
-                }
-                let changed = request.status == BackupRequestStatus::RequestedMetadataOnly.as_str();
-                if changed {
-                    request.status = status.as_str().to_string();
-                }
-                let view = request.clone();
-                let target = format!("backup_request:{}", view.id);
-                let action = backup_request_execution_action(&view.status);
-                let terminal_at = audits
-                    .iter()
-                    .rev()
-                    .find(|audit| audit.action == action && audit.target == target)
-                    .map(|audit| audit.created_at.clone())
-                    .unwrap_or_else(|| Utc::now().to_rfc3339());
-                if changed {
-                    audits.push(backup_request_execution_audit(
-                        &view,
-                        operator,
-                        reason,
-                        terminal_at.clone(),
-                    ));
-                }
-                drop(audits);
-                drop(requests);
-                if status == BackupRequestStatus::ExecutionFailed {
-                    self.reconcile_memory_backup_event_source(view.id, &terminal_at)
-                        .await?;
-                }
-                Ok(changed.then_some(view))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let Some(row) = sqlx::query(
@@ -916,36 +618,6 @@ impl Repository {
         selected_job_id: Option<Uuid>,
     ) -> Result<Option<BackupArtifactOutputCandidate>> {
         let job_id = match self {
-            Self::Memory(memory) => {
-                let jobs = memory.jobs.read().await;
-                let operations = memory.job_operations.read().await;
-                let targets = memory.job_targets.read().await;
-                let outputs = memory.job_outputs.read().await;
-                let mut candidates = jobs
-                    .iter()
-                    .filter(|job| {
-                        operations.get(&job.id).is_some_and(is_backup_operation)
-                            && job.payload_hash == backup_request.payload_hash
-                            && selected_job_id.is_none_or(|job_id| job.id == job_id)
-                            && targets.iter().any(|target| {
-                                target.job_id == job.id
-                                    && target.client_id == backup_request.client_id
-                                    && target.status == "completed"
-                            })
-                    })
-                    .filter(|job| {
-                        outputs.iter().any(|output| {
-                            output.job_id == job.id
-                                && output.client_id == backup_request.client_id
-                                && output.stream == "stdout"
-                        })
-                    })
-                    .map(|job| (job.id, job.created_at.clone()))
-                    .collect::<Vec<_>>();
-                candidates
-                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
-                candidates.into_iter().next().map(|(job_id, _)| job_id)
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -1025,23 +697,6 @@ pub(crate) fn backup_request_from_row(row: sqlx::postgres::PgRow) -> Result<Back
     })
 }
 
-fn backup_request_audit(
-    view: &BackupRequestView,
-    confirmed: bool,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "backup.requested_metadata_only".to_string(),
-        target: format!("backup_request:{}", view.id),
-        command_hash: Some(view.payload_hash.clone()),
-        metadata: backup_request_metadata(view, confirmed, operator),
-        created_at,
-    }
-}
-
 fn backup_request_metadata(
     view: &BackupRequestView,
     confirmed: bool,
@@ -1071,23 +726,6 @@ fn backup_request_metadata(
         "component": "backup-controller",
         "metadata_only": true,
     })
-}
-
-fn backup_request_execution_audit(
-    view: &BackupRequestView,
-    operator: Option<&AuthContext>,
-    reason: Option<&str>,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: operator.map(|operator| operator.operator.id),
-        action: backup_request_execution_action(&view.status).to_string(),
-        target: format!("backup_request:{}", view.id),
-        command_hash: Some(view.payload_hash.clone()),
-        metadata: backup_request_execution_metadata(view, operator, reason),
-        created_at,
-    }
 }
 
 fn backup_request_execution_action(status: &str) -> &'static str {

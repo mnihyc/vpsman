@@ -1,31 +1,26 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use sqlx::{
-    types::Json as SqlJson, Connection, Executor, PgConnection, PgPool, Postgres, Row, Transaction,
-};
+use sqlx::{types::Json as SqlJson, Executor, PgPool, Postgres, Row, Transaction};
 use tokio::time::Duration;
-use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
-    expression_referenced_roots, expression_references_vps_rules, parse_expression,
-    parse_persisted_vps_rule_value, payload_hash, render_template_with_limit, validate_template,
-    Expression, ExpressionContext, VpsMetadata, VpsRuleContext,
+    expression_referenced_roots, expression_references_vps_rules,
+    ordinal_admission_mask_has_exact_shape, parse_expression, parse_vps_rule_value, payload_hash,
+    projected_telemetry_tunnel_identity, render_template_with_limit, validate_template,
+    AgentMetrics, Expression, ExpressionContext, NetworkInterfacePolicy, NetworkInterfaceSource,
+    ProjectedTelemetryTunnelIdentity, VpsMetadata, VpsRuleContext,
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_SELECTORS,
     WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
-use vpsman_server_core::{prepare_webhook_target, ClientPolicySuppressionSharedGuard};
+use vpsman_server_core::prepare_webhook_target;
 
 use crate::actor_authority::actor_authorized;
-use crate::alert_policy_retention::{
-    process_alert_policy_retention, AlertPolicyRetentionConfig, AlertPolicyRetentionRun,
-};
-
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
 const MAX_AUDIT_DELIVERY_ROWS: usize = 100;
@@ -65,12 +60,19 @@ const INTERVAL_EVENTS: &[(&str, i64)] = &[
 
 type HmacSha256 = Hmac<Sha256>;
 
+fn telemetry_webhook_source_rows(rule_count: usize, materialize_limit: i64) -> i64 {
+    let rule_count = i64::try_from(rule_count).unwrap_or(i64::MAX).max(1);
+    // Reuse the configured materialization transaction bound instead of
+    // inventing a second operational threshold. A source is irreducible: all
+    // enabled rules are evaluated atomically before its cursor advances.
+    (materialize_limit.max(1) / rule_count).max(1)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WebhookRuleWorkerConfig {
     pub(crate) delivery_limit: i64,
     pub(crate) materialize_limit: i64,
     pub(crate) retention_days: i64,
-    pub(crate) telemetry_event_retention_days: i64,
     pub(crate) retention_prune_limit: i64,
     pub(crate) webhook_timeout_secs: u64,
 }
@@ -80,7 +82,6 @@ impl WebhookRuleWorkerConfig {
         delivery_limit: i64,
         materialize_limit: i64,
         retention_days: i64,
-        telemetry_event_retention_days: i64,
         retention_prune_limit: i64,
         webhook_timeout_secs: u64,
     ) -> Result<Self> {
@@ -92,7 +93,6 @@ impl WebhookRuleWorkerConfig {
             delivery_limit: delivery_limit.clamp(1, 200),
             materialize_limit: materialize_limit.clamp(1, 1000),
             retention_days,
-            telemetry_event_retention_days: telemetry_event_retention_days.clamp(1, retention_days),
             retention_prune_limit: retention_prune_limit.clamp(1, 10_000),
             webhook_timeout_secs: webhook_timeout_secs.clamp(1, 60),
         })
@@ -101,7 +101,7 @@ impl WebhookRuleWorkerConfig {
 
 impl Default for WebhookRuleWorkerConfig {
     fn default() -> Self {
-        Self::new(25, 100, 90, 7, 1_000, DEFAULT_WEBHOOK_TIMEOUT_SECS)
+        Self::new(25, 100, 90, 1_000, DEFAULT_WEBHOOK_TIMEOUT_SECS)
             .expect("default webhook retention config is valid")
     }
 }
@@ -109,12 +109,10 @@ impl Default for WebhookRuleWorkerConfig {
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct WebhookRuleWorkerRun {
     pub(crate) materialized: usize,
-    pub(crate) legacy_manual_events_skipped: usize,
     pub(crate) processed: usize,
     pub(crate) delivered: usize,
     pub(crate) failed: usize,
     pub(crate) pruned: usize,
-    pub(crate) alert_policy_retention: AlertPolicyRetentionRun,
 }
 
 #[derive(Clone, Debug)]
@@ -178,9 +176,9 @@ struct DeliveryRow {
     attempt_count: i32,
 }
 
-struct ClientAlertWebhookSendGuard {
-    client_suppression: Option<ClientPolicySuppressionSharedGuard>,
+struct ClientAlertWebhookSendEligibilityRevision {
     eligibility: ClientAlertWebhookSendEligibility,
+    revision: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,21 +201,6 @@ impl ClientAlertWebhookSendEligibility {
     }
 }
 
-impl ClientAlertWebhookSendGuard {
-    fn postgres_connection(&mut self) -> Option<&mut PgConnection> {
-        self.client_suppression
-            .as_mut()
-            .map(ClientPolicySuppressionSharedGuard::connection)
-    }
-
-    async fn release(self) -> Result<()> {
-        if let Some(guard) = self.client_suppression {
-            guard.release().await?;
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct EventRow {
     id: Uuid,
@@ -228,13 +211,6 @@ struct EventRow {
     subject_client_ids: Vec<String>,
     payload: Value,
     occurred_at_unix: i64,
-}
-
-#[derive(Clone, Debug)]
-struct SkippedLegacyManualEvent {
-    id: Uuid,
-    kind: String,
-    event_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -249,7 +225,6 @@ struct DeliveryOutcome {
     error: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct PrunedDelivery {
     id: Uuid,
@@ -262,95 +237,365 @@ pub(crate) async fn process_webhook_rules(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
 ) -> Result<WebhookRuleWorkerRun> {
-    if !alert_expression_migration_ready(pool).await? {
-        return Ok(WebhookRuleWorkerRun::default());
-    }
-    project_alert_lifecycle_events(pool, config.materialize_limit).await?;
-    ensure_event_partitions(pool).await?;
-    let materialized = materialize_interval_events(pool, config).await?;
-    let (event_deliveries, legacy_manual_events_skipped) =
-        process_webhook_events(pool, config).await?;
-    let (processed, delivered, failed) = process_queued_deliveries(pool, config).await?;
-    let pruned = prune_processed_telemetry_events(pool, config).await?
-        + drop_old_event_partitions(pool, config).await?
-        + prune_default_partition_rows(pool, config).await?
-        + prune_deliveries(pool, config).await?;
-    let alert_policy_retention = process_alert_policy_retention(
-        pool,
-        AlertPolicyRetentionConfig::new(config.retention_days, config.retention_prune_limit),
-    )
-    .await?;
+    let mut run = process_webhook_periodic_maintenance(pool, config).await?;
+    let events = process_webhook_event_materialization_work(pool, config).await?;
+    let telemetry = process_telemetry_webhook_materialization_work(pool, config, &[]).await?;
+    let deliveries = process_due_webhook_deliveries(pool, config).await?;
+    run.materialized = run
+        .materialized
+        .saturating_add(events.materialized)
+        .saturating_add(telemetry.materialized);
+    run.processed = deliveries.processed;
+    run.delivered = deliveries.delivered;
+    run.failed = deliveries.failed;
+    Ok(run)
+}
+
+/// Performs periodic, database-only webhook maintenance. Delivery HTTP is a
+/// separate durable consumer and is never awaited by this producer.
+pub(crate) async fn process_webhook_periodic_maintenance(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<WebhookRuleWorkerRun> {
     Ok(WebhookRuleWorkerRun {
-        materialized: materialized + event_deliveries,
-        legacy_manual_events_skipped,
-        processed,
-        delivered,
-        failed,
-        pruned,
-        alert_policy_retention,
+        materialized: materialize_interval_events(pool, config).await?,
+        pruned: drain_webhook_retention(pool, config).await?,
+        ..WebhookRuleWorkerRun::default()
     })
 }
 
-async fn alert_expression_migration_ready(pool: &PgPool) -> Result<bool> {
-    Ok(sqlx::query_scalar(
+/// Drains only telemetry-owned webhook cursor work for a projection wake.
+///
+/// A non-empty client list is an exact, losslessly coalesced notification
+/// scope. The overwhelmingly common no-enabled-rule path can therefore seek
+/// those cursor primary keys directly instead of scanning the fleet. An empty
+/// list is the immediate global fallback for an unrecognized projection
+/// notice. Its independent worker lane also runs an empty-scope global scan on
+/// every configured periodic recovery cycle.
+///
+/// Materialization transaction limits bound lock/WAL bursts, not wake
+/// throughput: the cursor and delivery-row production drain to completion.
+/// The independent delivery consumer owns all HTTP I/O.
+pub(crate) async fn process_telemetry_webhook_materialization_work(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+    client_ids: &[String],
+) -> Result<WebhookRuleWorkerRun> {
+    let materialized = if client_ids.is_empty() {
+        drain_telemetry_projection_events(pool, config).await?
+    } else {
+        match drain_telemetry_projection_without_enabled_rules_for_clients(
+            pool,
+            config.materialize_limit,
+            client_ids,
+        )
+        .await?
+        {
+            Some(()) => 0,
+            None => drain_telemetry_projection_events(pool, config).await?,
+        }
+    };
+    Ok(WebhookRuleWorkerRun {
+        materialized,
+        ..WebhookRuleWorkerRun::default()
+    })
+}
+
+/// Drains durable lifecycle and outbox materialization. Limits inside the
+/// called functions bound one transaction; they never cap a wake's throughput.
+/// Telemetry cursors and delivery HTTP have independent consumers.
+pub(crate) async fn process_webhook_event_materialization_work(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<WebhookRuleWorkerRun> {
+    let mut run = WebhookRuleWorkerRun::default();
+    loop {
+        project_alert_lifecycle_events(pool, config.materialize_limit).await?;
+        let events = process_webhook_events(pool, config).await?;
+        run.materialized = run.materialized.saturating_add(events);
+        if !webhook_event_materialization_pending(pool).await? {
+            return Ok(run);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn webhook_event_materialization_pending(pool: &PgPool) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT expression.completed_at IS NOT NULL
-           AND lifecycle.startup_reconciled_at IS NOT NULL
-        FROM alert_expression_migration_meta expression
-        CROSS JOIN alert_policy_lifecycle_meta lifecycle
-        WHERE expression.singleton AND lifecycle.singleton
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM alert_lifecycle_events lifecycle
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM alert_lifecycle_consumer_receipts receipt
+                    WHERE receipt.consumer_kind='webhook'
+                      AND receipt.event_seq=lifecycle.event_seq
+                      AND receipt.status='completed'
+                )
+            )
+            OR EXISTS (
+                SELECT 1 FROM webhook_events WHERE processed_at IS NULL
+            )
         "#,
     )
     .fetch_one(pool)
     .await?)
 }
 
-async fn lifecycle_projection_high_watermark(pool: &PgPool) -> Result<i64> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.alert_lifecycle_arm'))")
-        .execute(&mut *tx)
-        .await?;
-    let watermark: i64 =
-        sqlx::query_scalar("SELECT COALESCE(max(event_seq), 0) FROM alert_lifecycle_events")
-            .fetch_one(&mut *tx)
+/// Drains only due delivery rows. Each row is leased before HTTP begins, so
+/// this consumer can run independently from every materialization producer.
+pub(crate) async fn process_due_webhook_deliveries(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<WebhookRuleWorkerRun> {
+    let mut run = WebhookRuleWorkerRun::default();
+    loop {
+        let (claimed, processed, delivered, failed) =
+            process_queued_deliveries(pool, config).await?;
+        run.processed = run.processed.saturating_add(processed);
+        run.delivered = run.delivered.saturating_add(delivered);
+        run.failed = run.failed.saturating_add(failed);
+        if claimed == 0 {
+            return Ok(run);
+        }
+    }
+}
+
+async fn drain_webhook_retention(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Result<usize> {
+    let mut pruned = 0_usize;
+    loop {
+        let page = prune_webhook_events(pool, config).await?;
+        pruned = pruned.saturating_add(page);
+        if page < config.retention_prune_limit as usize {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    loop {
+        let page = prune_deliveries(pool, config).await?;
+        pruned = pruned.saturating_add(page);
+        if page < config.retention_prune_limit as usize {
+            return Ok(pruned);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Returns `Some(())` after the exact client scope is fully acknowledged when
+/// no rule is enabled. Returns `None` without acknowledging another row as
+/// soon as an enabled-rule snapshot is observed, handing that work to the
+/// existing repeatable-read materializer. Rule enable/disable commits thus
+/// keep the same configuration boundary as the global path.
+async fn drain_telemetry_projection_without_enabled_rules_for_clients(
+    pool: &PgPool,
+    materialize_limit: i64,
+    client_ids: &[String],
+) -> Result<Option<()>> {
+    debug_assert!(!client_ids.is_empty());
+    loop {
+        let (no_enabled, candidates, advanced, notifications) =
+            sqlx::query_as::<_, (bool, i64, i64, i64)>(
+                r#"
+            WITH configuration AS MATERIALIZED (
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM webhook_rules WHERE enabled = TRUE
+                ) AS no_enabled
+            ), candidates AS MATERIALIZED (
+                SELECT cursor.client_id, cursor.last_sample_seq,
+                       head.projected_seq,
+                       head.latest_projected_sample_id
+                FROM telemetry_webhook_cursors cursor
+                JOIN telemetry_projection_heads head USING (client_id)
+                CROSS JOIN configuration
+                WHERE configuration.no_enabled
+                  AND cursor.client_id = ANY($2::TEXT[])
+                  AND cursor.last_sample_seq < head.projected_seq
+                ORDER BY head.accepted_at ASC, cursor.client_id ASC
+                LIMIT $1
+                FOR UPDATE OF cursor SKIP LOCKED
+            ), sources AS MATERIALIZED (
+                SELECT candidate.client_id, candidate.last_sample_seq,
+                       candidate.projected_seq,
+                       first_sample.observed_at
+                            < now() - make_interval(days => $3)
+                       AND first_sample.id IS DISTINCT FROM
+                            candidate.latest_projected_sample_id
+                       AND first_sample.accepted_seq <= core_minute.materialized_seq
+                       AND first_sample.accepted_seq <= traffic_minute.materialized_seq
+                            AS sample_prune_due
+                FROM candidates candidate
+                JOIN telemetry_samples first_sample
+                  ON first_sample.client_id = candidate.client_id
+                 AND first_sample.accepted_seq = candidate.last_sample_seq + 1
+                JOIN telemetry_minute_materialization_heads core_minute
+                  ON core_minute.client_id = candidate.client_id
+                JOIN traffic_counter_minute_heads traffic_minute
+                  ON traffic_minute.client_id = candidate.client_id
+            ), source_completeness AS MATERIALIZED (
+                SELECT
+                    (SELECT count(*) FROM candidates) =
+                    (SELECT count(*) FROM sources) AS complete
+            ), advanced AS (
+                UPDATE telemetry_webhook_cursors cursor
+                SET last_sample_seq = source.projected_seq
+                FROM sources source
+                CROSS JOIN source_completeness completeness
+                WHERE completeness.complete
+                  AND cursor.client_id = source.client_id
+                  AND cursor.last_sample_seq = source.last_sample_seq
+                  AND EXISTS (
+                        SELECT 1
+                        FROM telemetry_projection_heads head
+                        WHERE head.client_id = cursor.client_id
+                          AND source.projected_seq <= head.projected_seq
+                  )
+                RETURNING source.sample_prune_due
+            ), notification AS MATERIALIZED (
+                SELECT pg_notify(
+                    'vpsman_telemetry_retention',
+                    json_build_object(
+                        'owner', 'history_retention',
+                        'effect', 'sample_prune_frontier_advanced'
+                    )::text
+                )
+                FROM advanced
+                WHERE sample_prune_due
+                LIMIT 1
+            )
+            SELECT
+                configuration.no_enabled,
+                (SELECT count(*)::bigint FROM candidates),
+                (SELECT count(*)::bigint FROM advanced),
+                (SELECT count(*)::bigint FROM notification)
+            FROM configuration
+            "#,
+            )
+            .bind(materialize_limit.max(1))
+            .bind(client_ids)
+            .bind(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS)
+            .fetch_one(pool)
             .await?;
-    tx.commit().await?;
-    Ok(watermark)
+        if !no_enabled {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            candidates == advanced,
+            "telemetry webhook cursor source sample is missing"
+        );
+        anyhow::ensure!(
+            (0..=1).contains(&notifications),
+            "telemetry webhook sample-prune notification was not statement-coalesced"
+        );
+
+        let pending = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM telemetry_webhook_cursors cursor
+                JOIN telemetry_projection_heads head USING (client_id)
+                WHERE cursor.client_id = ANY($1::TEXT[])
+                  AND cursor.last_sample_seq < head.projected_seq
+            )
+            "#,
+        )
+        .bind(client_ids)
+        .fetch_one(pool)
+        .await?;
+        if !pending {
+            return Ok(Some(()));
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn drain_telemetry_projection_events(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<usize> {
+    let mut inserted = 0_usize;
+    loop {
+        inserted = inserted
+            .checked_add(process_telemetry_projection_events(pool, config).await?)
+            .context("telemetry webhook delivery count overflow")?;
+        let pending = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM telemetry_webhook_cursors cursor
+                JOIN telemetry_projection_heads head USING (client_id)
+                WHERE cursor.last_sample_seq < head.projected_seq
+            )
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        if !pending {
+            return Ok(inserted);
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn project_alert_lifecycle_events(pool: &PgPool, limit: i64) -> Result<usize> {
-    let watermark = lifecycle_projection_high_watermark(pool).await?;
     let mut tx = pool.begin().await?;
-    let cursor: i64 = sqlx::query_scalar(
+    let page_limit = limit.clamp(1, 1000);
+    sqlx::query(
         r#"
-        SELECT last_event_seq FROM alert_lifecycle_consumer_cursors
-        WHERE consumer_kind='webhook'
-        FOR UPDATE
+        INSERT INTO alert_lifecycle_consumer_receipts (
+            consumer_kind, event_seq, status
+        )
+        SELECT 'webhook', lifecycle.event_seq, 'pending'
+        FROM alert_lifecycle_events lifecycle
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM alert_lifecycle_consumer_receipts receipt
+            WHERE receipt.consumer_kind='webhook'
+              AND receipt.event_seq=lifecycle.event_seq
+        )
+        ORDER BY lifecycle.event_seq
+        LIMIT $1
+        ON CONFLICT (consumer_kind,event_seq) DO NOTHING
         "#,
     )
-    .fetch_one(&mut *tx)
+    .bind(page_limit)
+    .execute(&mut *tx)
     .await?;
-    if watermark <= cursor {
-        tx.commit().await?;
-        return Ok(0);
-    }
+    let claim_id = Uuid::new_v4();
     let rows = sqlx::query(
         r#"
-        SELECT event_seq, edge_kind, event_id, event_predicates,
-               subject_client_ids, payload, occurred_at, causation_id,
-               schedule_lineage
-        FROM alert_lifecycle_events
-        WHERE event_seq > $1 AND event_seq <= $2
-        ORDER BY event_seq
-        LIMIT $3
+        WITH candidate AS (
+            SELECT receipt.event_seq
+            FROM alert_lifecycle_consumer_receipts receipt
+            WHERE receipt.consumer_kind='webhook'
+              AND receipt.status IN ('pending','failed')
+            ORDER BY receipt.event_seq
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+        ), claimed AS (
+            UPDATE alert_lifecycle_consumer_receipts receipt
+            SET status='in_progress', claim_id=$2,
+                attempt_count=receipt.attempt_count+1,
+                error=NULL, updated_at=clock_timestamp()
+            FROM candidate
+            WHERE receipt.consumer_kind='webhook'
+              AND receipt.event_seq=candidate.event_seq
+            RETURNING receipt.event_seq
+        )
+        SELECT lifecycle.event_seq, lifecycle.edge_kind, lifecycle.event_id,
+               lifecycle.event_predicates, lifecycle.subject_client_ids,
+               lifecycle.payload, lifecycle.occurred_at, lifecycle.causation_id,
+               lifecycle.schedule_lineage
+        FROM claimed
+        JOIN alert_lifecycle_events lifecycle USING (event_seq)
+        ORDER BY lifecycle.event_seq
         "#,
     )
-    .bind(cursor)
-    .bind(watermark)
-    .bind(limit.clamp(1, 1000))
+    .bind(page_limit)
+    .bind(claim_id)
     .fetch_all(&mut *tx)
     .await?;
-    let mut last_seq = cursor;
     for row in &rows {
         let event_seq: i64 = row.try_get("event_seq")?;
         let kind: String = row.try_get("edge_kind")?;
@@ -394,86 +639,41 @@ async fn project_alert_lifecycle_events(pool: &PgPool, limit: i64) -> Result<usi
         sqlx::query(
             r#"
             UPDATE webhook_events
-            SET alert_lifecycle_event_seq=$3,
-                causation_id=COALESCE(causation_id,$4),
-                schedule_lineage=$5
-            WHERE occurred_at=$1 AND id=$2
-              AND (alert_lifecycle_event_seq IS NULL OR alert_lifecycle_event_seq=$3)
+            SET alert_lifecycle_event_seq=$2,
+                causation_id=COALESCE(causation_id,$3),
+                schedule_lineage=$4
+            WHERE id=$1
+              AND (alert_lifecycle_event_seq IS NULL OR alert_lifecycle_event_seq=$2)
             "#,
         )
-        .bind(webhook_occurred_at)
         .bind(webhook_id)
         .bind(event_seq)
         .bind(causation_id)
         .bind(&lineage)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        let acknowledged = sqlx::query(
             r#"
-            INSERT INTO alert_lifecycle_webhook_receipts (
-                event_seq, webhook_event_id, webhook_event_occurred_at,
-                status, updated_at
-            ) VALUES ($1,$2,$3,'projected',clock_timestamp())
-            ON CONFLICT (event_seq) DO UPDATE SET
-                webhook_event_id=EXCLUDED.webhook_event_id,
-                webhook_event_occurred_at=EXCLUDED.webhook_event_occurred_at,
-                status='projected', error=NULL, updated_at=clock_timestamp()
+            UPDATE alert_lifecycle_consumer_receipts
+            SET status='completed', claim_id=NULL,
+                output_id=$3, output_occurred_at=$4,
+                error=NULL, updated_at=clock_timestamp()
+            WHERE consumer_kind='webhook' AND event_seq=$1
+              AND status='in_progress' AND claim_id=$2
             "#,
         )
         .bind(event_seq)
+        .bind(claim_id)
         .bind(webhook_id)
         .bind(webhook_occurred_at)
         .execute(&mut *tx)
         .await?;
-        last_seq = event_seq;
-    }
-    if last_seq != cursor {
-        let updated = sqlx::query(
-            r#"
-            UPDATE alert_lifecycle_consumer_cursors
-            SET last_event_seq=$2, updated_at=clock_timestamp()
-            WHERE consumer_kind='webhook' AND last_event_seq=$1
-            "#,
-        )
-        .bind(cursor)
-        .bind(last_seq)
-        .execute(&mut *tx)
-        .await?;
         anyhow::ensure!(
-            updated.rows_affected() == 1,
-            "webhook_lifecycle_cursor_stale"
+            acknowledged.rows_affected() == 1,
+            "webhook_lifecycle_receipt_claim_lost"
         );
     }
     tx.commit().await?;
-    Ok(rows.len())
-}
-
-async fn prune_processed_telemetry_events(
-    pool: &PgPool,
-    config: WebhookRuleWorkerConfig,
-) -> Result<usize> {
-    let rows = sqlx::query(
-        r#"
-        WITH candidates AS (
-            SELECT occurred_at, id
-            FROM webhook_events
-            WHERE kind = 'telemetry.rollup'
-              AND processed_at IS NOT NULL
-              AND occurred_at <= now() - ($1::bigint * interval '1 day')
-            ORDER BY occurred_at ASC, id ASC
-            LIMIT $2
-        )
-        DELETE FROM webhook_events events
-        USING candidates
-        WHERE events.occurred_at = candidates.occurred_at
-          AND events.id = candidates.id
-        RETURNING events.id
-        "#,
-    )
-    .bind(config.telemetry_event_retention_days)
-    .bind(config.retention_prune_limit)
-    .fetch_all(pool)
-    .await?;
     Ok(rows.len())
 }
 
@@ -717,7 +917,7 @@ fn insert_persisted_vps_rule(
     value_raw: String,
     stored_json: Value,
 ) -> Result<()> {
-    let parsed = parse_persisted_vps_rule_value(&key, &value_raw)
+    let parsed = parse_vps_rule_value(&key, &value_raw)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("invalid persisted VPS rule {key}"))?;
     if key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
@@ -733,32 +933,6 @@ fn insert_persisted_vps_rule(
     }
     context.insert(key, parsed.raw, parsed.json);
     Ok(())
-}
-
-#[allow(dead_code)]
-async fn claim_event_cursor(
-    pool: &PgPool,
-    rule_id: Uuid,
-    event_key: &str,
-    event_id: &str,
-) -> Result<bool> {
-    let row = sqlx::query_scalar::<_, String>(
-        r#"
-        INSERT INTO webhook_rule_cursors (rule_id, event_key, last_event_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (rule_id, event_key) DO UPDATE SET
-            last_event_id = EXCLUDED.last_event_id,
-            updated_at = now()
-        WHERE webhook_rule_cursors.last_event_id <> EXCLUDED.last_event_id
-        RETURNING last_event_id
-        "#,
-    )
-    .bind(rule_id)
-    .bind(event_key)
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.is_some())
 }
 
 pub(crate) async fn insert_webhook_event(
@@ -847,7 +1021,6 @@ pub(crate) async fn insert_webhook_event_with_provenance_at_in_tx(
     causation_id: Option<Uuid>,
     schedule_lineage: &[Uuid],
 ) -> Result<bool> {
-    create_event_partition_in_tx(tx, occurred_at.date_naive()).await?;
     let predicate_refs = event_predicates
         .iter()
         .map(String::as_str)
@@ -858,6 +1031,9 @@ pub(crate) async fn insert_webhook_event_with_provenance_at_in_tx(
         .bind(lock_name)
         .execute(&mut **tx)
         .await?;
+    // The ordinary table is the durable event outbox. Its exact event key is
+    // serialized here; bounded retention owns only processed rows and never
+    // takes a relation-wide DDL lock against producers.
     let inserted = sqlx::query(
         r#"
         INSERT INTO webhook_events (
@@ -900,10 +1076,726 @@ pub(crate) async fn insert_webhook_event_with_provenance_at_in_tx(
     Ok(false)
 }
 
+async fn mark_webhook_event_processed_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &EventRow,
+) -> Result<()> {
+    let updated = sqlx::query(
+        "UPDATE webhook_events SET processed_at = now() WHERE id = $1 AND processed_at IS NULL",
+    )
+    .bind(event.id)
+    .execute(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        updated.rows_affected() == 1,
+        "webhook event processing cursor did not advance exactly once"
+    );
+    Ok(())
+}
+
+async fn notify_sample_prune_frontier_advanced_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        SELECT pg_notify(
+            'vpsman_telemetry_retention',
+            json_build_object(
+                'owner', 'history_retention',
+                'effect', 'sample_prune_frontier_advanced'
+            )::text
+        )
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn advance_telemetry_webhook_cursor_without_valid_rules_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    materialize_limit: i64,
+) -> Result<()> {
+    // With no valid consumer, advance a bounded set of webhook-owned cursor
+    // rows in one statement without deserializing payload history. Canonical
+    // acceptance and telemetry projection never lock these rows.
+    let (candidates, advanced, notifications) = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        WITH candidates AS MATERIALIZED (
+            SELECT cursor.client_id, cursor.last_sample_seq,
+                   head.projected_seq,
+                   head.latest_projected_sample_id
+            FROM telemetry_webhook_cursors cursor
+            JOIN telemetry_projection_heads head USING (client_id)
+            WHERE cursor.last_sample_seq < head.projected_seq
+            ORDER BY head.accepted_at ASC, cursor.client_id ASC
+            LIMIT $1
+            FOR UPDATE OF cursor SKIP LOCKED
+        ), sources AS MATERIALIZED (
+            SELECT candidate.client_id, candidate.last_sample_seq,
+                   candidate.projected_seq,
+                   first_sample.observed_at
+                        < now() - make_interval(days => $2)
+                   AND first_sample.id IS DISTINCT FROM
+                        candidate.latest_projected_sample_id
+                   AND first_sample.accepted_seq <= core_minute.materialized_seq
+                   AND first_sample.accepted_seq <= traffic_minute.materialized_seq
+                        AS sample_prune_due
+            FROM candidates candidate
+            JOIN telemetry_samples first_sample
+              ON first_sample.client_id = candidate.client_id
+             AND first_sample.accepted_seq = candidate.last_sample_seq + 1
+            JOIN telemetry_minute_materialization_heads core_minute
+              ON core_minute.client_id = candidate.client_id
+            JOIN traffic_counter_minute_heads traffic_minute
+              ON traffic_minute.client_id = candidate.client_id
+        ), advanced AS (
+            UPDATE telemetry_webhook_cursors cursor
+            SET last_sample_seq = source.projected_seq
+            FROM sources source
+            WHERE cursor.client_id = source.client_id
+              AND cursor.last_sample_seq = source.last_sample_seq
+              AND EXISTS (
+                    SELECT 1
+                    FROM telemetry_projection_heads head
+                    WHERE head.client_id = cursor.client_id
+                      AND source.projected_seq <= head.projected_seq
+              )
+            RETURNING source.sample_prune_due
+        ), notification AS MATERIALIZED (
+            SELECT pg_notify(
+                'vpsman_telemetry_retention',
+                json_build_object(
+                    'owner', 'history_retention',
+                    'effect', 'sample_prune_frontier_advanced'
+                )::text
+            )
+            FROM advanced
+            WHERE sample_prune_due
+            LIMIT 1
+        )
+        SELECT
+            (SELECT count(*)::bigint FROM candidates),
+            (SELECT count(*)::bigint FROM advanced),
+            (SELECT count(*)::bigint FROM notification)
+        "#,
+    )
+    .bind(materialize_limit.max(1))
+    .bind(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS)
+    .fetch_one(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        candidates == advanced,
+        "telemetry webhook cursor source sample is missing"
+    );
+    anyhow::ensure!(
+        (0..=1).contains(&notifications),
+        "telemetry webhook sample-prune notification was not statement-coalesced"
+    );
+    Ok(())
+}
+
+/// Advances the telemetry cursor in one READ COMMITTED statement only when
+/// that statement's configuration snapshot contains no enabled webhook rule.
+/// The committed projection frontier is the source authority even when there
+/// is no delivery consumer: projection publishes first, then this independent
+/// owner advances and deterministically prunes their jointly consumed queue
+/// prefix. Canonical acceptance may remain ahead without becoming webhook work.
+async fn try_advance_telemetry_webhook_cursor_without_enabled_rules(
+    pool: &PgPool,
+    materialize_limit: i64,
+) -> Result<bool> {
+    let (no_enabled, candidates, advanced, notifications) =
+        sqlx::query_as::<_, (bool, i64, i64, i64)>(
+            r#"
+        WITH configuration AS MATERIALIZED (
+            SELECT NOT EXISTS (
+                SELECT 1 FROM webhook_rules WHERE enabled = TRUE
+            ) AS no_enabled
+        ), candidates AS MATERIALIZED (
+            SELECT cursor.client_id, cursor.last_sample_seq,
+                   head.projected_seq,
+                   head.latest_projected_sample_id
+            FROM telemetry_webhook_cursors cursor
+            JOIN telemetry_projection_heads head USING (client_id)
+            CROSS JOIN configuration
+            WHERE configuration.no_enabled
+              AND cursor.last_sample_seq < head.projected_seq
+            ORDER BY head.accepted_at ASC, cursor.client_id ASC
+            LIMIT $1
+            FOR UPDATE OF cursor SKIP LOCKED
+        ), sources AS MATERIALIZED (
+            SELECT candidate.client_id, candidate.last_sample_seq,
+                   candidate.projected_seq,
+                   first_sample.observed_at
+                        < now() - make_interval(days => $2)
+                   AND first_sample.id IS DISTINCT FROM
+                        candidate.latest_projected_sample_id
+                   AND first_sample.accepted_seq <= core_minute.materialized_seq
+                   AND first_sample.accepted_seq <= traffic_minute.materialized_seq
+                        AS sample_prune_due
+            FROM candidates candidate
+            JOIN telemetry_samples first_sample
+              ON first_sample.client_id = candidate.client_id
+             AND first_sample.accepted_seq = candidate.last_sample_seq + 1
+            JOIN telemetry_minute_materialization_heads core_minute
+              ON core_minute.client_id = candidate.client_id
+            JOIN traffic_counter_minute_heads traffic_minute
+              ON traffic_minute.client_id = candidate.client_id
+        ), source_completeness AS MATERIALIZED (
+            SELECT
+                (SELECT count(*) FROM candidates) =
+                (SELECT count(*) FROM sources) AS complete
+        ), advanced AS (
+            UPDATE telemetry_webhook_cursors cursor
+            SET last_sample_seq = source.projected_seq
+            FROM sources source
+            CROSS JOIN source_completeness completeness
+            WHERE completeness.complete
+              AND cursor.client_id = source.client_id
+              AND cursor.last_sample_seq = source.last_sample_seq
+              AND EXISTS (
+                SELECT 1
+                FROM telemetry_projection_heads head
+                WHERE head.client_id = cursor.client_id
+                      AND source.projected_seq <= head.projected_seq
+              )
+            RETURNING source.sample_prune_due
+        ), notification AS MATERIALIZED (
+            SELECT pg_notify(
+                'vpsman_telemetry_retention',
+                json_build_object(
+                    'owner', 'history_retention',
+                    'effect', 'sample_prune_frontier_advanced'
+                )::text
+            )
+            FROM advanced
+            WHERE sample_prune_due
+            LIMIT 1
+        )
+        SELECT
+            configuration.no_enabled,
+            (SELECT count(*)::bigint FROM candidates),
+            (SELECT count(*)::bigint FROM advanced),
+            (SELECT count(*)::bigint FROM notification)
+        FROM configuration
+        "#,
+        )
+        .bind(materialize_limit.max(1))
+        .bind(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS)
+        .fetch_one(pool)
+        .await?;
+    anyhow::ensure!(
+        candidates == advanced,
+        "telemetry webhook cursor source sample is missing"
+    );
+    anyhow::ensure!(
+        (0..=1).contains(&notifications),
+        "telemetry webhook sample-prune notification was not statement-coalesced"
+    );
+    Ok(no_enabled)
+}
+
+/// Materializes telemetry webhook deliveries directly from the canonical
+/// telemetry cursor.  The immutable telemetry sample is already the durable
+/// replay source, so copying its full JSON into `webhook_events` only to delete
+/// it again adds heap, TOAST, WAL, and worker wake amplification without adding
+/// a recovery boundary.  Non-telemetry events continue to use the ordinary
+/// outbox below.
+async fn process_telemetry_projection_events(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<usize> {
+    let (mut tx, rules) = loop {
+        if try_advance_telemetry_webhook_cursor_without_enabled_rules(
+            pool,
+            config.materialize_limit,
+        )
+        .await?
+        {
+            return Ok(0);
+        }
+
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+        let rules = list_enabled_rules_in_tx(&mut tx, config.materialize_limit).await?;
+        if rules.is_empty() {
+            // A rule may be disabled between the read-committed probe and this
+            // snapshot. Retry the single-statement no-rule path rather than
+            // updating a hot telemetry head from a repeatable-read snapshot.
+            tx.rollback().await?;
+            continue;
+        }
+        break (tx, rules);
+    };
+    let mut inserted = 0_usize;
+    let mut validated_rules = Vec::with_capacity(rules.len());
+    for rule in &rules {
+        match validated_rule_expression(rule) {
+            Ok(expression) => validated_rules.push((rule, expression)),
+            Err(error) => {
+                let error = format_delivery_error(&error);
+                if insert_rule_materialization_failure(&mut tx, rule, None, &error).await? {
+                    inserted += 1;
+                }
+            }
+        }
+    }
+
+    if validated_rules.is_empty() {
+        // Enabled-but-invalid rules retain the existing repeatable-read
+        // transaction so their durable materialization failures and cursor
+        // advancement remain one coherent result.
+        advance_telemetry_webhook_cursor_without_valid_rules_in_tx(
+            &mut tx,
+            config.materialize_limit,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(inserted);
+    }
+
+    let source_rows =
+        telemetry_webhook_source_rows(validated_rules.len(), config.materialize_limit);
+
+    // Lock the same bounded candidate set used below and prove its exact next
+    // canonical row exists before materializing anything. The per-row check
+    // below proves the remainder of every returned prefix is contiguous; this
+    // preflight also makes a completely missing source fail closed instead of
+    // looking like an idle sweep.
+    let missing_source_client = sqlx::query_scalar::<_, String>(
+        r#"
+        WITH candidate_heads AS MATERIALIZED (
+            SELECT cursor.client_id, cursor.last_sample_seq
+            FROM telemetry_webhook_cursors cursor
+            JOIN telemetry_projection_heads head USING (client_id)
+            WHERE cursor.last_sample_seq < head.projected_seq
+            ORDER BY head.accepted_at ASC, cursor.client_id ASC
+            LIMIT $1
+            FOR UPDATE OF cursor SKIP LOCKED
+        )
+        SELECT head.client_id
+        FROM candidate_heads head
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM telemetry_samples sample
+            WHERE sample.client_id = head.client_id
+              AND sample.accepted_seq = head.last_sample_seq + 1
+        )
+        ORDER BY head.client_id
+        LIMIT 1
+        "#,
+    )
+    .bind(source_rows)
+    .fetch_optional(&mut *tx)
+    .await?;
+    anyhow::ensure!(
+        missing_source_client.is_none(),
+        "telemetry webhook cursor source sample is missing for client {}",
+        missing_source_client.as_deref().unwrap_or_default()
+    );
+
+    let rows = sqlx::query(
+        r#"
+        WITH candidate_heads AS MATERIALIZED (
+            SELECT
+                cursor.client_id,
+                cursor.last_sample_seq AS initial_cursor_seq,
+                head.projected_seq AS final_projected_seq,
+                head.accepted_at AS head_accepted_at,
+                head.latest_projected_sample_id,
+                core_minute.materialized_seq AS core_minute_seq,
+                traffic_minute.materialized_seq AS traffic_minute_seq
+            FROM telemetry_webhook_cursors cursor
+            JOIN telemetry_projection_heads head USING (client_id)
+            JOIN telemetry_minute_materialization_heads core_minute USING (client_id)
+            JOIN traffic_counter_minute_heads traffic_minute USING (client_id)
+            WHERE cursor.last_sample_seq < head.projected_seq
+            ORDER BY head.accepted_at ASC, cursor.client_id ASC
+            LIMIT $1
+            FOR UPDATE OF cursor SKIP LOCKED
+        ), current_tunnels AS MATERIALIZED (
+            SELECT
+                tunnel.client_id,
+                jsonb_agg(
+                    jsonb_build_object(
+                        'plan_id', tunnel.telemetry_plan_id,
+                        'plan_name', tunnel.telemetry_plan_name,
+                        'interface', tunnel.interface,
+                        'kind', tunnel.kind,
+                        'endpoint_side', tunnel.telemetry_endpoint_side,
+                        'peer_client_id', tunnel.telemetry_peer_client_id
+                    )
+                    ORDER BY tunnel.interface COLLATE "C"
+                ) AS identities
+            FROM telemetry_current_tunnels tunnel
+            JOIN candidate_heads head
+              ON head.client_id = tunnel.client_id
+            GROUP BY tunnel.client_id
+        ), managed_tunnel_interfaces AS MATERIALIZED (
+            SELECT endpoint.client_id,
+                   array_agg(
+                       DISTINCT endpoint.interface COLLATE "C"
+                       ORDER BY endpoint.interface COLLATE "C"
+                   ) AS interfaces
+            FROM (
+                SELECT plan.left_client_id AS client_id,
+                       plan.plan ->> 'interface_name' AS interface
+                FROM tunnel_plans plan
+                JOIN candidate_heads head
+                  ON head.client_id = plan.left_client_id
+                WHERE plan.enabled IS TRUE
+                  AND plan.deleted_at IS NULL
+                UNION ALL
+                SELECT plan.right_client_id AS client_id,
+                       plan.plan ->> 'interface_name' AS interface
+                FROM tunnel_plans plan
+                JOIN candidate_heads head
+                  ON head.client_id = plan.right_client_id
+                WHERE plan.enabled IS TRUE
+                  AND plan.deleted_at IS NULL
+            ) endpoint
+            GROUP BY endpoint.client_id
+        )
+        SELECT
+            sample.id,
+            sample.client_id,
+            sample.accepted_seq,
+            sample.accepted_at,
+            sample.payload,
+            sample.source_gateway_id,
+            sample.source_gateway_session_id,
+            sample.source_process_incarnation_id,
+            sample.source_telemetry_seq,
+            sample.reported_observed_unix,
+            sample.network_admission_mask,
+            sample.tunnel_admission_mask,
+            interface_policy.value_json AS network_interface_rule,
+            COALESCE(
+                current_tunnels.identities,
+                '[]'::JSONB
+            ) AS current_tunnel_identities,
+            COALESCE(
+                managed_tunnel_interfaces.interfaces,
+                ARRAY[]::TEXT[]
+            ) AS managed_tunnel_interfaces,
+            head.initial_cursor_seq,
+            sample.accepted_seq = head.initial_cursor_seq + 1
+              AND sample.observed_at
+                    < now() - make_interval(days => $2)
+              AND sample.id IS DISTINCT FROM head.latest_projected_sample_id
+              AND sample.accepted_seq <= head.core_minute_seq
+              AND sample.accepted_seq <= head.traffic_minute_seq
+                AS sample_prune_due
+        FROM candidate_heads head
+        JOIN telemetry_samples sample
+          ON sample.client_id = head.client_id
+         AND sample.accepted_seq > head.initial_cursor_seq
+         AND sample.accepted_seq <= head.final_projected_seq
+        LEFT JOIN vps_rule_values interface_policy
+          ON interface_policy.client_id = sample.client_id
+         AND interface_policy.key = 'network.interfaces'
+        LEFT JOIN current_tunnels
+          ON current_tunnels.client_id = sample.client_id
+        LEFT JOIN managed_tunnel_interfaces
+          ON managed_tunnel_interfaces.client_id = sample.client_id
+        ORDER BY head.head_accepted_at ASC, sample.client_id ASC,
+                 sample.accepted_seq ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(source_rows)
+    .bind(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS)
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.is_empty() {
+        tx.commit().await?;
+        return Ok(inserted);
+    }
+
+    let mut events = Vec::with_capacity(rows.len());
+    let mut advances = std::collections::BTreeMap::<String, (i64, i64)>::new();
+    let mut sample_prune_due = false;
+    for row in rows {
+        let client_id: String = row.try_get("client_id")?;
+        let accepted_seq: i64 = row.try_get("accepted_seq")?;
+        let initial_cursor_seq: i64 = row.try_get("initial_cursor_seq")?;
+        let accepted_at: DateTime<Utc> = row.try_get("accepted_at")?;
+        let advance = advances
+            .entry(client_id.clone())
+            .or_insert((initial_cursor_seq, initial_cursor_seq));
+        anyhow::ensure!(
+            advance.0 == initial_cursor_seq && accepted_seq == advance.1.saturating_add(1),
+            "telemetry webhook cursor source sequence is not contiguous"
+        );
+        advance.1 = accepted_seq;
+        sample_prune_due |= row.try_get::<bool, _>("sample_prune_due")?;
+        let event = telemetry_event_from_projection_row(&row, &client_id, accepted_at)?;
+        events.push(event);
+    }
+
+    let include_vps_rules = validated_rules
+        .iter()
+        .any(|(_, expression)| expression_references_vps_rules(expression));
+    let mut explicit_subject_client_ids = events
+        .iter()
+        .flat_map(|event| event.subject_client_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    explicit_subject_client_ids.sort();
+    explicit_subject_client_ids.dedup();
+    let vps_rows = list_event_vps(&mut tx, include_vps_rules, &explicit_subject_client_ids).await?;
+
+    for event in events {
+        for (rule, expression) in &validated_rules {
+            match event_candidate_for_validated_rule(rule, expression, &event, &vps_rows) {
+                Ok(Some(candidate)) => {
+                    if insert_delivery_candidate(&mut tx, &candidate).await? {
+                        inserted += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let error = format_delivery_error(&error);
+                    if insert_rule_materialization_failure(&mut tx, rule, Some(&event), &error)
+                        .await?
+                    {
+                        inserted += 1;
+                    }
+                }
+            }
+        }
+    }
+    let client_ids = advances.keys().cloned().collect::<Vec<_>>();
+    let initial_sequences = advances
+        .values()
+        .map(|advance| advance.0)
+        .collect::<Vec<_>>();
+    let final_sequences = advances
+        .values()
+        .map(|advance| advance.1)
+        .collect::<Vec<_>>();
+    let advanced = sqlx::query(
+        r#"
+        WITH advances AS (
+            SELECT *
+            FROM UNNEST(
+                $1::TEXT[],
+                $2::BIGINT[],
+                $3::BIGINT[]
+            ) AS row(client_id, initial_seq, final_seq)
+        )
+        UPDATE telemetry_webhook_cursors cursor
+        SET last_sample_seq = advance.final_seq
+        FROM advances advance
+        WHERE cursor.client_id = advance.client_id
+          AND cursor.last_sample_seq = advance.initial_seq
+          AND EXISTS (
+                SELECT 1
+                FROM telemetry_projection_heads head
+                WHERE head.client_id = cursor.client_id
+                  AND advance.final_seq <= head.projected_seq
+          )
+        "#,
+    )
+    .bind(&client_ids)
+    .bind(&initial_sequences)
+    .bind(&final_sequences)
+    .execute(&mut *tx)
+    .await?;
+    anyhow::ensure!(
+        advanced.rows_affected() == advances.len() as u64,
+        "telemetry webhook cursor did not advance exactly once per client"
+    );
+    if sample_prune_due {
+        notify_sample_prune_frontier_advanced_in_tx(&mut tx).await?;
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+fn telemetry_event_from_projection_row(
+    row: &sqlx::postgres::PgRow,
+    client_id: &str,
+    accepted_at: DateTime<Utc>,
+) -> Result<EventRow> {
+    let metrics: SqlJson<AgentMetrics> = row.try_get("payload")?;
+    let mut metrics = metrics.0;
+    metrics.observed_unix = u64::try_from(row.try_get::<i64, _>("reported_observed_unix")?)
+        .context("negative telemetry webhook reported observation time")?;
+    let interface_rule: Option<SqlJson<Value>> = row.try_get("network_interface_rule")?;
+    let interface_policy =
+        NetworkInterfacePolicy::from_rule_json(interface_rule.as_ref().map(|rule| &rule.0))
+            .map_err(anyhow::Error::msg)
+            .context("invalid persisted network.interfaces rule")?;
+    let network_admission_mask: Vec<u8> = row.try_get("network_admission_mask")?;
+    let tunnel_admission_mask: Vec<u8> = row.try_get("tunnel_admission_mask")?;
+    let current_tunnel_identities = row
+        .try_get::<SqlJson<Vec<ProjectedTelemetryTunnelIdentity>>, _>("current_tunnel_identities")?
+        .0
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let managed_tunnel_interfaces = row
+        .try_get::<Vec<String>, _>("managed_tunnel_interfaces")?
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let interfaces = telemetry_webhook_interfaces(
+        &metrics,
+        &interface_policy,
+        &network_admission_mask,
+        &tunnel_admission_mask,
+        &current_tunnel_identities,
+        &managed_tunnel_interfaces,
+    )?;
+    let gateway_id: String = row.try_get("source_gateway_id")?;
+    let gateway_session_id: Uuid = row.try_get("source_gateway_session_id")?;
+    let process_incarnation_id: Uuid = row.try_get("source_process_incarnation_id")?;
+    let telemetry_seq = u64::try_from(row.try_get::<i64, _>("source_telemetry_seq")?)
+        .context("negative telemetry webhook source sequence")?;
+    let mut predicates = vec!["telemetry.rollup".to_string()];
+    if !interfaces.networks.is_empty() {
+        predicates.push("telemetry.network_rate".to_string());
+    }
+    if !metrics.tunnels.is_empty() {
+        predicates.push("telemetry.tunnel".to_string());
+    }
+    if !metrics.tunnel_reachability.is_empty() {
+        predicates.push("network.reachability".to_string());
+    }
+    predicates.sort();
+    predicates.dedup();
+    let disk = telemetry_persistent_disk_totals(&metrics);
+    let network_rx = telemetry_sum_u64(interfaces.networks.iter().map(|row| row.rx_bytes));
+    let network_tx = telemetry_sum_u64(interfaces.networks.iter().map(|row| row.tx_bytes));
+    let event_id = format!(
+        "telemetry:{client_id}:{gateway_session_id}:{process_incarnation_id}:{telemetry_seq}"
+    );
+    Ok(EventRow {
+        id: row.try_get("id")?,
+        actor_id: None,
+        kind: "telemetry.rollup".to_string(),
+        event_id: event_id.clone(),
+        event_predicates: predicates.clone(),
+        subject_client_ids: vec![client_id.to_string()],
+        payload: json!({
+            "event": {
+                "kind": "telemetry.rollup",
+                "id": &event_id,
+                "predicates": &predicates,
+            },
+            "telemetry": {
+                "client_id": client_id,
+                "gateway_id": gateway_id,
+                "observed_unix": metrics.observed_unix,
+                "hostname": &metrics.hostname,
+                "uptime_secs": metrics.uptime_secs,
+                "disk_collection_available": disk.is_some(),
+                "disk_total_bytes": disk.map(|(total, _)| total),
+                "disk_available_bytes": disk.map(|(_, available)| available),
+                "network_rx_bytes": network_rx,
+                "network_tx_bytes": network_tx,
+                "network_count": interfaces.networks.len(),
+                "tunnel_count": metrics.tunnels.len(),
+                "networks": &interfaces.networks,
+                "tunnels": &interfaces.tunnels,
+            },
+        }),
+        occurred_at_unix: accepted_at.timestamp(),
+    })
+}
+
+fn telemetry_persistent_disk_totals(metrics: &AgentMetrics) -> Option<(i64, i64)> {
+    metrics
+        .has_persistent_block_filesystem_disk_sample()
+        .then(|| {
+            (
+                telemetry_sum_u64(metrics.disks.iter().map(|disk| disk.total_bytes)),
+                telemetry_sum_u64(metrics.disks.iter().map(|disk| disk.available_bytes)),
+            )
+        })
+}
+
+struct TelemetryWebhookInterfaces<'a> {
+    networks: Vec<&'a vpsman_common::NetworkStat>,
+    tunnels: Vec<Value>,
+}
+
+/// Shapes only network-byte content. Tunnel presence and operational fields
+/// remain in the event so network.interfaces cannot alter tunnel lifecycle or
+/// reachability semantics.
+fn telemetry_webhook_interfaces<'a>(
+    metrics: &'a AgentMetrics,
+    policy: &NetworkInterfacePolicy,
+    network_admission_mask: &[u8],
+    tunnel_admission_mask: &[u8],
+    current_tunnel_identities: &std::collections::HashSet<ProjectedTelemetryTunnelIdentity>,
+    managed_tunnel_interfaces: &std::collections::HashSet<String>,
+) -> Result<TelemetryWebhookInterfaces<'a>> {
+    let network_mask_is_exact =
+        ordinal_admission_mask_has_exact_shape(network_admission_mask, metrics.networks.len());
+    let tunnel_mask_is_exact =
+        ordinal_admission_mask_has_exact_shape(tunnel_admission_mask, metrics.tunnels.len());
+    let networks = metrics
+        .networks
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, network)| {
+            network_mask_is_exact
+                && ordinal_admitted(network_admission_mask, *ordinal)
+                && policy.matches(NetworkInterfaceSource::Host, &network.interface)
+                && !(*policy == NetworkInterfacePolicy::DefaultPhysical
+                    && managed_tunnel_interfaces.contains(&network.interface))
+        })
+        .map(|(_, network)| network)
+        .collect::<Vec<_>>();
+    let tunnels = metrics
+        .tunnels
+        .iter()
+        .enumerate()
+        .map(|(ordinal, tunnel)| {
+            let mut value = serde_json::to_value(tunnel)?;
+            if !tunnel_mask_is_exact
+                || !ordinal_admitted(tunnel_admission_mask, ordinal)
+                || !projected_telemetry_tunnel_identity(tunnel)
+                    .is_some_and(|identity| current_tunnel_identities.contains(&identity))
+                || !policy.matches(NetworkInterfaceSource::Tunnel, &tunnel.interface)
+            {
+                let object = value
+                    .as_object_mut()
+                    .context("serialized telemetry tunnel is not an object")?;
+                for field in [
+                    "rx_bytes",
+                    "tx_bytes",
+                    "traffic_source",
+                    "traffic_status",
+                    "traffic_reason",
+                    "traffic_checked_unix",
+                ] {
+                    object.remove(field);
+                }
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TelemetryWebhookInterfaces { networks, tunnels })
+}
+
+fn ordinal_admitted(mask: &[u8], ordinal: usize) -> bool {
+    mask.get(ordinal / 8)
+        .is_some_and(|byte| byte & (1_u8 << (ordinal % 8)) != 0)
+}
+
+fn telemetry_sum_u64(values: impl Iterator<Item = u64>) -> i64 {
+    values
+        .fold(0_u128, |total, value| total.saturating_add(value as u128))
+        .min(i64::MAX as u128) as i64
+}
+
 pub(crate) async fn process_webhook_events(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
-) -> Result<(usize, usize)> {
+) -> Result<usize> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *tx)
@@ -931,7 +1823,7 @@ pub(crate) async fn process_webhook_events(
     .await?;
     if rows.is_empty() {
         tx.commit().await?;
-        return Ok((0, 0));
+        return Ok(0);
     }
     let rules = list_enabled_rules_in_tx(&mut tx, config.materialize_limit).await?;
     let mut inserted = 0_usize;
@@ -960,21 +1852,8 @@ pub(crate) async fn process_webhook_events(
     explicit_subject_client_ids.sort();
     explicit_subject_client_ids.dedup();
     let vps_rows = list_event_vps(&mut tx, include_vps_rules, &explicit_subject_client_ids).await?;
-    let mut skipped_legacy_manual_events = Vec::new();
     for row in rows {
         let event = event_from_row(row)?;
-        if is_legacy_broad_manual_dispatch(&event) {
-            skipped_legacy_manual_events.push(SkippedLegacyManualEvent {
-                id: event.id,
-                kind: event.kind.clone(),
-                event_id: event.event_id.clone(),
-            });
-            sqlx::query("UPDATE webhook_events SET processed_at = now() WHERE id = $1")
-                .bind(event.id)
-                .execute(&mut *tx)
-                .await?;
-            continue;
-        }
         for (rule, expression) in &validated_rules {
             match event_candidate_for_validated_rule(rule, expression, &event, &vps_rows) {
                 Ok(Some(candidate)) => {
@@ -993,58 +1872,10 @@ pub(crate) async fn process_webhook_events(
                 }
             }
         }
-        sqlx::query("UPDATE webhook_events SET processed_at = now() WHERE id = $1")
-            .bind(event.id)
-            .execute(&mut *tx)
-            .await?;
+        mark_webhook_event_processed_in_tx(&mut tx, &event).await?;
     }
-    if !skipped_legacy_manual_events.is_empty() {
-        insert_legacy_manual_event_skip_audit(&mut tx, &skipped_legacy_manual_events).await?;
-    }
-    let skipped_count = skipped_legacy_manual_events.len();
     tx.commit().await?;
-    Ok((inserted, skipped_count))
-}
-
-fn is_legacy_broad_manual_dispatch(event: &EventRow) -> bool {
-    event
-        .payload
-        .pointer("/event/source")
-        .and_then(Value::as_str)
-        .is_some_and(|source| source == "manual_dispatch")
-}
-
-async fn insert_legacy_manual_event_skip_audit(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    events: &[SkippedLegacyManualEvent],
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO audit_logs (
-            id, actor_id, action, target, command_hash, metadata
-        )
-        VALUES ($1, NULL, $2, $3, NULL, $4)
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind("webhook.legacy_manual_dispatch_events_skipped")
-    .bind("webhook_events")
-    .bind(json!({
-        "worker": "webhook_rule_worker",
-        "origin_kind": "worker",
-        "component": "webhook-rule-worker",
-        "result": "skipped",
-        "skipped_count": events.len(),
-        "reason": "legacy broad manual dispatch did not persist its reviewed candidate set; skipped fail-closed",
-        "events": events.iter().map(|event| json!({
-            "id": event.id,
-            "kind": &event.kind,
-            "event_id": &event.event_id,
-        })).collect::<Vec<_>>(),
-    }))
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    Ok(inserted)
 }
 
 #[cfg(test)]
@@ -1317,24 +2148,15 @@ async fn client_alert_trigger_materialization_cancellation_in_tx(
     if client_ids.is_empty() {
         return Ok(None);
     }
-    for client_id in &client_ids {
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
-            .bind(vpsman_server_core::client_policy_suppression_lock_key(
-                client_id,
-            ))
-            .execute(&mut **tx)
+    // Materialization records the event against this transaction's coherent
+    // subject snapshot. It does not own client lifecycle rows: the delivery
+    // consumer revalidates current suspension immediately before HTTP and its
+    // eligibility revision fences completion against a concurrent change.
+    let subjects =
+        sqlx::query("SELECT id, status FROM clients WHERE id=ANY($1::text[]) ORDER BY id")
+            .bind(&client_ids)
+            .fetch_all(&mut **tx)
             .await?;
-    }
-    // This worker materializes a coherent batch under REPEATABLE READ. Row
-    // locks make a suspension committed after that snapshot raise a
-    // serialization error rather than letting the stale pre-suspend status
-    // authorize a delivery. The next worker run then observes suspension.
-    let subjects = sqlx::query(
-        "SELECT id, status FROM clients WHERE id=ANY($1::text[]) ORDER BY id FOR SHARE",
-    )
-    .bind(&client_ids)
-    .fetch_all(&mut **tx)
-    .await?;
     if subjects.len() != client_ids.len() {
         return Ok(Some("client_alert_scope_invalid"));
     }
@@ -1382,13 +2204,21 @@ async fn insert_delivery_candidate(
     }
     let cancellation_reason =
         client_alert_trigger_materialization_cancellation_in_tx(tx, candidate).await?;
-    let suppression = sqlx::query(
+    let (duplicate, latest_cooldown_until_unix) = sqlx::query_as::<_, (bool, i64)>(
         r#"
         SELECT
-            COALESCE(BOOL_OR(event_id = $2), FALSE) AS duplicate,
-            COALESCE(MAX(cooldown_until_unix), 0) AS latest_cooldown_until_unix
-        FROM webhook_rule_deliveries
-        WHERE rule_id = $1
+            EXISTS (
+                SELECT 1
+                FROM webhook_rule_deliveries
+                WHERE rule_id = $1 AND event_id = $2
+            ),
+            COALESCE((
+                SELECT cooldown_until_unix
+                FROM webhook_rule_deliveries
+                WHERE rule_id = $1
+                ORDER BY cooldown_until_unix DESC
+                LIMIT 1
+            ), 0)
         "#,
     )
     .bind(candidate.rule_id)
@@ -1396,8 +2226,8 @@ async fn insert_delivery_candidate(
     .fetch_one(&mut **tx)
     .await?;
     if delivery_candidate_is_suppressed(
-        suppression.try_get("duplicate")?,
-        suppression.try_get("latest_cooldown_until_unix")?,
+        duplicate,
+        latest_cooldown_until_unix,
         candidate.occurred_at_unix,
         &candidate.event_kind,
     ) {
@@ -1605,211 +2435,168 @@ async fn begin_client_alert_webhook_send(
     pool: &PgPool,
     delivery_id: Uuid,
     lease_id: Uuid,
-) -> Result<ClientAlertWebhookSendGuard> {
-    let Some((event_kind, matched_count, mut client_ids)) =
-        sqlx::query_as::<_, (String, i32, Vec<String>)>(
-            r#"
-            SELECT event_kind, jsonb_array_length(matched_vps),
+) -> Result<ClientAlertWebhookSendEligibilityRevision> {
+    let Some(row) = sqlx::query(
+        r#"
+        WITH delivery_scope AS MATERIALIZED (
+            SELECT delivery.id, delivery.event_kind, delivery.event_id,
+                   delivery.status='in_progress'
+                     AND delivery.delivery_lease_id=$2 AS lease_owned,
+                   rule.enabled AS rule_enabled,
+                   jsonb_array_length(delivery.matched_vps) AS matched_count,
                    ARRAY(
-                       SELECT matched->>'id'
-                       FROM jsonb_array_elements(matched_vps) matched
+                       SELECT DISTINCT matched->>'id'
+                       FROM jsonb_array_elements(delivery.matched_vps) matched
                        WHERE jsonb_typeof(matched)='object'
                          AND NULLIF(btrim(matched->>'id'),'') IS NOT NULL
                        ORDER BY matched->>'id'
-                   )
-            FROM webhook_rule_deliveries
-            WHERE id=$1
-            "#,
+                   ) AS client_ids
+            FROM webhook_rule_deliveries delivery
+            JOIN webhook_rules rule ON rule.id=delivery.rule_id
+            WHERE delivery.id=$1
+        ), eligibility AS MATERIALIZED (
+            SELECT scope.*,
+                   scope.event_kind<>'alert.triggered'
+                     OR scope.matched_count=0
+                     OR (
+                        cardinality(scope.client_ids)=scope.matched_count
+                        AND (
+                            SELECT count(*)
+                            FROM clients subject
+                            WHERE subject.id=ANY(scope.client_ids)
+                        )=cardinality(scope.client_ids)
+                     ) AS scope_exact,
+                   scope.event_kind='alert.triggered'
+                     AND EXISTS (
+                        SELECT 1 FROM clients subject
+                        WHERE subject.id=ANY(scope.client_ids)
+                          AND subject.status='suspended'
+                     ) AS subject_suspended,
+                   scope.event_kind='alert.triggered'
+                     AND EXISTS (
+                        SELECT 1
+                        FROM alert_lifecycle_events lifecycle
+                        JOIN alert_episodes episode
+                          ON episode.id=lifecycle.episode_id
+                         AND episode.trigger_generation=lifecycle.trigger_generation
+                        WHERE lifecycle.edge_kind='alert.triggered'
+                          AND lifecycle.event_id=scope.event_id
+                          AND episode.evidence#>>'{_vpsman_client_suspension,client_id}'
+                                = ANY(scope.client_ids)
+                     ) AS source_suppressed
+            FROM delivery_scope scope
+        ), armed AS (
+            UPDATE webhook_rule_deliveries delivery
+            SET eligibility_revision=delivery.eligibility_revision+1
+            FROM eligibility
+            WHERE delivery.id=eligibility.id
+              AND eligibility.lease_owned AND eligibility.rule_enabled
+              AND eligibility.scope_exact
+              AND NOT eligibility.subject_suspended
+              AND NOT eligibility.source_suppressed
+            RETURNING delivery.eligibility_revision
         )
-        .bind(delivery_id)
-        .fetch_optional(pool)
-        .await?
-    else {
-        return Ok(ClientAlertWebhookSendGuard {
-            client_suppression: None,
-            eligibility: ClientAlertWebhookSendEligibility::LeaseLost,
-        });
-    };
-    if event_kind != "alert.triggered" || matched_count == 0 {
-        return Ok(ClientAlertWebhookSendGuard {
-            client_suppression: None,
-            eligibility: ClientAlertWebhookSendEligibility::Deliverable,
-        });
-    }
-    client_ids.sort();
-    client_ids.dedup();
-    if client_ids.is_empty() {
-        return Ok(ClientAlertWebhookSendGuard {
-            client_suppression: None,
-            eligibility: ClientAlertWebhookSendEligibility::InvalidClientScope,
-        });
-    }
-    let mut guard = ClientPolicySuppressionSharedGuard::acquire_many(
-        pool,
-        client_ids.iter().map(String::as_str),
-    )
-    .await?;
-    let eligibility = client_alert_webhook_send_eligibility(
-        guard.connection(),
-        delivery_id,
-        lease_id,
-        &client_ids,
-        matched_count,
-    )
-    .await?;
-    Ok(ClientAlertWebhookSendGuard {
-        client_suppression: Some(guard),
-        eligibility,
-    })
-}
-
-async fn client_alert_webhook_send_eligibility<'e, E>(
-    executor: E,
-    delivery_id: Uuid,
-    lease_id: Uuid,
-    expected_client_ids: &[String],
-    expected_matched_count: i32,
-) -> Result<ClientAlertWebhookSendEligibility>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let Some(row) = sqlx::query(
-        r#"
-        SELECT
-            delivery.status='in_progress'
-                AND delivery.delivery_lease_id=$2 AS lease_owned,
-            rule.enabled AS rule_enabled,
-            delivery.event_kind='alert.triggered'
-                AND jsonb_array_length(delivery.matched_vps)=$4
-                AND cardinality($3::text[])=$4
-                AND ARRAY(
-                    SELECT client.id
-                    FROM (
-                        SELECT DISTINCT matched->>'id' AS id
-                        FROM jsonb_array_elements(delivery.matched_vps) matched
-                        WHERE jsonb_typeof(matched)='object'
-                          AND NULLIF(btrim(matched->>'id'),'') IS NOT NULL
-                    ) client
-                    ORDER BY client.id
-                ) = $3::text[]
-                AND (
-                    SELECT count(*) FROM clients subject
-                    WHERE subject.id=ANY($3::text[])
-                ) = cardinality($3::text[]) AS scope_exact,
-            EXISTS (
-                SELECT 1
-                FROM clients subject
-                WHERE subject.id=ANY($3::text[])
-                  AND subject.status='suspended'
-            ) AS subject_suspended,
-            EXISTS (
-                SELECT 1
-                FROM alert_lifecycle_events lifecycle
-                JOIN alert_episodes episode
-                  ON episode.id=lifecycle.episode_id
-                 AND episode.trigger_generation=lifecycle.trigger_generation
-                WHERE lifecycle.edge_kind='alert.triggered'
-                  AND lifecycle.event_id=delivery.event_id
-                  AND episode.evidence#>>'{_vpsman_client_suspension,client_id}'
-                        = ANY($3::text[])
-            ) AS source_suppressed
-        FROM webhook_rule_deliveries delivery
-        JOIN webhook_rules rule ON rule.id=delivery.rule_id
-        WHERE delivery.id=$1
+        SELECT eligibility.lease_owned, eligibility.rule_enabled,
+               eligibility.scope_exact, eligibility.subject_suspended,
+               eligibility.source_suppressed, armed.eligibility_revision
+        FROM eligibility LEFT JOIN armed ON TRUE
         "#,
     )
     .bind(delivery_id)
     .bind(lease_id)
-    .bind(expected_client_ids)
-    .bind(expected_matched_count)
-    .fetch_optional(executor)
+    .fetch_optional(pool)
     .await?
     else {
-        return Ok(ClientAlertWebhookSendEligibility::LeaseLost);
+        return Ok(ClientAlertWebhookSendEligibilityRevision {
+            eligibility: ClientAlertWebhookSendEligibility::LeaseLost,
+            revision: None,
+        });
     };
-    if !row.try_get::<bool, _>("lease_owned")? {
-        return Ok(ClientAlertWebhookSendEligibility::LeaseLost);
-    }
-    if !row.try_get::<bool, _>("rule_enabled")? {
-        return Ok(ClientAlertWebhookSendEligibility::RuleDisabled);
-    }
-    if !row.try_get::<bool, _>("scope_exact")? {
-        return Ok(ClientAlertWebhookSendEligibility::InvalidClientScope);
-    }
-    if row.try_get::<bool, _>("subject_suspended")?
+    let eligibility = if !row.try_get::<bool, _>("lease_owned")? {
+        ClientAlertWebhookSendEligibility::LeaseLost
+    } else if !row.try_get::<bool, _>("rule_enabled")? {
+        ClientAlertWebhookSendEligibility::RuleDisabled
+    } else if !row.try_get::<bool, _>("scope_exact")? {
+        ClientAlertWebhookSendEligibility::InvalidClientScope
+    } else if row.try_get::<bool, _>("subject_suspended")?
         || row.try_get::<bool, _>("source_suppressed")?
     {
-        return Ok(ClientAlertWebhookSendEligibility::ClientSuspended);
-    }
-    Ok(ClientAlertWebhookSendEligibility::Deliverable)
+        ClientAlertWebhookSendEligibility::ClientSuspended
+    } else {
+        ClientAlertWebhookSendEligibility::Deliverable
+    };
+    let revision: Option<i64> = row.try_get("eligibility_revision")?;
+    anyhow::ensure!(
+        eligibility != ClientAlertWebhookSendEligibility::Deliverable || revision.is_some(),
+        "webhook delivery eligibility revision was not armed"
+    );
+    Ok(ClientAlertWebhookSendEligibilityRevision {
+        eligibility,
+        revision,
+    })
 }
 
 async fn process_queued_deliveries(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
-) -> Result<(usize, usize, usize)> {
-    let lease_id = Uuid::new_v4();
-    let lease_secs = delivery_lease_secs(config.delivery_limit, config.webhook_timeout_secs);
-    let rows = sqlx::query(
-        r#"
-        WITH claim AS (
-                        SELECT delivery.id, rule.signing_secret
-                        FROM webhook_rule_deliveries delivery
-            JOIN webhook_rules rule
-              ON rule.id = delivery.rule_id
-             AND rule.enabled = TRUE
-            WHERE (
-                    (
-                        delivery.status IN ('queued', 'failed')
-                        AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= now())
-                    )
-                    OR (
-                        delivery.status = 'in_progress'
-                        AND delivery.delivery_lease_until < now()
-                    )
-                  )
-              AND NOT (
-                    delivery.event_kind = 'alert.triggered'
-                    AND EXISTS (
-                        SELECT 1
-                        FROM jsonb_array_elements(delivery.matched_vps) matched
-                        JOIN clients subject ON subject.id=matched->>'id'
-                        WHERE subject.status='suspended'
-                    )
-                  )
-            ORDER BY delivery.created_at ASC, delivery.id ASC
-            LIMIT $1
-            FOR UPDATE OF delivery SKIP LOCKED
-        )
-        UPDATE webhook_rule_deliveries delivery
-        SET status = 'in_progress',
-            error = NULL,
-            delivery_lease_id = $2,
-            delivery_lease_until = now() + make_interval(secs => $3::integer),
-            next_attempt_at = NULL
-        FROM claim
-        WHERE delivery.id = claim.id
-        RETURNING
-            delivery.id,
-            delivery.rule_id,
-            delivery.actor_id,
-            delivery.rule_name,
-            delivery.event_kind,
-            delivery.event_id,
-            delivery.target,
-            claim.signing_secret,
-            delivery.payload,
-            delivery.attempt_count
-        "#,
-    )
-    .bind(config.delivery_limit)
-    .bind(lease_id)
-    .bind(lease_secs)
-    .fetch_all(pool)
-    .await?;
-
+) -> Result<(usize, usize, usize, usize)> {
+    let lease_secs = delivery_lease_secs(config.webhook_timeout_secs);
+    let mut claimed = 0_usize;
     let mut outcomes = Vec::new();
-    for row in rows {
+    // The configured limit bounds only one audit/scheduling page. Each HTTP
+    // attempt acquires its own row immediately before processing, so later
+    // deliveries never wait while carrying a lease they cannot yet use.
+    for _ in 0..config.delivery_limit {
+        let lease_id = Uuid::new_v4();
+        let Some(row) = sqlx::query(
+            r#"
+            WITH claim AS (
+                SELECT delivery.id, rule.signing_secret
+                FROM webhook_rule_deliveries delivery
+                LEFT JOIN webhook_rules rule ON rule.id = delivery.rule_id
+                WHERE (
+                        (
+                            delivery.status IN ('queued', 'failed')
+                            AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= now())
+                        )
+                        OR (
+                            delivery.status = 'in_progress'
+                            AND delivery.delivery_lease_until < now()
+                        )
+                      )
+                ORDER BY delivery.created_at ASC, delivery.id ASC
+                LIMIT 1
+                FOR UPDATE OF delivery SKIP LOCKED
+            )
+            UPDATE webhook_rule_deliveries delivery
+            SET status = 'in_progress',
+                error = NULL,
+                delivery_lease_id = $1,
+                delivery_lease_until = now() + make_interval(secs => $2::integer),
+                next_attempt_at = NULL
+            FROM claim
+            WHERE delivery.id = claim.id
+            RETURNING
+                delivery.id,
+                delivery.rule_id,
+                delivery.actor_id,
+                delivery.rule_name,
+                delivery.event_kind,
+                delivery.event_id,
+                delivery.target,
+                claim.signing_secret,
+                delivery.payload,
+                delivery.attempt_count
+            "#,
+        )
+        .bind(lease_id)
+        .bind(lease_secs)
+        .fetch_optional(pool)
+        .await?
+        else {
+            break;
+        };
+        claimed = claimed.saturating_add(1);
         let delivery = delivery_from_row(row)?;
         if !webhook_rule_enabled(pool, delivery.rule_id).await? {
             let updated = sqlx::query(
@@ -1849,59 +2636,39 @@ async fn process_queued_deliveries(
             });
             continue;
         }
+        let send_eligibility = begin_client_alert_webhook_send(pool, delivery.id, lease_id).await?;
+        if send_eligibility.eligibility != ClientAlertWebhookSendEligibility::Deliverable {
+            let cancellation_reason = send_eligibility.eligibility.cancellation_reason();
+            let updated = match cancellation_reason {
+                Some(reason) => {
+                    cancel_claimed_webhook_rule_delivery(pool, delivery.id, lease_id, reason).await
+                }
+                None => Ok(None),
+            };
+            let Some(recorded_attempt_count) = updated? else {
+                continue;
+            };
+            let cancellation_reason =
+                cancellation_reason.expect("canceled client alert webhook must have a reason");
+            outcomes.push(DeliveryOutcome {
+                id: delivery.id,
+                rule_id: delivery.rule_id,
+                rule_name: delivery.rule_name,
+                event_kind: delivery.event_kind,
+                event_id: delivery.event_id,
+                status: WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
+                attempt_count: recorded_attempt_count,
+                error: Some(cancellation_reason.to_string()),
+            });
+            continue;
+        }
+        let eligibility_revision = send_eligibility.revision;
         let actor_authorized =
             actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"]).await?;
-        let (result, mut send_guard) = if actor_authorized {
-            let mut send_guard =
-                begin_client_alert_webhook_send(pool, delivery.id, lease_id).await?;
-            if send_guard.eligibility != ClientAlertWebhookSendEligibility::Deliverable {
-                let cancellation_reason = send_guard.eligibility.cancellation_reason();
-                let updated = match (cancellation_reason, send_guard.postgres_connection()) {
-                    (Some(reason), Some(connection)) => {
-                        cancel_claimed_webhook_rule_delivery(
-                            connection,
-                            delivery.id,
-                            lease_id,
-                            reason,
-                        )
-                        .await
-                    }
-                    (Some(reason), None) => {
-                        cancel_claimed_webhook_rule_delivery(pool, delivery.id, lease_id, reason)
-                            .await
-                    }
-                    (None, _) => Ok(None),
-                };
-                if let Err(error) = send_guard.release().await {
-                    warn!(
-                        delivery_id = %delivery.id,
-                        error = %error,
-                        "failed to release webhook alert suspension fence"
-                    );
-                }
-                let Some(recorded_attempt_count) = updated? else {
-                    continue;
-                };
-                let cancellation_reason =
-                    cancellation_reason.expect("canceled client alert webhook must have a reason");
-                outcomes.push(DeliveryOutcome {
-                    id: delivery.id,
-                    rule_id: delivery.rule_id,
-                    rule_name: delivery.rule_name,
-                    event_kind: delivery.event_kind,
-                    event_id: delivery.event_id,
-                    status: WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
-                    attempt_count: recorded_attempt_count,
-                    error: Some(cancellation_reason.to_string()),
-                });
-                continue;
-            }
-            (
-                deliver_webhook(&delivery, config.webhook_timeout_secs).await,
-                Some(send_guard),
-            )
+        let result = if actor_authorized {
+            deliver_webhook(&delivery, config.webhook_timeout_secs).await
         } else {
-            (Err(anyhow::anyhow!("actor_authority_revoked")), None)
+            Err(anyhow::anyhow!("actor_authority_revoked"))
         };
         let next_attempt_count = delivery.attempt_count.saturating_add(1);
         let (status, error, next_attempt_after_secs) = match result {
@@ -1922,42 +2689,16 @@ async fn process_queued_deliveries(
                 retry_backoff_secs(next_attempt_count),
             ),
         };
-        let completion = match send_guard
-            .as_mut()
-            .and_then(ClientAlertWebhookSendGuard::postgres_connection)
-        {
-            Some(connection) => {
-                complete_webhook_rule_delivery_on_connection(
-                    connection,
-                    &delivery,
-                    lease_id,
-                    status,
-                    error.as_deref(),
-                    next_attempt_after_secs,
-                )
-                .await
-            }
-            None => {
-                complete_webhook_rule_delivery_on_pool(
-                    pool,
-                    &delivery,
-                    lease_id,
-                    status,
-                    error.as_deref(),
-                    next_attempt_after_secs,
-                )
-                .await
-            }
-        };
-        if let Some(send_guard) = send_guard {
-            if let Err(error) = send_guard.release().await {
-                warn!(
-                    delivery_id = %delivery.id,
-                    error = %error,
-                    "failed to release webhook alert suspension fence"
-                );
-            }
-        }
+        let completion = complete_webhook_rule_delivery_on_pool(
+            pool,
+            &delivery,
+            lease_id,
+            eligibility_revision,
+            status,
+            error.as_deref(),
+            next_attempt_after_secs,
+        )
+        .await;
         let Some(recorded_attempt_count) = completion? else {
             continue;
         };
@@ -1984,14 +2725,13 @@ async fn process_queued_deliveries(
         .filter(|outcome| outcome.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED)
         .count();
     let failed = outcomes.len().saturating_sub(delivered);
-    Ok((outcomes.len(), delivered, failed))
+    Ok((claimed, outcomes.len(), delivered, failed))
 }
 
-fn delivery_lease_secs(limit: i64, webhook_timeout_secs: u64) -> i32 {
+fn delivery_lease_secs(webhook_timeout_secs: u64) -> i32 {
     let per_attempt = i64::try_from(webhook_timeout_secs).unwrap_or(i64::MAX);
-    limit
-        .clamp(1, 200)
-        .saturating_mul(per_attempt.clamp(1, 60))
+    per_attempt
+        .clamp(1, 60)
         .saturating_add(60)
         .clamp(60, i32::MAX as i64) as i32
 }
@@ -2022,32 +2762,11 @@ where
     .await?)
 }
 
-async fn complete_webhook_rule_delivery_on_connection(
-    connection: &mut PgConnection,
-    delivery: &DeliveryRow,
-    lease_id: Uuid,
-    status: &str,
-    error: Option<&str>,
-    next_attempt_after_secs: Option<i64>,
-) -> Result<Option<i32>> {
-    let mut tx = connection.begin().await?;
-    let result = complete_webhook_rule_delivery_in_tx(
-        &mut tx,
-        delivery,
-        lease_id,
-        status,
-        error,
-        next_attempt_after_secs,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(result)
-}
-
 async fn complete_webhook_rule_delivery_on_pool(
     pool: &PgPool,
     delivery: &DeliveryRow,
     lease_id: Uuid,
+    eligibility_revision: Option<i64>,
     status: &str,
     error: Option<&str>,
     next_attempt_after_secs: Option<i64>,
@@ -2057,6 +2776,7 @@ async fn complete_webhook_rule_delivery_on_pool(
         &mut tx,
         delivery,
         lease_id,
+        eligibility_revision,
         status,
         error,
         next_attempt_after_secs,
@@ -2070,6 +2790,7 @@ async fn complete_webhook_rule_delivery_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     delivery: &DeliveryRow,
     lease_id: Uuid,
+    eligibility_revision: Option<i64>,
     status: &str,
     error: Option<&str>,
     next_attempt_after_secs: Option<i64>,
@@ -2078,28 +2799,30 @@ async fn complete_webhook_rule_delivery_in_tx(
         r#"
         UPDATE webhook_rule_deliveries
         SET
-            status = $2,
-            error = $3,
+            status = $3,
+            error = $4,
             attempt_count = attempt_count + 1,
             next_attempt_at = CASE
-                WHEN $4::bigint IS NULL THEN NULL
-                ELSE now() + ($4::bigint * interval '1 second')
+                WHEN $5::bigint IS NULL THEN NULL
+                ELSE now() + ($5::bigint * interval '1 second')
             END,
             last_attempt_at = now(),
-            delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END,
+            delivered_at = CASE WHEN $3 = 'delivered' THEN now() ELSE NULL END,
             delivery_lease_id = NULL,
             delivery_lease_until = NULL
         WHERE id = $1
           AND status = 'in_progress'
-          AND delivery_lease_id = $5
+          AND delivery_lease_id = $2
+          AND ($6::bigint IS NULL OR eligibility_revision=$6)
         RETURNING attempt_count
         "#,
     )
     .bind(delivery.id)
+    .bind(lease_id)
     .bind(status)
     .bind(error)
     .bind(next_attempt_after_secs)
-    .bind(lease_id)
+    .bind(eligibility_revision)
     .fetch_optional(&mut **tx)
     .await?;
     if attempt_count.is_some() && status == WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED {
@@ -2162,113 +2885,21 @@ fn webhook_signature(secret: &str, body: &[u8]) -> Result<String> {
     ))
 }
 
-pub(crate) async fn ensure_event_partitions(pool: &PgPool) -> Result<()> {
-    let today = Utc::now().date_naive();
-    for offset in 0..=1_i64 {
-        let date = today + ChronoDuration::days(offset);
-        create_event_partition(pool, date).await?;
-    }
-    Ok(())
-}
-
-async fn create_event_partition(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    create_event_partition_in_tx(&mut tx, date).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-async fn create_event_partition_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    date: chrono::NaiveDate,
-) -> Result<()> {
-    let next = date
-        .succ_opt()
-        .context("failed to calculate webhook event partition date")?;
-    let lock_name = format!("vpsman:webhook_events:{date}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(lock_name)
-        .execute(&mut **tx)
-        .await?;
-    let table_name = format!("webhook_events_{}", date.format("%Y%m%d"));
-    let sql = format!(
-        r#"
-        CREATE TABLE IF NOT EXISTS {table_name}
-        PARTITION OF webhook_events
-        FOR VALUES FROM ('{date}') TO ('{next}')
-        "#
-    );
-    sqlx::query(&sql).execute(&mut **tx).await?;
-    Ok(())
-}
-
-async fn drop_old_event_partitions(
-    pool: &PgPool,
-    config: WebhookRuleWorkerConfig,
-) -> Result<usize> {
-    let cutoff = Utc::now().date_naive() - ChronoDuration::days(config.retention_days);
-    let rows = sqlx::query(
-        r#"
-        SELECT tablename
-        FROM pg_tables
-        WHERE schemaname = current_schema()
-          AND tablename ~ '^webhook_events_[0-9]{8}$'
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut dropped = 0_usize;
-    for row in rows {
-        let table_name: String = row.try_get("tablename")?;
-        let Some(suffix) = table_name.strip_prefix("webhook_events_") else {
-            continue;
-        };
-        let Ok(date) = chrono::NaiveDate::parse_from_str(suffix, "%Y%m%d") else {
-            continue;
-        };
-        if date >= cutoff {
-            continue;
-        }
-        let mut tx = pool.begin().await?;
-        let lock_name = format!("vpsman:webhook_events:{date}");
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(lock_name)
-            .execute(&mut *tx)
-            .await?;
-        let safe_sql =
-            format!("SELECT NOT EXISTS (SELECT 1 FROM {table_name} WHERE processed_at IS NULL)");
-        let safe: bool = sqlx::query_scalar(&safe_sql).fetch_one(&mut *tx).await?;
-        if !safe {
-            tx.commit().await?;
-            continue;
-        }
-        let sql = format!("DROP TABLE IF EXISTS {table_name}");
-        sqlx::query(&sql).execute(&mut *tx).await?;
-        tx.commit().await?;
-        dropped += 1;
-    }
-    Ok(dropped)
-}
-
-async fn prune_default_partition_rows(
-    pool: &PgPool,
-    config: WebhookRuleWorkerConfig,
-) -> Result<usize> {
+async fn prune_webhook_events(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Result<usize> {
     let rows = sqlx::query(
         r#"
         WITH candidates AS (
             SELECT occurred_at, id
-            FROM webhook_events
-            WHERE tableoid = 'webhook_events_default'::regclass
-              AND processed_at IS NOT NULL
+            FROM webhook_events event
+            WHERE processed_at IS NOT NULL
               AND occurred_at <= now() - ($1::bigint * interval '1 day')
             ORDER BY occurred_at ASC, id ASC
             LIMIT $2
+            FOR UPDATE OF event SKIP LOCKED
         )
         DELETE FROM webhook_events events
         USING candidates
-        WHERE events.occurred_at = candidates.occurred_at
-          AND events.id = candidates.id
+        WHERE events.id = candidates.id
         RETURNING events.id
         "#,
     )
@@ -2279,11 +2910,11 @@ async fn prune_default_partition_rows(
     if rows.is_empty() {
         return Ok(0);
     }
-    insert_default_partition_prune_audit(pool, config, rows.len()).await?;
+    insert_webhook_event_prune_audit(pool, config, rows.len()).await?;
     Ok(rows.len())
 }
 
-async fn insert_default_partition_prune_audit(
+async fn insert_webhook_event_prune_audit(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
     pruned_count: usize,
@@ -2297,8 +2928,8 @@ async fn insert_default_partition_prune_audit(
         "#,
     )
     .bind(Uuid::new_v4())
-    .bind("webhook.default_partition_pruned")
-    .bind("webhook_events_default")
+    .bind("webhook.events_pruned")
+    .bind("webhook_events")
     .bind(json!({
         "worker": "webhook_rule_worker",
         "origin_kind": "worker",
@@ -2312,7 +2943,6 @@ async fn insert_default_partition_prune_audit(
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn prune_deliveries(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Result<usize> {
     let rows = sqlx::query(
         r#"
@@ -2440,7 +3070,6 @@ fn retry_backoff_secs(attempt_count: i32) -> Option<i64> {
     RETRY_BACKOFF_SECS.get(index).copied()
 }
 
-#[allow(dead_code)]
 async fn insert_prune_audit(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,

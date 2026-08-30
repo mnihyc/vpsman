@@ -631,8 +631,7 @@ jq -e '
 alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
   --selector 'tag:role:edge' \
-  --rule 'cpu.utilization_ratio >= 0.75' \
-  --severity warning \
+  --rule-json '{"name":"cpu","enabled":true,"rule_kind":"metric","evidence_source":"telemetry.combined","correlation_mode":"natural_key","trigger_condition_expression":"cpu.utilization_ratio >= 0.75","severity":"warning","category":"resource","title_template":"CPU busy","detail_template":"CPU utilization is high"}' \
   --notes docker-fault-fuzz-live-review \
   --confirmed)"
 jq -e '

@@ -101,28 +101,6 @@ impl Repository {
         self.list_network_ospf_update_plans_matching(limit).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn list_automatic_network_ospf_update_plans(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<NetworkOspfUpdatePlanView>> {
-        let plan_ids = self
-            .list_automatic_tunnel_plan_ids_for_controller(limit.clamp(1, 1_000) as usize)
-            .await?;
-        let AutomaticOspfUpdatePlanBatch { updates, failures } = self
-            .list_automatic_network_ospf_update_plan_batch(&plan_ids)
-            .await?;
-        if let Some(failure) = failures.into_iter().next() {
-            return Err(anyhow::anyhow!(
-                "automatic OSPF update plan {} failed during {}: {:#}",
-                failure.plan_id,
-                failure.phase,
-                failure.error
-            ));
-        }
-        Ok(updates)
-    }
-
     pub(crate) async fn list_automatic_network_ospf_update_plan_batch(
         &self,
         plan_ids: &[Uuid],

@@ -43,10 +43,9 @@ The CLI and VTY load 200 policies by default. If a page reaches its requested
 cap, they explicitly warn that more may exist; continue with
 `backup-policies --limit 200 --offset 200`.
 
-Policies imported from older releases remain visible even when their stored
-cron is malformed or has no future occurrence. These rows have an empty
-`next_runs` list and an explicit `cadence_error`. If an enabled invalid policy
-becomes due, the worker creates no job, disables it, records
+Policies with malformed stored cron or no future occurrence remain visible with
+an empty `next_runs` list and an explicit `cadence_error`. If an enabled invalid
+policy becomes due, the worker creates no job, disables it, records
 `schedule.due_failed`, and emits `schedule.failed`.
 
 Use **Edit** in the UI to repair the complete policy, or pass its schedule UUID

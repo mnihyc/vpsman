@@ -5,23 +5,25 @@ use chrono::{TimeZone, Utc};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row};
 use uuid::Uuid;
 use vpsman_common::{
-    NetworkTrafficImportBucket, NetworkTrafficImportResult, MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
+    NetworkTrafficImportBucket, NetworkTrafficImportResult,
     NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+    TRAFFIC_COUNTER_RAW_RETENTION_DAYS,
 };
 
-use crate::{
-    model_alert_policies::{TrafficCounterRollupRecord, TrafficCounterSampleRecord},
-    repository::Repository,
-};
+#[cfg(test)]
+use crate::model_alert_policies::TrafficCounterRollupRecord;
+use crate::{model_alert_policies::TrafficCounterSampleRecord, repository::Repository};
 
 pub(crate) const VNSTAT_IMPORT_SOURCE_PREFIX: &str = "vnstat_import:";
 const MAX_IMPORT_BUCKET_DURATION_SECS: u64 = 367 * 24 * 60 * 60;
 const POSTGRES_IMPORT_MAX_PREPARATION_ATTEMPTS: usize = 3;
-// Canonical imported raw spans at most cutoff-60 through the latest current-day
-// minute. Exceeding this derived bound indicates a prior interrupted/legacy
-// incident that must be audited; it is not an alternate replacement policy.
+// The hour-aligned raw frontier preserves every exact point in the configured
+// raw-retention window.
+// At most one partial boundary hour plus one sequencing predecessor sits beside
+// that window. Exceeding this bound indicates an interrupted or corrupt
+// import; it is not an alternate replacement policy.
 const POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE: usize =
-    (MIN_TRAFFIC_COUNTER_RETENTION_DAYS as usize + 1) * 24 * 60;
+    (TRAFFIC_COUNTER_RAW_RETENTION_DAYS as usize * 24 + 1) * 60 + 1;
 const POSTGRES_IMPORT_WORK_MEM_SQL: &str = "SET LOCAL work_mem = '32MB'";
 const POSTGRES_IMPORT_SAME_SHAPE_UPDATE_BEGIN_SQL: &str =
     "SELECT set_config('vpsman.traffic_import_same_shape_update', 'on', true)";
@@ -166,43 +168,6 @@ impl Repository {
         validate_result_contract(interfaces, start_unix, result, buckets, now_unix)?;
         let resolved_interfaces = &result.interfaces;
         match self {
-            Self::Memory(memory) => {
-                let mut samples = memory.traffic_counter_samples.write().await;
-                let prepared = prepare_imports(
-                    job_id,
-                    client_id,
-                    resolved_interfaces,
-                    start_unix,
-                    result,
-                    buckets,
-                    now_unix,
-                    &samples,
-                )?;
-                // Prepare every derived row before mutating either collection.  A
-                // malformed segment must leave the in-memory repository exactly as
-                // it was, just like the PostgreSQL transaction below.
-                let imported_samples = prepare_memory_import_samples(client_id, &prepared)?;
-                let (utc_day_start_unix, raw_cutoff_unix) =
-                    memory_import_retention_boundaries(now_unix)?;
-                let imported_rollups = prepare_memory_import_rollups(
-                    client_id,
-                    &prepared,
-                    utc_day_start_unix,
-                    raw_cutoff_unix,
-                )?;
-                apply_memory_import_rows(&mut samples, client_id, &prepared, &imported_samples);
-                drop(samples);
-
-                let mut rollups = memory.traffic_counter_rollups.write().await;
-                rollups.retain(|rollup| {
-                    rollup.client_id != client_id
-                        || rollup.source_kind != "host"
-                        || !resolved_interfaces.contains(&rollup.interface)
-                        || rollup.origin_kind != "vnstat_import"
-                });
-                rollups.extend(imported_rollups);
-                Ok(import_summary(&prepared))
-            }
             Self::Postgres(pool) => {
                 let effective_starts =
                     effective_interface_starts(resolved_interfaces, start_unix, result)?;
@@ -230,6 +195,12 @@ impl Repository {
                     let mut tx = pool.begin().await?;
                     lock_postgres_traffic_import_client(&mut tx, client_id).await?;
                     lock_postgres_traffic_counter_streams(&mut tx, client_id).await?;
+                    ensure_postgres_vnstat_interfaces_admitted(
+                        &mut tx,
+                        client_id,
+                        resolved_interfaces,
+                    )
+                    .await?;
                     let locked_snapshot = load_postgres_import_snapshot(
                         &mut tx,
                         client_id,
@@ -336,6 +307,14 @@ impl Repository {
                         )
                         .await?;
                     }
+                    // Replacement may alter already-promoted hours and their
+                    // revision fences. Rebuild monthly prefixes once after all
+                    // changed interfaces are coherent, inside the same client
+                    // transaction; reimport is an explicit rare operation.
+                    sqlx::query("SELECT refresh_traffic_counter_active_cycle_usage($1::text[])")
+                        .bind(vec![client_id])
+                        .execute(&mut *tx)
+                        .await?;
                     tx.commit().await?;
                     let prepared = postgres_prepared
                         .interfaces
@@ -348,6 +327,48 @@ impl Repository {
             }
         }
     }
+}
+
+/// Enforces the current durable-interface boundary once for the complete
+/// explicit import set. The caller owns the traffic-import transaction, so a
+/// rejection precedes every ledger mutation and cannot leave a partial import.
+pub(crate) async fn ensure_postgres_vnstat_interfaces_admitted(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    client_id: &str,
+    interfaces: &[String],
+) -> Result<()> {
+    let rejected = sqlx::query_scalar::<_, Option<Vec<String>>>(
+        r#"
+        WITH policy AS MATERIALIZED (
+            SELECT *
+            FROM public.resolve_telemetry_interface_policies(ARRAY[$1])
+        ), rejected AS (
+            SELECT requested.interface
+            FROM unnest($2::TEXT[]) requested(interface)
+            CROSS JOIN policy
+            WHERE NOT public.telemetry_interface_is_admitted_resolved(
+                policy.admission_mode,
+                policy.interface_patterns,
+                policy.managed_tunnel_interfaces,
+                'host',
+                requested.interface
+            )
+        )
+        SELECT array_agg(interface ORDER BY interface)
+        FROM rejected
+        "#,
+    )
+    .bind(client_id)
+    .bind(interfaces)
+    .fetch_one(&mut **tx)
+    .await?;
+    if let Some(rejected) = rejected.filter(|interfaces| !interfaces.is_empty()) {
+        anyhow::bail!(
+            "network_traffic_import_invalid:interface_excluded_by_network_policy:{}",
+            rejected.join(",")
+        );
+    }
+    Ok(())
 }
 
 async fn lock_postgres_traffic_import_client(
@@ -373,13 +394,14 @@ async fn postgres_import_retention_boundaries(
         )
         SELECT
             extract(epoch FROM utc_day_start)::bigint,
-            extract(epoch FROM (
-                utc_day_start - make_interval(days => $1)
+            extract(epoch FROM date_bin(
+                interval '1 hour', now() - make_interval(days => $1),
+                TIMESTAMPTZ '1970-01-01 00:00:00+00'
             ))::bigint
         FROM boundary
         "#,
     )
-    .bind(MIN_TRAFFIC_COUNTER_RETENTION_DAYS)
+    .bind(TRAFFIC_COUNTER_RAW_RETENTION_DAYS)
     .fetch_one(&mut **tx)
     .await?;
     Ok((
@@ -766,9 +788,9 @@ async fn load_postgres_import_snapshot(
 ) -> Result<PostgresImportSnapshot> {
     let (utc_day_start_unix, raw_cutoff_unix) = postgres_import_retention_boundaries(tx).await?;
     // The locked snapshot probes the owned-row bound before boundary
-    // discovery: a legacy dirty ledger must fail closed without scanning
-    // through millions of imported rows while looking for the first
-    // non-import successor.  The repeatable-read preflight intentionally
+    // discovery: a corrupt or interrupted import-owned raw set must fail closed
+    // without scanning through millions of rows while looking for the first
+    // non-import successor. The repeatable-read preflight intentionally
     // omits this duplicate probe; its boundary snapshot is revalidated under
     // the client/advisory locks, where this bound is checked authoritatively.
     let imported_raw_counts = if include_imported_raw_stats {
@@ -1875,6 +1897,7 @@ fn sample_record(
     })
 }
 
+#[cfg(test)]
 struct PreparedImportSampleIter<'a> {
     client_id: &'a str,
     prepared: &'a PreparedInterfaceImport,
@@ -1886,6 +1909,7 @@ struct PreparedImportSampleIter<'a> {
 }
 
 impl PreparedInterfaceImport {
+    #[cfg(test)]
     fn samples<'a>(&'a self, client_id: &'a str) -> PreparedImportSampleIter<'a> {
         PreparedImportSampleIter {
             client_id,
@@ -1997,7 +2021,7 @@ fn prepare_import_rollups(
 ) -> Result<Vec<PreparedImportRollup>> {
     invalid_ensure(
         utc_day_start_unix.is_multiple_of(86_400)
-            && raw_cutoff_unix.is_multiple_of(86_400)
+            && raw_cutoff_unix.is_multiple_of(3_600)
             && raw_cutoff_unix <= utc_day_start_unix,
         "retention_boundary_invalid",
     )?;
@@ -2162,6 +2186,7 @@ fn next_import_rollup_tier_boundary(observed_unix: u64, utc_day_start_unix: u64)
     u64::MAX
 }
 
+#[cfg(test)]
 impl Iterator for PreparedImportSampleIter<'_> {
     type Item = Result<TrafficCounterSampleRecord>;
 
@@ -2234,51 +2259,8 @@ impl Iterator for PreparedImportSampleIter<'_> {
     }
 }
 
-fn prepare_memory_import_samples(
-    client_id: &str,
-    prepared: &[PreparedInterfaceImport],
-) -> Result<Vec<TrafficCounterSampleRecord>> {
-    prepared
-        .iter()
-        .flat_map(|item| item.samples(client_id))
-        .collect()
-}
-
-fn apply_memory_import_rows(
-    samples: &mut Vec<TrafficCounterSampleRecord>,
-    client_id: &str,
-    prepared: &[PreparedInterfaceImport],
-    imported_samples: &[TrafficCounterSampleRecord],
-) {
-    let interfaces = prepared
-        .iter()
-        .map(|item| item.interface.as_str())
-        .collect::<BTreeSet<_>>();
-    samples.retain(|sample| {
-        !(sample.client_id == client_id
-            && sample.source_kind == "host"
-            && interfaces.contains(sample.interface.as_str())
-            && is_vnstat_import_source(&sample.sample_source))
-    });
-    samples.extend(imported_samples.iter().cloned());
-    for interface in interfaces {
-        recompute_memory_stream_epochs(samples, client_id, interface);
-    }
-}
-
-fn memory_import_retention_boundaries(now_unix: u64) -> Result<(u64, u64)> {
-    let utc_day_start_unix = now_unix - now_unix % 86_400;
-    let retention_secs = u64::try_from(MIN_TRAFFIC_COUNTER_RETENTION_DAYS)
-        .context("network_traffic_import_invalid:retention_days_out_of_range")?
-        .checked_mul(86_400)
-        .context("network_traffic_import_invalid:retention_window_overflow")?;
-    let raw_cutoff_unix = utc_day_start_unix
-        .checked_sub(retention_secs)
-        .context("network_traffic_import_invalid:raw_cutoff_out_of_range")?;
-    Ok((utc_day_start_unix, raw_cutoff_unix))
-}
-
-fn prepare_memory_import_rollups(
+#[cfg(test)]
+fn prepare_test_import_rollups(
     client_id: &str,
     prepared: &[PreparedInterfaceImport],
     utc_day_start_unix: u64,
@@ -2325,41 +2307,6 @@ fn prepare_memory_import_rollups(
         }
     }
     Ok(rows)
-}
-
-fn recompute_memory_stream_epochs(
-    samples: &mut [TrafficCounterSampleRecord],
-    client_id: &str,
-    interface: &str,
-) {
-    let mut indices = samples
-        .iter()
-        .enumerate()
-        .filter(|(_, sample)| {
-            sample.client_id == client_id
-                && sample.source_kind == "host"
-                && sample.interface == interface
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    indices.sort_by_key(|index| samples[*index].observed_unix);
-    let mut previous = None::<(i64, i64, bool)>;
-    let mut rx_epoch = 0_i64;
-    let mut tx_epoch = 0_i64;
-    for index in indices {
-        let imported = is_vnstat_import_source(&samples[index].sample_source);
-        if let Some((previous_rx, previous_tx, previous_imported)) = previous {
-            if samples[index].rx_bytes < previous_rx || (previous_imported && !imported) {
-                rx_epoch = rx_epoch.saturating_add(1);
-            }
-            if samples[index].tx_bytes < previous_tx || (previous_imported && !imported) {
-                tx_epoch = tx_epoch.saturating_add(1);
-            }
-        }
-        samples[index].rx_counter_epoch = rx_epoch;
-        samples[index].tx_counter_epoch = tx_epoch;
-        previous = Some((samples[index].rx_bytes, samples[index].tx_bytes, imported));
-    }
 }
 
 async fn insert_postgres_import_rollups(
@@ -2606,7 +2553,17 @@ async fn update_postgres_import_samples_same_shape(
             rx_counter_epoch = $4,
             tx_counter_epoch = $5,
             sample_source = $3,
-            inbound_promoted = incoming.inbound_promoted
+            inbound_promoted = incoming.inbound_promoted,
+            sample_count = 1,
+            rx_bytes_sum = incoming.rx_bytes::numeric,
+            tx_bytes_sum = incoming.tx_bytes::numeric,
+            latest_observed_at = existing.observed_at,
+            rx_usage_bytes = 0,
+            tx_usage_bytes = 0,
+            rx_reset_count = 0,
+            tx_reset_count = 0,
+            usage_authoritative = FALSE,
+            updated_at = clock_timestamp()
         FROM unnest(
             $6::bigint[], $7::bigint[], $8::bigint[], $9::boolean[]
         ) AS incoming(observed_unix, rx_bytes, tx_bytes, inbound_promoted)
@@ -2744,7 +2701,17 @@ async fn insert_postgres_import_samples(
             rx_counter_epoch = EXCLUDED.rx_counter_epoch,
             tx_counter_epoch = EXCLUDED.tx_counter_epoch,
             sample_source = EXCLUDED.sample_source,
-            inbound_promoted = EXCLUDED.inbound_promoted
+            inbound_promoted = EXCLUDED.inbound_promoted,
+            sample_count = 1,
+            rx_bytes_sum = EXCLUDED.rx_bytes::numeric,
+            tx_bytes_sum = EXCLUDED.tx_bytes::numeric,
+            latest_observed_at = EXCLUDED.observed_at,
+            rx_usage_bytes = 0,
+            tx_usage_bytes = 0,
+            rx_reset_count = 0,
+            tx_reset_count = 0,
+            usage_authoritative = FALSE,
+            updated_at = clock_timestamp()
         "#,
     )
     .bind(client_id)
@@ -3054,10 +3021,6 @@ async fn adjust_postgres_import_successor_epochs(
     Ok(())
 }
 
-fn import_summary(prepared: &[PreparedInterfaceImport]) -> NetworkTrafficImportSummary {
-    import_summary_refs(&prepared.iter().collect::<Vec<_>>())
-}
-
 fn import_summary_refs(prepared: &[&PreparedInterfaceImport]) -> NetworkTrafficImportSummary {
     let minutes = prepared
         .iter()
@@ -3083,6 +3046,7 @@ pub(crate) fn is_vnstat_import_source(source: &str) -> bool {
     source.starts_with(VNSTAT_IMPORT_SOURCE_PREFIX)
 }
 
+#[cfg(test)]
 pub(crate) fn is_intentional_vnstat_import_boundary(
     previous_source: &str,
     current_source: &str,

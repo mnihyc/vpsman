@@ -159,9 +159,9 @@ mod tests {
             "!alert.triggered && alert.category:traffic"
         )
         .is_err());
-        assert!(parse_and_validate_alert_event_expression("alert.open").is_err());
+        assert!(parse_and_validate_alert_event_expression("alert.unrecognized").is_err());
         assert!(
-            parse_and_validate_alert_event_expression("alert.triggered && alert.state:open")
+            parse_and_validate_alert_event_expression("alert.triggered && alert.phase:open")
                 .is_err()
         );
         assert!(parse_and_validate_alert_event_expression(

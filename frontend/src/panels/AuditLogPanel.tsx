@@ -135,8 +135,12 @@ export function AuditLogPanel({
       ) ?? historyRetentionPolicies[0],
     [historyRetentionPolicies, selectedDomain],
   );
-  const minimumRetentionDays =
-    selectedPolicy?.domain === "traffic_counter_samples" ? 32 : 1;
+  const minimumRetentionDays = historyRetentionMinimumDays(
+    selectedPolicy?.domain ?? selectedDomain,
+  );
+  const minimumRetentionMessage = historyRetentionMinimumMessage(
+    selectedPolicy?.domain ?? selectedDomain,
+  );
   const selectedUsesTieredHorizon = isTieredMonitoringDomain(
     selectedPolicy?.domain,
   );
@@ -400,9 +404,7 @@ export function AuditLogPanel({
       minimumRetentionDays > 1 &&
       Number(retentionDays) < minimumRetentionDays
     ) {
-      setRetentionStatus(
-        `Traffic accounting counters require at least ${minimumRetentionDays} retention days to preserve a complete monthly cycle`,
-      );
+      setRetentionStatus(minimumRetentionMessage ?? "Retention is too short");
       setRetentionStatusTone("danger");
       return;
     }
@@ -933,13 +935,14 @@ export function AuditLogPanel({
           />
           <p className="retentionPanelNote">
             <strong>Monitoring lifecycle.</strong> Accepted resource, network,
-            and Ping samples remain exact for 7 days. Their retained history,
-            system metrics, and automatic tunnel reachability use fixed age
-            tiers: 1m through 2d, 5m through 8d, 30m through 31d, 1h through
-            91d, 3h through 181d, 6h through 366d, then 1d. Missing fine detail
-            is not fabricated. Traffic counters remain exact through 32d, then
-            use 1h/3h/6h/1d transition tiers. For tiered domains, Retention days
-            is the final history horizon, not the exact-row duration.
+            Ping, traffic, and automatic reachability observations remain exact
+            for 1 day. Resource history uses fixed 1m/5m/30m/1h/3h/6h/1d age
+            tiers; reachability retains its 1m tier through day 2. Missing fine
+            detail is not fabricated. Traffic accounting keeps hourly authority
+            through day 91, then uses 3h/6h/1d tiers; its final horizon cannot
+            be below 32 days. For tiered domains,
+            Retention days is the final history horizon, not the exact-row
+            duration.
           </p>
           <div
             className="retentionSummaryStrip"
@@ -1066,10 +1069,7 @@ export function AuditLogPanel({
                     }}
                   />
                   {minimumRetentionDays > 1 && (
-                    <small>
-                      Minimum {minimumRetentionDays} days preserves the active
-                      monthly cycle.
-                    </small>
+                    <small>{minimumRetentionMessage}</small>
                   )}
                   {selectedUsesTieredHorizon && (
                     <small>
@@ -1735,7 +1735,8 @@ function historyDomainLabel(domain: string | null | undefined): string {
     telemetry_ping_rollups: "Long-term Ping history",
     telemetry_rollups: "Long-term resource history",
     telemetry_samples: "High-resolution monitoring samples",
-    traffic_counter_samples: "Long-term traffic counters",
+    traffic_counter_rollups: "Long-term traffic counters",
+    traffic_counter_samples: "Exact traffic counter export",
     topology_history: "Topology history",
   };
   return domain
@@ -1751,7 +1752,7 @@ function historyDomainDescription(domain: string | null | undefined): string {
     gateway_sessions: "Gateway connection session history",
     job_outputs: "Command output and retained job evidence",
     network_observations:
-      "Exact manual, speed, and status evidence; automatic reachability is exact through 2d, then retained in fixed age tiers",
+      "Exact manual, speed, and status evidence; automatic reachability is exact through 1d, then retained in fixed age tiers",
     system_metric_rollups:
       "Control-plane capacity history in fixed 1m/5m/30m/1h/3h/6h/1d age tiers",
     telemetry_network_rates:
@@ -1761,14 +1762,32 @@ function historyDomainDescription(domain: string | null | undefined): string {
     telemetry_rollups:
       "Authoritative CPU, load, memory, and disk history in fixed 1m/5m/30m/1h/3h/6h/1d age tiers",
     telemetry_samples:
-      "Accepted exact resource, network, traffic, and Ping source samples retained for 7 days",
+      "Accepted exact resource, network, traffic, and Ping source samples retained for 1 day",
+    traffic_counter_rollups:
+      "Authoritative hourly traffic accounting through day 91, followed by 3h/6h/1d transition tiers; final horizon minimum 32 days",
     traffic_counter_samples:
-      "Authoritative traffic counters exact through 32d, then retained at 1h/3h/6h/1d transition tiers",
+      "Exact traffic counter rows retained for 1 day and exported with retained rollups",
     topology_history: "Topology graph and trend history",
   };
   return domain
     ? (descriptions[domain] ?? "Retained history domain")
     : "Retained history domain";
+}
+
+function historyRetentionMinimumDays(
+  domain: string | null | undefined,
+): number {
+  if (domain === "traffic_counter_rollups") return 32;
+  return 1;
+}
+
+function historyRetentionMinimumMessage(
+  domain: string | null | undefined,
+): string | null {
+  if (domain === "traffic_counter_rollups") {
+    return "Minimum 32 days preserves a complete monthly traffic cycle.";
+  }
+  return null;
 }
 
 function isTieredMonitoringDomain(domain: string | null | undefined): boolean {
@@ -1778,7 +1797,7 @@ function isTieredMonitoringDomain(domain: string | null | undefined): boolean {
     "telemetry_network_rates",
     "telemetry_ping_rollups",
     "telemetry_rollups",
-    "traffic_counter_samples",
+    "traffic_counter_rollups",
   ].includes(domain ?? "");
 }
 

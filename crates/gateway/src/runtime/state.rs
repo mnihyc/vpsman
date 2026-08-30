@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Weak,
     },
     time::Instant,
 };
@@ -23,9 +23,7 @@ pub(crate) const SESSION_COMMAND_QUEUE_CAPACITY: usize = 1024;
 #[derive(Clone)]
 pub(crate) struct GatewayState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
-    /// Orders command enqueue against suspension-fence installation. The read
-    /// side is held only through `try_send`, never while awaiting an agent ACK.
-    pub(crate) dispatch_lifecycle: Arc<RwLock<()>>,
+    pub(crate) client_lifecycle_owners: Arc<GatewayClientLifecycleOwners>,
     pub(crate) client_suspension_fences: Arc<RwLock<HashMap<String, GatewayClientSuspensionFence>>>,
     pub(crate) command_enqueues:
         Arc<RwLock<HashMap<(String, uuid::Uuid), GatewayCommandEnqueueMarker>>>,
@@ -40,7 +38,7 @@ impl Default for GatewayState {
     fn default() -> Self {
         Self {
             sessions: Arc::default(),
-            dispatch_lifecycle: Arc::default(),
+            client_lifecycle_owners: Arc::default(),
             client_suspension_fences: Arc::default(),
             command_enqueues: Arc::default(),
             privilege_assertions: Arc::default(),
@@ -73,6 +71,10 @@ impl GatewayClientSuspensionFence {
 }
 
 impl GatewayState {
+    pub(crate) async fn client_lifecycle_owner(&self, client_id: &str) -> Arc<RwLock<()>> {
+        self.client_lifecycle_owners.owner(client_id).await
+    }
+
     pub(crate) fn reconnect_grace_secs(&self) -> u64 {
         self.reconnect_grace_secs.load(Ordering::Relaxed)
     }
@@ -93,6 +95,24 @@ impl GatewayState {
         let before = enqueues.len();
         enqueues.retain(|_, marker| marker.expires_at > now);
         before.saturating_sub(enqueues.len())
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct GatewayClientLifecycleOwners {
+    owners: Mutex<HashMap<String, Weak<RwLock<()>>>>,
+}
+
+impl GatewayClientLifecycleOwners {
+    async fn owner(&self, client_id: &str) -> Arc<RwLock<()>> {
+        let mut owners = self.owners.lock().await;
+        owners.retain(|_, owner| owner.strong_count() > 0);
+        if let Some(owner) = owners.get(client_id).and_then(Weak::upgrade) {
+            return owner;
+        }
+        let owner = Arc::new(RwLock::new(()));
+        owners.insert(client_id.to_string(), Arc::downgrade(&owner));
+        owner
     }
 }
 

@@ -376,16 +376,18 @@ api_get "/api/v1/tags" | jq -e \
   any(.[]; .name == "audit:docker-fleet" and (.clients | length) == $expected)
 ' >/dev/null
 
-# Fresh agents intentionally have no aggregate-rate interface selection. Make
-# this dashboard fixture explicit: an empty list means every reported host
-# interface, rather than inheriting an absent traffic selector.
+# Exercise the broadest interface workload explicitly. Missing/blank rate and
+# traffic rules mean none; only `*` requests every interface admitted by the
+# independently explicit network boundary.
 network_rate_rule_json="$(vpsctl_json vps-rules upsert \
   --selector 'tag:audit:docker-fleet' \
-  --set 'network.rate.interfaces=[]' \
+  --set 'network.interfaces=*' \
+  --set 'network.rate.interfaces=*' \
+  --set 'traffic.selectors=*' \
   --confirmed)"
 jq -e --argjson expected "$agent_count" '
   .matched_vps_count == $expected and
-  .changed_row_count == $expected and
+  .changed_row_count == ($expected * 3) and
   .invalid_row_count == 0
 ' <<<"$network_rate_rule_json" >/dev/null
 
@@ -505,8 +507,7 @@ smoke_fleet_log "validating alert notification, network plan, backup metadata, a
 alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
   --selector 'tag:role:edge' \
-  --rule 'cpu.utilization_ratio >= 0.75' \
-  --severity warning \
+  --rule-json '{"name":"cpu","enabled":true,"rule_kind":"metric","evidence_source":"telemetry.combined","correlation_mode":"natural_key","trigger_condition_expression":"cpu.utilization_ratio >= 0.75","severity":"warning","category":"resource","title_template":"CPU busy","detail_template":"CPU utilization is high"}' \
   --notes docker-fleet-live-review \
   --confirmed)"
 jq -e '
@@ -514,7 +515,7 @@ jq -e '
   .selector_expression == "tag:role:edge" and
   .enabled == true and
   (.rules | length) == 1 and
-  .rules[0].condition_expression == "cpu.utilization_ratio >= 0.75"
+  .rules[0].trigger_condition_expression == "cpu.utilization_ratio >= 0.75"
 ' <<<"$alert_policy_json" >/dev/null
 
 alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
@@ -913,7 +914,7 @@ if ! env \
   VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
   VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
   VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
-  target/debug/vpsman-worker --once --worker-id docker-fleet-artifact-cleanup --worker-lease-secs 60 \
+  target/debug/vpsman-worker --once \
   >"$cleanup_worker_log" 2>&1; then
   echo "artifact cleanup worker failed" >&2
   cat "$cleanup_worker_log" >&2 || true

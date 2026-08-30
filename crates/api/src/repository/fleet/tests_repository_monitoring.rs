@@ -1,6 +1,133 @@
 use super::*;
 
 #[test]
+fn ping_retention_wake_follows_only_orphan_creating_mutations() {
+    let source = include_str!("repository_monitoring.rs");
+    let upsert = source
+        .split_once("pub(crate) async fn upsert_ping_target")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn make_primary_ping_target")
+        .unwrap()
+        .0;
+    assert!(upsert.contains("stored.generation != record.generation"));
+    assert!(upsert.contains("generation_changed || removed_assignments > 0"));
+    assert!(upsert.contains("notify_ping_topology_changed_in_tx"));
+
+    let primary = source
+        .split_once("pub(crate) async fn make_primary_ping_target")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn replace_ping_target_assignments_bulk")
+        .unwrap()
+        .0;
+    assert!(!primary.contains("notify_ping_topology_changed_in_tx"));
+
+    let replacement = source
+        .split_once("pub(crate) async fn replace_ping_target_assignments_bulk")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn delete_ping_target")
+        .unwrap()
+        .0;
+    assert!(replacement.contains("if removed_assignments > 0"));
+
+    let delete = source
+        .split_once("pub(crate) async fn delete_ping_target")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn mutate_ping_targets_bulk")
+        .unwrap()
+        .0;
+    assert!(!delete.contains("notify_ping_topology_changed_in_tx"));
+
+    let bulk = source
+        .split_once("pub(crate) async fn mutate_ping_targets_bulk")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn ping_targets_for_client")
+        .unwrap()
+        .0;
+    assert!(bulk.contains("generation = generation + 1"));
+    assert!(bulk.contains("if topology_invalidations > 0"));
+    assert!(bulk.contains("ON DELETE CASCADE"));
+
+    let helper = source
+        .split_once("async fn replace_postgres_ping_assignments")
+        .unwrap()
+        .1
+        .split_once("async fn lock_postgres_ping_targets")
+        .unwrap()
+        .0;
+    assert!(helper.contains("let removed = sqlx::query("));
+    assert!(helper.contains("Ok(removed)"));
+}
+
+#[test]
+fn ping_card_and_detail_history_read_the_effective_minute_owner() {
+    let source = include_str!("repository_monitoring.rs");
+    let (_, card_tail) = source
+        .split_once("pub(crate) async fn list_raw_primary_ping_results_for_clients")
+        .expect("primary Ping history reader");
+    let (card, detail_tail) = card_tail
+        .split_once("pub(crate) async fn list_raw_ping_results")
+        .expect("Ping detail history reader");
+    let (detail, _) = detail_tail
+        .split_once("pub(crate) async fn list_ping_rollups_for_export")
+        .expect("Ping detail history boundary");
+    for reader in [card, detail] {
+        assert!(reader.contains("JOIN telemetry_ping_points point"));
+        assert!(reader.contains("point.bucket_secs = 60"));
+        assert!(reader.contains("sum(latency_sum_ms) / sum(success_count)"));
+        assert!(reader.contains("sum(loss_ratio_sum) / sum(sample_count)"));
+        assert!(!reader.contains("FROM telemetry_ping_facts fact"));
+    }
+}
+
+#[test]
+fn postgres_current_telemetry_reads_use_only_the_projected_sample_pointer() {
+    for query in [
+        LATEST_TELEMETRY_UPTIMES_SQL,
+        MONITORING_SYSTEM_INFORMATION_SQL,
+    ] {
+        assert!(query.contains("projection.latest_projected_sample_id"));
+        assert!(!query.contains("LATERAL"));
+        assert!(!query.contains("accepted_seq"));
+        assert!(!query.contains("sample.observed_at"));
+    }
+}
+
+#[test]
+fn fleet_live_projected_uptime_keeps_existing_unsigned_integer_semantics() {
+    assert!(
+        LATEST_TELEMETRY_UPTIMES_SQL.contains("latest.payload -> 'uptime_secs' AS uptime_value")
+    );
+    assert!(!LATEST_TELEMETRY_UPTIMES_SQL.contains("latest.payload AS payload"));
+
+    let project = |value| {
+        telemetry_uptime_from_projected_value(
+            "client-a".to_string(),
+            "2026-08-27T00:00:00Z".to_string(),
+            value,
+        )
+    };
+
+    assert_eq!(
+        project(Some(serde_json::json!(42))).unwrap().uptime_secs,
+        42
+    );
+    for absent_or_invalid in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!("42")),
+        Some(serde_json::json!(-1)),
+        Some(serde_json::json!(1.5)),
+    ] {
+        assert!(project(absent_or_invalid).is_none());
+    }
+}
+
+#[test]
 fn public_os_name_uses_display_fields_without_exposing_raw_release_data() {
     assert_eq!(
         public_os_name(
@@ -14,241 +141,6 @@ fn public_os_name_uses_display_fields_without_exposing_raw_release_data() {
         Some("Alpine Linux 3.20")
     );
     assert!(public_os_name("not-an-os-release-document").is_none());
-}
-
-#[tokio::test]
-async fn monitoring_system_information_combines_session_facts_with_latest_uptime() {
-    let repo = Repository::Memory(crate::repository::MemoryState::default());
-    let Repository::Memory(memory) = &repo else {
-        unreachable!()
-    };
-    memory.agents.write().await.push(crate::model::AgentView {
-        id: "v-1".to_string(),
-        display_name: "VPS 1".to_string(),
-        status: "online".to_string(),
-        tags: Vec::new(),
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: Some("200".to_string()),
-        arch: Some("x86_64".to_string()),
-        internal_build_number: 1,
-        process_incarnation_id: None,
-        stale_since: None,
-        stale_reason: None,
-        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    });
-    memory.client_system_facts.write().await.insert(
-        "v-1".to_string(),
-        crate::model::ClientSystemFactsRecord {
-            os_release: "PRETTY_NAME=\"Debian GNU/Linux 12\"\nSECRET=value\n".to_string(),
-            architecture: "x86_64".to_string(),
-            cpu_model: Some("AMD EPYC".to_string()),
-            kernel_release: Some("6.12.1".to_string()),
-            virtualization: Some("kvm".to_string()),
-            reported_at: "100".to_string(),
-        },
-    );
-    memory
-        .telemetry_samples
-        .write()
-        .await
-        .push(crate::model::TelemetrySampleView {
-            id: Uuid::from_u128(1),
-            client_id: "v-1".to_string(),
-            observed_at: "200".to_string(),
-            cpu_load_1: 0.1,
-            memory_total_bytes: 1,
-            memory_available_bytes: 1,
-            payload: serde_json::json!({"uptime_secs": 86400, "hostname": "private"}),
-        });
-
-    let views = repo
-        .monitoring_system_information_for_clients(&["v-1".to_string()])
-        .await
-        .unwrap();
-    let view = views.get("v-1").unwrap();
-    assert_eq!(view.os_name.as_deref(), Some("Debian GNU/Linux 12"));
-    assert_eq!(view.architecture.as_deref(), Some("x86_64"));
-    assert_eq!(view.cpu_model.as_deref(), Some("AMD EPYC"));
-    assert_eq!(view.kernel_release.as_deref(), Some("6.12.1"));
-    assert_eq!(view.virtualization.as_deref(), Some("kvm"));
-    assert_eq!(view.uptime_secs, Some(86_400));
-    assert_eq!(view.uptime_observed_at.as_deref(), Some("200"));
-
-    memory
-        .telemetry_samples
-        .write()
-        .await
-        .push(crate::model::TelemetrySampleView {
-            id: Uuid::from_u128(2),
-            client_id: "v-1".to_string(),
-            observed_at: "200".to_string(),
-            cpu_load_1: 0.1,
-            memory_total_bytes: 1,
-            memory_available_bytes: 1,
-            payload: serde_json::json!({"uptime_secs": 25}),
-        });
-    let same_timestamp_view = repo
-        .monitoring_system_information_for_clients(&["v-1".to_string()])
-        .await
-        .unwrap()
-        .remove("v-1")
-        .unwrap();
-    assert_eq!(same_timestamp_view.uptime_secs, Some(25));
-    assert_eq!(
-        same_timestamp_view.uptime_observed_at.as_deref(),
-        Some("200")
-    );
-
-    memory.agents.write().await[0].status = "revoked".to_string();
-    assert!(repo
-        .monitoring_system_information_for_clients(&["v-1".to_string()])
-        .await
-        .unwrap()
-        .contains_key("v-1"));
-
-    memory
-        .telemetry_samples
-        .write()
-        .await
-        .push(crate::model::TelemetrySampleView {
-            id: Uuid::new_v4(),
-            client_id: "v-1".to_string(),
-            observed_at: "300".to_string(),
-            cpu_load_1: 0.1,
-            memory_total_bytes: 1,
-            memory_available_bytes: 1,
-            payload: serde_json::json!({"hostname": "private"}),
-        });
-    let view_without_uptime = repo
-        .monitoring_system_information_for_clients(&["v-1".to_string()])
-        .await
-        .unwrap()
-        .remove("v-1")
-        .unwrap();
-    assert_eq!(view_without_uptime.uptime_secs, None);
-    assert_eq!(view_without_uptime.uptime_observed_at, None);
-
-    memory
-        .hidden_clients
-        .write()
-        .await
-        .insert("v-1".to_string());
-    assert!(repo
-        .monitoring_system_information_for_clients(&["v-1".to_string()])
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-async fn latest_telemetry_uptimes_use_only_each_visible_clients_newest_raw_sample() {
-    let repo = Repository::Memory(crate::repository::MemoryState::default());
-    let Repository::Memory(memory) = &repo else {
-        unreachable!()
-    };
-    memory.agents.write().await.extend([
-        uptime_test_agent("visible-reboot"),
-        uptime_test_agent("newest-missing"),
-        uptime_test_agent("same-timestamp"),
-        uptime_test_agent("hidden-deleted"),
-        {
-            let mut agent = uptime_test_agent("suspended");
-            agent.status = "suspended".to_string();
-            agent
-        },
-    ]);
-    memory
-        .hidden_clients
-        .write()
-        .await
-        .insert("hidden-deleted".to_string());
-
-    let sample = |id: u128, client_id: &str, observed_at: &str, payload: serde_json::Value| {
-        crate::model::TelemetrySampleView {
-            id: Uuid::from_u128(id),
-            client_id: client_id.to_string(),
-            observed_at: observed_at.to_string(),
-            cpu_load_1: 0.1,
-            memory_total_bytes: 1,
-            memory_available_bytes: 1,
-            payload,
-        }
-    };
-    memory.telemetry_samples.write().await.extend([
-        sample(
-            1,
-            "visible-reboot",
-            "100",
-            serde_json::json!({"uptime_secs": 50_000}),
-        ),
-        sample(
-            2,
-            "visible-reboot",
-            "200",
-            serde_json::json!({"uptime_secs": 25}),
-        ),
-        sample(
-            3,
-            "newest-missing",
-            "100",
-            serde_json::json!({"uptime_secs": 9_000}),
-        ),
-        sample(4, "newest-missing", "200", serde_json::json!({})),
-        sample(
-            5,
-            "same-timestamp",
-            "250",
-            serde_json::json!({"uptime_secs": 900}),
-        ),
-        sample(
-            6,
-            "same-timestamp",
-            "250",
-            serde_json::json!({"uptime_secs": 12}),
-        ),
-        sample(
-            7,
-            "hidden-deleted",
-            "300",
-            serde_json::json!({"uptime_secs": 300}),
-        ),
-        sample(8, "orphan", "400", serde_json::json!({"uptime_secs": 400})),
-        sample(
-            9,
-            "suspended",
-            "500",
-            serde_json::json!({"uptime_secs": 500}),
-        ),
-    ]);
-
-    let uptimes = repo.list_latest_telemetry_uptimes().await.unwrap();
-
-    assert_eq!(uptimes.len(), 2);
-    assert_eq!(uptimes[0].client_id, "same-timestamp");
-    assert_eq!(uptimes[0].uptime_secs, 12);
-    assert_eq!(uptimes[0].observed_at, "250");
-    assert_eq!(uptimes[1].client_id, "visible-reboot");
-    assert_eq!(uptimes[1].uptime_secs, 25);
-    assert_eq!(uptimes[1].observed_at, "200");
-}
-
-fn uptime_test_agent(client_id: &str) -> crate::model::AgentView {
-    crate::model::AgentView {
-        id: client_id.to_string(),
-        display_name: client_id.to_string(),
-        status: "online".to_string(),
-        tags: Vec::new(),
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: None,
-        arch: None,
-        internal_build_number: 1,
-        process_incarnation_id: None,
-        stale_since: None,
-        stale_reason: None,
-        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    }
 }
 
 #[test]
@@ -298,8 +190,6 @@ fn public_share_visitor_audit_uses_canonical_request_ip_key() {
         },
         expires_at: "200".to_string(),
         revoked_at: None,
-        revoked_by: None,
-        created_by: None,
         created_at: "100".to_string(),
         updated_at: "100".to_string(),
     };
@@ -339,7 +229,7 @@ fn fresh_ping_results_aggregate() {
         reason: None,
     };
     let mut rows = Vec::new();
-    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &result, 120);
+    upsert_test_ping_rollup(&mut rows, "v-1", &target, &result, 120);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].sample_count, 1);
 
@@ -348,76 +238,10 @@ fn fresh_ping_results_aggregate() {
         latency_avg_ms: Some(20.0),
         ..result
     };
-    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &fresh, 150);
+    upsert_test_ping_rollup(&mut rows, "v-1", &target, &fresh, 150);
     assert_eq!(rows[0].sample_count, 2);
     assert_eq!(rows[0].latency_avg_ms, Some(15.0));
     assert_eq!(rows[0].latest_checked_at, "150");
-}
-
-#[tokio::test]
-async fn memory_ping_source_identity_counts_equal_chart_times_and_deduplicates_cached_checks() {
-    let repo = Repository::Memory(crate::repository::MemoryState::default());
-    let Repository::Memory(memory) = &repo else {
-        unreachable!()
-    };
-    let target = current_ping_test_target();
-    memory.ping_targets.write().await.push(target.clone());
-    memory
-        .ping_target_assignments
-        .write()
-        .await
-        .push(PingTargetAssignmentRecord {
-            target_id: target.id,
-            client_id: "v-1".to_string(),
-            is_primary: true,
-            assigned_at: "100".to_string(),
-        });
-    let first = PingTargetResult {
-        target_id: target.id.to_string(),
-        generation: 1,
-        checked_unix: 120,
-        status: "ok".to_string(),
-        latency_avg_ms: Some(10.0),
-        loss_ratio: 0.0,
-        reason: None,
-    };
-    let second = PingTargetResult {
-        status: "degraded".to_string(),
-        latency_avg_ms: Some(20.0),
-        loss_ratio: 0.5,
-        reason: Some("higher source identity".to_string()),
-        ..first.clone()
-    };
-
-    repo.record_ping_results_memory("v-1", 120, &[first.clone(), second.clone()], &[200, 201])
-        .await
-        .unwrap();
-    repo.record_ping_results_memory("v-1", 180, &[second], &[201])
-        .await
-        .unwrap();
-
-    let rows = memory.telemetry_ping_rollups.read().await;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].sample_count, 2);
-    assert_eq!(rows[0].success_count, 2);
-    assert_eq!(rows[0].latency_avg_ms, Some(15.0));
-    assert_eq!(rows[0].latest_status, "degraded");
-    assert_eq!(
-        rows[0].latest_reason.as_deref(),
-        Some("higher source identity")
-    );
-    assert_eq!(rows[0].latest_checked_at, "120");
-    assert_eq!(rows[0].latest_source_checked_unix, 201);
-    assert_eq!(memory.telemetry_ping_source_checks.read().await.len(), 2);
-    assert_eq!(
-        memory.telemetry_ping_source_checks.read().await.get(&(
-            "v-1".to_string(),
-            target.id,
-            1,
-            201,
-        )),
-        Some(&180),
-    );
 }
 
 #[test]
@@ -498,49 +322,6 @@ fn current_ping_smooths_one_partial_batch_without_hiding_latest_details() {
     assert_eq!(current.latency_avg_ms, Some(37.0));
     assert_eq!(current.reason.as_deref(), Some("packet_loss"));
     assert_eq!(current.checked_at, Some(rows[14].latest_checked_at.clone()));
-}
-
-#[tokio::test]
-async fn memory_current_ping_isolates_the_active_generation_before_smoothing() {
-    let repo = Repository::Memory(crate::repository::MemoryState::default());
-    let Repository::Memory(memory) = &repo else {
-        unreachable!()
-    };
-    let mut target = current_ping_test_target();
-    target.generation = 2;
-    let mut rows = (0..15)
-        .map(|minute| {
-            current_ping_test_rollup(
-                &target,
-                120 + minute * 60,
-                if minute == 14 { 1.0 / 3.0 } else { 0.0 },
-                if minute == 14 { "degraded" } else { "ok" },
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut old_generation = current_ping_test_rollup(&target, 960, 1.0, "degraded");
-    old_generation.generation = 1;
-    rows.push(old_generation);
-    memory.ping_targets.write().await.push(target.clone());
-    memory
-        .ping_target_assignments
-        .write()
-        .await
-        .push(PingTargetAssignmentRecord {
-            target_id: target.id,
-            client_id: "v-1".to_string(),
-            is_primary: true,
-            assigned_at: "100".to_string(),
-        });
-    memory.telemetry_ping_rollups.write().await.extend(rows);
-
-    let current = repo
-        .current_primary_ping_for_clients(&["v-1".to_string()])
-        .await
-        .unwrap();
-    assert_eq!(current.len(), 1);
-    assert!((current[0].1.loss_ratio.unwrap() - 1.0 / 45.0).abs() < 1e-12);
-    assert_eq!(current[0].1.state, "ok");
 }
 
 #[test]

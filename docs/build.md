@@ -45,10 +45,8 @@ GitHub Actions reads the current positive counter values without incrementing
 them. Missing, malformed, or zero counters fail the build instead of inventing
 an identity. Only local builds advance the counters.
 
-The aggregate `scripts/release-check.sh` copies the counters into its ignored
-log directory and exports that location for all of its builds, so a verification
-run does not advance tracked release identity. Set `VPSMAN_BUILD_NUMBER_DIR`
-explicitly only when another isolated counter directory is required.
+Set `VPSMAN_BUILD_NUMBER_DIR` explicitly when a verification build needs an
+isolated counter directory that must not advance tracked release identity.
 
 `.cargo/config.toml` uses `rust-lld` for musl targets, so final linking does
 not require system cross linkers. Native C build scripts still use Cargo's
@@ -60,14 +58,22 @@ default tool discovery and require target-named tools on `PATH`:
 - `aarch64-linux-musl-ar`
 
 Local development can satisfy those names with profile-managed wrappers in
-`~/bin` or a real musl-cross distribution. The GitHub Actions CI, Release
-Check, and Release Build workflows create temporary wrappers around
-runner-provided `clang` and `ar` before static agent and CLI builds.
+`~/bin` or a real musl-cross distribution. The GitHub Actions CI and Release
+Build workflows create temporary wrappers around runner-provided `clang` and
+`ar` before static agent and CLI builds.
 
 Generate development Noise keypairs with:
 
 ```sh
 cargo run -p vpsctl -- noise-keygen
+```
+
+For schema or deployment-path changes, run the matching repository contracts:
+
+```sh
+bash scripts/audit-migrations.sh
+bash scripts/smoke-deploy-bundle.sh
+bash scripts/smoke-deploy-updater.sh
 ```
 
 ## Frontend

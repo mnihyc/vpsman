@@ -1,304 +1,121 @@
 use std::collections::BTreeSet;
 
 use super::{
-    aligned_timeline_point_count, build_monitoring_cards_page, client_monitoring_view,
-    enrich_monitoring_share_target_evidence, monitoring_agents, monitoring_cards_for_agents,
-    monitoring_range, network_rate_is_current, public_billing_plan, public_monitoring_card,
-    public_network_metric, public_traffic_metric, retained_resolution_for_age,
+    aligned_timeline_point_count, public_billing_plan, public_monitoring_cards_singleflight_key,
+    public_monitoring_detail_singleflight_key, public_network_metric, public_network_points,
+    public_traffic_metric, public_visibility_uses_projected_telemetry, retained_resolution_for_age,
     retained_traffic_resolution_for_age, tier_aligned_step_secs, traffic_uses_exact_source,
-    ClientMonitoringQuery,
+    validate_monitoring_share_targets, ClientMonitoringQuery, MonitoringCardsHistoryMode,
 };
-use axum::{
-    body::Body,
-    extract::ConnectInfo,
-    http::{Request, StatusCode},
-};
-use tower::ServiceExt;
 
 use crate::{
-    gateway_client::GatewayDispatchClient,
     model::{
         AgentView, BillingPlanView, MonitoringShareRecord, MonitoringShareTargetRecord,
-        MonitoringShareView, MonitoringShareVisibilityRequest, MonitoringShareVisibilityView,
-        PublicBillingPlanView, PublicMonitoringCardView, PublicMonitoringDataView,
-        PublicMonitoringDetailView, PublicMonitoringRangeView, PublicMonitoringShareBootstrapView,
-        PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
-        PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
-        PublicSystemInformationView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
-        TelemetryNetworkRateView, TelemetryRollupView, TelemetrySampleView,
+        MonitoringShareVisibilityRequest, MonitoringShareVisibilityView, PublicBillingPlanView,
+        PublicMonitoringCardView, PublicMonitoringDataView, PublicMonitoringDetailView,
+        PublicMonitoringRangeView, PublicMonitoringShareBootstrapView, PublicMonitoringShareView,
+        PublicNetworkMetricView, PublicNetworkPointView, PublicPingMetricView, PublicPingPointView,
+        PublicPortSpeedView, PublicResourceMetricView, PublicSystemInformationView,
+        PublicTrafficHistoryPointView, PublicTrafficMetricView, TelemetryNetworkRateView,
     },
     model_alert_policies::TrafficAccountingRecord,
-    repository::{MemoryState, Repository},
-    state::{AppState, DispatcherRuntimeConfig},
 };
 
-fn router_test_state() -> AppState {
-    let (events, _) = crate::state::WsEventBus::new(1);
-    AppState {
-        repo: Repository::Memory(MemoryState::default()),
-        events,
-        internal_token: None,
-        gateway: GatewayDispatchClient::default(),
-        backup_object_store: None,
-        update_release_policy: Default::default(),
-        job_output_artifact_min_bytes: 32_768,
-        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
-        require_registered_agent_updates: false,
-        suite_config_path: "config/vpsman.toml".into(),
-        dispatcher_config: DispatcherRuntimeConfig::default(),
-    }
-}
-
-#[tokio::test]
-async fn suspended_agent_is_absent_from_monitoring_cards_and_detail() {
-    let state = router_test_state();
-    let agent = AgentView {
-        id: "suspended-a".to_string(),
-        display_name: "Suspended VPS".to_string(),
-        status: "suspended".to_string(),
-        tags: vec!["provider:test".to_string()],
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: Some(crate::unix_now().to_string()),
-        arch: None,
-        internal_build_number: 1,
-        process_incarnation_id: Some(uuid::Uuid::new_v4()),
-        stale_since: None,
-        stale_reason: None,
-        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    };
-    let Repository::Memory(memory) = &state.repo else {
-        unreachable!();
-    };
-    memory.agents.write().await.push(agent.clone());
-
-    assert!(monitoring_agents(&state, None).await.unwrap().is_empty());
-    assert!(monitoring_cards_for_agents(&state, vec![agent])
-        .await
-        .unwrap()
-        .is_empty());
-    let error = client_monitoring_view(
-        &state,
-        "suspended-a",
-        &ClientMonitoringQuery {
-            window: None,
-            start_unix: None,
-            end_unix: None,
-            points: None,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.status, StatusCode::NOT_FOUND);
-    assert_eq!(error.code, "monitoring_client_not_found");
-}
-
-#[tokio::test]
-async fn home_monitoring_projection_omits_only_unrendered_histories() {
-    let state = router_test_state();
-    let Repository::Memory(memory) = &state.repo else {
-        unreachable!()
-    };
-    let now = crate::unix_now();
-    let observed_at = now.saturating_sub(30).to_string();
-    let agent = AgentView {
-        id: "v-history".to_string(),
-        display_name: "History VPS".to_string(),
-        status: "online".to_string(),
-        tags: Vec::new(),
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: Some(observed_at.clone()),
-        arch: None,
-        internal_build_number: 1,
-        process_incarnation_id: None,
-        stale_since: None,
-        stale_reason: None,
-        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    };
-    memory.agents.write().await.push(agent.clone());
-    memory
-        .telemetry_samples
-        .write()
-        .await
-        .push(TelemetrySampleView {
-            id: uuid::Uuid::new_v4(),
-            client_id: agent.id.clone(),
-            observed_at: observed_at.clone(),
-            cpu_load_1: 0.5,
-            memory_total_bytes: 1_000,
-            memory_available_bytes: 500,
-            payload: serde_json::to_value(vpsman_common::AgentMetrics::default()).unwrap(),
-        });
-    memory
-        .telemetry_rollups
-        .write()
-        .await
-        .push(monitoring_test_rollup(&agent.id, &observed_at));
-
-    let default_projection = build_monitoring_cards_page(&state, None, 1_000, 0, true)
-        .await
-        .unwrap();
-    let home_projection = build_monitoring_cards_page(&state, None, 1_000, 0, false)
-        .await
-        .unwrap();
-
-    assert_eq!(default_projection.total, 1);
-    assert_eq!(default_projection.items.len(), 1);
-    assert!(!default_projection.items[0].resource_history.is_empty());
-    assert_eq!(home_projection.total, 1);
-    assert_eq!(home_projection.items.len(), 1);
-    assert_eq!(home_projection.next_offset, None);
-    assert!(home_projection.items[0].resources.is_some());
-    assert!(home_projection.items[0].resource_history.is_empty());
-    assert!(home_projection.items[0].network_history.is_empty());
-    assert!(home_projection.items[0].primary_ping_history.is_empty());
-}
-
-fn monitoring_test_rollup(client_id: &str, observed_at: &str) -> TelemetryRollupView {
-    TelemetryRollupView {
-        client_id: client_id.to_string(),
-        bucket_start: observed_at.to_string(),
-        bucket_secs: 60,
-        sample_count: 1,
-        cpu_usage_sample_count: 0,
-        cpu_usage_avg: None,
-        cpu_usage_max: None,
-        cpu_cores_max: 1,
-        cpu_load_1_avg: 0.5,
-        cpu_load_1_max: 0.5,
-        cpu_load_5_avg: 0.5,
-        cpu_load_5_max: 0.5,
-        cpu_load_15_avg: 0.5,
-        cpu_load_15_max: 0.5,
-        memory_total_bytes_max: 1_000,
-        memory_available_bytes_avg: 500,
-        memory_available_bytes_min: 500,
-        memory_used_ratio_avg: 0.5,
-        memory_used_ratio_max: 0.5,
-        swap_sample_count: 0,
-        swap_total_bytes_max: None,
-        swap_available_bytes_avg: None,
-        swap_available_bytes_min: None,
-        swap_used_ratio_avg: None,
-        swap_used_ratio_max: None,
-        disk_sample_count: 1,
-        disk_total_bytes_max: 2_000,
-        disk_available_bytes_avg: 1_000,
-        disk_available_bytes_min: 1_000,
-        disk_used_ratio_avg: 0.5,
-        disk_used_ratio_max: 0.5,
-        network_rx_bytes_max: 0,
-        network_tx_bytes_max: 0,
-        connections_sample_count: 0,
-        tcp_sockets_latest: None,
-        udp_sockets_latest: None,
-        connections_observed_at: None,
-        latest_observed_at: observed_at.to_string(),
-        updated_at: observed_at.to_string(),
-    }
-}
-
-#[tokio::test]
-async fn product_name_is_a_canonical_narrow_private_and_identity_gated_projection() {
-    let state = router_test_state();
-    let Repository::Memory(memory) = &state.repo else {
-        unreachable!()
-    };
-    let agent = AgentView {
-        id: "v-1".to_string(),
-        display_name: "VPS 1".to_string(),
-        status: "online".to_string(),
-        tags: vec!["provider:test".to_string()],
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: Some(crate::unix_now().to_string()),
-        arch: None,
-        internal_build_number: 1,
-        process_incarnation_id: None,
-        stale_since: None,
-        stale_reason: None,
-        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    };
-    memory.agents.write().await.push(agent.clone());
-    memory
-        .vps_rule_values
-        .write()
-        .await
-        .push(crate::model_alert_policies::VpsRuleValueRecord {
-            client_id: agent.id.clone(),
-            key: vpsman_common::VPS_RULE_KEY_PRODUCT_NAME.to_string(),
-            value_raw: "  Storage-Box\t 4  ".to_string(),
-            stored_value_raw: None,
-            value_json: serde_json::json!({"stale": true}),
-            parsed_display: "stale".to_string(),
-            state: "ok".to_string(),
-            validation_errors: Vec::new(),
-            source_kind: "operator".to_string(),
-            source_id: None,
-            updated_by: None,
-            updated_at: "1".to_string(),
-        });
-
-    let card = monitoring_cards_for_agents(&state, vec![agent.clone()])
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert_eq!(card.product_name.as_deref(), Some("Storage-Box 4"));
-    let detail = client_monitoring_view(
-        &state,
-        &agent.id,
-        &ClientMonitoringQuery {
-            window: Some("15m".to_string()),
-            start_unix: None,
-            end_unix: None,
-            points: Some(2),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(detail.product_name.as_deref(), Some("Storage-Box 4"));
-
-    let share = |identity_context| MonitoringShareRecord {
-        id: uuid::Uuid::new_v4(),
-        name: "Status".to_string(),
-        token_secret: "secret".to_string(),
-        selector_expression: "*".to_string(),
-        targets: vec![MonitoringShareTargetRecord {
-            client_id: agent.id.clone(),
-            public_client_key: "a".repeat(64),
-        }],
-        visibility: MonitoringShareVisibilityView {
-            identity_context,
-            billing: false,
-            system_information: false,
-            resources: false,
-            network: false,
-            traffic: false,
-            ping: false,
-            detail_history: false,
-        },
-        expires_at: crate::unix_now().saturating_add(3_600).to_string(),
-        revoked_at: None,
-        revoked_by: None,
-        created_by: None,
-        created_at: "1".to_string(),
-        updated_at: "1".to_string(),
-    };
-    let visible = public_monitoring_card(card.clone(), &share(true)).unwrap();
-    assert_eq!(visible.product_name.as_deref(), Some("Storage-Box 4"));
+#[test]
+fn monitoring_card_history_compaction_is_additive_and_opt_in() {
     assert_eq!(
-        serde_json::to_value(visible).unwrap()["product_name"],
-        "Storage-Box 4"
+        MonitoringCardsHistoryMode::default(),
+        MonitoringCardsHistoryMode::PerInterface
     );
+    assert_eq!(
+        serde_json::from_str::<MonitoringCardsHistoryMode>("\"selected_aggregate\"").unwrap(),
+        MonitoringCardsHistoryMode::SelectedAggregate
+    );
+    assert_eq!(
+        MonitoringCardsHistoryMode::SelectedAggregate.as_str(),
+        "selected_aggregate"
+    );
+}
 
-    let hidden = public_monitoring_card(card, &share(false)).unwrap();
-    assert!(hidden.product_name.is_none());
-    assert!(serde_json::to_value(hidden)
-        .unwrap()
-        .get("product_name")
-        .is_none());
+#[test]
+fn retained_client_detail_uses_complete_projection_owners() {
+    let source = include_str!("routes_monitoring.rs");
+    let (_, detail) = source
+        .split_once("async fn client_monitoring_view")
+        .expect("client monitoring loader");
+    let (detail, _) = detail
+        .split_once("async fn monitoring_range")
+        .expect("client monitoring loader end");
+
+    assert!(detail.contains("list_projected_telemetry_resource_history"));
+    assert!(detail.contains("list_projected_telemetry_network_history"));
+    assert!(detail.contains("dashboard_projection_initializing"));
+    assert!(!detail.contains("list_dashboard_telemetry_rollups"));
+    assert!(!detail.contains("list_dashboard_telemetry_network_rates_selected"));
+}
+
+#[test]
+fn current_excluded_interfaces_are_owned_only_by_single_vps_detail() {
+    let source = include_str!("routes_monitoring.rs");
+    let (_, operator_detail) = source
+        .split_once("pub(crate) async fn get_client_monitoring")
+        .expect("operator VPS detail route");
+    let (operator_detail, _) = operator_detail
+        .split_once("pub(crate) async fn list_ping_targets")
+        .expect("operator VPS detail route end");
+    assert!(operator_detail.contains("CurrentNetworkDetail::SingleVpsDetail"));
+
+    let (_, public_detail) = source
+        .split_once("pub(crate) async fn public_monitoring_share_data")
+        .expect("public shared detail route");
+    let (public_detail, _) = public_detail
+        .split_once("fn public_monitoring_cards_singleflight_key")
+        .expect("public shared detail route end");
+    assert!(public_detail.contains("CurrentNetworkDetail::Hidden"));
+    assert!(!public_detail.contains("CurrentNetworkDetail::SingleVpsDetail"));
+
+    let (_, detail) = source
+        .split_once("async fn client_monitoring_view")
+        .expect("client monitoring loader");
+    let (detail, _) = detail
+        .split_once("async fn monitoring_range")
+        .expect("client monitoring loader end");
+    assert!(detail.contains("list_latest_telemetry_network_rates_for_vps_detail(client_id)"));
+    assert!(detail.contains("list_telemetry_tunnels_for_vps_detail(client_id)"));
+    assert!(detail.contains("network_current_detail,"));
+    assert!(detail.contains("tunnel_current_detail,"));
+    assert!(detail.contains("list_projected_telemetry_network_history"));
+
+    let frontend = include_str!("../../../../../frontend/src/panels/VpsMonitoringDetailPanel.tsx");
+    let frontend_text = frontend.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(frontend.contains("[...data.network_current_detail].sort"));
+    assert!(frontend.contains("currentNetworkDetail.map"));
+    assert!(frontend.contains("currentTunnelDetail.map"));
+    assert!(frontend.contains("Current interface telemetry"));
+    assert!(frontend.contains("formatByteRateFromBitsPerSecond(rate.rx_bps_avg)"));
+    assert!(frontend.contains("formatByteRateFromBitsPerSecond(rate.tx_bps_avg)"));
+    assert!(frontend_text.contains("Interfaces excluded by network.interfaces are shown only here"));
+    assert!(
+        frontend_text.contains("eligible evidence follows history and traffic-accounting rules")
+    );
+    assert!(frontend.contains("networkChart(data.network, timeline"));
+    assert!(!frontend.contains("networkChart(data.network_current_detail"));
+    assert!(!frontend.contains("networkChart(data.tunnel_current_detail"));
+}
+
+#[test]
+fn every_shared_view_mutation_requires_a_nonempty_bounded_target_set() {
+    let empty = validate_monitoring_share_targets(&[])
+        .expect_err("active shared views cannot have an empty frozen target set");
+    assert_eq!(empty.code, "monitoring_share_target_selection_required");
+
+    let bounded = vec!["vps".to_string(); super::MAX_SHARE_TARGETS];
+    validate_monitoring_share_targets(&bounded).expect("the documented maximum is valid");
+
+    let oversized = vec!["vps".to_string(); super::MAX_SHARE_TARGETS + 1];
+    let oversized = validate_monitoring_share_targets(&oversized)
+        .expect_err("the shared-view target maximum must be enforced consistently");
+    assert_eq!(oversized.code, "monitoring_share_target_count_too_large");
 }
 
 #[test]
@@ -316,35 +133,64 @@ fn monitoring_share_optional_visibility_defaults_remain_private() {
     assert!(visibility.detail_history);
 }
 
-#[tokio::test]
-async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
-    let state = router_test_state();
-    let Repository::Memory(memory) = &state.repo else {
-        unreachable!()
+#[test]
+fn public_projection_age_follows_every_projected_telemetry_group() {
+    let mut visibility = MonitoringShareVisibilityView {
+        identity_context: false,
+        billing: false,
+        system_information: false,
+        resources: false,
+        network: false,
+        traffic: false,
+        ping: false,
+        detail_history: false,
     };
-    memory.agents.write().await.push(AgentView {
-        id: "v-1".to_string(),
-        display_name: "v-1".to_string(),
+    assert!(!public_visibility_uses_projected_telemetry(&visibility));
+
+    let selectors: [fn(&mut MonitoringShareVisibilityView); 5] = [
+        |value: &mut MonitoringShareVisibilityView| value.system_information = true,
+        |value: &mut MonitoringShareVisibilityView| value.resources = true,
+        |value: &mut MonitoringShareVisibilityView| value.network = true,
+        |value: &mut MonitoringShareVisibilityView| value.traffic = true,
+        |value: &mut MonitoringShareVisibilityView| value.ping = true,
+    ];
+    for select in selectors {
+        select(&mut visibility);
+        assert!(public_visibility_uses_projected_telemetry(&visibility));
+        visibility.system_information = false;
+        visibility.resources = false;
+        visibility.network = false;
+        visibility.traffic = false;
+        visibility.ping = false;
+    }
+}
+
+#[test]
+fn public_read_cache_keys_are_fenced_by_the_monotonic_share_revision() {
+    let client = AgentView {
+        id: "shared-vps".to_string(),
+        display_name: "Shared VPS".to_string(),
         status: "online".to_string(),
         tags: Vec::new(),
         registration_ip: None,
         last_ip: None,
-        last_seen_at: Some(crate::unix_now().to_string()),
+        last_seen_at: None,
         arch: None,
         internal_build_number: 1,
         process_incarnation_id: None,
         stale_since: None,
         stale_reason: None,
         capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    });
-    let mut shares = vec![MonitoringShareView {
+    };
+    let mut share = MonitoringShareRecord {
         id: uuid::Uuid::new_v4(),
         name: "Status".to_string(),
+        token_secret: "secret".to_string(),
         selector_expression: "*".to_string(),
-        target_count: 1,
-        target_client_ids: vec!["v-1".to_string()],
-        target_update_available: false,
-        target_update_evidence_available: false,
+        targets: vec![MonitoringShareTargetRecord {
+            client_id: client.id.clone(),
+            public_client_key: "a".repeat(64),
+        }],
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
             billing: false,
@@ -355,264 +201,39 @@ async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
             ping: true,
             detail_history: true,
         },
-        status: "active".to_string(),
-        expires_at: crate::unix_now().saturating_add(3_600).to_string(),
+        expires_at: "100".to_string(),
         revoked_at: None,
-        created_by: Some("operator".to_string()),
-        created_at: crate::unix_now().to_string(),
-        updated_at: crate::unix_now().to_string(),
-        visitor_count: 0,
-        first_visited_at: None,
-        last_visited_at: None,
-    }];
-
-    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
-        .await
-        .unwrap();
-    assert!(!shares[0].target_update_available);
-    assert!(shares[0].target_update_evidence_available);
-    memory.agents.write().await.push(AgentView {
-        id: "v-2".to_string(),
-        display_name: "v-2".to_string(),
-        status: "online".to_string(),
-        tags: Vec::new(),
-        registration_ip: None,
-        last_ip: None,
-        last_seen_at: Some(crate::unix_now().to_string()),
-        arch: None,
-        internal_build_number: 1,
-        process_incarnation_id: None,
-        stale_since: None,
-        stale_reason: None,
-        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
-    });
-    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
-        .await
-        .unwrap();
-    assert!(shares[0].target_update_available);
-    let json = serde_json::to_value(&shares[0]).unwrap();
-    assert_eq!(json["target_client_ids"], serde_json::json!(["v-1"]));
-    assert_eq!(json["target_update_available"], true);
-
-    shares[0].selector_expression = "vps.rules:traffic.reset_day".to_string();
-    enrich_monitoring_share_target_evidence(&state, &mut shares, false)
-        .await
-        .unwrap();
-    assert_eq!(shares[0].target_client_ids, ["v-1"]);
-    assert!(!shares[0].target_update_available);
-    assert!(!shares[0].target_update_evidence_available);
-
-    shares[0].selector_expression = "(".to_string();
-    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
-        .await
-        .unwrap();
-    assert_eq!(shares[0].target_client_ids, ["v-1"]);
-    assert!(!shares[0].target_update_evidence_available);
-
-    shares[0].selector_expression = "vps.rules:traffic.reset_day".to_string();
-    let mut ordinary_share = shares[0].clone();
-    ordinary_share.id = uuid::Uuid::new_v4();
-    ordinary_share.selector_expression = "*".to_string();
-    shares.push(ordinary_share);
-    memory
-        .vps_rule_values
-        .write()
-        .await
-        .push(crate::model_alert_policies::VpsRuleValueRecord {
-            client_id: "v-1".to_string(),
-            key: vpsman_common::VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
-            value_raw: "bogus".to_string(),
-            stored_value_raw: None,
-            value_json: serde_json::json!({"bps": 1}),
-            parsed_display: "bogus".to_string(),
-            state: "ok".to_string(),
-            validation_errors: Vec::new(),
-            source_kind: "operator".to_string(),
-            source_id: None,
-            updated_by: None,
-            updated_at: "1".to_string(),
-        });
-    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
-        .await
-        .unwrap();
-    assert_eq!(shares[0].target_client_ids, ["v-1"]);
-    assert!(!shares[0].target_update_evidence_available);
-    assert_eq!(shares[1].target_client_ids, ["v-1"]);
-    assert!(shares[1].target_update_evidence_available);
-    assert!(shares[1].target_update_available);
-}
-
-#[tokio::test]
-async fn monitoring_share_routes_are_registered_at_their_public_and_operator_paths() {
-    let router = crate::routes::build_router(router_test_state());
-
-    for (method, uri, body) in [
-        ("GET", "/api/v1/monitoring-shares", Body::empty()),
-        (
-            "POST",
-            "/api/v1/monitoring-shares",
-            Body::from(
-                r#"{"name":"Status","visibility":{},"expires_in_secs":3600,"confirmed":true}"#,
-            ),
-        ),
-        (
-            "POST",
-            "/api/v1/monitoring-shares/extend",
-            Body::from(r#"{"share_ids":[],"extend_by_secs":3600}"#),
-        ),
-        (
-            "POST",
-            "/api/v1/monitoring-shares/update-targets",
-            Body::from(r#"{"share_ids":[]}"#),
-        ),
-        (
-            "PUT",
-            "/api/v1/monitoring-shares/00000000-0000-4000-8000-000000000001",
-            Body::from(
-                r#"{"name":"Status","selector_expression":"*","target_client_ids":[],"visibility":{},"expected_updated_at":"1"}"#,
-            ),
-        ),
-        (
-            "POST",
-            "/api/v1/monitoring-shares/revoke",
-            Body::from(r#"{"share_ids":[]}"#),
-        ),
-        (
-            "GET",
-            "/api/v1/monitoring-shares/00000000-0000-4000-8000-000000000001/url",
-            Body::empty(),
-        ),
-    ] {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::UNAUTHORIZED,
-            "{method} {uri}"
-        );
-    }
-
-    let viewer_only = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/api/v1/monitoring-shares/00000000-0000-4000-8000-000000000001")
-                .header("content-type", "application/json")
-                .header("x-vpsman-share-token", "viewer-bearer-is-read-only")
-                .body(Body::from(
-                    r#"{"name":"Status","selector_expression":"*","target_client_ids":[],"visibility":{},"expected_updated_at":"1"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(viewer_only.status(), StatusCode::UNAUTHORIZED);
-
-    let mut public_request = Request::builder()
-        .method("GET")
-        .uri(format!(
-            "/api/v1/public/monitoring-shares/{}/bootstrap",
-            uuid::Uuid::new_v4()
-        ))
-        .body(Body::empty())
-        .unwrap();
-    public_request.extensions_mut().insert(ConnectInfo(
-        "127.0.0.1:41000".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = router.oneshot(public_request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn fifteen_minutes_is_always_raw_without_a_legacy_alias() {
-    let state = router_test_state();
-    let Repository::Memory(memory) = &state.repo else {
-        unreachable!()
+        created_at: "1".to_string(),
+        updated_at: "revision-1".to_string(),
     };
-    memory.traffic_counter_samples.write().await.push(
-        crate::model_alert_policies::TrafficCounterSampleRecord {
-            client_id: "v-1".to_string(),
-            source_kind: "host".to_string(),
-            interface: "eth0".to_string(),
-            observed_at: crate::unix_now().saturating_sub(7_200).to_string(),
-            observed_unix: i64::try_from(crate::unix_now().saturating_sub(7_200)).unwrap(),
-            rx_bytes: 0,
-            tx_bytes: 0,
-            rx_counter_epoch: 0,
-            tx_counter_epoch: 0,
-            sample_source: "test".to_string(),
-        },
-    );
-    let clients = vec!["v-1".to_string()];
-    let query = |window: &str| ClientMonitoringQuery {
-        window: Some(window.to_string()),
+    let range = ClientMonitoringQuery {
+        window: Some("1d".to_string()),
         start_unix: None,
-        end_unix: None,
-        points: None,
+        end_unix: Some(90),
+        points: Some(80),
     };
+    let cards_before =
+        public_monitoring_cards_singleflight_key(&share, std::slice::from_ref(&client), 0, 100, 1);
+    let detail_before =
+        public_monitoring_detail_singleflight_key(&share, &client.id, "public-key", &range);
 
-    assert_eq!(
-        monitoring_range(&state, &clients, &query("15m"))
-            .await
-            .unwrap()
-            .source,
-        "raw"
+    share.updated_at = "revision-2".to_string();
+    assert_ne!(
+        cards_before,
+        public_monitoring_cards_singleflight_key(&share, std::slice::from_ref(&client), 0, 100, 1,)
     );
-    assert_eq!(
-        monitoring_range(&state, &clients, &query("1h"))
-            .await
-            .unwrap()
-            .source,
-        "retained"
+    assert_ne!(
+        detail_before,
+        public_monitoring_detail_singleflight_key(&share, &client.id, "public-key", &range)
     );
-    assert!(monitoring_range(&state, &clients, &query("R"))
-        .await
-        .is_err());
-}
 
-#[tokio::test]
-async fn narrow_old_custom_range_counts_both_aligned_coarse_slots() {
-    const DAY: u64 = 86_400;
-    const SIX_HOURS: u64 = 6 * 60 * 60;
-    let state = router_test_state();
-    let clients = vec!["v-1".to_string()];
-    let old_epoch = crate::unix_now().saturating_sub(200 * DAY);
-    let boundary = old_epoch / SIX_HOURS * SIX_HOURS;
-    let start_unix = boundary.saturating_sub(30 * 60);
-    let end_unix = boundary.saturating_add(30 * 60);
-    let range = monitoring_range(
-        &state,
-        &clients,
-        &ClientMonitoringQuery {
-            window: Some("custom".to_string()),
-            start_unix: Some(start_unix),
-            end_unix: Some(end_unix),
-            points: Some(720),
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(range.source, "retained");
-    assert_eq!(range.requested_step_secs, 60);
-    assert_eq!(range.effective_resolution_secs, SIX_HOURS as i32);
-    assert_eq!(range.step_secs, SIX_HOURS as i32);
-    assert_eq!(range.effective_points, 2);
-    assert_eq!(range.resolutions.resources, SIX_HOURS as i32);
-    assert_eq!(range.resolutions.network, SIX_HOURS as i32);
-    assert_eq!(range.resolutions.ping, SIX_HOURS as i32);
-    assert_eq!(range.resolutions.traffic, SIX_HOURS as i32);
+    let cards_before_total_change =
+        public_monitoring_cards_singleflight_key(&share, std::slice::from_ref(&client), 0, 100, 1);
+    assert_ne!(
+        cards_before_total_change,
+        public_monitoring_cards_singleflight_key(&share, std::slice::from_ref(&client), 0, 100, 2,),
+        "pagination metadata must fence an otherwise unchanged public page"
+    );
 }
 
 #[test]
@@ -626,12 +247,17 @@ fn retained_history_tiers_and_chart_steps_are_epoch_compatible() {
     assert_eq!(retained_resolution_for_age(181 * DAY + 1), 21_600);
     assert_eq!(retained_resolution_for_age(366 * DAY + 1), DAY);
 
-    assert_eq!(retained_traffic_resolution_for_age(32 * DAY), 60);
-    assert_eq!(retained_traffic_resolution_for_age(32 * DAY + 1), 3_600);
+    let exact_days = vpsman_common::TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64;
+    // Exact/raw selection owns the one-day boundary; the retained-only
+    // source begins with its hourly tier on either side of that boundary.
+    assert_eq!(retained_traffic_resolution_for_age(exact_days * DAY), 3_600);
+    assert_eq!(
+        retained_traffic_resolution_for_age(exact_days * DAY + 1),
+        3_600
+    );
     assert_eq!(retained_traffic_resolution_for_age(366 * DAY + 1), DAY);
-    assert!(traffic_uses_exact_source(true, 32 * DAY));
-    assert!(!traffic_uses_exact_source(true, 32 * DAY + 1));
-    assert!(!traffic_uses_exact_source(false, DAY));
+    assert!(traffic_uses_exact_source(exact_days * DAY));
+    assert!(!traffic_uses_exact_source(exact_days * DAY + 1));
 
     assert_eq!(aligned_timeline_point_count(21_000, 23_000, 21_600), 2);
     assert_eq!(aligned_timeline_point_count(21_600, 23_000, 21_600), 1);
@@ -659,34 +285,6 @@ fn retained_history_tiers_and_chart_steps_are_epoch_compatible() {
 }
 
 #[test]
-fn current_card_rates_reject_stale_and_future_interface_rows() {
-    let rate = |bucket_start: &str| TelemetryNetworkRateView {
-        client_id: "v-1".to_string(),
-        interface: "eth0".to_string(),
-        bucket_start: bucket_start.to_string(),
-        bucket_secs: 60,
-        sample_count: 1,
-        rx_bytes_avg: 1,
-        tx_bytes_avg: 2,
-        rx_bytes_last: 1,
-        tx_bytes_last: 2,
-        rx_counter_epoch: 0,
-        tx_counter_epoch: 0,
-        latest_observed_at: bucket_start.to_string(),
-        rx_bytes_delta: 1,
-        tx_bytes_delta: 2,
-        rx_bps_avg: 8.0,
-        tx_bps_avg: 16.0,
-        updated_at: bucket_start.to_string(),
-    };
-
-    assert!(network_rate_is_current(&rate("1000"), 1_180));
-    assert!(!network_rate_is_current(&rate("1000"), 1_181));
-    assert!(!network_rate_is_current(&rate("1361"), 1_180));
-    assert!(!network_rate_is_current(&rate("invalid"), 1_180));
-}
-
-#[test]
 fn public_network_projection_preserves_whether_rates_are_expected() {
     let intentionally_empty = public_network_metric(&[], false);
     assert!(!intentionally_empty.rate_expected);
@@ -699,6 +297,84 @@ fn public_network_projection_preserves_whether_rates_are_expected() {
     assert_eq!(missing_expected.rx_bps, None);
     assert_eq!(missing_expected.tx_bps, None);
     assert_eq!(missing_expected.observed_at, None);
+
+    let rate = |interface: &str,
+                latest_observed_at: &str,
+                updated_at: &str,
+                rx_bps_avg: f64,
+                tx_bps_avg: f64| TelemetryNetworkRateView {
+        client_id: "v-1".to_string(),
+        interface: interface.to_string(),
+        bucket_start: latest_observed_at.to_string(),
+        bucket_secs: 60,
+        sample_count: 1,
+        rx_bytes_avg: 0,
+        tx_bytes_avg: 0,
+        latest_observed_at: latest_observed_at.to_string(),
+        rx_bytes_delta: 0,
+        tx_bytes_delta: 0,
+        rx_bps_avg,
+        tx_bps_avg,
+        updated_at: updated_at.to_string(),
+    };
+    let projected = public_network_metric(
+        &[
+            rate(
+                "removed0",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:20:00+00:00",
+                100.0,
+                200.0,
+            ),
+            rate(
+                "eth0",
+                "2026-01-01T00:05:00+00:00",
+                "2026-01-01T00:05:01+00:00",
+                10.0,
+                20.0,
+            ),
+            rate(
+                "eth1",
+                "2026-01-01T00:05:00+00:00",
+                "2026-01-01T00:05:02+00:00",
+                30.0,
+                40.0,
+            ),
+        ],
+        true,
+    );
+    assert_eq!(projected.rx_bps, Some(40.0));
+    assert_eq!(projected.tx_bps, Some(60.0));
+    assert_eq!(
+        projected.observed_at.as_deref(),
+        Some("2026-01-01T00:05:00+00:00")
+    );
+}
+
+#[test]
+fn public_network_history_is_identical_after_selected_interface_compaction() {
+    let rate = |interface: &str, rx_bps_avg: f64, tx_bps_avg: f64| TelemetryNetworkRateView {
+        client_id: "v-1".to_string(),
+        interface: interface.to_string(),
+        bucket_start: "1000".to_string(),
+        bucket_secs: 60,
+        sample_count: 1,
+        rx_bytes_avg: 0,
+        tx_bytes_avg: 0,
+        latest_observed_at: "1000".to_string(),
+        rx_bytes_delta: 0,
+        tx_bytes_delta: 0,
+        rx_bps_avg,
+        tx_bps_avg,
+        updated_at: "1000".to_string(),
+    };
+    let legacy = public_network_points(vec![rate("eth0", 8.0, 16.0), rate("eth1", 24.0, 32.0)]);
+    let compact = public_network_points(vec![rate("", 32.0, 48.0)]);
+
+    assert_eq!(
+        serde_json::to_value(compact).unwrap(),
+        serde_json::to_value(legacy).unwrap()
+    );
 }
 
 #[test]
@@ -797,6 +473,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
     let traffic = PublicTrafficMetricView {
         configured: true,
         reset_day: Some(1),
+        reset_hour: Some(0),
         cycle_start: Some("1".to_string()),
         cycle_end: Some("2".to_string()),
         rx_bytes: Some(1),
@@ -844,6 +521,8 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         client_key: "a".repeat(64),
         display_name: "VPS".to_string(),
         status: "online".to_string(),
+        projection_pending_since: Some("2".to_string()),
+        projection_checked_at: Some("13".to_string()),
         tags: Some(vec!["provider:test".to_string()]),
         product_name: Some("Storage-Box 4".to_string()),
         billing: Some(billing.clone()),
@@ -990,6 +669,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "quota_total_bytes",
             "quota_tx_bytes",
             "reset_day",
+            "reset_hour",
             "rx_bytes",
             "state",
             "total_bytes",
@@ -1047,6 +727,8 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "primary_ping",
             "primary_ping_history",
             "product_name",
+            "projection_checked_at",
+            "projection_pending_since",
             "resource_history",
             "resources",
             "status",
@@ -1092,6 +774,7 @@ fn unconfigured_public_traffic_omits_retained_cycle_evidence() {
     let traffic = PublicTrafficMetricView {
         configured: false,
         reset_day: None,
+        reset_hour: None,
         cycle_start: None,
         cycle_end: None,
         rx_bytes: None,
@@ -1114,7 +797,7 @@ fn unconfigured_public_traffic_omits_retained_cycle_evidence() {
     assert_serialized_keys(
         "unconfigured traffic",
         &traffic,
-        &["configured", "port_speed", "state"],
+        &["configured", "port_speed", "reset_hour", "state"],
     );
 }
 
@@ -1128,6 +811,7 @@ fn public_traffic_keeps_diagnostics_separate_from_billing_totals() {
             cycle_start: Some("1".to_string()),
             cycle_end: Some("2".to_string()),
             reset_day: Some(1),
+            reset_hour: Some(5),
             rx_bytes: 0,
             tx_bytes: 200,
             total_bytes: 200,
@@ -1159,6 +843,7 @@ fn public_traffic_keeps_diagnostics_separate_from_billing_totals() {
     assert_eq!(projected.diagnostic_total_bytes, Some(300));
     assert_eq!(projected.cycle_percent, Some(20.0));
     assert_eq!(projected.reset_day, Some(1));
+    assert_eq!(projected.reset_hour, Some(5));
 }
 
 #[test]
@@ -1171,6 +856,7 @@ fn public_no_reset_traffic_exposes_sentinel_without_inventing_cycle_bounds() {
             cycle_start: None,
             cycle_end: None,
             reset_day: Some(-1),
+            reset_hour: None,
             rx_bytes: 100,
             tx_bytes: 200,
             total_bytes: 300,
@@ -1196,6 +882,7 @@ fn public_no_reset_traffic_exposes_sentinel_without_inventing_cycle_bounds() {
 
     assert!(projected.configured);
     assert_eq!(projected.reset_day, Some(-1));
+    assert_eq!(projected.reset_hour, None);
     assert_eq!(projected.cycle_start, None);
     assert_eq!(projected.cycle_end, None);
     assert_eq!(projected.total_bytes, Some(300));

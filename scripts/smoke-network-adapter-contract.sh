@@ -9,7 +9,7 @@ smoke_require_tools cargo
 
 cargo test -p vpsman-common network::tests:: -- --nocapture
 cargo test -p vpsman-agent network_routing_adapter -- --nocapture
-cargo test -p vpsman-api tests_network_ospf_updates -- --nocapture
+cargo test -p vpsman-api ospf -- --nocapture
 cargo test -p vpsctl vty_network_ospf -- --nocapture
 
 printf '{\n'

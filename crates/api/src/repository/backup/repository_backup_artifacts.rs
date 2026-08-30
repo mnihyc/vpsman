@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use anyhow::{ensure, Result};
 use serde_json::json;
 use sqlx::Row;
@@ -7,46 +5,13 @@ use uuid::Uuid;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, BackupArtifactView, BackupRequestStatus, BackupRequestView,
-        ListQuery, NewServerArtifact, RecordBackupArtifactMetadataRequest,
-        ServerArtifactCleanupCandidate,
+        AuthContext, BackupArtifactView, BackupRequestStatus, BackupRequestView, ListQuery,
+        NewServerArtifact, RecordBackupArtifactMetadataRequest,
     },
     repository::Repository,
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
-
-fn compare_text_or_number(left: &str, right: &str) -> Ordering {
-    match (left.parse::<i128>(), right.parse::<i128>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
-}
-
-fn compare_backup_artifact(
-    left: &BackupArtifactView,
-    right: &BackupArtifactView,
-    sort: Option<&str>,
-) -> Ordering {
-    match sort.unwrap_or("created_at") {
-        "client_id" | "client" => left.client_id.cmp(&right.client_id),
-        "object_key" | "object" => left.object_key.cmp(&right.object_key),
-        "sha256_hex" | "hash" => left.sha256_hex.cmp(&right.sha256_hex),
-        "size_bytes" | "size" => left.size_bytes.cmp(&right.size_bytes),
-        _ => compare_text_or_number(&left.created_at, &right.created_at),
-    }
-}
-
-fn backup_artifact_matches_search(artifact: &BackupArtifactView, needle: &str) -> bool {
-    artifact
-        .id
-        .to_string()
-        .to_ascii_lowercase()
-        .contains(needle)
-        || artifact.client_id.to_ascii_lowercase().contains(needle)
-        || artifact.object_key.to_ascii_lowercase().contains(needle)
-        || artifact.sha256_hex.to_ascii_lowercase().contains(needle)
-}
 
 fn backup_artifact_order_by(sort: Option<&str>, descending: bool) -> &'static str {
     match (sort.unwrap_or("created_at"), descending) {
@@ -69,18 +34,6 @@ impl Repository {
         limit: i64,
     ) -> Result<Vec<BackupArtifactView>> {
         match self {
-            Self::Memory(memory) => {
-                let artifacts = memory.backup_artifacts.read().await.clone();
-                let server_artifacts = memory.server_artifacts.read().await;
-                Ok(artifacts
-                    .iter()
-                    .rev()
-                    .take(limit as usize)
-                    .map(|artifact| {
-                        backup_artifact_with_storage_status(artifact, &server_artifacts)
-                    })
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -115,40 +68,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let backup_artifacts = memory.backup_artifacts.read().await.clone();
-                let server_artifacts = memory.server_artifacts.read().await;
-                let mut artifacts = backup_artifacts
-                    .iter()
-                    .filter(|artifact| {
-                        q.as_deref()
-                            .map(|needle| backup_artifact_matches_search(artifact, needle))
-                            .unwrap_or(true)
-                    })
-                    .map(|artifact| {
-                        backup_artifact_with_storage_status(artifact, &server_artifacts)
-                    })
-                    .collect::<Vec<_>>();
-                artifacts.sort_by(|left, right| {
-                    compare_backup_artifact(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    artifacts.reverse();
-                }
-                Ok(artifacts
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = backup_artifact_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -192,16 +112,6 @@ impl Repository {
         artifact_id: Uuid,
     ) -> Result<Option<BackupArtifactView>> {
         match self {
-            Self::Memory(memory) => {
-                let artifacts = memory.backup_artifacts.read().await.clone();
-                let server_artifacts = memory.server_artifacts.read().await;
-                Ok(artifacts
-                    .iter()
-                    .find(|artifact| artifact.id == artifact_id)
-                    .map(|artifact| {
-                        backup_artifact_with_storage_status(artifact, &server_artifacts)
-                    }))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -233,6 +143,7 @@ impl Repository {
         backup_request: &BackupRequestView,
         artifact_id: Uuid,
         request: &RecordBackupArtifactMetadataRequest,
+        reservation_token: Option<Uuid>,
         operator: &AuthContext,
     ) -> Result<BackupArtifactView> {
         let artifact = BackupArtifactView {
@@ -246,80 +157,6 @@ impl Repository {
             created_at: unix_now().to_string(),
         };
         match self {
-            Self::Memory(memory) => {
-                // Keep the same request -> artifact -> server artifact order as cleanup reads,
-                // then acquire the audit guard before making the retry-visible mutation.
-                let mut backup_requests = memory.backup_requests.write().await;
-                let mut backup_artifacts = memory.backup_artifacts.write().await;
-                let mut server_artifacts = memory.server_artifacts.write().await;
-                let mut audits = memory.audits.write().await;
-                let stored_index = backup_requests
-                    .iter()
-                    .position(|stored| stored.id == backup_request.id)
-                    .ok_or_else(|| anyhow::anyhow!("backup_request_not_found"))?;
-                let linked_artifact_id = backup_requests[stored_index].artifact_id;
-                let existing_artifact = linked_artifact_id
-                    .and_then(|existing_id| {
-                        backup_artifacts
-                            .iter()
-                            .find(|existing| existing.id == existing_id)
-                    })
-                    .or_else(|| {
-                        linked_artifact_id
-                            .is_none()
-                            .then(|| {
-                                backup_artifacts
-                                    .iter()
-                                    .find(|existing| existing.id == artifact.id)
-                            })
-                            .flatten()
-                    })
-                    .cloned();
-                ensure!(
-                    linked_artifact_id.is_none() || existing_artifact.is_some(),
-                    "backup_artifact_already_recorded"
-                );
-                let persisted = existing_artifact.as_ref().unwrap_or(&artifact);
-                if existing_artifact.is_some() {
-                    ensure!(
-                        backup_artifact_matches(persisted, &artifact),
-                        "backup_artifact_already_recorded"
-                    );
-                }
-                let server_artifact = backup_server_artifact(backup_request, persisted);
-                let existing_server_artifact =
-                    validate_memory_server_artifact_upsert(&server_artifacts, &server_artifact)?;
-                let audit = linked_artifact_id.is_none().then(|| {
-                    backup_artifact_audit(
-                        backup_request,
-                        &artifact,
-                        request.confirmed,
-                        operator,
-                        unix_now().to_string(),
-                    )
-                });
-
-                apply_memory_server_artifact_upsert(
-                    &mut server_artifacts,
-                    server_artifact,
-                    "active",
-                    existing_server_artifact,
-                );
-                if linked_artifact_id.is_some() {
-                    let existing = existing_artifact
-                        .expect("linked backup artifact must be prevalidated before mutation");
-                    return Ok(existing);
-                }
-                if existing_artifact.is_none() {
-                    backup_artifacts.push(artifact.clone());
-                }
-                backup_requests[stored_index].artifact_id = Some(artifact.id);
-                backup_requests[stored_index].status =
-                    BackupRequestStatus::ArtifactMetadataRecorded
-                        .as_str()
-                        .to_string();
-                audits.push(audit.expect("new backup artifact audit must be prepared"));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let linked_artifact_id: Option<Option<Uuid>> = sqlx::query_scalar(
@@ -366,6 +203,7 @@ impl Repository {
                         &mut tx,
                         &backup_server_artifact(backup_request, &existing),
                         "active",
+                        None,
                     )
                     .await?;
                     tx.commit().await?;
@@ -399,6 +237,7 @@ impl Repository {
                     &mut tx,
                     &backup_server_artifact(backup_request, &persisted),
                     "active",
+                    reservation_token,
                 )
                 .await?;
                 let update = sqlx::query(
@@ -439,70 +278,10 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                return Ok(persisted);
+                Ok(persisted)
             }
         }
-        Ok(artifact)
     }
-}
-
-fn validate_memory_server_artifact_upsert(
-    artifacts: &[ServerArtifactCleanupCandidate],
-    artifact: &NewServerArtifact,
-) -> Result<Option<usize>> {
-    ensure!(
-        artifact.size_bytes >= 0,
-        "server_artifact_size_bytes_invalid"
-    );
-    let existing = artifacts
-        .iter()
-        .position(|existing| existing.object_key == artifact.object_key);
-    if let Some(index) = existing {
-        let existing = &artifacts[index];
-        ensure!(
-            existing.domain == artifact.domain
-                && existing.sha256_hex == artifact.sha256_hex
-                && existing.size_bytes == artifact.size_bytes
-                && existing.job_id == artifact.job_id
-                && existing.client_id == artifact.client_id
-                && existing.stream == artifact.stream
-                && existing.seq == artifact.seq
-                && existing.backup_artifact_id == artifact.backup_artifact_id
-                && matches!(
-                    existing.status.as_str(),
-                    "creating" | "active" | "delete_failed"
-                ),
-            "server_artifact_object_key_conflict"
-        );
-    }
-    Ok(existing)
-}
-
-fn apply_memory_server_artifact_upsert(
-    artifacts: &mut Vec<ServerArtifactCleanupCandidate>,
-    artifact: NewServerArtifact,
-    status: &str,
-    existing: Option<usize>,
-) {
-    if let Some(index) = existing {
-        artifacts[index].status = status.to_string();
-        return;
-    }
-    artifacts.push(ServerArtifactCleanupCandidate {
-        id: Uuid::new_v4(),
-        domain: artifact.domain,
-        object_key: artifact.object_key,
-        sha256_hex: artifact.sha256_hex,
-        size_bytes: artifact.size_bytes,
-        status: status.to_string(),
-        job_id: artifact.job_id,
-        client_id: artifact.client_id,
-        stream: artifact.stream,
-        seq: artifact.seq,
-        backup_artifact_id: artifact.backup_artifact_id,
-        created_at: unix_now().to_string(),
-        reference_protected: false,
-    });
 }
 
 pub(crate) fn backup_artifact_from_row(row: sqlx::postgres::PgRow) -> Result<BackupArtifactView> {
@@ -526,24 +305,6 @@ fn backup_artifact_matches(existing: &BackupArtifactView, expected: &BackupArtif
         && existing.size_bytes == expected.size_bytes
 }
 
-fn backup_artifact_with_storage_status(
-    artifact: &BackupArtifactView,
-    server_artifacts: &[crate::model::ServerArtifactCleanupCandidate],
-) -> BackupArtifactView {
-    let mut artifact = artifact.clone();
-    if let Some(stored) = server_artifacts
-        .iter()
-        .find(|stored| stored.object_key == artifact.object_key)
-    {
-        artifact.status.clone_from(&stored.status);
-        artifact.content_available = stored.status == "active";
-    } else {
-        artifact.status = "missing".to_string();
-        artifact.content_available = false;
-    }
-    artifact
-}
-
 pub(crate) fn backup_server_artifact(
     backup_request: &BackupRequestView,
     artifact: &BackupArtifactView,
@@ -564,24 +325,6 @@ pub(crate) fn backup_server_artifact(
             "backup_request_id": backup_request.id,
             "backup_artifact_id": artifact.id,
         }),
-    }
-}
-
-fn backup_artifact_audit(
-    backup_request: &BackupRequestView,
-    artifact: &BackupArtifactView,
-    confirmed: bool,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "backup.artifact_metadata_recorded".to_string(),
-        target: format!("backup_artifact:{}", artifact.id),
-        command_hash: Some(backup_request.payload_hash.clone()),
-        metadata: backup_artifact_metadata(backup_request, artifact, confirmed, operator),
-        created_at,
     }
 }
 

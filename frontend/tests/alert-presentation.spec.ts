@@ -1,9 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { presentFleetAlert } from "../src/alertPresentation";
-import {
-  applyFleetAlertStates,
-  mergeFleetAlertStates,
-} from "../src/hooks/useFleetData";
+import { applyFleetAlertStates } from "../src/hooks/useFleetData";
 import type { FleetAlertRecord, FleetAlertStateRecord } from "../src/types";
 
 const baseAlert: FleetAlertRecord = {
@@ -60,7 +57,7 @@ function alertWithState(state: FleetAlertStateRecord): FleetAlertRecord {
   };
 }
 
-test("delayed bulk state responses cannot downgrade newer alert revisions", () => {
+test("delayed bulk state responses cannot downgrade embedded alert revisions", () => {
   const delayed: FleetAlertStateRecord = {
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     alert_id: baseAlert.id,
@@ -82,12 +79,10 @@ test("delayed bulk state responses cannot downgrade newer alert revisions", () =
   };
   const newerAlert = alertWithState(newer);
 
-  expect(mergeFleetAlertStates([newer], [delayed])).toEqual([newer]);
   expect(applyFleetAlertStates([newerAlert], [delayed])).toEqual([
     newerAlert,
   ]);
 
-  expect(mergeFleetAlertStates([delayed], [newer])).toEqual([newer]);
   expect(applyFleetAlertStates([alertWithState(delayed)], [newer])).toEqual([
     newerAlert,
   ]);
@@ -207,7 +202,7 @@ test("fails closed for impossible lifecycle shape, causality, or provenance", ()
   const malformedAlerts: FleetAlertRecord[] = [
     withLifecycle({ trigger_generation: 0 }),
     withLifecycle({ triggered_at: "" }),
-    withLifecycle({ last_confirmed_at: null }),
+    withLifecycle({ last_confirmed_at: null as unknown as string }),
     withLifecycle({ last_confirmed_at: "2026-08-18T09:59:00Z" }),
     withLifecycle({
       last_confirmed_at: "2026-08-18T09:59:00Z",
@@ -233,7 +228,7 @@ test("fails closed for impossible lifecycle shape, causality, or provenance", ()
       state: "resolved",
     }),
     withLifecycle({
-      last_confirmed_at: null,
+      last_confirmed_at: null as unknown as string,
       resolution_reason: "condition_recovered",
       resolved_at: "2026-08-18T10:02:00Z",
       state: "resolved",

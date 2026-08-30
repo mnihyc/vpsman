@@ -48,7 +48,6 @@ pub(crate) async fn home_snapshot(
     let events = state.events.clone();
     let response = events
         .singleflight_home_snapshot(key, move || async move {
-            let _admission = state.events.acquire_heavy_read_permit().await?;
             let prepared_dashboard = if fleet_read {
                 Some(prepare_dashboard_overview(&dashboard_query, unix_now())?)
             } else {
@@ -263,20 +262,7 @@ async fn load_jobs(
     state: &AppState,
     query: &ListQuery,
 ) -> anyhow::Result<Vec<crate::model::JobHistoryView>> {
-    let jobs = state.repo.query_jobs(query).await?;
-    let mut reconciled = false;
-    for job in jobs
-        .iter()
-        .filter(|job| job.command_type == "terminal_open")
-    {
-        state.repo.reconcile_terminal_job_by_id(job.id).await?;
-        reconciled = true;
-    }
-    if reconciled {
-        state.repo.query_jobs(query).await
-    } else {
-        Ok(jobs)
-    }
+    state.repo.query_jobs(query).await
 }
 
 async fn load_file_transfer_sessions(
@@ -296,16 +282,6 @@ async fn load_file_transfer_sessions(
 async fn load_terminal_sessions(
     state: &AppState,
 ) -> anyhow::Result<Vec<crate::model_terminal::TerminalSessionView>> {
-    let sessions = state
-        .repo
-        .list_terminal_sessions(FLEET_DETAIL_LIMIT, None, None)
-        .await?;
-    for session in &sessions {
-        state
-            .repo
-            .reconcile_terminal_job_by_id(session.job_id)
-            .await?;
-    }
     state
         .repo
         .list_terminal_sessions(FLEET_DETAIL_LIMIT, None, None)

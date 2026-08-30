@@ -30,9 +30,8 @@ use crate::{
         DecideJobApprovalRequest, JobApprovalDecisionResponse, JobApprovalView, ListQuery, WsEvent,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
-    repository::Repository,
     repository_jobs::{aggregate_job_status_from_statuses, PrecompletedJobTarget},
-    routes_ingest::{record_network_routing_terminal_result, status_output_message},
+    routes_ingest::status_output_message,
     security::SCOPE_JOBS_READ,
     state::AppState,
     unix_now,
@@ -79,14 +78,6 @@ pub(crate) async fn cancel_job(
             "job_cancel_request_failed",
             "The job cancellation could not be requested.",
         ))?;
-    if plan.pending_canceled > 0 && matches!(&state.repo, Repository::Memory(_)) {
-        if let Err(error) =
-            record_network_routing_terminal_result(&state, job_id, "", TARGET_STATUS_CANCELED, None)
-                .await
-        {
-            warn!(?error, %job_id, "network routing state update failed after queued cancellation");
-        }
-    }
     let mut cancel_acks = Vec::with_capacity(plan.cancel_targets.len());
     for client_id in &plan.cancel_targets {
         state
@@ -157,12 +148,14 @@ pub(crate) async fn cancel_job(
     }
     let refreshed = state
         .repo
-        .refresh_job_status_from_targets(job_id)
+        .get_job(job_id)
         .await
-        .map_err(job_status_refresh_failed)?;
-    state
-        .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed.clone())
-        .await?;
+        .map_err(ApiError::internal_mapper(
+            "job_status_refresh_failed",
+            "The job status could not be refreshed.",
+        ))?
+        .map(|job| job.status);
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
     Ok((
         StatusCode::ACCEPTED,
         Json(CancelJobResponse {
@@ -328,11 +321,34 @@ pub(crate) async fn create_job_from_internal_operator_mutation(
     .await
 }
 
+pub(crate) async fn create_job_from_runtime_config_reconciliation(
+    state: &AppState,
+    operator: &AuthContext,
+    request: CreateJobRequest,
+    desired_revision: i64,
+    claim_token: Uuid,
+) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
+    create_job_inner(
+        state,
+        operator,
+        request,
+        JobPrivilegeSource::InternalRuntimeConfigReconciliation {
+            desired_revision,
+            claim_token,
+        },
+    )
+    .await
+}
+
 enum JobPrivilegeSource {
     RequestAssertion,
     ApprovedRequest(Uuid),
     SavedSchedule(Uuid),
     InternalOperatorMutation,
+    InternalRuntimeConfigReconciliation {
+        desired_revision: i64,
+        claim_token: Uuid,
+    },
 }
 
 async fn prepare_job_approval(
@@ -595,7 +611,8 @@ async fn create_job_inner(
         JobPrivilegeSource::RequestAssertion => None,
         JobPrivilegeSource::ApprovedRequest(_) => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
-        JobPrivilegeSource::InternalOperatorMutation => None,
+        JobPrivilegeSource::InternalOperatorMutation
+        | JobPrivilegeSource::InternalRuntimeConfigReconciliation { .. } => None,
     };
     let approval_id = match &privilege_source {
         JobPrivilegeSource::ApprovedRequest(approval_id) => Some(*approval_id),
@@ -774,6 +791,27 @@ async fn create_job_inner(
             )
             .await
             .map_err(map_job_recording_error)?
+    } else if let JobPrivilegeSource::InternalRuntimeConfigReconciliation {
+        desired_revision,
+        claim_token,
+    } = &privilege_source
+    {
+        state
+            .repo
+            .record_dispatching_runtime_config_job_with_precompleted(
+                job_id,
+                &request,
+                &command_hash,
+                &request_fingerprint,
+                operator,
+                &resolved_targets,
+                &precompleted_targets,
+                approval_id,
+                *desired_revision,
+                *claim_token,
+            )
+            .await
+            .map_err(map_job_recording_error)?
     } else {
         state
             .repo
@@ -793,14 +831,8 @@ async fn create_job_inner(
     if !precompleted_targets.is_empty() {
         state.invalidate_job_details(job_id);
     }
-    if let Err(error) = state.process_job_terminal_events(500).await {
-        warn!(
-            ?error,
-            %job_id,
-            "job was accepted, but terminal event reconciliation was deferred to the durable dispatcher"
-        );
-    }
-    crate::job_dispatcher::wake_job_dispatcher(state.clone());
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
+    crate::job_dispatcher::wake_job_dispatcher();
     let control_deadline_extra_secs = state
         .dispatcher_runtime_config()
         .control_deadline_extra_secs();
@@ -925,6 +957,7 @@ fn validate_job_command_source(
     let internal_mutation = matches!(
         privilege_source,
         JobPrivilegeSource::InternalOperatorMutation
+            | JobPrivilegeSource::InternalRuntimeConfigReconciliation { .. }
     );
     if internal_mutation && server_issued_job_actor(job_command).is_none() {
         return Err(ApiError::bad_request(
@@ -2009,14 +2042,6 @@ fn map_job_recording_error(error: anyhow::Error) -> ApiError {
 
 fn job_unavailable(error: anyhow::Error) -> ApiError {
     ApiError::internal("job_unavailable", "The job could not be loaded.", error)
-}
-
-fn job_status_refresh_failed(error: anyhow::Error) -> ApiError {
-    ApiError::internal(
-        "job_status_refresh_failed",
-        "The job status could not be refreshed.",
-        error,
-    )
 }
 
 fn encode_job_status(status: &serde_json::Value) -> Result<Vec<u8>, ApiError> {

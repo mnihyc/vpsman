@@ -2209,7 +2209,7 @@ export function AccessPanel({
                   {identityClientIdError ??
                     (identityMode === "rotate"
                       ? "Use the existing VPS ID. Only the current public key is replaced."
-                      : `Defaults to the next numbered VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`)}
+                      : `Defaults to the next numbered VPS ID (${nextIdentityClientId}). Editable for imported or existing string IDs.`)}
                 </small>
               </label>
               <label className="wideField">

@@ -211,7 +211,7 @@ function systemChartPoints(density: SystemDashboardPointDensity): number {
     case "compact":
       return 120;
     case "dense":
-      return 720;
+      return 480;
     default:
       return 240;
   }

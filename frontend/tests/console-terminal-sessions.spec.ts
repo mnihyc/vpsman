@@ -232,7 +232,12 @@ test("uses retained session actions and sends exact xterm input without creating
   await expect.poll(() => terminalInputText(page)).toContain(
     "uptime\r\u0003\t\u001b",
   );
-  await expect(sessionContext).toContainText(/Last input seq [3-9]/);
+  const acceptedInputFrameCount = (await terminalControlRequests(page)).filter(
+    (request) => request.type === "input",
+  ).length;
+  await expect(sessionContext).toContainText(
+    `Last input seq ${terminalSessions[0].last_input_seq + acceptedInputFrameCount}`,
+  );
   await page.evaluate(() => {
     const socket = (
       window as typeof window & {
@@ -331,18 +336,18 @@ test("pipelines terminal input without waiting one RTT per frame", async ({
 
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
-  await page.evaluate(() => {
-    (
-      window as typeof window & {
-        __vpsmanTerminalControlAckDelayMs?: number;
-      }
-    ).__vpsmanTerminalControlAckDelayMs = 300;
-  });
   await invokeTerminalAction(page, activeTerminalRow, "Attach");
   const focused = page.getByRole("dialog", {
     name: "Focused terminal workspace",
   });
   await expect(focused.locator(".xterm-helper-textarea")).toBeFocused();
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanGateTerminalInputAcks: () => void;
+      }
+    ).__vpsmanGateTerminalInputAcks();
+  });
   await page.keyboard.type("a");
   await page.waitForTimeout(40);
   await page.keyboard.type("b");
@@ -367,6 +372,13 @@ test("pipelines terminal input without waiting one RTT per frame", async ({
     };
   });
   expect(beforeFirstAck).toEqual({ inputAcks: 0, inputFrames: 2 });
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanReleaseTerminalInputAcks: () => void;
+      }
+    ).__vpsmanReleaseTerminalInputAcks();
+  });
   await expect(page.getByLabel("Active terminal session context")).toContainText(
     "Last input seq 4",
   );

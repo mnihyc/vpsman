@@ -63,19 +63,36 @@ pub(crate) async fn process_alert_event_schedules(
     limit: i64,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
-    if !alert_expression_migration_ready(pool).await? {
-        return Ok(0);
-    }
-    ingest_alert_lifecycle_events(pool, limit).await?;
+    let event_seq_through = current_alert_lifecycle_frontier(pool).await?;
+    process_alert_event_schedules_through(pool, limit, dispatch_config, event_seq_through).await
+}
 
-    let receipt_limit = limit.clamp(1, 100) as usize;
+async fn process_alert_event_schedules_through(
+    pool: &PgPool,
+    limit: i64,
+    dispatch_config: &ScheduleDispatchConfig,
+    event_seq_through: i64,
+) -> Result<usize> {
+    let page_limit = limit.clamp(1, 100);
+    loop {
+        let ingested =
+            ingest_alert_lifecycle_events_through(pool, page_limit, event_seq_through).await?;
+        if ingested < page_limit as usize {
+            break;
+        }
+        // The page bounds one transaction, not the amount of due work handled
+        // per wake. Yield between pages so unrelated owners can use the pool.
+        tokio::task::yield_now().await;
+    }
+
     let mut attempted_receipts = Vec::new();
     let mut dispatched = 0_usize;
-    while attempted_receipts.len() < receipt_limit {
+    loop {
         let receipt_ids = load_ready_alert_event_receipt_ids(
             pool,
-            (receipt_limit - attempted_receipts.len()) as i64,
+            page_limit,
             &attempted_receipts,
+            event_seq_through,
         )
         .await?;
         if receipt_ids.is_empty() {
@@ -95,14 +112,29 @@ pub(crate) async fn process_alert_event_schedules(
                 }
             }
         }
+        // Every receipt is attempted at most once in this drain. Pending
+        // dependency/error receipts remain durable for the next recovery wake,
+        // while later independent receipts are never hidden behind the page.
+        tokio::task::yield_now().await;
     }
     Ok(dispatched)
+}
+
+async fn current_alert_lifecycle_frontier(pool: &PgPool) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar(
+            "SELECT COALESCE(max(event_seq), 0)::bigint FROM alert_lifecycle_events",
+        )
+        .fetch_one(pool)
+        .await?,
+    )
 }
 
 async fn load_ready_alert_event_receipt_ids(
     pool: &PgPool,
     limit: i64,
     attempted_receipts: &[Uuid],
+    event_seq_through: i64,
 ) -> Result<Vec<Uuid>> {
     let receipt_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -110,6 +142,7 @@ async fn load_ready_alert_event_receipt_ids(
         FROM schedule_event_receipts receipt
         WHERE receipt.status = 'pending'
           AND NOT (receipt.id = ANY($2::uuid[]))
+          AND receipt.event_seq <= $3
           AND (
               receipt.event_kind <> 'alert.resolved'
               OR NOT EXISTS (
@@ -146,43 +179,85 @@ async fn load_ready_alert_event_receipt_ids(
     )
     .bind(limit.clamp(1, 100))
     .bind(attempted_receipts)
+    .bind(event_seq_through)
     .fetch_all(pool)
     .await?;
     Ok(receipt_ids)
 }
 
+#[cfg(test)]
 async fn ingest_alert_lifecycle_events(pool: &PgPool, limit: i64) -> Result<usize> {
-    let watermark = capture_lifecycle_high_watermark(pool).await?;
+    let event_seq_through = current_alert_lifecycle_frontier(pool).await?;
+    ingest_alert_lifecycle_events_through(pool, limit, event_seq_through).await
+}
+
+async fn ingest_alert_lifecycle_events_through(
+    pool: &PgPool,
+    limit: i64,
+    event_seq_through: i64,
+) -> Result<usize> {
     let mut tx = pool.begin().await?;
-    let cursor: i64 = sqlx::query_scalar(
+    let page_limit = limit.clamp(1, 100);
+    sqlx::query(
         r#"
-        SELECT last_event_seq
-        FROM alert_lifecycle_consumer_cursors
-        WHERE consumer_kind = 'schedule'
-        FOR UPDATE
+        INSERT INTO alert_lifecycle_consumer_receipts (
+            consumer_kind, event_seq, status
+        )
+        SELECT 'schedule', lifecycle.event_seq, 'pending'
+        FROM alert_lifecycle_events lifecycle
+        WHERE lifecycle.event_seq <= $2
+          AND NOT EXISTS (
+            SELECT 1
+            FROM alert_lifecycle_consumer_receipts receipt
+            WHERE receipt.consumer_kind='schedule'
+              AND receipt.event_seq=lifecycle.event_seq
+        )
+        ORDER BY lifecycle.event_seq
+        LIMIT $1
+        ON CONFLICT (consumer_kind,event_seq) DO NOTHING
         "#,
     )
-    .fetch_one(&mut *tx)
+    .bind(page_limit)
+    .bind(event_seq_through)
+    .execute(&mut *tx)
     .await?;
-    if watermark <= cursor {
-        tx.commit().await?;
-        return Ok(0);
-    }
+    let claim_id = Uuid::new_v4();
     let rows = sqlx::query(
         r#"
+        WITH candidate AS (
+            SELECT receipt.event_seq
+            FROM alert_lifecycle_consumer_receipts receipt
+            WHERE receipt.consumer_kind='schedule'
+              AND receipt.status IN ('pending','failed')
+              AND receipt.event_seq <= $2
+            ORDER BY receipt.event_seq
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+        ), claimed AS (
+            UPDATE alert_lifecycle_consumer_receipts receipt
+            SET status='in_progress', claim_id=$3,
+                attempt_count=receipt.attempt_count+1,
+                error=NULL, updated_at=clock_timestamp()
+            FROM candidate
+            WHERE receipt.consumer_kind='schedule'
+              AND receipt.event_seq=candidate.event_seq
+            RETURNING receipt.event_seq
+        )
         SELECT
-            event_seq, id, episode_id, trigger_generation, edge_kind, event_id,
-            event_predicates, subject_client_ids, payload, causation_id,
-            schedule_lineage, occurred_at, created_at
-        FROM alert_lifecycle_events
-        WHERE event_seq > $1 AND event_seq <= $2
-        ORDER BY event_seq ASC
-        LIMIT $3
+            lifecycle.event_seq, lifecycle.id, lifecycle.episode_id,
+            lifecycle.trigger_generation, lifecycle.edge_kind,
+            lifecycle.event_id, lifecycle.event_predicates,
+            lifecycle.subject_client_ids, lifecycle.payload,
+            lifecycle.causation_id, lifecycle.schedule_lineage,
+            lifecycle.occurred_at, lifecycle.created_at
+        FROM claimed
+        JOIN alert_lifecycle_events lifecycle USING (event_seq)
+        ORDER BY lifecycle.event_seq ASC
         "#,
     )
-    .bind(cursor)
-    .bind(watermark)
-    .bind(limit.clamp(1, 100))
+    .bind(page_limit)
+    .bind(event_seq_through)
+    .bind(claim_id)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -192,56 +267,26 @@ async fn ingest_alert_lifecycle_events(pool: &PgPool, limit: i64) -> Result<usiz
         .collect::<Result<Vec<_>>>()?;
     for event in &events {
         ingest_lifecycle_event_in_tx(&mut tx, event).await?;
-    }
-    if let Some(last) = events.last() {
-        let updated = sqlx::query(
+        let acknowledged = sqlx::query(
             r#"
-            UPDATE alert_lifecycle_consumer_cursors
-            SET last_event_seq = $2, updated_at = clock_timestamp()
-            WHERE consumer_kind = 'schedule' AND last_event_seq = $1
+            UPDATE alert_lifecycle_consumer_receipts
+            SET status='completed', claim_id=NULL,
+                error=NULL, updated_at=clock_timestamp()
+            WHERE consumer_kind='schedule' AND event_seq=$1
+              AND status='in_progress' AND claim_id=$2
             "#,
         )
-        .bind(cursor)
-        .bind(last.event_seq)
+        .bind(event.event_seq)
+        .bind(claim_id)
         .execute(&mut *tx)
         .await?;
         ensure!(
-            updated.rows_affected() == 1,
-            "schedule_lifecycle_cursor_stale"
+            acknowledged.rows_affected() == 1,
+            "schedule_lifecycle_receipt_claim_lost"
         );
     }
     tx.commit().await?;
     Ok(events.len())
-}
-
-async fn capture_lifecycle_high_watermark(pool: &PgPool) -> Result<i64> {
-    let mut tx = pool.begin().await?;
-    // Writers retain the shared side from sequence allocation through commit.
-    // This short exclusive barrier drains them, captures a committed prefix,
-    // and releases before any schedule row or expression work is touched.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.alert_lifecycle_arm'))")
-        .execute(&mut *tx)
-        .await?;
-    let watermark: i64 =
-        sqlx::query_scalar("SELECT COALESCE(max(event_seq), 0) FROM alert_lifecycle_events")
-            .fetch_one(&mut *tx)
-            .await?;
-    tx.commit().await?;
-    Ok(watermark)
-}
-
-async fn alert_expression_migration_ready(pool: &PgPool) -> Result<bool> {
-    Ok(sqlx::query_scalar(
-        r#"
-        SELECT expression.completed_at IS NOT NULL
-           AND lifecycle.startup_reconciled_at IS NOT NULL
-        FROM alert_expression_migration_meta expression
-        CROSS JOIN alert_policy_lifecycle_meta lifecycle
-        WHERE expression.singleton AND lifecycle.singleton
-        "#,
-    )
-    .fetch_one(pool)
-    .await?)
 }
 
 async fn ingest_lifecycle_event_in_tx(
@@ -256,9 +301,7 @@ async fn ingest_lifecycle_event_in_tx(
         "alert_lifecycle_event_kind_invalid"
     );
 
-    let schedules =
-        load_eligible_event_schedules(tx, event.event_seq, event.occurred_at, event.created_at)
-            .await?;
+    let schedules = load_eligible_event_schedules(tx, event.occurred_at, event.created_at).await?;
     for schedule in schedules {
         if !actor_authorized_in_tx(
             tx,
@@ -419,7 +462,6 @@ async fn ingest_lifecycle_event_in_tx(
 
 async fn load_eligible_event_schedules(
     tx: &mut Transaction<'_, Postgres>,
-    event_seq: i64,
     event_occurred_at: DateTime<Utc>,
     event_created_at: DateTime<Utc>,
 ) -> Result<Vec<EventSchedule>> {
@@ -432,20 +474,22 @@ async fn load_eligible_event_schedules(
         WHERE trigger_kind = 'event'
           AND enabled = TRUE
           AND deleted_at IS NULL
-          AND armed_after_event_seq < $1
+          -- The immutable event creation instant is the schedule-generation
+          -- boundary. Unlike a sequence high-water mark, it remains exact
+          -- when two producers allocate sequence values and commit out of
+          -- order; no producer/consumer barrier is required.
+          AND event_armed_at <= $2::timestamptz
           AND (
               deferred_until IS NULL
               OR (
                   deferred_until <= clock_timestamp()
+                  AND $1::timestamptz >= deferred_until
                   AND $2::timestamptz >= deferred_until
-                  AND $3::timestamptz >= deferred_until
               )
           )
         ORDER BY id
-        FOR UPDATE
         "#,
     )
-    .bind(event_seq)
     .bind(event_occurred_at)
     .bind(event_created_at)
     .fetch_all(&mut **tx)
@@ -487,29 +531,12 @@ async fn dispatch_alert_event_receipt(
     };
     let snapshot_schedule_id: Uuid = snapshot.try_get("schedule_id")?;
     let snapshot_targets: Vec<String> = snapshot.try_get("fixed_target_client_ids")?;
-    let mut sorted_targets = snapshot_targets.clone();
-    sorted_targets.sort();
-    sorted_targets.dedup();
 
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("vpsman:schedule-event-receipt:{receipt_id}"))
         .execute(&mut *tx)
         .await?;
-    if !sorted_targets.is_empty() {
-        sqlx::query(
-            r#"
-            SELECT id
-            FROM clients
-            WHERE id = ANY($1::text[])
-            ORDER BY id
-            FOR UPDATE
-            "#,
-        )
-        .bind(&sorted_targets)
-        .fetch_all(&mut *tx)
-        .await?;
-    }
     let Some(row) = sqlx::query(
         r#"
         SELECT
@@ -1444,7 +1471,6 @@ mod tests {
         let Some(db) = PgWorkerTestDb::maybe_new().await else {
             return;
         };
-        mark_alert_lifecycle_ready(&db.pool).await;
         let episode_id = insert_resolved_test_episode(&db.pool).await;
         let actor_id = insert_event_schedule_actor(&db.pool).await;
         let schedule_id = insert_event_schedule(
@@ -1460,7 +1486,7 @@ mod tests {
 
         let dispatched = process_alert_event_schedules(
             &db.pool,
-            10,
+            1,
             &ScheduleDispatchConfig::new(60, vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
         )
         .await
@@ -1522,6 +1548,238 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(canonical_audit_count, 4);
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_schedule_round_excludes_lifecycle_events_appended_after_its_frontier() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        let actor_id = insert_event_schedule_actor(&db.pool).await;
+        let schedule_id = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered || alert.resolved",
+            None,
+            &[],
+            3,
+        )
+        .await;
+        let first_episode_id = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, first_episode_id).await;
+        let event_seq_through = current_alert_lifecycle_frontier(&db.pool).await.unwrap();
+        let later_episode_id = insert_resolved_test_episode(&db.pool).await;
+        let (later_triggered_seq, _) = insert_lifecycle_pair(&db.pool, later_episode_id).await;
+        assert!(later_triggered_seq > event_seq_through);
+
+        let config =
+            ScheduleDispatchConfig::new(60, vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS, false);
+        assert_eq!(
+            process_alert_event_schedules_through(&db.pool, 1, &config, event_seq_through)
+                .await
+                .unwrap(),
+            2
+        );
+        let (round_receipts, later_receipts): (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                count(*) FILTER (WHERE event_seq <= $2),
+                count(*) FILTER (WHERE event_seq > $2)
+            FROM schedule_event_receipts
+            WHERE schedule_id = $1
+            "#,
+        )
+        .bind(schedule_id)
+        .bind(event_seq_through)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!((round_receipts, later_receipts), (2, 0));
+
+        assert_eq!(
+            process_alert_event_schedules(&db.pool, 1, &config)
+                .await
+                .unwrap(),
+            2
+        );
+        let receipt_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM schedule_event_receipts WHERE schedule_id=$1")
+                .bind(schedule_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(receipt_count, 4);
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_timestamp_arming_boundaries_cover_create_edit_targets_and_reenable() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        let actor_id = insert_event_schedule_actor(&db.pool).await;
+        let schedule_id = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered || alert.resolved",
+            None,
+            &[],
+            3,
+        )
+        .await;
+        let initial_armed_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT event_armed_at FROM schedules WHERE id=$1")
+                .bind(schedule_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let pre_create = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, pre_create).await;
+        set_lifecycle_times(
+            &db.pool,
+            pre_create,
+            initial_armed_at - chrono::Duration::seconds(1),
+        )
+        .await;
+        let post_create = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, post_create).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, pre_create).await,
+            0
+        );
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, post_create).await,
+            2
+        );
+
+        let pre_edit = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, pre_edit).await;
+        let edit_armed_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            UPDATE schedules
+            SET definition_revision=definition_revision+1,
+                event_expression='alert.triggered || alert.resolved',
+                event_armed_at=clock_timestamp()
+            WHERE id=$1
+            RETURNING event_armed_at
+            "#,
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let pre_edit_created_at: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT min(created_at) FROM alert_lifecycle_events WHERE episode_id=$1",
+        )
+        .bind(pre_edit)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(pre_edit_created_at < edit_armed_at);
+        let post_edit = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, post_edit).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, pre_edit).await,
+            0
+        );
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, post_edit).await,
+            2
+        );
+
+        let pre_targets = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, pre_targets).await;
+        let targets_armed_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            UPDATE schedules
+            SET definition_revision=definition_revision+1,
+                target_client_ids=ARRAY['target-generation'],
+                event_armed_at=clock_timestamp()
+            WHERE id=$1
+            RETURNING event_armed_at
+            "#,
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let pre_targets_created_at: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT min(created_at) FROM alert_lifecycle_events WHERE episode_id=$1",
+        )
+        .bind(pre_targets)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(pre_targets_created_at < targets_armed_at);
+        let post_targets = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, post_targets).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, pre_targets).await,
+            0
+        );
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, post_targets).await,
+            2
+        );
+
+        let disabled_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            UPDATE schedules
+            SET enabled=FALSE, definition_revision=definition_revision+1,
+                event_armed_at=clock_timestamp()
+            WHERE id=$1
+            RETURNING event_armed_at
+            "#,
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let while_disabled = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, while_disabled).await;
+        let disabled_event_created_at: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT min(created_at) FROM alert_lifecycle_events WHERE episode_id=$1",
+        )
+        .bind(while_disabled)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(disabled_event_created_at >= disabled_at);
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, while_disabled).await,
+            0
+        );
+
+        let reenabled_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            UPDATE schedules
+            SET enabled=TRUE, definition_revision=definition_revision+1,
+                event_armed_at=clock_timestamp()
+            WHERE id=$1
+            RETURNING event_armed_at
+            "#,
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(disabled_event_created_at < reenabled_at);
+        let post_reenable = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, post_reenable).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, while_disabled).await,
+            0
+        );
+        assert_eq!(
+            receipt_count_for_episode(&db.pool, schedule_id, post_reenable).await,
+            2
+        );
         db.cleanup().await;
     }
 
@@ -1695,7 +1953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_exclusive_cursor_barrier_prevents_out_of_order_commit_skip() {
+    async fn postgres_per_event_receipts_preserve_out_of_order_commits() {
         let Some(db) = PgWorkerTestDb::maybe_new().await else {
             return;
         };
@@ -1712,20 +1970,12 @@ mod tests {
         .await;
 
         let mut low_writer = db.pool.begin().await.unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext('vpsman.alert_lifecycle_arm'))")
-            .execute(&mut *low_writer)
-            .await
-            .unwrap();
         let low_seq: i64 = sqlx::query_scalar("SELECT nextval('alert_lifecycle_event_seq')")
             .fetch_one(&mut *low_writer)
             .await
             .unwrap();
 
         let mut high_writer = db.pool.begin().await.unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext('vpsman.alert_lifecycle_arm'))")
-            .execute(&mut *high_writer)
-            .await
-            .unwrap();
         let high_seq: i64 = sqlx::query_scalar("SELECT nextval('alert_lifecycle_event_seq')")
             .fetch_one(&mut *high_writer)
             .await
@@ -1733,20 +1983,26 @@ mod tests {
         insert_lifecycle_edge_in_tx(&mut high_writer, high_seq, episode_id, "alert.resolved").await;
         high_writer.commit().await.unwrap();
 
-        let pool = db.pool.clone();
-        let ingest = tokio::spawn(async move { ingest_alert_lifecycle_events(&pool, 10).await });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !ingest.is_finished(),
-            "exclusive cursor barrier must wait for lower writer"
+        assert_eq!(
+            ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap(),
+            1
         );
         insert_lifecycle_edge_in_tx(&mut low_writer, low_seq, episode_id, "alert.triggered").await;
         low_writer.commit().await.unwrap();
-        assert_eq!(ingest.await.unwrap().unwrap(), 2);
+        assert_eq!(
+            ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap(),
+            1
+        );
 
-        let cursor: i64 = sqlx::query_scalar(
-            "SELECT last_event_seq FROM alert_lifecycle_consumer_cursors WHERE consumer_kind = 'schedule'",
+        let completed_receipts: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM alert_lifecycle_consumer_receipts
+            WHERE consumer_kind='schedule' AND status='completed'
+              AND event_seq=ANY($1::bigint[])
+            "#,
         )
+        .bind(vec![low_seq, high_seq])
         .fetch_one(&db.pool)
         .await
         .unwrap();
@@ -1757,7 +2013,7 @@ mod tests {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        assert_eq!(cursor, high_seq);
+        assert_eq!(completed_receipts, 2);
         assert_eq!(receipt_count, 2);
         db.cleanup().await;
     }
@@ -1814,6 +2070,59 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(revocation_audit_result, "rejected");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_event_dispatch_does_not_block_agent_owned_client_updates() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        let client_id = format!("event-dispatch-unlocked-{}", Uuid::new_v4());
+        insert_event_target(&db.pool, &client_id).await;
+        let episode_id = insert_resolved_test_episode(&db.pool).await;
+        let actor_id = insert_event_schedule_actor(&db.pool).await;
+        let schedule_id = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered",
+            None,
+            &[&client_id],
+            3,
+        )
+        .await;
+        insert_lifecycle_pair(&db.pool, episode_id).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        let receipt_id = receipt_id(&db.pool, schedule_id, "alert.triggered").await;
+
+        // Agent status/telemetry writers take a non-key-changing row lock when
+        // they update this client. Schedule dispatch consumes its immutable
+        // receipt and may read that status, but must not take ownership of the
+        // client row or wait for the unrelated producer to commit.
+        let mut agent_writer = db.pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM clients WHERE id=$1 FOR NO KEY UPDATE")
+            .bind(&client_id)
+            .fetch_one(&mut *agent_writer)
+            .await
+            .unwrap();
+
+        let dispatched = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch_alert_event_receipt(
+                &db.pool,
+                receipt_id,
+                &ScheduleDispatchConfig::new(
+                    60,
+                    vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS,
+                    false,
+                ),
+            ),
+        )
+        .await
+        .expect("event dispatch blocked on an agent-owned client row")
+        .unwrap();
+        assert!(dispatched);
+        agent_writer.rollback().await.unwrap();
         db.cleanup().await;
     }
 
@@ -2047,7 +2356,6 @@ mod tests {
         let Some(db) = PgWorkerTestDb::maybe_new().await else {
             return;
         };
-        mark_alert_lifecycle_ready(&db.pool).await;
         let episode_id = insert_resolved_test_episode(&db.pool).await;
         let actor_id = insert_event_schedule_actor(&db.pool).await;
         let mut waiting_schedule_ids = Vec::new();
@@ -2240,31 +2548,6 @@ mod tests {
         actor_id
     }
 
-    async fn mark_alert_lifecycle_ready(pool: &PgPool) {
-        sqlx::query(
-            r#"
-            UPDATE alert_expression_migration_meta
-            SET completed_at = clock_timestamp(),
-                rewritten_rule_count = 0,
-                rewritten_template_count = 0
-            WHERE singleton
-            "#,
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            UPDATE alert_policy_lifecycle_meta
-            SET startup_reconciled_at = clock_timestamp()
-            WHERE singleton
-            "#,
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
     async fn insert_event_schedule(
         pool: &PgPool,
         actor_id: Uuid,
@@ -2285,11 +2568,11 @@ mod tests {
                 target_client_ids, cron_expr, timezone, next_run_at,
                 catch_up_policy, catch_up_limit, retry_delay_secs, max_failures,
                 trigger_kind, event_expression, event_argv_template,
-                definition_revision, event_armed_at, armed_after_event_seq
+                definition_revision, event_armed_at
             )
             VALUES (
                 $1, $2, $3, TRUE, NULL, 'id:*', $4, NULL, NULL, NULL,
-                NULL, NULL, NULL, $5, 'event', $6, $7, 1, now(), 0
+                NULL, NULL, NULL, $5, 'event', $6, $7, 1, now()
             )
             "#,
         )
@@ -2363,10 +2646,6 @@ mod tests {
 
     async fn insert_lifecycle_pair(pool: &PgPool, episode_id: Uuid) -> (i64, i64) {
         let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext('vpsman.alert_lifecycle_arm'))")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
         let triggered_seq: i64 = sqlx::query_scalar("SELECT nextval('alert_lifecycle_event_seq')")
             .fetch_one(&mut *tx)
             .await
@@ -2379,6 +2658,28 @@ mod tests {
         insert_lifecycle_edge_in_tx(&mut tx, resolved_seq, episode_id, "alert.resolved").await;
         tx.commit().await.unwrap();
         (triggered_seq, resolved_seq)
+    }
+
+    async fn set_lifecycle_times(pool: &PgPool, episode_id: Uuid, at: DateTime<Utc>) {
+        sqlx::query(
+            "UPDATE alert_lifecycle_events SET occurred_at=$2, created_at=$2 WHERE episode_id=$1",
+        )
+        .bind(episode_id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn receipt_count_for_episode(pool: &PgPool, schedule_id: Uuid, episode_id: Uuid) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM schedule_event_receipts WHERE schedule_id=$1 AND episode_id=$2",
+        )
+        .bind(schedule_id)
+        .bind(episode_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     async fn insert_lifecycle_edge_in_tx(

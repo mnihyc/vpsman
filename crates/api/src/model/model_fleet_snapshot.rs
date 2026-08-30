@@ -11,7 +11,6 @@ use crate::{
     model_alert_policies::{
         PolicyAlertRecord, PolicyGroupRecord, TrafficAccountingRecord, VpsRuleValueRecord,
     },
-    model_alert_states::FleetAlertStateView,
     model_webhook_rules::{WebhookRuleDeliveryView, WebhookRuleView},
 };
 
@@ -61,8 +60,6 @@ pub(crate) struct FleetSnapshotResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alert_history_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) fleet_alert_states: Option<FleetSnapshotSource<Vec<FleetAlertStateView>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alert_policies: Option<FleetSnapshotSource<Vec<PolicyGroupRecord>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vps_rule_values: Option<FleetSnapshotSource<Vec<VpsRuleValueRecord>>>,
@@ -70,6 +67,8 @@ pub(crate) struct FleetSnapshotResponse {
     pub(crate) traffic_accounting: Option<FleetSnapshotSource<Vec<TrafficAccountingRecord>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) policy_alerts: Option<FleetSnapshotSource<Vec<PolicyAlertRecord>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) policy_alerts_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) current_policy_alerts: Option<FleetSnapshotSource<Vec<PolicyAlertRecord>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +80,11 @@ pub(crate) struct FleetSnapshotResponse {
     pub(crate) fleet_alert_notifications:
         Option<FleetSnapshotSource<Vec<FleetAlertNotificationDeliveryView>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fleet_alert_notifications_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) webhook_rules: Option<FleetSnapshotSource<Vec<WebhookRuleView>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) webhook_rule_deliveries: Option<FleetSnapshotSource<Vec<WebhookRuleDeliveryView>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) webhook_rule_deliveries_truncated: Option<bool>,
 }

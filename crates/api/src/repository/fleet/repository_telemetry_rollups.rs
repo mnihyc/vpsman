@@ -1,31 +1,724 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-
-use anyhow::{Context, Result};
-use chrono::DateTime;
-use sqlx::Row;
-use vpsman_common::AgentMetrics;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     model::{
         TelemetryNetworkRateView, TelemetryRollupView, TelemetrySampleView,
-        TelemetryTunnelAdapterHealthView, TelemetryTunnelView, TunnelPlanView,
+        TelemetryTunnelAdapterHealthView, TelemetryTunnelView,
     },
     model_alert_policies::NetworkRateInterfaceSelection,
     repository::Repository,
     util::compare_timestamps_desc,
 };
+use anyhow::Result;
+use sqlx::Row;
 
 const TELEMETRY_LIST_LIMIT_MAX: i64 = 50_000;
-const DASHBOARD_TELEMETRY_RESULT_LIMIT: usize = 50_000;
 
-// Migration 0013 backfills this host-stream registry from raw counters, and
-// live ingest creates the counter (and marker) before its corresponding rate.
-// The effective-time index added in 0015 makes both physical-row probes exact
-// even while a guarded retention conflict leaves overlapping tiers in place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LatestNetworkRateVisibility {
+    AdmittedOnly,
+    SingleVpsDetail,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TunnelCounterVisibility {
+    AdmittedOnly,
+    SingleVpsDetail,
+}
+
+// Resource, network-rate, and Ping charts share the raw telemetry envelope.
+// Their source selection needs the first retained observation without walking
+// retained history; traffic has its own canonical ledger and is deliberately
+// excluded. These bounds are maintained in the same transactions as their
+// source rows. The only physical-row probe left here is the earliest accepted
+// raw envelope for each requested client, which is one bounded
+// `(client_id, observed_at)` index seek.
+pub(crate) const RAW_TELEMETRY_COVERS_RANGE_START_SQL: &str = r#"
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT requested.client_id
+    FROM UNNEST($1::TEXT[]) AS requested(client_id)
+), retained_bounds AS MATERIALIZED (
+    SELECT
+        requested.client_id,
+        LEAST(
+            dashboard.resource_first_at,
+            dashboard.network_first_at,
+            dashboard.ping_first_at
+        ) AS minute_start
+    FROM requested
+    LEFT JOIN telemetry_dashboard_projection_heads dashboard
+      ON dashboard.client_id = requested.client_id
+), raw_bounds AS MATERIALIZED (
+    SELECT requested.client_id, first_raw.raw_start
+    FROM requested
+    LEFT JOIN LATERAL (
+        SELECT sample.observed_at AS raw_start
+        FROM telemetry_samples sample
+        LEFT JOIN telemetry_projection_heads projection
+          ON projection.client_id = sample.client_id
+        WHERE sample.client_id = requested.client_id
+          AND sample.accepted_seq <= projection.projected_seq
+        ORDER BY sample.observed_at ASC
+        LIMIT 1
+    ) first_raw ON TRUE
+)
+SELECT COALESCE(bool_and(
+    retained.minute_start IS NULL
+    OR (
+        raw.raw_start IS NOT NULL
+        AND raw.raw_start <= GREATEST(
+            retained.minute_start,
+            to_timestamp($2)
+        )
+    )
+), TRUE)
+FROM requested
+LEFT JOIN retained_bounds retained USING (client_id)
+LEFT JOIN raw_bounds raw USING (client_id)
+"#;
+
+// Raw retained-network export is candidate driven. Each page first takes no
+// more than the caller's public limit from the global effective-time key; a
+// separate bounded lookup then fetches payload and one predecessor per key.
+// The repository advances over every examined key and requests another page
+// when reset/decrease candidates did not fill the public result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawTelemetryNetworkRateCursor {
+    latest_observed_at: chrono::DateTime<chrono::Utc>,
+    client_id: String,
+    interface: String,
+    bucket_start: chrono::DateTime<chrono::Utc>,
+    bucket_secs: i32,
+}
+
+pub(crate) fn raw_telemetry_network_rate_candidate_keys_sql(
+    has_client_id: bool,
+    has_interface: bool,
+    has_bucket_secs: bool,
+    has_visible_client_ids: bool,
+    has_cursor: bool,
+    page_limit: usize,
+) -> String {
+    // This value is typed and bounded before interpolation. Keeping the LIMIT
+    // visible in the statement lets a generic prepared plan cost the physical
+    // index stop at its real page cardinality instead of costing five years of
+    // retained rows for an unknown parameter.
+    let page_limit = page_limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX as usize);
+    let mut next_parameter = 1;
+    let client_parameter = has_client_id.then(|| {
+        let parameter = next_parameter;
+        next_parameter += 1;
+        parameter
+    });
+    let interface_parameter = has_interface.then(|| {
+        let parameter = next_parameter;
+        next_parameter += 1;
+        parameter
+    });
+    let bucket_parameter = has_bucket_secs.then(|| {
+        let parameter = next_parameter;
+        next_parameter += 1;
+        parameter
+    });
+    let visible_client_ids_parameter = has_visible_client_ids.then(|| {
+        let parameter = next_parameter;
+        next_parameter += 1;
+        parameter
+    });
+    let cursor_parameters = has_cursor.then(|| {
+        (
+            next_parameter,
+            next_parameter + 1,
+            next_parameter + 2,
+            next_parameter + 3,
+            next_parameter + 4,
+        )
+    });
+    let cursor_progress_expression = cursor_parameters
+        .map(|(latest, client, interface, bucket, bucket_secs)| {
+            format!(
+                r#"candidate.latest_observed_at < ${latest}::TIMESTAMPTZ
+        OR (
+            candidate.latest_observed_at = ${latest}::TIMESTAMPTZ
+            AND candidate.client_id > ${client}::TEXT
+        )
+        OR (
+            candidate.latest_observed_at = ${latest}::TIMESTAMPTZ
+            AND candidate.client_id = ${client}::TEXT
+            AND candidate.interface > ${interface}::TEXT
+        )
+        OR (
+            candidate.latest_observed_at = ${latest}::TIMESTAMPTZ
+            AND candidate.client_id = ${client}::TEXT
+            AND candidate.interface = ${interface}::TEXT
+            AND candidate.bucket_start < ${bucket}::TIMESTAMPTZ
+        )
+        OR (
+            candidate.latest_observed_at = ${latest}::TIMESTAMPTZ
+            AND candidate.client_id = ${client}::TEXT
+            AND candidate.interface = ${interface}::TEXT
+            AND candidate.bucket_start = ${bucket}::TIMESTAMPTZ
+            AND candidate.bucket_secs < ${bucket_secs}::INTEGER
+        )"#
+            )
+        })
+        .unwrap_or_else(|| "TRUE".to_string());
+    // Each physical owner takes its own ordered public-size page before any
+    // policy work. This is the only shape that lets PostgreSQL stop the two
+    // retained indexes after the requested keys instead of expanding years of
+    // the composite point view in order to join admission. Current admission
+    // is evaluated once for the resulting bounded page below; the repository
+    // advances past rejected keys and refills just as it does for resets.
+    let mut candidate_filters = Vec::with_capacity(4);
+    if let Some(parameter) = client_parameter {
+        candidate_filters.push(format!("candidate.client_id = ${parameter}"));
+    }
+    if let Some(parameter) = interface_parameter {
+        candidate_filters.push(format!("candidate.interface = ${parameter}"));
+    }
+    if let Some(parameter) = bucket_parameter {
+        candidate_filters.push(format!("candidate.bucket_secs = ${parameter}"));
+    }
+    if let Some(parameter) = visible_client_ids_parameter {
+        candidate_filters.push(format!("candidate.client_id = ANY(${parameter}::TEXT[])"));
+    }
+
+    let order = "candidate.latest_observed_at DESC,\n             candidate.client_id ASC,\n             candidate.interface ASC,\n             candidate.bucket_start DESC,\n             candidate.bucket_secs DESC";
+    // Minute and coarse are one logical retained owner. Keeping them under a
+    // single ordered LIMIT lets PostgreSQL use Merge Append and stop after the
+    // global page plus one look-ahead tuple; limiting them independently would
+    // read two full pages before throwing half away.
+    let projected_raw_client_ids = if let Some(parameter) = client_parameter {
+        format!("ARRAY[${parameter}::TEXT]")
+    } else if let Some(parameter) = visible_client_ids_parameter {
+        format!("${parameter}::TEXT[]")
+    } else {
+        "NULL::TEXT[]".to_string()
+    };
+    let physical_sources = [
+        r#"SELECT rate.client_id, rate.interface, rate.bucket_start,
+                  60::INTEGER AS bucket_secs, rate.latest_observed_at,
+                  1::SMALLINT AS source_priority
+           FROM telemetry_network_rates_minute rate
+           UNION ALL
+           SELECT rate.client_id, rate.interface, rate.bucket_start,
+                  rate.bucket_secs, rate.latest_observed_at,
+                  1::SMALLINT AS source_priority
+           FROM telemetry_network_rates_coarse rate"#
+            .to_string(),
+        r#"SELECT sample.client_id, sample.interface,
+                  sample.observed_at AS bucket_start,
+                  60::INTEGER AS bucket_secs, sample.latest_observed_at,
+                  2::SMALLINT AS source_priority
+           FROM traffic_counter_samples sample
+           WHERE sample.source_kind = 'host'
+             AND NOT sample.inbound_promoted"#
+            .to_string(),
+        format!(
+            r#"SELECT suffix.client_id, suffix.interface, suffix.bucket_start,
+                  suffix.bucket_secs, suffix.latest_observed_at,
+                  3::SMALLINT AS source_priority
+           FROM telemetry_projected_raw_network_minutes_source(
+               {projected_raw_client_ids}
+           ) suffix"#
+        ),
+    ];
+    let candidate_branch = |suffix: &[String], parenthesized: bool| {
+        let mut filters = candidate_filters.clone();
+        filters.extend_from_slice(suffix);
+        let where_clause = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}\n", filters.join("\n  AND "))
+        };
+        let source_pages = physical_sources
+            .iter()
+            .map(|source| {
+                format!(
+                    r#"(
+        SELECT candidate.*
+        FROM (
+            {source}
+        ) candidate
+        {where_clause}ORDER BY {order}
+        LIMIT {page_limit}
+    )"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n    UNION ALL\n    ");
+        // A projected raw minute shadows either durable representation. The
+        // three logical owner pages (four physical relations) are already
+        // bounded, so this reduction cannot become a retained-history sort.
+        let select = format!(
+            r#"SELECT normalized.client_id,
+           normalized.interface,
+           normalized.bucket_start,
+           normalized.bucket_secs,
+           normalized.latest_observed_at
+    FROM (
+        SELECT DISTINCT ON (
+                   source.client_id,
+                   source.interface,
+                   source.bucket_start,
+                   source.bucket_secs
+               )
+               source.*
+        FROM (
+            {source_pages}
+        ) source
+        ORDER BY source.client_id,
+                 source.interface,
+                 source.bucket_start,
+                 source.bucket_secs,
+                 source.source_priority DESC
+    ) normalized
+    ORDER BY normalized.latest_observed_at DESC,
+             normalized.client_id ASC,
+             normalized.interface ASC,
+             normalized.bucket_start DESC,
+             normalized.bucket_secs DESC
+    LIMIT {page_limit}"#
+        );
+        if parenthesized {
+            format!("({select})")
+        } else {
+            select
+        }
+    };
+
+    let candidate_page =
+        if let Some((latest, client, interface, bucket, bucket_secs)) = cursor_parameters {
+            // The public key mixes descending timestamps with ascending text.
+            // These disjoint branches are its exact strict suffix; a uniform ROW
+            // comparison would skip or repeat keys at equal effective times.
+            let mut suffixes = vec![vec![format!(
+                "candidate.latest_observed_at < ${latest}::TIMESTAMPTZ"
+            )]];
+            if !has_client_id {
+                suffixes.push(vec![
+                    format!("candidate.latest_observed_at = ${latest}::TIMESTAMPTZ"),
+                    format!("candidate.client_id > ${client}::TEXT"),
+                ]);
+            }
+            if !has_interface {
+                suffixes.push(vec![
+                    format!("candidate.latest_observed_at = ${latest}::TIMESTAMPTZ"),
+                    format!("candidate.client_id = ${client}::TEXT"),
+                    format!("candidate.interface > ${interface}::TEXT"),
+                ]);
+            }
+            suffixes.push(vec![
+                format!("candidate.latest_observed_at = ${latest}::TIMESTAMPTZ"),
+                format!("candidate.client_id = ${client}::TEXT"),
+                format!("candidate.interface = ${interface}::TEXT"),
+                format!("candidate.bucket_start < ${bucket}::TIMESTAMPTZ"),
+            ]);
+            if !has_bucket_secs {
+                suffixes.push(vec![
+                    format!("candidate.latest_observed_at = ${latest}::TIMESTAMPTZ"),
+                    format!("candidate.client_id = ${client}::TEXT"),
+                    format!("candidate.interface = ${interface}::TEXT"),
+                    format!("candidate.bucket_start = ${bucket}::TIMESTAMPTZ"),
+                    format!("candidate.bucket_secs < ${bucket_secs}::INTEGER"),
+                ]);
+            }
+            let branches = suffixes
+                .iter()
+                .map(|suffix| candidate_branch(suffix, true))
+                .collect::<Vec<_>>()
+                .join("\n    UNION ALL\n    ");
+            format!(
+                r#"SELECT suffix.*
+    FROM (
+    {branches}
+    ) suffix
+    ORDER BY suffix.latest_observed_at DESC,
+             suffix.client_id ASC,
+             suffix.interface ASC,
+             suffix.bucket_start DESC,
+             suffix.bucket_secs DESC
+    LIMIT {page_limit}"#
+            )
+        } else {
+            candidate_branch(&[], false)
+        };
+
+    format!(
+        r#"WITH candidate_keys AS MATERIALIZED (
+    {candidate_page}
+), resolved_interface_policies AS MATERIALIZED (
+    SELECT policy.*
+    FROM public.resolve_telemetry_interface_policies(ARRAY(
+        SELECT DISTINCT candidate.client_id
+        FROM candidate_keys candidate
+        ORDER BY candidate.client_id
+    )) policy
+), admitted_keys AS MATERIALIZED (
+    SELECT DISTINCT candidate.client_id, candidate.interface
+    FROM candidate_keys candidate
+    JOIN resolved_interface_policies policy
+      ON policy.client_id = candidate.client_id
+    WHERE public.telemetry_interface_is_admitted_resolved(
+        policy.admission_mode,
+        policy.interface_patterns,
+        policy.managed_tunnel_interfaces,
+        'host',
+        candidate.interface
+    )
+)
+SELECT
+    candidate.client_id,
+    candidate.interface,
+    candidate.bucket_start,
+    candidate.bucket_secs,
+    candidate.latest_observed_at,
+    EXISTS (
+        SELECT 1
+        FROM admitted_keys admitted
+        WHERE admitted.client_id = candidate.client_id
+          AND admitted.interface = candidate.interface
+    ) AS admitted,
+    ({cursor_progress_expression}) AS page_cursor_strictly_after
+FROM candidate_keys candidate
+ORDER BY candidate.latest_observed_at DESC,
+         candidate.client_id ASC,
+         candidate.interface ASC,
+         candidate.bucket_start DESC,
+         candidate.bucket_secs DESC
+"#
+    )
+}
+
+// Candidate keys are already page bounded. Resolve their exact payloads and
+// strict predecessors from physical owners so every retained/raw lookup can
+// stop on its natural index; the projected suffix is evaluated once per page.
+pub(crate) fn raw_telemetry_network_rate_payload_sql(has_bucket_secs: bool) -> String {
+    let retained_predecessor_bucket_filter = if has_bucket_secs {
+        "          AND predecessor.bucket_secs = candidate.bucket_secs\n"
+    } else {
+        ""
+    };
+    let minute_predecessor_bucket_filter = if has_bucket_secs {
+        "          AND candidate.bucket_secs = 60\n"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"WITH candidate_keys AS MATERIALIZED (
+    SELECT
+        candidate.client_id,
+        candidate.interface,
+        candidate.bucket_start,
+        candidate.bucket_secs,
+        candidate.ordinal
+    FROM UNNEST(
+        $1::TEXT[],
+        $2::TEXT[],
+        $3::TIMESTAMPTZ[],
+        $4::INTEGER[]
+    ) WITH ORDINALITY AS candidate(
+        client_id,
+        interface,
+        bucket_start,
+        bucket_secs,
+        ordinal
+    )
+), candidate_streams AS MATERIALIZED (
+    SELECT DISTINCT candidate.client_id, candidate.interface
+    FROM candidate_keys candidate
+), stream_keys AS MATERIALIZED (
+    SELECT candidate.client_id, candidate.interface,
+           stream.first_unpromoted_observed_at
+    FROM candidate_streams candidate
+    LEFT JOIN traffic_counter_streams stream
+      ON stream.client_id = candidate.client_id
+     AND stream.source_kind = 'host'
+     AND stream.interface = candidate.interface
+), projected_suffix AS MATERIALIZED (
+    SELECT suffix.*
+    FROM telemetry_projected_raw_network_minutes_source($1::TEXT[]) suffix
+    JOIN candidate_streams candidate
+      ON candidate.client_id = suffix.client_id
+     AND candidate.interface = suffix.interface
+), candidate_points AS MATERIALIZED (
+    SELECT key.ordinal, retained.client_id, retained.interface,
+           retained.bucket_start, retained.bucket_secs,
+           retained.sample_count, retained.rx_bytes_avg,
+           retained.tx_bytes_avg, retained.rx_bytes_last,
+           retained.tx_bytes_last, retained.rx_counter_epoch,
+           retained.tx_counter_epoch, retained.latest_observed_at,
+           retained.updated_at
+    FROM candidate_keys key
+    JOIN telemetry_network_rates retained
+      ON retained.client_id = key.client_id
+     AND retained.interface = key.interface
+     AND retained.bucket_secs = key.bucket_secs
+     AND retained.bucket_start = key.bucket_start
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM projected_suffix shadow
+        WHERE shadow.client_id = retained.client_id
+          AND shadow.interface = retained.interface
+          AND shadow.bucket_secs = retained.bucket_secs
+          AND shadow.bucket_start = retained.bucket_start
+    )
+
+    UNION ALL
+
+    SELECT key.ordinal, sample.client_id, sample.interface,
+           sample.observed_at, 60::INTEGER, sample.sample_count,
+           round(
+               sample.rx_bytes_sum / sample.sample_count::NUMERIC
+           )::BIGINT,
+           round(
+               sample.tx_bytes_sum / sample.sample_count::NUMERIC
+           )::BIGINT,
+           sample.rx_bytes, sample.tx_bytes,
+           sample.rx_counter_epoch, sample.tx_counter_epoch,
+           sample.latest_observed_at, sample.updated_at
+    FROM candidate_keys key
+    JOIN stream_keys stream
+      ON stream.client_id = key.client_id
+     AND stream.interface = key.interface
+    JOIN traffic_counter_samples sample
+      ON sample.client_id = stream.client_id
+     AND sample.source_kind = 'host'
+     AND sample.interface = stream.interface
+     AND sample.observed_at = key.bucket_start
+    WHERE key.bucket_secs = 60
+      AND stream.first_unpromoted_observed_at IS NOT NULL
+      AND sample.observed_at >= stream.first_unpromoted_observed_at
+      AND NOT sample.inbound_promoted
+      AND NOT EXISTS (
+          SELECT 1
+          FROM projected_suffix shadow
+          WHERE shadow.client_id = sample.client_id
+            AND shadow.interface = sample.interface
+            AND shadow.bucket_start = sample.observed_at
+      )
+
+    UNION ALL
+
+    SELECT key.ordinal, suffix.client_id, suffix.interface,
+           suffix.bucket_start, suffix.bucket_secs,
+           suffix.sample_count, suffix.rx_bytes_avg,
+           suffix.tx_bytes_avg, suffix.rx_bytes_last,
+           suffix.tx_bytes_last, suffix.rx_counter_epoch,
+           suffix.tx_counter_epoch, suffix.latest_observed_at,
+           suffix.updated_at
+    FROM candidate_keys key
+    JOIN projected_suffix suffix
+      ON suffix.client_id = key.client_id
+     AND suffix.interface = key.interface
+     AND suffix.bucket_secs = key.bucket_secs
+     AND suffix.bucket_start = key.bucket_start
+), examined AS MATERIALIZED (
+    SELECT
+        candidate.*,
+        previous.latest_observed_at AS previous_observed_at,
+        previous.rx_bytes_last AS previous_rx_bytes,
+        previous.tx_bytes_last AS previous_tx_bytes,
+        previous.rx_counter_epoch AS previous_rx_counter_epoch,
+        previous.tx_counter_epoch AS previous_tx_counter_epoch,
+        previous.latest_observed_at IS NOT NULL
+          AND candidate.rx_counter_epoch = previous.rx_counter_epoch
+          AND candidate.tx_counter_epoch = previous.tx_counter_epoch
+          AND candidate.rx_bytes_last >= previous.rx_bytes_last
+          AND candidate.tx_bytes_last >= previous.tx_bytes_last
+            AS transition_valid
+    FROM candidate_points candidate
+    LEFT JOIN LATERAL (
+        SELECT
+            edge.latest_observed_at,
+            edge.rx_bytes_last,
+            edge.tx_bytes_last,
+            edge.rx_counter_epoch,
+            edge.tx_counter_epoch
+        FROM (
+            (
+                SELECT predecessor.bucket_start,
+                       predecessor.bucket_secs,
+                       predecessor.latest_observed_at,
+                       predecessor.rx_bytes_last,
+                       predecessor.tx_bytes_last,
+                       predecessor.rx_counter_epoch,
+                       predecessor.tx_counter_epoch,
+                       1::SMALLINT AS source_priority
+                FROM telemetry_network_rates predecessor
+                WHERE predecessor.client_id = candidate.client_id
+                  AND predecessor.interface = candidate.interface
+{retained_predecessor_bucket_filter}                  AND ROW(
+                        predecessor.latest_observed_at,
+                        predecessor.bucket_start,
+                        predecessor.bucket_secs
+                      ) < ROW(
+                        candidate.latest_observed_at,
+                        candidate.bucket_start,
+                        candidate.bucket_secs
+                      )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM projected_suffix shadow
+                      WHERE shadow.client_id = predecessor.client_id
+                        AND shadow.interface = predecessor.interface
+                        AND shadow.bucket_secs = predecessor.bucket_secs
+                        AND shadow.bucket_start = predecessor.bucket_start
+                  )
+                ORDER BY predecessor.latest_observed_at DESC,
+                         predecessor.bucket_start DESC,
+                         predecessor.bucket_secs DESC
+                LIMIT 1
+            )
+
+            UNION ALL
+
+            (
+                SELECT sample.observed_at, 60::INTEGER,
+                       sample.latest_observed_at,
+                       sample.rx_bytes, sample.tx_bytes,
+                       sample.rx_counter_epoch, sample.tx_counter_epoch,
+                       2::SMALLINT AS source_priority
+                FROM stream_keys stream
+                JOIN traffic_counter_samples sample
+                  ON sample.client_id = stream.client_id
+                 AND sample.source_kind = 'host'
+                 AND sample.interface = stream.interface
+                WHERE stream.client_id = candidate.client_id
+                  AND stream.interface = candidate.interface
+                  AND stream.first_unpromoted_observed_at IS NOT NULL
+                  AND sample.observed_at >=
+                      stream.first_unpromoted_observed_at
+                  AND NOT sample.inbound_promoted
+{minute_predecessor_bucket_filter}                  AND ROW(
+                        sample.latest_observed_at,
+                        sample.observed_at,
+                        60::INTEGER
+                      ) < ROW(
+                        candidate.latest_observed_at,
+                        candidate.bucket_start,
+                        candidate.bucket_secs
+                      )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM projected_suffix shadow
+                      WHERE shadow.client_id = sample.client_id
+                        AND shadow.interface = sample.interface
+                        AND shadow.bucket_start = sample.observed_at
+                  )
+                ORDER BY sample.observed_at DESC
+                LIMIT 1
+            )
+
+            UNION ALL
+
+            (
+                SELECT predecessor.bucket_start,
+                       predecessor.bucket_secs,
+                       predecessor.latest_observed_at,
+                       predecessor.rx_bytes_last,
+                       predecessor.tx_bytes_last,
+                       predecessor.rx_counter_epoch,
+                       predecessor.tx_counter_epoch,
+                       3::SMALLINT AS source_priority
+                FROM projected_suffix predecessor
+                WHERE predecessor.client_id = candidate.client_id
+                  AND predecessor.interface = candidate.interface
+{retained_predecessor_bucket_filter}                  AND ROW(
+                        predecessor.latest_observed_at,
+                        predecessor.bucket_start,
+                        predecessor.bucket_secs
+                      ) < ROW(
+                        candidate.latest_observed_at,
+                        candidate.bucket_start,
+                        candidate.bucket_secs
+                      )
+                ORDER BY predecessor.latest_observed_at DESC,
+                         predecessor.bucket_start DESC,
+                         predecessor.bucket_secs DESC
+                LIMIT 1
+            )
+        ) edge
+        ORDER BY edge.latest_observed_at DESC,
+                 edge.bucket_start DESC,
+                 edge.bucket_secs DESC,
+                 edge.source_priority ASC
+        LIMIT 1
+    ) previous ON TRUE
+)
+SELECT
+    candidate.ordinal AS candidate_ordinal,
+    candidate.client_id,
+    candidate.interface,
+    candidate.bucket_start::text AS bucket_start,
+    candidate.bucket_secs,
+    candidate.sample_count,
+    candidate.rx_bytes_avg,
+    candidate.tx_bytes_avg,
+    candidate.rx_bytes_last,
+    candidate.tx_bytes_last,
+    candidate.rx_counter_epoch,
+    candidate.tx_counter_epoch,
+    CASE WHEN candidate.transition_valid THEN
+        candidate.rx_bytes_last - candidate.previous_rx_bytes
+    END AS rx_bytes_delta,
+    CASE WHEN candidate.transition_valid THEN
+        candidate.tx_bytes_last - candidate.previous_tx_bytes
+    END AS tx_bytes_delta,
+    CASE WHEN candidate.transition_valid THEN
+        (candidate.rx_bytes_last - candidate.previous_rx_bytes)::double precision * 8
+            / GREATEST(
+                extract(epoch FROM (
+                    candidate.latest_observed_at - candidate.previous_observed_at
+                )),
+                1
+            )::double precision
+    END AS rx_bps_avg,
+    CASE WHEN candidate.transition_valid THEN
+        (candidate.tx_bytes_last - candidate.previous_tx_bytes)::double precision * 8
+            / GREATEST(
+                extract(epoch FROM (
+                    candidate.latest_observed_at - candidate.previous_observed_at
+                )),
+                1
+            )::double precision
+    END AS tx_bps_avg,
+    candidate.latest_observed_at::text AS latest_observed_at,
+    candidate.updated_at::text AS updated_at,
+    candidate.transition_valid
+FROM examined candidate
+ORDER BY candidate.ordinal ASC
+"#
+    )
+}
+
+// Explicit physical-tier inspection remains backed by retained history. The
+// dashboard sparse projection path does not use this query. Minute points have
+// two short-lived overlays: accepted projected envelopes not yet materialized
+// and materialized counter samples not yet promoted. Resolve the former once,
+// then take the two newest distinct effective edges from the three physical
+// owners. This preserves effective-history shadowing without expanding the
+// composite source inside every per-stream index probe.
 pub(crate) const LATEST_TELEMETRY_NETWORK_RATES_SQL: &str = r#"
-WITH stream_keys AS MATERIALIZED (
-    SELECT streams.client_id, streams.interface
-    FROM traffic_counter_hourly_usage_streams streams
+WITH requested_clients AS MATERIALIZED (
+    SELECT client.id AS client_id
+    FROM visible_clients client
+    WHERE client.status <> 'suspended'
+      AND ($1::TEXT IS NULL OR client.id = $1)
+      AND ($2::TEXT[] IS NULL OR client.id = ANY($2))
+      AND (
+          $6::BOOLEAN
+          OR client.id = ANY($7::TEXT[])
+          OR client.id = ANY($8::TEXT[])
+      )
+), durable_candidate_keys AS MATERIALIZED (
+    SELECT
+        streams.client_id,
+        streams.source_kind,
+        streams.interface,
+        streams.first_unpromoted_observed_at
+    FROM traffic_counter_streams streams
     JOIN visible_clients client
       ON client.id = streams.client_id
      AND client.status <> 'suspended'
@@ -44,42 +737,220 @@ WITH stream_keys AS MATERIALIZED (
                 AND selected.interface = streams.interface
           )
       )
-), latest AS (
+), candidate_projected_suffix AS MATERIALIZED (
+    SELECT suffix.*
+    FROM telemetry_projected_raw_network_minutes_source(ARRAY(
+        SELECT requested.client_id
+        FROM requested_clients requested
+        ORDER BY requested.client_id
+    )) suffix
+    JOIN requested_clients client
+      ON client.client_id = suffix.client_id
+    WHERE $4::INTEGER = 60
+      AND ($1::TEXT IS NULL OR suffix.client_id = $1)
+      AND ($2::TEXT[] IS NULL OR suffix.client_id = ANY($2))
+      AND ($3::TEXT IS NULL OR suffix.interface = $3)
+      AND (
+          $6::BOOLEAN
+          OR suffix.client_id = ANY($7::TEXT[])
+          OR EXISTS (
+              SELECT 1
+              FROM UNNEST($8::TEXT[], $9::TEXT[])
+                  AS selected(client_id, interface)
+              WHERE selected.client_id = suffix.client_id
+                AND selected.interface = suffix.interface
+          )
+      )
+), candidate_stream_keys AS MATERIALIZED (
+    SELECT candidate.client_id, 'host'::TEXT AS source_kind,
+           candidate.interface,
+           max(candidate.first_unpromoted_observed_at)
+               AS first_unpromoted_observed_at
+    FROM (
+        SELECT durable.client_id, durable.interface,
+               durable.first_unpromoted_observed_at
+        FROM durable_candidate_keys durable
+
+        UNION ALL
+
+        SELECT suffix.client_id, suffix.interface,
+               NULL::TIMESTAMPTZ AS first_unpromoted_observed_at
+        FROM candidate_projected_suffix suffix
+    ) candidate
+    GROUP BY candidate.client_id, candidate.interface
+), resolved_interface_policies AS MATERIALIZED (
+    SELECT policy.*
+    FROM public.resolve_telemetry_interface_policies(ARRAY(
+        SELECT DISTINCT candidate.client_id
+        FROM candidate_stream_keys candidate
+        ORDER BY candidate.client_id
+    )) policy
+), stream_keys AS MATERIALIZED (
+    SELECT
+        candidate.client_id,
+        candidate.interface,
+        candidate.first_unpromoted_observed_at
+    FROM candidate_stream_keys candidate
+    JOIN resolved_interface_policies policy
+      ON policy.client_id = candidate.client_id
+    WHERE public.telemetry_interface_is_admitted_resolved(
+        policy.admission_mode,
+        policy.interface_patterns,
+        policy.managed_tunnel_interfaces,
+        candidate.source_kind,
+        candidate.interface
+    )
+), projected_suffix AS MATERIALIZED (
+    SELECT suffix.*
+    FROM candidate_projected_suffix suffix
+    JOIN stream_keys stream
+      ON stream.client_id = suffix.client_id
+     AND stream.interface = suffix.interface
+    WHERE $4::INTEGER = 60
+), stream_edges AS MATERIALIZED (
     SELECT
         stream.client_id,
         stream.interface,
-        rate.bucket_start,
-        rate.bucket_secs,
-        rate.sample_count,
-        rate.rx_bytes_avg,
-        rate.tx_bytes_avg,
-        rate.rx_bytes_last,
-        rate.tx_bytes_last,
-        rate.rx_counter_epoch,
-        rate.tx_counter_epoch,
-        rate.latest_observed_at,
-        rate.updated_at
+        edge.bucket_start,
+        edge.bucket_secs,
+        edge.sample_count,
+        edge.rx_bytes_avg,
+        edge.tx_bytes_avg,
+        edge.rx_bytes_last,
+        edge.tx_bytes_last,
+        edge.rx_counter_epoch,
+        edge.tx_counter_epoch,
+        edge.latest_observed_at,
+        edge.updated_at,
+        row_number() OVER (
+            PARTITION BY stream.client_id, stream.interface
+            ORDER BY edge.latest_observed_at DESC,
+                     edge.bucket_start DESC,
+                     edge.source_priority ASC
+        ) AS recency_rank
     FROM stream_keys stream
     CROSS JOIN LATERAL (
-        SELECT
-            candidate.bucket_start,
-            candidate.bucket_secs,
-            candidate.sample_count,
-            candidate.rx_bytes_avg,
-            candidate.tx_bytes_avg,
-            candidate.rx_bytes_last,
-            candidate.tx_bytes_last,
-            candidate.rx_counter_epoch,
-            candidate.tx_counter_epoch,
-            candidate.latest_observed_at,
-            candidate.updated_at
-        FROM telemetry_network_rates candidate
-        WHERE candidate.client_id = stream.client_id
-          AND candidate.interface = stream.interface
-          AND ($4::INTEGER IS NULL OR candidate.bucket_secs = $4)
-        ORDER BY candidate.latest_observed_at DESC, candidate.bucket_start DESC
-        LIMIT 1
-    ) rate
+        SELECT DISTINCT ON (candidate.latest_observed_at)
+            candidate.*
+        FROM (
+            (
+                SELECT
+                    retained.bucket_start,
+                    retained.bucket_secs,
+                    retained.sample_count,
+                    retained.rx_bytes_avg,
+                    retained.tx_bytes_avg,
+                    retained.rx_bytes_last,
+                    retained.tx_bytes_last,
+                    retained.rx_counter_epoch,
+                    retained.tx_counter_epoch,
+                    retained.latest_observed_at,
+                    retained.updated_at,
+                    1::SMALLINT AS source_priority
+                FROM telemetry_network_rates retained
+                WHERE retained.client_id = stream.client_id
+                  AND retained.interface = stream.interface
+                  AND retained.bucket_secs = $4
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM projected_suffix shadow
+                      WHERE shadow.client_id = retained.client_id
+                        AND shadow.interface = retained.interface
+                        AND shadow.bucket_secs = retained.bucket_secs
+                        AND shadow.bucket_start = retained.bucket_start
+                  )
+                ORDER BY retained.latest_observed_at DESC,
+                         retained.bucket_start DESC
+                LIMIT 2
+            )
+
+            UNION ALL
+
+            (
+                SELECT
+                    sample.observed_at AS bucket_start,
+                    60 AS bucket_secs,
+                    sample.sample_count,
+                    round(
+                        sample.rx_bytes_sum / sample.sample_count::NUMERIC
+                    )::BIGINT AS rx_bytes_avg,
+                    round(
+                        sample.tx_bytes_sum / sample.sample_count::NUMERIC
+                    )::BIGINT AS tx_bytes_avg,
+                    sample.rx_bytes AS rx_bytes_last,
+                    sample.tx_bytes AS tx_bytes_last,
+                    sample.rx_counter_epoch,
+                    sample.tx_counter_epoch,
+                    sample.latest_observed_at,
+                    sample.updated_at,
+                    2::SMALLINT AS source_priority
+                FROM traffic_counter_samples sample
+                WHERE $4::INTEGER = 60
+                  AND stream.first_unpromoted_observed_at IS NOT NULL
+                  AND sample.client_id = stream.client_id
+                  AND sample.source_kind = 'host'
+                  AND sample.interface = stream.interface
+                  AND sample.observed_at >=
+                      stream.first_unpromoted_observed_at
+                  AND NOT sample.inbound_promoted
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM projected_suffix shadow
+                      WHERE shadow.client_id = sample.client_id
+                        AND shadow.interface = sample.interface
+                        AND shadow.bucket_start = sample.observed_at
+                  )
+                -- `latest_observed_at` is inside this exact minute, so the
+                -- primary-key minute order is its strict effective-time order.
+                ORDER BY sample.observed_at DESC
+                LIMIT 2
+            )
+
+            UNION ALL
+
+            (
+                SELECT
+                    suffix.bucket_start,
+                    suffix.bucket_secs,
+                    suffix.sample_count,
+                    suffix.rx_bytes_avg,
+                    suffix.tx_bytes_avg,
+                    suffix.rx_bytes_last,
+                    suffix.tx_bytes_last,
+                    suffix.rx_counter_epoch,
+                    suffix.tx_counter_epoch,
+                    suffix.latest_observed_at,
+                    suffix.updated_at,
+                    3::SMALLINT AS source_priority
+                FROM projected_suffix suffix
+                WHERE suffix.client_id = stream.client_id
+                  AND suffix.interface = stream.interface
+                ORDER BY suffix.bucket_start DESC
+                LIMIT 2
+            )
+        ) candidate
+        -- The predecessor contract is strictly older by effective time. A
+        -- duplicate logical minute from two owners must not become its own
+        -- predecessor while ownership is transferring.
+        ORDER BY candidate.latest_observed_at DESC,
+                 candidate.bucket_start DESC,
+                 candidate.source_priority ASC
+        LIMIT 2
+    ) edge
+), examined AS (
+    SELECT
+        latest.*,
+        previous.latest_observed_at AS previous_effective_at,
+        previous.rx_bytes_last AS previous_rx_bytes_last,
+        previous.tx_bytes_last AS previous_tx_bytes_last,
+        previous.rx_counter_epoch AS previous_rx_counter_epoch,
+        previous.tx_counter_epoch AS previous_tx_counter_epoch
+    FROM stream_edges latest
+    JOIN stream_edges previous
+      ON previous.client_id = latest.client_id
+     AND previous.interface = latest.interface
+     AND previous.recency_rank = 2
+    WHERE latest.recency_rank = 1
 )
 SELECT
     latest.client_id,
@@ -93,168 +964,833 @@ SELECT
     latest.tx_bytes_last,
     latest.rx_counter_epoch,
     latest.tx_counter_epoch,
-    latest.rx_bytes_last - previous.rx_bytes_last AS rx_bytes_delta,
-    latest.tx_bytes_last - previous.tx_bytes_last AS tx_bytes_delta,
-    ((latest.rx_bytes_last - previous.rx_bytes_last) * 8)::double precision
+    latest.rx_bytes_last - latest.previous_rx_bytes_last AS rx_bytes_delta,
+    latest.tx_bytes_last - latest.previous_tx_bytes_last AS tx_bytes_delta,
+    (latest.rx_bytes_last - latest.previous_rx_bytes_last)::double precision * 8.0
         / GREATEST(
-            extract(epoch FROM (latest.latest_observed_at - previous.effective_at)),
+            extract(epoch FROM (
+                latest.latest_observed_at - latest.previous_effective_at
+            )),
             1
         )::double precision AS rx_bps_avg,
-    ((latest.tx_bytes_last - previous.tx_bytes_last) * 8)::double precision
+    (latest.tx_bytes_last - latest.previous_tx_bytes_last)::double precision * 8.0
         / GREATEST(
-            extract(epoch FROM (latest.latest_observed_at - previous.effective_at)),
+            extract(epoch FROM (
+                latest.latest_observed_at - latest.previous_effective_at
+            )),
             1
         )::double precision AS tx_bps_avg,
     latest.latest_observed_at::text AS latest_observed_at,
     latest.updated_at::text AS updated_at
-FROM latest
-LEFT JOIN LATERAL (
-    SELECT
-        candidate.latest_observed_at AS effective_at,
-        candidate.rx_bytes_last,
-        candidate.tx_bytes_last,
-        candidate.rx_counter_epoch,
-        candidate.tx_counter_epoch
-    FROM telemetry_network_rates candidate
-    WHERE candidate.client_id = latest.client_id
-      AND candidate.interface = latest.interface
-      AND ($4::INTEGER IS NULL OR candidate.bucket_secs = $4)
-      AND candidate.latest_observed_at < latest.latest_observed_at
-    ORDER BY candidate.latest_observed_at DESC, candidate.bucket_start DESC
-    LIMIT 1
-) previous ON TRUE
-WHERE previous.effective_at IS NOT NULL
-  AND latest.rx_counter_epoch = previous.rx_counter_epoch
-  AND latest.tx_counter_epoch = previous.tx_counter_epoch
-  AND latest.rx_bytes_last >= previous.rx_bytes_last
-  AND latest.tx_bytes_last >= previous.tx_bytes_last
+FROM examined latest
+WHERE latest.rx_counter_epoch = latest.previous_rx_counter_epoch
+  AND latest.tx_counter_epoch = latest.previous_tx_counter_epoch
+  AND latest.rx_bytes_last >= latest.previous_rx_bytes_last
+  AND latest.tx_bytes_last >= latest.previous_tx_bytes_last
 ORDER BY latest.latest_observed_at DESC, latest.client_id ASC, latest.interface ASC
 LIMIT $5
 "#;
 
-fn raw_sample_rollup(sample: TelemetrySampleView) -> Result<TelemetryRollupView> {
-    let metrics: AgentMetrics =
-        serde_json::from_value(sample.payload.clone()).with_context(|| {
-            format!(
-                "invalid raw telemetry payload for {} at {}",
-                sample.client_id, sample.observed_at
-            )
-        })?;
-    let disk = metrics
-        .has_persistent_block_filesystem_disk_sample()
-        .then(|| {
-            let total = metrics
-                .disks
-                .iter()
-                .fold(0_u64, |total, disk| total.saturating_add(disk.total_bytes));
-            let available = metrics.disks.iter().fold(0_u64, |total, disk| {
-                total.saturating_add(disk.available_bytes)
-            });
+// The fifteen-minute visibility exception belongs only to one VPS detail.
+// Shared current readers consume the traffic materialization suffix instead;
+// this parameterized reader expands exactly one requested client's recent raw
+// payload and returns only interfaces excluded by its current admission rule.
+const RECENT_EXCLUDED_NETWORK_TRANSITIONS_SQL: &str = r#"
+WITH policy AS MATERIALIZED (
+    SELECT *
+    FROM public.resolve_telemetry_interface_policies(ARRAY[$1::TEXT])
+), raw AS MATERIALIZED (
+    SELECT
+        sample.client_id,
+        network.value ->> 'interface' AS interface,
+        sample.observed_at,
+        sample.accepted_seq,
+        sample.accepted_at AS updated_at,
+        network.ordinality,
+        telemetry_u64_counter_to_bigint(
+            network.value ->> 'rx_bytes'
+        ) AS rx_bytes,
+        telemetry_u64_counter_to_bigint(
+            network.value ->> 'tx_bytes'
+        ) AS tx_bytes
+    FROM visible_clients client
+    JOIN telemetry_projection_heads projection
+      ON projection.client_id = client.id
+    JOIN telemetry_samples sample
+      ON sample.client_id = projection.client_id
+     AND sample.accepted_seq <= projection.projected_seq
+    CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
+            THEN sample.payload -> 'networks' ELSE '[]'::JSONB END
+    ) WITH ORDINALITY network(value, ordinality)
+    WHERE client.id = $1
+      AND client.status <> 'suspended'
+      AND sample.observed_at >= statement_timestamp() - interval '15 minutes'
+      AND octet_length(network.value ->> 'interface') BETWEEN 1 AND 128
+), sequenced AS MATERIALIZED (
+    SELECT raw.*,
+           lag(raw.observed_at) OVER stream AS previous_observed_at,
+           lag(raw.rx_bytes) OVER stream AS previous_rx_bytes,
+           lag(raw.tx_bytes) OVER stream AS previous_tx_bytes,
+           row_number() OVER (
+               PARTITION BY raw.client_id, raw.interface
+               ORDER BY raw.observed_at DESC,
+                        raw.accepted_seq DESC,
+                        raw.ordinality DESC
+           ) AS recency
+    FROM raw
+    WINDOW stream AS (
+        PARTITION BY raw.client_id, raw.interface
+        ORDER BY raw.observed_at, raw.accepted_seq, raw.ordinality
+    )
+), latest AS MATERIALIZED (
+    SELECT row.*
+    FROM sequenced row
+    CROSS JOIN policy
+    WHERE row.recency = 1
+      AND row.previous_observed_at IS NOT NULL
+      AND row.observed_at > row.previous_observed_at
+      AND row.rx_bytes >= row.previous_rx_bytes
+      AND row.tx_bytes >= row.previous_tx_bytes
+      AND NOT public.telemetry_interface_is_admitted_resolved(
+          policy.admission_mode,
+          policy.interface_patterns,
+          policy.managed_tunnel_interfaces,
+          'host',
+          row.interface
+      )
+      AND ($2::TEXT IS NULL OR row.interface = $2)
+), minute_summary AS MATERIALIZED (
+    SELECT raw.client_id, raw.interface,
+           date_trunc('minute', raw.observed_at) AS bucket_start,
+           count(*)::INTEGER AS sample_count,
+           round(avg(raw.rx_bytes::NUMERIC))::BIGINT AS rx_bytes_avg,
+           round(avg(raw.tx_bytes::NUMERIC))::BIGINT AS tx_bytes_avg
+    FROM raw
+    JOIN latest
+      ON latest.client_id = raw.client_id
+     AND latest.interface = raw.interface
+     AND date_trunc('minute', latest.observed_at) =
+         date_trunc('minute', raw.observed_at)
+    GROUP BY raw.client_id, raw.interface,
+             date_trunc('minute', raw.observed_at)
+)
+SELECT latest.client_id,
+       latest.interface,
+       summary.bucket_start::TEXT AS bucket_start,
+       60::INTEGER AS bucket_secs,
+       summary.sample_count,
+       summary.rx_bytes_avg,
+       summary.tx_bytes_avg,
+       latest.rx_bytes AS rx_bytes_last,
+       latest.tx_bytes AS tx_bytes_last,
+       latest.rx_bytes - latest.previous_rx_bytes AS rx_bytes_delta,
+       latest.tx_bytes - latest.previous_tx_bytes AS tx_bytes_delta,
+       (latest.rx_bytes - latest.previous_rx_bytes)::DOUBLE PRECISION * 8.0
+           / GREATEST(
+               extract(epoch FROM (
+                   latest.observed_at - latest.previous_observed_at
+               )),
+               1.0
+           )::DOUBLE PRECISION AS rx_bps_avg,
+       (latest.tx_bytes - latest.previous_tx_bytes)::DOUBLE PRECISION * 8.0
+           / GREATEST(
+               extract(epoch FROM (
+                   latest.observed_at - latest.previous_observed_at
+               )),
+               1.0
+           )::DOUBLE PRECISION AS tx_bps_avg,
+       latest.observed_at::TEXT AS latest_observed_at,
+       latest.updated_at::TEXT AS updated_at
+FROM latest
+JOIN minute_summary summary USING (client_id, interface)
+ORDER BY latest.observed_at DESC, latest.interface
+"#;
+
+pub(crate) struct DashboardTelemetryNetworkProjection {
+    pub(crate) rates: Vec<TelemetryNetworkRateView>,
+    /// Fleet-level history already summed across clients by the sparse query.
+    /// `None` means `rates` still contains the complete unaggregated history.
+    pub(crate) fleet_rates: Option<Vec<TelemetryNetworkRateView>>,
+    pub(crate) latest_rates: Vec<TelemetryNetworkRateView>,
+    pub(crate) interfaces_by_rate: HashMap<(String, String), Vec<String>>,
+}
+
+pub(crate) struct DashboardTelemetryResourceProjection {
+    pub(crate) rollups: Vec<TelemetryRollupView>,
+    pub(crate) latest_rollups: Vec<TelemetryRollupView>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DashboardTelemetryTrafficPoint {
+    pub(crate) client_id: String,
+    pub(crate) bucket_start: String,
+    pub(crate) rx_bytes: Option<i64>,
+    pub(crate) tx_bytes: Option<i64>,
+}
+
+pub(crate) struct DashboardTelemetryTrafficProjection {
+    pub(crate) client_points: Vec<DashboardTelemetryTrafficPoint>,
+    pub(crate) fleet_points: Vec<DashboardTelemetryTrafficPoint>,
+    pub(crate) interfaces_by_client: HashMap<String, Vec<String>>,
+    pub(crate) client_ids_in_rank_order: Vec<String>,
+}
+
+pub(crate) struct TelemetryResourceHistoryProjection {
+    pub(crate) rows: Vec<TelemetryRollupView>,
+    pub(crate) complete: bool,
+}
+
+pub(crate) struct TelemetryNetworkHistoryProjection {
+    pub(crate) rows: Vec<TelemetryNetworkRateView>,
+    pub(crate) complete: bool,
+}
+
+/// The earliest projected telemetry boundary for an exact requested client set.
+///
+/// `complete` distinguishes a valid empty history (`start_unix == None`) from
+/// projection heads whose resource, selected-rate network, traffic, and Ping minima
+/// have not yet converged.
+pub(crate) struct DashboardTelemetryStart {
+    pub(crate) start_unix: Option<u64>,
+    pub(crate) complete: bool,
+}
+
+const TELEMETRY_RESOURCE_HISTORY_PROJECTION_SQL: &str = r#"
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT client_id
+    FROM UNNEST($1::TEXT[]) requested(client_id)
+), ready AS MATERIALIZED (
+    SELECT NOT $6::BOOLEAN OR count(*) = count(head.client_id) AS value
+    FROM requested
+    LEFT JOIN telemetry_dashboard_resource_projection_heads head
+      ON head.client_id = requested.client_id
+), source AS MATERIALIZED (
+    SELECT
+        rollup.*,
+        extract(epoch FROM rollup.bucket_start)::BIGINT AS source_start_unix,
+        GREATEST($4, rollup.bucket_secs)::INTEGER AS effective_step,
+        floor(
+            extract(epoch FROM rollup.bucket_start)::DOUBLE PRECISION
+                / GREATEST($4, rollup.bucket_secs)::DOUBLE PRECISION
+        )::BIGINT * GREATEST($4, rollup.bucket_secs)::BIGINT
+            AS chart_start_unix
+    FROM requested
+    JOIN telemetry_resource_points_source(
+        $1::TEXT[],
+        to_timestamp($2) - make_interval(secs => 86400),
+        to_timestamp($3),
+        NULL::INTEGER,
+        $5::BIGINT * (($4::BIGINT + 59) / 60)
+    ) rollup USING (client_id)
+    WHERE rollup.client_id = ANY($1::TEXT[])
+      AND rollup.bucket_start >= to_timestamp($2)
+            - make_interval(secs => 86400)
+      AND rollup.bucket_start <= to_timestamp($3)
+      AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
+            > to_timestamp($2)
+), bucketed AS MATERIALIZED (
+    SELECT
+        source.client_id,
+        source.chart_start_unix,
+        source.effective_step,
+        LEAST(sum(source.sample_count::BIGINT), 2147483647)::INTEGER
+            AS sample_count,
+        LEAST(sum(source.cpu_usage_sample_count::BIGINT), 2147483647)::INTEGER
+            AS cpu_usage_sample_count,
+        sum(source.cpu_usage_sum
+            ORDER BY source.source_start_unix, source.bucket_secs)
+            / NULLIF(sum(source.cpu_usage_sample_count)::DOUBLE PRECISION, 0)
+            AS cpu_usage_avg,
+        max(source.cpu_usage_max)::DOUBLE PRECISION AS cpu_usage_max,
+        max(source.cpu_cores_max)::INTEGER AS cpu_cores_max,
+        sum(source.cpu_load_1_sum
+            ORDER BY source.source_start_unix, source.bucket_secs)
+            / sum(source.sample_count)::DOUBLE PRECISION AS cpu_load_1_avg,
+        max(source.cpu_load_1_max)::DOUBLE PRECISION AS cpu_load_1_max,
+        sum(source.cpu_load_5_sum
+            ORDER BY source.source_start_unix, source.bucket_secs)
+            / sum(source.sample_count)::DOUBLE PRECISION AS cpu_load_5_avg,
+        max(source.cpu_load_5_max)::DOUBLE PRECISION AS cpu_load_5_max,
+        sum(source.cpu_load_15_sum
+            ORDER BY source.source_start_unix, source.bucket_secs)
+            / sum(source.sample_count)::DOUBLE PRECISION AS cpu_load_15_avg,
+        max(source.cpu_load_15_max)::DOUBLE PRECISION AS cpu_load_15_max,
+        max(source.memory_total_bytes_max)::BIGINT AS memory_total_bytes_max,
+        round(
+            sum(source.memory_available_bytes_sum)
+                / sum(source.sample_count)::NUMERIC
+        )::BIGINT AS memory_available_bytes_avg,
+        min(source.memory_available_bytes_min)::BIGINT
+            AS memory_available_bytes_min,
+        sum(source.memory_used_ratio_sum
+            ORDER BY source.source_start_unix, source.bucket_secs)
+            / sum(source.sample_count)::DOUBLE PRECISION
+            AS memory_used_ratio_avg,
+        max(source.memory_used_ratio_max)::DOUBLE PRECISION
+            AS memory_used_ratio_max,
+        LEAST(sum(source.swap_sample_count::BIGINT), 2147483647)::INTEGER
+            AS swap_sample_count,
+        max(source.swap_total_bytes_max)::BIGINT AS swap_total_bytes_max,
+        CASE WHEN sum(source.swap_sample_count) > 0 THEN round(
+            sum(source.swap_available_bytes_sum)
+                / sum(source.swap_sample_count)::NUMERIC
+        )::BIGINT WHEN max(source.swap_total_bytes_max) = 0 THEN 0 END
+            AS swap_available_bytes_avg,
+        CASE WHEN sum(source.swap_sample_count) > 0 THEN
+            min(source.swap_available_bytes_min)
+                FILTER (WHERE source.swap_sample_count > 0)
+            WHEN max(source.swap_total_bytes_max) = 0 THEN 0 END
+            AS swap_available_bytes_min,
+        sum(source.swap_used_ratio_sum
+            ORDER BY source.source_start_unix, source.bucket_secs)
+            / NULLIF(sum(source.swap_sample_count)::DOUBLE PRECISION, 0)
+            AS swap_used_ratio_avg,
+        max(source.swap_used_ratio_max)
+            FILTER (WHERE source.swap_sample_count > 0)
+            AS swap_used_ratio_max,
+        LEAST(sum(source.disk_sample_count::BIGINT), 2147483647)::INTEGER
+            AS disk_sample_count,
+        COALESCE(max(source.disk_total_bytes_max)
+            FILTER (WHERE source.disk_sample_count > 0), 0)::BIGINT
+            AS disk_total_bytes_max,
+        round(COALESCE(
+            sum(source.disk_available_bytes_sum)
+                FILTER (WHERE source.disk_sample_count > 0)
+                / NULLIF(sum(source.disk_sample_count)::NUMERIC, 0),
+            0
+        ))::BIGINT AS disk_available_bytes_avg,
+        COALESCE(min(source.disk_available_bytes_min)
+            FILTER (WHERE source.disk_sample_count > 0), 0)::BIGINT
+            AS disk_available_bytes_min,
+        COALESCE(
+            sum(source.disk_used_ratio_sum
+                ORDER BY source.source_start_unix, source.bucket_secs)
+                FILTER (WHERE source.disk_sample_count > 0)
+                / NULLIF(sum(source.disk_sample_count)::DOUBLE PRECISION, 0),
+            0
+        )::DOUBLE PRECISION AS disk_used_ratio_avg,
+        COALESCE(max(source.disk_used_ratio_max)
+            FILTER (WHERE source.disk_sample_count > 0), 0)::DOUBLE PRECISION
+            AS disk_used_ratio_max,
+        LEAST(sum(source.connections_sample_count::BIGINT), 2147483647)::INTEGER
+            AS connections_sample_count,
+        (array_agg(
+            source.tcp_sockets_latest
+            ORDER BY source.connections_observed_at DESC NULLS LAST,
+                     source.source_start_unix DESC, source.bucket_secs DESC
+        ) FILTER (WHERE source.connections_sample_count > 0))[1]
+            AS tcp_sockets_latest,
+        (array_agg(
+            source.udp_sockets_latest
+            ORDER BY source.connections_observed_at DESC NULLS LAST,
+                     source.source_start_unix DESC, source.bucket_secs DESC
+        ) FILTER (WHERE source.connections_sample_count > 0))[1]
+            AS udp_sockets_latest,
+        max(source.connections_observed_at) AS connections_observed_at,
+        max(source.latest_observed_at) AS latest_observed_at,
+        max(source.updated_at) AS updated_at
+    FROM source
+    GROUP BY source.client_id, source.chart_start_unix, source.effective_step
+), recent AS MATERIALIZED (
+    SELECT ranked.*
+    FROM (
+        SELECT point.*,
+               row_number() OVER (
+                    PARTITION BY point.client_id
+                    ORDER BY point.chart_start_unix DESC,
+                             point.effective_step DESC
+               ) AS recency_rank
+        FROM bucketed point
+    ) ranked
+    WHERE ranked.recency_rank <= $5
+), output AS MATERIALIZED (
+    SELECT requested.client_id, FALSE AS has_point,
+           NULL::BIGINT AS chart_start_unix,
+           NULL::INTEGER AS effective_step
+    FROM requested
+    UNION ALL
+    SELECT recent.client_id, TRUE, recent.chart_start_unix,
+           recent.effective_step
+    FROM recent
+)
+SELECT
+    output.client_id,
+    output.has_point,
+    CASE WHEN output.has_point
+        THEN to_timestamp(output.chart_start_unix)::TEXT
+    END AS bucket_start,
+    COALESCE(output.effective_step, $4)::INTEGER AS bucket_secs,
+    recent.sample_count,
+    recent.cpu_usage_sample_count,
+    recent.cpu_usage_avg,
+    recent.cpu_usage_max,
+    recent.cpu_cores_max,
+    recent.cpu_load_1_avg,
+    recent.cpu_load_1_max,
+    recent.cpu_load_5_avg,
+    recent.cpu_load_5_max,
+    recent.cpu_load_15_avg,
+    recent.cpu_load_15_max,
+    recent.memory_total_bytes_max,
+    recent.memory_available_bytes_avg,
+    recent.memory_available_bytes_min,
+    recent.memory_used_ratio_avg,
+    recent.memory_used_ratio_max,
+    recent.swap_sample_count,
+    recent.swap_total_bytes_max,
+    recent.swap_available_bytes_avg,
+    recent.swap_available_bytes_min,
+    recent.swap_used_ratio_avg,
+    recent.swap_used_ratio_max,
+    recent.disk_sample_count,
+    recent.disk_total_bytes_max,
+    recent.disk_available_bytes_avg,
+    recent.disk_available_bytes_min,
+    recent.disk_used_ratio_avg,
+    recent.disk_used_ratio_max,
+    recent.connections_sample_count,
+    recent.tcp_sockets_latest,
+    recent.udp_sockets_latest,
+    recent.connections_observed_at::TEXT AS connections_observed_at,
+    recent.latest_observed_at::TEXT AS latest_observed_at,
+    recent.updated_at::TEXT AS updated_at
+FROM output
+LEFT JOIN recent
+  ON output.has_point
+ AND recent.client_id = output.client_id
+ AND recent.chart_start_unix = output.chart_start_unix
+ AND recent.effective_step = output.effective_step
+CROSS JOIN ready
+WHERE ready.value
+ORDER BY output.chart_start_unix ASC NULLS FIRST, output.client_id
+"#;
+
+const TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL: &str = r#"
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT client_id
+    FROM UNNEST($1::TEXT[]) requested(client_id)
+), resolved_interface_policies AS MATERIALIZED (
+    SELECT policy.*
+    FROM public.resolve_telemetry_interface_policies(ARRAY(
+        SELECT requested.client_id
+        FROM requested
+        ORDER BY requested.client_id
+    )) policy
+), heads AS MATERIALIZED (
+    SELECT requested.client_id,
+           head.network_generation_interfaces,
+           head.client_id IS NOT NULL AS complete
+    FROM requested
+    LEFT JOIN telemetry_dashboard_network_projection_heads head
+      ON head.client_id = requested.client_id
+), ready AS MATERIALIZED (
+    SELECT COALESCE(bool_and(heads.complete), TRUE) AS value
+    FROM heads
+), selected_streams AS MATERIALIZED (
+    SELECT DISTINCT heads.client_id, selected.interface
+    FROM heads
+    JOIN resolved_interface_policies policy
+      ON policy.client_id = heads.client_id
+    CROSS JOIN LATERAL unnest(heads.network_generation_interfaces)
+        selected(interface)
+    WHERE heads.complete
+      AND public.telemetry_interface_is_admitted_resolved(
+          policy.admission_mode,
+          policy.interface_patterns,
+          policy.managed_tunnel_interfaces,
+          'host',
+          selected.interface
+      )
+), selected_stream_arrays AS MATERIALIZED (
+    SELECT
+        COALESCE(array_agg(
+            stream.client_id
+            ORDER BY stream.client_id COLLATE "C",
+                     stream.interface COLLATE "C"
+        ), ARRAY[]::TEXT[]) AS client_ids,
+        COALESCE(array_agg(
+            stream.interface
+            ORDER BY stream.client_id COLLATE "C",
+                     stream.interface COLLATE "C"
+        ), ARRAY[]::TEXT[]) AS interfaces
+    FROM selected_streams stream
+), projected_suffix AS MATERIALIZED (
+    SELECT suffix.*
+    FROM telemetry_projected_raw_network_minutes_source($1::TEXT[]) suffix
+    JOIN selected_streams stream USING (client_id, interface)
+    WHERE suffix.client_id = ANY($1::TEXT[])
+      AND suffix.bucket_start >= to_timestamp($2)
+            - make_interval(secs => 86400)
+      AND suffix.bucket_start <= to_timestamp($3)
+), bounded_durable AS MATERIALIZED (
+    -- The paired arrays are one exact stream relation.  One function executor
+    -- retains the per-stream index stops without paying one PL/pgSQL startup
+    -- for every selected interface.
+    SELECT durable.*
+    FROM selected_stream_arrays streams
+    CROSS JOIN LATERAL telemetry_network_durable_points_source(
+        streams.client_ids,
+        to_timestamp($2) - make_interval(secs => 86400),
+        to_timestamp($3),
+        NULL::INTEGER,
+        streams.interfaces,
+        ($5::BIGINT + 1)
+            * ((GREATEST($4, 60)::BIGINT + 59) / 60)
+    ) durable
+), canonical_points AS MATERIALIZED (
+    SELECT durable.*
+    FROM bounded_durable durable
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM projected_suffix shadow
+        WHERE shadow.client_id = durable.client_id
+          AND shadow.interface = durable.interface
+          AND shadow.bucket_secs = durable.bucket_secs
+          AND shadow.bucket_start = durable.bucket_start
+    )
+
+    UNION ALL
+
+    SELECT suffix.*
+    FROM projected_suffix suffix
+), ranked_effective_points AS MATERIALIZED (
+    SELECT candidate.*,
+           row_number() OVER (
+               PARTITION BY candidate.client_id, candidate.interface
+               ORDER BY candidate.bucket_start DESC,
+                        candidate.latest_observed_at DESC,
+                        candidate.bucket_secs ASC
+           ) AS physical_rank
+    FROM canonical_points candidate
+), effective_points AS MATERIALIZED (
+    -- N chart points need at most N * ceil(step / 60) canonical
+    -- physical rows. One additional chart-width allowance preserves the
+    -- strict counter predecessor before reset/decrease filtering. This cap is
+    -- set-wise but remains independently partitioned by the exact stream.
+    SELECT ranked.*
+    FROM ranked_effective_points ranked
+    WHERE ranked.physical_rank <= ($5::BIGINT + 1)
+        * ((GREATEST($4, 60)::BIGINT + 59) / 60)
+), source AS (
+    SELECT
+        rate.client_id,
+        rate.interface,
+        rate.bucket_start,
+        rate.bucket_secs,
+        rate.sample_count,
+        rate.updated_at,
+        GREATEST($4, rate.bucket_secs)::INTEGER AS effective_step,
+        floor(
+            extract(epoch FROM rate.bucket_start)::DOUBLE PRECISION
+                / GREATEST($4, rate.bucket_secs)::DOUBLE PRECISION
+        )::BIGINT * GREATEST($4, rate.bucket_secs)::BIGINT
+            AS chart_start_unix,
+        ARRAY[
+            extract(epoch FROM rate.latest_observed_at)::BIGINT,
+            extract(epoch FROM rate.bucket_start)::BIGINT,
+            rate.bucket_secs::BIGINT,
+            rate.rx_bytes_avg,
+            rate.tx_bytes_avg,
+            rate.rx_bytes_last,
+            rate.tx_bytes_last,
+            rate.rx_counter_epoch,
+            rate.tx_counter_epoch
+        ] AS terminal_values
+    FROM effective_points rate
+    WHERE rate.client_id = ANY($1::TEXT[])
+      AND rate.bucket_start >= to_timestamp($2)
+            - make_interval(secs => 86400)
+      AND rate.bucket_start <= to_timestamp($3)
+      AND rate.bucket_start + make_interval(secs => rate.bucket_secs)
+            > to_timestamp($2)
+), bucket_values AS (
+    SELECT
+        source.client_id,
+        source.interface,
+        source.chart_start_unix,
+        source.effective_step,
+        sum(source.sample_count::BIGINT) AS merged_sample_count,
+        min(source.bucket_start) AS first_source_start,
+        max(source.terminal_values) AS terminal_values,
+        max(source.updated_at) AS merged_updated_at
+    FROM source
+    GROUP BY source.client_id, source.interface,
+             source.chart_start_unix, source.effective_step
+), bucketed AS MATERIALIZED (
+    SELECT
+        row.client_id,
+        row.interface,
+        row.chart_start_unix,
+        row.effective_step,
+        row.first_source_start,
+        row.merged_sample_count AS sample_count,
+        to_timestamp(row.terminal_values[1]) AS latest_observed_at,
+        row.terminal_values[4] AS rx_bytes_avg,
+        row.terminal_values[5] AS tx_bytes_avg,
+        row.terminal_values[6] AS rx_bytes_last,
+        row.terminal_values[7] AS tx_bytes_last,
+        row.terminal_values[8] AS rx_counter_epoch,
+        row.terminal_values[9] AS tx_counter_epoch,
+        row.merged_updated_at AS updated_at
+    FROM bucket_values row
+), ranked_points AS MATERIALIZED (
+    SELECT point.*,
+           row_number() OVER (
+                PARTITION BY point.client_id, point.interface
+                ORDER BY point.chart_start_unix DESC,
+                         point.effective_step DESC
+           ) AS recency_rank
+    FROM bucketed point
+), capped_points AS MATERIALIZED (
+    SELECT point.* FROM ranked_points point
+    WHERE point.recency_rank <= $5
+), dropped_predecessors AS MATERIALIZED (
+    SELECT point.client_id, point.interface,
+           point.chart_start_unix, point.effective_step,
+           point.sample_count, point.latest_observed_at,
+           point.rx_bytes_avg, point.tx_bytes_avg,
+           point.rx_bytes_last, point.tx_bytes_last,
+           point.rx_counter_epoch, point.tx_counter_epoch, point.updated_at
+    FROM ranked_points point
+    WHERE point.recency_rank = $5 + 1
+), oldest_returned AS MATERIALIZED (
+    SELECT DISTINCT ON (point.client_id, point.interface)
+           point.client_id, point.interface, point.first_source_start
+    FROM capped_points point
+    ORDER BY point.client_id, point.interface,
+             point.chart_start_unix, point.effective_step
+), missing_predecessor_keys AS MATERIALIZED (
+    SELECT oldest.*
+    FROM oldest_returned oldest
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM dropped_predecessors dropped
+        WHERE dropped.client_id = oldest.client_id
+          AND dropped.interface = oldest.interface
+    )
+), retained_predecessors AS MATERIALIZED (
+    SELECT
+        oldest.client_id,
+        oldest.interface,
+        NULL::BIGINT AS chart_start_unix,
+        $4::INTEGER AS effective_step,
+        predecessor.sample_count::BIGINT AS sample_count,
+        predecessor.latest_observed_at,
+        predecessor.rx_bytes_avg,
+        predecessor.tx_bytes_avg,
+        predecessor.rx_bytes_last,
+        predecessor.tx_bytes_last,
+        predecessor.rx_counter_epoch,
+        predecessor.tx_counter_epoch,
+        predecessor.updated_at
+    FROM missing_predecessor_keys oldest
+    CROSS JOIN LATERAL (
+        SELECT candidate.*
+        FROM (
             (
-                saturating_u64_to_i64(total),
-                saturating_u64_to_i64(available),
+                SELECT retained.bucket_start, retained.bucket_secs,
+                       retained.sample_count, retained.latest_observed_at,
+                       retained.rx_bytes_avg, retained.tx_bytes_avg,
+                       retained.rx_bytes_last, retained.tx_bytes_last,
+                       retained.rx_counter_epoch, retained.tx_counter_epoch,
+                       retained.updated_at, 1::SMALLINT AS source_priority
+                FROM telemetry_network_rates retained
+                WHERE retained.client_id = oldest.client_id
+                  AND retained.interface = oldest.interface
+                  AND retained.latest_observed_at < oldest.first_source_start
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM projected_suffix shadow
+                      WHERE shadow.client_id = retained.client_id
+                        AND shadow.interface = retained.interface
+                        AND shadow.bucket_secs = retained.bucket_secs
+                        AND shadow.bucket_start = retained.bucket_start
+                  )
+                ORDER BY retained.latest_observed_at DESC,
+                         retained.bucket_start DESC,
+                         retained.bucket_secs DESC
+                LIMIT 1
             )
-        })
-        .filter(|(total, _)| *total > 0);
-    let disk_used_ratio = disk.and_then(|(total, available)| used_ratio(total, available));
-    let network_rx = metrics.networks.iter().fold(0_u64, |total, network| {
-        total.saturating_add(network.rx_bytes)
-    });
-    let network_tx = metrics.networks.iter().fold(0_u64, |total, network| {
-        total.saturating_add(network.tx_bytes)
-    });
-    let cpu_usage = metrics.cpu.utilization_ratio;
-    let memory_total = saturating_u64_to_i64(metrics.memory.total_bytes);
-    let memory_available = saturating_u64_to_i64(metrics.memory.available_bytes);
-    let memory_used_ratio = used_ratio_or_zero(memory_total, memory_available);
-    let swap = match (
-        metrics.memory.swap_total_bytes,
-        metrics.memory.swap_available_bytes,
-    ) {
-        (None, None) => None,
-        (Some(total), Some(available)) if available <= total => Some((
-            saturating_u64_to_i64(total),
-            saturating_u64_to_i64(available),
-        )),
-        (Some(_), Some(_)) => anyhow::bail!(
-            "invalid raw telemetry payload for {} at {}: swap available exceeds total",
-            sample.client_id,
-            sample.observed_at
-        ),
-        _ => anyhow::bail!(
-            "invalid raw telemetry payload for {} at {}: swap evidence is one-sided",
-            sample.client_id,
-            sample.observed_at
-        ),
-    };
-    let positive_swap = swap.filter(|(total, _)| *total > 0);
 
-    Ok(TelemetryRollupView {
-        client_id: sample.client_id,
-        bucket_start: sample.observed_at.clone(),
-        bucket_secs: 60,
-        sample_count: 1,
-        cpu_usage_sample_count: i32::from(cpu_usage.is_some()),
-        cpu_usage_avg: cpu_usage,
-        cpu_usage_max: cpu_usage,
-        cpu_cores_max: i32::from(metrics.cpu.cores),
-        cpu_load_1_avg: metrics.cpu.load.one,
-        cpu_load_1_max: metrics.cpu.load.one,
-        cpu_load_5_avg: metrics.cpu.load.five,
-        cpu_load_5_max: metrics.cpu.load.five,
-        cpu_load_15_avg: metrics.cpu.load.fifteen,
-        cpu_load_15_max: metrics.cpu.load.fifteen,
-        memory_total_bytes_max: memory_total,
-        memory_available_bytes_avg: memory_available,
-        memory_available_bytes_min: memory_available,
-        memory_used_ratio_avg: memory_used_ratio,
-        memory_used_ratio_max: memory_used_ratio,
-        swap_sample_count: i32::from(positive_swap.is_some()),
-        swap_total_bytes_max: swap.map(|(total, _)| total),
-        swap_available_bytes_avg: swap.map(|(_, available)| available),
-        swap_available_bytes_min: swap.map(|(_, available)| available),
-        swap_used_ratio_avg: positive_swap
-            .and_then(|(total, available)| used_ratio(total, available)),
-        swap_used_ratio_max: positive_swap
-            .and_then(|(total, available)| used_ratio(total, available)),
-        disk_sample_count: i32::from(disk.is_some()),
-        disk_total_bytes_max: disk.map_or(0, |(total, _)| total),
-        disk_available_bytes_avg: disk.map_or(0, |(_, available)| available),
-        disk_available_bytes_min: disk.map_or(0, |(_, available)| available),
-        disk_used_ratio_avg: disk_used_ratio.unwrap_or(0.0),
-        disk_used_ratio_max: disk_used_ratio.unwrap_or(0.0),
-        network_rx_bytes_max: saturating_u64_to_i64(network_rx),
-        network_tx_bytes_max: saturating_u64_to_i64(network_tx),
-        connections_sample_count: i32::from(metrics.connections.is_some()),
-        tcp_sockets_latest: metrics
-            .connections
-            .as_ref()
-            .map(|connections| saturating_u64_to_i64(connections.tcp)),
-        udp_sockets_latest: metrics
-            .connections
-            .as_ref()
-            .map(|connections| saturating_u64_to_i64(connections.udp)),
-        connections_observed_at: metrics
-            .connections
-            .as_ref()
-            .map(|_| sample.observed_at.clone()),
-        latest_observed_at: sample.observed_at.clone(),
-        updated_at: sample.observed_at,
-    })
-}
+            UNION ALL
 
-fn saturating_u64_to_i64(value: u64) -> i64 {
-    value.min(i64::MAX as u64) as i64
-}
+            (
+                SELECT sample.observed_at AS bucket_start,
+                       60::INTEGER AS bucket_secs,
+                       sample.sample_count, sample.latest_observed_at,
+                       round(
+                           sample.rx_bytes_sum / sample.sample_count::NUMERIC
+                       )::BIGINT AS rx_bytes_avg,
+                       round(
+                           sample.tx_bytes_sum / sample.sample_count::NUMERIC
+                       )::BIGINT AS tx_bytes_avg,
+                       sample.rx_bytes AS rx_bytes_last,
+                       sample.tx_bytes AS tx_bytes_last,
+                       sample.rx_counter_epoch, sample.tx_counter_epoch,
+                       sample.updated_at, 2::SMALLINT AS source_priority
+                FROM traffic_counter_streams stream
+                JOIN traffic_counter_samples sample
+                  ON sample.client_id = stream.client_id
+                 AND sample.source_kind = stream.source_kind
+                 AND sample.interface = stream.interface
+                WHERE stream.client_id = oldest.client_id
+                  AND stream.source_kind = 'host'
+                  AND stream.interface = oldest.interface
+                  AND stream.first_unpromoted_observed_at IS NOT NULL
+                  AND sample.observed_at >=
+                      stream.first_unpromoted_observed_at
+                  AND NOT sample.inbound_promoted
+                  AND sample.latest_observed_at < oldest.first_source_start
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM projected_suffix shadow
+                      WHERE shadow.client_id = sample.client_id
+                        AND shadow.interface = sample.interface
+                        AND shadow.bucket_start = sample.observed_at
+                  )
+                ORDER BY sample.observed_at DESC
+                LIMIT 1
+            )
 
-fn used_ratio(total: i64, available: i64) -> Option<f64> {
-    (total > 0)
-        .then(|| (total.saturating_sub(available).max(0) as f64 / total as f64).clamp(0.0, 1.0))
-}
+            UNION ALL
 
-fn used_ratio_or_zero(total: i64, available: i64) -> f64 {
-    used_ratio(total, available).unwrap_or(0.0)
-}
+            (
+                SELECT suffix.bucket_start, suffix.bucket_secs,
+                       suffix.sample_count, suffix.latest_observed_at,
+                       suffix.rx_bytes_avg, suffix.tx_bytes_avg,
+                       suffix.rx_bytes_last, suffix.tx_bytes_last,
+                       suffix.rx_counter_epoch, suffix.tx_counter_epoch,
+                       suffix.updated_at, 3::SMALLINT AS source_priority
+                FROM projected_suffix suffix
+                WHERE suffix.client_id = oldest.client_id
+                  AND suffix.interface = oldest.interface
+                  AND suffix.latest_observed_at < oldest.first_source_start
+                ORDER BY suffix.latest_observed_at DESC,
+                         suffix.bucket_start DESC
+                LIMIT 1
+            )
+        ) candidate
+        ORDER BY candidate.latest_observed_at DESC,
+                 candidate.bucket_start DESC,
+                 candidate.bucket_secs DESC,
+                 candidate.source_priority ASC
+        LIMIT 1
+    ) predecessor
+), predecessor_interfaces AS MATERIALIZED (
+    SELECT predecessor.*
+    FROM dropped_predecessors predecessor
+    UNION ALL
+    SELECT predecessor.*
+    FROM retained_predecessors predecessor
+), interface_states AS MATERIALIZED (
+    SELECT point.client_id, 'point'::TEXT AS row_kind,
+           point.chart_start_unix, point.effective_step,
+           point.interface, point.sample_count, point.latest_observed_at,
+           point.rx_bytes_avg, point.tx_bytes_avg,
+           point.rx_bytes_last, point.tx_bytes_last,
+           point.rx_counter_epoch, point.tx_counter_epoch, point.updated_at
+    FROM capped_points point
+    UNION ALL
+    SELECT predecessor.client_id, 'predecessor'::TEXT,
+           predecessor.chart_start_unix, predecessor.effective_step,
+           predecessor.interface, predecessor.sample_count,
+           predecessor.latest_observed_at,
+           predecessor.rx_bytes_avg, predecessor.tx_bytes_avg,
+           predecessor.rx_bytes_last, predecessor.tx_bytes_last,
+           predecessor.rx_counter_epoch, predecessor.tx_counter_epoch,
+           predecessor.updated_at
+    FROM predecessor_interfaces predecessor
+), ordered AS MATERIALIZED (
+    SELECT state.*,
+           lag(state.latest_observed_at) OVER stream AS previous_observed_at,
+           lag(state.rx_bytes_last) OVER stream AS previous_rx_bytes,
+           lag(state.tx_bytes_last) OVER stream AS previous_tx_bytes,
+           lag(state.rx_counter_epoch) OVER stream AS previous_rx_epoch,
+           lag(state.tx_counter_epoch) OVER stream AS previous_tx_epoch
+    FROM interface_states state
+    WINDOW stream AS (
+        PARTITION BY state.client_id, state.interface
+        ORDER BY state.latest_observed_at,
+                 CASE state.row_kind WHEN 'predecessor' THEN 0 ELSE 1 END,
+                 state.chart_start_unix NULLS FIRST,
+                 state.effective_step
+    )
+), derived AS MATERIALIZED (
+    SELECT state.*,
+           state.rx_bytes_last - state.previous_rx_bytes AS rx_bytes_delta,
+           state.tx_bytes_last - state.previous_tx_bytes AS tx_bytes_delta,
+           (state.rx_bytes_last - state.previous_rx_bytes)::DOUBLE PRECISION * 8.0
+               / GREATEST(
+                    extract(epoch FROM (
+                        state.latest_observed_at - state.previous_observed_at
+                    )),
+                    1.0
+                 )::DOUBLE PRECISION AS rx_bps_avg,
+           (state.tx_bytes_last - state.previous_tx_bytes)::DOUBLE PRECISION * 8.0
+               / GREATEST(
+                    extract(epoch FROM (
+                        state.latest_observed_at - state.previous_observed_at
+                    )),
+                    1.0
+                 )::DOUBLE PRECISION AS tx_bps_avg
+    FROM ordered state
+    WHERE state.row_kind = 'point'
+      AND state.previous_observed_at IS NOT NULL
+      AND state.latest_observed_at > state.previous_observed_at
+      AND state.rx_counter_epoch = state.previous_rx_epoch
+      AND state.tx_counter_epoch = state.previous_tx_epoch
+      AND state.rx_bytes_last >= state.previous_rx_bytes
+      AND state.tx_bytes_last >= state.previous_tx_bytes
+), output AS MATERIALIZED (
+    SELECT requested.client_id, FALSE AS has_point,
+           NULL::TEXT AS interface, NULL::BIGINT AS chart_start_unix,
+           $4::INTEGER AS effective_step,
+           NULL::BIGINT AS sample_count,
+           NULL::BIGINT AS rx_bytes_avg, NULL::BIGINT AS tx_bytes_avg,
+           NULL::BIGINT AS rx_bytes_last, NULL::BIGINT AS tx_bytes_last,
+           NULL::BIGINT AS rx_counter_epoch, NULL::BIGINT AS tx_counter_epoch,
+           NULL::BIGINT AS rx_bytes_delta, NULL::BIGINT AS tx_bytes_delta,
+           NULL::DOUBLE PRECISION AS rx_bps_avg,
+           NULL::DOUBLE PRECISION AS tx_bps_avg,
+           NULL::TIMESTAMPTZ AS latest_observed_at,
+           NULL::TIMESTAMPTZ AS updated_at
+    FROM requested
+    UNION ALL
+    SELECT derived.client_id, TRUE, derived.interface,
+           derived.chart_start_unix, derived.effective_step,
+           derived.sample_count, derived.rx_bytes_avg, derived.tx_bytes_avg,
+           derived.rx_bytes_last, derived.tx_bytes_last,
+           derived.rx_counter_epoch, derived.tx_counter_epoch,
+           derived.rx_bytes_delta, derived.tx_bytes_delta,
+           derived.rx_bps_avg, derived.tx_bps_avg,
+           derived.latest_observed_at, derived.updated_at
+    FROM derived
+)
+SELECT output.client_id, output.has_point, output.interface,
+       CASE WHEN output.has_point
+            THEN to_timestamp(output.chart_start_unix)::TEXT
+       END AS bucket_start,
+       output.effective_step AS bucket_secs,
+       CASE WHEN output.has_point
+            THEN LEAST(output.sample_count, 2147483647)::INTEGER
+       END AS sample_count,
+       output.rx_bytes_avg, output.tx_bytes_avg,
+       output.rx_bytes_last, output.tx_bytes_last,
+       output.rx_counter_epoch, output.tx_counter_epoch,
+       output.rx_bytes_delta, output.tx_bytes_delta,
+       output.rx_bps_avg, output.tx_bps_avg,
+       CASE WHEN output.has_point
+            THEN output.latest_observed_at::TEXT
+       END AS latest_observed_at,
+       CASE WHEN output.has_point
+            THEN output.updated_at::TEXT
+       END AS updated_at
+FROM output CROSS JOIN ready
+WHERE ready.value
+ORDER BY output.chart_start_unix ASC NULLS FIRST,
+         output.client_id, output.interface
+"#;
 
 impl Repository {
     pub(crate) async fn raw_telemetry_covers_range_start(
@@ -266,92 +1802,12 @@ impl Repository {
             return Ok(true);
         }
         match self {
-            Self::Memory(memory) => {
-                let samples = memory.telemetry_samples.read().await;
-                let resource_rollups = memory.telemetry_rollups.read().await;
-                let network_rollups = memory.telemetry_network_rates.read().await;
-                let ping_rollups = memory.telemetry_ping_rollups.read().await;
-                let traffic_samples = memory.traffic_counter_samples.read().await;
-                Ok(client_ids.iter().all(|client_id| {
-                    let raw_start = samples
-                        .iter()
-                        .filter(|row| row.client_id == *client_id)
-                        .filter_map(|row| parse_timestamp_unix(&row.observed_at))
-                        .min();
-                    let minute_start = resource_rollups
-                        .iter()
-                        .filter(|row| row.client_id == *client_id)
-                        .filter_map(|row| parse_timestamp_unix(&row.bucket_start))
-                        .chain(
-                            network_rollups
-                                .iter()
-                                .filter(|row| row.client_id == *client_id)
-                                .filter_map(|row| parse_timestamp_unix(&row.bucket_start)),
-                        )
-                        .chain(
-                            ping_rollups
-                                .iter()
-                                .filter(|row| row.client_id == *client_id)
-                                .filter_map(|row| parse_timestamp_unix(&row.bucket_start)),
-                        )
-                        .chain(
-                            traffic_samples
-                                .iter()
-                                .filter(|row| row.client_id == *client_id)
-                                .filter_map(|row| u64::try_from(row.observed_unix).ok()),
-                        )
-                        .min();
-                    minute_start.is_none_or(|minute_start| {
-                        raw_start.is_some_and(|raw_start| raw_start <= minute_start.max(start_unix))
-                    })
-                }))
-            }
             Self::Postgres(pool) => {
-                let covers = sqlx::query_scalar::<_, bool>(
-                    r#"
-                    WITH requested AS (
-                        SELECT unnest($1::TEXT[]) AS client_id
-                    ), minute_bounds AS (
-                        SELECT client_id, min(bucket_start) AS minute_start
-                        FROM (
-                            SELECT client_id, bucket_start FROM telemetry_rollups
-                            UNION ALL
-                            SELECT client_id, bucket_start FROM telemetry_network_rates
-                            UNION ALL
-                            SELECT series.client_id, rollup.bucket_start
-                            FROM telemetry_ping_rollups rollup
-                            JOIN telemetry_ping_series series ON series.id = rollup.series_id
-                            UNION ALL
-                            SELECT client_id, observed_at AS bucket_start
-                            FROM traffic_counter_samples
-                        ) retained
-                        WHERE client_id = ANY($1::TEXT[])
-                        GROUP BY client_id
-                    ), raw_bounds AS (
-                        SELECT client_id, min(observed_at) AS raw_start
-                        FROM telemetry_samples
-                        WHERE client_id = ANY($1::TEXT[])
-                        GROUP BY client_id
-                    )
-                    SELECT COALESCE(bool_and(
-                        minute_bounds.minute_start IS NULL
-                        OR (
-                            raw_bounds.raw_start IS NOT NULL
-                            AND raw_bounds.raw_start <= GREATEST(
-                                minute_bounds.minute_start,
-                                to_timestamp($2)
-                            )
-                        )
-                    ), TRUE)
-                    FROM requested
-                    LEFT JOIN minute_bounds USING (client_id)
-                    LEFT JOIN raw_bounds USING (client_id)
-                    "#,
-                )
-                .bind(client_ids)
-                .bind(start_unix as i64)
-                .fetch_one(pool)
-                .await?;
+                let covers = sqlx::query_scalar::<_, bool>(RAW_TELEMETRY_COVERS_RANGE_START_SQL)
+                    .bind(client_ids)
+                    .bind(start_unix as i64)
+                    .fetch_one(pool)
+                    .await?;
                 Ok(covers)
             }
         }
@@ -366,74 +1822,222 @@ impl Repository {
         visible_only: bool,
     ) -> Result<Vec<TelemetrySampleView>> {
         match self {
-            Self::Memory(memory) => {
-                let suspended_clients = if visible_only {
-                    memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|agent| agent.status == "suspended")
-                        .map(|agent| agent.id.clone())
-                        .collect::<HashSet<_>>()
-                } else {
-                    HashSet::new()
-                };
-                let hidden = memory.hidden_clients.read().await;
-                let mut rows = memory
-                    .telemetry_samples
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|sample| {
-                        (!visible_only
-                            || (!hidden.contains(&sample.client_id)
-                                && !suspended_clients.contains(&sample.client_id)))
-                            && client_id.is_none_or(|client_id| sample.client_id == client_id)
-                            && timestamp_in_bounds(&sample.observed_at, start_unix, end_unix)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    compare_timestamps_desc(&left.observed_at, &right.observed_at)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    SELECT
-                        id,
-                        client_id,
-                        observed_at::text AS observed_at,
-                        cpu_load_1,
-                        memory_total_bytes,
-                        memory_available_bytes,
-                        payload
-                    FROM telemetry_samples
-                    WHERE
-                        ($1::TEXT IS NULL OR client_id = $1)
-                        AND observed_at >= COALESCE(
-                            to_timestamp($2::double precision),
-                            '-infinity'::timestamptz
-                        )
-                        AND observed_at <= COALESCE(
-                            to_timestamp($3::double precision),
-                            'infinity'::timestamptz
-                        )
-                        AND (
-                            NOT $4
-                            OR EXISTS (
-                                SELECT 1 FROM visible_clients
-                                WHERE visible_clients.id = telemetry_samples.client_id
-                                  AND visible_clients.status <> 'suspended'
+                    WITH source_samples AS MATERIALIZED (
+                        SELECT
+                            sample.id,
+                            sample.client_id,
+                            sample.observed_at,
+                            sample.cpu_load_1,
+                            sample.memory_total_bytes,
+                            sample.memory_available_bytes,
+                            sample.network_admission_mask,
+                            sample.tunnel_admission_mask,
+                            public.telemetry_ordinal_admission_mask_is_exact(
+                                sample.network_admission_mask,
+                                CASE
+                                    WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
+                                    THEN jsonb_array_length(sample.payload -> 'networks')::BIGINT
+                                    ELSE 0
+                                END
+                            ) AS network_admission_mask_is_exact,
+                            public.telemetry_ordinal_admission_mask_is_exact(
+                                sample.tunnel_admission_mask,
+                                CASE
+                                    WHEN jsonb_typeof(sample.payload -> 'tunnels') = 'array'
+                                    THEN jsonb_array_length(sample.payload -> 'tunnels')::BIGINT
+                                    ELSE 0
+                                END
+                            ) AS tunnel_admission_mask_is_exact,
+                            sample.payload
+                        FROM telemetry_samples sample
+                        LEFT JOIN telemetry_projection_heads projection
+                          ON projection.client_id = sample.client_id
+                        WHERE
+                            ($1::TEXT IS NULL OR sample.client_id = $1)
+                            AND sample.observed_at >= COALESCE(
+                                to_timestamp($2::double precision),
+                                '-infinity'::timestamptz
                             )
+                            AND sample.observed_at <= COALESCE(
+                                to_timestamp($3::double precision),
+                                'infinity'::timestamptz
+                            )
+                            AND sample.accepted_seq <= projection.projected_seq
+                            AND (
+                                NOT $4
+                                OR EXISTS (
+                                    SELECT 1 FROM visible_clients
+                                    WHERE visible_clients.id = sample.client_id
+                                      AND visible_clients.status <> 'suspended'
+                                )
+                            )
+                        ORDER BY sample.observed_at DESC, sample.id DESC
+                        LIMIT $5
+                    ), interface_candidates AS MATERIALIZED (
+                        SELECT DISTINCT
+                            sample.client_id,
+                            'host'::TEXT AS source_kind,
+                            network.value ->> 'interface' AS interface
+                        FROM source_samples sample
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
+                                THEN sample.payload -> 'networks'
+                                ELSE '[]'::JSONB
+                            END
+                        ) WITH ORDINALITY AS network(value, ordinality)
+                        WHERE sample.network_admission_mask_is_exact
+                          AND CASE
+                                  WHEN network.ordinality <=
+                                       octet_length(
+                                           sample.network_admission_mask
+                                       )::bigint * 8
+                                  THEN get_bit(
+                                      sample.network_admission_mask,
+                                      (network.ordinality - 1)::integer
+                                  ) = 1
+                                  ELSE FALSE
+                              END
+                          AND octet_length(network.value ->> 'interface')
+                              BETWEEN 1 AND 128
+
+                        UNION
+
+                        SELECT DISTINCT
+                            sample.client_id,
+                            'tunnel'::TEXT AS source_kind,
+                            tunnel.value ->> 'interface' AS interface
+                        FROM source_samples sample
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(sample.payload -> 'tunnels') = 'array'
+                                THEN sample.payload -> 'tunnels'
+                                ELSE '[]'::JSONB
+                            END
+                        ) WITH ORDINALITY AS tunnel(value, ordinality)
+                        WHERE sample.tunnel_admission_mask_is_exact
+                          AND CASE
+                                  WHEN tunnel.ordinality <=
+                                       octet_length(
+                                           sample.tunnel_admission_mask
+                                       )::bigint * 8
+                                  THEN get_bit(
+                                      sample.tunnel_admission_mask,
+                                      (tunnel.ordinality - 1)::integer
+                                  ) = 1
+                                  ELSE FALSE
+                              END
+                          AND octet_length(tunnel.value ->> 'interface')
+                              BETWEEN 1 AND 128
+                    ), resolved_interface_policies AS MATERIALIZED (
+                        SELECT policy.*
+                        FROM public.resolve_telemetry_interface_policies(ARRAY(
+                            SELECT DISTINCT candidate.client_id
+                            FROM interface_candidates candidate
+                            ORDER BY candidate.client_id
+                        )) policy
+                    ), admitted_interfaces AS MATERIALIZED (
+                        SELECT candidate.client_id,
+                               candidate.source_kind,
+                               candidate.interface
+                        FROM interface_candidates candidate
+                        JOIN resolved_interface_policies policy
+                          ON policy.client_id = candidate.client_id
+                        WHERE public.telemetry_interface_is_admitted_resolved(
+                            policy.admission_mode,
+                            policy.interface_patterns,
+                            policy.managed_tunnel_interfaces,
+                            candidate.source_kind,
+                            candidate.interface
                         )
-                    ORDER BY observed_at DESC, id DESC
-                    LIMIT $5
+                    )
+                    SELECT
+                        sample.id,
+                        sample.client_id,
+                        sample.observed_at::text AS observed_at,
+                        sample.cpu_load_1,
+                        sample.memory_total_bytes,
+                        sample.memory_available_bytes,
+                        jsonb_set(
+                            jsonb_set(
+                                sample.payload,
+                                '{networks}',
+                                COALESCE((
+                                    SELECT jsonb_agg(
+                                        network.value ORDER BY network.ordinality
+                                    )
+                                    FROM jsonb_array_elements(
+                                        CASE
+                                            WHEN jsonb_typeof(
+                                                sample.payload -> 'networks'
+                                            ) = 'array'
+                                            THEN sample.payload -> 'networks'
+                                            ELSE '[]'::JSONB
+                                        END
+                                    ) WITH ORDINALITY AS network(value, ordinality)
+                                    WHERE sample.network_admission_mask_is_exact
+                                      AND CASE
+                                              WHEN network.ordinality <=
+                                                   octet_length(
+                                                       sample.network_admission_mask
+                                                   )::bigint * 8
+                                              THEN get_bit(
+                                                  sample.network_admission_mask,
+                                                  (network.ordinality - 1)::integer
+                                              ) = 1
+                                              ELSE FALSE
+                                          END
+                                      AND EXISTS (
+                                        SELECT 1
+                                        FROM admitted_interfaces admitted
+                                        WHERE admitted.client_id = sample.client_id
+                                          AND admitted.source_kind = 'host'
+                                          AND admitted.interface =
+                                              network.value ->> 'interface'
+                                    )
+                                ), '[]'::JSONB)
+                            ),
+                            '{tunnels}',
+                            COALESCE((
+                                SELECT jsonb_agg(
+                                    tunnel.value ORDER BY tunnel.ordinality
+                                )
+                                FROM jsonb_array_elements(
+                                    CASE
+                                        WHEN jsonb_typeof(
+                                            sample.payload -> 'tunnels'
+                                        ) = 'array'
+                                        THEN sample.payload -> 'tunnels'
+                                        ELSE '[]'::JSONB
+                                    END
+                                ) WITH ORDINALITY AS tunnel(value, ordinality)
+                                WHERE sample.tunnel_admission_mask_is_exact
+                                  AND CASE
+                                          WHEN tunnel.ordinality <=
+                                               octet_length(
+                                                   sample.tunnel_admission_mask
+                                               )::bigint * 8
+                                          THEN get_bit(
+                                              sample.tunnel_admission_mask,
+                                              (tunnel.ordinality - 1)::integer
+                                          ) = 1
+                                          ELSE FALSE
+                                      END
+                                  AND EXISTS (
+                                    SELECT 1
+                                    FROM admitted_interfaces admitted
+                                    WHERE admitted.client_id = sample.client_id
+                                      AND admitted.source_kind = 'tunnel'
+                                      AND admitted.interface =
+                                          tunnel.value ->> 'interface'
+                                )
+                            ), '[]'::JSONB)
+                        ) AS payload
+                    FROM source_samples sample
+                    ORDER BY sample.observed_at DESC, sample.id DESC
                     "#,
                 )
                 .bind(client_id)
@@ -468,240 +2072,69 @@ impl Repository {
         step_secs: i32,
         client_ids: &[String],
     ) -> Result<Vec<TelemetryRollupView>> {
+        Ok(self
+            .query_telemetry_resource_history(
+                points_per_client,
+                start_unix,
+                end_unix,
+                step_secs,
+                client_ids,
+                false,
+            )
+            .await?
+            .rows)
+    }
+
+    /// Reads recent and retained resource history through its single canonical
+    /// owner. `require_projection_ready` is presentation policy only: retained
+    /// detail ranges fail closed until their dashboard head exists, while cards
+    /// and recent detail ranges keep returning the latest complete canonical
+    /// points and expose lag through their existing freshness state.
+    async fn query_telemetry_resource_history(
+        &self,
+        points_per_client: i64,
+        start_unix: u64,
+        end_unix: u64,
+        step_secs: i32,
+        client_ids: &[String],
+        require_projection_ready: bool,
+    ) -> Result<TelemetryResourceHistoryProjection> {
+        if client_ids.is_empty() {
+            return Ok(TelemetryResourceHistoryProjection {
+                rows: Vec::new(),
+                complete: true,
+            });
+        }
         let points_per_client = points_per_client.clamp(2, 1_440) as usize;
         let step_secs = normalized_dashboard_step_secs(step_secs);
-        if let Self::Postgres(pool) = self {
-            let rows = sqlx::query(
-                r#"
-                WITH expanded AS (
-                    SELECT
-                        sample.client_id,
-                        -- Unix telemetry timestamps are bounded well below
-                        -- 2^53, so binary floating-point keeps every epoch
-                        -- second exact while avoiding the expensive arbitrary
-                        -- precision NUMERIC division on the cold read path.
-                        floor(
-                            extract(epoch FROM sample.observed_at)::double precision
-                                / $4::double precision
-                        )::bigint * $4::bigint AS chart_epoch,
-                        sample.observed_at,
-                        sample.cpu_utilization_ratio AS cpu_usage,
-                        sample.cpu_cores,
-                        sample.cpu_load_1,
-                        sample.cpu_load_5,
-                        sample.cpu_load_15,
-                        sample.memory_total_bytes,
-                        sample.memory_available_bytes,
-                        sample.swap_total_bytes,
-                        sample.swap_available_bytes,
-                        CASE
-                            WHEN sample.payload ->> 'disk_semantics'
-                                    = 'persistent_block_filesystems_v1'
-                                AND sample.payload ->> 'disk_collection_available' = 'true'
-                            THEN sample.disk_total_bytes
-                            ELSE NULL
-                        END AS disk_total_bytes,
-                        CASE
-                            WHEN sample.payload ->> 'disk_semantics'
-                                    = 'persistent_block_filesystems_v1'
-                                AND sample.payload ->> 'disk_collection_available' = 'true'
-                            THEN sample.disk_available_bytes
-                            ELSE NULL
-                        END AS disk_available_bytes,
-                        sample.network_rx_bytes,
-                        sample.network_tx_bytes,
-                        sample.tcp_sockets,
-                        sample.udp_sockets
-                    FROM telemetry_samples sample
-                    WHERE sample.client_id = ANY($1::TEXT[])
-                      AND sample.observed_at >= to_timestamp($2)
-                      AND sample.observed_at <= to_timestamp($3)
-                ), bucketed AS (
-                    SELECT
-                        client_id,
-                        chart_epoch,
-                        LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
-                        LEAST(count(cpu_usage)::bigint, 2147483647)::integer
-                            AS cpu_usage_sample_count,
-                        avg(cpu_usage ORDER BY observed_at)::double precision AS cpu_usage_avg,
-                        max(cpu_usage)::double precision AS cpu_usage_max,
-                        max(cpu_cores)::integer AS cpu_cores_max,
-                        avg(cpu_load_1 ORDER BY observed_at)::double precision AS cpu_load_1_avg,
-                        max(cpu_load_1)::double precision AS cpu_load_1_max,
-                        avg(cpu_load_5 ORDER BY observed_at)::double precision AS cpu_load_5_avg,
-                        max(cpu_load_5)::double precision AS cpu_load_5_max,
-                        avg(cpu_load_15 ORDER BY observed_at)::double precision AS cpu_load_15_avg,
-                        max(cpu_load_15)::double precision AS cpu_load_15_max,
-                        max(memory_total_bytes)::bigint AS memory_total_bytes_max,
-                        round(avg(memory_available_bytes::numeric))::bigint
-                            AS memory_available_bytes_avg,
-                        min(memory_available_bytes)::bigint AS memory_available_bytes_min,
-                        avg(CASE WHEN memory_total_bytes = 0 THEN 0::double precision
-                            ELSE (memory_total_bytes - memory_available_bytes)::double precision
-                                / memory_total_bytes::double precision
-                        END ORDER BY observed_at)::double precision AS memory_used_ratio_avg,
-                        max(CASE WHEN memory_total_bytes = 0 THEN 0::double precision
-                            ELSE (memory_total_bytes - memory_available_bytes)::double precision
-                                / memory_total_bytes::double precision
-                        END)::double precision AS memory_used_ratio_max,
-                        LEAST(
-                            count(*) FILTER (WHERE swap_total_bytes > 0),
-                            2147483647
-                        )::integer AS swap_sample_count,
-                        max(swap_total_bytes)::bigint AS swap_total_bytes_max,
-                        CASE
-                            WHEN max(swap_total_bytes) = 0 THEN 0
-                            ELSE round(avg(swap_available_bytes::numeric)
-                                FILTER (WHERE swap_total_bytes > 0))::bigint
-                        END AS swap_available_bytes_avg,
-                        CASE
-                            WHEN max(swap_total_bytes) = 0 THEN 0
-                            ELSE min(swap_available_bytes)
-                                FILTER (WHERE swap_total_bytes > 0)
-                        END::bigint AS swap_available_bytes_min,
-                        avg(CASE
-                            WHEN swap_total_bytes > 0
-                                THEN (swap_total_bytes - swap_available_bytes)::double precision
-                                / swap_total_bytes::double precision
-                            ELSE NULL
-                        END ORDER BY observed_at)::double precision AS swap_used_ratio_avg,
-                        max(CASE
-                            WHEN swap_total_bytes > 0
-                                THEN (swap_total_bytes - swap_available_bytes)::double precision
-                                / swap_total_bytes::double precision
-                            ELSE NULL
-                        END)::double precision AS swap_used_ratio_max,
-                        LEAST(
-                            count(*) FILTER (WHERE disk_total_bytes > 0),
-                            2147483647
-                        )::integer AS disk_sample_count,
-                        COALESCE(max(disk_total_bytes) FILTER (WHERE disk_total_bytes > 0), 0)::bigint
-                            AS disk_total_bytes_max,
-                        COALESCE(round(avg(disk_available_bytes::numeric)
-                            FILTER (WHERE disk_total_bytes > 0)), 0)::bigint
-                            AS disk_available_bytes_avg,
-                        COALESCE(min(disk_available_bytes)
-                            FILTER (WHERE disk_total_bytes > 0), 0)::bigint
-                            AS disk_available_bytes_min,
-                        COALESCE(avg(CASE WHEN disk_total_bytes > 0
-                            THEN (disk_total_bytes - disk_available_bytes)::double precision
-                                / disk_total_bytes::double precision
-                            ELSE NULL
-                        END ORDER BY observed_at), 0)::double precision AS disk_used_ratio_avg,
-                        COALESCE(max(CASE WHEN disk_total_bytes > 0
-                            THEN (disk_total_bytes - disk_available_bytes)::double precision
-                                / disk_total_bytes::double precision
-                            ELSE NULL
-                        END), 0)::double precision AS disk_used_ratio_max,
-                        max(network_rx_bytes)::bigint AS network_rx_bytes_max,
-                        max(network_tx_bytes)::bigint AS network_tx_bytes_max,
-                        LEAST(count(tcp_sockets)::bigint, 2147483647)::integer
-                            AS connections_sample_count,
-                        max(observed_at) FILTER (WHERE tcp_sockets IS NOT NULL)
-                            AS connections_observed_at,
-                        max(observed_at) AS latest_observed_at
-                    FROM expanded
-                    GROUP BY client_id, chart_epoch
-                ), latest_connections AS (
-                    SELECT DISTINCT ON (client_id, chart_epoch)
-                        client_id,
-                        chart_epoch,
-                        tcp_sockets AS tcp_sockets_latest,
-                        udp_sockets AS udp_sockets_latest
-                    FROM expanded
-                    WHERE tcp_sockets IS NOT NULL
-                    ORDER BY client_id, chart_epoch, observed_at DESC
-                ), complete AS (
-                    SELECT
-                        bucketed.*,
-                        latest_connections.tcp_sockets_latest,
-                        latest_connections.udp_sockets_latest
-                    FROM bucketed
-                    LEFT JOIN latest_connections
-                      ON latest_connections.client_id = bucketed.client_id
-                     AND latest_connections.chart_epoch = bucketed.chart_epoch
-                ), ranked AS (
-                    SELECT
-                        complete.*,
-                        row_number() OVER (
-                            PARTITION BY client_id ORDER BY chart_epoch DESC
-                        ) AS point_rank
-                    FROM complete
-                ), globally_bounded AS (
-                    SELECT *
-                    FROM ranked
-                    WHERE point_rank <= $5
-                    ORDER BY point_rank, chart_epoch DESC, client_id
-                    LIMIT $6
-                )
-                SELECT
-                    client_id,
-                    to_timestamp(chart_epoch)::text AS bucket_start,
-                    $4::integer AS bucket_secs,
-                    sample_count,
-                    cpu_usage_sample_count,
-                    cpu_usage_avg,
-                    cpu_usage_max,
-                    cpu_cores_max,
-                    cpu_load_1_avg,
-                    cpu_load_1_max,
-                    cpu_load_5_avg,
-                    cpu_load_5_max,
-                    cpu_load_15_avg,
-                    cpu_load_15_max,
-                    memory_total_bytes_max,
-                    memory_available_bytes_avg,
-                    memory_available_bytes_min,
-                    memory_used_ratio_avg,
-                    memory_used_ratio_max,
-                    swap_sample_count,
-                    swap_total_bytes_max,
-                    swap_available_bytes_avg,
-                    swap_available_bytes_min,
-                    swap_used_ratio_avg,
-                    swap_used_ratio_max,
-                    disk_sample_count,
-                    disk_total_bytes_max,
-                    disk_available_bytes_avg,
-                    disk_available_bytes_min,
-                    disk_used_ratio_avg,
-                    disk_used_ratio_max,
-                    network_rx_bytes_max,
-                    network_tx_bytes_max,
-                    connections_sample_count,
-                    tcp_sockets_latest,
-                    udp_sockets_latest,
-                    connections_observed_at::text AS connections_observed_at,
-                    latest_observed_at::text AS latest_observed_at,
-                    latest_observed_at::text AS updated_at
-                FROM globally_bounded
-                ORDER BY chart_epoch, client_id
-                "#,
-            )
+        let Self::Postgres(pool) = self;
+        let rows = sqlx::query(TELEMETRY_RESOURCE_HISTORY_PROJECTION_SQL)
             .bind(client_ids)
-            .bind(start_unix as i64)
-            .bind(end_unix as i64)
+            .bind(start_unix.min(i64::MAX as u64) as i64)
+            .bind(end_unix.min(i64::MAX as u64) as i64)
             .bind(step_secs)
             .bind(points_per_client as i64)
-            .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
+            .bind(require_projection_ready)
             .fetch_all(pool)
             .await?;
-            return rows.into_iter().map(telemetry_rollup_from_row).collect();
+        let requested_clients = client_ids.iter().collect::<HashSet<_>>().len();
+        let mut returned_clients = HashSet::with_capacity(requested_clients);
+        let mut history = Vec::with_capacity(requested_clients.saturating_mul(points_per_client));
+        for row in rows {
+            if row.try_get::<bool, _>("has_point")? {
+                history.push(telemetry_rollup_from_row(row)?);
+            } else {
+                returned_clients.insert(row.try_get::<String, _>("client_id")?);
+            }
         }
-        let samples = self
-            .list_raw_telemetry_samples_for_clients(client_ids, start_unix, end_unix, usize::MAX)
-            .await?;
-        let rows = samples
-            .into_iter()
-            .map(raw_sample_rollup)
-            .collect::<Result<Vec<_>>>()?;
-        let mut rows = aggregate_memory_telemetry_rollups(rows, step_secs);
-        retain_fair_rollup_points(
-            &mut rows,
-            points_per_client,
-            DASHBOARD_TELEMETRY_RESULT_LIMIT,
-        );
-        Ok(rows)
+        let complete = returned_clients.len() == requested_clients;
+        if !complete {
+            history.clear();
+        }
+        Ok(TelemetryResourceHistoryProjection {
+            rows: history,
+            complete,
+        })
     }
 
     #[cfg(test)]
@@ -732,925 +2165,170 @@ impl Repository {
         step_secs: i32,
         selection: &NetworkRateInterfaceSelection,
     ) -> Result<Vec<TelemetryNetworkRateView>> {
+        self.list_dashboard_raw_telemetry_network_rates_selected_with_output(
+            points_per_series,
+            start_unix,
+            end_unix,
+            step_secs,
+            selection,
+            false,
+        )
+        .await
+    }
+
+    /// Returns one selected-interface total per client and chart bucket.
+    ///
+    /// This is deliberately separate from the existing per-interface reader: the
+    /// Monitoring cards UI only graphs selected totals, while other API callers
+    /// retain the existing interface-level response by default.
+    pub(crate) async fn list_monitoring_card_raw_network_history_selected(
+        &self,
+        points_per_client: i64,
+        start_unix: u64,
+        end_unix: u64,
+        step_secs: i32,
+        selection: &NetworkRateInterfaceSelection,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
+        self.list_dashboard_raw_telemetry_network_rates_selected_with_output(
+            points_per_client.clamp(2, 16),
+            start_unix,
+            end_unix,
+            step_secs,
+            selection,
+            true,
+        )
+        .await
+    }
+
+    async fn list_dashboard_raw_telemetry_network_rates_selected_with_output(
+        &self,
+        points_per_series: i64,
+        start_unix: u64,
+        end_unix: u64,
+        step_secs: i32,
+        selection: &NetworkRateInterfaceSelection,
+        aggregate_selected_interfaces: bool,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
         if selection.is_empty() {
             return Ok(Vec::new());
         }
-        let client_ids = selection.client_ids();
-        let (all_client_ids, exact_client_ids, exact_interfaces) = selection.query_parts();
-        let points_per_series = points_per_series.clamp(2, 1_440) as usize;
-        let step_secs = normalized_dashboard_step_secs(step_secs);
-        /*
-         * Include one maximum telemetry interval before the visible range so
-         * the first visible counter delta has an explicit baseline.
-         */
-        let query_start = start_unix.saturating_sub(3_600);
-        if let Self::Postgres(pool) = self {
-            let rows = sqlx::query(
-                r#"
-                -- The selection model is disjoint: a client is either
-                -- unrestricted or represented by exact interfaces.  Keep the
-                -- branches separate so the exact-interface branch can use
-                -- telemetry_counter_facts_client_source_interface_time_idx;
-                -- a single OR predicate makes PostgreSQL fall back to the
-                -- broader client/source/time index for both cases.
-                WITH expanded AS (
-                    SELECT
-                        fact.sample_id,
-                        fact.client_id,
-                        fact.interface,
-                        extract(epoch FROM fact.observed_at)::bigint AS sample_epoch,
-                        fact.observed_at,
-                        fact.ordinal,
-                        fact.rx_bytes,
-                        fact.tx_bytes
-                    FROM telemetry_counter_facts fact
-                    WHERE fact.client_id = ANY($1::TEXT[])
-                      AND fact.client_id = ANY($10::TEXT[])
-                      AND fact.source_kind = 'host'
-                      AND fact.observed_at >= to_timestamp($2)
-                      AND fact.observed_at <= to_timestamp($3)
-                      AND length(fact.interface) BETWEEN 1 AND 128
-                    UNION ALL
-                    SELECT
-                        fact.sample_id,
-                        fact.client_id,
-                        fact.interface,
-                        extract(epoch FROM fact.observed_at)::bigint AS sample_epoch,
-                        fact.observed_at,
-                        fact.ordinal,
-                        fact.rx_bytes,
-                        fact.tx_bytes
-                    FROM UNNEST($8::TEXT[], $9::TEXT[])
-                        AS selected(client_id, interface)
-                    JOIN telemetry_counter_facts fact
-                      ON fact.client_id = selected.client_id
-                     AND fact.interface = selected.interface
-                     AND fact.source_kind = 'host'
-                    WHERE fact.observed_at >= to_timestamp($2)
-                      AND fact.observed_at <= to_timestamp($3)
-                      AND length(fact.interface) BETWEEN 1 AND 128
-                ), sequenced AS (
-                    SELECT
-                        expanded.*,
-                        lag(rx_bytes) OVER samples AS previous_rx_bytes,
-                        lag(tx_bytes) OVER samples AS previous_tx_bytes
-                    FROM expanded
-                    WINDOW samples AS (
-                        PARTITION BY client_id, interface
-                        ORDER BY sample_epoch, observed_at, sample_id, ordinal
-                    )
-                ), marked AS (
-                    SELECT
-                        sequenced.*,
-                        sum(CASE
-                            WHEN previous_rx_bytes IS NOT NULL
-                                AND rx_bytes < previous_rx_bytes
-                            THEN 1 ELSE 0
-                        END) OVER samples AS rx_counter_epoch,
-                        sum(CASE
-                            WHEN previous_tx_bytes IS NOT NULL
-                                AND tx_bytes < previous_tx_bytes
-                            THEN 1 ELSE 0
-                        END) OVER samples AS tx_counter_epoch
-                    FROM sequenced
-                    WINDOW samples AS (
-                        PARTITION BY client_id, interface
-                        ORDER BY sample_epoch, observed_at, sample_id, ordinal
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                    )
-                ), visible_bucketed AS (
-                    SELECT
-                        client_id,
-                        interface,
-                        floor(sample_epoch::double precision / $4::double precision)::bigint
-                            * $4::bigint AS chart_epoch,
-                        min(sample_epoch)::bigint AS first_sample_epoch,
-                        max(sample_epoch)::bigint AS effective_epoch,
-                        LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
-                        (array_agg(rx_bytes ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
-                            AS rx_bytes,
-                        (array_agg(tx_bytes ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
-                            AS tx_bytes,
-                        (array_agg(rx_counter_epoch ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
-                            AS rx_counter_epoch,
-                        (array_agg(tx_counter_epoch ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
-                            AS tx_counter_epoch,
-                        max(observed_at) AS updated_at
-                    FROM marked
-                    WHERE sample_epoch >= $5
-                    GROUP BY client_id, interface, chart_epoch
-                ), series_start AS (
-                    SELECT
-                        client_id,
-                        interface,
-                        min(first_sample_epoch)::bigint AS first_effective_epoch,
-                        min(chart_epoch)::bigint AS first_chart_epoch
-                    FROM visible_bucketed
-                    GROUP BY client_id, interface
-                ), preceding AS (
-                    SELECT
-                        series_start.client_id,
-                        series_start.interface,
-                        series_start.first_chart_epoch - $4::bigint AS chart_epoch,
-                        baseline.sample_epoch AS effective_epoch,
-                        0::integer AS sample_count,
-                        baseline.rx_bytes,
-                        baseline.tx_bytes,
-                        baseline.rx_counter_epoch,
-                        baseline.tx_counter_epoch,
-                        baseline.observed_at AS updated_at,
-                        FALSE AS visible
-                    FROM series_start
-                    JOIN LATERAL (
-                        SELECT
-                            sample_epoch,
-                            rx_bytes,
-                            tx_bytes,
-                            rx_counter_epoch,
-                            tx_counter_epoch,
-                            observed_at
-                        FROM marked candidate
-                        WHERE candidate.client_id = series_start.client_id
-                          AND candidate.interface = series_start.interface
-                          AND candidate.sample_epoch < series_start.first_effective_epoch
-                        ORDER BY candidate.sample_epoch DESC, candidate.observed_at DESC
-                        LIMIT 1
-                    ) baseline ON TRUE
-                ), combined AS (
-                    SELECT
-                        client_id,
-                        interface,
-                        chart_epoch,
-                        effective_epoch,
-                        sample_count,
-                        rx_bytes,
-                        tx_bytes,
-                        rx_counter_epoch,
-                        tx_counter_epoch,
-                        updated_at,
-                        TRUE AS visible
-                    FROM visible_bucketed
-                    UNION ALL
-                    SELECT * FROM preceding
-                ), derived AS (
-                    SELECT
-                        combined.*,
-                        lag(effective_epoch) OVER series AS previous_effective_epoch,
-                        lag(rx_bytes) OVER series AS previous_rx_bytes,
-                        lag(tx_bytes) OVER series AS previous_tx_bytes,
-                        lag(rx_counter_epoch) OVER series AS previous_rx_counter_epoch,
-                        lag(tx_counter_epoch) OVER series AS previous_tx_counter_epoch
-                    FROM combined
-                    WINDOW series AS (
-                        PARTITION BY client_id, interface
-                        ORDER BY effective_epoch, chart_epoch
-                    )
-                ), bounded AS (
-                    SELECT
-                        client_id,
-                        interface,
-                        chart_epoch,
-                        effective_epoch,
-                        sample_count,
-                        rx_bytes,
-                        tx_bytes,
-                        rx_counter_epoch,
-                        tx_counter_epoch,
-                        rx_bytes - previous_rx_bytes AS rx_delta,
-                        tx_bytes - previous_tx_bytes AS tx_delta,
-                        (
-                            (rx_bytes - previous_rx_bytes) * 8
-                        )::double precision / GREATEST(
-                            effective_epoch - previous_effective_epoch,
-                            1
-                        )::double precision AS rx_bps,
-                        (
-                            (tx_bytes - previous_tx_bytes) * 8
-                        )::double precision / GREATEST(
-                            effective_epoch - previous_effective_epoch,
-                            1
-                        )::double precision AS tx_bps,
-                        updated_at
-                    FROM derived
-                    WHERE visible
-                      AND previous_effective_epoch IS NOT NULL
-                      AND rx_counter_epoch = previous_rx_counter_epoch
-                      AND tx_counter_epoch = previous_tx_counter_epoch
-                      AND rx_bytes >= previous_rx_bytes
-                      AND tx_bytes >= previous_tx_bytes
-                ), ranked AS (
-                    SELECT
-                        bounded.*,
-                        row_number() OVER (
-                            PARTITION BY client_id, interface ORDER BY chart_epoch DESC
-                        ) AS point_rank
-                    FROM bounded
-                ), globally_bounded AS (
-                    SELECT *
-                    FROM ranked
-                    WHERE point_rank <= $6
-                    ORDER BY point_rank, chart_epoch DESC, client_id, interface
-                    LIMIT $7
-                )
-                SELECT
-                    client_id,
-                    interface,
-                    to_timestamp(chart_epoch)::text AS bucket_start,
-                    LEAST(
-                        GREATEST(effective_epoch - chart_epoch + 60, 60),
-                        2147483647
-                    )::integer AS bucket_secs,
-                    sample_count,
-                    rx_bytes AS rx_bytes_avg,
-                    tx_bytes AS tx_bytes_avg,
-                    rx_bytes AS rx_bytes_last,
-                    tx_bytes AS tx_bytes_last,
-                    rx_counter_epoch,
-                    tx_counter_epoch,
-                    rx_delta AS rx_bytes_delta,
-                    tx_delta AS tx_bytes_delta,
-                    rx_bps AS rx_bps_avg,
-                    tx_bps AS tx_bps_avg,
-                    to_timestamp(effective_epoch)::text AS latest_observed_at,
-                    updated_at::text AS updated_at
-                FROM globally_bounded
-                ORDER BY chart_epoch, client_id, interface
-                "#,
-            )
-            .bind(&all_client_ids)
-            .bind(query_start as i64)
-            .bind(end_unix as i64)
-            .bind(step_secs)
-            .bind(start_unix as i64)
-            .bind(points_per_series as i64)
-            .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
-            .bind(&exact_client_ids)
-            .bind(&exact_interfaces)
-            .bind(&client_ids)
-            .fetch_all(pool)
-            .await?;
-            let rows = rows
-                .into_iter()
-                .map(telemetry_network_rate_from_row)
-                .collect::<Result<Vec<_>>>()?;
-            return Ok(project_network_rate_selection(rows, selection));
-        }
-        let samples = self
-            .list_raw_telemetry_samples_for_clients(&client_ids, query_start, end_unix, usize::MAX)
-            .await?;
-        let mut counters = Vec::new();
-        for sample in samples {
-            let metrics: AgentMetrics = serde_json::from_value(sample.payload.clone())
-                .with_context(|| {
-                    format!(
-                        "invalid raw telemetry payload for {} at {}",
-                        sample.client_id, sample.observed_at
-                    )
-                })?;
-            for network in metrics.networks {
-                if !selection.allows(&sample.client_id, &network.interface) {
-                    continue;
-                }
-                if network.interface.is_empty() || network.interface.len() > 64 {
-                    continue;
-                }
-                counters.push(TelemetryNetworkRateView {
-                    client_id: sample.client_id.clone(),
-                    interface: network.interface,
-                    bucket_start: sample.observed_at.clone(),
-                    bucket_secs: 60,
-                    sample_count: 1,
-                    rx_bytes_avg: saturating_u64_to_i64(network.rx_bytes),
-                    tx_bytes_avg: saturating_u64_to_i64(network.tx_bytes),
-                    rx_bytes_last: saturating_u64_to_i64(network.rx_bytes),
-                    tx_bytes_last: saturating_u64_to_i64(network.tx_bytes),
-                    rx_counter_epoch: 0,
-                    tx_counter_epoch: 0,
-                    latest_observed_at: sample.observed_at.clone(),
-                    rx_bytes_delta: 0,
-                    tx_bytes_delta: 0,
-                    rx_bps_avg: 0.0,
-                    tx_bps_avg: 0.0,
-                    updated_at: sample.observed_at.clone(),
-                });
-            }
-        }
-        let mut rows = derive_network_rates(aggregate_memory_network_rates(
-            mark_memory_network_counter_epochs(counters),
-            step_secs,
-        ));
-        rows.retain(|row| timestamp_in_bounds(&row.bucket_start, Some(start_unix), Some(end_unix)));
-        retain_fair_network_points(
-            &mut rows,
-            points_per_series,
-            DASHBOARD_TELEMETRY_RESULT_LIMIT,
-        );
-        Ok(project_network_rate_selection(rows, selection))
-    }
 
-    async fn list_raw_telemetry_samples_for_clients(
-        &self,
-        client_ids: &[String],
-        start_unix: u64,
-        end_unix: u64,
-        samples_per_client: usize,
-    ) -> Result<Vec<TelemetrySampleView>> {
-        if client_ids.is_empty() || start_unix > end_unix {
-            return Ok(Vec::new());
-        }
-        match self {
-            Self::Memory(memory) => {
-                let allowed = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let mut rows = memory
-                    .telemetry_samples
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|sample| allowed.contains(sample.client_id.as_str()))
-                    .filter(|sample| {
-                        timestamp_in_bounds(&sample.observed_at, Some(start_unix), Some(end_unix))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    left.client_id
-                        .cmp(&right.client_id)
-                        .then_with(|| {
-                            compare_timestamps_desc(&left.observed_at, &right.observed_at)
-                        })
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                let mut counts = HashMap::<String, usize>::new();
-                rows.retain(|row| {
-                    let count = counts.entry(row.client_id.clone()).or_default();
-                    let keep = *count < samples_per_client;
-                    *count = count.saturating_add(1);
-                    keep
-                });
-                rows.sort_by(|left, right| {
-                    parse_timestamp_unix(&left.observed_at)
-                        .cmp(&parse_timestamp_unix(&right.observed_at))
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                Ok(rows)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    WITH ranked AS (
-                        SELECT
-                            id,
-                            client_id,
-                            observed_at,
-                            cpu_load_1,
-                            memory_total_bytes,
-                            memory_available_bytes,
-                            payload,
-                            row_number() OVER (
-                                PARTITION BY client_id
-                                ORDER BY observed_at DESC, id DESC
-                            ) AS sample_rank
-                        FROM telemetry_samples
-                        WHERE
-                            client_id = ANY($1::TEXT[])
-                            AND observed_at >= to_timestamp($2)
-                            AND observed_at <= to_timestamp($3)
-                    )
-                    SELECT
-                        id,
-                        client_id,
-                        observed_at::text AS observed_at,
-                        cpu_load_1,
-                        memory_total_bytes,
-                        memory_available_bytes,
-                        payload
-                    FROM ranked
-                    WHERE sample_rank <= $4
-                    ORDER BY observed_at ASC, client_id ASC, id ASC
-                    LIMIT $5
-                    "#,
-                )
-                .bind(client_ids)
-                .bind(start_unix as i64)
-                .bind(end_unix as i64)
-                .bind(samples_per_client as i64)
-                .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(TelemetrySampleView {
-                            id: row.try_get("id")?,
-                            client_id: row.try_get("client_id")?,
-                            observed_at: row.try_get("observed_at")?,
-                            cpu_load_1: row.try_get("cpu_load_1")?,
-                            memory_total_bytes: row.try_get("memory_total_bytes")?,
-                            memory_available_bytes: row.try_get("memory_available_bytes")?,
-                            payload: row.try_get("payload")?,
-                        })
-                    })
-                    .collect()
-            }
+        // "Raw" is a requested chart resolution, not permission to bypass the
+        // canonical durable-plus-projected owner. The shared reader preserves
+        // exact counter transitions across raw retention and compaction.
+        let projection = self
+            .list_projected_telemetry_network_history(
+                points_per_series,
+                start_unix,
+                end_unix,
+                step_secs,
+                selection,
+            )
+            .await?;
+        let rows = project_network_rate_selection(projection.rows, selection);
+        if aggregate_selected_interfaces {
+            Ok(aggregate_selected_network_history(rows))
+        } else {
+            Ok(rows)
         }
     }
 
     pub(crate) async fn dashboard_telemetry_start_unix(
         &self,
         client_ids: &[String],
-    ) -> Result<Option<u64>> {
+    ) -> Result<DashboardTelemetryStart> {
         if client_ids.is_empty() {
-            return Ok(None);
+            return Ok(DashboardTelemetryStart {
+                start_unix: None,
+                complete: true,
+            });
         }
         match self {
-            Self::Memory(memory) => {
-                let rollup_start = memory
-                    .telemetry_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_ids.contains(&row.client_id))
-                    .filter_map(|row| parse_timestamp_unix(&row.bucket_start))
-                    .min();
-                let network_start = memory
-                    .telemetry_network_rates
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_ids.contains(&row.client_id))
-                    .filter_map(|row| parse_timestamp_unix(&row.bucket_start))
-                    .min();
-                let current_ping_keys = {
-                    let generations = memory
-                        .ping_targets
-                        .read()
-                        .await
-                        .iter()
-                        .map(|target| (target.id, target.generation))
-                        .collect::<std::collections::HashMap<_, _>>();
-                    memory
-                        .ping_target_assignments
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|assignment| client_ids.contains(&assignment.client_id))
-                        .filter_map(|assignment| {
-                            generations.get(&assignment.target_id).map(|generation| {
-                                (
-                                    assignment.client_id.clone(),
-                                    assignment.target_id,
-                                    *generation,
-                                )
-                            })
-                        })
-                        .collect::<std::collections::HashSet<_>>()
-                };
-                let ping_start = memory
-                    .telemetry_ping_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| {
-                        current_ping_keys.contains(&(
-                            row.client_id.clone(),
-                            row.target_id,
-                            row.generation,
-                        ))
-                    })
-                    .filter_map(|row| parse_timestamp_unix(&row.bucket_start))
-                    .min();
-                Ok(rollup_start
-                    .into_iter()
-                    .chain(network_start)
-                    .chain(ping_start)
-                    .min())
-            }
             Self::Postgres(pool) => {
-                let value = sqlx::query_scalar::<_, Option<f64>>(
+                let (complete, value) = sqlx::query_as::<_, (bool, Option<f64>)>(
                     r#"
-                    SELECT extract(epoch FROM min(first_bucket))::double precision
-                    FROM (
-                        SELECT min(bucket_start) AS first_bucket
-                        FROM telemetry_rollups
-                        WHERE client_id = ANY($1::TEXT[])
+                    WITH requested AS MATERIALIZED (
+                        SELECT DISTINCT requested.client_id
+                        FROM UNNEST($1::TEXT[]) requested(client_id)
+                    ), projected AS MATERIALIZED (
+                        SELECT
+                               requested.client_id,
+                               COALESCE(
+                                   dashboard.resource_generation > 0
+                                       AND dashboard.network_generation > 0
+                                       AND dashboard.traffic_generation > 0,
+                                   FALSE
+                               ) AS projection_ready,
+                               dashboard.resource_first_at,
+                               dashboard.network_first_at,
+                               dashboard.traffic_first_at,
+                               dashboard.ping_first_at
+                        FROM requested
+                        LEFT JOIN telemetry_dashboard_projection_heads dashboard
+                          ON dashboard.client_id = requested.client_id
+                    ), bounds AS (
+                        SELECT projected.resource_first_at AS first_bucket
+                        FROM projected
+                        WHERE projected.resource_first_at IS NOT NULL
+
                         UNION ALL
-                        SELECT min(bucket_start) AS first_bucket
-                        FROM telemetry_network_rates
-                        WHERE client_id = ANY($1::TEXT[])
+
+                        SELECT projected.network_first_at AS first_bucket
+                        FROM projected
+                        WHERE projected.network_first_at IS NOT NULL
+
                         UNION ALL
-                        SELECT min(p.bucket_start) AS first_bucket
-                        FROM telemetry_ping_rollups p
-                        JOIN telemetry_ping_series series ON series.id = p.series_id
-                        JOIN ping_targets t
-                          ON t.id = series.target_id AND t.generation = series.generation
-                        JOIN ping_target_assignments a
-                          ON a.target_id = series.target_id
-                         AND a.client_id = series.client_id
-                        WHERE series.client_id = ANY($1::TEXT[])
-                    ) AS bounds
+
+                        SELECT projected.traffic_first_at AS first_bucket
+                        FROM projected
+                        WHERE projected.traffic_first_at IS NOT NULL
+
+                        UNION ALL
+
+                        SELECT projected.ping_first_at AS first_bucket
+                        FROM projected
+                        WHERE projected.ping_first_at IS NOT NULL
+                    )
+                    SELECT
+                        COALESCE(bool_and(projected.projection_ready), TRUE),
+                        (
+                            SELECT extract(epoch FROM min(first_bucket))
+                                ::double precision
+                            FROM bounds
+                        )
+                    FROM projected
                     "#,
                 )
                 .bind(client_ids)
                 .fetch_one(pool)
                 .await?;
-                Ok(value
-                    .filter(|value| value.is_finite() && *value >= 0.0)
-                    .map(|value| value as u64))
+                Ok(DashboardTelemetryStart {
+                    start_unix: value
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| value as u64),
+                    complete,
+                })
             }
         }
     }
 
-    pub(crate) async fn list_dashboard_telemetry_rollups(
+    pub(crate) async fn list_projected_telemetry_resource_history(
         &self,
         points_per_client: i64,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        bucket_secs: Option<i32>,
+        start_unix: u64,
+        end_unix: u64,
         step_secs: i32,
         client_ids: &[String],
-    ) -> Result<Vec<TelemetryRollupView>> {
-        if client_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let step_secs = normalized_dashboard_step_secs(step_secs);
-        let points_per_client = points_per_client.clamp(2, 1_440) as usize;
-        match self {
-            Self::Memory(memory) => {
-                let physical_rows = memory
-                    .telemetry_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rollup| {
-                        client_ids.contains(&rollup.client_id)
-                            && bucket_secs
-                                .is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
-                            && bucket_overlaps_bounds(
-                                &rollup.bucket_start,
-                                rollup.bucket_secs,
-                                start_unix,
-                                end_unix,
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let rows = retain_authoritative_telemetry_rows(physical_rows)
-                    .into_iter()
-                    .flat_map(|rollup| {
-                        fragment_telemetry_rollup(rollup, start_unix, end_unix, step_secs)
-                    })
-                    .collect::<Vec<_>>();
-                let mut rows = aggregate_memory_telemetry_rollups(rows, step_secs);
-                retain_fair_rollup_points(
-                    &mut rows,
-                    points_per_client,
-                    DASHBOARD_TELEMETRY_RESULT_LIMIT,
-                );
-                Ok(rows)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    WITH physical AS MATERIALIZED (
-                        SELECT
-                            row.client_id,
-                            extract(epoch FROM bucket_start)::bigint AS source_start,
-                            bucket_secs,
-                            sample_count,
-                            cpu_usage_sample_count,
-                            cpu_usage_sum,
-                            cpu_usage_avg,
-                            cpu_usage_max,
-                            cpu_cores_max,
-                            cpu_load_1_avg,
-                            cpu_load_1_sum,
-                            cpu_load_1_max,
-                            cpu_load_5_avg,
-                            cpu_load_5_sum,
-                            cpu_load_5_max,
-                            cpu_load_15_avg,
-                            cpu_load_15_sum,
-                            cpu_load_15_max,
-                            memory_total_bytes_max,
-                            memory_available_bytes_avg,
-                            memory_available_bytes_sum,
-                            memory_available_bytes_min,
-                            memory_used_ratio_avg,
-                            memory_used_ratio_sum,
-                            memory_used_ratio_max,
-                            swap_sample_count,
-                            swap_total_bytes_max,
-                            swap_available_bytes_avg,
-                            swap_available_bytes_sum,
-                            swap_available_bytes_min,
-                            swap_used_ratio_avg,
-                            swap_used_ratio_sum,
-                            swap_used_ratio_max,
-                            disk_sample_count,
-                            disk_total_bytes_max,
-                            disk_available_bytes_avg,
-                            disk_available_bytes_sum,
-                            disk_available_bytes_min,
-                            disk_used_ratio_avg,
-                            disk_used_ratio_sum,
-                            disk_used_ratio_max,
-                            network_rx_bytes_max,
-                            network_tx_bytes_max,
-                            connections_sample_count,
-                            tcp_sockets_latest,
-                            udp_sockets_latest,
-                            connections_observed_at,
-                            latest_observed_at,
-                            updated_at
-                        FROM UNNEST($6::TEXT[]) AS selected(client_id)
-                        JOIN telemetry_rollups row ON row.client_id = selected.client_id
-                        WHERE
-                            ($1::INTEGER IS NULL OR row.bucket_secs = $1)
-                            AND row.bucket_secs >= 60
-                            AND row.bucket_secs % 60 = 0
-                            AND row.bucket_start
-                                + make_interval(secs => row.bucket_secs)
-                                    > COALESCE(
-                                        to_timestamp($2::double precision),
-                                        '-infinity'::timestamptz
-                                    )
-                            AND row.bucket_start <= COALESCE(
-                                to_timestamp($3::double precision),
-                                'infinity'::timestamptz
-                            )
-                    ), coverage AS MATERIALIZED (
-                        SELECT
-                            client_id,
-                            bucket_secs,
-                            range_agg(int8range(
-                                source_start,
-                                source_start + bucket_secs::bigint,
-                                '[)'
-                            )) AS covered_spans
-                        FROM physical
-                        GROUP BY client_id, bucket_secs
-                    ), candidates AS (
-                        SELECT row.*
-                        FROM physical row
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM coverage coarser
-                            WHERE coarser.client_id = row.client_id
-                              AND coarser.bucket_secs > row.bucket_secs
-                              AND coarser.covered_spans && int8range(
-                                    row.source_start,
-                                    row.source_start + row.bucket_secs::bigint,
-                                    '[)'
-                              )
-                        )
-                    ), selected AS (
-                        SELECT
-                            client_id,
-                            to_timestamp(
-                                floor(
-                                    source_start::double precision
-                                        / GREATEST($4, bucket_secs)::double precision
-                                )::bigint * GREATEST($4, bucket_secs)
-                            ) AS chart_bucket_start,
-                            GREATEST($4, bucket_secs)::integer AS chart_bucket_secs,
-                            sample_count,
-                            cpu_usage_sample_count,
-                            cpu_usage_sum,
-                            cpu_usage_avg,
-                            cpu_usage_max,
-                            cpu_cores_max,
-                            cpu_load_1_avg,
-                            cpu_load_1_sum,
-                            cpu_load_1_max,
-                            cpu_load_5_avg,
-                            cpu_load_5_sum,
-                            cpu_load_5_max,
-                            cpu_load_15_avg,
-                            cpu_load_15_sum,
-                            cpu_load_15_max,
-                            memory_total_bytes_max,
-                            memory_available_bytes_avg,
-                            memory_available_bytes_sum,
-                            memory_available_bytes_min,
-                            memory_used_ratio_avg,
-                            memory_used_ratio_sum,
-                            memory_used_ratio_max,
-                            swap_sample_count,
-                            swap_total_bytes_max,
-                            swap_available_bytes_avg,
-                            swap_available_bytes_sum,
-                            swap_available_bytes_min,
-                            swap_used_ratio_avg,
-                            swap_used_ratio_sum,
-                            swap_used_ratio_max,
-                            disk_sample_count,
-                            disk_total_bytes_max,
-                            disk_available_bytes_avg,
-                            disk_available_bytes_sum,
-                            disk_available_bytes_min,
-                            disk_used_ratio_avg,
-                            disk_used_ratio_sum,
-                            disk_used_ratio_max,
-                            network_rx_bytes_max,
-                            network_tx_bytes_max,
-                            connections_sample_count,
-                            tcp_sockets_latest,
-                            udp_sockets_latest,
-                            connections_observed_at,
-                            latest_observed_at,
-                            updated_at
-                        FROM candidates
-                    ),
-                    bucketed AS (
-                        SELECT
-                            client_id,
-                            chart_bucket_start,
-                            chart_bucket_secs AS bucket_secs,
-                            LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
-                            LEAST(sum(cpu_usage_sample_count)::bigint, 2147483647)::integer
-                                AS cpu_usage_sample_count,
-                            sum(cpu_usage_sum)
-                                / NULLIF(sum(cpu_usage_sample_count)::double precision, 0)
-                                AS cpu_usage_avg,
-                            max(cpu_usage_max)::double precision AS cpu_usage_max,
-                            max(cpu_cores_max)::integer AS cpu_cores_max,
-                            COALESCE(
-                                sum(cpu_load_1_sum)
-                                    / NULLIF(sum(sample_count)::double precision, 0),
-                                0
-                            ) AS cpu_load_1_avg,
-                            max(cpu_load_1_max)::double precision AS cpu_load_1_max,
-                            COALESCE(
-                                sum(cpu_load_5_sum)
-                                    / NULLIF(sum(sample_count)::double precision, 0),
-                                0
-                            ) AS cpu_load_5_avg,
-                            max(cpu_load_5_max)::double precision AS cpu_load_5_max,
-                            COALESCE(
-                                sum(cpu_load_15_sum)
-                                    / NULLIF(sum(sample_count)::double precision, 0),
-                                0
-                            ) AS cpu_load_15_avg,
-                            max(cpu_load_15_max)::double precision AS cpu_load_15_max,
-                            max(memory_total_bytes_max)::bigint AS memory_total_bytes_max,
-                            round(COALESCE(
-                                sum(memory_available_bytes_sum)
-                                    / NULLIF(sum(sample_count)::numeric, 0),
-                                0
-                            ))::bigint AS memory_available_bytes_avg,
-                            min(memory_available_bytes_min)::bigint
-                                AS memory_available_bytes_min,
-                            COALESCE(
-                                sum(memory_used_ratio_sum)
-                                    / NULLIF(sum(sample_count)::numeric, 0),
-                                0
-                            )::double precision AS memory_used_ratio_avg,
-                            max(memory_used_ratio_max)::double precision AS memory_used_ratio_max,
-                            LEAST(sum(swap_sample_count)::bigint, 2147483647)::integer
-                                AS swap_sample_count,
-                            max(swap_total_bytes_max)::bigint AS swap_total_bytes_max,
-                            CASE
-                                WHEN sum(swap_sample_count) > 0 THEN round(
-                                    sum(swap_available_bytes_sum)
-                                        / sum(swap_sample_count)::numeric
-                                )::bigint
-                                WHEN max(swap_total_bytes_max) = 0 THEN 0
-                                ELSE NULL
-                            END AS swap_available_bytes_avg,
-                            CASE
-                                WHEN sum(swap_sample_count) > 0 THEN
-                                    (min(swap_available_bytes_min)
-                                        FILTER (WHERE swap_sample_count > 0))::bigint
-                                WHEN max(swap_total_bytes_max) = 0 THEN 0
-                                ELSE NULL
-                            END AS swap_available_bytes_min,
-                            (
-                                sum(swap_used_ratio_sum)
-                                    / NULLIF(sum(swap_sample_count)::numeric, 0)
-                            )::double precision AS swap_used_ratio_avg,
-                            (max(swap_used_ratio_max)
-                                FILTER (WHERE swap_sample_count > 0))::double precision
-                                AS swap_used_ratio_max,
-                            LEAST(sum(disk_sample_count)::bigint, 2147483647)::integer
-                                AS disk_sample_count,
-                            COALESCE(
-                                max(disk_total_bytes_max) FILTER (WHERE disk_sample_count > 0),
-                                0
-                            )::bigint AS disk_total_bytes_max,
-                            round(COALESCE(
-                                sum(disk_available_bytes_sum)
-                                    FILTER (WHERE disk_sample_count > 0)
-                                    / NULLIF(sum(disk_sample_count)::numeric, 0),
-                                0
-                            ))::bigint AS disk_available_bytes_avg,
-                            COALESCE(
-                                min(disk_available_bytes_min)
-                                    FILTER (WHERE disk_sample_count > 0),
-                                0
-                            )::bigint
-                                AS disk_available_bytes_min,
-                            COALESCE(
-                                sum(disk_used_ratio_sum)
-                                    FILTER (WHERE disk_sample_count > 0)
-                                    / NULLIF(sum(disk_sample_count)::numeric, 0),
-                                0
-                            )::double precision AS disk_used_ratio_avg,
-                            COALESCE(
-                                max(disk_used_ratio_max) FILTER (WHERE disk_sample_count > 0),
-                                0
-                            )::double precision AS disk_used_ratio_max,
-                            max(network_rx_bytes_max)::bigint AS network_rx_bytes_max,
-                            max(network_tx_bytes_max)::bigint AS network_tx_bytes_max,
-                            LEAST(sum(connections_sample_count)::bigint, 2147483647)::integer
-                                AS connections_sample_count,
-                            (array_agg(tcp_sockets_latest ORDER BY connections_observed_at DESC)
-                                FILTER (WHERE connections_observed_at IS NOT NULL))[1]
-                                AS tcp_sockets_latest,
-                            (array_agg(udp_sockets_latest ORDER BY connections_observed_at DESC)
-                                FILTER (WHERE connections_observed_at IS NOT NULL))[1]
-                                AS udp_sockets_latest,
-                            max(connections_observed_at)::text AS connections_observed_at,
-                            max(latest_observed_at)::text AS latest_observed_at,
-                            max(updated_at)::text AS updated_at
-                        FROM selected
-                        GROUP BY client_id, chart_bucket_start, chart_bucket_secs
-                    ), ranked AS (
-                        SELECT
-                            bucketed.*,
-                            row_number() OVER (
-                                PARTITION BY client_id
-                                ORDER BY chart_bucket_start DESC
-                            ) AS point_rank
-                        FROM bucketed
-                    ), globally_bounded AS (
-                        SELECT *
-                        FROM ranked
-                        WHERE point_rank <= $5
-                        ORDER BY
-                            point_rank ASC,
-                            chart_bucket_start DESC,
-                            client_id ASC
-                        LIMIT $7
-                    )
-                    SELECT
-                        client_id,
-                        chart_bucket_start::text AS bucket_start,
-                        bucket_secs,
-                        sample_count,
-                        cpu_usage_sample_count,
-                        cpu_usage_avg,
-                        cpu_usage_max,
-                        cpu_cores_max,
-                        cpu_load_1_avg,
-                        cpu_load_1_max,
-                        cpu_load_5_avg,
-                        cpu_load_5_max,
-                        cpu_load_15_avg,
-                        cpu_load_15_max,
-                        memory_total_bytes_max,
-                        memory_available_bytes_avg,
-                        memory_available_bytes_min,
-                        memory_used_ratio_avg,
-                        memory_used_ratio_max,
-                        swap_sample_count,
-                        swap_total_bytes_max,
-                        swap_available_bytes_avg,
-                        swap_available_bytes_min,
-                        swap_used_ratio_avg,
-                        swap_used_ratio_max,
-                        disk_sample_count,
-                        disk_total_bytes_max,
-                        disk_available_bytes_avg,
-                        disk_available_bytes_min,
-                        disk_used_ratio_avg,
-                        disk_used_ratio_max,
-                        network_rx_bytes_max,
-                        network_tx_bytes_max,
-                        connections_sample_count,
-                        tcp_sockets_latest,
-                        udp_sockets_latest,
-                        connections_observed_at,
-                        latest_observed_at,
-                        updated_at
-                    FROM globally_bounded
-                    ORDER BY chart_bucket_start ASC, client_id ASC
-                    "#,
-                )
-                .bind(bucket_secs)
-                .bind(start_unix.map(|value| value as i64))
-                .bind(end_unix.map(|value| value as i64))
-                .bind(step_secs)
-                .bind(points_per_client as i64)
-                .bind(client_ids)
-                .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
-                .fetch_all(pool)
-                .await?;
-
-                rows.into_iter().map(telemetry_rollup_from_row).collect()
-            }
-        }
+    ) -> Result<TelemetryResourceHistoryProjection> {
+        self.query_telemetry_resource_history(
+            points_per_client,
+            start_unix,
+            end_unix,
+            step_secs,
+            client_ids,
+            true,
+        )
+        .await
     }
 
     pub(crate) async fn list_telemetry_rollups(
@@ -1661,100 +2339,83 @@ impl Repository {
         visible_only: bool,
     ) -> Result<Vec<TelemetryRollupView>> {
         match self {
-            Self::Memory(memory) => {
-                let suspended_clients = if visible_only {
-                    memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|agent| agent.status == "suspended")
-                        .map(|agent| agent.id.clone())
-                        .collect::<HashSet<_>>()
-                } else {
-                    HashSet::new()
-                };
-                let hidden = memory.hidden_clients.read().await;
-                let mut rows = memory
-                    .telemetry_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rollup| {
-                        (!visible_only
-                            || (!hidden.contains(&rollup.client_id)
-                                && !suspended_clients.contains(&rollup.client_id)))
-                            && client_id.is_none_or(|client_id| rollup.client_id == client_id)
-                            && bucket_secs
-                                .is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    right
-                        .bucket_start
-                        .cmp(&left.bucket_start)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                });
-                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH requested_visible_clients AS MATERIALIZED (
+                        SELECT visible.id AS client_id
+                        FROM visible_clients visible
+                        WHERE visible.status <> 'suspended'
+                    )
                     SELECT
-                        client_id,
-                        bucket_start::text AS bucket_start,
-                        bucket_secs,
-                        sample_count,
-                        cpu_usage_sample_count,
-                        cpu_usage_avg,
-                        cpu_usage_max,
-                        cpu_cores_max,
-                        cpu_load_1_avg,
-                        cpu_load_1_max,
-                        cpu_load_5_avg,
-                        cpu_load_5_max,
-                        cpu_load_15_avg,
-                        cpu_load_15_max,
-                        memory_total_bytes_max,
-                        memory_available_bytes_avg,
-                        memory_available_bytes_min,
-                        memory_used_ratio_avg,
-                        memory_used_ratio_max,
-                        swap_sample_count,
-                        swap_total_bytes_max,
-                        swap_available_bytes_avg,
-                        swap_available_bytes_min,
-                        swap_used_ratio_avg,
-                        swap_used_ratio_max,
-                        disk_sample_count,
-                        disk_total_bytes_max,
-                        disk_available_bytes_avg,
-                        disk_available_bytes_min,
-                        disk_used_ratio_avg,
-                        disk_used_ratio_max,
-                        network_rx_bytes_max,
-                        network_tx_bytes_max,
-                        connections_sample_count,
-                        tcp_sockets_latest,
-                        udp_sockets_latest,
-                        connections_observed_at::text AS connections_observed_at,
-                        latest_observed_at::text AS latest_observed_at,
-                        updated_at::text AS updated_at
-                    FROM telemetry_rollups
+                        point.client_id,
+                        point.bucket_start::text AS bucket_start,
+                        point.bucket_secs,
+                        point.sample_count,
+                        point.cpu_usage_sample_count,
+                        point.cpu_usage_avg,
+                        point.cpu_usage_max,
+                        point.cpu_cores_max,
+                        point.cpu_load_1_avg,
+                        point.cpu_load_1_max,
+                        point.cpu_load_5_avg,
+                        point.cpu_load_5_max,
+                        point.cpu_load_15_avg,
+                        point.cpu_load_15_max,
+                        point.memory_total_bytes_max,
+                        point.memory_available_bytes_avg,
+                        point.memory_available_bytes_min,
+                        point.memory_used_ratio_avg,
+                        point.memory_used_ratio_max,
+                        point.swap_sample_count,
+                        point.swap_total_bytes_max,
+                        point.swap_available_bytes_avg,
+                        point.swap_available_bytes_min,
+                        point.swap_used_ratio_avg,
+                        point.swap_used_ratio_max,
+                        point.disk_sample_count,
+                        point.disk_total_bytes_max,
+                        point.disk_available_bytes_avg,
+                        point.disk_available_bytes_min,
+                        point.disk_used_ratio_avg,
+                        point.disk_used_ratio_max,
+                        point.connections_sample_count,
+                        point.tcp_sockets_latest,
+                        point.udp_sockets_latest,
+                        point.connections_observed_at::text AS connections_observed_at,
+                        point.latest_observed_at::text AS latest_observed_at,
+                        point.updated_at::text AS updated_at
+                    FROM telemetry_resource_points_source(
+                        CASE
+                            WHEN $1::TEXT IS NOT NULL THEN ARRAY[$1::TEXT]
+                            WHEN $3::BOOLEAN THEN ARRAY(
+                                SELECT requested.client_id
+                                FROM requested_visible_clients requested
+                                ORDER BY requested.client_id
+                            )
+                            ELSE ARRAY(
+                                SELECT client.id
+                                FROM clients client
+                                ORDER BY client.id
+                            )
+                        END,
+                        NULL::TIMESTAMPTZ,
+                        NULL::TIMESTAMPTZ,
+                        $2::INTEGER,
+                        $4::BIGINT
+                    ) point
                     WHERE
-                        ($1::TEXT IS NULL OR client_id = $1)
-                        AND ($2::INTEGER IS NULL OR bucket_secs = $2)
+                        ($1::TEXT IS NULL OR point.client_id = $1)
+                        AND ($2::INTEGER IS NULL OR point.bucket_secs = $2)
                         AND (
                             NOT $3
                             OR EXISTS (
-                                SELECT 1 FROM visible_clients
-                                WHERE visible_clients.id = telemetry_rollups.client_id
-                                  AND visible_clients.status <> 'suspended'
+                                SELECT 1
+                                FROM requested_visible_clients requested
+                                WHERE requested.client_id = point.client_id
                             )
                         )
-                    ORDER BY bucket_start DESC, client_id ASC
+                    ORDER BY point.bucket_start DESC, point.client_id ASC
                     LIMIT $4
                     "#,
                 )
@@ -1800,6 +2461,78 @@ impl Repository {
             .await
     }
 
+    /// Pending age is client metadata, not a resource-row attribute.  Keeping
+    /// it independent lets a first-ever sample surface the delayed warning
+    /// before any resource-history row exists.
+    pub(crate) async fn telemetry_projection_pending_for_clients(
+        &self,
+        client_ids: &[String],
+    ) -> Result<HashMap<String, (Option<String>, Option<String>)>> {
+        if client_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH requested AS MATERIALIZED (
+                        SELECT DISTINCT client_id
+                        FROM UNNEST($1::TEXT[]) requested(client_id)
+                    )
+                    SELECT requested.client_id,
+                           pending.pending_since::TEXT AS pending_since,
+                           statement_timestamp()::TEXT AS checked_at
+                    FROM requested
+                    LEFT JOIN LATERAL (
+                        SELECT min(source.pending_since) AS pending_since
+                        FROM (
+                            SELECT sample.accepted_at AS pending_since
+                            FROM telemetry_projection_heads head
+                            JOIN LATERAL (
+                                SELECT sample.accepted_at
+                                FROM telemetry_samples sample
+                                WHERE sample.client_id = head.client_id
+                                  AND sample.accepted_seq > head.projected_seq
+                                  AND sample.accepted_seq <= head.accepted_seq
+                                ORDER BY sample.accepted_seq
+                                LIMIT 1
+                            ) sample ON TRUE
+                            WHERE head.client_id = requested.client_id
+
+                            UNION ALL
+
+                            SELECT min(event.queued_at)
+                            FROM telemetry_dashboard_block_events event
+                            WHERE event.client_id = requested.client_id
+
+                            UNION ALL
+
+                            SELECT min(event.queued_at)
+                            FROM telemetry_dashboard_generation_events event
+                            WHERE event.client_id = requested.client_id
+                        ) source
+                    ) pending ON TRUE
+                    ORDER BY requested.client_id
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok((
+                            row.try_get::<String, _>("client_id")?,
+                            (
+                                row.try_get::<Option<String>, _>("pending_since")?,
+                                Some(row.try_get::<String, _>("checked_at")?),
+                            ),
+                        ))
+                    })
+                    .collect()
+            }
+        }
+    }
+
     async fn list_latest_telemetry_rollups_matching(
         &self,
         result_limit: Option<usize>,
@@ -1808,119 +2541,73 @@ impl Repository {
         bucket_secs: Option<i32>,
     ) -> Result<Vec<TelemetryRollupView>> {
         match self {
-            Self::Memory(memory) => {
-                let suspended_clients = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status == "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let allowed_client_ids = client_ids.map(|client_ids| {
-                    client_ids
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<HashSet<_>>()
-                });
-                let mut latest = HashMap::<String, TelemetryRollupView>::new();
-                for rollup in memory
-                    .telemetry_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rollup| {
-                        !hidden.contains(&rollup.client_id)
-                            && !suspended_clients.contains(&rollup.client_id)
-                            && client_id.is_none_or(|client_id| rollup.client_id == client_id)
-                            && allowed_client_ids.as_ref().is_none_or(|client_ids| {
-                                client_ids.contains(rollup.client_id.as_str())
-                            })
-                            && bucket_secs
-                                .is_none_or(|bucket_secs| rollup.bucket_secs == bucket_secs)
-                    })
-                {
-                    let replace = latest.get(&rollup.client_id).is_none_or(|current| {
-                        (
-                            parse_timestamp_unix(&current.bucket_start).unwrap_or(0),
-                            parse_timestamp_unix(&current.latest_observed_at).unwrap_or(0),
-                        ) < (
-                            parse_timestamp_unix(&rollup.bucket_start).unwrap_or(0),
-                            parse_timestamp_unix(&rollup.latest_observed_at).unwrap_or(0),
-                        )
-                    });
-                    if replace {
-                        latest.insert(rollup.client_id.clone(), rollup.clone());
-                    }
-                }
-                let mut rows = latest.into_values().collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    parse_timestamp_unix(&right.latest_observed_at)
-                        .unwrap_or(0)
-                        .cmp(&parse_timestamp_unix(&left.latest_observed_at).unwrap_or(0))
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                });
-                if let Some(result_limit) = result_limit {
-                    rows.truncate(result_limit);
-                }
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    WITH latest AS (
-                        SELECT DISTINCT ON (client_id)
-                            client_id,
-                            bucket_start,
-                            bucket_secs,
-                            sample_count,
-                            cpu_usage_sample_count,
-                            cpu_usage_avg,
-                            cpu_usage_max,
-                            cpu_cores_max,
-                            cpu_load_1_avg,
-                            cpu_load_1_max,
-                            cpu_load_5_avg,
-                            cpu_load_5_max,
-                            cpu_load_15_avg,
-                            cpu_load_15_max,
-                            memory_total_bytes_max,
-                            memory_available_bytes_avg,
-                            memory_available_bytes_min,
-                            memory_used_ratio_avg,
-                            memory_used_ratio_max,
-                            swap_sample_count,
-                            swap_total_bytes_max,
-                            swap_available_bytes_avg,
-                            swap_available_bytes_min,
-                            swap_used_ratio_avg,
-                            swap_used_ratio_max,
-                            disk_sample_count,
-                            disk_total_bytes_max,
-                            disk_available_bytes_avg,
-                            disk_available_bytes_min,
-                            disk_used_ratio_avg,
-                            disk_used_ratio_max,
-                            network_rx_bytes_max,
-                            network_tx_bytes_max,
-                            connections_sample_count,
-                            tcp_sockets_latest,
-                            udp_sockets_latest,
-                            connections_observed_at,
-                            latest_observed_at,
-                            updated_at
-                        FROM telemetry_resource_latest AS telemetry_rollups
-                        WHERE
-                            EXISTS (
-                                SELECT 1 FROM visible_clients
-                                WHERE visible_clients.id = telemetry_rollups.client_id
-                                  AND visible_clients.status <> 'suspended'
-                            )
-                            AND ($1::TEXT IS NULL OR client_id = $1)
-                            AND ($2::TEXT[] IS NULL OR client_id = ANY($2))
-                            AND ($3::INTEGER IS NULL OR bucket_secs = $3)
-                        ORDER BY client_id, bucket_start DESC, latest_observed_at DESC, bucket_secs ASC
+                const QUERY: &str = r#"
+                    WITH requested AS MATERIALIZED (
+                        SELECT visible.id AS client_id
+                        FROM visible_clients visible
+                        WHERE visible.status <> 'suspended'
+                          AND ($1::TEXT IS NULL OR visible.id = $1)
+                          AND ($2::TEXT[] IS NULL OR visible.id = ANY($2))
+                    ), projected_suffix AS MATERIALIZED (
+                        SELECT suffix.*
+                        FROM telemetry_projected_raw_resource_minutes_source(ARRAY(
+                            SELECT owner.client_id
+                            FROM requested owner
+                            ORDER BY owner.client_id
+                        )) suffix
+                        JOIN requested USING (client_id)
+                        WHERE ($1::TEXT IS NULL OR suffix.client_id = $1)
+                          AND ($2::TEXT[] IS NULL
+                               OR suffix.client_id = ANY($2))
+                          AND ($3::INTEGER IS NULL OR $3 = 60)
+                    ), latest AS (
+                        SELECT point.*
+                        FROM requested
+                        CROSS JOIN LATERAL (
+                            SELECT candidate.*
+                            FROM (
+                                (
+                                    SELECT retained.*
+                                    FROM telemetry_rollups retained
+                                    WHERE retained.client_id = requested.client_id
+                                      AND ($3::INTEGER IS NULL
+                                           OR retained.bucket_secs = $3)
+                                      AND NOT EXISTS (
+                                          SELECT 1
+                                          FROM projected_suffix shadow
+                                          WHERE shadow.client_id =
+                                                retained.client_id
+                                            AND shadow.bucket_secs =
+                                                retained.bucket_secs
+                                            AND shadow.bucket_start =
+                                                retained.bucket_start
+                                      )
+                                    ORDER BY retained.bucket_start DESC,
+                                             retained.latest_observed_at DESC,
+                                             retained.bucket_secs ASC
+                                    LIMIT 1
+                                )
+
+                                UNION ALL
+
+                                (
+                                    SELECT suffix.*
+                                    FROM projected_suffix suffix
+                                    WHERE suffix.client_id = requested.client_id
+                                      AND ($3::INTEGER IS NULL
+                                           OR suffix.bucket_secs = $3)
+                                    ORDER BY suffix.bucket_start DESC,
+                                             suffix.latest_observed_at DESC,
+                                             suffix.bucket_secs ASC
+                                    LIMIT 1
+                                )
+                            ) candidate
+                            ORDER BY candidate.bucket_start DESC,
+                                     candidate.latest_observed_at DESC,
+                                     candidate.bucket_secs ASC
+                            LIMIT 1
+                        ) point
                     )
                     SELECT
                         client_id,
@@ -1954,8 +2641,6 @@ impl Repository {
                         disk_available_bytes_min,
                         disk_used_ratio_avg,
                         disk_used_ratio_max,
-                        network_rx_bytes_max,
-                        network_tx_bytes_max,
                         connections_sample_count,
                         tcp_sockets_latest,
                         udp_sockets_latest,
@@ -1965,364 +2650,65 @@ impl Repository {
                     FROM latest
                     ORDER BY latest_observed_at DESC, client_id ASC
                     LIMIT $4
-                    "#,
-                )
-                .bind(client_id)
-                .bind(client_ids)
-                .bind(bucket_secs)
-                .bind(result_limit.map(|limit| limit as i64))
-                .fetch_all(pool)
-                .await?;
+                    "#;
+                let rows = sqlx::query(QUERY)
+                    .bind(client_id)
+                    .bind(client_ids)
+                    .bind(bucket_secs)
+                    .bind(result_limit.map(|limit| limit as i64))
+                    .fetch_all(pool)
+                    .await?;
                 rows.into_iter().map(telemetry_rollup_from_row).collect()
             }
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn list_dashboard_telemetry_network_rates(
+    pub(crate) async fn list_projected_telemetry_network_history(
         &self,
         points_per_series: i64,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        bucket_secs: Option<i32>,
-        step_secs: i32,
-        client_ids: &[String],
-    ) -> Result<Vec<TelemetryNetworkRateView>> {
-        let selection = NetworkRateInterfaceSelection::all(client_ids);
-        self.list_dashboard_telemetry_network_rates_selected(
-            points_per_series,
-            start_unix,
-            end_unix,
-            bucket_secs,
-            step_secs,
-            &selection,
-        )
-        .await
-    }
-
-    pub(crate) async fn list_dashboard_telemetry_network_rates_selected(
-        &self,
-        points_per_series: i64,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        bucket_secs: Option<i32>,
+        start_unix: u64,
+        end_unix: u64,
         step_secs: i32,
         selection: &NetworkRateInterfaceSelection,
-    ) -> Result<Vec<TelemetryNetworkRateView>> {
-        if selection.is_empty() {
-            return Ok(Vec::new());
+    ) -> Result<TelemetryNetworkHistoryProjection> {
+        let client_ids = selection.client_ids();
+        if client_ids.is_empty() {
+            return Ok(TelemetryNetworkHistoryProjection {
+                rows: Vec::new(),
+                complete: true,
+            });
         }
-        let (all_client_ids, exact_client_ids, exact_interfaces) = selection.query_parts();
-        let selected_client_ids = selection.client_ids();
-        let step_secs = normalized_dashboard_step_secs(step_secs);
         let points_per_series = points_per_series.clamp(2, 1_440) as usize;
+        let step_secs = normalized_dashboard_step_secs(step_secs);
         match self {
-            Self::Memory(memory) => {
-                let rows = memory
-                    .telemetry_network_rates
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rate| {
-                        selection.allows(&rate.client_id, &rate.interface)
-                            && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
-                            && end_unix.is_none_or(|end| {
-                                parse_timestamp_unix(&rate.bucket_start)
-                                    .is_some_and(|timestamp| timestamp <= end)
-                            })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let rows = retain_authoritative_network_rows(rows);
-                let rows = select_dashboard_network_rows(rows, start_unix, end_unix, step_secs);
-                let mut rows = derive_network_rates(rows);
-                rows.retain(|rate| rate.sample_count > 0);
-                retain_fair_network_points(
-                    &mut rows,
-                    points_per_series,
-                    DASHBOARD_TELEMETRY_RESULT_LIMIT,
-                );
-                Ok(project_network_rate_selection(rows, selection))
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    WITH selected_scope AS MATERIALIZED (
-                        SELECT client_id, NULL::text AS interface
-                        FROM UNNEST($6::TEXT[]) AS selected(client_id)
-                        UNION ALL
-                        SELECT client_id, interface
-                        FROM UNNEST($8::TEXT[], $9::TEXT[])
-                            AS selected(client_id, interface)
-                    ), physical AS MATERIALIZED (
-                        SELECT
-                            row.client_id,
-                            row.interface,
-                            extract(epoch FROM bucket_start)::bigint AS source_start,
-                            bucket_secs,
-                            sample_count,
-                            rx_bytes_avg,
-                            tx_bytes_avg,
-                            rx_bytes_last,
-                            tx_bytes_last,
-                            rx_counter_epoch,
-                            tx_counter_epoch,
-                            extract(epoch FROM latest_observed_at)::bigint AS effective_epoch,
-                            updated_at
-                        FROM selected_scope selected
-                        JOIN telemetry_network_rates row
-                          ON row.client_id = selected.client_id
-                         AND (selected.interface IS NULL
-                              OR row.interface = selected.interface)
-                        WHERE
-                            ($1::INTEGER IS NULL OR row.bucket_secs = $1)
-                            AND row.bucket_secs >= 60
-                            AND row.bucket_secs % 60 = 0
-                            AND row.client_id = ANY($10::TEXT[])
-                            AND row.bucket_start <= COALESCE(
-                                to_timestamp($3::double precision),
-                                'infinity'::timestamptz
-                            )
-                    ), coverage AS MATERIALIZED (
-                        SELECT
-                            client_id,
-                            interface,
-                            bucket_secs,
-                            range_agg(int8range(
-                                source_start,
-                                source_start + bucket_secs::bigint,
-                                '[)'
-                            )) AS covered_spans
-                        FROM physical
-                        GROUP BY client_id, interface, bucket_secs
-                    ), authoritative AS MATERIALIZED (
-                        SELECT row.*
-                        FROM physical row
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM coverage coarser
-                            WHERE coarser.client_id = row.client_id
-                              AND coarser.interface = row.interface
-                              AND coarser.bucket_secs > row.bucket_secs
-                              AND coarser.covered_spans && int8range(
-                                    row.source_start,
-                                    row.source_start + row.bucket_secs::bigint,
-                                    '[)'
-                              )
-                        )
-                    ), candidates AS (
-                        SELECT row.*
-                        FROM authoritative row
-                        WHERE row.source_start + row.bucket_secs::bigint > COALESCE(
-                            $2::BIGINT,
-                            -9223372036854775807::BIGINT
-                        )
-                    ), selected AS (
-                        SELECT
-                            client_id,
-                            interface,
-                            floor(
-                                source_start::double precision
-                                    / GREATEST($4, bucket_secs)::double precision
-                            )::bigint * GREATEST($4, bucket_secs)::bigint AS chart_epoch,
-                            GREATEST($4, bucket_secs)::integer AS chart_bucket_secs,
-                            source_start AS first_sample_epoch,
-                            effective_epoch,
-                            sample_count,
-                            rx_bytes_avg,
-                            tx_bytes_avg,
-                            rx_bytes_last,
-                            tx_bytes_last,
-                            rx_counter_epoch,
-                            tx_counter_epoch,
-                            updated_at
-                        FROM candidates
-                    ), bucketed AS (
-                        SELECT
-                            client_id,
-                            interface,
-                            chart_epoch,
-                            chart_bucket_secs,
-                            min(first_sample_epoch)::bigint AS first_sample_epoch,
-                            max(effective_epoch)::bigint AS effective_epoch,
-                            LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
-                            (array_agg(rx_bytes_avg ORDER BY effective_epoch DESC))[1]
-                                AS rx_bytes_avg,
-                            (array_agg(tx_bytes_avg ORDER BY effective_epoch DESC))[1]
-                                AS tx_bytes_avg,
-                            (array_agg(rx_bytes_last ORDER BY effective_epoch DESC))[1]
-                                AS rx_bytes_last,
-                            (array_agg(tx_bytes_last ORDER BY effective_epoch DESC))[1]
-                                AS tx_bytes_last,
-                            (array_agg(rx_counter_epoch ORDER BY effective_epoch DESC))[1]
-                                AS rx_counter_epoch,
-                            (array_agg(tx_counter_epoch ORDER BY effective_epoch DESC))[1]
-                                AS tx_counter_epoch,
-                            max(updated_at)::text AS updated_at
-                        FROM selected
-                        GROUP BY client_id, interface, chart_epoch, chart_bucket_secs
-                    ), series_start AS (
-                        SELECT
-                            client_id,
-                            interface,
-                            min(first_sample_epoch)::bigint AS first_sample_epoch,
-                            min(chart_epoch)::bigint AS first_chart_epoch,
-                            max(chart_bucket_secs)::integer AS chart_bucket_secs
-                        FROM bucketed
-                        GROUP BY client_id, interface
-                    ), preceding AS (
-                        SELECT DISTINCT ON (
-                            series_start.client_id,
-                            series_start.interface
-                        )
-                            series_start.client_id,
-                            series_start.interface,
-                            series_start.first_chart_epoch
-                                - series_start.chart_bucket_secs::bigint AS chart_epoch,
-                            series_start.chart_bucket_secs,
-                            candidate.effective_epoch,
-                            0::integer AS sample_count,
-                            candidate.rx_bytes_avg,
-                            candidate.tx_bytes_avg,
-                            candidate.rx_bytes_last,
-                            candidate.tx_bytes_last,
-                            candidate.rx_counter_epoch,
-                            candidate.tx_counter_epoch,
-                            candidate.updated_at::text AS updated_at,
-                            FALSE AS visible
-                        FROM series_start
-                        JOIN authoritative candidate
-                          ON candidate.client_id = series_start.client_id
-                         AND candidate.interface = series_start.interface
-                         AND candidate.effective_epoch < series_start.first_sample_epoch
-                        ORDER BY
-                            series_start.client_id,
-                            series_start.interface,
-                            candidate.effective_epoch DESC,
-                            candidate.source_start DESC
-                    ), combined AS (
-                        SELECT
-                            client_id,
-                            interface,
-                            chart_epoch,
-                            chart_bucket_secs,
-                            effective_epoch,
-                            sample_count,
-                            rx_bytes_avg,
-                            tx_bytes_avg,
-                            rx_bytes_last,
-                            tx_bytes_last,
-                            rx_counter_epoch,
-                            tx_counter_epoch,
-                            updated_at,
-                            TRUE AS visible
-                        FROM bucketed
-                        UNION ALL
-                        SELECT * FROM preceding
-                    ), derived AS (
-                        SELECT
-                            combined.*,
-                            lag(rx_bytes_avg) OVER rate_window AS previous_rx_bytes_avg,
-                            lag(tx_bytes_avg) OVER rate_window AS previous_tx_bytes_avg,
-                            lag(rx_bytes_last) OVER rate_window AS previous_rx_bytes_last,
-                            lag(tx_bytes_last) OVER rate_window AS previous_tx_bytes_last,
-                            lag(rx_counter_epoch) OVER rate_window AS previous_rx_counter_epoch,
-                            lag(tx_counter_epoch) OVER rate_window AS previous_tx_counter_epoch,
-                            lag(effective_epoch) OVER rate_window AS previous_effective_epoch
-                        FROM combined
-                        WINDOW rate_window AS (
-                            PARTITION BY client_id, interface
-                            ORDER BY effective_epoch ASC, visible ASC
-                        )
-                    ),
-                    bounded AS (
-                        SELECT
-                            client_id,
-                            interface,
-                            to_timestamp(chart_epoch) AS chart_bucket_start,
-                            chart_bucket_secs AS bucket_secs,
-                            sample_count,
-                            rx_bytes_avg,
-                            tx_bytes_avg,
-                            rx_bytes_last,
-                            tx_bytes_last,
-                            rx_counter_epoch,
-                            tx_counter_epoch,
-                            rx_bytes_last - previous_rx_bytes_last AS rx_bytes_delta,
-                            tx_bytes_last - previous_tx_bytes_last AS tx_bytes_delta,
-                            ((rx_bytes_last - previous_rx_bytes_last) * 8)::double precision
-                                / GREATEST(effective_epoch - previous_effective_epoch, 1)::double precision
-                                AS rx_bps_avg,
-                            ((tx_bytes_last - previous_tx_bytes_last) * 8)::double precision
-                                / GREATEST(effective_epoch - previous_effective_epoch, 1)::double precision
-                                AS tx_bps_avg,
-                            to_timestamp(effective_epoch)::text AS latest_observed_at,
-                            updated_at
-                        FROM derived
-                        WHERE visible
-                          AND previous_effective_epoch IS NOT NULL
-                          AND rx_counter_epoch = previous_rx_counter_epoch
-                          AND tx_counter_epoch = previous_tx_counter_epoch
-                          AND rx_bytes_last >= previous_rx_bytes_last
-                          AND tx_bytes_last >= previous_tx_bytes_last
-                    ), ranked AS (
-                        SELECT
-                            bounded.*,
-                            row_number() OVER (
-                                PARTITION BY client_id, interface
-                                ORDER BY chart_bucket_start DESC
-                            ) AS point_rank
-                        FROM bounded
-                    ), globally_bounded AS (
-                        SELECT *
-                        FROM ranked
-                        WHERE point_rank <= $5
-                        ORDER BY
-                            point_rank ASC,
-                            chart_bucket_start DESC,
-                            client_id ASC,
-                            interface ASC
-                        LIMIT $7
-                    )
-                    SELECT
-                        client_id,
-                        interface,
-                        chart_bucket_start::text AS bucket_start,
-                        bucket_secs,
-                        sample_count,
-                        rx_bytes_avg,
-                        tx_bytes_avg,
-                        rx_bytes_last,
-                        tx_bytes_last,
-                        rx_counter_epoch,
-                        tx_counter_epoch,
-                        rx_bytes_delta,
-                        tx_bytes_delta,
-                        rx_bps_avg,
-                        tx_bps_avg,
-                        latest_observed_at,
-                        updated_at
-                    FROM globally_bounded
-                    ORDER BY chart_bucket_start ASC, client_id ASC, interface ASC
-                    "#,
-                )
-                .bind(bucket_secs)
-                .bind(start_unix.map(|value| value as i64))
-                .bind(end_unix.map(|value| value as i64))
-                .bind(step_secs)
-                .bind(points_per_series as i64)
-                .bind(&all_client_ids)
-                .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
-                .bind(&exact_client_ids)
-                .bind(&exact_interfaces)
-                .bind(&selected_client_ids)
-                .fetch_all(pool)
-                .await?;
-
-                let rows = rows
-                    .into_iter()
-                    .map(telemetry_network_rate_from_row)
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(project_network_rate_selection(rows, selection))
+                let rows = sqlx::query(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL)
+                    .bind(&client_ids)
+                    .bind(start_unix.min(i64::MAX as u64) as i64)
+                    .bind(end_unix.min(i64::MAX as u64) as i64)
+                    .bind(step_secs)
+                    .bind(points_per_series as i64)
+                    .fetch_all(pool)
+                    .await?;
+                let requested_clients = client_ids.iter().collect::<HashSet<_>>().len();
+                let mut returned_clients = HashSet::with_capacity(requested_clients);
+                let mut history =
+                    Vec::with_capacity(requested_clients.saturating_mul(points_per_series));
+                for row in rows {
+                    if row.try_get::<bool, _>("has_point")? {
+                        history.push(telemetry_network_rate_from_row(row)?);
+                    } else {
+                        returned_clients.insert(row.try_get::<String, _>("client_id")?);
+                    }
+                }
+                let complete = returned_clients.len() == requested_clients;
+                if !complete {
+                    history.clear();
+                }
+                Ok(TelemetryNetworkHistoryProjection {
+                    rows: history,
+                    complete,
+                })
             }
         }
     }
@@ -2336,134 +2722,166 @@ impl Repository {
         visible_only: bool,
     ) -> Result<Vec<TelemetryNetworkRateView>> {
         match self {
-            Self::Memory(memory) => {
-                let suspended_clients = if visible_only {
-                    memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|agent| agent.status == "suspended")
-                        .map(|agent| agent.id.clone())
-                        .collect::<HashSet<_>>()
-                } else {
-                    HashSet::new()
-                };
-                let hidden = memory.hidden_clients.read().await;
-                let rows = memory
-                    .telemetry_network_rates
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rate| {
-                        (!visible_only
-                            || (!hidden.contains(&rate.client_id)
-                                && !suspended_clients.contains(&rate.client_id)))
-                            && client_id.is_none_or(|client_id| rate.client_id == client_id)
-                            && interface.is_none_or(|interface| rate.interface == interface)
-                            && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let mut rows = derive_network_rates(rows);
-                rows.sort_by(|left, right| {
-                    right
-                        .bucket_start
-                        .cmp(&left.bucket_start)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.interface.cmp(&right.interface))
-                });
-                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    WITH selected AS (
-                        SELECT
-                            client_id,
-                            interface,
-                            bucket_start,
-                            bucket_secs,
-                            sample_count,
-                            rx_bytes_avg,
-                            tx_bytes_avg,
-                            rx_bytes_last,
-                            tx_bytes_last,
-                            rx_counter_epoch,
-                            tx_counter_epoch,
-                            updated_at,
-                            lag(rx_bytes_last) OVER rate_window AS previous_rx_bytes_last,
-                            lag(tx_bytes_last) OVER rate_window AS previous_tx_bytes_last,
-                            lag(rx_counter_epoch) OVER rate_window AS previous_rx_counter_epoch,
-                            lag(tx_counter_epoch) OVER rate_window AS previous_tx_counter_epoch,
-                            lag(latest_observed_at) OVER rate_window AS previous_effective_at,
-                            latest_observed_at AS effective_at
-                        FROM telemetry_network_rates
-                        WHERE
-                            ($1::TEXT IS NULL OR client_id = $1)
-                            AND ($2::TEXT IS NULL OR interface = $2)
-                            AND ($3::INTEGER IS NULL OR bucket_secs = $3)
-                            AND (
-                                NOT $4
-                                OR EXISTS (
-                                    SELECT 1 FROM visible_clients
-                                    WHERE visible_clients.id = telemetry_network_rates.client_id
-                                      AND visible_clients.status <> 'suspended'
-                                )
-                            )
-                        WINDOW rate_window AS (
-                            PARTITION BY client_id, interface
-                            ORDER BY latest_observed_at ASC, bucket_start ASC
-                        )
-                    )
-                    SELECT
-                        client_id,
-                        interface,
-                        bucket_start::text AS bucket_start,
-                        bucket_secs,
-                        sample_count,
-                        rx_bytes_avg,
-                        tx_bytes_avg,
-                        rx_bytes_last,
-                        tx_bytes_last,
-                        rx_counter_epoch,
-                        tx_counter_epoch,
-                        rx_bytes_last - previous_rx_bytes_last AS rx_bytes_delta,
-                        tx_bytes_last - previous_tx_bytes_last AS tx_bytes_delta,
-                        ((rx_bytes_last - previous_rx_bytes_last) * 8)::double precision
-                            / GREATEST(
-                                extract(epoch FROM (effective_at - previous_effective_at)),
-                                1
-                            )::double precision AS rx_bps_avg,
-                        ((tx_bytes_last - previous_tx_bytes_last) * 8)::double precision
-                            / GREATEST(
-                                extract(epoch FROM (effective_at - previous_effective_at)),
-                                1
-                            )::double precision AS tx_bps_avg,
-                        effective_at::text AS latest_observed_at,
-                        updated_at::text AS updated_at
-                    FROM selected
-                    WHERE previous_effective_at IS NOT NULL
-                      AND rx_counter_epoch = previous_rx_counter_epoch
-                      AND tx_counter_epoch = previous_tx_counter_epoch
-                      AND rx_bytes_last >= previous_rx_bytes_last
-                      AND tx_bytes_last >= previous_tx_bytes_last
-                    ORDER BY effective_at DESC, client_id ASC, interface ASC
-                    LIMIT $5
-                    "#,
-                )
-                .bind(client_id)
-                .bind(interface)
-                .bind(bucket_secs)
-                .bind(visible_only)
-                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
-                .fetch_all(pool)
-                .await?;
+                let requested = limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize;
+                let mut transaction = pool.begin().await?;
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    .execute(&mut *transaction)
+                    .await?;
 
-                rows.into_iter()
-                    .map(telemetry_network_rate_from_row)
-                    .collect()
+                // Visibility is one fixed set in the same snapshot as every
+                // history page. Binding it keeps fleet ownership out of the
+                // ordered rate scan and avoids one client lookup per row.
+                let visible_client_ids = if visible_only {
+                    sqlx::query_scalar::<_, String>(
+                        r#"
+                        SELECT client.id
+                        FROM visible_clients client
+                        WHERE client.status <> 'suspended'
+                        ORDER BY client.id
+                        "#,
+                    )
+                    .fetch_all(&mut *transaction)
+                    .await?
+                } else {
+                    Vec::new()
+                };
+                if visible_only && visible_client_ids.is_empty() {
+                    transaction.commit().await?;
+                    return Ok(Vec::new());
+                }
+
+                let mut result = Vec::with_capacity(requested);
+                let mut cursor: Option<RawTelemetryNetworkRateCursor> = None;
+                while result.len() < requested {
+                    // The public request is the page-size authority. It gives
+                    // a normal all-valid request one page and avoids reducing
+                    // a late refill to one round trip per invalid transition;
+                    // the unbounded loop, not a larger speculative batch,
+                    // owns reset/decrease refill.
+                    let page_limit = requested;
+                    let candidate_sql = raw_telemetry_network_rate_candidate_keys_sql(
+                        client_id.is_some(),
+                        interface.is_some(),
+                        bucket_secs.is_some(),
+                        visible_only,
+                        cursor.is_some(),
+                        page_limit,
+                    );
+                    let mut candidate_query = sqlx::query(&candidate_sql);
+                    if let Some(client_id) = client_id {
+                        candidate_query = candidate_query.bind(client_id);
+                    }
+                    if let Some(interface) = interface {
+                        candidate_query = candidate_query.bind(interface);
+                    }
+                    if let Some(bucket_secs) = bucket_secs {
+                        candidate_query = candidate_query.bind(bucket_secs);
+                    }
+                    if visible_only {
+                        candidate_query = candidate_query.bind(&visible_client_ids);
+                    }
+                    if let Some(cursor) = &cursor {
+                        candidate_query = candidate_query
+                            .bind(cursor.latest_observed_at)
+                            .bind(&cursor.client_id)
+                            .bind(&cursor.interface)
+                            .bind(cursor.bucket_start)
+                            .bind(cursor.bucket_secs);
+                    }
+                    let candidate_rows = candidate_query.fetch_all(&mut *transaction).await?;
+                    if candidate_rows.is_empty() {
+                        break;
+                    }
+                    if candidate_rows.len() > page_limit {
+                        anyhow::bail!("raw network candidate page exceeded its requested size");
+                    }
+
+                    let page_was_full = candidate_rows.len() == page_limit;
+                    let mut candidate_keys = Vec::with_capacity(candidate_rows.len());
+                    let mut next_cursor = None;
+                    for row in candidate_rows {
+                        if !row.try_get::<bool, _>("page_cursor_strictly_after")? {
+                            anyhow::bail!("raw network candidate cursor moved out of order");
+                        }
+                        let key = RawTelemetryNetworkRateCursor {
+                            latest_observed_at: row.try_get("latest_observed_at")?,
+                            client_id: row.try_get("client_id")?,
+                            interface: row.try_get("interface")?,
+                            bucket_start: row.try_get("bucket_start")?,
+                            bucket_secs: row.try_get("bucket_secs")?,
+                        };
+                        next_cursor = Some(key.clone());
+                        if row.try_get::<bool, _>("admitted")? {
+                            candidate_keys.push(key);
+                        }
+                    }
+                    let next_cursor = next_cursor
+                        .ok_or_else(|| anyhow::anyhow!("raw network page lost its cursor"))?;
+                    if cursor.as_ref() == Some(&next_cursor) {
+                        anyhow::bail!("raw network candidate cursor did not advance");
+                    }
+
+                    // Admission is intentionally after the physical page
+                    // boundary so it cannot turn an ordered index stop into a
+                    // history join. Rejected keys still advance this exact
+                    // cursor and a full page immediately refills.
+                    if candidate_keys.is_empty() {
+                        cursor = Some(next_cursor);
+                        if page_was_full {
+                            continue;
+                        }
+                        break;
+                    }
+
+                    // Arrays retain candidate ordinality while keeping the
+                    // payload statement's cardinality independent of generic
+                    // LIMIT estimates. Thus it can only probe the page's keys
+                    // and one predecessor for each key.
+                    let candidate_client_ids = candidate_keys
+                        .iter()
+                        .map(|key| key.client_id.clone())
+                        .collect::<Vec<_>>();
+                    let candidate_interfaces = candidate_keys
+                        .iter()
+                        .map(|key| key.interface.clone())
+                        .collect::<Vec<_>>();
+                    let candidate_bucket_starts = candidate_keys
+                        .iter()
+                        .map(|key| key.bucket_start.to_owned())
+                        .collect::<Vec<_>>();
+                    let candidate_bucket_secs = candidate_keys
+                        .iter()
+                        .map(|key| key.bucket_secs)
+                        .collect::<Vec<_>>();
+                    let payload_sql = raw_telemetry_network_rate_payload_sql(bucket_secs.is_some());
+                    let payload_rows = sqlx::query(&payload_sql)
+                        .bind(&candidate_client_ids)
+                        .bind(&candidate_interfaces)
+                        .bind(&candidate_bucket_starts)
+                        .bind(&candidate_bucket_secs)
+                        .fetch_all(&mut *transaction)
+                        .await?;
+                    if payload_rows.len() != candidate_keys.len() {
+                        anyhow::bail!("raw network payload page lost a candidate");
+                    }
+                    for (index, row) in payload_rows.into_iter().enumerate() {
+                        let ordinal = row.try_get::<i64, _>("candidate_ordinal")?;
+                        if ordinal != index as i64 + 1 {
+                            anyhow::bail!("raw network payload page moved out of order");
+                        }
+                        if result.len() < requested && row.try_get::<bool, _>("transition_valid")? {
+                            result.push(telemetry_network_rate_from_row(row)?);
+                        }
+                    }
+
+                    cursor = Some(next_cursor);
+                    if !page_was_full {
+                        break;
+                    }
+                }
+                transaction.commit().await?;
+                Ok(result)
             }
         }
     }
@@ -2482,11 +2900,11 @@ impl Repository {
             interface,
             bucket_secs,
             None,
+            LatestNetworkRateVisibility::AdmittedOnly,
         )
         .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn list_latest_telemetry_network_rates_for_clients(
         &self,
         client_ids: &[String],
@@ -2501,6 +2919,23 @@ impl Repository {
             None,
             None,
             None,
+            LatestNetworkRateVisibility::AdmittedOnly,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_latest_telemetry_network_rates_for_vps_detail(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
+        self.list_latest_telemetry_network_rates_matching(
+            None,
+            Some(client_id),
+            None,
+            None,
+            None,
+            None,
+            LatestNetworkRateVisibility::SingleVpsDetail,
         )
         .await
     }
@@ -2521,6 +2956,7 @@ impl Repository {
                 None,
                 None,
                 Some(selection),
+                LatestNetworkRateVisibility::AdmittedOnly,
             )
             .await?;
         Ok(project_network_rate_selection(rows, selection))
@@ -2534,76 +2970,218 @@ impl Repository {
         interface: Option<&str>,
         bucket_secs: Option<i32>,
         selection: Option<&NetworkRateInterfaceSelection>,
+        visibility: LatestNetworkRateVisibility,
     ) -> Result<Vec<TelemetryNetworkRateView>> {
-        let selected_client_ids = client_ids.map(|client_ids| {
-            client_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<HashSet<_>>()
-        });
         let unrestricted_selection = selection.is_none();
         let (all_client_ids, exact_client_ids, exact_interfaces) = selection
             .map(NetworkRateInterfaceSelection::query_parts)
             .unwrap_or_default();
         match self {
-            Self::Memory(memory) => {
-                let suspended_clients = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status == "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let rows = memory
-                    .telemetry_network_rates
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|rate| {
-                        !hidden.contains(&rate.client_id)
-                            && !suspended_clients.contains(&rate.client_id)
-                            && client_id.is_none_or(|client_id| rate.client_id == client_id)
-                            && selected_client_ids.as_ref().is_none_or(|client_ids| {
-                                client_ids.contains(rate.client_id.as_str())
-                            })
-                            && selection.is_none_or(|selection| {
-                                selection.allows(&rate.client_id, &rate.interface)
-                            })
-                            && interface.is_none_or(|interface| rate.interface == interface)
-                            && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let mut rows = derive_latest_network_rates(rows);
-                rows.sort_by(|left, right| {
-                    network_rate_effective_unix(right)
-                        .cmp(&network_rate_effective_unix(left))
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.interface.cmp(&right.interface))
-                });
-                if let Some(limit) = result_limit {
-                    rows.truncate(limit);
-                }
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(LATEST_TELEMETRY_NETWORK_RATES_SQL)
+                let rows = if bucket_secs.is_none() {
+                    // Online/current membership comes from the canonical projected
+                    // sample, not a wall-age or generation heuristic. Dashboard
+                    // selection owns a separate projection and cannot change this
+                    // core membership. An offline client deliberately keeps its
+                    // bounded last-known projection even if the protected raw
+                    // envelope is unavailable.
+                    sqlx::query(
+                        r#"
+                        WITH online_current_interfaces AS MATERIALIZED (
+                            SELECT
+                                projection.client_id,
+                                array_agg(
+                                    projected_network.value ->> 'interface'
+                                ) AS interfaces
+                            FROM telemetry_projection_heads projection
+                            JOIN visible_clients online_client
+                              ON online_client.id = projection.client_id
+                             AND online_client.status = 'online'
+                            JOIN telemetry_samples latest
+                              ON latest.id = projection.latest_projected_sample_id
+                             AND latest.client_id = projection.client_id
+                            CROSS JOIN LATERAL jsonb_array_elements(
+                                CASE
+                                    WHEN jsonb_typeof(
+                                        latest.payload -> 'networks'
+                                    ) = 'array'
+                                    THEN latest.payload -> 'networks'
+                                    ELSE '[]'::jsonb
+                                END
+                            ) WITH ORDINALITY AS projected_network(value, ordinality)
+                            WHERE ($1::TEXT IS NULL OR projection.client_id = $1)
+                              AND ($2::TEXT[] IS NULL OR projection.client_id = ANY($2))
+                              AND (
+                                  $5::BOOLEAN
+                                  OR projection.client_id = ANY($6::TEXT[])
+                                  OR projection.client_id = ANY($7::TEXT[])
+                              )
+                              AND CASE
+                                  WHEN NOT public.telemetry_ordinal_admission_mask_is_exact(
+                                      latest.network_admission_mask,
+                                      CASE
+                                          WHEN jsonb_typeof(
+                                              latest.payload -> 'networks'
+                                          ) = 'array'
+                                          THEN jsonb_array_length(
+                                              latest.payload -> 'networks'
+                                          )::BIGINT
+                                          ELSE 0
+                                      END
+                                  ) THEN FALSE
+                                  ELSE get_bit(
+                                      latest.network_admission_mask,
+                                      (projected_network.ordinality - 1)::INTEGER
+                                  ) = 1
+                              END
+                            GROUP BY projection.client_id
+                        ), policy_clients AS MATERIALIZED (
+                            SELECT client.id
+                            FROM visible_clients client
+                            WHERE client.status <> 'suspended'
+                              AND ($1::TEXT IS NULL OR client.id = $1)
+                              AND ($2::TEXT[] IS NULL OR client.id = ANY($2))
+                              AND (
+                                  $5::BOOLEAN
+                                  OR client.id = ANY($6::TEXT[])
+                                  OR client.id = ANY($7::TEXT[])
+                              )
+                        ), resolved_interface_policies AS MATERIALIZED (
+                            SELECT policy.*
+                            FROM public.resolve_telemetry_interface_policies(ARRAY(
+                                SELECT client.id
+                                FROM policy_clients client
+                                ORDER BY client.id
+                            )) policy
+                        )
+                        SELECT
+                            network_current.client_id,
+                            network_current.interface,
+                            network_current.latest_bucket_start::text AS bucket_start,
+                            network_current.latest_bucket_secs AS bucket_secs,
+                            network_current.latest_sample_count AS sample_count,
+                            network_current.latest_rx_bytes_avg AS rx_bytes_avg,
+                            network_current.latest_tx_bytes_avg AS tx_bytes_avg,
+                            network_current.latest_rx_bytes AS rx_bytes_last,
+                            network_current.latest_tx_bytes AS tx_bytes_last,
+                            network_current.latest_rx_counter_epoch AS rx_counter_epoch,
+                            network_current.latest_tx_counter_epoch AS tx_counter_epoch,
+                            network_current.rx_bytes_delta,
+                            network_current.tx_bytes_delta,
+                            network_current.rx_bps_avg,
+                            network_current.tx_bps_avg,
+                            network_current.latest_observed_at::text AS latest_observed_at,
+                            network_current.updated_at::text AS updated_at
+                        FROM telemetry_network_current_source(ARRAY(
+                            SELECT client.id
+                            FROM policy_clients client
+                            ORDER BY client.id
+                        )) network_current
+                        JOIN telemetry_projection_heads projection
+                          ON projection.client_id = network_current.client_id
+                        JOIN visible_clients client
+                          ON client.id = network_current.client_id
+                         AND client.status <> 'suspended'
+                        JOIN resolved_interface_policies policy
+                          ON policy.client_id = network_current.client_id
+                        LEFT JOIN online_current_interfaces current_interfaces
+                          ON current_interfaces.client_id = network_current.client_id
+                        CROSS JOIN LATERAL (
+                            SELECT public.telemetry_interface_is_admitted_resolved(
+                                policy.admission_mode,
+                                policy.interface_patterns,
+                                policy.managed_tunnel_interfaces,
+                                'host',
+                                network_current.interface
+                            ) AS admitted
+                            OFFSET 0
+                        ) interface_policy
+                        WHERE network_current.transition_valid
+                          AND network_current.transition_admitted_at_projection
+                          AND interface_policy.admitted
+                          AND (
+                              client.status <> 'online'
+                              OR network_current.interface = ANY(
+                                  current_interfaces.interfaces
+                              )
+                          )
+                          AND ($1::TEXT IS NULL OR network_current.client_id = $1)
+                          AND ($2::TEXT[] IS NULL OR network_current.client_id = ANY($2))
+                          AND ($3::TEXT IS NULL OR network_current.interface = $3)
+                          AND (
+                              $5::BOOLEAN
+                              OR network_current.client_id = ANY($6::TEXT[])
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM UNNEST($7::TEXT[], $8::TEXT[])
+                                      AS selected(client_id, interface)
+                                  WHERE selected.client_id = network_current.client_id
+                                    AND selected.interface = network_current.interface
+                              )
+                          )
+                        ORDER BY network_current.latest_observed_at DESC,
+                                 network_current.client_id ASC,
+                                 network_current.interface ASC
+                        LIMIT $4
+                        "#,
+                    )
                     .bind(client_id)
                     .bind(client_ids)
                     .bind(interface)
-                    .bind(bucket_secs)
                     .bind(result_limit.map(|limit| limit as i64))
                     .bind(unrestricted_selection)
                     .bind(&all_client_ids)
                     .bind(&exact_client_ids)
                     .bind(&exact_interfaces)
                     .fetch_all(pool)
-                    .await?;
-                rows.into_iter()
+                    .await?
+                } else {
+                    // Explicit physical-tier inspection keeps its historical API
+                    // semantics; endpoint snapshots use canonical current rows.
+                    sqlx::query(LATEST_TELEMETRY_NETWORK_RATES_SQL)
+                        .bind(client_id)
+                        .bind(client_ids)
+                        .bind(interface)
+                        .bind(bucket_secs)
+                        .bind(result_limit.map(|limit| limit as i64))
+                        .bind(unrestricted_selection)
+                        .bind(&all_client_ids)
+                        .bind(&exact_client_ids)
+                        .bind(&exact_interfaces)
+                        .fetch_all(pool)
+                        .await?
+                };
+                let mut result = rows
+                    .into_iter()
                     .map(telemetry_network_rate_from_row)
-                    .collect()
+                    .collect::<Result<Vec<_>>>()?;
+                if bucket_secs.is_none()
+                    && visibility == LatestNetworkRateVisibility::SingleVpsDetail
+                {
+                    let detail_client_id = client_id.ok_or_else(|| {
+                        anyhow::anyhow!("the recent excluded-interface reader requires one VPS")
+                    })?;
+                    let excluded = sqlx::query(RECENT_EXCLUDED_NETWORK_TRANSITIONS_SQL)
+                        .bind(detail_client_id)
+                        .bind(interface)
+                        .fetch_all(pool)
+                        .await?;
+                    result.extend(
+                        excluded
+                            .into_iter()
+                            .map(telemetry_network_rate_from_row)
+                            .collect::<Result<Vec<_>>>()?,
+                    );
+                    result.sort_by(|left, right| {
+                        compare_timestamps_desc(&left.latest_observed_at, &right.latest_observed_at)
+                            .then_with(|| left.client_id.cmp(&right.client_id))
+                            .then_with(|| left.interface.cmp(&right.interface))
+                    });
+                }
+                if let Some(limit) = result_limit {
+                    result.truncate(limit);
+                }
+                Ok(result)
             }
         }
     }
@@ -2623,6 +3201,7 @@ impl Repository {
             None,
             None,
             None,
+            TunnelCounterVisibility::AdmittedOnly,
         )
         .await
     }
@@ -2643,6 +3222,25 @@ impl Repository {
             None,
             None,
             None,
+            TunnelCounterVisibility::AdmittedOnly,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_telemetry_tunnels_for_vps_detail(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<TelemetryTunnelView>> {
+        self.list_telemetry_tunnels_matching(
+            None,
+            Some(client_id),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            TunnelCounterVisibility::SingleVpsDetail,
         )
         .await
     }
@@ -2657,86 +3255,71 @@ impl Repository {
         severity: Option<&str>,
         start_unix: Option<u64>,
         end_unix: Option<u64>,
+        counter_visibility: TunnelCounterVisibility,
     ) -> Result<Vec<TelemetryTunnelView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory.telemetry_tunnels.read().await.clone();
-                let suspended_clients = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status == "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let allowed_client_ids = client_ids.map(|client_ids| {
-                    client_ids
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<HashSet<_>>()
-                });
-                let plans = memory
-                    .tunnel_plans
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|plan| plan.deleted_at.is_none())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                retain_declared_telemetry_tunnels(&mut records, &plans);
-                records.retain(|record| {
-                    !hidden.contains(&record.client_id)
-                        && !suspended_clients.contains(&record.client_id)
-                        && record
-                            .peer_client_id
-                            .as_ref()
-                            .is_none_or(|peer| !suspended_clients.contains(peer))
-                        && client_id.is_none_or(|expected| record.client_id == expected)
-                        && allowed_client_ids
-                            .as_ref()
-                            .is_none_or(|client_ids| client_ids.contains(record.client_id.as_str()))
-                        && interface.is_none_or(|expected| record.interface == expected)
-                        && timestamp_in_bounds(&record.observed_at, start_unix, end_unix)
-                        && (!alert_candidates_only
-                            || telemetry_tunnel_matches_alert_candidate(record, severity))
-                });
-                records.sort_by(|left, right| {
-                    tunnel_alert_priority(left, alert_candidates_only, severity)
-                        .cmp(&tunnel_alert_priority(
-                            right,
-                            alert_candidates_only,
-                            severity,
-                        ))
-                        .then_with(|| {
-                            compare_timestamps_desc(&left.observed_at, &right.observed_at)
-                        })
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.interface.cmp(&right.interface))
-                });
-                if let Some(result_limit) = result_limit {
-                    records.truncate(result_limit);
-                }
-                Ok(records)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH visible_status AS MATERIALIZED (
+                        SELECT id, status
+                        FROM visible_clients
+                    ), policy_clients AS MATERIALIZED (
+                        SELECT visible.id
+                        FROM visible_status visible
+                        WHERE visible.status <> 'suspended'
+                          AND ($1::TEXT IS NULL OR visible.id = $1)
+                          AND ($2::TEXT[] IS NULL OR visible.id = ANY($2))
+                    ), resolved_interface_policies AS MATERIALIZED (
+                        SELECT policy.*
+                        FROM public.resolve_telemetry_interface_policies(
+                            CASE WHEN $9::BOOLEAN
+                                 THEN ARRAY[]::TEXT[]
+                                 ELSE ARRAY(
+                                     SELECT client.id
+                                     FROM policy_clients client
+                                     ORDER BY client.id
+                                 )
+                            END
+                        ) policy
+                    )
                     SELECT
                         telemetry.client_id,
                         telemetry.observed_at::text AS observed_at,
                         telemetry.updated_at::text AS accepted_at,
                         telemetry.interface,
                         telemetry.kind AS kind,
-                        ownership_mode,
-                        mutation_policy,
+                        current_plan_policy.ownership_mode,
+                        CASE current_plan_policy.ownership_mode
+                            WHEN 'external_observed' THEN 'observe_only_saved_plan'
+                            WHEN 'agent_builtin' THEN 'managed_desired'
+                            WHEN 'custom_adapter' THEN 'managed_desired'
+                        END AS mutation_policy,
                         source,
                         operstate,
                         mtu,
                         link_type,
                         address,
-                        rx_bytes,
-                        tx_bytes,
+                        CASE WHEN (
+                                telemetry.counters_admitted_at_projection
+                                AND interface_policy.admitted
+                            ) OR (
+                                $9::BOOLEAN
+                                AND telemetry.observed_at >=
+                                    clock_timestamp() - INTERVAL '15 minutes'
+                            )
+                            THEN telemetry.rx_bytes
+                        END AS rx_bytes,
+                        CASE WHEN (
+                                telemetry.counters_admitted_at_projection
+                                AND interface_policy.admitted
+                            ) OR (
+                                $9::BOOLEAN
+                                AND telemetry.observed_at >=
+                                    clock_timestamp() - INTERVAL '15 minutes'
+                            )
+                            THEN telemetry.tx_bytes
+                        END AS tx_bytes,
                         traffic_source,
                         traffic_status,
                         traffic_reason,
@@ -2745,7 +3328,8 @@ impl Repository {
                         telemetry_topology_identity_hash,
                         telemetry_runtime_evidence_identity_hash,
                         telemetry_plan_name,
-                        telemetry_plan_runtime_manager,
+                        current_plan_policy.ownership_mode
+                            AS telemetry_plan_runtime_manager,
                         telemetry_endpoint_side,
                         telemetry_peer_client_id,
                         adapter_health,
@@ -2759,45 +3343,41 @@ impl Repository {
                         packet_loss_ratio,
                         latency_healthy_windows,
                         latency_missed_windows
-                    FROM telemetry_tunnels telemetry
-                    JOIN visible_clients visible_client
+                    FROM telemetry_current_tunnels telemetry
+                    JOIN visible_status visible_client
                       ON visible_client.id = telemetry.client_id
                      AND visible_client.status <> 'suspended'
-                    JOIN tunnel_plans current_plan
-                      ON current_plan.id::TEXT = telemetry.telemetry_plan_id
-                     AND current_plan.deleted_at IS NULL
-                     AND current_plan.enabled
-                     AND current_plan.name = telemetry.telemetry_plan_name
-                     AND current_plan.plan->>'interface_name' = telemetry.interface
-                     AND (
-                        (
-                            telemetry.telemetry_endpoint_side = 'left'
-                            AND current_plan.left_client_id = telemetry.client_id
-                            AND current_plan.right_client_id = telemetry.telemetry_peer_client_id
-                        )
-                        OR (
-                            telemetry.telemetry_endpoint_side = 'right'
-                            AND current_plan.right_client_id = telemetry.client_id
-                            AND current_plan.left_client_id = telemetry.telemetry_peer_client_id
-                        )
-                     )
+                    LEFT JOIN visible_status visible_peer
+                      ON visible_peer.id = telemetry.telemetry_peer_client_id
+                    LEFT JOIN resolved_interface_policies policy
+                      ON policy.client_id = telemetry.client_id
+                    CROSS JOIN LATERAL (
+                        SELECT COALESCE(
+                            telemetry.current_plan#>>'{runtime_control,manager}',
+                            'agent_builtin'
+                        ) AS ownership_mode
+                        OFFSET 0
+                    ) current_plan_policy
+                    CROSS JOIN LATERAL (
+                        SELECT CASE WHEN $9::BOOLEAN THEN FALSE ELSE
+                            public.telemetry_interface_is_admitted_resolved(
+                                policy.admission_mode,
+                                policy.interface_patterns,
+                                policy.managed_tunnel_interfaces,
+                                'tunnel',
+                                telemetry.interface
+                            )
+                        END AS admitted
+                        OFFSET 0
+                    ) interface_policy
                     WHERE ($1::TEXT IS NULL OR telemetry.client_id = $1)
                       AND ($2::TEXT[] IS NULL OR telemetry.client_id = ANY($2))
                       AND ($3::TEXT IS NULL OR telemetry.interface = $3)
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM visible_clients suspended_peer
-                          WHERE suspended_peer.id = telemetry.telemetry_peer_client_id
-                            AND suspended_peer.status = 'suspended'
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM visible_clients suspended_endpoint
-                          WHERE suspended_endpoint.status = 'suspended'
-                            AND suspended_endpoint.id IN (
-                                current_plan.left_client_id,
-                                current_plan.right_client_id
-                            )
+                      AND visible_peer.status IS DISTINCT FROM 'suspended'
+                      AND (
+                        NOT $9::BOOLEAN
+                        OR telemetry.observed_at >=
+                            clock_timestamp() - INTERVAL '15 minutes'
                       )
                       AND (
                         $6::DOUBLE PRECISION IS NULL
@@ -2811,8 +3391,7 @@ impl Repository {
                         NOT $4::BOOLEAN
                         OR (
                             ($5::TEXT IS NULL OR $5 = 'critical')
-                            AND current_plan.plan#>>'{runtime_control,manager}'
-                                = 'custom_adapter'
+                            AND current_plan_policy.ownership_mode = 'custom_adapter'
                             AND jsonb_typeof(telemetry.adapter_health) = 'object'
                             AND jsonb_typeof(telemetry.adapter_health->'status') = 'string'
                             AND telemetry.adapter_health->'success'
@@ -2828,8 +3407,7 @@ impl Repository {
                         CASE
                             WHEN $4::BOOLEAN
                              AND $5::TEXT IS NULL
-                             AND current_plan.plan#>>'{runtime_control,manager}'
-                                = 'custom_adapter'
+                             AND current_plan_policy.ownership_mode = 'custom_adapter'
                              AND jsonb_typeof(telemetry.adapter_health) = 'object'
                              AND jsonb_typeof(telemetry.adapter_health->'status') = 'string'
                              AND telemetry.adapter_health->'success'
@@ -2851,15 +3429,14 @@ impl Repository {
                 .bind(start_unix.map(|value| value as f64))
                 .bind(end_unix.map(|value| value as f64))
                 .bind(result_limit.map(|limit| limit as i64))
+                .bind(counter_visibility == TunnelCounterVisibility::SingleVpsDetail)
                 .fetch_all(pool)
                 .await?;
 
                 let mut records = rows
                     .into_iter()
                     .map(|row| {
-                        let telemetry_plan_id = row
-                            .try_get::<Option<String>, _>("telemetry_plan_id")?
-                            .and_then(|value| uuid::Uuid::parse_str(&value).ok());
+                        let telemetry_plan_id = row.try_get("telemetry_plan_id")?;
                         let telemetry_plan_name = row.try_get("telemetry_plan_name")?;
                         Ok(TelemetryTunnelView {
                             client_id: row.try_get("client_id")?,
@@ -2904,8 +3481,6 @@ impl Repository {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let plans = self.list_tunnel_plans().await?;
-                retain_declared_telemetry_tunnels(&mut records, &plans);
                 if alert_candidates_only {
                     records.retain(|record| {
                         telemetry_tunnel_matches_alert_candidate(record, severity)
@@ -2915,825 +3490,6 @@ impl Repository {
             }
         }
     }
-}
-
-#[derive(Default)]
-struct MemoryRollupAggregate {
-    sample_count: i64,
-    cpu_usage_sample_count: i64,
-    cpu_usage_weighted_total: f64,
-    cpu_usage_max: Option<f64>,
-    cpu_cores_max: i32,
-    cpu_weighted_total: f64,
-    cpu_max: Option<f64>,
-    cpu_load_5_weighted_total: f64,
-    cpu_load_5_max: Option<f64>,
-    cpu_load_15_weighted_total: f64,
-    cpu_load_15_max: Option<f64>,
-    memory_total_max: Option<i64>,
-    memory_available_weighted_total: i128,
-    memory_available_min: Option<i64>,
-    memory_used_ratio_weighted_total: f64,
-    memory_used_ratio_max: Option<f64>,
-    swap_sample_count: i64,
-    swap_total_max: Option<i64>,
-    swap_explicit_no_swap: bool,
-    swap_available_weighted_total: i128,
-    swap_available_min: Option<i64>,
-    swap_used_ratio_weighted_total: f64,
-    swap_used_ratio_max: Option<f64>,
-    disk_sample_count: i64,
-    disk_total_max: Option<i64>,
-    disk_available_weighted_total: i128,
-    disk_available_min: Option<i64>,
-    disk_used_ratio_weighted_total: f64,
-    disk_used_ratio_max: Option<f64>,
-    network_rx_max: Option<i64>,
-    network_tx_max: Option<i64>,
-    connections_sample_count: i64,
-    tcp_sockets_latest: Option<i64>,
-    udp_sockets_latest: Option<i64>,
-    connections_observed_at: Option<String>,
-    latest_observed_at: String,
-    updated_at: String,
-}
-
-fn aggregate_memory_telemetry_rollups(
-    rows: Vec<TelemetryRollupView>,
-    step_secs: i32,
-) -> Vec<TelemetryRollupView> {
-    let step_secs = step_secs.max(60) as u64;
-    let mut groups = BTreeMap::<(String, u64), MemoryRollupAggregate>::new();
-    for row in rows {
-        let timestamp = parse_timestamp_unix(&row.bucket_start).unwrap_or(0);
-        let chart_bucket = timestamp / step_secs * step_secs;
-        let aggregate = groups
-            .entry((row.client_id.clone(), chart_bucket))
-            .or_default();
-        let sample_count = i64::from(row.sample_count.max(0));
-        aggregate.sample_count = aggregate.sample_count.saturating_add(sample_count);
-        let cpu_usage_sample_count = i64::from(row.cpu_usage_sample_count.max(0));
-        aggregate.cpu_usage_sample_count = aggregate
-            .cpu_usage_sample_count
-            .saturating_add(cpu_usage_sample_count);
-        if let Some(value) = row.cpu_usage_avg {
-            aggregate.cpu_usage_weighted_total += value * cpu_usage_sample_count as f64;
-        }
-        if let Some(value) = row.cpu_usage_max {
-            aggregate.cpu_usage_max = Some(
-                aggregate
-                    .cpu_usage_max
-                    .map_or(value, |current| current.max(value)),
-            );
-        }
-        aggregate.cpu_cores_max = aggregate.cpu_cores_max.max(row.cpu_cores_max);
-        aggregate.cpu_weighted_total += row.cpu_load_1_avg * sample_count as f64;
-        aggregate.cpu_max = Some(aggregate.cpu_max.map_or(row.cpu_load_1_max, |current| {
-            current.max(row.cpu_load_1_max)
-        }));
-        aggregate.cpu_load_5_weighted_total += row.cpu_load_5_avg * sample_count as f64;
-        aggregate.cpu_load_5_max = Some(
-            aggregate
-                .cpu_load_5_max
-                .map_or(row.cpu_load_5_max, |current| {
-                    current.max(row.cpu_load_5_max)
-                }),
-        );
-        aggregate.cpu_load_15_weighted_total += row.cpu_load_15_avg * sample_count as f64;
-        aggregate.cpu_load_15_max = Some(
-            aggregate
-                .cpu_load_15_max
-                .map_or(row.cpu_load_15_max, |current| {
-                    current.max(row.cpu_load_15_max)
-                }),
-        );
-        aggregate.memory_total_max = Some(
-            aggregate
-                .memory_total_max
-                .map_or(row.memory_total_bytes_max, |current| {
-                    current.max(row.memory_total_bytes_max)
-                }),
-        );
-        aggregate.memory_available_weighted_total =
-            aggregate.memory_available_weighted_total.saturating_add(
-                i128::from(row.memory_available_bytes_avg).saturating_mul(i128::from(sample_count)),
-            );
-        aggregate.memory_available_min = Some(
-            aggregate
-                .memory_available_min
-                .map_or(row.memory_available_bytes_min, |current| {
-                    current.min(row.memory_available_bytes_min)
-                }),
-        );
-        aggregate.memory_used_ratio_weighted_total +=
-            row.memory_used_ratio_avg * sample_count as f64;
-        aggregate.memory_used_ratio_max = Some(
-            aggregate
-                .memory_used_ratio_max
-                .map_or(row.memory_used_ratio_max, |current| {
-                    current.max(row.memory_used_ratio_max)
-                }),
-        );
-        let swap_sample_count = i64::from(row.swap_sample_count.max(0));
-        if let Some(total) = row.swap_total_bytes_max {
-            aggregate.swap_total_max = Some(
-                aggregate
-                    .swap_total_max
-                    .map_or(total, |current| current.max(total)),
-            );
-            aggregate.swap_explicit_no_swap |= swap_sample_count == 0 && total == 0;
-        }
-        if let (Some(used_ratio_avg), Some(used_ratio_max)) =
-            (row.swap_used_ratio_avg, row.swap_used_ratio_max)
-        {
-            aggregate.swap_sample_count = aggregate
-                .swap_sample_count
-                .saturating_add(swap_sample_count);
-            aggregate.swap_used_ratio_weighted_total += used_ratio_avg * swap_sample_count as f64;
-            aggregate.swap_used_ratio_max = Some(
-                aggregate
-                    .swap_used_ratio_max
-                    .map_or(used_ratio_max, |current| current.max(used_ratio_max)),
-            );
-            if let (Some(available_avg), Some(available_min)) =
-                (row.swap_available_bytes_avg, row.swap_available_bytes_min)
-            {
-                aggregate.swap_available_weighted_total =
-                    aggregate.swap_available_weighted_total.saturating_add(
-                        i128::from(available_avg).saturating_mul(i128::from(swap_sample_count)),
-                    );
-                aggregate.swap_available_min = Some(
-                    aggregate
-                        .swap_available_min
-                        .map_or(available_min, |current| current.min(available_min)),
-                );
-            }
-        }
-        let disk_sample_count = i64::from(row.disk_sample_count.max(0));
-        if disk_sample_count > 0 {
-            aggregate.disk_sample_count = aggregate
-                .disk_sample_count
-                .saturating_add(disk_sample_count);
-            aggregate.disk_total_max = Some(
-                aggregate
-                    .disk_total_max
-                    .map_or(row.disk_total_bytes_max, |current| {
-                        current.max(row.disk_total_bytes_max)
-                    }),
-            );
-            aggregate.disk_available_weighted_total =
-                aggregate.disk_available_weighted_total.saturating_add(
-                    i128::from(row.disk_available_bytes_avg)
-                        .saturating_mul(i128::from(disk_sample_count)),
-                );
-            aggregate.disk_available_min = Some(
-                aggregate
-                    .disk_available_min
-                    .map_or(row.disk_available_bytes_min, |current| {
-                        current.min(row.disk_available_bytes_min)
-                    }),
-            );
-            aggregate.disk_used_ratio_weighted_total +=
-                row.disk_used_ratio_avg * disk_sample_count as f64;
-            aggregate.disk_used_ratio_max = Some(
-                aggregate
-                    .disk_used_ratio_max
-                    .map_or(row.disk_used_ratio_max, |current| {
-                        current.max(row.disk_used_ratio_max)
-                    }),
-            );
-        }
-        aggregate.network_rx_max = Some(
-            aggregate
-                .network_rx_max
-                .map_or(row.network_rx_bytes_max, |current| {
-                    current.max(row.network_rx_bytes_max)
-                }),
-        );
-        aggregate.network_tx_max = Some(
-            aggregate
-                .network_tx_max
-                .map_or(row.network_tx_bytes_max, |current| {
-                    current.max(row.network_tx_bytes_max)
-                }),
-        );
-        aggregate.connections_sample_count = aggregate
-            .connections_sample_count
-            .saturating_add(i64::from(row.connections_sample_count.max(0)));
-        if row
-            .connections_observed_at
-            .as_deref()
-            .is_some_and(|observed_at| {
-                aggregate
-                    .connections_observed_at
-                    .as_deref()
-                    .is_none_or(|stored| {
-                        parse_timestamp_unix(observed_at).unwrap_or(0)
-                            >= parse_timestamp_unix(stored).unwrap_or(0)
-                    })
-            })
-        {
-            aggregate.tcp_sockets_latest = row.tcp_sockets_latest;
-            aggregate.udp_sockets_latest = row.udp_sockets_latest;
-            aggregate.connections_observed_at = row.connections_observed_at;
-        }
-        retain_newer_timestamp(&mut aggregate.latest_observed_at, &row.latest_observed_at);
-        retain_newer_timestamp(&mut aggregate.updated_at, &row.updated_at);
-    }
-
-    groups
-        .into_iter()
-        .map(|((client_id, bucket_start), aggregate)| {
-            let sample_count = aggregate.sample_count.max(0);
-            TelemetryRollupView {
-                client_id,
-                bucket_start: bucket_start.to_string(),
-                bucket_secs: step_secs as i32,
-                sample_count: sample_count.min(i64::from(i32::MAX)) as i32,
-                cpu_usage_sample_count: aggregate.cpu_usage_sample_count.min(i64::from(i32::MAX))
-                    as i32,
-                cpu_usage_avg: (aggregate.cpu_usage_sample_count > 0).then_some(
-                    aggregate.cpu_usage_weighted_total / aggregate.cpu_usage_sample_count as f64,
-                ),
-                cpu_usage_max: aggregate.cpu_usage_max,
-                cpu_cores_max: aggregate.cpu_cores_max,
-                cpu_load_1_avg: if sample_count == 0 {
-                    0.0
-                } else {
-                    aggregate.cpu_weighted_total / sample_count as f64
-                },
-                cpu_load_1_max: aggregate.cpu_max.unwrap_or(0.0),
-                cpu_load_5_avg: if sample_count == 0 {
-                    0.0
-                } else {
-                    aggregate.cpu_load_5_weighted_total / sample_count as f64
-                },
-                cpu_load_5_max: aggregate.cpu_load_5_max.unwrap_or(0.0),
-                cpu_load_15_avg: if sample_count == 0 {
-                    0.0
-                } else {
-                    aggregate.cpu_load_15_weighted_total / sample_count as f64
-                },
-                cpu_load_15_max: aggregate.cpu_load_15_max.unwrap_or(0.0),
-                memory_total_bytes_max: aggregate.memory_total_max.unwrap_or(0),
-                memory_available_bytes_avg: round_i128_div_i64(
-                    aggregate.memory_available_weighted_total,
-                    sample_count,
-                ),
-                memory_available_bytes_min: aggregate.memory_available_min.unwrap_or(0),
-                memory_used_ratio_avg: if sample_count == 0 {
-                    0.0
-                } else {
-                    aggregate.memory_used_ratio_weighted_total / sample_count as f64
-                },
-                memory_used_ratio_max: aggregate.memory_used_ratio_max.unwrap_or(0.0),
-                swap_sample_count: aggregate.swap_sample_count.min(i64::from(i32::MAX)) as i32,
-                swap_total_bytes_max: aggregate.swap_total_max,
-                swap_available_bytes_avg: if aggregate.swap_sample_count > 0 {
-                    Some(round_i128_div_i64(
-                        aggregate.swap_available_weighted_total,
-                        aggregate.swap_sample_count,
-                    ))
-                } else {
-                    aggregate.swap_explicit_no_swap.then_some(0)
-                },
-                swap_available_bytes_min: if aggregate.swap_sample_count > 0 {
-                    aggregate.swap_available_min
-                } else {
-                    aggregate.swap_explicit_no_swap.then_some(0)
-                },
-                swap_used_ratio_avg: (aggregate.swap_sample_count > 0).then_some(
-                    aggregate.swap_used_ratio_weighted_total / aggregate.swap_sample_count as f64,
-                ),
-                swap_used_ratio_max: aggregate.swap_used_ratio_max,
-                disk_sample_count: aggregate.disk_sample_count.min(i64::from(i32::MAX)) as i32,
-                disk_total_bytes_max: aggregate.disk_total_max.unwrap_or(0),
-                disk_available_bytes_avg: round_i128_div_i64(
-                    aggregate.disk_available_weighted_total,
-                    aggregate.disk_sample_count,
-                ),
-                disk_available_bytes_min: aggregate.disk_available_min.unwrap_or(0),
-                disk_used_ratio_avg: if aggregate.disk_sample_count == 0 {
-                    0.0
-                } else {
-                    aggregate.disk_used_ratio_weighted_total / aggregate.disk_sample_count as f64
-                },
-                disk_used_ratio_max: aggregate.disk_used_ratio_max.unwrap_or(0.0),
-                network_rx_bytes_max: aggregate.network_rx_max.unwrap_or(0),
-                network_tx_bytes_max: aggregate.network_tx_max.unwrap_or(0),
-                connections_sample_count: aggregate
-                    .connections_sample_count
-                    .min(i64::from(i32::MAX)) as i32,
-                tcp_sockets_latest: aggregate.tcp_sockets_latest,
-                udp_sockets_latest: aggregate.udp_sockets_latest,
-                connections_observed_at: aggregate.connections_observed_at,
-                latest_observed_at: aggregate.latest_observed_at,
-                updated_at: aggregate.updated_at,
-            }
-        })
-        .collect()
-}
-
-fn retain_fair_rollup_points(
-    rows: &mut Vec<TelemetryRollupView>,
-    points_per_client: usize,
-    total_limit: usize,
-) {
-    // Assign each client a local recency rank before applying the global cap.
-    // This keeps one noisy client from crowding out newer points from its peers.
-    rows.sort_by(|left, right| {
-        left.client_id
-            .cmp(&right.client_id)
-            .then_with(|| {
-                parse_timestamp_unix(&right.bucket_start)
-                    .cmp(&parse_timestamp_unix(&left.bucket_start))
-            })
-            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
-    });
-    let mut counts = HashMap::<String, usize>::new();
-    let mut ranked = std::mem::take(rows)
-        .into_iter()
-        .filter_map(|row| {
-            let count = counts.entry(row.client_id.clone()).or_default();
-            let rank = *count;
-            *count = count.saturating_add(1);
-            (rank < points_per_client).then_some((rank, row))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
-        left_rank
-            .cmp(right_rank)
-            .then_with(|| {
-                parse_timestamp_unix(&right.bucket_start)
-                    .cmp(&parse_timestamp_unix(&left.bucket_start))
-            })
-            .then_with(|| left.client_id.cmp(&right.client_id))
-            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
-    });
-    ranked.truncate(total_limit);
-    rows.extend(ranked.into_iter().map(|(_, row)| row));
-    rows.sort_by(|left, right| {
-        parse_timestamp_unix(&left.bucket_start)
-            .cmp(&parse_timestamp_unix(&right.bucket_start))
-            .then_with(|| left.client_id.cmp(&right.client_id))
-            .then_with(|| left.bucket_start.cmp(&right.bucket_start))
-    });
-}
-
-fn retain_fair_network_points(
-    rows: &mut Vec<TelemetryNetworkRateView>,
-    points_per_series: usize,
-    total_limit: usize,
-) {
-    // Use the same rank-first policy for every client/interface series.
-    rows.sort_by(|left, right| {
-        left.client_id
-            .cmp(&right.client_id)
-            .then_with(|| left.interface.cmp(&right.interface))
-            .then_with(|| {
-                parse_timestamp_unix(&right.bucket_start)
-                    .cmp(&parse_timestamp_unix(&left.bucket_start))
-            })
-            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
-    });
-    let mut counts = HashMap::<(String, String), usize>::new();
-    let mut ranked = std::mem::take(rows)
-        .into_iter()
-        .filter_map(|row| {
-            let count = counts
-                .entry((row.client_id.clone(), row.interface.clone()))
-                .or_default();
-            let rank = *count;
-            *count = count.saturating_add(1);
-            (rank < points_per_series).then_some((rank, row))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
-        left_rank
-            .cmp(right_rank)
-            .then_with(|| {
-                parse_timestamp_unix(&right.bucket_start)
-                    .cmp(&parse_timestamp_unix(&left.bucket_start))
-            })
-            .then_with(|| left.client_id.cmp(&right.client_id))
-            .then_with(|| left.interface.cmp(&right.interface))
-            .then_with(|| right.bucket_start.cmp(&left.bucket_start))
-    });
-    ranked.truncate(total_limit);
-    rows.extend(ranked.into_iter().map(|(_, row)| row));
-    rows.sort_by(|left, right| {
-        parse_timestamp_unix(&left.bucket_start)
-            .cmp(&parse_timestamp_unix(&right.bucket_start))
-            .then_with(|| left.client_id.cmp(&right.client_id))
-            .then_with(|| left.interface.cmp(&right.interface))
-            .then_with(|| left.bucket_start.cmp(&right.bucket_start))
-    });
-}
-
-fn retain_newer_timestamp(current: &mut String, candidate: &str) {
-    let replace = current.is_empty()
-        || match (
-            parse_timestamp_unix(candidate),
-            parse_timestamp_unix(current),
-        ) {
-            (Some(candidate), Some(current)) => candidate > current,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => candidate > current.as_str(),
-        };
-    if replace {
-        candidate.clone_into(current);
-    }
-}
-
-fn round_i128_div_i64(numerator: i128, denominator: i64) -> i64 {
-    let denominator = i128::from(denominator.max(1));
-    ((numerator + denominator / 2) / denominator).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
-        as i64
-}
-
-#[derive(Default)]
-struct MemoryNetworkAggregate {
-    sample_count: i32,
-    bucket_secs: i32,
-    last_sample_unix: u64,
-    rx_bytes_avg: i64,
-    tx_bytes_avg: i64,
-    rx_bytes_last: i64,
-    tx_bytes_last: i64,
-    rx_counter_epoch: i64,
-    tx_counter_epoch: i64,
-    latest_observed_at: String,
-    updated_at: String,
-}
-
-fn retain_authoritative_network_rows(
-    rows: Vec<TelemetryNetworkRateView>,
-) -> Vec<TelemetryNetworkRateView> {
-    rows.iter()
-        .filter(|row| {
-            let Some(row_start) = parse_timestamp_unix(&row.bucket_start) else {
-                return false;
-            };
-            !rows.iter().any(|coarser| {
-                if coarser.client_id != row.client_id
-                    || coarser.interface != row.interface
-                    || coarser.bucket_secs <= row.bucket_secs
-                {
-                    return false;
-                }
-                let Some(coarser_start) = parse_timestamp_unix(&coarser.bucket_start) else {
-                    return false;
-                };
-                coarser_start < bucket_end_unix(row_start, row.bucket_secs)
-                    && bucket_end_unix(coarser_start, coarser.bucket_secs) > row_start
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-fn select_dashboard_network_rows(
-    rows: Vec<TelemetryNetworkRateView>,
-    start_unix: Option<u64>,
-    end_unix: Option<u64>,
-    step_secs: i32,
-) -> Vec<TelemetryNetworkRateView> {
-    let step_secs = normalized_dashboard_step_secs(step_secs);
-    let mut visible = BTreeMap::<(String, String, u64), MemoryNetworkAggregate>::new();
-    let mut preceding = HashMap::<(String, String), TelemetryNetworkRateView>::new();
-    for row in rows {
-        let Some(bucket_start) = parse_timestamp_unix(&row.bucket_start) else {
-            continue;
-        };
-        if row.bucket_secs < 60 || row.bucket_secs % 60 != 0 {
-            continue;
-        }
-        if bucket_overlaps_bounds(&row.bucket_start, row.bucket_secs, start_unix, end_unix) {
-            let chart_step = step_secs.max(row.bucket_secs) as u64;
-            let chart_bucket_start = bucket_start / chart_step * chart_step;
-            let last_sample_unix = parse_timestamp_unix(&row.latest_observed_at)
-                .unwrap_or_else(|| bucket_last_sample_unix(&row.bucket_start, row.bucket_secs));
-            let aggregate = visible
-                .entry((
-                    row.client_id.clone(),
-                    row.interface.clone(),
-                    chart_bucket_start,
-                ))
-                .or_default();
-            aggregate.bucket_secs = chart_step.clamp(60, i32::MAX as u64) as i32;
-            aggregate.sample_count = aggregate.sample_count.saturating_add(row.sample_count);
-            if last_sample_unix >= aggregate.last_sample_unix {
-                aggregate.last_sample_unix = last_sample_unix;
-                aggregate.rx_bytes_avg = row.rx_bytes_avg;
-                aggregate.tx_bytes_avg = row.tx_bytes_avg;
-                aggregate.rx_bytes_last = row.rx_bytes_last;
-                aggregate.tx_bytes_last = row.tx_bytes_last;
-                aggregate.rx_counter_epoch = row.rx_counter_epoch;
-                aggregate.tx_counter_epoch = row.tx_counter_epoch;
-                aggregate.latest_observed_at = row.latest_observed_at.clone();
-            }
-            retain_newer_timestamp(&mut aggregate.updated_at, &row.updated_at);
-        }
-
-        let Some(start) = start_unix else {
-            continue;
-        };
-        let effective_at = parse_timestamp_unix(&row.latest_observed_at)
-            .unwrap_or_else(|| bucket_last_sample_unix(&row.bucket_start, row.bucket_secs));
-        if effective_at >= start {
-            continue;
-        }
-        let key = (row.client_id.clone(), row.interface.clone());
-        if preceding.get(&key).is_none_or(|current| {
-            bucket_last_sample_unix(&current.bucket_start, current.bucket_secs) < effective_at
-        }) {
-            preceding.insert(
-                key,
-                TelemetryNetworkRateView {
-                    bucket_start: effective_at.to_string(),
-                    bucket_secs: 60,
-                    sample_count: 0,
-                    rx_bytes_delta: 0,
-                    tx_bytes_delta: 0,
-                    rx_bps_avg: 0.0,
-                    tx_bps_avg: 0.0,
-                    ..row.clone()
-                },
-            );
-        }
-    }
-    let mut selected = visible
-        .into_iter()
-        .map(
-            |((client_id, interface, chart_bucket_start), aggregate)| TelemetryNetworkRateView {
-                client_id,
-                interface,
-                bucket_start: chart_bucket_start.to_string(),
-                bucket_secs: aggregate.bucket_secs.max(60),
-                sample_count: aggregate.sample_count,
-                rx_bytes_avg: aggregate.rx_bytes_avg,
-                tx_bytes_avg: aggregate.tx_bytes_avg,
-                rx_bytes_last: aggregate.rx_bytes_last,
-                tx_bytes_last: aggregate.tx_bytes_last,
-                rx_counter_epoch: aggregate.rx_counter_epoch,
-                tx_counter_epoch: aggregate.tx_counter_epoch,
-                latest_observed_at: aggregate.latest_observed_at,
-                rx_bytes_delta: 0,
-                tx_bytes_delta: 0,
-                rx_bps_avg: 0.0,
-                tx_bps_avg: 0.0,
-                updated_at: aggregate.updated_at,
-            },
-        )
-        .collect::<Vec<_>>();
-    selected.extend(preceding.into_values());
-    selected
-}
-
-fn aggregate_memory_network_rates(
-    rows: Vec<TelemetryNetworkRateView>,
-    step_secs: i32,
-) -> Vec<TelemetryNetworkRateView> {
-    let step_secs = step_secs.max(60) as u64;
-    let mut groups = BTreeMap::<(String, String, i32, u64), MemoryNetworkAggregate>::new();
-    for row in rows {
-        let timestamp = parse_timestamp_unix(&row.bucket_start).unwrap_or(0);
-        let chart_bucket = timestamp / step_secs * step_secs;
-        let key = (
-            row.client_id.clone(),
-            row.interface.clone(),
-            step_secs as i32,
-            chart_bucket,
-        );
-        let aggregate = groups.entry(key).or_default();
-        let sample_count = row.sample_count.max(0);
-        aggregate.sample_count = aggregate.sample_count.saturating_add(sample_count);
-        let last_sample_unix = bucket_last_sample_unix(&row.bucket_start, row.bucket_secs);
-        if last_sample_unix >= aggregate.last_sample_unix {
-            aggregate.last_sample_unix = last_sample_unix;
-            aggregate.rx_bytes_avg = row.rx_bytes_avg;
-            aggregate.tx_bytes_avg = row.tx_bytes_avg;
-            aggregate.rx_bytes_last = row.rx_bytes_last;
-            aggregate.tx_bytes_last = row.tx_bytes_last;
-            aggregate.rx_counter_epoch = row.rx_counter_epoch;
-            aggregate.tx_counter_epoch = row.tx_counter_epoch;
-            aggregate.latest_observed_at = row.latest_observed_at.clone();
-        }
-        retain_newer_timestamp(&mut aggregate.updated_at, &row.updated_at);
-    }
-
-    groups
-        .into_iter()
-        .map(
-            |((client_id, interface, _bucket_secs, bucket_start), aggregate)| {
-                let sample_count = aggregate.sample_count.max(1);
-                TelemetryNetworkRateView {
-                    client_id,
-                    interface,
-                    bucket_start: bucket_start.to_string(),
-                    bucket_secs: aggregate
-                        .last_sample_unix
-                        .saturating_sub(bucket_start)
-                        .saturating_add(60)
-                        .clamp(60, i32::MAX as u64) as i32,
-                    sample_count,
-                    rx_bytes_avg: aggregate.rx_bytes_avg,
-                    tx_bytes_avg: aggregate.tx_bytes_avg,
-                    rx_bytes_last: aggregate.rx_bytes_last,
-                    tx_bytes_last: aggregate.tx_bytes_last,
-                    rx_counter_epoch: aggregate.rx_counter_epoch,
-                    tx_counter_epoch: aggregate.tx_counter_epoch,
-                    latest_observed_at: aggregate.latest_observed_at,
-                    rx_bytes_delta: 0,
-                    tx_bytes_delta: 0,
-                    rx_bps_avg: 0.0,
-                    tx_bps_avg: 0.0,
-                    updated_at: aggregate.updated_at,
-                }
-            },
-        )
-        .collect()
-}
-
-fn network_rate_effective_unix(row: &TelemetryNetworkRateView) -> u64 {
-    parse_timestamp_unix(&row.latest_observed_at)
-        .unwrap_or_else(|| bucket_last_sample_unix(&row.bucket_start, row.bucket_secs))
-}
-
-fn derive_latest_network_rates(
-    rows: Vec<TelemetryNetworkRateView>,
-) -> Vec<TelemetryNetworkRateView> {
-    let mut rows_by_key = HashMap::<(String, String), Vec<TelemetryNetworkRateView>>::new();
-    for row in rows {
-        rows_by_key
-            .entry((row.client_id.clone(), row.interface.clone()))
-            .or_default()
-            .push(row);
-    }
-
-    let mut derived = Vec::with_capacity(rows_by_key.len());
-    for mut rows in rows_by_key.into_values() {
-        rows.sort_by(|left, right| {
-            network_rate_effective_unix(right)
-                .cmp(&network_rate_effective_unix(left))
-                .then_with(|| {
-                    parse_timestamp_unix(&right.bucket_start)
-                        .cmp(&parse_timestamp_unix(&left.bucket_start))
-                })
-        });
-        let Some(mut latest) = rows.first().cloned() else {
-            continue;
-        };
-        let latest_effective = network_rate_effective_unix(&latest);
-        let Some(previous) = rows
-            .iter()
-            .skip(1)
-            .find(|row| network_rate_effective_unix(row) < latest_effective)
-        else {
-            continue;
-        };
-        if latest.rx_counter_epoch != previous.rx_counter_epoch
-            || latest.tx_counter_epoch != previous.tx_counter_epoch
-            || latest.rx_bytes_last < previous.rx_bytes_last
-            || latest.tx_bytes_last < previous.tx_bytes_last
-        {
-            continue;
-        }
-        let duration = latest_effective
-            .saturating_sub(network_rate_effective_unix(previous))
-            .max(1) as f64;
-        latest.rx_bytes_delta = latest.rx_bytes_last - previous.rx_bytes_last;
-        latest.tx_bytes_delta = latest.tx_bytes_last - previous.tx_bytes_last;
-        latest.rx_bps_avg = (latest.rx_bytes_delta * 8) as f64 / duration;
-        latest.tx_bps_avg = (latest.tx_bytes_delta * 8) as f64 / duration;
-        derived.push(latest);
-    }
-    derived
-}
-
-fn derive_network_rates(mut rows: Vec<TelemetryNetworkRateView>) -> Vec<TelemetryNetworkRateView> {
-    rows.sort_by(|left, right| {
-        left.client_id
-            .cmp(&right.client_id)
-            .then_with(|| left.interface.cmp(&right.interface))
-            .then_with(|| {
-                bucket_last_sample_unix(&left.bucket_start, left.bucket_secs).cmp(
-                    &bucket_last_sample_unix(&right.bucket_start, right.bucket_secs),
-                )
-            })
-    });
-    let mut previous_by_key = HashMap::<(String, String), TelemetryNetworkRateView>::new();
-    let mut derived = Vec::with_capacity(rows.len());
-    for mut row in rows {
-        let key = (row.client_id.clone(), row.interface.clone());
-        if let Some(previous) = previous_by_key.get(&key) {
-            if row.rx_counter_epoch == previous.rx_counter_epoch
-                && row.tx_counter_epoch == previous.tx_counter_epoch
-                && row.rx_bytes_last >= previous.rx_bytes_last
-                && row.tx_bytes_last >= previous.tx_bytes_last
-            {
-                let current_ts = parse_timestamp_unix(&row.latest_observed_at)
-                    .unwrap_or_else(|| bucket_last_sample_unix(&row.bucket_start, row.bucket_secs));
-                let previous_ts = parse_timestamp_unix(&previous.latest_observed_at)
-                    .unwrap_or_else(|| {
-                        bucket_last_sample_unix(&previous.bucket_start, previous.bucket_secs)
-                    });
-                let duration = current_ts.saturating_sub(previous_ts).max(1) as f64;
-                row.rx_bytes_delta = row.rx_bytes_last - previous.rx_bytes_last;
-                row.tx_bytes_delta = row.tx_bytes_last - previous.tx_bytes_last;
-                row.rx_bps_avg = (row.rx_bytes_delta * 8) as f64 / duration;
-                row.tx_bps_avg = (row.tx_bytes_delta * 8) as f64 / duration;
-                derived.push(row.clone());
-            }
-        }
-        // A reset row is unavailable as a rate point, but it is the baseline
-        // for the next sample. Advancing here preserves a single explicit gap
-        // instead of smearing traffic across the reset boundary.
-        previous_by_key.insert(key, row);
-    }
-    derived
-}
-
-fn mark_memory_network_counter_epochs(
-    mut rows: Vec<TelemetryNetworkRateView>,
-) -> Vec<TelemetryNetworkRateView> {
-    rows.sort_by(|left, right| {
-        left.client_id
-            .cmp(&right.client_id)
-            .then_with(|| left.interface.cmp(&right.interface))
-            .then_with(|| {
-                bucket_last_sample_unix(&left.bucket_start, left.bucket_secs).cmp(
-                    &bucket_last_sample_unix(&right.bucket_start, right.bucket_secs),
-                )
-            })
-    });
-    let mut previous = HashMap::<(String, String), (i64, i64, i64, i64)>::new();
-    for row in &mut rows {
-        let key = (row.client_id.clone(), row.interface.clone());
-        let (rx_epoch, tx_epoch) = previous.get(&key).map_or((0, 0), |state| {
-            (
-                state.2 + i64::from(row.rx_bytes_last < state.0),
-                state.3 + i64::from(row.tx_bytes_last < state.1),
-            )
-        });
-        row.rx_counter_epoch = rx_epoch;
-        row.tx_counter_epoch = tx_epoch;
-        previous.insert(
-            key,
-            (row.rx_bytes_last, row.tx_bytes_last, rx_epoch, tx_epoch),
-        );
-    }
-    rows
-}
-
-fn retain_declared_telemetry_tunnels(
-    records: &mut Vec<TelemetryTunnelView>,
-    plans: &[TunnelPlanView],
-) {
-    let plans_by_id = plans
-        .iter()
-        .map(|plan| (plan.id, plan))
-        .collect::<HashMap<_, _>>();
-    records.retain_mut(|record| {
-        let Some(plan) = record
-            .plan_id
-            .and_then(|plan_id| plans_by_id.get(&plan_id).copied())
-        else {
-            return false;
-        };
-        if !plan.enabled {
-            return false;
-        }
-        let (side, peer_client_id) = match record.endpoint_side.as_deref() {
-            Some("left")
-                if plan.left_client_id == record.client_id
-                    && record.peer_client_id.as_deref() == Some(plan.right_client_id.as_str()) =>
-            {
-                ("left", plan.right_client_id.as_str())
-            }
-            Some("right")
-                if plan.right_client_id == record.client_id
-                    && record.peer_client_id.as_deref() == Some(plan.left_client_id.as_str()) =>
-            {
-                ("right", plan.left_client_id.as_str())
-            }
-            _ => return false,
-        };
-        if record.interface != plan.plan.interface_name
-            || record.plan_name.as_deref() != Some(plan.name.as_str())
-        {
-            return false;
-        }
-        let manager = plan.plan.runtime_control.manager;
-        let runtime_manager = runtime_manager_label(manager);
-        record.plan_runtime_manager = Some(runtime_manager.to_string());
-        record.endpoint_side = Some(side.to_string());
-        record.peer_client_id = Some(peer_client_id.to_string());
-        record.ownership_mode = runtime_manager.to_string();
-        record.mutation_policy = matched_plan_mutation_policy(manager).to_string();
-        true
-    });
 }
 
 pub(crate) fn tunnel_adapter_health_is_degraded(tunnel: &TelemetryTunnelView) -> bool {
@@ -3755,18 +3511,6 @@ fn telemetry_tunnel_matches_alert_candidate(
                 .traffic_status
                 .as_deref()
                 .is_some_and(|status| status != "ok"))
-}
-
-fn tunnel_alert_priority(
-    tunnel: &TelemetryTunnelView,
-    alert_candidates_only: bool,
-    severity: Option<&str>,
-) -> usize {
-    if alert_candidates_only && severity.is_none() && tunnel_adapter_health_is_degraded(tunnel) {
-        0
-    } else {
-        1
-    }
 }
 
 fn parse_adapter_health(
@@ -3858,8 +3602,6 @@ fn telemetry_rollup_from_row(row: sqlx::postgres::PgRow) -> Result<TelemetryRoll
         disk_available_bytes_min: row.try_get("disk_available_bytes_min")?,
         disk_used_ratio_avg: row.try_get("disk_used_ratio_avg")?,
         disk_used_ratio_max: row.try_get("disk_used_ratio_max")?,
-        network_rx_bytes_max: row.try_get("network_rx_bytes_max")?,
-        network_tx_bytes_max: row.try_get("network_tx_bytes_max")?,
         connections_sample_count: row.try_get("connections_sample_count")?,
         tcp_sockets_latest: row.try_get("tcp_sockets_latest")?,
         udp_sockets_latest: row.try_get("udp_sockets_latest")?,
@@ -3878,10 +3620,6 @@ fn telemetry_network_rate_from_row(row: sqlx::postgres::PgRow) -> Result<Telemet
         sample_count: row.try_get("sample_count")?,
         rx_bytes_avg: row.try_get("rx_bytes_avg")?,
         tx_bytes_avg: row.try_get("tx_bytes_avg")?,
-        rx_bytes_last: row.try_get("rx_bytes_last")?,
-        tx_bytes_last: row.try_get("tx_bytes_last")?,
-        rx_counter_epoch: row.try_get("rx_counter_epoch")?,
-        tx_counter_epoch: row.try_get("tx_counter_epoch")?,
         latest_observed_at: row.try_get("latest_observed_at")?,
         rx_bytes_delta: row.try_get("rx_bytes_delta")?,
         tx_bytes_delta: row.try_get("tx_bytes_delta")?,
@@ -3900,128 +3638,45 @@ fn project_network_rate_selection(
         .collect()
 }
 
-fn timestamp_in_bounds(value: &str, start_unix: Option<u64>, end_unix: Option<u64>) -> bool {
-    if start_unix.is_none() && end_unix.is_none() {
-        return true;
-    }
-    parse_timestamp_unix(value).is_some_and(|timestamp| {
-        start_unix.is_none_or(|start| timestamp >= start)
-            && end_unix.is_none_or(|end| timestamp <= end)
-    })
-}
-
-fn bucket_end_unix(bucket_start: u64, bucket_secs: i32) -> u64 {
-    bucket_start.saturating_add(bucket_secs.max(1) as u64)
-}
-
-fn retain_authoritative_telemetry_rows(rows: Vec<TelemetryRollupView>) -> Vec<TelemetryRollupView> {
-    rows.iter()
-        .filter(|row| {
-            let Some(row_start) = parse_timestamp_unix(&row.bucket_start) else {
-                return false;
-            };
-            !rows.iter().any(|coarser| {
-                if coarser.client_id != row.client_id || coarser.bucket_secs <= row.bucket_secs {
-                    return false;
+fn aggregate_selected_network_history(
+    rows: Vec<TelemetryNetworkRateView>,
+) -> Vec<TelemetryNetworkRateView> {
+    let mut points =
+        std::collections::BTreeMap::<(String, String, i32), TelemetryNetworkRateView>::new();
+    for mut row in rows {
+        let key = (
+            row.client_id.clone(),
+            row.bucket_start.clone(),
+            row.bucket_secs,
+        );
+        match points.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                row.interface.clear();
+                entry.insert(row);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let point = entry.get_mut();
+                point.sample_count = point.sample_count.max(row.sample_count);
+                point.rx_bytes_avg = point.rx_bytes_avg.saturating_add(row.rx_bytes_avg);
+                point.tx_bytes_avg = point.tx_bytes_avg.saturating_add(row.tx_bytes_avg);
+                point.rx_bytes_delta = point.rx_bytes_delta.saturating_add(row.rx_bytes_delta);
+                point.tx_bytes_delta = point.tx_bytes_delta.saturating_add(row.tx_bytes_delta);
+                point.rx_bps_avg += row.rx_bps_avg;
+                point.tx_bps_avg += row.tx_bps_avg;
+                if row.latest_observed_at > point.latest_observed_at {
+                    point.latest_observed_at = row.latest_observed_at;
                 }
-                let Some(coarser_start) = parse_timestamp_unix(&coarser.bucket_start) else {
-                    return false;
-                };
-                coarser_start < bucket_end_unix(row_start, row.bucket_secs)
-                    && bucket_end_unix(coarser_start, coarser.bucket_secs) > row_start
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-fn fragment_telemetry_rollup(
-    row: TelemetryRollupView,
-    start_unix: Option<u64>,
-    end_unix: Option<u64>,
-    step_secs: i32,
-) -> Vec<TelemetryRollupView> {
-    let Some(bucket_start) = parse_timestamp_unix(&row.bucket_start) else {
-        return Vec::new();
-    };
-    if !bucket_overlaps_bounds(&row.bucket_start, row.bucket_secs, start_unix, end_unix) {
-        return Vec::new();
+                if row.updated_at > point.updated_at {
+                    point.updated_at = row.updated_at;
+                }
+            }
+        }
     }
-    let chart_step_secs = normalized_dashboard_step_secs(step_secs).max(row.bucket_secs);
-    vec![TelemetryRollupView {
-        bucket_start: (bucket_start / chart_step_secs as u64 * chart_step_secs as u64).to_string(),
-        bucket_secs: chart_step_secs,
-        ..row
-    }]
-}
-
-fn bucket_last_sample_unix(bucket_start: &str, bucket_secs: i32) -> u64 {
-    parse_timestamp_unix(bucket_start)
-        .unwrap_or(0)
-        .saturating_add(bucket_secs.max(60) as u64)
-        .saturating_sub(60)
-}
-
-fn bucket_overlaps_bounds(
-    bucket_start: &str,
-    bucket_secs: i32,
-    start_unix: Option<u64>,
-    end_unix: Option<u64>,
-) -> bool {
-    let Some(bucket_start) = parse_timestamp_unix(bucket_start) else {
-        return false;
-    };
-    end_unix.is_none_or(|end| bucket_start <= end)
-        && start_unix.is_none_or(|start| bucket_end_unix(bucket_start, bucket_secs) > start)
+    points.into_values().collect()
 }
 
 fn normalized_dashboard_step_secs(step_secs: i32) -> i32 {
     step_secs.max(60).saturating_add(59) / 60 * 60
-}
-
-fn parse_timestamp_unix(value: &str) -> Option<u64> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Ok(timestamp) = value.parse::<i64>() {
-        return (timestamp >= 0).then_some(timestamp as u64);
-    }
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .or_else(|| DateTime::parse_from_rfc3339(&normalize_postgres_timestamp(value)).ok())
-        .map(|timestamp| timestamp.timestamp())
-        .filter(|timestamp| *timestamp >= 0)
-        .map(|timestamp| timestamp as u64)
-}
-
-fn normalize_postgres_timestamp(value: &str) -> String {
-    let mut normalized = value.replacen(' ', "T", 1);
-    if let Some(offset_start) = normalized.rfind(['+', '-']) {
-        let offset = &normalized[offset_start..];
-        if offset.len() == 3 {
-            normalized.push_str(":00");
-        } else if offset.len() == 5 && !offset.contains(':') {
-            normalized.insert(offset_start + 3, ':');
-        }
-    }
-    normalized
-}
-
-fn runtime_manager_label(manager: vpsman_common::RuntimeTunnelManager) -> &'static str {
-    match manager {
-        vpsman_common::RuntimeTunnelManager::AgentBuiltin => "agent_builtin",
-        vpsman_common::RuntimeTunnelManager::ExternalObserved => "external_observed",
-        vpsman_common::RuntimeTunnelManager::CustomAdapter => "custom_adapter",
-    }
-}
-
-fn matched_plan_mutation_policy(manager: vpsman_common::RuntimeTunnelManager) -> &'static str {
-    match manager {
-        vpsman_common::RuntimeTunnelManager::ExternalObserved => "observe_only_saved_plan",
-        vpsman_common::RuntimeTunnelManager::AgentBuiltin
-        | vpsman_common::RuntimeTunnelManager::CustomAdapter => "managed_desired",
-    }
 }
 
 #[cfg(test)]

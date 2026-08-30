@@ -20,11 +20,10 @@ use crate::{
     auth_model::AuthContext,
     model::WsEvent,
     security::{operator_has_scope, SCOPE_FLEET_READ},
-    state::{AppState, WsEventBus, WsInvalidationDriver},
+    state::{AppState, WsEventBus, WsInvalidationDriver, FLEET_TELEMETRY_INVALIDATION_WINDOW},
 };
 
 const WS_AUTH_REVALIDATE_SECS: u64 = 30;
-const FLEET_TELEMETRY_INVALIDATION_WINDOW: Duration = Duration::from_secs(15);
 const JOB_DETAILS_INVALIDATION_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +62,9 @@ async fn run_ws_invalidation_coalescer(events: WsEventBus, invalidations: WsInva
             biased;
             _ = telemetry_boundaries.tick() => {
                 if invalidations.take_fleet_telemetry() {
+                    // Invalidate immediately before the notification so the
+                    // refetch it causes cannot reuse a pre-boundary result.
+                    events.invalidate_fleet_telemetry_read_cache();
                     events.publish(WsEvent::FleetTelemetryInvalidated);
                 }
             }

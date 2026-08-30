@@ -9,85 +9,94 @@ use vpsman_common::{
 
 use crate::{
     model::{
-        AgentView, AuditLogView, AuthContext, MonitoringShareDefinitionUpdate,
-        MonitoringShareRecord, MonitoringShareTargetRecord, MonitoringShareTargetReplacement,
-        MonitoringShareView, MonitoringShareVisibilityView, MonitoringShareVisitorRecord,
-        PingRollupView, PingTargetAssignmentRecord, PingTargetAssignmentReplacement,
-        PingTargetAssignmentView, PingTargetDetailView, PingTargetRecord,
-        PingTargetRuntimeSyncView, PingTargetView, SystemInformationView, TelemetryUptimeView,
+        AgentView, AuthContext, MonitoringShareDefinitionUpdate, MonitoringShareRecord,
+        MonitoringShareTargetRecord, MonitoringShareTargetReplacement, MonitoringShareView,
+        MonitoringShareVisibilityView, PingRollupView, PingTargetAssignmentRecord,
+        PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
+        PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView, SystemInformationView,
+        TelemetryUptimeView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
     repository_key_lifecycle::{
-        lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+        lock_postgres_definition_lifecycles_in_tx, lock_postgres_definitions_and_clients_in_tx,
         require_visible_postgres_clients_in_tx,
     },
     security::{constant_time_eq, generate_token},
     util::parse_timestamp_unix,
 };
 
+#[cfg(test)]
 const CURRENT_PING_LOSS_WINDOW_SECS: u64 = 15 * 60;
 const CURRENT_PING_DEGRADED_LOSS_RATIO: f64 = 0.10;
+const TELEMETRY_RETENTION_WAKE_CHANNEL: &str = "vpsman_telemetry_retention";
+
+async fn notify_ping_topology_changed_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(TELEMETRY_RETENTION_WAKE_CHANNEL)
+        .bind(
+            serde_json::json!({
+                "owner": "history_retention",
+                "effect": "ping_topology_changed",
+            })
+            .to_string(),
+        )
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+const LATEST_TELEMETRY_UPTIMES_SQL: &str = r#"
+    SELECT
+        client.id AS client_id,
+        latest.observed_at::text AS observed_at,
+        latest.payload -> 'uptime_secs' AS uptime_value
+    FROM visible_clients client
+    JOIN telemetry_projection_heads projection
+      ON projection.client_id = client.id
+    JOIN telemetry_samples latest
+      ON latest.id = projection.latest_projected_sample_id
+     AND latest.client_id = client.id
+    WHERE client.status <> 'suspended'
+      AND client.id = ANY($1::text[])
+    ORDER BY client.id
+"#;
+const MONITORING_SYSTEM_INFORMATION_SQL: &str = r#"
+    SELECT
+        client.id AS client_id,
+        client.os_release,
+        client.arch,
+        client.cpu_model,
+        client.kernel_release,
+        client.virtualization,
+        client.system_reported_at::text AS system_reported_at,
+        latest.payload AS latest_payload,
+        latest.observed_at::text AS uptime_observed_at
+    FROM visible_clients client
+    LEFT JOIN telemetry_projection_heads projection
+      ON projection.client_id = client.id
+    LEFT JOIN telemetry_samples latest
+      ON latest.id = projection.latest_projected_sample_id
+     AND latest.client_id = client.id
+    WHERE client.id = ANY($1::text[])
+"#;
 
 impl Repository {
-    pub(crate) async fn list_latest_telemetry_uptimes(&self) -> Result<Vec<TelemetryUptimeView>> {
+    pub(crate) async fn list_latest_telemetry_uptimes_for_clients(
+        &self,
+        client_ids: &[String],
+    ) -> Result<Vec<TelemetryUptimeView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         match self {
-            Self::Memory(memory) => {
-                let mut visible_clients = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| agent.status != "suspended")
-                    .map(|agent| agent.id.clone())
-                    .collect::<HashSet<_>>();
-                let hidden_clients = memory.hidden_clients.read().await;
-                visible_clients.retain(|client_id| !hidden_clients.contains(client_id));
-                drop(hidden_clients);
-                let samples = memory.telemetry_samples.read().await;
-                let mut latest = HashMap::<String, &crate::model::TelemetrySampleView>::new();
-                for sample in samples
-                    .iter()
-                    .filter(|sample| visible_clients.contains(&sample.client_id))
-                {
-                    let replace = latest.get(&sample.client_id).is_none_or(|current| {
-                        parse_timestamp_unix(&sample.observed_at)
-                            .cmp(&parse_timestamp_unix(&current.observed_at))
-                            .then_with(|| sample.id.cmp(&current.id))
-                            .is_gt()
-                    });
-                    if replace {
-                        latest.insert(sample.client_id.clone(), sample);
-                    }
-                }
-                let mut uptimes = latest
-                    .into_values()
-                    .filter_map(telemetry_uptime_from_sample)
-                    .collect::<Vec<_>>();
-                uptimes.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-                Ok(uptimes)
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        client.id AS client_id,
-                        latest.observed_at::text AS observed_at,
-                        latest.payload
-                    FROM visible_clients client
-                    JOIN LATERAL (
-                        SELECT sample.observed_at, sample.payload
-                        FROM telemetry_samples sample
-                        WHERE sample.client_id = client.id
-                        ORDER BY sample.observed_at DESC, sample.id DESC
-                        LIMIT 1
-                    ) latest ON TRUE
-                    WHERE client.status <> 'suspended'
-                    ORDER BY client.id
-                    "#,
-                )
-                .fetch_all(pool)
-                .await?;
+                let rows = sqlx::query(LATEST_TELEMETRY_UPTIMES_SQL)
+                    .bind(client_ids)
+                    .fetch_all(pool)
+                    .await?;
                 rows.into_iter()
                     .filter_map(|row| {
                         let client_id = match row.try_get("client_id") {
@@ -98,20 +107,13 @@ impl Repository {
                             Ok(observed_at) => observed_at,
                             Err(error) => return Some(Err(error.into())),
                         };
-                        let payload: serde_json::Value = match row.try_get("payload") {
-                            Ok(payload) => payload,
-                            Err(error) => return Some(Err(error.into())),
-                        };
-                        payload
-                            .get("uptime_secs")
-                            .and_then(serde_json::Value::as_u64)
-                            .map(|uptime_secs| {
-                                Ok(TelemetryUptimeView {
-                                    client_id,
-                                    uptime_secs,
-                                    observed_at,
-                                })
-                            })
+                        let uptime_value: Option<serde_json::Value> =
+                            match row.try_get("uptime_value") {
+                                Ok(uptime_value) => uptime_value,
+                                Err(error) => return Some(Err(error.into())),
+                            };
+                        telemetry_uptime_from_projected_value(client_id, observed_at, uptime_value)
+                            .map(Ok)
                     })
                     .collect()
             }
@@ -126,75 +128,11 @@ impl Repository {
             return Ok(HashMap::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let facts = memory.client_system_facts.read().await;
-                let agents = memory.agents.read().await;
-                let hidden_clients = memory.hidden_clients.read().await;
-                let samples = memory.telemetry_samples.read().await;
-                let mut views = HashMap::new();
-                for client_id in client_ids {
-                    let agent = agents.iter().find(|agent| agent.id == *client_id);
-                    if hidden_clients.contains(client_id) || agent.is_none() {
-                        continue;
-                    }
-                    let facts = facts.get(client_id);
-                    let latest_sample = samples
-                        .iter()
-                        .filter(|sample| sample.client_id == *client_id)
-                        .max_by(|left, right| {
-                            parse_timestamp_unix(&left.observed_at)
-                                .cmp(&parse_timestamp_unix(&right.observed_at))
-                                .then_with(|| left.id.cmp(&right.id))
-                        });
-                    let uptime_secs = latest_sample
-                        .and_then(|sample| sample.payload.get("uptime_secs"))
-                        .and_then(serde_json::Value::as_u64);
-                    let view = system_information_view(
-                        facts.map(|facts| facts.os_release.as_str()),
-                        facts
-                            .map(|facts| facts.architecture.as_str())
-                            .or_else(|| agent.and_then(|agent| agent.arch.as_deref())),
-                        facts.and_then(|facts| facts.cpu_model.as_deref()),
-                        facts.and_then(|facts| facts.kernel_release.as_deref()),
-                        facts.and_then(|facts| facts.virtualization.as_deref()),
-                        facts.map(|facts| facts.reported_at.clone()),
-                        uptime_secs,
-                        uptime_secs
-                            .and_then(|_| latest_sample.map(|sample| sample.observed_at.clone())),
-                    );
-                    if let Some(view) = view {
-                        views.insert(client_id.clone(), view);
-                    }
-                }
-                Ok(views)
-            }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        client.id AS client_id,
-                        client.os_release,
-                        client.arch,
-                        client.cpu_model,
-                        client.kernel_release,
-                        client.virtualization,
-                        client.system_reported_at::text AS system_reported_at,
-                        latest.payload AS latest_payload,
-                        latest.observed_at::text AS uptime_observed_at
-                    FROM visible_clients client
-                    LEFT JOIN LATERAL (
-                        SELECT sample.payload, sample.observed_at
-                        FROM telemetry_samples sample
-                        WHERE sample.client_id = client.id
-                        ORDER BY sample.observed_at DESC, sample.id DESC
-                        LIMIT 1
-                    ) latest ON TRUE
-                    WHERE client.id = ANY($1::text[])
-                    "#,
-                )
-                .bind(client_ids)
-                .fetch_all(pool)
-                .await?;
+                let rows = sqlx::query(MONITORING_SYSTEM_INFORMATION_SQL)
+                    .bind(client_ids)
+                    .fetch_all(pool)
+                    .await?;
                 let mut views = HashMap::with_capacity(rows.len());
                 for row in rows {
                     let client_id: String = row.try_get("client_id")?;
@@ -253,65 +191,9 @@ impl Repository {
         &self,
         target_id: Uuid,
     ) -> Result<Option<PingTargetDetailView>> {
-        if let Self::Postgres(pool) = self {
-            let mut connection = pool.acquire().await?;
-            return postgres_ping_target_detail(&mut connection, target_id).await;
-        }
-        let Some(record) = self
-            .list_ping_target_records()
-            .await?
-            .into_iter()
-            .find(|record| record.id == target_id)
-        else {
-            return Ok(None);
-        };
-        let assignment_records = self
-            .list_ping_target_assignment_records(Some(target_id))
-            .await?;
-        let ids = assignment_records
-            .iter()
-            .map(|record| record.client_id.clone())
-            .collect::<Vec<_>>();
-        let agents = self
-            .list_agents_for_client_ids(&ids)
-            .await?
-            .into_iter()
-            .map(|agent| (agent.id.clone(), agent))
-            .collect::<HashMap<_, _>>();
-        let assignments = assignment_records
-            .iter()
-            .filter_map(|assignment| {
-                agents
-                    .get(&assignment.client_id)
-                    .cloned()
-                    .map(|client| PingTargetAssignmentView {
-                        target_id,
-                        client,
-                        is_primary: assignment.is_primary,
-                        assigned_at: assignment.assigned_at.clone(),
-                    })
-            })
-            .collect::<Vec<_>>();
-        let mut assigned = HashMap::new();
-        assigned.insert(
-            target_id,
-            assignments
-                .iter()
-                .map(|assignment| assignment.client.id.clone())
-                .collect(),
-        );
-        let mut primary = HashMap::new();
-        primary.insert(
-            target_id,
-            assignments
-                .iter()
-                .filter(|assignment| assignment.is_primary)
-                .count(),
-        );
-        Ok(Some(PingTargetDetailView {
-            target: ping_target_view(&record, &assigned, &primary),
-            assignments,
-        }))
+        let Self::Postgres(pool) = self;
+        let mut connection = pool.acquire().await?;
+        postgres_ping_target_detail(&mut connection, target_id).await
     }
 
     pub(crate) async fn ping_target_record(
@@ -327,16 +209,6 @@ impl Repository {
 
     async fn list_ping_target_records(&self) -> Result<Vec<PingTargetRecord>> {
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory.ping_targets.read().await.clone();
-                records.sort_by(|left, right| {
-                    left.name
-                        .to_lowercase()
-                        .cmp(&right.name.to_lowercase())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                Ok(records)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -361,34 +233,13 @@ impl Repository {
         target_id: Option<Uuid>,
     ) -> Result<Vec<PingTargetAssignmentRecord>> {
         match self {
-            Self::Memory(memory) => {
-                let visible = visible_memory_ping_client_ids(memory).await;
-                let mut records = memory
-                    .ping_target_assignments
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|record| {
-                        visible.contains(&record.client_id)
-                            && target_id.is_none_or(|id| record.target_id == id)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                records.sort_by(|left, right| {
-                    left.target_id
-                        .cmp(&right.target_id)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                });
-                Ok(records)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
                     SELECT
                         target_id,
                         client_id,
-                        is_primary,
-                        assigned_at::text AS assigned_at
+                        is_primary
                     FROM ping_target_assignments assignment
                     JOIN visible_clients client ON client.id = assignment.client_id
                     WHERE $1::UUID IS NULL OR assignment.target_id = $1
@@ -404,7 +255,6 @@ impl Repository {
                             target_id: row.try_get("target_id")?,
                             client_id: row.try_get("client_id")?,
                             is_primary: row.try_get("is_primary")?,
-                            assigned_at: row.try_get("assigned_at")?,
                         })
                     })
                     .collect()
@@ -431,93 +281,6 @@ impl Repository {
             bail!("ping_target_update_stale");
         }
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden_clients = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                let visible_client_ids = agents
-                    .iter()
-                    .filter(|agent| !hidden_clients.contains(&agent.id))
-                    .map(|agent| agent.id.clone())
-                    .collect::<BTreeSet<_>>();
-                if target_ids
-                    .iter()
-                    .any(|client_id| !visible_client_ids.contains(client_id))
-                {
-                    bail!("ping_target_resolution_stale");
-                }
-                let mut targets = memory.ping_targets.write().await;
-                let mut assignments = memory.ping_target_assignments.write().await;
-                let mut next_targets = targets.clone();
-                if action == "ping_target.updated"
-                    && !next_targets.iter().any(|stored| stored.id == record.id)
-                {
-                    bail!("ping_target_not_found");
-                }
-                if let Some(expected) = expected {
-                    let Some(stored) = next_targets
-                        .iter()
-                        .find(|stored| stored.id == expected.expected_target.id)
-                    else {
-                        bail!("ping_target_update_stale");
-                    };
-                    let current_assignments = assignments
-                        .iter()
-                        .filter(|assignment| {
-                            assignment.target_id == record.id
-                                && visible_client_ids.contains(&assignment.client_id)
-                        })
-                        .map(|assignment| assignment.client_id.clone())
-                        .collect::<Vec<_>>();
-                    if !same_ping_target_revision(stored, &expected.expected_target)
-                        || normalized_client_ids(&current_assignments)
-                            != normalized_client_ids(&expected.expected_client_ids)
-                    {
-                        bail!("ping_target_update_stale");
-                    }
-                }
-                if next_targets.iter().any(|stored| {
-                    stored.id != record.id && stored.name.eq_ignore_ascii_case(&record.name)
-                }) {
-                    bail!("ping_target_name_conflict");
-                }
-                if let Some(stored) = next_targets
-                    .iter_mut()
-                    .find(|stored| stored.id == record.id)
-                {
-                    *stored = record.clone();
-                } else {
-                    next_targets.push(record.clone());
-                }
-                let enabled_targets = next_targets
-                    .iter()
-                    .filter(|target| target.enabled)
-                    .map(|target| target.id)
-                    .collect::<BTreeSet<_>>();
-                let next_assignments = next_memory_ping_assignments(
-                    &assignments,
-                    &visible_client_ids,
-                    &enabled_targets,
-                    record.id,
-                    &target_ids,
-                )?;
-                let persisted = memory_ping_target_detail(&record, &next_assignments, &agents);
-                *targets = next_targets;
-                *assignments = next_assignments;
-                drop(assignments);
-                drop(targets);
-                drop(agents);
-                drop(hidden_clients);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    action,
-                    format!("ping_target:{}", record.id),
-                    ping_target_audit_metadata(&record, &target_ids, operator),
-                )
-                .await;
-                Ok(persisted)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_ping_clients(&mut tx, &[record.id], &target_ids).await?;
@@ -552,6 +315,9 @@ impl Repository {
                         bail!("ping_target_update_stale");
                     }
                 }
+                let generation_changed = locked_targets
+                    .iter()
+                    .any(|stored| stored.id == record.id && stored.generation != record.generation);
                 sqlx::query(
                     r#"
                     INSERT INTO ping_targets (
@@ -586,8 +352,12 @@ impl Repository {
                 .bind(required_timestamp_f64(&record.created_at)?)
                 .execute(&mut *tx)
                 .await?;
-                replace_postgres_ping_assignments(&mut tx, record.id, &target_ids).await?;
+                let removed_assignments =
+                    replace_postgres_ping_assignments(&mut tx, record.id, &target_ids).await?;
                 ensure_postgres_ping_capacity(&mut tx).await?;
+                if generation_changed || removed_assignments > 0 {
+                    notify_ping_topology_changed_in_tx(&mut tx).await?;
+                }
                 insert_monitoring_audit(
                     &mut tx,
                     Some(operator.operator.id),
@@ -616,54 +386,6 @@ impl Repository {
             bail!("ping_primary_clients_required");
         }
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(memory, &client_ids, "ping_target_resolution_stale")
-                    .await?;
-                let hidden_clients = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                let visible_agents = agents
-                    .iter()
-                    .filter(|agent| !hidden_clients.contains(&agent.id))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let targets = memory.ping_targets.read().await;
-                let target = targets
-                    .iter()
-                    .find(|target| target.id == target_id)
-                    .cloned()
-                    .context("ping_target_not_found")?;
-                let mut assignments = memory.ping_target_assignments.write().await;
-                if client_ids.iter().any(|client_id| {
-                    !assignments.iter().any(|assignment| {
-                        assignment.target_id == target_id && assignment.client_id == *client_id
-                    })
-                }) {
-                    bail!("ping_primary_assignment_required");
-                }
-                for assignment in assignments.iter_mut() {
-                    if client_ids.contains(&assignment.client_id) {
-                        assignment.is_primary = assignment.target_id == target_id;
-                    }
-                }
-                let persisted = memory_ping_target_detail(&target, &assignments, &visible_agents);
-                drop(assignments);
-                drop(targets);
-                drop(agents);
-                drop(hidden_clients);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "ping_target.primary_updated",
-                    format!("ping_target:{target_id}"),
-                    base_monitoring_audit_metadata(
-                        operator,
-                        serde_json::json!({"target_id": target_id, "client_ids": client_ids}),
-                    ),
-                )
-                .await;
-                Ok(persisted)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_ping_clients(&mut tx, &[target_id], &client_ids).await?;
@@ -751,131 +473,6 @@ impl Repository {
             .map(|replacement| replacement.expected_target.id)
             .collect::<BTreeSet<_>>();
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let proposed_client_ids = replacements
-                    .iter()
-                    .flat_map(|replacement| normalized_client_ids(&replacement.next_client_ids))
-                    .collect::<BTreeSet<_>>();
-                let hidden_clients = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                let visible_client_ids = agents
-                    .iter()
-                    .filter(|agent| !hidden_clients.contains(&agent.id))
-                    .map(|agent| agent.id.clone())
-                    .collect::<BTreeSet<_>>();
-                if proposed_client_ids
-                    .iter()
-                    .any(|client_id| !visible_client_ids.contains(client_id))
-                {
-                    bail!("ping_target_resolution_stale");
-                }
-                // Every in-memory Ping mutation takes target state before
-                // assignment state, matching the PostgreSQL lock order.
-                let mut stored_targets = memory.ping_targets.write().await;
-                for replacement in replacements {
-                    let Some(stored) = stored_targets
-                        .iter()
-                        .find(|target| target.id == replacement.expected_target.id)
-                    else {
-                        bail!("ping_target_preview_stale");
-                    };
-                    if !same_ping_target_revision(stored, &replacement.expected_target) {
-                        bail!("ping_target_preview_stale");
-                    }
-                }
-                let enabled_targets = stored_targets
-                    .iter()
-                    .filter(|target| target.enabled)
-                    .map(|target| target.id)
-                    .collect::<BTreeSet<_>>();
-                let mut stored_assignments = memory.ping_target_assignments.write().await;
-                let existing = stored_assignments.clone();
-                for replacement in replacements {
-                    let current = existing
-                        .iter()
-                        .filter(|assignment| {
-                            assignment.target_id == replacement.expected_target.id
-                                && visible_client_ids.contains(&assignment.client_id)
-                        })
-                        .map(|assignment| assignment.client_id.clone())
-                        .collect::<BTreeSet<_>>();
-                    if current
-                        != normalized_client_ids(&replacement.expected_client_ids)
-                            .into_iter()
-                            .collect()
-                    {
-                        bail!("ping_target_preview_stale");
-                    }
-                }
-                let primaries = existing
-                    .iter()
-                    .filter(|assignment| {
-                        assignment.is_primary && visible_client_ids.contains(&assignment.client_id)
-                    })
-                    .map(|assignment| (assignment.target_id, assignment.client_id.clone()))
-                    .collect::<BTreeSet<_>>();
-                let mut next = existing
-                    .into_iter()
-                    .filter(|assignment| {
-                        !visible_client_ids.contains(&assignment.client_id)
-                            || !target_ids.contains(&assignment.target_id)
-                    })
-                    .collect::<Vec<_>>();
-                let now = crate::unix_now().to_string();
-                for replacement in replacements {
-                    let target_id = replacement.expected_target.id;
-                    next.extend(
-                        normalized_client_ids(&replacement.next_client_ids)
-                            .into_iter()
-                            .map(|client_id| PingTargetAssignmentRecord {
-                                target_id,
-                                is_primary: primaries.contains(&(target_id, client_id.clone())),
-                                client_id,
-                                assigned_at: now.clone(),
-                            }),
-                    );
-                }
-                let mut counts = HashMap::<String, usize>::new();
-                for assignment in &next {
-                    if visible_client_ids.contains(&assignment.client_id)
-                        && enabled_targets.contains(&assignment.target_id)
-                    {
-                        let count = counts.entry(assignment.client_id.clone()).or_default();
-                        *count += 1;
-                        if *count > MAX_AGENT_PING_TARGETS {
-                            bail!("ping_targets_per_client_too_many:{}", assignment.client_id);
-                        }
-                    }
-                }
-                let affected = changed_ping_assignment_clients(replacements);
-                *stored_assignments = next;
-                for target in stored_targets
-                    .iter_mut()
-                    .filter(|target| changed_target_ids.contains(&target.id))
-                {
-                    target.updated_at = now.clone();
-                }
-                drop(stored_assignments);
-                drop(stored_targets);
-                drop(agents);
-                drop(hidden_clients);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "ping_target.targets_bulk_updated",
-                    "ping_targets:bulk".to_string(),
-                    base_monitoring_audit_metadata(
-                        operator,
-                        serde_json::json!({
-                            "target_ids": target_ids,
-                            "client_ids": &affected,
-                        }),
-                    ),
-                )
-                .await;
-                Ok(affected)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let target_ids = target_ids.iter().copied().collect::<Vec<_>>();
@@ -931,13 +528,16 @@ impl Repository {
                         bail!("ping_target_preview_stale");
                     }
                 }
+                let mut removed_assignments = 0_u64;
                 for replacement in replacements {
-                    replace_postgres_ping_assignments(
-                        &mut tx,
-                        replacement.expected_target.id,
-                        &normalized_client_ids(&replacement.next_client_ids),
-                    )
-                    .await?;
+                    removed_assignments = removed_assignments.saturating_add(
+                        replace_postgres_ping_assignments(
+                            &mut tx,
+                            replacement.expected_target.id,
+                            &normalized_client_ids(&replacement.next_client_ids),
+                        )
+                        .await?,
+                    );
                 }
                 if !changed_target_ids.is_empty() {
                     sqlx::query(
@@ -949,6 +549,9 @@ impl Repository {
                     .await?;
                 }
                 ensure_postgres_ping_capacity(&mut tx).await?;
+                if removed_assignments > 0 {
+                    notify_ping_topology_changed_in_tx(&mut tx).await?;
+                }
                 let affected = changed_ping_assignment_clients(replacements);
                 insert_monitoring_audit(
                     &mut tx,
@@ -976,48 +579,6 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<Vec<String>> {
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let visible_client_ids = visible_memory_ping_client_ids(memory).await;
-                let mut targets = memory.ping_targets.write().await;
-                let mut assignments = memory.ping_target_assignments.write().await;
-                let affected = assignments
-                    .iter()
-                    .filter(|assignment| {
-                        assignment.target_id == target_id
-                            && visible_client_ids.contains(&assignment.client_id)
-                    })
-                    .map(|assignment| assignment.client_id.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                let before = targets.len();
-                targets.retain(|target| target.id != target_id);
-                let removed = targets.len() != before;
-                if !removed {
-                    bail!("ping_target_not_found");
-                }
-                assignments.retain(|assignment| assignment.target_id != target_id);
-                drop(assignments);
-                drop(targets);
-                memory
-                    .telemetry_ping_rollups
-                    .write()
-                    .await
-                    .retain(|rollup| rollup.target_id != target_id);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "ping_target.deleted",
-                    format!("ping_target:{target_id}"),
-                    base_monitoring_audit_metadata(
-                        operator,
-                        serde_json::json!({"target_id": target_id, "client_ids": &affected}),
-                    ),
-                )
-                .await;
-                Ok(affected)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let affected = lock_postgres_ping_clients(&mut tx, &[target_id], &[]).await?;
@@ -1067,93 +628,6 @@ impl Repository {
         }
         let audit_action = format!("ping_target.bulk_{action}d");
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let visible_client_ids = visible_memory_ping_client_ids(memory).await;
-                let mut stored_targets = memory.ping_targets.write().await;
-                if target_ids
-                    .iter()
-                    .any(|target_id| !stored_targets.iter().any(|target| target.id == *target_id))
-                {
-                    bail!("ping_target_not_found");
-                }
-                let mut stored_assignments = memory.ping_target_assignments.write().await;
-                let affected = stored_assignments
-                    .iter()
-                    .filter(|assignment| {
-                        target_ids.contains(&assignment.target_id)
-                            && visible_client_ids.contains(&assignment.client_id)
-                    })
-                    .map(|assignment| assignment.client_id.clone())
-                    .collect::<BTreeSet<_>>();
-                let mut next_targets = stored_targets.clone();
-                let mut next_assignments = stored_assignments.clone();
-                match action {
-                    "enable" | "disable" => {
-                        let enabled = action == "enable";
-                        for target in &mut next_targets {
-                            if target_ids.contains(&target.id) && target.enabled != enabled {
-                                target.enabled = enabled;
-                                target.generation = target.generation.saturating_add(1);
-                                target.updated_at = crate::unix_now().to_string();
-                            }
-                        }
-                        let enabled_targets = next_targets
-                            .iter()
-                            .filter(|target| target.enabled)
-                            .map(|target| target.id)
-                            .collect::<BTreeSet<_>>();
-                        let mut counts = HashMap::<String, usize>::new();
-                        for assignment in &next_assignments {
-                            if visible_client_ids.contains(&assignment.client_id)
-                                && enabled_targets.contains(&assignment.target_id)
-                            {
-                                let count = counts.entry(assignment.client_id.clone()).or_default();
-                                *count += 1;
-                                if *count > MAX_AGENT_PING_TARGETS {
-                                    bail!(
-                                        "ping_targets_per_client_too_many:{}",
-                                        assignment.client_id
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    "delete" => {
-                        next_targets.retain(|target| !target_ids.contains(&target.id));
-                        next_assignments
-                            .retain(|assignment| !target_ids.contains(&assignment.target_id));
-                    }
-                    _ => unreachable!(),
-                }
-                *stored_targets = next_targets;
-                *stored_assignments = next_assignments;
-                drop(stored_assignments);
-                drop(stored_targets);
-                if action == "delete" {
-                    memory
-                        .telemetry_ping_rollups
-                        .write()
-                        .await
-                        .retain(|rollup| !target_ids.contains(&rollup.target_id));
-                }
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    &audit_action,
-                    "ping_targets:bulk".to_string(),
-                    base_monitoring_audit_metadata(
-                        operator,
-                        serde_json::json!({
-                            "action": action,
-                            "target_ids": &target_ids,
-                            "client_ids": &affected,
-                        }),
-                    ),
-                )
-                .await;
-                Ok(affected.into_iter().collect())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let ids = target_ids.iter().copied().collect::<Vec<_>>();
@@ -1162,9 +636,9 @@ impl Repository {
                 if locked.len() != ids.len() {
                     bail!("ping_target_not_found");
                 }
-                match action {
+                let topology_invalidations = match action {
                     "enable" | "disable" => {
-                        sqlx::query(
+                        let result = sqlx::query(
                             "UPDATE ping_targets SET enabled = $2, generation = generation + 1, updated_by = $3, updated_at = now() WHERE id = ANY($1::UUID[]) AND enabled IS DISTINCT FROM $2",
                         )
                         .bind(&ids)
@@ -1173,14 +647,22 @@ impl Repository {
                         .execute(&mut *tx)
                         .await?;
                         ensure_postgres_ping_capacity(&mut tx).await?;
+                        result.rows_affected()
                     }
                     "delete" => {
                         sqlx::query("DELETE FROM ping_targets WHERE id = ANY($1::UUID[])")
                             .bind(&ids)
                             .execute(&mut *tx)
                             .await?;
+                        // Series, current, facts, and rollups are all owned by
+                        // the target's ON DELETE CASCADE, so no retained orphan
+                        // frontier is created for the worker.
+                        0
                     }
                     _ => unreachable!(),
+                };
+                if topology_invalidations > 0 {
+                    notify_ping_topology_changed_in_tx(&mut tx).await?;
                 }
                 insert_monitoring_audit(
                     &mut tx,
@@ -1275,69 +757,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let selected = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let targets = memory
-                    .ping_targets
-                    .read()
-                    .await
-                    .iter()
-                    .map(|target| (target.id, target.clone()))
-                    .collect::<HashMap<_, _>>();
-                let rollups = memory.telemetry_ping_rollups.read().await;
-                let mut rows = Vec::new();
-                for assignment in
-                    memory
-                        .ping_target_assignments
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|assignment| {
-                            (!primary_only || assignment.is_primary)
-                                && selected.contains(assignment.client_id.as_str())
-                        })
-                {
-                    let Some(target) = targets.get(&assignment.target_id) else {
-                        continue;
-                    };
-                    let authoritative = retain_authoritative_ping_rows(
-                        rollups
-                            .iter()
-                            .filter(|rollup| {
-                                rollup.client_id == assignment.client_id
-                                    && rollup.target_id == assignment.target_id
-                                    && rollup.generation == target.generation
-                            })
-                            .cloned()
-                            .collect(),
-                    );
-                    let latest = authoritative.iter().max_by(|left, right| {
-                        monitoring_timestamp_unix(&left.latest_checked_at)
-                            .cmp(&monitoring_timestamp_unix(&right.latest_checked_at))
-                    });
-                    let rolling_loss_ratio = latest
-                        .and_then(|latest| current_ping_loss_ratio(latest, authoritative.iter()));
-                    rows.push((
-                        assignment.client_id.clone(),
-                        current_ping_view(target, latest, rolling_loss_ratio),
-                    ));
-                }
-                rows.sort_by(|left, right| {
-                    left.0
-                        .cmp(&right.0)
-                        .then_with(|| {
-                            left.1
-                                .target_name
-                                .to_lowercase()
-                                .cmp(&right.1.target_name.to_lowercase())
-                        })
-                        .then_with(|| left.1.target_id.cmp(&right.1.target_id))
-                });
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1406,138 +825,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn record_ping_results_memory(
-        &self,
-        client_id: &str,
-        observed_unix: u64,
-        results: &[PingTargetResult],
-        source_checked_unix: &[u64],
-    ) -> Result<()> {
-        let Self::Memory(memory) = self else {
-            return Ok(());
-        };
-        let targets = memory
-            .ping_targets
-            .read()
-            .await
-            .iter()
-            .map(|target| (target.id, target.clone()))
-            .collect::<HashMap<_, _>>();
-        let assignments = memory.ping_target_assignments.read().await.clone();
-        if results.len() != source_checked_unix.len() {
-            bail!("Ping result/source timestamp cardinality mismatch");
-        }
-        let mut source_checks = memory.telemetry_ping_source_checks.write().await;
-        let mut stored = memory.telemetry_ping_rollups.write().await;
-        for (result, source_checked_unix) in results
-            .iter()
-            .zip(source_checked_unix)
-            .take(MAX_AGENT_PING_TARGETS)
-        {
-            let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
-                continue;
-            };
-            let Some(target) = targets.get(&target_id) else {
-                continue;
-            };
-            if !target.enabled
-                || target.generation != result.generation as i64
-                || !assignments.iter().any(|assignment| {
-                    assignment.target_id == target_id && assignment.client_id == client_id
-                })
-                || !(1..=i64::MAX as u64).contains(source_checked_unix)
-                || !valid_ping_result(result, observed_unix)
-            {
-                continue;
-            }
-            let source_key = (
-                client_id.to_string(),
-                target_id,
-                target.generation,
-                *source_checked_unix,
-            );
-            if let Some(retained_at) = source_checks.get_mut(&source_key) {
-                *retained_at = observed_unix;
-                continue;
-            }
-            source_checks.insert(source_key, observed_unix);
-            upsert_memory_ping_rollup(&mut stored, client_id, target, result, *source_checked_unix);
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn accepted_ping_results_memory(
-        &self,
-        client_id: &str,
-        observed_unix: u64,
-        results: &[PingTargetResult],
-        source_checked_unix: &[u64],
-    ) -> Result<(Vec<PingTargetResult>, Vec<u64>)> {
-        if results.len() != source_checked_unix.len() {
-            bail!("Ping result/source timestamp cardinality mismatch");
-        }
-        let Self::Memory(memory) = self else {
-            return Ok((Vec::new(), Vec::new()));
-        };
-        let enabled_generations = memory
-            .ping_targets
-            .read()
-            .await
-            .iter()
-            .filter(|target| target.enabled)
-            .map(|target| (target.id, target.generation))
-            .collect::<HashSet<_>>();
-        let assigned = memory
-            .ping_target_assignments
-            .read()
-            .await
-            .iter()
-            .filter(|assignment| assignment.client_id == client_id)
-            .map(|assignment| assignment.target_id)
-            .collect::<HashSet<_>>();
-        let mut deduplicated = BTreeMap::<(Uuid, i64, u64), (PingTargetResult, u64)>::new();
-        for (result, source_checked_unix) in results
-            .iter()
-            .zip(source_checked_unix)
-            .take(MAX_AGENT_PING_TARGETS)
-        {
-            let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
-                continue;
-            };
-            let generation = result.generation as i64;
-            if assigned.contains(&target_id)
-                && enabled_generations.contains(&(target_id, generation))
-                && (1..=i64::MAX as u64).contains(source_checked_unix)
-                && valid_ping_result(result, observed_unix)
-            {
-                deduplicated.insert(
-                    (target_id, generation, *source_checked_unix),
-                    (result.clone(), *source_checked_unix),
-                );
-            }
-        }
-        let mut source_checks = memory.telemetry_ping_source_checks.write().await;
-        let mut accepted = Vec::with_capacity(deduplicated.len());
-        for ((target_id, generation, source_checked_unix), (result, _)) in deduplicated {
-            let source_key = (
-                client_id.to_string(),
-                target_id,
-                generation,
-                source_checked_unix,
-            );
-            if let Some(retained_at) = source_checks.get_mut(&source_key) {
-                // Agent cache entries are immutable for one source check. A
-                // conflicting duplicate inside this envelope was already
-                // resolved last-input-wins above; later envelopes only refresh
-                // the bounded retention clock and must not add chart evidence.
-                *retained_at = observed_unix;
-            } else {
-                accepted.push((result, source_checked_unix));
-            }
-        }
-        Ok(accepted.into_iter().unzip())
-    }
-
     pub(crate) async fn list_ping_rollups(
         &self,
         client_id: &str,
@@ -1549,48 +836,6 @@ impl Repository {
         let points_per_target = points_per_target.clamp(2, 1_440) as usize;
         let step_secs = step_secs.max(60);
         match self {
-            Self::Memory(memory) => {
-                let targets = memory
-                    .ping_targets
-                    .read()
-                    .await
-                    .iter()
-                    .map(|target| (target.id, target.clone()))
-                    .collect::<HashMap<_, _>>();
-                let primary = memory
-                    .ping_target_assignments
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|assignment| assignment.client_id == client_id)
-                    .map(|assignment| (assignment.target_id, assignment.is_primary))
-                    .collect::<HashMap<_, _>>();
-                let physical_rows = memory
-                    .telemetry_ping_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| row.client_id == client_id)
-                    .filter_map(|row| {
-                        let target = targets.get(&row.target_id)?;
-                        let is_primary = primary.get(&row.target_id).copied()?;
-                        if row.generation != target.generation {
-                            return None;
-                        }
-                        let mut row = row.clone();
-                        row.target_name = target.name.clone();
-                        row.is_primary = is_primary;
-                        Some(row)
-                    })
-                    .collect::<Vec<_>>();
-                let rows = retain_authoritative_ping_rows(physical_rows)
-                    .into_iter()
-                    .flat_map(|row| fragment_ping_rollup(row, start_unix, end_unix, step_secs))
-                    .collect::<Vec<_>>();
-                let mut rows = aggregate_memory_ping_rollups(rows, step_secs);
-                retain_fair_ping_points(&mut rows, points_per_target, 50_000);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1632,7 +877,7 @@ impl Repository {
                             p.latest_status,
                             p.latest_reason,
                             p.latest_checked_at
-                        FROM telemetry_ping_rollups p
+                        FROM telemetry_ping_points p
                         JOIN scoped_series series ON series.series_id = p.series_id
                         WHERE
                             p.bucket_secs >= 60
@@ -1789,23 +1034,17 @@ impl Repository {
         }
         let points_per_client = points_per_client.clamp(2, 1_440) as usize;
         let step_secs = step_secs.max(60);
-        if let Self::Postgres(pool) = self {
-            let rows = sqlx::query(
-                r#"
-                WITH accepted AS (
+        let Self::Postgres(pool) = self;
+        let rows = sqlx::query(
+            r#"
+                WITH scoped_series AS MATERIALIZED (
                     SELECT
                         series.client_id,
+                        series.id AS series_id,
                         target.id AS target_id,
                         target.name AS target_name,
-                        target.generation,
-                        fact.source_checked_unix,
-                        fact.checked_unix,
-                        fact.status,
-                        fact.latency_avg_ms,
-                        fact.loss_ratio,
-                        left(fact.reason, 512) AS reason
-                    FROM telemetry_ping_facts fact
-                    JOIN telemetry_ping_series series ON series.id = fact.series_id
+                        target.generation
+                    FROM telemetry_ping_series series
                     JOIN ping_targets target
                       ON target.id = series.target_id
                      AND target.generation = series.generation
@@ -1814,30 +1053,58 @@ impl Repository {
                      AND assignment.client_id = series.client_id
                      AND assignment.is_primary
                     WHERE series.client_id = ANY($1::TEXT[])
-                      AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
-                      AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
-                      AND fact.checked_unix >= $2
-                      AND fact.checked_unix <= $3
+                ), accepted AS (
+                    SELECT
+                        series.client_id,
+                        series.target_id,
+                        series.target_name,
+                        series.generation,
+                        extract(epoch FROM point.bucket_start)::BIGINT
+                            AS source_start,
+                        point.sample_count,
+                        point.success_count,
+                        point.latency_sum_ms,
+                        point.latency_min_ms,
+                        point.latency_max_ms,
+                        point.loss_ratio_sum,
+                        point.loss_ratio_max,
+                        point.latest_status,
+                        point.latest_reason,
+                        point.latest_checked_at
+                    FROM scoped_series series
+                    JOIN telemetry_ping_points point
+                      ON point.series_id = series.series_id
+                    WHERE point.bucket_secs = 60
+                      AND point.bucket_start + interval '1 minute'
+                            > to_timestamp($2::DOUBLE PRECISION)
+                      AND point.bucket_start
+                            <= to_timestamp($3::DOUBLE PRECISION)
                 ), bucketed AS (
                     SELECT
                         client_id,
                         target_id,
                         target_name,
                         generation,
-                        (checked_unix / $4::bigint) * $4::bigint AS chart_epoch,
-                        LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
-                        LEAST(count(latency_avg_ms)::bigint, 2147483647)::integer
+                        (source_start / $4::BIGINT) * $4::BIGINT AS chart_epoch,
+                        LEAST(sum(sample_count)::BIGINT, 2147483647)::INTEGER
+                            AS sample_count,
+                        LEAST(sum(success_count)::BIGINT, 2147483647)::INTEGER
                             AS success_count,
-                        avg(latency_avg_ms)::double precision AS latency_avg_ms,
-                        min(latency_avg_ms)::double precision AS latency_min_ms,
-                        max(latency_avg_ms)::double precision AS latency_max_ms,
-                        avg(loss_ratio)::double precision AS loss_ratio_avg,
-                        max(loss_ratio)::double precision AS loss_ratio_max,
-                        (array_agg(status ORDER BY checked_unix DESC,
-                            source_checked_unix DESC))[1] AS latest_status,
-                        (array_agg(reason ORDER BY checked_unix DESC,
-                            source_checked_unix DESC))[1] AS latest_reason,
-                        max(checked_unix)::bigint AS latest_checked_unix
+                        CASE WHEN sum(success_count) > 0 THEN
+                            sum(latency_sum_ms) / sum(success_count)
+                        END::DOUBLE PRECISION AS latency_avg_ms,
+                        min(latency_min_ms)::double precision AS latency_min_ms,
+                        max(latency_max_ms)::double precision AS latency_max_ms,
+                        (sum(loss_ratio_sum) / sum(sample_count))::double precision
+                            AS loss_ratio_avg,
+                        max(loss_ratio_max)::double precision AS loss_ratio_max,
+                        (array_agg(latest_status ORDER BY latest_checked_at DESC,
+                            source_start DESC))[1] AS latest_status,
+                        (array_agg(left(latest_reason, 512)
+                            ORDER BY latest_checked_at DESC,
+                            source_start DESC))[1] AS latest_reason,
+                        max(extract(epoch FROM latest_checked_at))::bigint
+                            AS latest_checked_unix
                     FROM accepted
                     GROUP BY client_id, target_id, target_name, generation, chart_epoch
                 ), ranked AS (
@@ -1872,38 +1139,15 @@ impl Repository {
                 ORDER BY chart_epoch, client_id, lower(target_name), target_id
                 LIMIT 50000
                 "#,
-            )
-            .bind(client_ids)
-            .bind(start_unix as i64)
-            .bind(end_unix as i64)
-            .bind(step_secs)
-            .bind(points_per_client as i64)
-            .fetch_all(pool)
-            .await?;
-            return rows.into_iter().map(ping_rollup_from_row).collect();
-        }
-        let mut rows = Vec::new();
-        for client_id in client_ids {
-            rows.extend(
-                self.list_raw_ping_results(
-                    client_id,
-                    Some(start_unix),
-                    Some(end_unix),
-                    points_per_client as i64,
-                    step_secs,
-                )
-                .await?
-                .into_iter()
-                .filter(|row| row.is_primary),
-            );
-        }
-        rows.sort_by(|left, right| {
-            monitoring_timestamp_unix(&left.bucket_start)
-                .cmp(&monitoring_timestamp_unix(&right.bucket_start))
-                .then_with(|| left.client_id.cmp(&right.client_id))
-                .then_with(|| left.target_id.cmp(&right.target_id))
-        });
-        Ok(rows)
+        )
+        .bind(client_ids)
+        .bind(start_unix as i64)
+        .bind(end_unix as i64)
+        .bind(step_secs)
+        .bind(points_per_client as i64)
+        .fetch_all(pool)
+        .await?;
+        rows.into_iter().map(ping_rollup_from_row).collect()
     }
 
     pub(crate) async fn list_raw_ping_results(
@@ -1916,53 +1160,56 @@ impl Repository {
     ) -> Result<Vec<PingRollupView>> {
         let points_per_target = points_per_target.clamp(2, 1_440) as usize;
         let step_secs = step_secs.max(60);
-        if let Self::Postgres(pool) = self {
-            let rows = sqlx::query(
-                r#"
-                WITH accepted AS (
+        let Self::Postgres(pool) = self;
+        let rows = sqlx::query(
+            r#"
+                WITH scoped_series AS MATERIALIZED (
                     SELECT
                         series.client_id,
-                        series.target_id,
-                        series.generation,
-                        fact.source_checked_unix,
-                        fact.checked_unix,
-                        fact.status,
-                        fact.latency_avg_ms,
-                        fact.loss_ratio,
-                        left(fact.reason, 512) AS reason
-                    FROM telemetry_ping_facts fact
-                    JOIN telemetry_ping_series series ON series.id = fact.series_id
-                    WHERE series.client_id = $1
-                      AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
-                      AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
-                      -- Raw Ping facts enforce checked_unix > 0. Sentinel bounds
-                      -- preserve the None/None API contract while keeping both
-                      -- range predicates visible to generic prepared plans.
-                      AND fact.checked_unix >= COALESCE($2::BIGINT, 0)
-                      AND fact.checked_unix <= COALESCE(
-                            $3::BIGINT,
-                            9223372036854775807::BIGINT
-                          )
-                ), selected AS (
-                    SELECT
-                        accepted.client_id,
+                        series.id AS series_id,
                         target.id AS target_id,
                         target.name AS target_name,
                         assignment.is_primary,
-                        target.generation,
-                        accepted.source_checked_unix,
-                        accepted.checked_unix,
-                        accepted.status,
-                        accepted.latency_avg_ms,
-                        accepted.loss_ratio,
-                        accepted.reason
-                    FROM accepted
+                        target.generation
+                    FROM telemetry_ping_series series
                     JOIN ping_targets target
-                      ON target.id = accepted.target_id
-                     AND target.generation = accepted.generation
+                      ON target.id = series.target_id
+                     AND target.generation = series.generation
                     JOIN ping_target_assignments assignment
                       ON assignment.target_id = target.id
-                     AND assignment.client_id = accepted.client_id
+                     AND assignment.client_id = series.client_id
+                    WHERE series.client_id = $1
+                ), accepted AS (
+                    SELECT
+                        series.client_id,
+                        series.target_id,
+                        series.target_name,
+                        series.is_primary,
+                        series.generation,
+                        extract(epoch FROM point.bucket_start)::BIGINT
+                            AS source_start,
+                        point.sample_count,
+                        point.success_count,
+                        point.latency_sum_ms,
+                        point.latency_min_ms,
+                        point.latency_max_ms,
+                        point.loss_ratio_sum,
+                        point.loss_ratio_max,
+                        point.latest_status,
+                        point.latest_reason,
+                        point.latest_checked_at
+                    FROM scoped_series series
+                    JOIN telemetry_ping_points point
+                      ON point.series_id = series.series_id
+                    WHERE point.bucket_secs = 60
+                      AND point.bucket_start + interval '1 minute' > COALESCE(
+                            to_timestamp($2::DOUBLE PRECISION),
+                            '-infinity'::TIMESTAMPTZ
+                          )
+                      AND point.bucket_start <= COALESCE(
+                            to_timestamp($3::DOUBLE PRECISION),
+                            'infinity'::TIMESTAMPTZ
+                          )
                 ), bucketed AS (
                     SELECT
                         client_id,
@@ -1970,21 +1217,27 @@ impl Repository {
                         target_name,
                         bool_or(is_primary) AS is_primary,
                         generation,
-                        (checked_unix / $4::bigint) * $4::bigint AS chart_epoch,
-                        LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
-                        LEAST(count(latency_avg_ms)::bigint, 2147483647)::integer
+                        (source_start / $4::BIGINT) * $4::BIGINT AS chart_epoch,
+                        LEAST(sum(sample_count)::BIGINT, 2147483647)::INTEGER
+                            AS sample_count,
+                        LEAST(sum(success_count)::BIGINT, 2147483647)::INTEGER
                             AS success_count,
-                        avg(latency_avg_ms)::double precision AS latency_avg_ms,
-                        min(latency_avg_ms)::double precision AS latency_min_ms,
-                        max(latency_avg_ms)::double precision AS latency_max_ms,
-                        avg(loss_ratio)::double precision AS loss_ratio_avg,
-                        max(loss_ratio)::double precision AS loss_ratio_max,
-                        (array_agg(status ORDER BY checked_unix DESC,
-                            source_checked_unix DESC))[1] AS latest_status,
-                        (array_agg(reason ORDER BY checked_unix DESC,
-                            source_checked_unix DESC))[1] AS latest_reason,
-                        max(checked_unix)::bigint AS latest_checked_unix
-                    FROM selected
+                        CASE WHEN sum(success_count) > 0 THEN
+                            sum(latency_sum_ms) / sum(success_count)
+                        END::DOUBLE PRECISION AS latency_avg_ms,
+                        min(latency_min_ms)::DOUBLE PRECISION AS latency_min_ms,
+                        max(latency_max_ms)::DOUBLE PRECISION AS latency_max_ms,
+                        (sum(loss_ratio_sum) / sum(sample_count))::DOUBLE PRECISION
+                            AS loss_ratio_avg,
+                        max(loss_ratio_max)::DOUBLE PRECISION AS loss_ratio_max,
+                        (array_agg(latest_status ORDER BY latest_checked_at DESC,
+                            source_start DESC))[1] AS latest_status,
+                        (array_agg(left(latest_reason, 512)
+                            ORDER BY latest_checked_at DESC,
+                            source_start DESC))[1] AS latest_reason,
+                        max(extract(epoch FROM latest_checked_at))::BIGINT
+                            AS latest_checked_unix
+                    FROM accepted
                     GROUP BY client_id, target_id, target_name, generation, chart_epoch
                 ), ranked AS (
                     SELECT
@@ -2018,27 +1271,15 @@ impl Repository {
                 ORDER BY chart_epoch, lower(target_name), target_id
                 LIMIT 50000
                 "#,
-            )
-            .bind(client_id)
-            .bind(start_unix.map(|value| value as i64))
-            .bind(end_unix.map(|value| value as i64))
-            .bind(step_secs)
-            .bind(points_per_target as i64)
-            .fetch_all(pool)
-            .await?;
-            return rows.into_iter().map(ping_rollup_from_row).collect();
-        }
-        // Memory keeps the same logical 60-second Ping facts in its exact
-        // rollup vector. Reading that source preserves source-clock identity
-        // ties that the rebased AgentMetrics JSON cannot represent by itself.
-        self.list_ping_rollups(
-            client_id,
-            start_unix,
-            end_unix,
-            points_per_target as i64,
-            step_secs,
         )
-        .await
+        .bind(client_id)
+        .bind(start_unix.map(|value| value as i64))
+        .bind(end_unix.map(|value| value as i64))
+        .bind(step_secs)
+        .bind(points_per_target as i64)
+        .fetch_all(pool)
+        .await?;
+        rows.into_iter().map(ping_rollup_from_row).collect()
     }
 
     pub(crate) async fn list_ping_rollups_for_export(
@@ -2047,43 +1288,6 @@ impl Repository {
         limit: i64,
     ) -> Result<Vec<PingRollupView>> {
         match self {
-            Self::Memory(memory) => {
-                let primary = memory
-                    .ping_target_assignments
-                    .read()
-                    .await
-                    .iter()
-                    .map(|assignment| {
-                        (
-                            (assignment.target_id, assignment.client_id.clone()),
-                            assignment.is_primary,
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
-                let mut rows = memory
-                    .telemetry_ping_rollups
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| client_id.is_none_or(|id| row.client_id == id))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for row in &mut rows {
-                    row.is_primary = primary
-                        .get(&(row.target_id, row.client_id.clone()))
-                        .copied()
-                        .unwrap_or(false);
-                }
-                rows.sort_by(|left, right| {
-                    right
-                        .bucket_start
-                        .cmp(&left.bucket_start)
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                        .then_with(|| left.target_id.cmp(&right.target_id))
-                });
-                rows.truncate(limit.clamp(1, 50_000) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2105,7 +1309,7 @@ impl Repository {
                         p.latest_status,
                         p.latest_reason,
                         p.latest_checked_at::text AS latest_checked_at
-                    FROM telemetry_ping_rollups p
+                    FROM telemetry_ping_points p
                     JOIN telemetry_ping_series series ON series.id = p.series_id
                     JOIN ping_targets t ON t.id = series.target_id
                     LEFT JOIN ping_target_assignments a
@@ -2125,13 +1329,16 @@ impl Repository {
     }
 }
 
-fn telemetry_uptime_from_sample(
-    sample: &crate::model::TelemetrySampleView,
+fn telemetry_uptime_from_projected_value(
+    client_id: String,
+    observed_at: String,
+    uptime_value: Option<serde_json::Value>,
 ) -> Option<TelemetryUptimeView> {
+    let uptime_secs = uptime_value.as_ref().and_then(serde_json::Value::as_u64)?;
     Some(TelemetryUptimeView {
-        client_id: sample.client_id.clone(),
-        uptime_secs: sample.payload.get("uptime_secs")?.as_u64()?,
-        observed_at: sample.observed_at.clone(),
+        client_id,
+        uptime_secs,
+        observed_at,
     })
 }
 
@@ -2142,46 +1349,15 @@ impl Repository {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<MonitoringShareView>> {
-        if let Self::Postgres(pool) = self {
-            return postgres_monitoring_share_views(
-                pool,
-                status,
-                None,
-                limit.clamp(1, 1_000),
-                offset.clamp(0, 1_000_000),
-            )
-            .await;
-        }
-        let records = self.list_monitoring_share_records().await?;
-        let visitors = self.list_monitoring_share_visitor_records().await?;
-        let creators = self
-            .list_operators()
-            .await?
-            .into_iter()
-            .map(|operator| (operator.id, operator.username))
-            .collect::<HashMap<_, _>>();
-        let mut views = records
-            .iter()
-            .map(|record| {
-                monitoring_share_view(
-                    record,
-                    &visitors,
-                    record.created_by.and_then(|id| creators.get(&id).cloned()),
-                )
-            })
-            .filter(|view| status.is_none_or(|status| view.status == status))
-            .collect::<Vec<_>>();
-        views.sort_by(|left, right| {
-            right
-                .created_at
-                .cmp(&left.created_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        Ok(views
-            .into_iter()
-            .skip(offset.clamp(0, 1_000_000) as usize)
-            .take(limit.clamp(1, 1_000) as usize)
-            .collect())
+        let Self::Postgres(pool) = self;
+        postgres_monitoring_share_views(
+            pool,
+            status,
+            None,
+            limit.clamp(1, 1_000),
+            offset.clamp(0, 1_000_000),
+        )
+        .await
     }
 
     pub(crate) async fn monitoring_share_record(
@@ -2189,13 +1365,6 @@ impl Repository {
         share_id: Uuid,
     ) -> Result<Option<MonitoringShareRecord>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .monitoring_shares
-                .read()
-                .await
-                .iter()
-                .find(|record| record.id == share_id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -2214,8 +1383,6 @@ impl Repository {
                         s.allow_detail_history,
                         s.expires_at::text AS expires_at,
                         s.revoked_at::text AS revoked_at,
-                        s.revoked_by,
-                        s.created_by,
                         s.created_at::text AS created_at,
                         s.updated_at::text AS updated_at,
                         COALESCE(
@@ -2242,93 +1409,6 @@ impl Repository {
         }
     }
 
-    async fn list_monitoring_share_records(&self) -> Result<Vec<MonitoringShareRecord>> {
-        match self {
-            Self::Memory(memory) => Ok(memory.monitoring_shares.read().await.clone()),
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        s.id,
-                        s.name,
-                        s.token_secret,
-                        s.selector_expression,
-                        s.show_identity_context,
-                        s.show_billing,
-                        s.show_system_information,
-                        s.show_resources,
-                        s.show_network,
-                        s.show_traffic,
-                        s.show_ping,
-                        s.allow_detail_history,
-                        s.expires_at::text AS expires_at,
-                        s.revoked_at::text AS revoked_at,
-                        s.revoked_by,
-                        s.created_by,
-                        s.created_at::text AS created_at,
-                        s.updated_at::text AS updated_at,
-                        COALESCE(
-                            array_agg(st.client_id ORDER BY st.client_id)
-                                FILTER (WHERE st.client_id IS NOT NULL),
-                            ARRAY[]::TEXT[]
-                        ) AS target_client_ids,
-                        COALESCE(
-                            array_agg(st.public_client_key ORDER BY st.client_id)
-                                FILTER (WHERE st.client_id IS NOT NULL),
-                            ARRAY[]::TEXT[]
-                        ) AS target_public_client_keys
-                    FROM monitoring_share_links s
-                    LEFT JOIN monitoring_share_targets st ON st.share_id = s.id
-                    GROUP BY s.id
-                    ORDER BY s.created_at DESC, s.id
-                    "#,
-                )
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(monitoring_share_record_from_row)
-                    .collect()
-            }
-        }
-    }
-
-    async fn list_monitoring_share_visitor_records(
-        &self,
-    ) -> Result<Vec<MonitoringShareVisitorRecord>> {
-        match self {
-            Self::Memory(memory) => Ok(memory.monitoring_share_visitors.read().await.clone()),
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        share_id,
-                        visitor_id,
-                        host(source_ip) AS source_ip,
-                        user_agent,
-                        first_seen_at::text AS first_seen_at,
-                        last_seen_at::text AS last_seen_at
-                    FROM monitoring_share_visitors
-                    ORDER BY share_id, first_seen_at, visitor_id
-                    "#,
-                )
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(MonitoringShareVisitorRecord {
-                            share_id: row.try_get("share_id")?,
-                            visitor_id: row.try_get("visitor_id")?,
-                            source_ip: row.try_get("source_ip")?,
-                            user_agent: row.try_get("user_agent")?,
-                            first_seen_at: row.try_get("first_seen_at")?,
-                            last_seen_at: row.try_get("last_seen_at")?,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn create_monitoring_share(
         &self,
         record: MonitoringShareRecord,
@@ -2337,26 +1417,14 @@ impl Repository {
         validate_monitoring_share_targets(&record.targets)?;
         let target_client_ids = record.target_client_ids();
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    &target_client_ids,
-                    "monitoring_share_resolution_stale",
-                )
-                .await?;
-                memory.monitoring_shares.write().await.push(record.clone());
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "monitoring_share.created",
-                    format!("monitoring_share:{}", record.id),
-                    share_operator_audit_metadata(&record, operator),
-                )
-                .await;
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &[format!("monitoring-share:{}", record.id)],
+                    &target_client_ids,
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &target_client_ids,
@@ -2428,7 +1496,6 @@ impl Repository {
         }
         Ok(monitoring_share_view(
             &record,
-            &[],
             Some(operator.operator.username.clone()),
         ))
     }
@@ -2439,36 +1506,6 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<String> {
         match self {
-            Self::Memory(memory) => {
-                let records = memory.monitoring_shares.read().await;
-                let record = records
-                    .iter()
-                    .find(|record| record.id == share_id)
-                    .context("monitoring_share_not_found")?;
-                if monitoring_share_status(record, crate::unix_now()) != "active" {
-                    bail!("monitoring_share_not_active");
-                }
-                let token_secret = record.token_secret.clone();
-                let metadata = base_monitoring_audit_metadata(
-                    operator,
-                    serde_json::json!({
-                        "share_id": record.id,
-                        "name": record.name,
-                        "target_count": record.targets.len(),
-                        "expires_at": record.expires_at,
-                    }),
-                );
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "monitoring_share.url_recovered",
-                    format!("monitoring_share:{share_id}"),
-                    metadata,
-                )
-                .await;
-                drop(records);
-                Ok(token_secret)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -2554,76 +1591,19 @@ impl Repository {
         if changed_share_ids.is_empty() {
             return Ok(());
         }
-        let now = crate::unix_now();
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    &proposed_client_ids,
-                    "monitoring_share_resolution_stale",
-                )
-                .await?;
-                let mut records = memory.monitoring_shares.write().await;
-                for replacement in replacements {
-                    let Some(stored) = records
-                        .iter()
-                        .find(|record| record.id == replacement.expected_share.id)
-                    else {
-                        bail!("monitoring_share_preview_stale");
-                    };
-                    if !same_monitoring_share_revision(stored, &replacement.expected_share)
-                        || monitoring_share_status(stored, now) != "active"
-                    {
-                        bail!("monitoring_share_preview_stale");
-                    }
-                }
-                let mut next_targets_by_share = HashMap::new();
-                for replacement in replacements.iter().filter(|replacement| {
-                    changed_share_ids.contains(&replacement.expected_share.id)
-                }) {
-                    let stored = records
-                        .iter()
-                        .find(|record| record.id == replacement.expected_share.id)
-                        .context("monitoring_share_preview_stale")?;
-                    let existing_keys = stored
-                        .targets
-                        .iter()
-                        .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
-                        .collect::<HashMap<_, _>>();
-                    let targets = normalized_client_ids(&replacement.next_client_ids)
-                        .into_iter()
-                        .map(|client_id| MonitoringShareTargetRecord {
-                            public_client_key: existing_keys
-                                .get(&client_id)
-                                .cloned()
-                                .unwrap_or_else(generate_token),
-                            client_id,
-                        })
-                        .collect::<Vec<_>>();
-                    validate_monitoring_share_targets(&targets)?;
-                    next_targets_by_share.insert(replacement.expected_share.id, targets);
-                }
-                for (share_id, targets) in next_targets_by_share {
-                    let stored = records
-                        .iter_mut()
-                        .find(|record| record.id == share_id)
-                        .context("monitoring_share_preview_stale")?;
-                    stored.targets = targets;
-                    stored.updated_at = next_monitoring_share_updated_at(&stored.updated_at);
-                }
-                drop(records);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "monitoring_share.targets_bulk_updated",
-                    "monitoring_shares:bulk".to_string(),
-                    share_target_updates_audit_metadata(replacements, operator),
-                )
-                .await;
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let share_definition_ids = share_ids
+                    .iter()
+                    .map(|id| format!("monitoring-share:{id}"))
+                    .collect::<Vec<_>>();
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &share_definition_ids,
+                    &proposed_client_ids,
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &proposed_client_ids,
@@ -2781,73 +1761,15 @@ impl Repository {
             next_client_ids.len() <= 1_000,
             "monitoring_share_target_count_too_large"
         );
-        let now = crate::unix_now();
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    &next_client_ids,
-                    "monitoring_share_resolution_stale",
-                )
-                .await?;
-                let mut records = memory.monitoring_shares.write().await;
-                let stored = records
-                    .iter_mut()
-                    .find(|record| record.id == update.expected_share.id)
-                    .context("monitoring_share_preview_stale")?;
-                if !same_monitoring_share_revision(stored, &update.expected_share)
-                    || monitoring_share_status(stored, now) != "active"
-                {
-                    bail!("monitoring_share_preview_stale");
-                }
-                let existing_keys = stored
-                    .targets
-                    .iter()
-                    .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
-                    .collect::<HashMap<_, _>>();
-                let targets = next_client_ids
-                    .iter()
-                    .cloned()
-                    .map(|client_id| MonitoringShareTargetRecord {
-                        public_client_key: existing_keys
-                            .get(&client_id)
-                            .cloned()
-                            .unwrap_or_else(generate_token),
-                        client_id,
-                    })
-                    .collect::<Vec<_>>();
-                validate_monitoring_share_targets(&targets)?;
-                stored.name = update.next_name.clone();
-                stored.selector_expression = update.next_selector_expression.clone();
-                stored.targets = targets;
-                stored.visibility = update.next_visibility.clone();
-                stored.updated_at = next_monitoring_share_updated_at(&stored.updated_at);
-                let persisted = stored.clone();
-                drop(records);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "monitoring_share.definition_updated",
-                    format!("monitoring_share:{}", persisted.id),
-                    share_definition_update_audit_metadata(&update, operator),
-                )
-                .await;
-                let visitors = memory.monitoring_share_visitors.read().await.clone();
-                let creator = match persisted.created_by {
-                    Some(created_by) => memory
-                        .operators
-                        .read()
-                        .await
-                        .iter()
-                        .find(|candidate| candidate.id == created_by)
-                        .map(|candidate| candidate.username.clone()),
-                    None => None,
-                };
-                Ok(monitoring_share_view(&persisted, &visitors, creator))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &[format!("monitoring-share:{}", update.expected_share.id)],
+                    &next_client_ids,
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &next_client_ids,
@@ -3027,69 +1949,6 @@ impl Repository {
         let now = crate::unix_now();
         let maximum = now.saturating_add(365 * 24 * 60 * 60);
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory.monitoring_shares.write().await;
-                let selected = records
-                    .iter()
-                    .filter(|record| ids.contains(&record.id))
-                    .collect::<Vec<_>>();
-                if selected.len() != ids.len() {
-                    bail!("monitoring_share_not_found");
-                }
-                if selected
-                    .iter()
-                    .any(|record| monitoring_share_status(record, now) != "active")
-                {
-                    bail!("monitoring_share_not_active");
-                }
-                for record in records.iter_mut().filter(|record| ids.contains(&record.id)) {
-                    let current = parse_timestamp_unix(&record.expires_at).unwrap_or(now);
-                    record.expires_at = current
-                        .max(now)
-                        .saturating_add(extend_by_secs)
-                        .min(maximum)
-                        .to_string();
-                    record.updated_at = next_monitoring_share_updated_at(&record.updated_at);
-                }
-                let persisted_records = records
-                    .iter()
-                    .filter(|record| ids.contains(&record.id))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                drop(records);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "monitoring_share.extended",
-                    "monitoring_shares:bulk".to_string(),
-                    base_monitoring_audit_metadata(
-                        operator,
-                        serde_json::json!({
-                            "share_ids": ids,
-                            "extend_by_secs": extend_by_secs,
-                        }),
-                    ),
-                )
-                .await;
-                let visitors = memory.monitoring_share_visitors.read().await.clone();
-                let creators = memory
-                    .operators
-                    .read()
-                    .await
-                    .iter()
-                    .map(|operator| (operator.id, operator.username.clone()))
-                    .collect::<HashMap<_, _>>();
-                Ok(persisted_records
-                    .iter()
-                    .map(|record| {
-                        monitoring_share_view(
-                            record,
-                            &visitors,
-                            record.created_by.and_then(|id| creators.get(&id).cloned()),
-                        )
-                    })
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let current = sqlx::query(
@@ -3173,61 +2032,7 @@ impl Repository {
             bail!("monitoring_share_selection_too_large");
         }
         let now_unix = crate::unix_now();
-        let now = now_unix.to_string();
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory.monitoring_shares.write().await;
-                let selected = records
-                    .iter()
-                    .filter(|record| ids.contains(&record.id))
-                    .collect::<Vec<_>>();
-                if selected.len() != ids.len() {
-                    bail!("monitoring_share_not_found");
-                }
-                if selected
-                    .iter()
-                    .any(|record| monitoring_share_status(record, now_unix) != "active")
-                {
-                    bail!("monitoring_share_not_active");
-                }
-                for record in records.iter_mut().filter(|record| ids.contains(&record.id)) {
-                    record.revoked_at = Some(now.clone());
-                    record.revoked_by = Some(operator.operator.id);
-                    record.updated_at = next_monitoring_share_updated_at(&record.updated_at);
-                }
-                let persisted_records = records
-                    .iter()
-                    .filter(|record| ids.contains(&record.id))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                drop(records);
-                record_memory_monitoring_audit(
-                    memory,
-                    operator,
-                    "monitoring_share.revoked",
-                    "monitoring_shares:bulk".to_string(),
-                    base_monitoring_audit_metadata(operator, serde_json::json!({"share_ids": ids})),
-                )
-                .await;
-                let visitors = memory.monitoring_share_visitors.read().await.clone();
-                let creators = memory
-                    .operators
-                    .read()
-                    .await
-                    .iter()
-                    .map(|operator| (operator.id, operator.username.clone()))
-                    .collect::<HashMap<_, _>>();
-                Ok(persisted_records
-                    .iter()
-                    .map(|record| {
-                        monitoring_share_view(
-                            record,
-                            &visitors,
-                            record.created_by.and_then(|id| creators.get(&id).cloned()),
-                        )
-                    })
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let current = sqlx::query(
@@ -3319,43 +2124,7 @@ impl Repository {
     ) -> Result<(Uuid, bool)> {
         let visitor_id = proposed_visitor_id.unwrap_or_else(Uuid::new_v4);
         let user_agent = user_agent.map(|value| truncate(value, 512));
-        let now = crate::unix_now().to_string();
         match self {
-            Self::Memory(memory) => {
-                let mut visitors = memory.monitoring_share_visitors.write().await;
-                if let Some(visitor) = visitors.iter_mut().find(|visitor| {
-                    visitor.share_id == share.id && visitor.visitor_id == visitor_id
-                }) {
-                    visitor.last_seen_at = now;
-                    visitor.source_ip = Some(source_ip.to_string());
-                    visitor.user_agent = user_agent;
-                    return Ok((visitor_id, false));
-                }
-                visitors.push(MonitoringShareVisitorRecord {
-                    share_id: share.id,
-                    visitor_id,
-                    source_ip: Some(source_ip.to_string()),
-                    user_agent: user_agent.clone(),
-                    first_seen_at: now.clone(),
-                    last_seen_at: now,
-                });
-                drop(visitors);
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: None,
-                    action: "monitoring_share.visitor_opened".to_string(),
-                    target: format!("monitoring_share:{}", share.id),
-                    command_hash: None,
-                    metadata: share_visitor_audit_metadata(
-                        share,
-                        visitor_id,
-                        source_ip,
-                        user_agent.as_deref(),
-                    ),
-                    created_at: crate::unix_now().to_string(),
-                });
-                Ok((visitor_id, true))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let inserted = sqlx::query_scalar::<_, Uuid>(
@@ -3415,16 +2184,6 @@ impl Repository {
         visitor_id: Uuid,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                let mut visitors = memory.monitoring_share_visitors.write().await;
-                let Some(visitor) = visitors.iter_mut().find(|visitor| {
-                    visitor.share_id == share_id && visitor.visitor_id == visitor_id
-                }) else {
-                    return Ok(false);
-                };
-                visitor.last_seen_at = crate::unix_now().to_string();
-                Ok(true)
-            }
             Self::Postgres(pool) => Ok(sqlx::query(
                 r#"
                 UPDATE monitoring_share_visitors
@@ -3440,169 +2199,6 @@ impl Repository {
                 == 1),
         }
     }
-}
-
-pub(crate) async fn upsert_postgres_ping_results(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-    observed_unix: u64,
-    results: &[PingTargetResult],
-    source_checked_unix: &[u64],
-) -> Result<()> {
-    for (result, source_checked_unix) in results
-        .iter()
-        .zip(source_checked_unix)
-        .take(MAX_AGENT_PING_TARGETS)
-    {
-        if !valid_ping_result(result, observed_unix)
-            || !(1..=i64::MAX as u64).contains(source_checked_unix)
-        {
-            continue;
-        }
-        let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
-            continue;
-        };
-        let accepted: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM ping_targets t
-                JOIN ping_target_assignments a ON a.target_id = t.id
-                WHERE
-                    t.id = $1
-                    AND a.client_id = $2
-                    AND t.enabled
-                    AND t.generation = $3
-            )
-            "#,
-        )
-        .bind(target_id)
-        .bind(client_id)
-        .bind(result.generation as i64)
-        .fetch_one(&mut **tx)
-        .await?;
-        if !accepted {
-            continue;
-        }
-        sqlx::query(
-            r#"
-            WITH series AS (
-                INSERT INTO telemetry_ping_series (client_id, target_id, generation)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (client_id, target_id, generation) DO UPDATE
-                    SET generation = EXCLUDED.generation
-                RETURNING id
-            ), affected_bucket AS (
-                SELECT fact.checked_unix / 60 * 60 AS bucket_start_unix
-                FROM series
-                JOIN telemetry_ping_facts fact ON fact.series_id = series.id
-                WHERE fact.source_checked_unix = $4
-            ), aggregated AS (
-                SELECT
-                    series.id AS series_id,
-                    affected_bucket.bucket_start_unix,
-                    count(*)::integer AS sample_count,
-                    count(fact.latency_avg_ms)::integer AS success_count,
-                    sum(COALESCE(fact.latency_avg_ms, 0))::double precision AS latency_sum_ms,
-                    avg(fact.latency_avg_ms)::double precision AS latency_avg_ms,
-                    min(fact.latency_avg_ms)::double precision AS latency_min_ms,
-                    max(fact.latency_avg_ms)::double precision AS latency_max_ms,
-                    avg(fact.loss_ratio)::double precision AS loss_ratio_avg,
-                    sum(fact.loss_ratio)::double precision AS loss_ratio_sum,
-                    max(fact.loss_ratio)::double precision AS loss_ratio_max,
-                    (array_agg(fact.status ORDER BY fact.checked_unix DESC,
-                        fact.observed_at DESC, fact.evidence_id DESC,
-                        fact.source_checked_unix DESC))[1] AS latest_status,
-                    (array_agg(left(fact.reason, 512) ORDER BY fact.checked_unix DESC,
-                        fact.observed_at DESC, fact.evidence_id DESC,
-                        fact.source_checked_unix DESC))[1] AS latest_reason,
-                    max(fact.checked_unix)::bigint AS latest_checked_unix
-                FROM series
-                JOIN telemetry_ping_facts fact ON fact.series_id = series.id
-                CROSS JOIN affected_bucket
-                WHERE fact.checked_unix >= affected_bucket.bucket_start_unix
-                  AND fact.checked_unix < affected_bucket.bucket_start_unix + 60
-                GROUP BY series.id, affected_bucket.bucket_start_unix
-            )
-            INSERT INTO telemetry_ping_rollups (
-                series_id, bucket_start, bucket_secs,
-                sample_count, success_count, latency_sum_ms,
-                latency_avg_ms, latency_min_ms, latency_max_ms,
-                loss_ratio_avg, loss_ratio_sum, loss_ratio_max,
-                latest_status, latest_reason, latest_checked_at, updated_at
-            ) SELECT
-                series_id, to_timestamp(bucket_start_unix::double precision), 60,
-                sample_count, success_count, latency_sum_ms,
-                latency_avg_ms, latency_min_ms, latency_max_ms,
-                loss_ratio_avg, loss_ratio_sum, loss_ratio_max,
-                latest_status, latest_reason, to_timestamp(latest_checked_unix), now()
-            FROM aggregated
-            ON CONFLICT (series_id, bucket_secs, bucket_start) DO UPDATE SET
-                sample_count = EXCLUDED.sample_count,
-                success_count = EXCLUDED.success_count,
-                latency_sum_ms = EXCLUDED.latency_sum_ms,
-                latency_avg_ms = EXCLUDED.latency_avg_ms,
-                latency_min_ms = EXCLUDED.latency_min_ms,
-                latency_max_ms = EXCLUDED.latency_max_ms,
-                loss_ratio_avg = EXCLUDED.loss_ratio_avg,
-                loss_ratio_sum = EXCLUDED.loss_ratio_sum,
-                loss_ratio_max = EXCLUDED.loss_ratio_max,
-                latest_status = EXCLUDED.latest_status,
-                latest_reason = EXCLUDED.latest_reason,
-                latest_checked_at = EXCLUDED.latest_checked_at,
-                updated_at = now()
-            "#,
-        )
-        .bind(client_id)
-        .bind(target_id)
-        .bind(result.generation as i64)
-        .bind(*source_checked_unix as i64)
-        .execute(&mut **tx)
-        .await?;
-        sqlx::query(
-            r#"
-            WITH series AS (
-                SELECT id FROM telemetry_ping_series
-                WHERE client_id = $1 AND target_id = $2 AND generation = $3
-            ), latest AS (
-                SELECT fact.*
-                FROM telemetry_ping_facts fact, series
-                WHERE fact.series_id = series.id
-                ORDER BY fact.checked_unix DESC, fact.observed_at DESC,
-                    fact.evidence_id DESC, fact.source_checked_unix DESC
-                LIMIT 1
-            ), rolling AS (
-                SELECT avg(fact.loss_ratio)::double precision AS loss_ratio
-                FROM telemetry_ping_facts fact, latest
-                WHERE fact.series_id = latest.series_id
-                  AND fact.checked_unix >= latest.checked_unix - ($4 - 1)
-                  AND fact.checked_unix <= latest.checked_unix
-            )
-            INSERT INTO telemetry_ping_current (
-                series_id, latest_status, latency_avg_ms, rolling_loss_ratio,
-                latest_reason, latest_checked_at, updated_at
-            ) SELECT latest.series_id, latest.status, latest.latency_avg_ms,
-                COALESCE(rolling.loss_ratio, latest.loss_ratio), left(latest.reason, 512),
-                to_timestamp(latest.checked_unix::double precision), now()
-            FROM latest CROSS JOIN rolling
-            ON CONFLICT (series_id) DO UPDATE SET
-                latest_status = EXCLUDED.latest_status,
-                latency_avg_ms = EXCLUDED.latency_avg_ms,
-                rolling_loss_ratio = EXCLUDED.rolling_loss_ratio,
-                latest_reason = EXCLUDED.latest_reason,
-                latest_checked_at = EXCLUDED.latest_checked_at,
-                updated_at = now()
-            WHERE telemetry_ping_current.latest_checked_at <= EXCLUDED.latest_checked_at
-            "#,
-        )
-        .bind(client_id)
-        .bind(target_id)
-        .bind(result.generation as i64)
-        .bind(CURRENT_PING_LOSS_WINDOW_SECS as i64)
-        .execute(&mut **tx)
-        .await?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn accepted_postgres_ping_results(
@@ -3703,32 +2299,6 @@ fn ping_target_view(
     }
 }
 
-fn memory_ping_target_detail(
-    record: &PingTargetRecord,
-    assignment_records: &[PingTargetAssignmentRecord],
-    agents: &[AgentView],
-) -> PingTargetDetailView {
-    let agents = agents
-        .iter()
-        .map(|agent| (agent.id.as_str(), agent))
-        .collect::<HashMap<_, _>>();
-    let assignments = assignment_records
-        .iter()
-        .filter(|assignment| assignment.target_id == record.id)
-        .filter_map(|assignment| {
-            agents
-                .get(assignment.client_id.as_str())
-                .map(|client| PingTargetAssignmentView {
-                    target_id: record.id,
-                    client: (*client).clone(),
-                    is_primary: assignment.is_primary,
-                    assigned_at: assignment.assigned_at.clone(),
-                })
-        })
-        .collect();
-    ping_target_detail_from_assignments(record, assignments)
-}
-
 fn ping_target_detail_from_assignments(
     record: &PingTargetRecord,
     mut assignments: Vec<PingTargetAssignmentView>,
@@ -3756,6 +2326,7 @@ fn ping_target_detail_from_assignments(
     }
 }
 
+#[cfg(test)]
 fn current_ping_view(
     target: &PingTargetRecord,
     latest: Option<&PingRollupView>,
@@ -3794,6 +2365,7 @@ fn current_ping_status(latest_status: &str, rolling_loss_ratio: Option<f64>) -> 
     }
 }
 
+#[cfg(test)]
 fn current_ping_loss_ratio<'a>(
     latest: &PingRollupView,
     rollups: impl Iterator<Item = &'a PingRollupView>,
@@ -3955,66 +2527,12 @@ async fn postgres_ping_target_detail(
     )))
 }
 
-fn next_memory_ping_assignments(
-    existing: &[PingTargetAssignmentRecord],
-    visible_client_ids: &BTreeSet<String>,
-    enabled_targets: &BTreeSet<Uuid>,
-    target_id: Uuid,
-    target_client_ids: &[String],
-) -> Result<Vec<PingTargetAssignmentRecord>> {
-    let mut counts = HashMap::<String, usize>::new();
-    for assignment in existing.iter().filter(|assignment| {
-        visible_client_ids.contains(&assignment.client_id)
-            && assignment.target_id != target_id
-            && enabled_targets.contains(&assignment.target_id)
-    }) {
-        *counts.entry(assignment.client_id.clone()).or_default() += 1;
-    }
-    if enabled_targets.contains(&target_id) {
-        for client_id in target_client_ids {
-            let count = counts.entry(client_id.clone()).or_default();
-            *count += 1;
-            if *count > MAX_AGENT_PING_TARGETS {
-                bail!("ping_targets_per_client_too_many:{client_id}");
-            }
-        }
-    }
-    let existing_primary = existing
-        .iter()
-        .filter(|assignment| {
-            visible_client_ids.contains(&assignment.client_id)
-                && assignment.target_id == target_id
-                && assignment.is_primary
-        })
-        .map(|assignment| assignment.client_id.clone())
-        .collect::<BTreeSet<_>>();
-    let now = crate::unix_now().to_string();
-    let mut assignments = existing
-        .iter()
-        .filter(|assignment| {
-            !visible_client_ids.contains(&assignment.client_id) || assignment.target_id != target_id
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    assignments.extend(
-        target_client_ids
-            .iter()
-            .map(|client_id| PingTargetAssignmentRecord {
-                target_id,
-                client_id: client_id.clone(),
-                is_primary: existing_primary.contains(client_id),
-                assigned_at: now.clone(),
-            }),
-    );
-    Ok(assignments)
-}
-
 async fn replace_postgres_ping_assignments(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     target_id: Uuid,
     target_client_ids: &[String],
-) -> Result<()> {
-    sqlx::query(
+) -> Result<u64> {
+    let removed = sqlx::query(
         r#"
         DELETE FROM ping_target_assignments assignment
         USING visible_clients client
@@ -4026,7 +2544,8 @@ async fn replace_postgres_ping_assignments(
     .bind(target_id)
     .bind(target_client_ids)
     .execute(&mut **tx)
-    .await?;
+    .await?
+    .rows_affected();
     sqlx::query(
         r#"
         INSERT INTO ping_target_assignments (target_id, client_id)
@@ -4038,7 +2557,7 @@ async fn replace_postgres_ping_assignments(
     .bind(target_client_ids)
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    Ok(removed)
 }
 
 async fn lock_postgres_ping_targets(
@@ -4075,7 +2594,11 @@ async fn lock_postgres_ping_clients(
     target_ids: &[Uuid],
     proposed_client_ids: &[String],
 ) -> Result<Vec<String>> {
-    lock_postgres_agent_identity_lifecycle(tx).await?;
+    let target_definition_ids = target_ids
+        .iter()
+        .map(|id| format!("ping-target:{id}"))
+        .collect::<Vec<_>>();
+    lock_postgres_definition_lifecycles_in_tx(tx, &target_definition_ids).await?;
     let proposed_client_ids = normalized_client_ids(proposed_client_ids)
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -4100,20 +2623,6 @@ async fn lock_postgres_ping_clients(
     }
     require_visible_postgres_clients_in_tx(tx, &client_ids, "ping_target_resolution_stale").await?;
     Ok(client_ids)
-}
-
-async fn visible_memory_ping_client_ids(
-    memory: &crate::repository::MemoryState,
-) -> BTreeSet<String> {
-    let hidden = memory.hidden_clients.read().await;
-    memory
-        .agents
-        .read()
-        .await
-        .iter()
-        .filter(|agent| !hidden.contains(&agent.id))
-        .map(|agent| agent.id.clone())
-        .collect()
 }
 
 async fn ensure_postgres_ping_capacity(
@@ -4199,26 +2708,7 @@ fn valid_ping_result(result: &PingTargetResult, observed_unix: u64) -> bool {
             .is_none_or(|reason| reason.len() <= 4096)
 }
 
-#[derive(Default)]
-struct MemoryPingAggregate {
-    client_id: String,
-    target_id: Uuid,
-    target_name: String,
-    is_primary: bool,
-    generation: i64,
-    sample_count: i64,
-    success_count: i64,
-    latency_weighted_total: f64,
-    latency_min_ms: Option<f64>,
-    latency_max_ms: Option<f64>,
-    loss_weighted_total: f64,
-    loss_ratio_max: f64,
-    latest_status: String,
-    latest_reason: Option<String>,
-    latest_checked_at: String,
-    latest_source_checked_unix: u64,
-}
-
+#[cfg(test)]
 fn retain_authoritative_ping_rows(rows: Vec<PingRollupView>) -> Vec<PingRollupView> {
     rows.iter()
         .filter(|row| {
@@ -4244,133 +2734,7 @@ fn retain_authoritative_ping_rows(rows: Vec<PingRollupView>) -> Vec<PingRollupVi
         .collect()
 }
 
-fn aggregate_memory_ping_rollups(rows: Vec<PingRollupView>, step_secs: i32) -> Vec<PingRollupView> {
-    let step_secs = step_secs.max(60) as u64;
-    let mut groups = std::collections::BTreeMap::<(Uuid, i64, u64), MemoryPingAggregate>::new();
-    for row in rows {
-        let timestamp = parse_timestamp_unix(&row.bucket_start).unwrap_or(0);
-        let chart_bucket = timestamp / step_secs * step_secs;
-        let aggregate = groups
-            .entry((row.target_id, row.generation, chart_bucket))
-            .or_default();
-        aggregate.client_id = row.client_id.clone();
-        aggregate.target_id = row.target_id;
-        aggregate.target_name = row.target_name.clone();
-        aggregate.is_primary |= row.is_primary;
-        aggregate.generation = row.generation;
-        let sample_count = i64::from(row.sample_count.max(0));
-        let success_count = i64::from(row.success_count.max(0));
-        aggregate.sample_count = aggregate.sample_count.saturating_add(sample_count);
-        aggregate.success_count = aggregate.success_count.saturating_add(success_count);
-        if let Some(latency) = row.latency_avg_ms {
-            aggregate.latency_weighted_total += latency * success_count as f64;
-        }
-        if let Some(latency) = row.latency_min_ms {
-            aggregate.latency_min_ms = Some(
-                aggregate
-                    .latency_min_ms
-                    .map_or(latency, |current| current.min(latency)),
-            );
-        }
-        if let Some(latency) = row.latency_max_ms {
-            aggregate.latency_max_ms = Some(
-                aggregate
-                    .latency_max_ms
-                    .map_or(latency, |current| current.max(latency)),
-            );
-        }
-        aggregate.loss_weighted_total += row.loss_ratio_avg * sample_count as f64;
-        aggregate.loss_ratio_max = aggregate.loss_ratio_max.max(row.loss_ratio_max);
-        if aggregate.latest_checked_at.is_empty()
-            || parse_timestamp_unix(&row.latest_checked_at)
-                > parse_timestamp_unix(&aggregate.latest_checked_at)
-            || (parse_timestamp_unix(&row.latest_checked_at)
-                == parse_timestamp_unix(&aggregate.latest_checked_at)
-                && row.latest_source_checked_unix > aggregate.latest_source_checked_unix)
-        {
-            aggregate.latest_status = row.latest_status;
-            aggregate.latest_reason = row.latest_reason;
-            aggregate.latest_checked_at = row.latest_checked_at;
-            aggregate.latest_source_checked_unix = row.latest_source_checked_unix;
-        }
-    }
-    groups
-        .into_iter()
-        .map(
-            |((_target_id, _generation, bucket_start), aggregate)| PingRollupView {
-                client_id: aggregate.client_id,
-                target_id: aggregate.target_id,
-                target_name: aggregate.target_name,
-                is_primary: aggregate.is_primary,
-                generation: aggregate.generation,
-                bucket_start: bucket_start.to_string(),
-                bucket_secs: step_secs as i32,
-                sample_count: aggregate.sample_count.min(i64::from(i32::MAX)) as i32,
-                success_count: aggregate.success_count.min(i64::from(i32::MAX)) as i32,
-                latency_avg_ms: (aggregate.success_count > 0)
-                    .then_some(aggregate.latency_weighted_total / aggregate.success_count as f64),
-                latency_min_ms: aggregate.latency_min_ms,
-                latency_max_ms: aggregate.latency_max_ms,
-                loss_ratio_avg: if aggregate.sample_count > 0 {
-                    aggregate.loss_weighted_total / aggregate.sample_count as f64
-                } else {
-                    0.0
-                },
-                loss_ratio_max: aggregate.loss_ratio_max,
-                latest_status: aggregate.latest_status,
-                latest_reason: aggregate.latest_reason,
-                latest_checked_at: aggregate.latest_checked_at,
-                latest_source_checked_unix: aggregate.latest_source_checked_unix,
-            },
-        )
-        .collect()
-}
-
-fn retain_fair_ping_points(
-    rows: &mut Vec<PingRollupView>,
-    points_per_target: usize,
-    total_limit: usize,
-) {
-    rows.sort_by(|left, right| {
-        left.target_id
-            .cmp(&right.target_id)
-            .then_with(|| left.generation.cmp(&right.generation))
-            .then_with(|| {
-                parse_timestamp_unix(&right.bucket_start)
-                    .cmp(&parse_timestamp_unix(&left.bucket_start))
-            })
-    });
-    let mut counts = HashMap::<(Uuid, i64), usize>::new();
-    let mut ranked = std::mem::take(rows)
-        .into_iter()
-        .filter_map(|row| {
-            let count = counts.entry((row.target_id, row.generation)).or_default();
-            let rank = *count;
-            *count = count.saturating_add(1);
-            (rank < points_per_target).then_some((rank, row))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
-        left_rank
-            .cmp(right_rank)
-            .then_with(|| {
-                parse_timestamp_unix(&right.bucket_start)
-                    .cmp(&parse_timestamp_unix(&left.bucket_start))
-            })
-            .then_with(|| left.target_id.cmp(&right.target_id))
-            .then_with(|| left.generation.cmp(&right.generation))
-    });
-    ranked.truncate(total_limit);
-    rows.extend(ranked.into_iter().map(|(_, row)| row));
-    rows.sort_by(|left, right| {
-        parse_timestamp_unix(&left.bucket_start)
-            .cmp(&parse_timestamp_unix(&right.bucket_start))
-            .then_with(|| left.target_name.cmp(&right.target_name))
-            .then_with(|| left.target_id.cmp(&right.target_id))
-            .then_with(|| left.generation.cmp(&right.generation))
-    });
-}
-
+#[cfg(test)]
 fn fragment_ping_rollup(
     row: PingRollupView,
     start_unix: Option<u64>,
@@ -4394,7 +2758,8 @@ fn fragment_ping_rollup(
     }]
 }
 
-fn upsert_memory_ping_rollup(
+#[cfg(test)]
+fn upsert_test_ping_rollup(
     stored: &mut Vec<PingRollupView>,
     client_id: &str,
     target: &PingTargetRecord,
@@ -4485,26 +2850,9 @@ fn ping_rollup_from_row(row: sqlx::postgres::PgRow) -> Result<PingRollupView> {
         latest_status: row.try_get("latest_status")?,
         latest_reason: row.try_get("latest_reason")?,
         latest_checked_at: row.try_get("latest_checked_at")?,
+        #[cfg(test)]
         latest_source_checked_unix: 0,
     })
-}
-
-async fn record_memory_monitoring_audit(
-    memory: &crate::repository::MemoryState,
-    operator: &AuthContext,
-    action: &str,
-    target: String,
-    metadata: serde_json::Value,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target,
-        command_hash: None,
-        metadata,
-        created_at: crate::unix_now().to_string(),
-    });
 }
 
 pub(crate) async fn insert_monitoring_audit(
@@ -4591,10 +2939,6 @@ fn required_timestamp_f64(value: &str) -> Result<f64> {
     parse_timestamp_unix(value)
         .map(|timestamp| timestamp as f64)
         .context("monitoring timestamp is invalid")
-}
-
-fn monitoring_timestamp_unix(value: &str) -> u64 {
-    parse_timestamp_unix(value).unwrap_or(0)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -4755,8 +3099,6 @@ fn monitoring_share_record_from_row(row: sqlx::postgres::PgRow) -> Result<Monito
         },
         expires_at: row.try_get("expires_at")?,
         revoked_at: row.try_get("revoked_at")?,
-        revoked_by: row.try_get("revoked_by")?,
-        created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -4764,13 +3106,8 @@ fn monitoring_share_record_from_row(row: sqlx::postgres::PgRow) -> Result<Monito
 
 fn monitoring_share_view(
     record: &MonitoringShareRecord,
-    visitors: &[MonitoringShareVisitorRecord],
     created_by: Option<String>,
 ) -> MonitoringShareView {
-    let share_visitors = visitors
-        .iter()
-        .filter(|visitor| visitor.share_id == record.id)
-        .collect::<Vec<_>>();
     MonitoringShareView {
         id: record.id,
         name: record.name.clone(),
@@ -4786,15 +3123,9 @@ fn monitoring_share_view(
         created_by,
         created_at: record.created_at.clone(),
         updated_at: record.updated_at.clone(),
-        visitor_count: share_visitors.len(),
-        first_visited_at: share_visitors
-            .iter()
-            .map(|visitor| visitor.first_seen_at.clone())
-            .min(),
-        last_visited_at: share_visitors
-            .iter()
-            .map(|visitor| visitor.last_seen_at.clone())
-            .max(),
+        visitor_count: 0,
+        first_visited_at: None,
+        last_visited_at: None,
     }
 }
 
@@ -4807,40 +3138,6 @@ pub(crate) fn monitoring_share_status(record: &MonitoringShareRecord, now: u64) 
             Some(_) | None => "expired",
         }
     }
-}
-
-/// Advance the in-memory share revision even when several mutations happen
-/// within one wall-clock second. PostgreSQL uses `clock_timestamp()` for its
-/// persisted timestamp; the memory repository must provide the same CAS
-/// guarantee rather than reusing the second-resolution import timestamp.
-fn next_monitoring_share_updated_at(previous: &str) -> String {
-    let now = chrono::Utc::now();
-    let previous = chrono::DateTime::parse_from_rfc3339(previous)
-        .ok()
-        .map(|value| value.with_timezone(&chrono::Utc));
-    let next = previous.map_or(now, |previous| {
-        if now > previous {
-            now
-        } else {
-            previous + chrono::Duration::nanoseconds(1)
-        }
-    });
-    next.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
-}
-
-fn same_monitoring_share_revision(
-    stored: &MonitoringShareRecord,
-    expected: &MonitoringShareRecord,
-) -> bool {
-    stored.id == expected.id
-        && stored.name == expected.name
-        && stored.token_secret == expected.token_secret
-        && stored.selector_expression == expected.selector_expression
-        && stored.targets == expected.targets
-        && stored.visibility == expected.visibility
-        && stored.expires_at == expected.expires_at
-        && stored.revoked_at == expected.revoked_at
-        && stored.updated_at == expected.updated_at
 }
 
 fn share_operator_audit_metadata(

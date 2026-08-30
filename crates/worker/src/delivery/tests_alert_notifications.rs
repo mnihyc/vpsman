@@ -1,6 +1,404 @@
 use super::*;
 use crate::test_support::PgWorkerTestDb;
-use tokio::sync::oneshot;
+use crate::webhook_rules::{
+    process_due_webhook_deliveries, WebhookRuleWorkerConfig, WebhookRuleWorkerRun,
+};
+use vpsman_common::WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED;
+
+#[test]
+fn automatic_http_delivery_owners_claim_one_row_and_redrain_until_empty() {
+    for (source, due_owner, due_boundary, http_call, completion_call) in [
+        (
+            include_str!("alert_notifications.rs"),
+            "pub(crate) async fn process_due_alert_notifications",
+            "pub(crate) async fn drain_alert_notification_retention",
+            "deliver_notification(&delivery, config.webhook_timeout_secs).await",
+            "complete_claimed_alert_notification(",
+        ),
+        (
+            include_str!("webhook_rules.rs"),
+            "pub(crate) async fn process_due_webhook_deliveries",
+            "async fn drain_webhook_retention",
+            "deliver_webhook(&delivery, config.webhook_timeout_secs).await",
+            "complete_webhook_rule_delivery_on_pool(",
+        ),
+    ] {
+        let (_, due) = source
+            .split_once(due_owner)
+            .expect("automatic delivery owner");
+        let (due, _) = due
+            .split_once(due_boundary)
+            .expect("automatic delivery owner boundary");
+        assert!(due.contains("loop {"));
+        assert!(due.contains("process_queued_deliveries(pool, config).await?"));
+        assert!(due.contains("if claimed == 0"));
+        assert!(!due.contains("yield_now"));
+
+        let (_, attempt_page) = source
+            .split_once("async fn process_queued_deliveries")
+            .expect("automatic delivery attempt page");
+        let (attempt_page, _) = attempt_page
+            .split_once("fn delivery_lease_secs")
+            .expect("automatic delivery attempt page boundary");
+        let lease = attempt_page
+            .find("let lease_id = Uuid::new_v4();")
+            .expect("per-row durable lease");
+        let claim = attempt_page.find("LIMIT 1").expect("single-row claim");
+        let fetch = attempt_page
+            .find(".fetch_optional(pool)")
+            .expect("optional single-row claim result");
+        let http = attempt_page.find(http_call).expect("bounded HTTP attempt");
+        let completion = attempt_page
+            .find(completion_call)
+            .expect("lease-fenced completion");
+        assert!(lease < claim && claim < fetch && fetch < http && http < completion);
+        assert!(attempt_page.contains("FOR UPDATE OF delivery SKIP LOCKED"));
+        assert!(attempt_page.contains("for _ in 0..config.delivery_limit"));
+        assert!(!attempt_page.contains("fetch_all(pool)"));
+        assert!(!attempt_page.contains("yield_now"));
+    }
+}
+
+#[tokio::test]
+async fn postgres_event_owner_executes_without_retention() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    assert_eq!(
+        process_due_alert_notifications(&db.pool, AlertNotificationWorkerConfig::default())
+            .await
+            .unwrap(),
+        AlertNotificationWorkerRun::default()
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_delivery_consumer_terminalizes_ineligible_durable_work() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = format!("alert-consumer-{}", Uuid::new_v4().simple());
+    let alert_id = format!("agent_status:agent:{client_id}");
+    let channel_id = Uuid::new_v4();
+    let delivery_id = Uuid::new_v4();
+    insert_alert_send_fixture(
+        &db.pool,
+        &client_id,
+        &alert_id,
+        channel_id,
+        delivery_id,
+        Uuid::new_v4(),
+    )
+    .await;
+    sqlx::query(
+        r#"
+        UPDATE fleet_alert_notification_deliveries
+        SET status='queued', delivery_lease_id=NULL, delivery_lease_until=NULL
+        WHERE id=$1
+        "#,
+    )
+    .bind(delivery_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE alert_episodes SET lifecycle_state='resolved', resolved_at=now(), resolution_reason='condition_recovered' WHERE public_id=$1")
+        .bind(&alert_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let run = process_due_alert_notifications(&db.pool, AlertNotificationWorkerConfig::default())
+        .await
+        .unwrap();
+    assert_eq!((run.processed, run.delivered, run.failed), (1, 0, 1));
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>, i32)>(
+            "SELECT status, error, attempt_count FROM fleet_alert_notification_deliveries WHERE id=$1",
+        )
+        .bind(delivery_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
+            Some("fleet alert resolved or client suspended".to_string()),
+            0,
+        )
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_delivery_owners_terminalize_disabled_and_deleted_sources_without_http() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!(
+        "http://{}/delivery-owner-proof",
+        listener.local_addr().unwrap()
+    );
+
+    let client_id = format!("delivery-source-{}", Uuid::new_v4().simple());
+    let alert_id = format!("agent_status:agent:{client_id}");
+    let disabled_channel_id = Uuid::new_v4();
+    let disabled_alert_delivery_id = Uuid::new_v4();
+    insert_alert_send_fixture(
+        &db.pool,
+        &client_id,
+        &alert_id,
+        disabled_channel_id,
+        disabled_alert_delivery_id,
+        Uuid::new_v4(),
+    )
+    .await;
+    let deleted_channel_id = Uuid::new_v4();
+    let deleted_alert_delivery_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO fleet_alert_notification_channels (
+            id, name, scope_kind, scope_value, min_severity,
+            categories, operator_states, delivery_kind, target,
+            cooldown_secs, enabled
+        ) VALUES (
+            $1, $2, 'client', $3, 'warning', '[]'::jsonb,
+            '[]'::jsonb, 'webhook', $4, 0, TRUE
+        )
+        "#,
+    )
+    .bind(deleted_channel_id)
+    .bind(format!("deleted-alert-source-{deleted_channel_id}"))
+    .bind(&client_id)
+    .bind(&target)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    insert_claimed_alert_delivery(
+        &db.pool,
+        &alert_id,
+        deleted_channel_id,
+        deleted_alert_delivery_id,
+        Uuid::new_v4(),
+    )
+    .await;
+    sqlx::query(
+        r#"
+        UPDATE fleet_alert_notification_channels
+        SET enabled=FALSE, target=$2
+        WHERE id=$1
+        "#,
+    )
+    .bind(disabled_channel_id)
+    .bind(&target)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE fleet_alert_notification_deliveries
+        SET status='queued', target=$1,
+            delivery_lease_id=NULL, delivery_lease_until=NULL
+        WHERE id = ANY($2)
+        "#,
+    )
+    .bind(&target)
+    .bind(vec![disabled_alert_delivery_id, deleted_alert_delivery_id])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM fleet_alert_notification_channels WHERE id=$1")
+        .bind(deleted_channel_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let disabled_rule_id = Uuid::new_v4();
+    let deleted_rule_id = Uuid::new_v4();
+    for (rule_id, name) in [
+        (disabled_rule_id, "disabled-webhook-source"),
+        (deleted_rule_id, "deleted-webhook-source"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_rules (
+                id, name, enabled, expression, target, body_template, cooldown_secs
+            ) VALUES ($1, $2, TRUE, 'job.created', $3, '', 0)
+            "#,
+        )
+        .bind(rule_id)
+        .bind(format!("{name}-{rule_id}"))
+        .bind(&target)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let disabled_webhook_delivery_id = Uuid::new_v4();
+    let deleted_webhook_delivery_id = Uuid::new_v4();
+    for (delivery_id, rule_id, source) in [
+        (disabled_webhook_delivery_id, disabled_rule_id, "disabled"),
+        (deleted_webhook_delivery_id, deleted_rule_id, "deleted"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_rule_deliveries (
+                id, rule_id, rule_name, event_kind, event_id, status,
+                target, dedupe_key, payload, matched_vps, message,
+                cooldown_until_unix
+            ) VALUES (
+                $1, $2, $3, 'job.created', $4, 'queued', $5, $6,
+                '{}'::jsonb, '[]'::jsonb, 'delivery owner proof', 0
+            )
+            "#,
+        )
+        .bind(delivery_id)
+        .bind(rule_id)
+        .bind(format!("{source}-webhook-source"))
+        .bind(format!("job.created:{delivery_id}"))
+        .bind(&target)
+        .bind(format!("delivery-owner-proof:{delivery_id}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE webhook_rules SET enabled=FALSE WHERE id=$1")
+        .bind(disabled_rule_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM webhook_rules WHERE id=$1")
+        .bind(deleted_rule_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let alert_run = process_due_alert_notifications(
+        &db.pool,
+        AlertNotificationWorkerConfig::new(1, 90, 1_000, 1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (alert_run.processed, alert_run.delivered, alert_run.failed),
+        (2, 0, 2)
+    );
+    let webhook_run = process_due_webhook_deliveries(
+        &db.pool,
+        WebhookRuleWorkerConfig::new(1, 100, 90, 1_000, 1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        webhook_run,
+        WebhookRuleWorkerRun {
+            processed: 2,
+            failed: 2,
+            ..WebhookRuleWorkerRun::default()
+        }
+    );
+
+    let alert_rows = sqlx::query_as::<_, (Uuid, String, Option<String>, i32)>(
+        r#"
+        SELECT id, status, error, attempt_count
+        FROM fleet_alert_notification_deliveries
+        WHERE id = ANY($1)
+        ORDER BY id
+        "#,
+    )
+    .bind(vec![disabled_alert_delivery_id, deleted_alert_delivery_id])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(alert_rows.len(), 2, "terminal history must remain durable");
+    assert!(alert_rows.iter().all(|(_, status, error, attempts)| {
+        status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED
+            && error.as_deref() == Some("fleet alert notification channel disabled")
+            && *attempts == 0
+    }));
+    let webhook_rows = sqlx::query_as::<_, (Uuid, String, Option<String>, i32)>(
+        r#"
+        SELECT id, status, error, attempt_count
+        FROM webhook_rule_deliveries
+        WHERE id = ANY($1)
+        ORDER BY id
+        "#,
+    )
+    .bind(vec![
+        disabled_webhook_delivery_id,
+        deleted_webhook_delivery_id,
+    ])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        webhook_rows.len(),
+        2,
+        "terminal webhook history must remain durable"
+    );
+    assert!(webhook_rows.iter().all(|(_, status, error, attempts)| {
+        status == WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED
+            && error.as_deref() == Some("webhook rule disabled")
+            && *attempts == 0
+    }));
+    let listener = listener.into_std().unwrap();
+    assert!(
+        matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "disabled or deleted sources must be terminalized before any HTTP connection"
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_delivery_drain_does_not_spin_on_another_consumers_claimable_row_lock() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = format!("alert-locked-{}", Uuid::new_v4().simple());
+    let alert_id = format!("agent_status:agent:{client_id}");
+    let channel_id = Uuid::new_v4();
+    let delivery_id = Uuid::new_v4();
+    insert_alert_send_fixture(
+        &db.pool,
+        &client_id,
+        &alert_id,
+        channel_id,
+        delivery_id,
+        Uuid::new_v4(),
+    )
+    .await;
+    sqlx::query(
+        r#"
+        UPDATE fleet_alert_notification_deliveries
+        SET status='queued', delivery_lease_id=NULL, delivery_lease_until=NULL
+        WHERE id=$1
+        "#,
+    )
+    .bind(delivery_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let mut other_consumer = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fleet_alert_notification_deliveries WHERE id=$1 FOR UPDATE")
+        .bind(delivery_id)
+        .execute(&mut *other_consumer)
+        .await
+        .unwrap();
+    let run = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        process_due_alert_notifications(&db.pool, AlertNotificationWorkerConfig::default()),
+    )
+    .await
+    .expect("a worker must return when all due rows are owned elsewhere")
+    .unwrap();
+    assert_eq!(run, AlertNotificationWorkerRun::default());
+    other_consumer.rollback().await.unwrap();
+    db.cleanup().await;
+}
 
 #[test]
 fn notification_worker_config_clamps_bounds() {
@@ -40,7 +438,7 @@ fn delivery_error_keeps_nested_transport_cause() {
 }
 
 #[tokio::test]
-async fn postgres_client_alert_send_fence_linearizes_suspension() {
+async fn postgres_client_alert_send_revision_rejects_completion_after_suspension() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;
     };
@@ -59,92 +457,68 @@ async fn postgres_client_alert_send_fence_linearizes_suspension() {
     )
     .await;
 
-    let mut send_guard =
+    let send_eligibility =
         begin_alert_notification_send(&db.pool, delivery_id, channel_id, &alert_id, lease_id)
             .await
             .unwrap();
-    assert!(send_guard.deliverable);
+    let revision = send_eligibility
+        .eligibility_revision
+        .expect("eligible send must be armed with a durable revision");
 
-    let suspension_pool = db.pool.clone();
-    let suspension_client_id = client_id.clone();
-    let (attempting_tx, attempted_rx) = oneshot::channel();
-    let mut suspension = tokio::spawn(async move {
-        let mut tx = suspension_pool.begin().await.unwrap();
-        attempting_tx.send(()).unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(vpsman_server_core::client_policy_suppression_lock_key(
-                &suspension_client_id,
-            ))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query(
-            r#"
-            UPDATE clients
-            SET status='suspended', suspended_at=now(),
-                suspended_reason='test', suspended_from_status='offline'
-            WHERE id=$1
-            "#,
-        )
-        .bind(&suspension_client_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"
-            UPDATE fleet_alert_notification_deliveries delivery
-            SET status='canceled_disabled', error='client_suspended',
-                delivery_lease_id=NULL, delivery_lease_until=NULL
-            FROM alert_episodes episode
-            WHERE episode.public_id=delivery.alert_id
-              AND episode.client_id=$1
-              AND delivery.status IN ('queued','failed','in_progress')
-            "#,
-        )
-        .bind(&suspension_client_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-    });
-    attempted_rx.await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut suspension)
-            .await
-            .is_err(),
-        "suspension must wait while a pre-suspension external send owns the shared fence"
-    );
-
+    let mut suspension = db.pool.begin().await.unwrap();
     sqlx::query(
         r#"
-        UPDATE fleet_alert_notification_deliveries
-        SET status='delivered', attempt_count=attempt_count+1,
-            last_attempt_at=now(), delivered_at=now(),
-            delivery_lease_id=NULL, delivery_lease_until=NULL
-        WHERE id=$1 AND status='in_progress' AND delivery_lease_id=$2
+        UPDATE clients
+        SET status='suspended', suspended_at=now(),
+            suspended_reason='test', suspended_from_status='offline'
+        WHERE id=$1
         "#,
     )
-    .bind(delivery_id)
-    .bind(lease_id)
-    .execute(
-        send_guard
-            .postgres_connection()
-            .expect("client-scoped alert send guard must own its fenced connection"),
-    )
+    .bind(&client_id)
+    .execute(&mut *suspension)
     .await
     .unwrap();
-    send_guard.release().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), suspension)
+    sqlx::query(
+        r#"
+        UPDATE fleet_alert_notification_deliveries delivery
+        SET status='canceled_disabled', error='client_suspended',
+            delivery_lease_id=NULL, delivery_lease_until=NULL
+        FROM alert_episodes episode
+        WHERE episode.public_id=delivery.alert_id
+          AND episode.client_id=$1
+          AND delivery.status IN ('queued','failed','in_progress')
+        "#,
+    )
+    .bind(&client_id)
+    .execute(&mut *suspension)
+    .await
+    .unwrap();
+    suspension.commit().await.unwrap();
+    assert!(
+        complete_claimed_alert_notification(
+            &db.pool,
+            delivery_id,
+            lease_id,
+            Some(revision),
+            FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+            None,
+            None,
+        )
         .await
-        .expect("suspension did not resume after send outcome commit")
-        .unwrap();
+        .unwrap()
+        .is_none(),
+        "the pre-suspension result must not overwrite durable cancellation"
+    );
     let status: String =
         sqlx::query_scalar("SELECT status FROM fleet_alert_notification_deliveries WHERE id=$1")
             .bind(delivery_id)
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert_eq!(status, FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED);
+    assert_eq!(
+        status,
+        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED
+    );
 
     let blocked_delivery_id = Uuid::new_v4();
     let blocked_lease_id = Uuid::new_v4();
@@ -166,10 +540,9 @@ async fn postgres_client_alert_send_fence_linearizes_suspension() {
     .await
     .unwrap();
     assert!(
-        !blocked_guard.deliverable,
-        "a send whose fence starts after suspension commits must be rejected"
+        blocked_guard.eligibility_revision.is_none(),
+        "a send armed after suspension commits must be rejected"
     );
-    blocked_guard.release().await.unwrap();
 
     db.cleanup().await;
 }
@@ -205,37 +578,9 @@ async fn postgres_alert_send_fails_closed_when_its_episode_is_missing() {
             .unwrap();
     assert!(guard.channel_enabled);
     assert!(
-        !guard.deliverable,
+        guard.eligibility_revision.is_none(),
         "a missing immutable episode must never authorize an outbound alert"
     );
-    guard.release().await.unwrap();
-    db.cleanup().await;
-}
-
-#[tokio::test]
-async fn postgres_dropped_client_alert_send_fence_discards_locked_session() {
-    let Some(db) = PgWorkerTestDb::maybe_new().await else {
-        return;
-    };
-    let client_id = format!("alert-fence-drop-{}", Uuid::new_v4().simple());
-    let guard = ClientPolicySuppressionSharedGuard::acquire(&db.pool, &client_id)
-        .await
-        .unwrap();
-    drop(guard);
-
-    let mut tx = db.pool.begin().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(vpsman_server_core::client_policy_suppression_lock_key(
-                &client_id,
-            ))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-    })
-    .await
-    .expect("dropping a guarded send must close the locked PostgreSQL session");
-    tx.rollback().await.unwrap();
     db.cleanup().await;
 }
 

@@ -16,7 +16,7 @@ fn history_retention_prune_preview_hash_ignores_moving_cutoff() {
             built_in_default: false,
         },
         prune_plan: HistoryRetentionPrunePlan {
-            domain: HistoryDomain::JobOutputs,
+            domain: HistoryRetentionDomain::JobOutputs,
             prune_limit: 1000,
             enabled: true,
         },

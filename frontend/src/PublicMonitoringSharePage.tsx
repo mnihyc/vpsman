@@ -24,7 +24,7 @@ import {
   type MonitorCardDensity,
 } from "./monitorCardDensity";
 import { countryTagValue } from "./tagDisplay";
-import { providerProductLabel } from "./vpsRules";
+import { formatMonthlyTrafficResetUtc, providerProductLabel } from "./vpsRules";
 import {
   MiniSparkline,
   MonitorFact,
@@ -83,6 +83,8 @@ type CustomBounds = {
 };
 
 const publicMonitorSortOptions = monitorSortOptions;
+const PUBLIC_PING_MISSED_CHECK_WINDOW_MS = 3 * 60_000;
+const TELEMETRY_PROJECTION_WARNING_MS = 10_000;
 
 // React StrictMode remounts effects in development. Sharing only an in-flight
 // bootstrap avoids recording that remount as a second visitor. The secret is
@@ -375,7 +377,8 @@ export function PublicMonitoringSharePage({
       client_key: selectedClientKey,
       limit: "1",
       offset: "0",
-      points: "360",
+      // Public and private detail views share the bounded dense profile.
+      points: "480",
       window,
     });
     if (window === "custom") {
@@ -964,13 +967,22 @@ function PublicMonitoringCardView({
     card.network_history ?? [],
     (point) => point.tx_bps,
   );
+  const projectionProblem = publicProjectionProblem(card);
   const resourceProblem = visibility?.resources
-    ? publicFreshnessProblem(card.resources?.observed_at, "Resource telemetry")
+    ? publicFreshnessProblem(
+        card.resources?.observed_at,
+        "Resource telemetry",
+        card.status,
+      )
     : null;
   const networkProblem = visibility?.network
     ? card.network?.rate_expected === false
       ? null
-      : publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
+      : publicFreshnessProblem(
+          card.network?.observed_at,
+          "Network telemetry",
+          card.status,
+        )
     : null;
   const warnings = publicCardWarnings(card, visibility);
   const country = visibility?.identity_context
@@ -984,11 +996,14 @@ function PublicMonitoringCardView({
     : "";
   const cardTitle = `${card.display_name || "Unnamed VPS"} · ${visibleStatusLabel}`;
   const freshness = publicCardFreshness(card, visibility);
-  const freshnessLabel = freshness
+  const observedFreshnessLabel = freshness
     ? `Updated ${formatCompactTime(freshness)}`
     : publicCardHasVisibleTelemetry(visibility)
       ? "Visible telemetry unavailable"
       : "Status only";
+  const freshnessLabel = projectionProblem
+    ? `${projectionProblem} · ${observedFreshnessLabel}`
+    : observedFreshnessLabel;
   const auxiliaryFacts = publicMonitoringAuxiliaryFacts(card, visibility);
   const cardHeader = (
     <>
@@ -1049,7 +1064,7 @@ function PublicMonitoringCardView({
       {visibility?.resources ? (
         <div
           aria-label={`Current resources for ${card.display_name}`}
-          className={`vpsMonitorMetrics publicMonitoringMetricMatrix${resourceProblem ? " stale" : ""}`}
+          className={`vpsMonitorMetrics publicMonitoringMetricMatrix${resourceProblem || projectionProblem ? " stale" : ""}`}
         >
           <PublicMetric
             caption={
@@ -1066,7 +1081,7 @@ function PublicMonitoringCardView({
             }
             percent={cpuPercent}
             showCaption={false}
-            stale={Boolean(resourceProblem)}
+            stale={Boolean(resourceProblem || projectionProblem)}
             title="CPU time used during the latest shared reporting interval; - means no usable CPU sample was shared"
             value={formatOptionalPercent(cpuPercent)}
           />
@@ -1077,7 +1092,7 @@ function PublicMonitoringCardView({
             context={maximumCapacity(resource?.memory_total_bytes)}
             percent={memoryUsed}
             showCaption={false}
-            stale={Boolean(resourceProblem)}
+            stale={Boolean(resourceProblem || projectionProblem)}
             title="Used memory as a percentage of the maximum reported RAM capacity; - means memory evidence was not shared"
             value={formatOptionalPercent(memoryUsed)}
           />
@@ -1088,7 +1103,7 @@ function PublicMonitoringCardView({
             context={maximumCapacity(diskTotal)}
             percent={diskUsed}
             showCaption={false}
-            stale={Boolean(resourceProblem)}
+            stale={Boolean(resourceProblem || projectionProblem)}
             title="Used space across reported block-device filesystems as a percentage of their maximum aggregate capacity; - means disk evidence was not shared"
             value={formatOptionalPercent(diskUsed)}
           />
@@ -1111,7 +1126,7 @@ function PublicMonitoringCardView({
                 />
               ) : undefined
             }
-            stale={Boolean(resourceProblem)}
+            stale={Boolean(resourceProblem || projectionProblem)}
             title="Linux load average divided by reported CPU cores; - means load evidence was not shared"
             value={
               resource
@@ -1129,7 +1144,7 @@ function PublicMonitoringCardView({
       {visibility?.network ? (
         <div
           aria-label={`Current network rate for ${card.display_name}`}
-          className={`vpsMonitorFlowFacts publicMonitoringNetwork ${density}${networkProblem ? " stale" : ""}`}
+          className={`vpsMonitorFlowFacts publicMonitoringNetwork ${density}${networkProblem || projectionProblem ? " stale" : ""}`}
         >
           <PublicFact
             icon={<Network size={13} />}
@@ -1137,8 +1152,12 @@ function PublicMonitoringCardView({
             sparkline={
               <MiniSparkline label="RX activity" tone="rx" values={rxHistory} />
             }
-            stale={Boolean(networkProblem)}
-            title={publicNetworkRateTitle("received", card.network)}
+            stale={Boolean(networkProblem || projectionProblem)}
+            title={publicNetworkRateTitle(
+              "received",
+              card.network,
+              card.status,
+            )}
             value={formatOptionalRate(card.network?.rx_bps)}
           />
           <PublicFact
@@ -1147,8 +1166,8 @@ function PublicMonitoringCardView({
             sparkline={
               <MiniSparkline label="TX activity" tone="tx" values={txHistory} />
             }
-            stale={Boolean(networkProblem)}
-            title={publicNetworkRateTitle("sent", card.network)}
+            stale={Boolean(networkProblem || projectionProblem)}
+            title={publicNetworkRateTitle("sent", card.network, card.status)}
             value={formatOptionalRate(card.network?.tx_bps)}
           />
           {density === "comfortable" ? (
@@ -1322,7 +1341,12 @@ function PublicTrafficRow({
   const resetContext = traffic.configured
     ? traffic.reset_day === -1
       ? null
-      : formatTrafficReset(traffic.cycle_end)
+      : [
+          formatTrafficReset(traffic.cycle_end),
+          formatMonthlyTrafficResetUtc(traffic.reset_day, traffic.reset_hour),
+        ]
+          .filter(Boolean)
+          .join(" · ")
     : null;
   const trafficEvidenceInHeading = resetContext === null && !portSpeed;
   const trafficEvidenceOnDiagnosticRow =
@@ -2513,14 +2537,14 @@ function PublicMonitoringInformationGroups({
   if (visibility?.network && card.network && card.network.rx_bps !== null) {
     network.push({
       label: "RX",
-      title: publicNetworkRateTitle("received", card.network),
+      title: publicNetworkRateTitle("received", card.network, card.status),
       value: formatOptionalRate(card.network.rx_bps),
     });
   }
   if (visibility?.network && card.network && card.network.tx_bps !== null) {
     network.push({
       label: "TX",
-      title: publicNetworkRateTitle("sent", card.network),
+      title: publicNetworkRateTitle("sent", card.network, card.status),
       value: formatOptionalRate(card.network.tx_bps),
     });
   }
@@ -2964,8 +2988,12 @@ function summarizePublicFleet(
     if (
       network &&
       statusGroup(card.status) === "online" &&
-      publicFreshnessProblem(card.network?.observed_at, "Network telemetry") ===
-        null
+      publicFreshnessProblem(
+        card.network?.observed_at,
+        "Network telemetry",
+        card.status,
+      ) === null &&
+      publicProjectionProblem(card) === null
     ) {
       network.rxBps += finiteNumber(card.network?.rx_bps) ?? 0;
       network.txBps += finiteNumber(card.network?.tx_bps) ?? 0;
@@ -3261,11 +3289,15 @@ function statusGroup(status: string): Exclude<CardStatusFilter, "all"> {
 function publicFreshnessProblem(
   observedAt: string | null | undefined,
   label: string,
+  reportedStatus: string,
 ): string | null {
   if (!observedAt) return `${label} unavailable`;
   const timestamp = timestampMillis(observedAt);
   if (!Number.isFinite(timestamp)) return `${label} timestamp invalid`;
-  return Date.now() - timestamp > 3 * 60_000 ? `${label} stale` : null;
+  // Agent status is the server-owned current-state boundary. A browser wall
+  // clock and a fixed three-minute age cannot classify telemetry whose
+  // configured cadence may be as long as one hour.
+  return statusGroup(reportedStatus) === "online" ? null : `${label} stale`;
 }
 
 function publicCardHasVisibleTelemetry(
@@ -3289,8 +3321,15 @@ function publicCardFreshness(
     visibility?.traffic ? card.traffic?.observed_at : null,
     visibility?.ping ? card.primary_ping?.checked_at : null,
   ].filter((value): value is string => Boolean(value));
+  return latestPublicTimestamp(candidates);
+}
+
+function latestPublicTimestamp(
+  candidates: Array<string | null | undefined>,
+): string | null {
   let latest: { timestamp: number; value: string } | null = null;
   for (const value of candidates) {
+    if (!value) continue;
     const timestamp = timestampMillis(value);
     if (
       Number.isFinite(timestamp) &&
@@ -3323,7 +3362,38 @@ function publicPingProblem(ping: PublicPingMetric | undefined): string | null {
   ) {
     return `Primary Ping ${publicPingStatusLabel(status).toLocaleLowerCase()}`;
   }
-  return publicFreshnessProblem(ping.checked_at, "Primary Ping");
+  if (!ping.checked_at) return "Primary Ping unavailable";
+  const checkedAt = timestampMillis(ping.checked_at);
+  if (!Number.isFinite(checkedAt)) return "Primary Ping timestamp invalid";
+  return Date.now() - checkedAt > PUBLIC_PING_MISSED_CHECK_WINDOW_MS
+    ? "Primary Ping stale"
+    : null;
+}
+
+function publicProjectionProblem(card: PublicMonitoringCard): string | null {
+  if (statusGroup(card.status) !== "online" || !card.projection_pending_since) {
+    return null;
+  }
+  const pendingSince = timestampMillis(card.projection_pending_since);
+  const checkedAt = timestampMillis(card.projection_checked_at ?? "");
+  if (!Number.isFinite(pendingSince) || !Number.isFinite(checkedAt)) {
+    return null;
+  }
+  return checkedAt - pendingSince > TELEMETRY_PROJECTION_WARNING_MS
+    ? "Telemetry delayed"
+    : null;
+}
+
+function publicVisibilityUsesProjectedTelemetry(
+  visibility: PublicMonitoringShareView["visibility"] | undefined,
+): boolean {
+  return Boolean(
+    visibility?.system_information ||
+      visibility?.resources ||
+      visibility?.network ||
+      visibility?.traffic ||
+      visibility?.ping,
+  );
 }
 
 function publicPingEffectiveStatus(ping: PublicPingMetric): string {
@@ -3342,15 +3412,23 @@ function publicCardWarnings(
       ? publicFreshnessProblem(
           card.resources?.observed_at,
           "Resource telemetry",
+          card.status,
         )
       : null,
     visibility?.network
       ? card.network?.rate_expected === false
         ? null
-        : publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
+        : publicFreshnessProblem(
+            card.network?.observed_at,
+            "Network telemetry",
+            card.status,
+          )
       : null,
     visibility?.traffic ? publicTrafficProblem(card.traffic) : null,
     visibility?.ping ? publicPingProblem(card.primary_ping) : null,
+    publicVisibilityUsesProjectedTelemetry(visibility)
+      ? publicProjectionProblem(card)
+      : null,
   ].filter((warning): warning is string => Boolean(warning));
 }
 
@@ -3519,14 +3597,20 @@ function formatPublicSocketCount(value: number | null | undefined) {
 function publicConnectionTitle(
   protocol: "TCP" | "UDP",
   observedAt: string | null | undefined,
+  reportedStatus: string,
 ) {
-  const freshness = publicFreshnessProblem(observedAt, "Connection telemetry");
+  const freshness = publicFreshnessProblem(
+    observedAt,
+    "Connection telemetry",
+    reportedStatus,
+  );
   return `${protocol} entries in the agent's Linux network-namespace socket tables; TCP includes every state and listeners. ${freshness ?? "Current telemetry"}.`;
 }
 
 function publicNetworkRateTitle(
   direction: "received" | "sent",
   network: PublicNetworkMetric | undefined,
+  reportedStatus: string,
 ): string {
   if (network?.rate_expected === false) {
     return `Network ${direction} rate is intentionally not selected; - is shown`;
@@ -3541,6 +3625,7 @@ function publicNetworkRateTitle(
   const freshness = publicFreshnessProblem(
     network.observed_at,
     `Network ${direction} rate`,
+    reportedStatus,
   );
   return `Interval-average network ${direction} rate${freshness ? `; ${freshness.toLocaleLowerCase()}` : "; current shared telemetry"}`;
 }
@@ -3589,7 +3674,11 @@ function publicMonitoringAuxiliaryFacts(
       kind: "connection",
       label: "TCP",
       title: resource
-        ? publicConnectionTitle("TCP", resource.connections_observed_at)
+        ? publicConnectionTitle(
+            "TCP",
+            resource.connections_observed_at,
+            card.status,
+          )
         : "TCP connection telemetry is unavailable",
       value: formatPublicSocketCount(resource?.tcp_sockets),
     });
@@ -3597,7 +3686,11 @@ function publicMonitoringAuxiliaryFacts(
       kind: "connection",
       label: "UDP",
       title: resource
-        ? publicConnectionTitle("UDP", resource.connections_observed_at)
+        ? publicConnectionTitle(
+            "UDP",
+            resource.connections_observed_at,
+            card.status,
+          )
         : "UDP connection telemetry is unavailable",
       value: formatPublicSocketCount(resource?.udp_sockets),
     });

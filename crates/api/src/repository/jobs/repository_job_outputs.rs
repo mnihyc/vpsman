@@ -1,36 +1,40 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
-use sqlx::{postgres::PgRow, Row};
-use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+use sqlx::{
+    postgres::{PgListener, PgRow},
+    PgPool, Postgres, Row, Transaction,
 };
+use std::{collections::BTreeSet, time::Duration};
+use tokio::sync::oneshot;
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 use vpsman_server_core::{
-    aggregate_job_status_from_statuses, target_status_is_active, INLINE_OUTPUT_PREVIEW_BYTES,
-    STATUS_OUTPUT_MAX_BYTES,
+    target_status_is_active, INLINE_OUTPUT_PREVIEW_BYTES, STATUS_OUTPUT_MAX_BYTES,
 };
 
 use crate::model::{
-    AuditLogView, JobOutputListItemView, JobOutputView, NewServerArtifact,
-    ProcessSupervisorInventoryView,
+    JobOutputListItemView, JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView,
 };
 use crate::object_store::BackupObjectStore;
-use crate::repository::{MemoryState, Repository};
+use crate::repository::Repository;
 use crate::repository_jobs::{
     enqueue_target_terminal_event_in_tx, finish_jobs_in_tx_and_reconcile_event_sources,
     insert_agent_update_lifecycle_for_stored_job_in_tx,
 };
-use crate::{output_stream_name, unix_now, TargetDispatchOutcome};
+use crate::{output_stream_name, TargetDispatchOutcome};
 
 const JOB_OUTPUT_ARTIFACT_PREFIX: &str = "job-outputs";
 const PROCESS_SUPERVISOR_INVENTORY_PAGE_SIZE: i64 = 500;
 const PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT: usize = 10_000;
 pub(crate) const PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR: &str =
     "process_supervisor_inventory_scan_limit_exceeded";
+const JOB_OUTPUT_PROJECTION_CHANNEL: &str = "vpsman_job_output_projection";
+const JOB_OUTPUT_PROJECTION_LEASE_SECS: i32 = 30;
+const JOB_OUTPUT_PROJECTION_RENEW_SECS: u64 = 10;
+const JOB_OUTPUT_PROJECTION_RECOVERY_POLL_SECS: u64 = 5;
+const JOB_OUTPUT_PROJECTION_ERROR_RETRY_SECS: i32 = 5;
 
 #[derive(Clone, Copy)]
 pub(crate) struct JobOutputPersistConfig<'a> {
@@ -47,7 +51,6 @@ pub(crate) enum JobOutputWriteResult {
 
 pub(crate) struct FinalJobOutputRecordResult {
     pub(crate) write_result: JobOutputWriteResult,
-    pub(crate) target_terminalized: bool,
     pub(crate) terminal_reconciliation_ready: bool,
 }
 
@@ -65,10 +68,152 @@ pub(crate) struct PendingFinalJobOutput {
     pub(crate) received_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PendingNetworkTrafficImportFinalization {
+#[derive(Clone)]
+pub(crate) struct ClaimedNetworkTrafficImportFinalization {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
+    pub(crate) final_seq: i32,
+    pub(crate) target_active: bool,
+    lease_id: Uuid,
+    pool: PgPool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ClaimedJobOutputProjectionWork {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) seq: i32,
+    lease_id: Uuid,
+    pool: PgPool,
+}
+
+impl ClaimedJobOutputProjectionWork {
+    async fn renew(&self) -> Result<bool> {
+        let updated = sqlx::query(
+            r#"
+            UPDATE job_output_projection_work
+            SET lease_until = now() + ($5::int * interval '1 second'),
+                updated_at = now()
+            WHERE job_id = $1 AND client_id = $2 AND seq = $3
+              AND lease_id = $4
+              AND lease_until > now()
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(&self.client_id)
+        .bind(self.seq)
+        .bind(self.lease_id)
+        .bind(JOB_OUTPUT_PROJECTION_LEASE_SECS)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    async fn acknowledge(self) -> Result<bool> {
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM job_output_projection_work
+            WHERE job_id = $1 AND client_id = $2 AND seq = $3
+              AND lease_id = $4
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(&self.client_id)
+        .bind(self.seq)
+        .bind(self.lease_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(deleted.rows_affected() == 1)
+    }
+
+    async fn defer(self, error: &str) -> Result<bool> {
+        let updated = sqlx::query(
+            r#"
+            UPDATE job_output_projection_work
+            SET next_attempt_at = now() + ($5::int * interval '1 second'),
+                last_error = left($4, 1000),
+                lease_id = NULL,
+                lease_until = NULL,
+                updated_at = now()
+            WHERE job_id = $1 AND client_id = $2 AND seq = $3
+              AND lease_id = $6
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(&self.client_id)
+        .bind(self.seq)
+        .bind(error)
+        .bind(JOB_OUTPUT_PROJECTION_ERROR_RETRY_SECS)
+        .bind(self.lease_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+}
+
+impl ClaimedNetworkTrafficImportFinalization {
+    pub(crate) async fn renew(&self, lease_secs: u64) -> Result<bool> {
+        let lease_secs = lease_secs.clamp(1, 3_600);
+        let updated = sqlx::query(
+            r#"
+            UPDATE network_traffic_import_finalizations
+            SET lease_until = now() + make_interval(secs => $5::integer),
+                updated_at = now()
+            WHERE job_id = $1 AND client_id = $2 AND final_seq = $3
+              AND lease_id = $4
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(&self.client_id)
+        .bind(self.final_seq)
+        .bind(self.lease_id)
+        .bind(i32::try_from(lease_secs).unwrap_or(3_600))
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    pub(crate) async fn acknowledge(self) -> Result<bool> {
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM network_traffic_import_finalizations
+            WHERE job_id = $1 AND client_id = $2 AND final_seq = $3
+              AND lease_id = $4
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(&self.client_id)
+        .bind(self.final_seq)
+        .bind(self.lease_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(deleted.rows_affected() == 1)
+    }
+
+    pub(crate) async fn defer(self, message: &str, retry_after_secs: u64) -> Result<bool> {
+        let retry_after_secs = retry_after_secs.clamp(1, 3_600);
+        let updated = sqlx::query(
+            r#"
+            UPDATE network_traffic_import_finalizations
+            SET next_attempt_at = now() + make_interval(secs => $4::integer),
+                last_error = left($5, 1000),
+                lease_id = NULL,
+                lease_until = NULL,
+                updated_at = now()
+            WHERE job_id = $1 AND client_id = $2 AND final_seq = $3
+              AND lease_id = $6
+            "#,
+        )
+        .bind(self.job_id)
+        .bind(&self.client_id)
+        .bind(self.final_seq)
+        .bind(i32::try_from(retry_after_secs).unwrap_or(3_600))
+        .bind(message)
+        .bind(self.lease_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -94,189 +239,251 @@ pub(crate) struct JobOutputCursor {
     pub(crate) seq: i32,
 }
 
-impl Repository {
-    pub(crate) async fn list_pending_network_traffic_import_finalizations(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<PendingNetworkTrafficImportFinalization>> {
-        let limit = limit.clamp(1, 128) as usize;
-        match self {
-            Self::Memory(memory) => {
-                let operations = memory.job_operations.read().await;
-                let targets = memory.job_targets.read().await;
-                let outputs = memory.job_outputs.read().await;
-                let mut retry_not_before =
-                    memory.network_traffic_import_retry_not_before.write().await;
-                retry_not_before.retain(|(job_id, client_id), _| {
-                    targets.iter().any(|target| {
-                        target.job_id == *job_id
-                            && target.client_id == *client_id
-                            && target.completed_at.is_none()
-                            && target_status_is_active(&target.status)
-                    })
-                });
-                let now = unix_now();
-                let mut pending = targets
-                    .iter()
-                    .filter(|target| {
-                        target.completed_at.is_none()
-                            && target_status_is_active(&target.status)
-                            && matches!(
-                                operations.get(&target.job_id),
-                                Some(vpsman_common::JobCommand::NetworkTrafficImportVnstat { .. })
-                            )
-                            && retry_not_before
-                                .get(&(target.job_id, target.client_id.clone()))
-                                .is_none_or(|not_before| *not_before <= now)
-                            && outputs.iter().any(|output| {
-                                output.job_id == target.job_id
-                                    && output.client_id == target.client_id
-                                    && output.done
-                                    && job_output_sequence_contiguous_in_views(
-                                        &outputs,
-                                        output.job_id,
-                                        &output.client_id,
-                                        output.seq,
-                                    )
-                            })
-                    })
-                    .map(|target| PendingNetworkTrafficImportFinalization {
-                        job_id: target.job_id,
-                        client_id: target.client_id.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                pending.sort_by(|left, right| {
-                    retry_not_before
-                        .get(&(left.job_id, left.client_id.clone()))
-                        .cmp(&retry_not_before.get(&(right.job_id, right.client_id.clone())))
-                        .then_with(|| left.job_id.cmp(&right.job_id))
-                        .then_with(|| left.client_id.cmp(&right.client_id))
-                });
-                pending.truncate(limit);
-                Ok(pending)
+/// Starts the sole API-owned durable output projector. PostgreSQL NOTIFY is
+/// only a wake hint; the indexed work table is drained before every wait and
+/// after listener recovery.
+pub(crate) fn spawn_job_output_projection_consumer(
+    repo: Repository,
+) -> tokio::task::JoinHandle<()> {
+    let pool = match &repo {
+        Repository::Postgres(pool) => pool.clone(),
+    };
+    tokio::spawn(async move {
+        loop {
+            let mut listener = match PgListener::connect_with(&pool).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    warn!(%error, "job-output projection listener connection failed");
+                    tokio::time::sleep(Duration::from_secs(
+                        JOB_OUTPUT_PROJECTION_RECOVERY_POLL_SECS,
+                    ))
+                    .await;
+                    continue;
+                }
+            };
+            if let Err(error) = listener.listen(JOB_OUTPUT_PROJECTION_CHANNEL).await {
+                warn!(%error, "job-output projection listener registration failed");
+                tokio::time::sleep(Duration::from_secs(
+                    JOB_OUTPUT_PROJECTION_RECOVERY_POLL_SECS,
+                ))
+                .await;
+                continue;
             }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT target.job_id, target.client_id
-                    FROM job_targets target
-                    JOIN jobs job ON job.id = target.job_id
-                    WHERE target.completed_at IS NULL
-                      AND target.status IN ('dispatching', 'running')
-                      AND job.command_type = 'network_traffic_import_vnstat'
-                      AND (
-                        target.dispatch_lease_until IS NULL
-                        OR target.dispatch_lease_until <= now()
-                      )
-                      AND EXISTS (
-                        SELECT 1
-                        FROM job_outputs final_output
-                        WHERE final_output.job_id = target.job_id
-                          AND final_output.client_id = target.client_id
-                          AND final_output.done = TRUE
-                          AND final_output.seq >= 0
-                          AND (
-                            SELECT COUNT(DISTINCT chunk.seq)
-                            FROM job_outputs chunk
-                            WHERE chunk.job_id = final_output.job_id
-                              AND chunk.client_id = final_output.client_id
-                              AND chunk.seq BETWEEN 0 AND final_output.seq
-                          ) = final_output.seq::bigint + 1
-                      )
-                    ORDER BY
-                        target.dispatch_lease_until ASC NULLS FIRST,
-                        target.job_id,
-                        target.client_id
-                    LIMIT $1
-                    "#,
+            loop {
+                match process_next_job_output_projection(&repo).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => warn!(%error, "durable job-output projection drain failed"),
+                }
+                match tokio::time::timeout(
+                    Duration::from_secs(JOB_OUTPUT_PROJECTION_RECOVERY_POLL_SECS),
+                    listener.recv(),
                 )
-                .bind(i64::try_from(limit).unwrap_or(128))
-                .fetch_all(pool)
-                .await?;
-                Ok(rows
-                    .into_iter()
-                    .map(|row| {
-                        Ok(PendingNetworkTrafficImportFinalization {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?)
+                .await
+                {
+                    Ok(Ok(_)) | Err(_) => {}
+                    Ok(Err(error)) => {
+                        warn!(%error, "job-output projection listener disconnected");
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn process_next_job_output_projection(repo: &Repository) -> Result<bool> {
+    let Some(owner) = repo.claim_job_output_projection_work().await? else {
+        return Ok(false);
+    };
+    let heartbeat_owner = owner.clone();
+    let (heartbeat_stop, heartbeat_stop_rx) = oneshot::channel();
+    let heartbeat = tokio::spawn(renew_job_output_projection_owner_until_stopped(
+        heartbeat_owner,
+        heartbeat_stop_rx,
+    ));
+    let projection = repo
+        .project_persisted_job_output_identity(owner.job_id, &owner.client_id, owner.seq)
+        .await;
+    let _ = heartbeat_stop.send(());
+    let ownership_current = heartbeat
+        .await
+        .context("job-output projection heartbeat task failed")??;
+    if !ownership_current {
+        warn!(
+            job_id = %owner.job_id,
+            client_id = owner.client_id,
+            seq = owner.seq,
+            "job-output projection ownership changed before completion"
+        );
+        return Ok(true);
+    }
+    match projection {
+        Ok(()) => {
+            if !owner.acknowledge().await? {
+                warn!("job-output projection changed owner before acknowledgement");
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if !owner.defer(&message).await? {
+                warn!(%error, "job-output projection changed owner before deferral");
+            } else {
+                warn!(%error, "job-output projection deferred after exact projection failure");
             }
         }
     }
+    Ok(true)
+}
 
-    pub(crate) async fn defer_network_traffic_import_finalization(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        message: &str,
-        retry_after_secs: u64,
-    ) -> Result<()> {
-        let retry_after_secs = retry_after_secs.clamp(1, 3_600);
-        match self {
-            Self::Memory(memory) => {
-                let target_updated = {
-                    let mut targets = memory.job_targets.write().await;
-                    if let Some(target) = targets.iter_mut().find(|target| {
-                        target.job_id == job_id
-                            && target.client_id == client_id
-                            && target.completed_at.is_none()
-                            && target_status_is_active(&target.status)
-                    }) {
-                        target.status = vpsman_server_core::TARGET_STATUS_RUNNING.to_string();
-                        target.message = Some(message.to_string());
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if target_updated {
-                    memory
-                        .network_traffic_import_retry_not_before
-                        .write()
-                        .await
-                        .insert(
-                            (job_id, client_id.to_string()),
-                            unix_now().saturating_add(retry_after_secs),
-                        );
+// Full-workflow tests drive the same durable owner as production, but without
+// starting a listener task whose scheduling would make assertions racy.
+#[cfg(test)]
+pub(crate) async fn drain_job_output_projections_for_test(repo: &Repository) -> Result<usize> {
+    let mut projected = 0_usize;
+    while process_next_job_output_projection(repo).await? {
+        projected = projected.saturating_add(1);
+    }
+    Ok(projected)
+}
+
+async fn renew_job_output_projection_owner_until_stopped(
+    owner: ClaimedJobOutputProjectionWork,
+    mut stop: oneshot::Receiver<()>,
+) -> Result<bool> {
+    loop {
+        tokio::select! {
+            _ = &mut stop => return Ok(true),
+            _ = tokio::time::sleep(Duration::from_secs(
+                JOB_OUTPUT_PROJECTION_RENEW_SECS,
+            )) => {
+                if !owner.renew().await? {
+                    return Ok(false);
                 }
             }
+        }
+    }
+}
+
+impl Repository {
+    pub(crate) async fn claim_job_output_projection_work(
+        &self,
+    ) -> Result<Option<ClaimedJobOutputProjectionWork>> {
+        let Self::Postgres(pool) = self;
+        let lease_id = Uuid::new_v4();
+        let row = sqlx::query(
+            r#"
+            WITH candidate AS MATERIALIZED (
+                SELECT job_id, client_id, seq
+                FROM job_output_projection_work
+                WHERE next_attempt_at <= now()
+                  AND (lease_id IS NULL OR lease_until <= now())
+                ORDER BY next_attempt_at, created_at, job_id, client_id, seq
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE job_output_projection_work work
+            SET attempt_count = work.attempt_count + 1,
+                lease_id = $1,
+                lease_until = now() + ($2::int * interval '1 second'),
+                last_error = NULL,
+                updated_at = now()
+            FROM candidate
+            WHERE work.job_id = candidate.job_id
+              AND work.client_id = candidate.client_id
+              AND work.seq = candidate.seq
+            RETURNING work.job_id, work.client_id, work.seq
+            "#,
+        )
+        .bind(lease_id)
+        .bind(JOB_OUTPUT_PROJECTION_LEASE_SECS)
+        .fetch_optional(pool)
+        .await?;
+        row.map(|row| {
+            Ok(ClaimedJobOutputProjectionWork {
+                job_id: row.try_get("job_id")?,
+                client_id: row.try_get("client_id")?,
+                seq: row.try_get("seq")?,
+                lease_id,
+                pool: pool.clone(),
+            })
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn claim_network_traffic_import_finalization(
+        &self,
+        lease_secs: u64,
+    ) -> Result<Option<ClaimedNetworkTrafficImportFinalization>> {
+        let lease_secs = lease_secs.clamp(1, 3_600);
+        match self {
             Self::Postgres(pool) => {
-                sqlx::query(
+                let lease_id = Uuid::new_v4();
+                let row = sqlx::query(
                     r#"
-                    UPDATE job_targets
-                    SET status = 'running',
-                        message = $3,
-                        dispatch_lease_until = now() + make_interval(secs => $4::integer),
-                        last_dispatch_error = $3
-                    WHERE job_id = $1
-                      AND client_id = $2
-                      AND completed_at IS NULL
-                      AND status IN ('dispatching', 'running')
-                    "#,
+                        WITH candidate AS MATERIALIZED (
+                            SELECT
+                                finalization.job_id,
+                                finalization.client_id,
+                                finalization.final_seq,
+                                (
+                                    target.completed_at IS NULL
+                                    AND target.status IN ('dispatching', 'running')
+                                ) AS target_active
+                            FROM network_traffic_import_finalizations finalization
+                            JOIN job_targets target
+                              ON target.job_id = finalization.job_id
+                             AND target.client_id = finalization.client_id
+                            WHERE finalization.next_attempt_at <= now()
+                              AND (
+                                  finalization.lease_id IS NULL
+                                  OR finalization.lease_until <= now()
+                              )
+                            ORDER BY
+                                finalization.next_attempt_at,
+                                finalization.created_at,
+                                finalization.job_id,
+                                finalization.client_id
+                            LIMIT 1
+                            FOR UPDATE OF finalization SKIP LOCKED
+                        )
+                        UPDATE network_traffic_import_finalizations finalization
+                        SET attempt_count = finalization.attempt_count + 1,
+                            lease_id = $1,
+                            lease_until = now() + make_interval(secs => $2::integer),
+                            last_error = NULL,
+                            updated_at = now()
+                        FROM candidate
+                        WHERE finalization.job_id = candidate.job_id
+                          AND finalization.client_id = candidate.client_id
+                        RETURNING
+                            finalization.job_id,
+                            finalization.client_id,
+                            finalization.final_seq,
+                            candidate.target_active
+                        "#,
                 )
-                .bind(job_id)
-                .bind(client_id)
-                .bind(message)
-                .bind(i32::try_from(retry_after_secs).unwrap_or(3_600))
-                .execute(pool)
+                .bind(lease_id)
+                .bind(i32::try_from(lease_secs).unwrap_or(3_600))
+                .fetch_optional(pool)
                 .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                Ok(Some(ClaimedNetworkTrafficImportFinalization {
+                    job_id: row.try_get("job_id")?,
+                    client_id: row.try_get("client_id")?,
+                    final_seq: row.try_get("final_seq")?,
+                    target_active: row.try_get("target_active")?,
+                    lease_id,
+                    pool: pool.clone(),
+                }))
             }
         }
-        Ok(())
     }
 
     pub(crate) async fn list_job_outputs(&self, job_id: Uuid) -> Result<Vec<JobOutputView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .job_outputs
-                .read()
-                .await
-                .iter()
-                .filter(|output| output.job_id == job_id)
-                .cloned()
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -316,18 +523,6 @@ impl Repository {
         client_id: &str,
     ) -> Result<Vec<JobOutputView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                outputs.sort_by_key(|output| output.seq);
-                Ok(outputs)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -370,42 +565,6 @@ impl Repository {
         terminal_status: &str,
     ) -> Result<Option<CommandOutput>> {
         match self {
-            Self::Memory(memory) => {
-                let job_id_text = job_id.to_string();
-                let output_seq = {
-                    let audits = memory.audits.read().await;
-                    audits
-                        .iter()
-                        .rev()
-                        .find(|audit| {
-                            audit.action == "job.target_result"
-                                && audit.target == format!("client:{client_id}")
-                                && audit.metadata["job_id"].as_str() == Some(job_id_text.as_str())
-                                && audit.metadata["status"].as_str() == Some(terminal_status)
-                                && audit.metadata["component"].as_str()
-                                    == Some("gateway-command-output-ingest")
-                        })
-                        .and_then(|audit| audit.metadata["output_seq"].as_i64())
-                        .and_then(|seq| i32::try_from(seq).ok())
-                };
-                let Some(output_seq) = output_seq else {
-                    return Ok(None);
-                };
-                memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .find(|output| {
-                        output.job_id == job_id
-                            && output.client_id == client_id
-                            && output.seq == output_seq
-                            && output.done
-                            && output.stream == "status"
-                    })
-                    .map(command_output_from_view)
-                    .transpose()
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -464,45 +623,6 @@ impl Repository {
     ) -> Result<Vec<JobOutputListItemView>> {
         let limit = filter.limit.clamp(1, 1001);
         match self {
-            Self::Memory(memory) => {
-                let mut outputs = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|output| output.job_id == job_id)
-                    .filter(|output| {
-                        filter
-                            .client_id
-                            .as_ref()
-                            .is_none_or(|client_id| &output.client_id == client_id)
-                    })
-                    .filter(|output| {
-                        filter
-                            .stream
-                            .as_ref()
-                            .is_none_or(|stream| &output.stream == stream)
-                    })
-                    .filter(|output| filter.seq_after.is_none_or(|seq| output.seq > seq))
-                    .filter(|output| {
-                        filter.cursor.as_ref().is_none_or(|cursor| {
-                            output.client_id.as_str() > cursor.client_id.as_str()
-                                || (output.client_id == cursor.client_id && output.seq > cursor.seq)
-                        })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                outputs.sort_by(|left, right| {
-                    left.client_id
-                        .cmp(&right.client_id)
-                        .then_with(|| left.seq.cmp(&right.seq))
-                });
-                outputs.truncate(limit as usize);
-                Ok(outputs
-                    .into_iter()
-                    .map(|output| output.into_list_item(filter.include_data))
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let cursor_client_id = filter
                     .cursor
@@ -564,15 +684,6 @@ impl Repository {
         seq: i32,
     ) -> Result<Option<JobOutputView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .job_outputs
-                .read()
-                .await
-                .iter()
-                .find(|output| {
-                    output.job_id == job_id && output.client_id == client_id && output.seq == seq
-                })
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -611,21 +722,6 @@ impl Repository {
         seq: i32,
     ) -> Result<Option<JobOutputArtifactRef>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .job_outputs
-                .read()
-                .await
-                .iter()
-                .find(|output| {
-                    output.job_id == job_id && output.client_id == client_id && output.seq == seq
-                })
-                .and_then(|output| {
-                    Some(JobOutputArtifactRef {
-                        object_key: output.artifact_object_key.clone()?,
-                        sha256_hex: output.artifact_sha256_hex.clone()?,
-                        size_bytes: output.artifact_size_bytes?,
-                    })
-                })),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -660,84 +756,46 @@ impl Repository {
         }
     }
 
+    async fn project_persisted_job_output_identity(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+    ) -> Result<()> {
+        let Some(output) = self.get_job_output(job_id, client_id, seq).await? else {
+            // A cascading job deletion may retire the source and its work row
+            // after the claim transaction commits. There is then no surviving
+            // authority to project.
+            return Ok(());
+        };
+        if let Some(artifact) = job_output_view_server_artifact(&output) {
+            self.register_server_artifact(artifact).await?;
+        }
+        let command = command_output_from_view(&output)?;
+        let observed_at = output
+            .received_at
+            .clone()
+            .unwrap_or_else(|| output.created_at.clone());
+        self.record_persisted_network_observations(
+            job_id,
+            client_id,
+            &[(seq, command, observed_at)],
+        )
+        .await?;
+        self.project_file_transfer_session_from_job_output(job_id, client_id, seq)
+            .await?;
+        self.project_terminal_session_from_job_output(job_id, client_id, seq)
+            .await?;
+        self.project_terminal_command_replay_from_job_output(&output)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn list_process_supervisor_inventory(
         &self,
         limit: i64,
     ) -> Result<Vec<ProcessSupervisorInventoryView>> {
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden = memory.hidden_clients.read().await;
-                let visible_client_ids = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .map(|agent| agent.id.clone())
-                    .collect::<BTreeSet<_>>();
-                let command_types = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .map(|job| (job.id, job.command_type.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let stored = memory.job_outputs.read().await;
-                let mut newest = BinaryHeap::<Reverse<(String, Uuid, String, i32, usize)>>::new();
-                for (index, output) in stored.iter().enumerate() {
-                    if !visible_client_ids.contains(output.client_id.as_str())
-                        || !command_types
-                            .get(&output.job_id)
-                            .is_some_and(|command_type| is_process_supervisor_command(command_type))
-                    {
-                        continue;
-                    }
-                    newest.push(Reverse((
-                        output.created_at.clone(),
-                        output.job_id,
-                        output.client_id.clone(),
-                        output.seq,
-                        index,
-                    )));
-                    if newest.len() > PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT + 1 {
-                        newest.pop();
-                    }
-                }
-                let history_exhausted = newest.len() <= PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT;
-                let mut newest = newest
-                    .into_iter()
-                    .map(|Reverse(row)| row)
-                    .collect::<Vec<_>>();
-                newest.sort_by(|left, right| right.cmp(left));
-                let outputs = newest
-                    .into_iter()
-                    .take(PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT)
-                    .filter_map(|(_, _, _, _, index)| {
-                        let output = stored.get(index)?;
-                        let command_type = command_types.get(&output.job_id)?;
-                        if !is_process_supervisor_command(command_type) {
-                            return None;
-                        }
-                        let data = BASE64.decode(&output.data_base64).ok()?;
-                        Some(SupervisorInventoryOutput {
-                            job_id: output.job_id,
-                            client_id: output.client_id.clone(),
-                            stream: output.stream.clone(),
-                            data,
-                            created_at: output.created_at.clone(),
-                            command_type: command_type.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let inventory = build_process_supervisor_inventory(outputs, limit);
-                ensure_process_supervisor_inventory_complete(
-                    inventory.len(),
-                    limit.clamp(1, 200) as usize,
-                    history_exhausted,
-                )?;
-                Ok(inventory)
-            }
             Self::Postgres(pool) => {
                 let wanted = limit.clamp(1, 200) as usize;
                 let mut tx = pool.begin().await?;
@@ -863,69 +921,6 @@ impl Repository {
     }
 
     #[cfg(test)]
-    pub(crate) async fn record_job_outputs(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        outputs: &[CommandOutput],
-    ) -> Result<()> {
-        self.record_job_outputs_with_config(
-            job_id,
-            client_id,
-            outputs,
-            JobOutputPersistConfig {
-                object_store: None,
-                artifact_min_bytes: usize::MAX,
-            },
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_job_outputs_with_config(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        outputs: &[CommandOutput],
-        config: JobOutputPersistConfig<'_>,
-    ) -> Result<()> {
-        if outputs.is_empty() {
-            return Ok(());
-        }
-        let _ = self
-            .record_job_outputs_starting_at(
-                job_id, client_id, 0, outputs, None, config, false, false,
-            )
-            .await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_job_output_chunk_with_config(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        seq: i32,
-        output: &CommandOutput,
-        received_at: Option<String>,
-        config: JobOutputPersistConfig<'_>,
-    ) -> Result<()> {
-        let _ = self
-            .record_job_outputs_starting_at(
-                job_id,
-                client_id,
-                seq,
-                std::slice::from_ref(output),
-                received_at,
-                config,
-                false,
-                false,
-            )
-            .await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
     pub(crate) async fn record_job_output_chunk_checked_with_config(
         &self,
         job_id: Uuid,
@@ -944,7 +939,7 @@ impl Repository {
                 received_at,
                 config,
                 false,
-                false,
+                None,
             )
             .await?;
         Ok(results.pop().unwrap_or(JobOutputWriteResult::Inserted))
@@ -968,7 +963,7 @@ impl Repository {
                 received_at,
                 config,
                 true,
-                false,
+                None,
             )
             .await?;
         Ok(results.pop().unwrap_or(JobOutputWriteResult::Inserted))
@@ -1003,152 +998,12 @@ impl Repository {
             anyhow::bail!("job output materialization produced no rows");
         };
         let mut orphaned_object_keys = Vec::new();
-        let mut accepted_persisted = Vec::new();
-        let mut conflict_audits = Vec::new();
         let operation: Result<ActiveJobOutputChunkRecordResult> = async {
             match self {
-                Self::Memory(memory) => {
-                    let completed_at = unix_now().to_string();
-                    // Acquire every guard before mutating. Cancellation can therefore leave either
-                    // the entire Memory transition unapplied or a complete output/target/audit/job
-                    // transition, never a partially terminalized target.
-                    let mut jobs = memory.jobs.write().await;
-                    let mut targets = memory.job_targets.write().await;
-                    let Some(target_index) = targets.iter().position(|target| {
-                        target.job_id == job_id && target.client_id == client_id
-                    }) else {
-                        anyhow::bail!("job_target_not_found");
-                    };
-                    let mut stored = memory.job_outputs.write().await;
-                    let mut audits = memory.audits.write().await;
-                    let write_result = if let Some(existing) = stored.iter().find(|existing| {
-                        existing.job_id == stored_output.job_id
-                            && existing.client_id == stored_output.client_id
-                            && existing.seq == stored_output.seq
-                    }) {
-                        classify_memory_existing_job_output(
-                            existing,
-                            &stored_output,
-                            &mut accepted_persisted,
-                            &mut orphaned_object_keys,
-                            &mut conflict_audits,
-                        )
-                    } else {
-                        let target = &targets[target_index];
-                        if target.completed_at.is_some() || !target_status_is_active(&target.status)
-                        {
-                            anyhow::bail!("job_target_not_active");
-                        }
-                        stored.push(stored_output.clone().into_view());
-                        accepted_persisted.push(stored_output.clone());
-                        JobOutputWriteResult::Inserted
-                    };
-                    audits.extend(conflict_audits.drain(..));
-                    let mut done_outputs = stored
-                        .iter()
-                        .filter(|stored| {
-                            stored.job_id == job_id && stored.client_id == client_id && stored.done
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    done_outputs.sort_by_key(|stored| stored.seq);
-                    let contiguous_final = done_outputs
-                        .into_iter()
-                        .find(|candidate| {
-                            job_output_sequence_contiguous_in_views(
-                                &stored,
-                                job_id,
-                                client_id,
-                                candidate.seq,
-                            )
-                        })
-                        .map(|candidate| -> Result<PendingFinalJobOutput> {
-                            Ok(PendingFinalJobOutput {
-                                seq: candidate.seq,
-                                output: command_output_from_view(&candidate)?,
-                                received_at: candidate.received_at,
-                            })
-                        })
-                        .transpose()?;
-                    let mut terminal_reconciliation_ready = false;
-                    if write_result != JobOutputWriteResult::DuplicateConflict {
-                        if let Some(candidate) = contiguous_final.as_ref() {
-                            let received_at = candidate
-                                .received_at
-                                .clone()
-                                .unwrap_or_else(|| completed_at.clone());
-                            let outcome =
-                                crate::job_traffic_import::target_outcome_from_done_output(
-                                    job_id,
-                                    &candidate.output,
-                                    received_at,
-                                );
-                            let target = &mut targets[target_index];
-                            if target.completed_at.is_none()
-                                && target_status_is_active(&target.status)
-                            {
-                                target.status = outcome.status.clone();
-                                target.message = Some(outcome.message.clone());
-                                target.exit_code = outcome.exit_code;
-                                target
-                                    .started_at
-                                    .get_or_insert_with(|| completed_at.clone());
-                                target.completed_at = Some(completed_at.clone());
-                                audits.push(job_target_result_audit(
-                                    jobs.iter()
-                                        .find(|job| job.id == job_id)
-                                        .map(|job| job.payload_hash.clone()),
-                                    job_id,
-                                    client_id,
-                                    candidate.seq,
-                                    &outcome,
-                                    &completed_at,
-                                ));
-                            }
-                            terminal_reconciliation_ready = audits.iter().any(|audit| {
-                                job_target_result_audit_matches_output(
-                                    audit,
-                                    job_id,
-                                    client_id,
-                                    candidate.seq,
-                                )
-                            });
-                            if terminal_reconciliation_ready {
-                                let statuses = targets
-                                    .iter()
-                                    .filter(|target| target.job_id == job_id)
-                                    .map(|target| target.status.clone())
-                                    .collect::<Vec<_>>();
-                                if !statuses.is_empty()
-                                    && !statuses
-                                        .iter()
-                                        .any(|status| target_status_is_active(status))
-                                {
-                                    if let Some(job) = jobs
-                                        .iter_mut()
-                                        .find(|job| job.id == job_id && job.completed_at.is_none())
-                                    {
-                                        job.status = aggregate_job_status_from_statuses(
-                                            &statuses,
-                                            statuses.len(),
-                                        )
-                                        .to_string();
-                                        job.completed_at = Some(completed_at.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(ActiveJobOutputChunkRecordResult {
-                        write_result,
-                        contiguous_final,
-                        terminal_reconciliation_ready,
-                    })
-                }
                 Self::Postgres(pool) => {
                     let mut tx = pool.begin().await?;
                     let target_active =
-                        lock_job_output_target_active_state_in_tx(&mut tx, job_id, client_id)
+                        lock_job_output_target_active_state_in_tx(&mut tx, job_id, client_id, None)
                             .await?;
                     let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
                     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
@@ -1171,7 +1026,6 @@ impl Repository {
                     .await?;
                     let write_result = match existing {
                         Some(row) if job_output_row_matches_stored(&row, &stored_output) => {
-                            accepted_persisted.push(stored_output.clone());
                             JobOutputWriteResult::DuplicateIdentical
                         }
                         Some(_) => {
@@ -1212,15 +1066,6 @@ impl Repository {
                             .bind(&stored_output.received_at)
                             .execute(&mut *tx)
                             .await?;
-                            accepted_persisted.push(stored_output.clone());
-                            if let Some(artifact) =
-                                job_output_server_artifact(client_id, &stored_output)
-                            {
-                                Repository::upsert_server_artifact_in_tx(
-                                    &mut tx, &artifact, "active",
-                                )
-                                .await?;
-                            }
                             JobOutputWriteResult::Inserted
                         }
                     };
@@ -1231,30 +1076,30 @@ impl Repository {
                             contiguous_final_job_output_candidate_in_tx(&mut tx, job_id, client_id)
                                 .await?
                         };
-                    let (_target_terminalized, terminal_reconciliation_ready) =
-                        if let Some(candidate) = contiguous_final.as_ref() {
-                            let received_at = candidate
-                                .received_at
-                                .clone()
-                                .unwrap_or_else(|| Utc::now().to_rfc3339());
-                            let outcome =
-                                crate::job_traffic_import::target_outcome_from_done_output(
-                                    job_id,
-                                    &candidate.output,
-                                    received_at,
-                                );
-                            terminalize_job_target_from_output_in_tx(
-                                &mut tx,
-                                job_id,
-                                client_id,
-                                candidate.seq,
-                                &outcome,
-                                JobOutputWriteResult::DuplicateIdentical,
-                            )
-                            .await?
-                        } else {
-                            (false, false)
-                        };
+                    let terminal_reconciliation_ready = if let Some(candidate) =
+                        contiguous_final.as_ref()
+                    {
+                        let received_at = candidate
+                            .received_at
+                            .clone()
+                            .unwrap_or_else(|| Utc::now().to_rfc3339());
+                        let outcome = crate::job_traffic_import::target_outcome_from_done_output(
+                            job_id,
+                            &candidate.output,
+                            received_at,
+                        );
+                        terminalize_job_target_from_output_in_tx(
+                            &mut tx,
+                            job_id,
+                            client_id,
+                            candidate.seq,
+                            &outcome,
+                            JobOutputWriteResult::DuplicateIdentical,
+                        )
+                        .await?
+                    } else {
+                        false
+                    };
                     tx.commit().await?;
                     Ok(ActiveJobOutputChunkRecordResult {
                         write_result,
@@ -1281,56 +1126,6 @@ impl Repository {
                 store.delete_best_effort(&object_key).await;
             }
         }
-        if !conflict_audits.is_empty() {
-            if let Self::Memory(memory) = self {
-                memory.audits.write().await.extend(conflict_audits);
-            }
-        }
-        let derived_result: Result<()> = async {
-            self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
-                .await?;
-            if result.write_result != JobOutputWriteResult::DuplicateConflict {
-                self.record_persisted_network_observations_for_sequences(job_id, client_id, &[seq])
-                    .await?;
-            }
-            self.refresh_file_transfer_sessions_for_client(client_id)
-                .await?;
-            self.refresh_terminal_sessions_for_client(client_id).await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = derived_result {
-            if result.terminal_reconciliation_ready && matches!(self, Self::Postgres(_)) {
-                warn!(
-                    %error,
-                    %job_id,
-                    client_id,
-                    "deferred contiguous-final derived-state repair to the durable terminal event"
-                );
-            } else {
-                return Err(error);
-            }
-        }
-        if result.terminal_reconciliation_ready && matches!(self, Self::Memory(_)) {
-            if let Some(candidate) = result.contiguous_final.as_ref() {
-                let received_at = candidate
-                    .received_at
-                    .clone()
-                    .unwrap_or_else(|| unix_now().to_string());
-                let outcome = crate::job_traffic_import::target_outcome_from_done_output(
-                    job_id,
-                    &candidate.output,
-                    received_at,
-                );
-                self.record_memory_final_job_output_side_effects(
-                    job_id,
-                    client_id,
-                    candidate.seq,
-                    &outcome,
-                )
-                .await?;
-            }
-        }
         Ok(result)
     }
 
@@ -1343,6 +1138,54 @@ impl Repository {
         received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
         outcome: &TargetDispatchOutcome,
+    ) -> Result<FinalJobOutputRecordResult> {
+        self.record_active_final_job_output_and_target_result_for_dispatch_attempt_with_config(
+            job_id,
+            client_id,
+            seq,
+            output,
+            received_at,
+            config,
+            outcome,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_claimed_final_job_output_and_target_result_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        output: &CommandOutput,
+        received_at: Option<String>,
+        config: JobOutputPersistConfig<'_>,
+        outcome: &TargetDispatchOutcome,
+        dispatch_attempt: i32,
+    ) -> Result<FinalJobOutputRecordResult> {
+        self.record_active_final_job_output_and_target_result_for_dispatch_attempt_with_config(
+            job_id,
+            client_id,
+            seq,
+            output,
+            received_at,
+            config,
+            outcome,
+            Some(dispatch_attempt),
+        )
+        .await
+    }
+
+    async fn record_active_final_job_output_and_target_result_for_dispatch_attempt_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        output: &CommandOutput,
+        received_at: Option<String>,
+        config: JobOutputPersistConfig<'_>,
+        outcome: &TargetDispatchOutcome,
+        expected_dispatch_attempt: Option<i32>,
     ) -> Result<FinalJobOutputRecordResult> {
         if !output.done {
             anyhow::bail!("final job output recorder requires done output");
@@ -1364,114 +1207,20 @@ impl Repository {
             anyhow::bail!("final output materialization produced no rows");
         };
         let mut orphaned_object_keys = Vec::new();
-        let mut accepted_persisted = Vec::new();
-        let mut conflict_audits = Vec::new();
         let operation: Result<FinalJobOutputRecordResult> = async {
             match self {
-                Self::Memory(memory) => {
-                    let completed_at = unix_now().to_string();
-                    // Acquire every guard before mutating. A cancelled future therefore leaves either
-                    // no change or one complete output/target/audit/job transition.
-                    let mut jobs = memory.jobs.write().await;
-                    let mut targets = memory.job_targets.write().await;
-                    let Some(target_index) = targets.iter().position(|target| {
-                        target.job_id == job_id && target.client_id == client_id
-                    }) else {
-                        anyhow::bail!("job_target_not_found");
-                    };
-                    let mut stored = memory.job_outputs.write().await;
-                    let mut audits = memory.audits.write().await;
-                    let write_result = if let Some(existing) = stored.iter().find(|existing| {
-                        existing.job_id == stored_output.job_id
-                            && existing.client_id == stored_output.client_id
-                            && existing.seq == stored_output.seq
-                    }) {
-                        classify_memory_existing_job_output(
-                            existing,
-                            &stored_output,
-                            &mut accepted_persisted,
-                            &mut orphaned_object_keys,
-                            &mut conflict_audits,
-                        )
-                    } else {
-                        let target = &targets[target_index];
-                        if target.completed_at.is_some() || !target_status_is_active(&target.status)
-                        {
-                            anyhow::bail!("job_target_not_active");
-                        }
-                        stored.push(stored_output.clone().into_view());
-                        accepted_persisted.push(stored_output.clone());
-                        JobOutputWriteResult::Inserted
-                    };
-                    audits.extend(conflict_audits.drain(..));
-                    let sequence_contiguous =
-                        job_output_sequence_contiguous_in_views(&stored, job_id, client_id, seq);
-                    let mut target_terminalized = false;
-                    if sequence_contiguous
-                        && write_result != JobOutputWriteResult::DuplicateConflict
-                    {
-                        let target = &mut targets[target_index];
-                        if target.completed_at.is_none() && target_status_is_active(&target.status)
-                        {
-                            target.status = outcome.status.clone();
-                            target.message = Some(outcome.message.clone());
-                            target.exit_code = outcome.exit_code;
-                            target
-                                .started_at
-                                .get_or_insert_with(|| completed_at.clone());
-                            target.completed_at = Some(completed_at.clone());
-                            target_terminalized = true;
-                            audits.push(job_target_result_audit(
-                                jobs.iter()
-                                    .find(|job| job.id == job_id)
-                                    .map(|job| job.payload_hash.clone()),
-                                job_id,
-                                client_id,
-                                seq,
-                                outcome,
-                                &completed_at,
-                            ));
-                        } else if write_result != JobOutputWriteResult::DuplicateIdentical {
-                            anyhow::bail!("job_target_not_active");
-                        }
-                    }
-                    let terminal_reconciliation_ready = sequence_contiguous
-                        && audits.iter().any(|audit| {
-                            job_target_result_audit_matches_output(audit, job_id, client_id, seq)
-                        });
-                    if terminal_reconciliation_ready {
-                        let statuses = targets
-                            .iter()
-                            .filter(|target| target.job_id == job_id)
-                            .map(|target| target.status.clone())
-                            .collect::<Vec<_>>();
-                        if !statuses.is_empty()
-                            && !statuses
-                                .iter()
-                                .any(|status| target_status_is_active(status))
-                        {
-                            if let Some(job) = jobs
-                                .iter_mut()
-                                .find(|job| job.id == job_id && job.completed_at.is_none())
-                            {
-                                job.status =
-                                    aggregate_job_status_from_statuses(&statuses, statuses.len())
-                                        .to_string();
-                                job.completed_at = Some(completed_at);
-                            }
-                        }
-                    }
-                    Ok(FinalJobOutputRecordResult {
-                        write_result,
-                        target_terminalized,
-                        terminal_reconciliation_ready,
-                    })
-                }
                 Self::Postgres(pool) => {
                     let mut tx = pool.begin().await?;
-                    let target_active =
-                        lock_job_output_target_active_state_in_tx(&mut tx, job_id, client_id)
-                            .await?;
+                    let target_active = lock_job_output_target_active_state_in_tx(
+                        &mut tx,
+                        job_id,
+                        client_id,
+                        expected_dispatch_attempt,
+                    )
+                    .await?;
+                    if expected_dispatch_attempt.is_some() && !target_active {
+                        anyhow::bail!("job_dispatch_attempt_stale");
+                    }
                     let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
                     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
                         .bind(lock_a)
@@ -1500,7 +1249,6 @@ impl Repository {
                     .await?;
                     let write_result = match existing {
                         Some(row) if job_output_row_matches_stored(&row, &stored_output) => {
-                            accepted_persisted.push(stored_output.clone());
                             JobOutputWriteResult::DuplicateIdentical
                         }
                         Some(_) => {
@@ -1559,21 +1307,12 @@ impl Repository {
                                     stored_output.seq
                                 );
                             }
-                            accepted_persisted.push(stored_output.clone());
-                            if let Some(artifact) =
-                                job_output_server_artifact(client_id, &stored_output)
-                            {
-                                Repository::upsert_server_artifact_in_tx(
-                                    &mut tx, &artifact, "active",
-                                )
-                                .await?;
-                            }
                             JobOutputWriteResult::Inserted
                         }
                     };
-                    let (target_terminalized, terminal_reconciliation_ready) =
+                    let terminal_reconciliation_ready =
                         if write_result == JobOutputWriteResult::DuplicateConflict {
-                            (false, false)
+                            false
                         } else {
                             terminalize_job_target_from_output_in_tx(
                                 &mut tx,
@@ -1588,7 +1327,6 @@ impl Repository {
                     tx.commit().await?;
                     Ok(FinalJobOutputRecordResult {
                         write_result,
-                        target_terminalized,
                         terminal_reconciliation_ready,
                     })
                 }
@@ -1606,44 +1344,10 @@ impl Repository {
                 return Err(error);
             }
         };
-        if !conflict_audits.is_empty() {
-            if let Self::Memory(memory) = self {
-                memory.audits.write().await.extend(conflict_audits);
-            }
-        }
         if let Some(store) = config.object_store {
             for object_key in orphaned_object_keys {
                 store.delete_best_effort(&object_key).await;
             }
-        }
-        let derived_result: Result<()> = async {
-            self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
-                .await?;
-            if result.write_result != JobOutputWriteResult::DuplicateConflict {
-                self.record_persisted_network_observations_for_sequences(job_id, client_id, &[seq])
-                    .await?;
-            }
-            self.refresh_file_transfer_sessions_for_client(client_id)
-                .await?;
-            self.refresh_terminal_sessions_for_client(client_id).await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = derived_result {
-            if result.terminal_reconciliation_ready && matches!(self, Self::Postgres(_)) {
-                warn!(
-                    %error,
-                    %job_id,
-                    client_id,
-                    "deferred final-output derived-state repair to the durable terminal event"
-                );
-            } else {
-                return Err(error);
-            }
-        }
-        if result.terminal_reconciliation_ready && matches!(self, Self::Memory(_)) {
-            self.record_memory_final_job_output_side_effects(job_id, client_id, seq, outcome)
-                .await?;
         }
         Ok(result)
     }
@@ -1658,21 +1362,6 @@ impl Repository {
     ) -> Result<Option<JobOutputWriteResult>> {
         let expected = expected_stored_job_output(job_id, client_id, seq, output, config)?;
         match self {
-            Self::Memory(memory) => {
-                let stored = memory.job_outputs.read().await;
-                let Some(existing) = stored.iter().find(|existing| {
-                    existing.job_id == job_id
-                        && existing.client_id == client_id
-                        && existing.seq == seq
-                }) else {
-                    return Ok(None);
-                };
-                if job_output_view_matches_stored(existing, &expected) {
-                    Ok(Some(JobOutputWriteResult::DuplicateIdentical))
-                } else {
-                    Ok(Some(JobOutputWriteResult::DuplicateConflict))
-                }
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -1712,28 +1401,6 @@ impl Repository {
         client_id: &str,
     ) -> Result<Option<PendingFinalJobOutput>> {
         match self {
-            Self::Memory(memory) => {
-                let stored = memory.job_outputs.read().await;
-                let mut done_outputs = stored
-                    .iter()
-                    .filter(|output| {
-                        output.job_id == job_id && output.client_id == client_id && output.done
-                    })
-                    .collect::<Vec<_>>();
-                done_outputs.sort_by_key(|output| output.seq);
-                for output in done_outputs {
-                    if job_output_sequence_contiguous_in_views(
-                        &stored, job_id, client_id, output.seq,
-                    ) {
-                        return Ok(Some(PendingFinalJobOutput {
-                            seq: output.seq,
-                            output: command_output_from_view(output)?,
-                            received_at: output.received_at.clone(),
-                        }));
-                    }
-                }
-                Ok(None)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1787,12 +1454,6 @@ impl Repository {
         final_seq: i32,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                let stored = memory.job_outputs.read().await;
-                Ok(job_output_sequence_contiguous_in_views(
-                    &stored, job_id, client_id, final_seq,
-                ))
-            }
             Self::Postgres(pool) => {
                 if final_seq < 0 {
                     return Ok(false);
@@ -1824,13 +1485,6 @@ impl Repository {
         seq: i32,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(job_output_conflict_audit(job_id, client_id, seq));
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -1867,11 +1521,12 @@ impl Repository {
         config: JobOutputPersistConfig<'_>,
     ) -> Result<Vec<JobOutputWriteResult>> {
         self.record_job_outputs_starting_at(
-            job_id, client_id, 0, outputs, None, config, false, false,
+            job_id, client_id, 0, outputs, None, config, false, None,
         )
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_active_job_outputs_checked_with_config(
         &self,
         job_id: Uuid,
@@ -1879,155 +1534,29 @@ impl Repository {
         outputs: &[CommandOutput],
         config: JobOutputPersistConfig<'_>,
     ) -> Result<Vec<JobOutputWriteResult>> {
-        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config, true, true)
+        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config, true, None)
             .await
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) async fn append_job_output_chunk_with_config(
+    pub(crate) async fn record_claimed_job_outputs_checked_with_config(
         &self,
         job_id: Uuid,
         client_id: &str,
-        output: &CommandOutput,
+        outputs: &[CommandOutput],
         config: JobOutputPersistConfig<'_>,
-    ) -> Result<i32> {
-        match self {
-            Self::Memory(memory) => {
-                let seq = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|existing| existing.job_id == job_id && existing.client_id == client_id)
-                    .map(|existing| existing.seq)
-                    .max()
-                    .unwrap_or(-1)
-                    .saturating_add(1);
-                self.record_job_output_chunk_with_config(
-                    job_id, client_id, seq, output, None, config,
-                )
-                .await?;
-                Ok(seq)
-            }
-            Self::Postgres(pool) => {
-                let mut created_object_keys = Vec::new();
-                let result: Result<i32> = async {
-                    let mut tx = pool.begin().await?;
-                    let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
-                    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
-                        .bind(lock_a)
-                        .bind(lock_b)
-                        .execute(&mut *tx)
-                        .await?;
-                    let seq: i32 = sqlx::query_scalar(
-                        r#"
-                        SELECT COALESCE(MAX(seq), -1) + 1
-                        FROM job_outputs
-                        WHERE job_id = $1 AND client_id = $2
-                        "#,
-                    )
-                    .bind(job_id)
-                    .bind(client_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    let mut persisted = materialize_job_outputs(
-                        job_id,
-                        client_id,
-                        seq,
-                        std::slice::from_ref(output),
-                        None,
-                        config,
-                    )
-                    .await?;
-                    created_object_keys.extend(
-                        persisted
-                            .iter()
-                            .filter_map(|output| output.created_artifact_object_key.clone()),
-                    );
-                    let Some(output) = persisted.pop() else {
-                        anyhow::bail!("append output materialization produced no rows");
-                    };
-                    sqlx::query(
-                        r#"
-                        INSERT INTO job_outputs (
-                            job_id,
-                            client_id,
-                            seq,
-                            stream,
-                            data,
-                            storage,
-                            object_key,
-                            data_sha256_hex,
-                            data_size_bytes,
-                            exit_code,
-                            done,
-                            received_at
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
-                        "#,
-                    )
-                    .bind(output.job_id)
-                    .bind(&output.client_id)
-                    .bind(output.seq)
-                    .bind(&output.stream)
-                    .bind(&output.data)
-                    .bind(&output.storage)
-                    .bind(&output.artifact_object_key)
-                    .bind(&output.artifact_sha256_hex)
-                    .bind(output.artifact_size_bytes)
-                    .bind(output.exit_code)
-                    .bind(output.done)
-                    .bind(&output.received_at)
-                    .execute(&mut *tx)
-                    .await?;
-                    if let Some(artifact) = job_output_server_artifact(client_id, &output) {
-                        Repository::upsert_server_artifact_in_tx(&mut tx, &artifact, "active")
-                            .await?;
-                    }
-                    tx.commit().await?;
-                    Ok(seq)
-                }
-                .await;
-                let seq = match result {
-                    Ok(seq) => seq,
-                    Err(error) => {
-                        if let Some(store) = config.object_store {
-                            for object_key in created_object_keys {
-                                store.delete_best_effort(&object_key).await;
-                            }
-                        }
-                        return Err(error);
-                    }
-                };
-                self.record_persisted_network_observations_for_sequences(job_id, client_id, &[seq])
-                    .await?;
-                if let Some(artifact) = self
-                    .get_job_output_artifact_ref(job_id, client_id, seq)
-                    .await?
-                {
-                    self.register_server_artifact(NewServerArtifact {
-                        domain: "job_output".to_string(),
-                        object_key: artifact.object_key,
-                        sha256_hex: artifact.sha256_hex,
-                        size_bytes: artifact.size_bytes,
-                        job_id: Some(job_id),
-                        client_id: Some(client_id.to_string()),
-                        stream: Some(output_stream_name(output.stream).to_string()),
-                        seq: Some(seq),
-                        backup_request_id: None,
-                        backup_artifact_id: None,
-                        release_id: None,
-                        metadata: serde_json::json!({}),
-                    })
-                    .await?;
-                }
-                self.refresh_file_transfer_sessions_for_client(client_id)
-                    .await?;
-                self.refresh_terminal_sessions_for_client(client_id).await?;
-                Ok(seq)
-            }
-        }
+        dispatch_attempt: i32,
+    ) -> Result<Vec<JobOutputWriteResult>> {
+        self.record_job_outputs_starting_at(
+            job_id,
+            client_id,
+            0,
+            outputs,
+            None,
+            config,
+            true,
+            Some(dispatch_attempt),
+        )
+        .await
     }
 
     async fn record_job_outputs_starting_at(
@@ -2039,7 +1568,7 @@ impl Repository {
         received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
         require_active_target: bool,
-        defer_derived_to_terminal_event: bool,
+        expected_dispatch_attempt: Option<i32>,
     ) -> Result<Vec<JobOutputWriteResult>> {
         if outputs.is_empty() {
             return Ok(Vec::new());
@@ -2052,87 +1581,26 @@ impl Repository {
             .filter_map(|output| output.created_artifact_object_key.clone())
             .collect::<Vec<_>>();
         let mut orphaned_object_keys = Vec::new();
-        let mut accepted_persisted = Vec::new();
-        let mut conflict_audits = Vec::new();
         let result: Result<Vec<JobOutputWriteResult>> = async {
             match self {
-                Self::Memory(memory) => {
-                    let target_lock = if require_active_target {
-                        Some(memory.job_targets.read().await)
-                    } else {
-                        None
-                    };
-                    let target_active = match target_lock.as_ref() {
-                        Some(targets) => {
-                            let Some(target) = targets.iter().find(|target| {
-                                target.job_id == job_id && target.client_id == client_id
-                            }) else {
-                                anyhow::bail!("job_target_not_found");
-                            };
-                            target.completed_at.is_none() && target_status_is_active(&target.status)
-                        }
-                        None => true,
-                    };
-                    let mut stored = memory.job_outputs.write().await;
-                    let mut planned_results = Vec::with_capacity(persisted.len());
-                    let mut has_conflict = false;
-                    for output in &persisted {
-                        if let Some(existing) = stored.iter().find(|existing| {
-                            existing.job_id == output.job_id
-                                && existing.client_id == output.client_id
-                                && existing.seq == output.seq
-                        }) {
-                            if !job_output_view_matches_stored(existing, output) {
-                                conflict_audits.push(job_output_conflict_audit(
-                                    output.job_id,
-                                    &output.client_id,
-                                    output.seq,
-                                ));
-                                planned_results.push(JobOutputWriteResult::DuplicateConflict);
-                                has_conflict = true;
-                            } else {
-                                planned_results.push(JobOutputWriteResult::DuplicateIdentical);
-                                accepted_persisted.push(output.clone());
-                            }
-                        } else {
-                            planned_results.push(JobOutputWriteResult::Inserted);
-                        }
-                    }
-                    if !has_conflict
-                        && !target_active
-                        && planned_results.contains(&JobOutputWriteResult::Inserted)
-                    {
-                        anyhow::bail!("job_target_not_active");
-                    }
-                    if has_conflict {
-                        for (output, result) in persisted.iter().zip(planned_results.iter_mut()) {
-                            if *result == JobOutputWriteResult::Inserted {
-                                *result = JobOutputWriteResult::DuplicateConflict;
-                            }
-                            if let Some(object_key) = output.created_artifact_object_key.clone() {
-                                orphaned_object_keys.push(object_key);
-                            }
-                        }
-                    } else {
-                        for (output, result) in persisted.iter().zip(planned_results.iter()) {
-                            if *result == JobOutputWriteResult::Inserted {
-                                stored.push(output.clone().into_view());
-                                accepted_persisted.push(output.clone());
-                            }
-                        }
-                    }
-                    Ok(planned_results)
-                }
                 Self::Postgres(pool) => {
                     let mut tx = pool.begin().await?;
                     let target_active = if require_active_target {
                         Some(
-                            lock_job_output_target_active_state_in_tx(&mut tx, job_id, client_id)
-                                .await?,
+                            lock_job_output_target_active_state_in_tx(
+                                &mut tx,
+                                job_id,
+                                client_id,
+                                expected_dispatch_attempt,
+                            )
+                            .await?,
                         )
                     } else {
                         None
                     };
+                    if expected_dispatch_attempt.is_some() && target_active == Some(false) {
+                        anyhow::bail!("job_dispatch_attempt_stale");
+                    }
                     let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
                     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
                         .bind(lock_a)
@@ -2166,7 +1634,6 @@ impl Repository {
                         match existing {
                             Some(row) if job_output_row_matches_stored(&row, output) => {
                                 planned_results.push(JobOutputWriteResult::DuplicateIdentical);
-                                accepted_persisted.push(output.clone());
                             }
                             Some(_) => {
                                 planned_results.push(JobOutputWriteResult::DuplicateConflict);
@@ -2248,13 +1715,14 @@ impl Repository {
                                     output.seq
                                 );
                             }
-                            accepted_persisted.push(output.clone());
-                            if let Some(artifact) = job_output_server_artifact(client_id, output) {
-                                Repository::upsert_server_artifact_in_tx(
-                                    &mut tx, &artifact, "active",
-                                )
-                                .await?;
-                            }
+                        }
+                        if require_active_target
+                            && planned_results.contains(&JobOutputWriteResult::Inserted)
+                        {
+                            enqueue_network_traffic_import_finalization_if_ready_in_tx(
+                                &mut tx, job_id, client_id,
+                            )
+                            .await?;
                         }
                     }
                     tx.commit().await?;
@@ -2274,327 +1742,12 @@ impl Repository {
                 return Err(error);
             }
         };
-        if !conflict_audits.is_empty() {
-            if let Self::Memory(memory) = self {
-                memory.audits.write().await.extend(conflict_audits);
-            }
-        }
         if let Some(store) = config.object_store {
             for object_key in orphaned_object_keys {
                 store.delete_best_effort(&object_key).await;
             }
         }
-        let derived_result: Result<()> = async {
-            let mut accepted_sequences = Vec::with_capacity(write_results.len());
-            for (index, write_result) in write_results.iter().enumerate() {
-                if *write_result == JobOutputWriteResult::DuplicateConflict {
-                    continue;
-                }
-                let seq = start_seq
-                    .checked_add(i32::try_from(index)?)
-                    .ok_or_else(|| anyhow::anyhow!("job output sequence overflow"))?;
-                accepted_sequences.push(seq);
-            }
-            self.record_persisted_network_observations_for_sequences(
-                job_id,
-                client_id,
-                &accepted_sequences,
-            )
-            .await?;
-            self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
-                .await?;
-            self.refresh_file_transfer_sessions_for_client(client_id)
-                .await?;
-            self.refresh_terminal_sessions_for_client(client_id).await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = derived_result {
-            if !defer_derived_to_terminal_event {
-                return Err(error);
-            }
-            warn!(
-                %error,
-                %job_id,
-                client_id,
-                "deferred job-output derived-state repair to the durable terminal event"
-            );
-        }
         Ok(write_results)
-    }
-
-    async fn record_memory_final_job_output_side_effects(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        output_seq: i32,
-        fallback_outcome: &TargetDispatchOutcome,
-    ) -> Result<()> {
-        let Self::Memory(memory) = self else {
-            return Ok(());
-        };
-        // The core output/target transition is already atomic under the Memory data guards.
-        // Keep every replayable follow-up in one additional critical section so two identical
-        // replays cannot both observe a missing receipt/audit and apply the same side effect.
-        let memory_side_effect_guard = memory.job_terminal_side_effects.lock().await;
-        let outcome = canonical_memory_target_outcome(
-            memory,
-            job_id,
-            client_id,
-            output_seq,
-            fallback_outcome,
-        )
-        .await;
-        let update_lifecycle_operation = memory.job_operations.read().await.get(&job_id).cloned();
-        match update_lifecycle_operation {
-            Some(vpsman_common::JobCommand::AgentUpdateActivate {
-                staged_sha256_hex, ..
-            }) if outcome.status == vpsman_server_core::TARGET_STATUS_COMPLETED => {
-                if !memory_agent_update_audit_exists(
-                    memory,
-                    "agent_update.activation_completed",
-                    "activation_job_id",
-                    job_id,
-                )
-                .await
-                {
-                    self.record_agent_update_activation_completed(
-                        client_id,
-                        job_id,
-                        &staged_sha256_hex,
-                    )
-                    .await?;
-                }
-            }
-            Some(vpsman_common::JobCommand::AgentUpdateActivate {
-                staged_sha256_hex, ..
-            }) if matches!(
-                outcome.status.as_str(),
-                vpsman_server_core::TARGET_STATUS_FAILED
-                    | vpsman_server_core::TARGET_STATUS_REJECTED
-                    | vpsman_server_core::TARGET_STATUS_AGENT_TIMEOUT
-                    | vpsman_server_core::TARGET_STATUS_CONTROL_TIMEOUT
-                    | vpsman_server_core::TARGET_STATUS_AGENT_LOST
-                    | vpsman_server_core::TARGET_STATUS_CANCELED
-            ) =>
-            {
-                if !memory_agent_update_audit_exists(
-                    memory,
-                    "agent_update.activation_failed",
-                    "activation_job_id",
-                    job_id,
-                )
-                .await
-                {
-                    self.record_agent_update_activation_failed(
-                        client_id,
-                        job_id,
-                        &staged_sha256_hex,
-                        &outcome.status,
-                        outcome.exit_code,
-                        &outcome.message,
-                    )
-                    .await?;
-                }
-            }
-            Some(vpsman_common::JobCommand::AgentUpdateRollback {
-                rollback_sha256_hex,
-            }) if outcome.status == vpsman_server_core::TARGET_STATUS_COMPLETED => {
-                if !memory_agent_update_audit_exists(
-                    memory,
-                    "agent_update.rollback_completed",
-                    "rollback_job_id",
-                    job_id,
-                )
-                .await
-                {
-                    self.record_agent_update_rollback_completed(
-                        client_id,
-                        job_id,
-                        rollback_sha256_hex.as_deref(),
-                    )
-                    .await?;
-                }
-            }
-            Some(vpsman_common::JobCommand::AgentUpdateRollback {
-                rollback_sha256_hex,
-            }) if matches!(
-                outcome.status.as_str(),
-                vpsman_server_core::TARGET_STATUS_FAILED
-                    | vpsman_server_core::TARGET_STATUS_REJECTED
-                    | vpsman_server_core::TARGET_STATUS_AGENT_TIMEOUT
-                    | vpsman_server_core::TARGET_STATUS_CONTROL_TIMEOUT
-                    | vpsman_server_core::TARGET_STATUS_AGENT_LOST
-                    | vpsman_server_core::TARGET_STATUS_CANCELED
-            ) && !memory_agent_update_audit_exists(
-                memory,
-                "agent_update.rollback_failed",
-                "rollback_job_id",
-                job_id,
-            )
-            .await =>
-            {
-                self.record_agent_update_rollback_failed(
-                    client_id,
-                    job_id,
-                    rollback_sha256_hex.as_deref(),
-                    &outcome.status,
-                    outcome.exit_code,
-                    &outcome.message,
-                )
-                .await?;
-            }
-            _ => {}
-        }
-        self.record_backup_request_terminal_for_target_status(
-            job_id,
-            client_id,
-            &outcome.status,
-            None,
-        )
-        .await?;
-        self.record_runtime_config_apply_terminal_for_target_status(
-            job_id,
-            client_id,
-            &outcome.status,
-            Some(outcome.message.as_str()),
-        )
-        .await?;
-        self.record_job_target_webhook_event(job_id, client_id, &outcome)
-            .await?;
-        let terminal_status = memory
-            .jobs
-            .read()
-            .await
-            .iter()
-            .find(|job| job.id == job_id && job.completed_at.is_some())
-            .map(|job| job.status.clone());
-        drop(memory_side_effect_guard);
-        if let Some(status) = terminal_status {
-            self.record_job_terminal_side_effects(job_id, &status)
-                .await?;
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn repair_persisted_job_output_derivations_for_target(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-    ) -> Result<()> {
-        let outputs = self.list_job_outputs_for_target(job_id, client_id).await?;
-        let persisted_outputs = outputs
-            .iter()
-            .map(|output| {
-                Ok((
-                    output.seq,
-                    command_output_from_view(output)?,
-                    output
-                        .received_at
-                        .clone()
-                        .unwrap_or_else(|| output.created_at.clone()),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.record_persisted_network_observations(job_id, client_id, &persisted_outputs)
-            .await?;
-        self.refresh_file_transfer_sessions_for_client(client_id)
-            .await?;
-        self.refresh_terminal_sessions_for_client(client_id).await?;
-        Ok(())
-    }
-
-    async fn record_persisted_network_observations_for_sequences(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        sequences: &[i32],
-    ) -> Result<()> {
-        if sequences.is_empty() {
-            return Ok(());
-        }
-        let mut sequences = sequences.to_vec();
-        sequences.sort_unstable();
-        sequences.dedup();
-        let outputs = match self {
-            Self::Memory(memory) => memory
-                .job_outputs
-                .read()
-                .await
-                .iter()
-                .filter(|output| {
-                    output.job_id == job_id
-                        && output.client_id == client_id
-                        && sequences.binary_search(&output.seq).is_ok()
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        job_id,
-                        client_id,
-                        seq,
-                        stream,
-                        data,
-                        storage,
-                        object_key,
-                        data_sha256_hex,
-                        data_size_bytes,
-                        received_at::text AS received_at,
-                        exit_code,
-                        done,
-                        created_at::text AS created_at
-                    FROM job_outputs
-                    WHERE job_id = $1
-                      AND client_id = $2
-                      AND seq = ANY($3::integer[])
-                    ORDER BY seq
-                    "#,
-                )
-                .bind(job_id)
-                .bind(client_id)
-                .bind(&sequences)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(job_output_view_from_row)
-                    .collect::<std::result::Result<Vec<_>, _>>()?
-            }
-        };
-        if outputs.len() != sequences.len() {
-            anyhow::bail!("persisted_job_output_missing_during_derived_state_repair");
-        }
-        let persisted_outputs = outputs
-            .iter()
-            .map(|output| {
-                Ok((
-                    output.seq,
-                    command_output_from_view(output)?,
-                    output
-                        .received_at
-                        .clone()
-                        .unwrap_or_else(|| output.created_at.clone()),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.record_persisted_network_observations(job_id, client_id, &persisted_outputs)
-            .await
-    }
-
-    async fn register_persisted_job_output_artifacts(
-        &self,
-        client_id: &str,
-        outputs: &[StoredJobOutput],
-    ) -> Result<()> {
-        for output in outputs {
-            let Some(artifact) = job_output_server_artifact(client_id, output) else {
-                continue;
-            };
-            self.register_server_artifact(artifact).await?;
-        }
-        Ok(())
     }
 }
 
@@ -2613,20 +1766,16 @@ struct StoredJobOutput {
     exit_code: Option<i32>,
     done: bool,
     received_at: String,
-    created_at: String,
 }
 
-fn job_output_server_artifact(
-    client_id: &str,
-    output: &StoredJobOutput,
-) -> Option<NewServerArtifact> {
+fn job_output_view_server_artifact(output: &JobOutputView) -> Option<NewServerArtifact> {
     Some(NewServerArtifact {
         domain: "job_output".to_string(),
         object_key: output.artifact_object_key.clone()?,
         sha256_hex: output.artifact_sha256_hex.clone()?,
         size_bytes: output.artifact_size_bytes?,
         job_id: Some(output.job_id),
-        client_id: Some(client_id.to_string()),
+        client_id: Some(output.client_id.clone()),
         stream: Some(output.stream.clone()),
         seq: Some(output.seq),
         backup_request_id: None,
@@ -2634,46 +1783,6 @@ fn job_output_server_artifact(
         release_id: None,
         metadata: serde_json::json!({}),
     })
-}
-
-impl StoredJobOutput {
-    fn into_view(self) -> JobOutputView {
-        JobOutputView {
-            job_id: self.job_id,
-            client_id: self.client_id,
-            seq: self.seq,
-            stream: self.stream,
-            data_base64: BASE64.encode(self.data),
-            storage: self.storage,
-            artifact_object_key: self.artifact_object_key,
-            artifact_sha256_hex: self.artifact_sha256_hex,
-            artifact_size_bytes: self.artifact_size_bytes,
-            exit_code: self.exit_code,
-            done: self.done,
-            received_at: Some(self.received_at),
-            created_at: self.created_at,
-        }
-    }
-}
-
-impl JobOutputView {
-    fn into_list_item(self, include_data: bool) -> JobOutputListItemView {
-        JobOutputListItemView {
-            job_id: self.job_id,
-            client_id: self.client_id,
-            seq: self.seq,
-            stream: self.stream,
-            data_base64: include_data.then_some(self.data_base64),
-            storage: self.storage,
-            artifact_object_key: self.artifact_object_key,
-            artifact_sha256_hex: self.artifact_sha256_hex,
-            artifact_size_bytes: self.artifact_size_bytes,
-            exit_code: self.exit_code,
-            done: self.done,
-            received_at: self.received_at,
-            created_at: self.created_at,
-        }
-    }
 }
 
 fn job_output_view_from_row(row: PgRow) -> std::result::Result<JobOutputView, sqlx::Error> {
@@ -2716,40 +1825,6 @@ fn job_output_list_item_from_row(
     })
 }
 
-fn job_output_view_matches_stored(existing: &JobOutputView, output: &StoredJobOutput) -> bool {
-    existing.stream == output.stream
-        && existing.data_base64 == BASE64.encode(&output.data)
-        && existing.storage == output.storage
-        && existing.artifact_object_key == output.artifact_object_key
-        && existing.artifact_sha256_hex == output.artifact_sha256_hex
-        && existing.artifact_size_bytes == output.artifact_size_bytes
-        && existing.exit_code == output.exit_code
-        && existing.done == output.done
-}
-
-fn classify_memory_existing_job_output(
-    existing: &JobOutputView,
-    output: &StoredJobOutput,
-    accepted: &mut Vec<StoredJobOutput>,
-    orphaned_object_keys: &mut Vec<String>,
-    conflict_audits: &mut Vec<AuditLogView>,
-) -> JobOutputWriteResult {
-    if job_output_view_matches_stored(existing, output) {
-        accepted.push(output.clone());
-        JobOutputWriteResult::DuplicateIdentical
-    } else {
-        if let Some(object_key) = output.created_artifact_object_key.clone() {
-            orphaned_object_keys.push(object_key);
-        }
-        conflict_audits.push(job_output_conflict_audit(
-            output.job_id,
-            &output.client_id,
-            output.seq,
-        ));
-        JobOutputWriteResult::DuplicateConflict
-    }
-}
-
 fn command_output_from_view(view: &JobOutputView) -> Result<CommandOutput> {
     Ok(CommandOutput {
         job_id: view.job_id,
@@ -2770,36 +1845,50 @@ fn output_stream_from_name(value: &str) -> Result<OutputStream> {
     }
 }
 
-pub(crate) fn job_output_sequence_contiguous_in_views(
-    outputs: &[JobOutputView],
+async fn enqueue_network_traffic_import_finalization_if_ready_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
     client_id: &str,
-    final_seq: i32,
-) -> bool {
-    if final_seq < 0 {
-        return false;
-    }
-    let mut expected = 0_i32;
-    let present = outputs
-        .iter()
-        .filter(|output| {
-            output.job_id == job_id
-                && output.client_id == client_id
-                && output.seq >= 0
-                && output.seq <= final_seq
-        })
-        .map(|output| output.seq)
-        .collect::<BTreeSet<_>>();
-    for seq in present {
-        if seq != expected {
-            return false;
-        }
-        if seq == final_seq {
-            return true;
-        }
-        expected = expected.saturating_add(1);
-    }
-    false
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO network_traffic_import_finalizations (
+            job_id, client_id, final_seq
+        )
+        SELECT $1, $2, final_output.seq
+        FROM jobs job
+        JOIN job_targets target
+          ON target.job_id = job.id
+         AND target.client_id = $2
+        JOIN LATERAL (
+            SELECT output.seq
+            FROM job_outputs output
+            WHERE output.job_id = job.id
+              AND output.client_id = $2
+              AND output.done = TRUE
+              AND output.seq >= 0
+              AND (
+                  SELECT COUNT(*)
+                  FROM job_outputs chunk
+                  WHERE chunk.job_id = output.job_id
+                    AND chunk.client_id = output.client_id
+                    AND chunk.seq BETWEEN 0 AND output.seq
+              ) = output.seq::bigint + 1
+            ORDER BY output.seq
+            LIMIT 1
+        ) final_output ON TRUE
+        WHERE job.id = $1
+          AND job.command_type = 'network_traffic_import_vnstat'
+          AND target.completed_at IS NULL
+          AND target.status IN ('dispatching', 'running')
+        ON CONFLICT (job_id, client_id) DO NOTHING
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn job_output_sequence_contiguous_in_tx(
@@ -2888,9 +1977,9 @@ async fn terminalize_job_target_from_output_in_tx(
     output_seq: i32,
     outcome: &TargetDispatchOutcome,
     write_result: JobOutputWriteResult,
-) -> Result<(bool, bool)> {
+) -> Result<bool> {
     if !job_output_sequence_contiguous_in_tx(tx, job_id, client_id, output_seq).await? {
-        return Ok((false, false));
+        return Ok(false);
     }
     let updated = sqlx::query(
         r#"
@@ -2978,7 +2067,7 @@ async fn terminalize_job_target_from_output_in_tx(
         .await?
     };
     finish_jobs_in_tx_and_reconcile_event_sources(tx, &[job_id]).await?;
-    Ok((target_terminalized, terminal_reconciliation_ready))
+    Ok(terminal_reconciliation_ready)
 }
 
 fn job_output_row_matches_stored(row: &sqlx::postgres::PgRow, output: &StoredJobOutput) -> bool {
@@ -3020,10 +2109,11 @@ async fn lock_job_output_target_active_state_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     job_id: Uuid,
     client_id: &str,
+    expected_dispatch_attempt: Option<i32>,
 ) -> Result<bool> {
     let row = sqlx::query(
         r#"
-        SELECT status, completed_at::text AS completed_at
+        SELECT status, completed_at::text AS completed_at, dispatch_attempts
         FROM job_targets
         WHERE job_id = $1 AND client_id = $2
         FOR UPDATE
@@ -3038,7 +2128,10 @@ async fn lock_job_output_target_active_state_in_tx(
     };
     let status: String = row.try_get("status")?;
     let completed_at: Option<String> = row.try_get("completed_at")?;
-    Ok(completed_at.is_none() && target_status_is_active(&status))
+    let dispatch_attempts: i32 = row.try_get("dispatch_attempts")?;
+    Ok(completed_at.is_none()
+        && target_status_is_active(&status)
+        && expected_dispatch_attempt.is_none_or(|expected| expected == dispatch_attempts))
 }
 
 fn expected_stored_job_output(
@@ -3078,7 +2171,6 @@ fn expected_stored_job_output(
             exit_code: output.exit_code,
             done: output.done,
             received_at: String::new(),
-            created_at: String::new(),
         })
     } else {
         Ok(StoredJobOutput {
@@ -3095,118 +2187,8 @@ fn expected_stored_job_output(
             exit_code: output.exit_code,
             done: output.done,
             received_at: String::new(),
-            created_at: String::new(),
         })
     }
-}
-
-fn job_output_conflict_audit(job_id: Uuid, client_id: &str, seq: i32) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: None,
-        action: "job.output_conflict_ignored".to_string(),
-        target: format!("client:{client_id}"),
-        command_hash: None,
-        metadata: serde_json::json!({
-            "job_id": job_id,
-            "client_id": client_id,
-            "seq": seq,
-            "reason": "output sequence already persisted with different content",
-            "result": "ignored",
-            "origin_kind": "gateway_ingest",
-            "component": "gateway-command-output-ingest",
-        }),
-        created_at: unix_now().to_string(),
-    }
-}
-
-fn job_target_result_audit(
-    command_hash: Option<String>,
-    job_id: Uuid,
-    client_id: &str,
-    output_seq: i32,
-    outcome: &TargetDispatchOutcome,
-    created_at: &str,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: None,
-        action: "job.target_result".to_string(),
-        target: format!("client:{client_id}"),
-        command_hash,
-        metadata: serde_json::json!({
-            "job_id": job_id,
-            "status": outcome.status,
-            "result": outcome.status,
-            "exit_code": outcome.exit_code,
-            "accepted": outcome.accepted,
-            "message": outcome.message,
-            "received_at": outcome.received_at,
-            "output_seq": output_seq,
-            "origin_kind": "gateway_ingest",
-            "component": "gateway-command-output-ingest",
-        }),
-        created_at: created_at.to_string(),
-    }
-}
-
-fn job_target_result_audit_matches_output(
-    audit: &AuditLogView,
-    job_id: Uuid,
-    client_id: &str,
-    output_seq: i32,
-) -> bool {
-    audit.action == "job.target_result"
-        && audit.target == format!("client:{client_id}")
-        && audit.metadata["job_id"] == job_id.to_string()
-        && audit.metadata["output_seq"].as_i64() == Some(i64::from(output_seq))
-        && audit.metadata["component"] == "gateway-command-output-ingest"
-}
-
-async fn memory_agent_update_audit_exists(
-    memory: &MemoryState,
-    action: &str,
-    job_id_field: &str,
-    job_id: Uuid,
-) -> bool {
-    let job_id = job_id.to_string();
-    memory.audits.read().await.iter().any(|audit| {
-        audit.action == action
-            && audit.metadata[job_id_field]
-                .as_str()
-                .is_some_and(|value| value == job_id)
-    })
-}
-
-async fn canonical_memory_target_outcome(
-    memory: &MemoryState,
-    job_id: Uuid,
-    client_id: &str,
-    output_seq: i32,
-    fallback: &TargetDispatchOutcome,
-) -> TargetDispatchOutcome {
-    let audits = memory.audits.read().await;
-    let Some(audit) = audits
-        .iter()
-        .find(|audit| job_target_result_audit_matches_output(audit, job_id, client_id, output_seq))
-    else {
-        return fallback.clone();
-    };
-    let mut canonical = fallback.clone();
-    if let Some(status) = audit.metadata["status"].as_str() {
-        canonical.status = status.to_string();
-    }
-    canonical.exit_code = audit.metadata["exit_code"]
-        .as_i64()
-        .and_then(|value| i32::try_from(value).ok());
-    if let Some(accepted) = audit.metadata["accepted"].as_bool() {
-        canonical.accepted = accepted;
-    }
-    if let Some(message) = audit.metadata["message"].as_str() {
-        canonical.message = message.to_string();
-    }
-    canonical.received_at = audit.metadata["received_at"].as_str().map(str::to_string);
-    canonical
 }
 
 async fn insert_job_output_conflict_audit(
@@ -3245,7 +2227,6 @@ async fn materialize_job_outputs(
     received_at: Option<String>,
     config: JobOutputPersistConfig<'_>,
 ) -> Result<Vec<StoredJobOutput>> {
-    let created_at = unix_now().to_string();
     let received_at = received_at.unwrap_or_else(|| Utc::now().to_rfc3339());
     let mut persisted = Vec::with_capacity(outputs.len());
     for (index, output) in outputs.iter().enumerate() {
@@ -3290,7 +2271,6 @@ async fn materialize_job_outputs(
                 exit_code: output.exit_code,
                 done: output.done,
                 received_at: received_at.clone(),
-                created_at: created_at.clone(),
             });
         } else {
             persisted.push(StoredJobOutput {
@@ -3307,7 +2287,6 @@ async fn materialize_job_outputs(
                 exit_code: output.exit_code,
                 done: output.done,
                 received_at: received_at.clone(),
-                created_at: created_at.clone(),
             });
         }
     }
@@ -3368,6 +2347,7 @@ struct SupervisorInventoryOutput {
     command_type: String,
 }
 
+#[cfg(test)]
 fn build_process_supervisor_inventory(
     outputs: Vec<SupervisorInventoryOutput>,
     limit: i64,
@@ -3515,6 +2495,77 @@ fn is_process_supervisor_command(command_type: &str) -> bool {
         command_type,
         "process_start" | "process_stop" | "process_restart" | "process_status" | "process_logs"
     )
+}
+
+#[cfg(test)]
+mod exact_projection_contract_tests {
+    const SOURCE: &str = include_str!("repository_job_outputs.rs");
+    const INGEST_ROUTE: &str = include_str!("../../routes/fleet/routes_ingest.rs");
+    const SCHEMA: &str = include_str!("../../../../../migrations/0002_jobs_schedules.sql");
+
+    fn source_between(start: &str, end: &str) -> &'static str {
+        SOURCE
+            .split_once(start)
+            .expect("producer start marker")
+            .1
+            .split_once(end)
+            .expect("producer end marker")
+            .0
+    }
+
+    fn assert_enqueue_only_producer(source: &str) {
+        assert!(!source.contains("project_persisted_job_output_identity"));
+        assert!(!source.contains("refresh_file_transfer_sessions_for_client"));
+        assert!(!source.contains("refresh_terminal_sessions_for_client"));
+        assert!(!source.contains("upsert_server_artifact_in_tx"));
+    }
+
+    #[test]
+    fn every_insert_enqueues_one_exact_durable_identity() {
+        assert!(SCHEMA.contains("CREATE TABLE public.job_output_projection_work"));
+        assert!(SCHEMA.contains("PRIMARY KEY (job_id, client_id, seq)"));
+        assert!(SCHEMA.contains(
+            "FOREIGN KEY (job_id, client_id, seq) REFERENCES public.job_outputs(job_id, client_id, seq) ON DELETE CASCADE"
+        ));
+        assert!(SCHEMA.contains(
+            "CREATE TRIGGER job_outputs_projection_work_after_insert AFTER INSERT ON public.job_outputs"
+        ));
+        assert!(SCHEMA.contains("pg_notify('vpsman_job_output_projection', '')"));
+    }
+
+    #[test]
+    fn hot_output_producers_only_commit_source_and_triggered_work() {
+        assert_enqueue_only_producer(source_between(
+            "pub(crate) async fn record_active_job_output_chunk_and_finalize_if_ready_with_config",
+            "pub(crate) async fn record_active_final_job_output_and_target_result_with_config",
+        ));
+        assert_enqueue_only_producer(source_between(
+            "async fn record_active_final_job_output_and_target_result_for_dispatch_attempt_with_config",
+            "pub(crate) async fn classify_existing_job_output_chunk_with_config",
+        ));
+        assert_enqueue_only_producer(source_between(
+            "async fn record_job_outputs_starting_at",
+            "#[derive(Clone, Debug)]\nstruct StoredJobOutput",
+        ));
+    }
+
+    #[test]
+    fn consumer_claim_is_exact_skip_locked_and_token_fenced() {
+        let claim = source_between(
+            "pub(crate) async fn claim_job_output_projection_work",
+            "pub(crate) async fn claim_network_traffic_import_finalization",
+        );
+        assert!(claim.contains("LIMIT 1"));
+        assert!(claim.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(claim.contains("lease_id = $1"));
+        assert!(SOURCE.contains("AND lease_id = $4"));
+    }
+
+    #[test]
+    fn ingest_route_persists_and_wakes_but_never_runs_output_consumers() {
+        assert!(!INGEST_ROUTE.contains("refresh_job_status_from_targets"));
+        assert!(SOURCE.contains("project_terminal_command_replay_from_job_output(&output)"));
+    }
 }
 
 #[cfg(test)]

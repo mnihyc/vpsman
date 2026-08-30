@@ -59,8 +59,6 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import {
-  FLEET_DETAIL_LIMIT,
-  FLEET_TELEMETRY_SNAPSHOT_LIMIT,
   formatLowerBoundCount,
 } from "../constants";
 import {
@@ -138,7 +136,11 @@ import {
 import { selectorExpressionForClientIds } from "../searchExpression";
 import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../webhookExpressionSuggestions";
 import { DEFAULT_WEBHOOK_BODY_TEMPLATE } from "../webhookTemplate";
-import { productNameFromVpsRules, providerProductLabel } from "../vpsRules";
+import {
+  formatMonthlyTrafficResetUtc,
+  productNameFromVpsRules,
+  providerProductLabel,
+} from "../vpsRules";
 import {
   decodeOutputPreview,
   dispatchFailureReason,
@@ -184,7 +186,6 @@ import type {
   FleetAlertNotificationDeliveryRecord,
   FleetAlertNotificationDispatchRequest,
   FleetAlertNotificationProcessRequest,
-  FleetAlertStateRecord,
   FleetSummary,
   TrafficAccountingRecord,
   TrafficAccountingSelectorBreakdown,
@@ -336,20 +337,22 @@ export function FleetWorkspace({
   canManageAlertPolicies,
   fleetCoreEvidenceAvailable,
   fleetAlerts,
-  fleetAlertStates,
   fleetPageResetKey,
   fleetAlertPolicies,
   currentPolicyAlerts,
   currentPolicyAlertsEvidenceAvailable,
   currentPolicyAlertsTruncated,
   policyAlerts,
+  policyAlertsTruncated,
   policyAlertsEvidenceAvailable,
   trafficAccounting,
   vpsRuleValues,
   fleetAlertNotificationChannels,
   fleetAlertNotifications,
+  fleetAlertNotificationsTruncated,
   webhookRules,
   webhookRuleDeliveries,
+  webhookRuleDeliveriesTruncated,
   lastLiveEvent,
   configurationSources,
   onCreateJob,
@@ -399,20 +402,22 @@ export function FleetWorkspace({
   canManageAlertPolicies: boolean;
   fleetCoreEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
-  fleetAlertStates: FleetAlertStateRecord[];
   fleetPageResetKey: string;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   currentPolicyAlerts: PolicyAlertRecord[];
   currentPolicyAlertsEvidenceAvailable: boolean;
   currentPolicyAlertsTruncated: boolean;
   policyAlerts: PolicyAlertRecord[];
+  policyAlertsTruncated: boolean;
   policyAlertsEvidenceAvailable: boolean;
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
   fleetAlertNotifications: FleetAlertNotificationDeliveryRecord[];
+  fleetAlertNotificationsTruncated: boolean;
   webhookRules: WebhookRuleRecord[];
   webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
+  webhookRuleDeliveriesTruncated: boolean;
   lastLiveEvent: string;
   configurationSources: ConfigurationSourceView[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
@@ -499,42 +504,27 @@ export function FleetWorkspace({
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const formatBytes = useByteCountFormatter();
-  const fleetAlertPoliciesTruncated =
-    fleetAlertPolicies.length >= FLEET_DETAIL_LIMIT;
-  const policyAlertHistoryTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
-  const trafficAccountingTruncated =
-    trafficAccounting.length >= FLEET_DETAIL_LIMIT;
-  const notificationChannelsTruncated =
-    fleetAlertNotificationChannels.length >= FLEET_DETAIL_LIMIT;
-  const alertNotificationsTruncated =
-    fleetAlertNotifications.length >= FLEET_DETAIL_LIMIT;
-  const webhookRulesTruncated = webhookRules.length >= FLEET_DETAIL_LIMIT;
-  const webhookDeliveriesTruncated =
-    webhookRuleDeliveries.length >= FLEET_DETAIL_LIMIT;
-  // Rule rows are a bounded configuration source (ten keys per VPS) and the
-  // full fleet snapshot now returns them without the telemetry row cap.
+  // These sources are authoritative current configuration/projections, not
+  // retained history pages. The full snapshot returns every matching row.
+  const fleetAlertPoliciesTruncated = false;
+  const policyAlertHistoryTruncated = policyAlertsTruncated;
+  const trafficAccountingTruncated = false;
+  const notificationChannelsTruncated = false;
+  const webhookRulesTruncated = false;
   const vpsRuleValuesTruncated = false;
-  const telemetryRollupsTruncated =
-    telemetryRollups.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
-  const telemetryNetworkRatesTruncated =
-    telemetryNetworkRates.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
-  const telemetryTunnelsTruncated =
-    telemetryTunnels.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
-  const telemetryTruncated =
-    telemetryRollupsTruncated ||
-    telemetryNetworkRatesTruncated ||
-    telemetryTunnelsTruncated;
+  const telemetryRollupsTruncated = false;
+  const telemetryNetworkRatesTruncated = false;
+  const telemetryTunnelsTruncated = false;
   const fleetLoadBoundaryLabels = [
     fleetAlertPoliciesTruncated ? "alert policies" : null,
     policyAlertHistoryTruncated ? "policy alert history" : null,
     currentPolicyAlertsTruncated ? "current policy alerts" : null,
     trafficAccountingTruncated ? "traffic accounting" : null,
     notificationChannelsTruncated ? "notification channels" : null,
-    alertNotificationsTruncated ? "notification deliveries" : null,
+    fleetAlertNotificationsTruncated ? "notification deliveries" : null,
     webhookRulesTruncated ? "webhook rules" : null,
-    webhookDeliveriesTruncated ? "webhook deliveries" : null,
+    webhookRuleDeliveriesTruncated ? "webhook deliveries" : null,
     vpsRuleValuesTruncated ? "VPS rules" : null,
-    telemetryTruncated ? "telemetry" : null,
   ].filter((label): label is string => label !== null);
   const [selectionStatsMode, setSelectionStatsMode] =
     useState<FleetSelectionStatsMode>("telemetry");
@@ -1026,11 +1016,15 @@ export function FleetWorkspace({
       },
       {
         id: "reset_day",
-        header: "Reset Day",
-        size: 125,
+        header: "Reset Time",
+        size: 155,
         minSize: 105,
-        sortValue: (agent) =>
-          trafficByClientRef.current.get(agent.id)?.reset_day ?? 0,
+        sortValue: (agent) => {
+          const traffic = trafficByClientRef.current.get(agent.id);
+          return traffic?.reset_day == null
+            ? 0
+            : traffic.reset_day * 24 + (traffic.reset_hour ?? 0);
+        },
         searchValue: (agent) =>
           resetDaySummary(trafficByClientRef.current.get(agent.id)),
         cell: (agent) =>
@@ -1980,9 +1974,11 @@ export function FleetWorkspace({
             <span className="sectionContext">
               {formatLowerBoundCount(
                 fleetAlertNotifications.length + webhookRuleDeliveries.length,
-                alertNotificationsTruncated || webhookDeliveriesTruncated,
+                fleetAlertNotificationsTruncated ||
+                  webhookRuleDeliveriesTruncated,
               )}{" "}
-              {alertNotificationsTruncated || webhookDeliveriesTruncated
+              {fleetAlertNotificationsTruncated ||
+              webhookRuleDeliveriesTruncated
                 ? "loaded "
                 : ""}
               retained deliveries
@@ -1993,7 +1989,9 @@ export function FleetWorkspace({
             agents={targetAgents}
             alertChannels={fleetAlertNotificationChannels}
             alertDeliveries={fleetAlertNotifications}
+            alertDeliveriesTruncated={fleetAlertNotificationsTruncated}
             webhookDeliveries={webhookRuleDeliveries}
+            webhookDeliveriesTruncated={webhookRuleDeliveriesTruncated}
             webhookRules={webhookRules}
             onDeleteAlertChannel={onDeleteFleetAlertNotificationChannel}
             onDeleteWebhookRule={onDeleteWebhookRule}
@@ -3110,15 +3108,6 @@ function FleetInstanceDetail({
             />
             <DetailLine
               icon={<Network size={18} />}
-              label="Network bytes"
-              value={
-                !latestRollup && telemetryRollupsTruncated
-                  ? "Unknown in loaded rollup page; more may exist"
-                  : formatNetworkBytes(latestRollup, formatBytes)
-              }
-            />
-            <DetailLine
-              icon={<Network size={18} />}
               label="Network rate"
               value={
                 networkRateSelection.valid &&
@@ -3227,7 +3216,6 @@ function FleetInstanceDetail({
             <NetworkRateList
               rates={latestNetworkRates}
               ratesTruncated={telemetryNetworkRatesTruncated}
-              rollup={latestRollup}
             />
             {agent.capabilities.unprivileged_hint && (
               <DetailLine
@@ -3773,11 +3761,8 @@ function TrafficRulesDetail({
         header: "Last confirmed",
         size: 145,
         minSize: 120,
-        sortValue: (row) => row.last_confirmed_at ?? "",
-        cell: (row) =>
-          row.last_confirmed_at
-            ? formatCompactTime(row.last_confirmed_at)
-            : "Not recorded",
+        sortValue: (row) => row.last_confirmed_at,
+        cell: (row) => formatCompactTime(row.last_confirmed_at),
       },
       {
         id: "severity",
@@ -4035,7 +4020,7 @@ function TrafficRulesDetail({
           </span>
         </span>
         <span>
-          <strong>Reset day</strong>
+          <strong>Reset time</strong>
           <span>
             {trafficMissingUnderCap
               ? unknownTrafficPage
@@ -4467,12 +4452,10 @@ function FleetSelectionStatsTable({
             <span role="columnheader">VPS</span>
             <span role="columnheader">Total rate</span>
             <span role="columnheader">Interface rates</span>
-            <span role="columnheader">Counters</span>
           </div>
           {rows.map((agent) => {
             const rates = latestNetworkRates.get(agent.id) ?? [];
             const allRates = allNetworkRates.get(agent.id) ?? [];
-            const rollup = latestRollups.get(agent.id) ?? null;
             return (
               <div className="fleetSelectionStatsRow" key={agent.id} role="row">
                 <span role="cell" title={agent.id}>
@@ -4492,9 +4475,6 @@ function FleetSelectionStatsTable({
                         `${rate.interface}: ${formatByteRateFromBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
                     )
                     .join("; ") || "no rate rollup"}
-                </span>
-                <span role="cell">
-                  {formatNetworkBytes(rollup, formatBytes)}
                 </span>
               </div>
             );
@@ -4665,7 +4645,7 @@ function seedSingleFileBrowser(agent: AgentView) {
       JSON.stringify({
         path: "/",
         showHidden: false,
-        targetExpression: selectorExpressionForClientIds([agent.id]),
+        targetClientId: agent.id,
       }),
     );
   } catch {
@@ -6071,7 +6051,7 @@ export function FleetAlertPolicyManager({
   onEditorOpenChange,
   onPolicyFocusChange,
   policies,
-  rowsTruncated = policies.length >= FLEET_DETAIL_LIMIT,
+  rowsTruncated = false,
   policyAlerts,
   policyFocusId,
   policyFilterClientId,
@@ -7799,10 +7779,7 @@ function policyAlertLifecycleEvidence(alert: PolicyAlertRecord): string {
         : ""
     }`;
   }
-  if (alert.last_confirmed_at) {
-    return `Last confirmed ${formatCompactTime(alert.last_confirmed_at)}`;
-  }
-  return "Last confirmed not recorded";
+  return `Last confirmed ${formatCompactTime(alert.last_confirmed_at)}`;
 }
 
 type NotificationRegistryTab =
@@ -7815,7 +7792,9 @@ export function FleetNotificationsHub({
   agents,
   alertChannels,
   alertDeliveries,
+  alertDeliveriesTruncated,
   webhookDeliveries,
+  webhookDeliveriesTruncated,
   webhookRules,
   onDeleteAlertChannel,
   onDeleteWebhookRule,
@@ -7831,7 +7810,9 @@ export function FleetNotificationsHub({
   agents: AgentView[];
   alertChannels: FleetAlertNotificationChannelRecord[];
   alertDeliveries: FleetAlertNotificationDeliveryRecord[];
+  alertDeliveriesTruncated: boolean;
   webhookDeliveries: WebhookRuleDeliveryRecord[];
+  webhookDeliveriesTruncated: boolean;
   webhookRules: WebhookRuleRecord[];
   onDeleteAlertChannel: (
     channelId: string,
@@ -7983,10 +7964,12 @@ export function FleetNotificationsHub({
             <NotificationDeliveryHistoryGrid
               deliveries={alertDeliveries}
               preview={false}
+              rowsTruncated={alertDeliveriesTruncated}
             />
             <WebhookDeliveryHistoryGrid
               deliveries={webhookDeliveries}
               preview={false}
+              rowsTruncated={webhookDeliveriesTruncated}
             />
           </div>
         )}
@@ -8046,7 +8029,7 @@ export function FleetAlertNotificationManager({
   onProcess,
   onUpsert,
   queueMode = "full",
-  rowsTruncated = channels.length >= FLEET_DETAIL_LIMIT,
+  rowsTruncated = false,
 }: {
   agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
@@ -9317,7 +9300,7 @@ export function FleetAlertNotificationManager({
 export function NotificationDeliveryHistoryGrid({
   deliveries,
   preview,
-  rowsTruncated = !preview && deliveries.length >= FLEET_DETAIL_LIMIT,
+  rowsTruncated = false,
 }: {
   deliveries: FleetAlertNotificationDeliveryRecord[];
   preview: boolean;
@@ -9617,7 +9600,7 @@ export function WebhookRuleManager({
   onUpsert,
   queueMode = "full",
   rules,
-  rowsTruncated = rules.length >= FLEET_DETAIL_LIMIT,
+  rowsTruncated = false,
 }: {
   agents: AgentView[];
   deliveries: WebhookRuleDeliveryRecord[];
@@ -11248,7 +11231,7 @@ function WebhookRuleSamplePreview({
 export function WebhookDeliveryHistoryGrid({
   deliveries,
   preview,
-  rowsTruncated = !preview && deliveries.length >= FLEET_DETAIL_LIMIT,
+  rowsTruncated = false,
 }: {
   deliveries: WebhookRuleDeliveryRecord[];
   preview: boolean;
@@ -11827,19 +11810,6 @@ function privilegeModeLabel(agent: AgentView) {
   return "privilege unknown";
 }
 
-function formatNetworkBytes(
-  rollup: TelemetryRollupRecord | null | undefined,
-  formatBytes: ByteCountFormatter,
-) {
-  if (
-    !rollup ||
-    (rollup.network_rx_bytes_max === 0 && rollup.network_tx_bytes_max === 0)
-  ) {
-    return "Awaiting counters";
-  }
-  return `RX ${formatBytes(rollup.network_rx_bytes_max)} / TX ${formatBytes(rollup.network_tx_bytes_max)}`;
-}
-
 function formatNetworkRateSummary(
   rates: TelemetryNetworkRateRecord[],
   selection: NetworkRateInterfaceResolution | undefined,
@@ -12072,9 +12042,14 @@ function resetDaySummary(
   if (!traffic?.reset_day) {
     return "not set";
   }
+  const reset = formatMonthlyTrafficResetUtc(
+    traffic.reset_day,
+    traffic.reset_hour,
+  );
+  if (!reset) return "not set";
   return traffic.reset_day === 31
-    ? "31 UTC, clamps short months"
-    : `${traffic.reset_day} UTC`;
+    ? `${reset}, clamps short months`
+    : reset;
 }
 
 function selectorSummary(
@@ -12397,11 +12372,9 @@ function isNetworkInterfacesSnapshot(
 function NetworkRateList({
   rates,
   ratesTruncated,
-  rollup,
 }: {
   rates: TelemetryNetworkRateRecord[];
   ratesTruncated: boolean;
-  rollup: TelemetryRollupRecord | null | undefined;
 }) {
   const formatBytes = useByteCountFormatter();
   const formatByteRateFromBitsPerSecond = useByteRateFormatter();
@@ -12413,11 +12386,7 @@ function NetworkRateList({
         value={
           ratesTruncated
             ? "Unknown in loaded network-rate page; more may exist"
-            : rollup &&
-                (rollup.network_rx_bytes_max > 0 ||
-                  rollup.network_tx_bytes_max > 0)
-              ? "Counter-only telemetry; rate rollup pending"
-              : "Awaiting rate rollup"
+            : "Awaiting rate rollup"
         }
       />
     );

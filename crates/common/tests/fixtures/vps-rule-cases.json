@@ -1,11 +1,12 @@
 {
   "normalization_cases": [
-    { "name": "reset_day_leading_zero", "key": "traffic.reset_day", "input": "014", "canonical": "14" },
-    { "name": "reset_day_explicit_plus", "key": "traffic.reset_day", "input": "+001", "canonical": "1" },
+    { "name": "reset_day_leading_zero", "key": "traffic.reset_day", "input": "014", "canonical": "14 00:00" },
+    { "name": "reset_day_explicit_plus", "key": "traffic.reset_day", "input": "+001", "canonical": "1 00:00" },
     { "name": "decimal_quota_spacing_and_case", "key": "traffic.quota.total", "input": " 04.00 tb ", "canonical": "4TB" },
     { "name": "binary_quota_unit", "key": "traffic.quota.rx", "input": "1.5 gib", "canonical": "1.5GiB" },
     { "name": "unlimited_quota", "key": "traffic.quota.tx", "input": "-1", "canonical": "-1" },
     { "name": "selector_spacing", "key": "traffic.selectors", "input": " ens3, eth0+tx ", "canonical": "ens3,eth0+tx" },
+    { "name": "selector_explicit_all", "key": "traffic.selectors", "input": " * ", "canonical": "*" },
     { "name": "selector_total_rx_tx_alias", "key": "traffic.selectors", "input": "eth0+RX+TX", "canonical": "eth0" },
     { "name": "selector_total_tx_rx_alias", "key": "traffic.selectors", "input": "eth0+TX+RX", "canonical": "eth0" },
     { "name": "selector_max_tx_rx", "key": "traffic.selectors", "input": "ens3+TX/RX", "canonical": "ens3+tx/rx" },
@@ -24,6 +25,9 @@
     { "name": "rate_interface_host_prefix", "key": "network.rate.interfaces", "input": " host:eth0, eth1+tx ", "canonical": "eth0,eth1+tx" },
     { "name": "rate_interface_total_and_max_aliases", "key": "network.rate.interfaces", "input": " eth0+TX+RX, ens3+RX/TX ", "canonical": "eth0,ens3+tx/rx" },
     { "name": "rate_interface_reference", "key": "network.rate.interfaces", "input": "[traffic.selectors]", "canonical": "[traffic.selectors]" },
+    { "name": "rate_interface_explicit_all", "key": "network.rate.interfaces", "input": " * ", "canonical": "*" },
+    { "name": "eligible_interface_patterns", "key": "network.interfaces", "input": " w*, eth0, ens* ", "canonical": "w*,eth0,ens*" },
+    { "name": "eligible_interfaces_explicit_all", "key": "network.interfaces", "input": " * ", "canonical": "*" },
     { "name": "quota_above_javascript_safe_integer", "key": "traffic.quota.total", "input": " 9007199254740993 B ", "canonical": "9007199254740993B" },
     { "name": "quota_i64_maximum", "key": "traffic.quota.rx", "input": "9223372036854775807b", "canonical": "9223372036854775807B" },
     { "name": "quota_exact_half_up", "key": "traffic.quota.tx", "input": "0.000000000000500000000001 tb", "canonical": "0.000000000000500000000001TB" },
@@ -48,12 +52,17 @@
     { "name": "selector_repeated_total_direction", "key": "traffic.selectors", "input": "eth0+rx+rx", "error_contains": "traffic_selector_direction_invalid" },
     { "name": "selector_repeated_max_direction", "key": "traffic.selectors", "input": "eth0+tx/tx", "error_contains": "traffic_selector_direction_invalid" },
     { "name": "selector_mixed_direction_forms", "key": "traffic.selectors", "input": "eth0+rx/tx+rx", "error_contains": "traffic_selector_direction_invalid" },
-    { "name": "selector_interface_utf8_byte_limit", "key": "traffic.selectors", "input": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé", "error_contains": "traffic_selector_interface_invalid" }
+    { "name": "selector_interface_utf8_byte_limit", "key": "traffic.selectors", "input": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé", "error_contains": "traffic_selector_interface_invalid" },
+    { "name": "selector_embedded_wildcard", "key": "traffic.selectors", "input": "eth*", "error_contains": "traffic_selector_interface_invalid" },
+    { "name": "rate_obsolete_all_token", "key": "network.rate.interfaces", "input": "[]", "error_contains": "network_rate_selector_obsolete_all_invalid" },
+    { "name": "eligible_interface_interior_wildcard", "key": "network.interfaces", "input": "eth*0", "error_contains": "network_interfaces_pattern_invalid" },
+    { "name": "eligible_interface_duplicate", "key": "network.interfaces", "input": "e*,e*", "error_contains": "network_interfaces_pattern_duplicate" },
+    { "name": "eligible_interface_source_syntax", "key": "network.interfaces", "input": "host:eth0", "error_contains": "network_interfaces_pattern_invalid" }
   ],
   "contexts": {
     "configured": {
       "rules": [
-        { "key": "traffic.reset_day", "raw": "15", "json": { "day": 15 } },
+        { "key": "traffic.reset_day", "raw": "15 00:00", "json": { "day": 15, "hour": 0 } },
         { "key": "traffic.quota.total", "raw": "9007199254740993B", "json": { "bytes": "9007199254740993" } },
         { "key": "network.port_speed", "raw": "1.5 Gbps", "json": { "bps": 1500000000 } },
         { "key": "billing.price", "raw": "29.90 CNY/m", "json": { "disabled": false, "price": "29.90", "currency": "CNY", "period_code": "m" } },
@@ -64,7 +73,7 @@
     },
     "sentinels": {
       "rules": [
-        { "key": "traffic.reset_day", "raw": "-1", "json": { "day": -1 } },
+        { "key": "traffic.reset_day", "raw": "-1", "json": { "day": -1, "hour": 0 } },
         { "key": "traffic.quota.total", "raw": "-1", "json": { "bytes": -1, "unlimited": true } },
         { "key": "billing.price", "raw": "-1", "json": { "disabled": true } }
       ]

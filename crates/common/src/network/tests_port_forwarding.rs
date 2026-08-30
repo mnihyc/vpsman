@@ -83,13 +83,14 @@ fn serde_defaults_keep_old_runtime_configs_valid() {
 #[test]
 fn rejects_desired_state_that_would_render_an_oversized_program() {
     let mut rules = Vec::new();
-    for rule_index in 0..43_u16 {
+    for rule_index in 0..256_u32 {
         let first = rule_index * 256 + 1;
-        let mappings = (0..256_u16)
-            .map(|offset| PortForwardMapping {
+        let mappings = (0..256_u32)
+            .filter_map(|offset| u16::try_from(first + offset).ok())
+            .map(|port| PortForwardMapping {
                 incoming: PortRange {
-                    start: first + offset,
-                    end: first + offset,
+                    start: port,
+                    end: port,
                 },
                 target: PortRange {
                     start: 8080,

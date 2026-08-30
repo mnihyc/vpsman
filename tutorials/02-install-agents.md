@@ -32,11 +32,10 @@ cargo run -p vpsctl -- agent-identity-upsert \
 ```
 
 A new registration is prefilled with `v-` plus one more than the greatest
-persisted numeric identity. Both legacy numeric IDs and current `v-N` IDs
-contribute to that maximum, including deleted tombstones. Merely opening or
-abandoning the form does not reserve an ID; if another registration commits the
-same suggestion first, refresh and use the newly suggested ID after the explicit
-conflict.
+persisted numeric identity. Numeric IDs and `v-N` IDs contribute to that
+maximum, including deleted tombstones. Merely opening or abandoning the form
+does not reserve an ID; if another registration commits the same suggestion
+first, refresh and use the newly suggested ID after the explicit conflict.
 
 A key change requires `--replace-existing-key --confirmed`. Public-key ownership
 is global: registration rejects a key already assigned to another client and a

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -12,9 +12,7 @@ use vpsman_common::{
 
 // This adapter owns only facts written by worker source transactions. Policy
 // evaluation and lifecycle/webhook projection stay with the API's durable
-// evaluator (including its bounded missing-receipt repair).
-const OPERATIONAL_RECONCILE_LOCK: &str = "vpsman:operational-alert-reconcile";
-const POLICY_EVIDENCE_ARM_LOCK: &str = "vpsman.alert_policy_evidence_arm";
+// evaluator (including its durable pending-evidence drain).
 const MAX_SCHEDULE_LINEAGE: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,15 +76,13 @@ struct PolicyEvidenceFact {
 }
 
 /// Reconciles the worker's authoritative status transition before its source
-/// transaction commits. The caller already holds the changed client row, so
-/// the lock order is source row -> global source advisory -> evidence arm.
+/// transaction commits. The caller owns the changed source row; the evidence
+/// append stamps the currently enabled immutable rule generations.
 pub(crate) async fn reconcile_agent_status_transition_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     client_id: &str,
     to_status: &str,
 ) -> Result<()> {
-    lock_lifecycle(tx).await?;
-
     let identity = sqlx::query(
         r#"
         SELECT c.display_name, c.status, c.capabilities,
@@ -502,13 +498,33 @@ async fn insert_policy_evidence_facts_in_tx(
         return Ok(());
     }
 
-    // Rule edits take the exclusive counterpart. Holding the shared fence for
-    // the complete source batch prevents an arm operation from splitting facts
-    // emitted by one authoritative source transaction.
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext($1)::bigint)")
-        .bind(POLICY_EVIDENCE_ARM_LOCK)
-        .execute(&mut **tx)
-        .await?;
+    let source_kinds = facts
+        .iter()
+        .map(|fact| fact.source_kind.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let generation_rows = sqlx::query(
+        r#"
+        SELECT rule.id, rule.rule_version, rule.evidence_source
+        FROM policy_rules rule
+        JOIN policy_groups group_row ON group_row.id=rule.group_id
+        WHERE rule.enabled AND group_row.enabled
+          AND rule.evidence_source=ANY($1::text[])
+        ORDER BY rule.id
+        FOR KEY SHARE OF rule
+        "#,
+    )
+    .bind(&source_kinds)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut generations_by_source = HashMap::<String, Vec<(Uuid, i32)>>::new();
+    for row in generation_rows {
+        generations_by_source
+            .entry(row.try_get("evidence_source")?)
+            .or_default()
+            .push((row.try_get("id")?, row.try_get("rule_version")?));
+    }
 
     for mut fact in facts {
         if let Some(client_id) = fact.subject_client_id.as_deref() {
@@ -516,18 +532,23 @@ async fn insert_policy_evidence_facts_in_tx(
                 fact.subject_snapshot = snapshot;
             }
         }
-        sqlx::query(
+        let generations = generations_by_source
+            .get(&fact.source_kind)
+            .cloned()
+            .unwrap_or_default();
+        let inserted = sqlx::query(
             r#"
             INSERT INTO alert_policy_evidence (
                 id, source_kind, source_event_id, fact_kind, natural_key,
                 confirmation_bucket_key, subject_client_id, target_kind, target_id,
                 source_status, completeness, subject_snapshot, payload, observed_at,
-                state_started_at, causation_id, schedule_lineage
+                state_started_at, causation_id, schedule_lineage, evaluation_pending
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17
+                $12, $13, $14, $15, $16, $17, $18
             )
             ON CONFLICT (source_kind, source_event_id) DO NOTHING
+            RETURNING id, evidence_seq
             "#,
         )
         .bind(Uuid::new_v4())
@@ -547,8 +568,38 @@ async fn insert_policy_evidence_facts_in_tx(
         .bind(fact.state_started_at)
         .bind(fact.causation_id)
         .bind(&fact.schedule_lineage)
-        .execute(&mut **tx)
+        .bind(!generations.is_empty())
+        .fetch_optional(&mut **tx)
         .await?;
+        let Some(inserted) = inserted else {
+            continue;
+        };
+        if !generations.is_empty() {
+            let rule_ids = generations
+                .iter()
+                .map(|(rule_id, _)| *rule_id)
+                .collect::<Vec<_>>();
+            let rule_versions = generations
+                .iter()
+                .map(|(_, rule_version)| *rule_version)
+                .collect::<Vec<_>>();
+            sqlx::query(
+                r#"
+                INSERT INTO alert_policy_evidence_targets (
+                    evidence_id, evidence_seq, policy_rule_id, rule_version
+                )
+                SELECT $1, $2, target.policy_rule_id, target.rule_version
+                FROM UNNEST($3::uuid[], $4::integer[])
+                     AS target(policy_rule_id, rule_version)
+                "#,
+            )
+            .bind(inserted.try_get::<Uuid, _>("id")?)
+            .bind(inserted.try_get::<i64, _>("evidence_seq")?)
+            .bind(rule_ids)
+            .bind(rule_versions)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
     Ok(())
 }
@@ -778,21 +829,4 @@ fn merge_json(mut base: Value, extra: Value) -> Value {
         base.extend(extra.clone());
     }
     base
-}
-
-async fn lock_lifecycle(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(OPERATIONAL_RECONCILE_LOCK)
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
-pub(crate) async fn try_lock_lifecycle(tx: &mut Transaction<'_, Postgres>) -> Result<bool> {
-    Ok(
-        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(OPERATIONAL_RECONCILE_LOCK)
-            .fetch_one(&mut **tx)
-            .await?,
-    )
 }

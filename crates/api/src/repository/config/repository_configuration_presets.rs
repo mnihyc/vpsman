@@ -19,10 +19,9 @@ use crate::{
     },
     repository::Repository,
     repository_key_lifecycle::{
-        lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+        lock_postgres_definition_lifecycles_in_tx, lock_postgres_definitions_and_clients_in_tx,
         require_visible_postgres_clients_in_tx,
     },
-    unix_now,
 };
 
 const MAX_ARGV_ITEMS: usize = 32;
@@ -208,36 +207,6 @@ fn system_configuration_presets() -> Vec<SystemConfigurationPreset> {
 impl Repository {
     pub(crate) async fn initialize_system_configuration_presets(&self) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let mut seeded = memory.configuration_presets_seeded.write().await;
-                if *seeded {
-                    return Ok(());
-                }
-                let now = unix_now().to_string();
-                let mut presets = memory.configuration_presets.write().await;
-                for system in system_configuration_presets() {
-                    let id = Uuid::parse_str(system.id)?;
-                    validate_configuration_preset_definition(system.behavior, &system.definition)?;
-                    if presets.iter().any(|preset| preset.id == id) {
-                        continue;
-                    }
-                    presets.push(ConfigurationPresetView {
-                        id,
-                        behavior: system.behavior.to_string(),
-                        name: system.name.to_string(),
-                        kind: "system".to_string(),
-                        is_default: system.is_default,
-                        description: Some(system.description.to_string()),
-                        definition: system.definition,
-                        effective_vps_count: 0,
-                        override_vps_count: 0,
-                        created_at: now.clone(),
-                        updated_at: now.clone(),
-                    });
-                }
-                *seeded = true;
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 for system in system_configuration_presets()
@@ -319,47 +288,7 @@ impl Repository {
         &self,
         behavior: Option<&str>,
     ) -> Result<Vec<ConfigurationPresetView>> {
-        if matches!(self, Self::Memory(_)) {
-            self.initialize_system_configuration_presets().await?;
-        }
         let mut presets = match self {
-            Self::Memory(memory) => {
-                let agents = self.list_agents().await?;
-                let visible_client_ids = agents
-                    .iter()
-                    .map(|agent| agent.id.as_str())
-                    .collect::<BTreeSet<_>>();
-                let overrides = memory.configuration_preset_overrides.read().await.clone();
-                let mut rows = memory
-                    .configuration_presets
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|preset| behavior.is_none_or(|value| preset.behavior == value))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for preset in &mut rows {
-                    preset.override_vps_count = overrides
-                        .iter()
-                        .filter(|entry| {
-                            entry.preset_id == preset.id
-                                && visible_client_ids.contains(entry.client_id.as_str())
-                        })
-                        .count() as i64;
-                    preset.effective_vps_count = preset.override_vps_count;
-                    if preset.is_default {
-                        preset.effective_vps_count += agents
-                            .iter()
-                            .filter(|agent| {
-                                !overrides.iter().any(|entry| {
-                                    entry.client_id == agent.id && entry.behavior == preset.behavior
-                                })
-                            })
-                            .count() as i64;
-                    }
-                }
-                rows
-            }
             Self::Postgres(pool) => sqlx::query(
                 r#"
                 SELECT
@@ -419,18 +348,7 @@ impl Repository {
         &self,
         behavior: Option<&str>,
     ) -> Result<Vec<ConfigurationPresetView>> {
-        if matches!(self, Self::Memory(_)) {
-            self.initialize_system_configuration_presets().await?;
-        }
         let mut presets = match self {
-            Self::Memory(memory) => memory
-                .configuration_presets
-                .read()
-                .await
-                .iter()
-                .filter(|preset| behavior.is_none_or(|value| preset.behavior == value))
-                .cloned()
-                .collect::<Vec<_>>(),
             Self::Postgres(pool) => sqlx::query(
                 r#"
                 SELECT
@@ -489,36 +407,22 @@ impl Repository {
             request.description.as_deref(),
             &request.definition,
         )?;
-        let now = unix_now().to_string();
-        let preset = match self {
-            Self::Memory(memory) => {
-                self.initialize_system_configuration_presets().await?;
-                let mut presets = memory.configuration_presets.write().await;
-                anyhow::ensure!(
-                    !presets.iter().any(|preset| {
-                        preset.behavior == request.behavior
-                            && preset.name.eq_ignore_ascii_case(request.name.trim())
-                    }),
-                    "configuration_preset_duplicate"
-                );
-                let preset = ConfigurationPresetView {
-                    id: Uuid::new_v4(),
-                    behavior: request.behavior.clone(),
-                    name: request.name.trim().to_string(),
-                    kind: "custom".to_string(),
-                    is_default: false,
-                    description: normalized_description(request.description.as_deref()),
-                    definition: request.definition.clone(),
-                    effective_vps_count: 0,
-                    override_vps_count: 0,
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                presets.push(preset.clone());
-                preset
-            }
+        let preset_id = Uuid::new_v4();
+        match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_definition_lifecycles_in_tx(
+                    &mut tx,
+                    &[
+                        format!("configuration-preset:{preset_id}"),
+                        format!(
+                            "configuration-preset-name:{}:{}",
+                            request.behavior,
+                            request.name.trim()
+                        ),
+                    ],
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO configuration_presets (
@@ -532,7 +436,7 @@ impl Repository {
                         0::bigint AS override_vps_count
                     "#,
                 )
-                .bind(Uuid::new_v4())
+                .bind(preset_id)
                 .bind(&request.behavior)
                 .bind(request.name.trim())
                 .bind(normalized_description(request.description.as_deref()))
@@ -550,17 +454,9 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(preset);
+                Ok(preset)
             }
-        };
-        self.record_configuration_preset_audit(
-            "configuration_preset.created",
-            &preset,
-            &[],
-            operator,
-        )
-        .await?;
-        Ok(preset)
+        }
     }
 
     pub(crate) async fn clone_configuration_preset(
@@ -655,73 +551,15 @@ impl Repository {
         preview: &ConfigurationPresetPreviewView,
         operator: &AuthContext,
     ) -> Result<ConfigurationPresetView> {
-        let now = unix_now().to_string();
-        let mut preset = match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden = memory.hidden_clients.read().await;
-                let visible_client_ids = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .map(|agent| agent.id.clone())
-                    .collect::<BTreeSet<_>>();
-                let mut presets = memory.configuration_presets.write().await;
-                let preset = presets
-                    .iter_mut()
-                    .find(|preset| preset.id == preset_id)
-                    .context("configuration_preset_not_found")?;
-                anyhow::ensure!(
-                    preset.kind == "custom",
-                    "configuration_preset_system_immutable"
-                );
-                anyhow::ensure!(
-                    preset.updated_at == preview.current_updated_at
-                        && preset.description == preview.current_description
-                        && preset.definition == preview.current_definition,
-                    "configuration_preset_preview_stale"
-                );
-                if preview.current_definition != preview.candidate_definition {
-                    let mut current_clients = memory
-                        .configuration_preset_overrides
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|entry| {
-                            entry.preset_id == preset_id
-                                && visible_client_ids.contains(entry.client_id.as_str())
-                        })
-                        .map(|entry| entry.client_id.clone())
-                        .collect::<Vec<_>>();
-                    current_clients.sort();
-                    current_clients.dedup();
-                    anyhow::ensure!(
-                        current_clients == preview.affected_client_ids,
-                        "configuration_preset_preview_stale"
-                    );
-                }
-                let visible_override_count = memory
-                    .configuration_preset_overrides
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|entry| {
-                        entry.preset_id == preset_id
-                            && visible_client_ids.contains(entry.client_id.as_str())
-                    })
-                    .count() as i64;
-                preset.description = preview.candidate_description.clone();
-                preset.definition = preview.candidate_definition.clone();
-                preset.override_vps_count = visible_override_count;
-                preset.effective_vps_count = visible_override_count;
-                preset.updated_at = now;
-                preset.clone()
-            }
+        match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &[format!("configuration-preset:{preset_id}")],
+                    &preview.affected_client_ids,
+                )
+                .await?;
                 let current = sqlx::query(
                     r#"
                     SELECT kind, description, definition, updated_at::text AS updated_at
@@ -764,6 +602,12 @@ impl Repository {
                     .bind(preset_id)
                     .fetch_all(&mut *tx)
                     .await?;
+                    require_visible_postgres_clients_in_tx(
+                        &mut tx,
+                        &current_clients,
+                        "configuration_preset_preview_stale",
+                    )
+                    .await?;
                     anyhow::ensure!(
                         current_clients == preview.affected_client_ids,
                         "configuration_preset_preview_stale"
@@ -803,18 +647,9 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(preset);
+                Ok(preset)
             }
-        };
-        preset.effective_vps_count = preset.override_vps_count;
-        self.record_configuration_preset_audit(
-            "configuration_preset.updated",
-            &preset,
-            &preview.affected_client_ids,
-            operator,
-        )
-        .await?;
-        Ok(preset)
+        }
     }
 
     pub(crate) async fn delete_configuration_preset(
@@ -831,48 +666,13 @@ impl Repository {
             "configuration_preset_system_immutable"
         );
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden = memory.hidden_clients.read().await;
-                let visible_client_ids = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .map(|agent| agent.id.clone())
-                    .collect::<BTreeSet<_>>();
-                let mut presets = memory.configuration_presets.write().await;
-                let current = presets
-                    .iter()
-                    .find(|candidate| candidate.id == preset_id)
-                    .context("configuration_preset_not_found")?;
-                anyhow::ensure!(
-                    current.kind == "custom",
-                    "configuration_preset_system_immutable"
-                );
-                anyhow::ensure!(
-                    !memory
-                        .configuration_preset_overrides
-                        .read()
-                        .await
-                        .iter()
-                        .any(|entry| {
-                            entry.preset_id == preset_id
-                                && visible_client_ids.contains(entry.client_id.as_str())
-                        }),
-                    "configuration_preset_in_use"
-                );
-                memory
-                    .configuration_preset_overrides
-                    .write()
-                    .await
-                    .retain(|entry| entry.preset_id != preset_id);
-                presets.retain(|candidate| candidate.id != preset_id);
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_definition_lifecycles_in_tx(
+                    &mut tx,
+                    &[format!("configuration-preset:{preset_id}")],
+                )
+                .await?;
                 let kind: Option<String> = sqlx::query_scalar(
                     "SELECT kind FROM configuration_presets WHERE id = $1 FOR UPDATE",
                 )
@@ -928,16 +728,9 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(());
+                Ok(())
             }
         }
-        self.record_configuration_preset_audit(
-            "configuration_preset.deleted",
-            &preset,
-            &[],
-            operator,
-        )
-        .await
     }
 
     pub(crate) async fn list_configuration_sources(
@@ -1166,7 +959,6 @@ impl Repository {
         preview: &ConfigurationSourceOverridePreviewView,
         operator: &AuthContext,
     ) -> Result<()> {
-        let now = unix_now().to_string();
         let target_ids = preview
             .targets
             .iter()
@@ -1175,64 +967,19 @@ impl Repository {
             .into_iter()
             .collect::<Vec<_>>();
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    &target_ids,
-                    "configuration_source_override_preview_stale",
-                )
-                .await?;
-                let presets = memory.configuration_presets.read().await;
-                let mut overrides = memory.configuration_preset_overrides.write().await;
-                if let Some(reviewed) = preview.preset.as_ref() {
-                    let current = presets
-                        .iter()
-                        .find(|preset| preset.id == reviewed.id)
-                        .context("configuration_source_override_preview_stale")?;
-                    anyhow::ensure!(
-                        current.updated_at == reviewed.updated_at
-                            && current.definition == reviewed.definition,
-                        "configuration_source_override_preview_stale"
-                    );
-                }
-                let default = presets
-                    .iter()
-                    .find(|preset| preset.behavior == preview.behavior && preset.is_default)
-                    .context("configuration_preset_default_missing")?;
-                for target in &preview.targets {
-                    let current = overrides.iter().find(|entry| {
-                        entry.client_id == target.client_id && entry.behavior == preview.behavior
-                    });
-                    let current_id = current.map_or(default.id, |entry| entry.preset_id);
-                    let current_origin = if current.is_some() {
-                        "explicit_override"
-                    } else {
-                        "system_default"
-                    };
-                    anyhow::ensure!(
-                        current_id == target.before_preset_id
-                            && current_origin == target.before_origin,
-                        "configuration_source_override_preview_stale"
-                    );
-                }
-                drop(presets);
-                for target in &preview.targets {
-                    overrides.retain(|entry| {
-                        entry.client_id != target.client_id || entry.behavior != preview.behavior
-                    });
-                    if matches!(preview.action, ConfigurationOverrideAction::Set) {
-                        overrides.push(ConfigurationPresetOverrideRecord {
-                            client_id: target.client_id.clone(),
-                            behavior: preview.behavior.clone(),
-                            preset_id: target.after_preset_id,
-                            updated_at: now.clone(),
-                        });
-                    }
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let mut definition_identities =
+                    vec![format!("configuration-source:{}", preview.behavior)];
+                if let Some(reviewed) = preview.preset.as_ref() {
+                    definition_identities.push(format!("configuration-preset:{}", reviewed.id));
+                }
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &definition_identities,
+                    &target_ids,
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &target_ids,
@@ -1332,6 +1079,18 @@ impl Repository {
                         ConfigurationOverrideAction::Reset => {
                             sqlx::query(
                                 r#"
+                                UPDATE client_configuration_preset_overrides
+                                SET updated_by = $3, updated_at = now()
+                                WHERE client_id = $1 AND behavior = $2
+                                "#,
+                            )
+                            .bind(&target.client_id)
+                            .bind(&preview.behavior)
+                            .bind(operator.operator.id)
+                            .execute(&mut *tx)
+                            .await?;
+                            sqlx::query(
+                                r#"
                                 DELETE FROM client_configuration_preset_overrides
                                 WHERE client_id = $1 AND behavior = $2
                                 "#,
@@ -1359,23 +1118,9 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(());
+                Ok(())
             }
         }
-        self.record_configuration_audit(
-            "configuration_source_override.applied",
-            &format!("configuration_behavior:{}", preview.behavior),
-            serde_json::json!({
-                "action": preview.action,
-                "behavior": preview.behavior,
-                "preset_id": preview.preset.as_ref().map(|preset| preset.id),
-                "selector_expression": preview.selector_expression,
-                "target_clients": preview.targets.iter().map(|target| target.client_id.as_str()).collect::<Vec<_>>(),
-                "preview_hash": preview.preview_hash,
-            }),
-            operator,
-        )
-        .await
     }
 
     pub(crate) async fn render_configuration_preset_patch_toml(
@@ -1495,24 +1240,6 @@ impl Repository {
         adapter_kind: Option<&str>,
     ) -> Result<Vec<NetworkAdapterDefinitionView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .network_adapter_definitions
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|adapter| {
-                        adapter_kind.is_none_or(|value| adapter.adapter_kind == value)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                rows.sort_by(|left, right| {
-                    left.adapter_kind
-                        .cmp(&right.adapter_kind)
-                        .then_with(|| left.name.cmp(&right.name))
-                });
-                Ok(rows)
-            }
             Self::Postgres(pool) => Ok(sqlx::query(
                 r#"
                 SELECT id, adapter_kind, name, description, definition,
@@ -1549,40 +1276,22 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<NetworkAdapterDefinitionView> {
         validate_network_adapter_definition(request)?;
-        let now = unix_now().to_string();
+        let definition_id = Uuid::new_v4();
         match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let mut definitions = memory.network_adapter_definitions.write().await;
-                anyhow::ensure!(
-                    !definitions.iter().any(|definition| {
-                        definition.adapter_kind == request.adapter_kind
-                            && definition.name.eq_ignore_ascii_case(request.name.trim())
-                    }),
-                    "network_adapter_definition_duplicate"
-                );
-                let definition = NetworkAdapterDefinitionView {
-                    id: Uuid::new_v4(),
-                    adapter_kind: request.adapter_kind.clone(),
-                    name: request.name.trim().to_string(),
-                    description: normalized_description(request.description.as_deref()),
-                    definition: request.definition.clone(),
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                definitions.push(definition.clone());
-                drop(definitions);
-                self.record_configuration_audit(
-                    "network_adapter_definition.created",
-                    &format!("network_adapter_definition:{}", definition.id),
-                    network_adapter_audit_metadata(&definition),
-                    operator,
-                )
-                .await?;
-                Ok(definition)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_definition_lifecycles_in_tx(
+                    &mut tx,
+                    &[
+                        format!("network-adapter:{definition_id}"),
+                        format!(
+                            "network-adapter-name:{}:{}",
+                            request.adapter_kind,
+                            request.name.trim()
+                        ),
+                    ],
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO network_adapter_definitions (
@@ -1593,7 +1302,7 @@ impl Repository {
                               created_at::text AS created_at, updated_at::text AS updated_at
                     "#,
                 )
-                .bind(Uuid::new_v4())
+                .bind(definition_id)
                 .bind(&request.adapter_kind)
                 .bind(request.name.trim())
                 .bind(normalized_description(request.description.as_deref()))
@@ -1624,54 +1333,20 @@ impl Repository {
     ) -> Result<NetworkAdapterDefinitionView> {
         validate_network_adapter_definition(request)?;
         match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let plans = memory.tunnel_plans.read().await;
-                anyhow::ensure!(
-                    !plans
-                        .iter()
-                        .any(|plan| tunnel_plan_references_adapter(plan, id)),
-                    "network_adapter_definition_in_use"
-                );
-                let mut definitions = memory.network_adapter_definitions.write().await;
-                let index = definitions
-                    .iter()
-                    .position(|definition| definition.id == id)
-                    .context("network_adapter_definition_not_found")?;
-                anyhow::ensure!(
-                    definitions[index].adapter_kind == request.adapter_kind,
-                    "network_adapter_definition_kind_immutable"
-                );
-                anyhow::ensure!(
-                    !definitions.iter().any(|definition| {
-                        definition.id != id
-                            && definition.adapter_kind == request.adapter_kind
-                            && definition.name.eq_ignore_ascii_case(request.name.trim())
-                    }),
-                    "network_adapter_definition_duplicate"
-                );
-                let definition = &mut definitions[index];
-                definition.name = request.name.trim().to_string();
-                definition.description = normalized_description(request.description.as_deref());
-                definition.definition = request.definition.clone();
-                definition.updated_at = unix_now().to_string();
-                let definition = definition.clone();
-                drop(definitions);
-                drop(plans);
-                self.record_configuration_audit(
-                    "network_adapter_definition.updated",
-                    &format!("network_adapter_definition:{id}"),
-                    network_adapter_audit_metadata(&definition),
-                    operator,
-                )
-                .await?;
-                Ok(definition)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("LOCK TABLE tunnel_plans IN SHARE MODE")
-                    .execute(&mut *tx)
-                    .await?;
+                lock_postgres_definition_lifecycles_in_tx(
+                    &mut tx,
+                    &[
+                        format!("network-adapter:{id}"),
+                        format!(
+                            "network-adapter-name:{}:{}",
+                            request.adapter_kind,
+                            request.name.trim()
+                        ),
+                    ],
+                )
+                .await?;
                 let current_kind = sqlx::query_scalar::<_, String>(
                     r#"
                     SELECT adapter_kind
@@ -1729,42 +1404,21 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let plans = memory.tunnel_plans.read().await;
-                anyhow::ensure!(
-                    !plans
-                        .iter()
-                        .any(|plan| tunnel_plan_references_adapter(plan, id)),
-                    "network_adapter_definition_in_use"
-                );
-                let mut definitions = memory.network_adapter_definitions.write().await;
-                let definition = definitions
-                    .iter()
-                    .find(|definition| definition.id == id)
-                    .cloned()
-                    .context("network_adapter_definition_not_found")?;
-                let before = definitions.len();
-                definitions.retain(|definition| definition.id != id);
-                anyhow::ensure!(
-                    before != definitions.len(),
-                    "network_adapter_definition_not_found"
-                );
-                drop(definitions);
-                drop(plans);
-                self.record_configuration_audit(
-                    "network_adapter_definition.deleted",
-                    &format!("network_adapter_definition:{id}"),
-                    network_adapter_audit_metadata(&definition),
-                    operator,
-                )
-                .await?;
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("LOCK TABLE tunnel_plans IN SHARE MODE")
-                    .execute(&mut *tx)
-                    .await?;
+                lock_postgres_definition_lifecycles_in_tx(
+                    &mut tx,
+                    &[format!("network-adapter:{id}")],
+                )
+                .await?;
+                // Tunnel writers hold FOR SHARE on every referenced adapter
+                // row through commit. Locking this exact definition first
+                // therefore makes the following reference scan race-free.
+                sqlx::query("SELECT id FROM network_adapter_definitions WHERE id = $1 FOR UPDATE")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .context("network_adapter_definition_not_found")?;
                 let in_use = postgres_tunnel_plan_references_adapter(&mut tx, id).await?;
                 anyhow::ensure!(!in_use, "network_adapter_definition_in_use");
                 let row = sqlx::query(
@@ -1803,27 +1457,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let selected = client_ids.map(|client_ids| {
-                    client_ids
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<BTreeSet<_>>()
-                });
-                Ok(memory
-                    .configuration_preset_overrides
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|entry| {
-                        selected
-                            .as_ref()
-                            .is_none_or(|selected| selected.contains(entry.client_id.as_str()))
-                    })
-                    .filter(|entry| behavior.is_none_or(|value| entry.behavior == value))
-                    .cloned()
-                    .collect())
-            }
             Self::Postgres(pool) => Ok(sqlx::query(
                 r#"
                 SELECT client_id, behavior, preset_id,
@@ -1866,28 +1499,6 @@ impl Repository {
         preset_id: Uuid,
     ) -> Result<Vec<String>> {
         let mut clients = match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let visible_client_ids = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .map(|agent| agent.id.clone())
-                    .collect::<BTreeSet<_>>();
-                memory
-                    .configuration_preset_overrides
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|entry| {
-                        entry.preset_id == preset_id
-                            && visible_client_ids.contains(entry.client_id.as_str())
-                    })
-                    .map(|entry| entry.client_id.clone())
-                    .collect::<Vec<_>>()
-            }
             Self::Postgres(pool) => {
                 sqlx::query_scalar::<_, String>(
                     r#"
@@ -1906,68 +1517,6 @@ impl Repository {
         clients.sort();
         clients.dedup();
         Ok(clients)
-    }
-
-    async fn record_configuration_preset_audit(
-        &self,
-        action: &str,
-        preset: &ConfigurationPresetView,
-        client_ids: &[String],
-        operator: &AuthContext,
-    ) -> Result<()> {
-        self.record_configuration_audit(
-            action,
-            &format!("configuration_preset:{}", preset.id),
-            configuration_preset_audit_metadata(preset, client_ids),
-            operator,
-        )
-        .await
-    }
-
-    async fn record_configuration_audit(
-        &self,
-        action: &str,
-        target: &str,
-        metadata: Value,
-        operator: &AuthContext,
-    ) -> Result<()> {
-        let command_hash = payload_hash(metadata.to_string().as_bytes());
-        let metadata = configuration_audit_metadata(metadata, operator);
-        match self {
-            Self::Memory(memory) => {
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(crate::model::AuditLogView {
-                        id: Uuid::new_v4(),
-                        actor_id: Some(operator.operator.id),
-                        action: action.to_string(),
-                        target: target.to_string(),
-                        command_hash: Some(command_hash),
-                        metadata,
-                        created_at: unix_now().to_string(),
-                    });
-                Ok(())
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind(action)
-                .bind(target)
-                .bind(command_hash)
-                .bind(sqlx::types::Json(metadata))
-                .execute(pool)
-                .await?;
-                Ok(())
-            }
-        }
     }
 }
 
@@ -2572,20 +2121,6 @@ fn configuration_audit_metadata(mut metadata: Value, operator: &AuthContext) -> 
         serde_json::json!("configuration-controller"),
     );
     metadata
-}
-
-fn tunnel_plan_references_adapter(plan: &crate::model::TunnelPlanView, id: Uuid) -> bool {
-    if plan.deleted_at.is_some() {
-        return false;
-    }
-    let id = id.to_string();
-    let runtime = &plan.plan.runtime_control;
-    runtime.left_adapter_definition_id.as_deref() == Some(&id)
-        || runtime.right_adapter_definition_id.as_deref() == Some(&id)
-        || plan.plan.ospf.as_ref().is_some_and(|ospf| {
-            ospf.left_adapter_definition_id.as_deref() == Some(&id)
-                || ospf.right_adapter_definition_id.as_deref() == Some(&id)
-        })
 }
 
 async fn postgres_tunnel_plan_references_adapter(

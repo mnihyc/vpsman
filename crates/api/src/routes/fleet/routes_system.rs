@@ -34,21 +34,77 @@ pub(crate) async fn system_dashboard(
     headers: HeaderMap,
     Query(query): Query<SystemDashboardQuery>,
 ) -> Result<Json<SystemDashboardView>, ApiError> {
-    state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(load_system_dashboard(&state, &query).await?))
+    let operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let (window, chart_points) = normalize_system_dashboard_query(&query)?;
+    let key = system_dashboard_singleflight_key(
+        operator.operator.id,
+        &operator.operator.scopes,
+        window,
+        chart_points,
+    );
+    let events = state.events.clone();
+    let response = events
+        .singleflight_system_dashboard(key, move || async move {
+            load_prepared_system_dashboard(&state, window, chart_points).await
+        })
+        .await?;
+    Ok(Json(response))
 }
 
 pub(crate) async fn load_system_dashboard(
     state: &AppState,
     query: &SystemDashboardQuery,
 ) -> Result<SystemDashboardView, ApiError> {
-    let window = validate_window(query.window.as_deref())?;
-    let chart_points = query
-        .chart_points
-        .unwrap_or(DEFAULT_CHART_POINTS)
-        .clamp(1, MAX_CHART_POINTS);
+    let (window, chart_points) = normalize_system_dashboard_query(query)?;
+    load_prepared_system_dashboard(state, window, chart_points).await
+}
+
+fn normalize_system_dashboard_query(
+    query: &SystemDashboardQuery,
+) -> Result<(&'static str, i64), ApiError> {
+    Ok((
+        validate_window(query.window.as_deref())?,
+        query
+            .chart_points
+            .unwrap_or(DEFAULT_CHART_POINTS)
+            .clamp(1, MAX_CHART_POINTS),
+    ))
+}
+
+fn system_dashboard_singleflight_key(
+    operator_id: uuid::Uuid,
+    scopes: &[String],
+    window: &'static str,
+    chart_points: i64,
+) -> String {
+    serde_json::json!({
+        "endpoint": "system_dashboard",
+        "auth": crate::state::read_singleflight_auth_key(operator_id, scopes),
+        "window": window,
+        "chart_points": chart_points,
+    })
+    .to_string()
+}
+
+async fn load_prepared_system_dashboard(
+    state: &AppState,
+    window: &'static str,
+    chart_points: i64,
+) -> Result<SystemDashboardView, ApiError> {
     let now = unix_now();
-    let start = now.saturating_sub(window_seconds(window));
+    let earliest_system_bucket = if window == "all" {
+        state
+            .repo
+            .earliest_system_metric_bucket_unix()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "system_metrics_unavailable",
+                "System metric history could not be loaded.",
+            ))?
+    } else {
+        None
+    };
+    let start = system_dashboard_start(now, window, earliest_system_bucket);
     let span = now.saturating_sub(start);
     let requested_step_secs = requested_chart_step_secs(span, chart_points);
     let effective_resolution_secs = retained_system_resolution_for_age(span);
@@ -63,21 +119,20 @@ pub(crate) async fn load_system_dashboard(
         .unwrap_or(0)
         .saturating_add(1)
         .min(MAX_CHART_POINTS as u64) as i64;
-    let collected =
-        collect_system_dashboard_snapshot(state)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "system_dashboard_unavailable",
-                "The system dashboard could not be loaded.",
-            ))?;
-    let rollups = state
-        .repo
-        .list_system_metric_rollups_at_step(start, now, effective_points, bucket_secs as u64)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "system_metrics_unavailable",
-            "System metric history could not be loaded.",
-        ))?;
+    let (collected, rollups) = tokio::join!(
+        collect_system_dashboard_snapshot(state),
+        state
+            .repo
+            .list_system_metric_rollups_at_step(start, now, bucket_secs as u64,),
+    );
+    let collected = collected.map_err(ApiError::internal_mapper(
+        "system_dashboard_unavailable",
+        "The system dashboard could not be loaded.",
+    ))?;
+    let rollups = rollups.map_err(ApiError::internal_mapper(
+        "system_metrics_unavailable",
+        "System metric history could not be loaded.",
+    ))?;
     Ok(SystemDashboardView {
         generated_at: Utc::now().to_rfc3339(),
         window: window.to_string(),
@@ -200,6 +255,14 @@ fn window_seconds(window: &str) -> u64 {
     }
 }
 
+fn system_dashboard_start(now: u64, window: &str, earliest_system_bucket: Option<u64>) -> u64 {
+    if window == "all" {
+        earliest_system_bucket.unwrap_or(now).min(now)
+    } else {
+        now.saturating_sub(window_seconds(window))
+    }
+}
+
 fn requested_chart_step_secs(span: u64, points: i64) -> i32 {
     let intervals = points.clamp(2, MAX_CHART_POINTS).saturating_sub(1) as u64;
     let raw = span.div_ceil(intervals.max(1)).max(60);
@@ -253,14 +316,8 @@ fn suite_capacity(state: &AppState) -> SystemDashboardCapacityView {
         internal_http_read_secs: Some(dispatcher_config.internal_http_read_secs),
         control_deadline_grace_secs: Some(dispatcher_config.control_deadline_grace_secs),
         max_job_timeout_secs: Some(dispatcher_config.max_job_timeout_secs),
-        worker_schedule_job_max_timeout_secs: config
-            .timeout
-            .worker_schedule_job_max_timeout_secs
-            .or(config.worker.schedule_job_max_timeout_secs),
-        agent_offline_secs: config
-            .timeout
-            .agent_offline_secs
-            .or(config.worker.agent_offline_timeout_secs),
+        schedule_job_max_timeout_secs: config.worker.schedule_job_max_timeout_secs,
+        agent_offline_timeout_secs: config.worker.agent_offline_timeout_secs,
     }
 }
 
@@ -294,10 +351,10 @@ fn system_metric_series(rollups: Vec<SystemMetricRollupView>) -> Vec<SystemMetri
 
 fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
     match metric {
-        "db_pool.max_connections" => ("DB max connections", "connections"),
-        "db_pool.open_connections" => ("DB open connections", "connections"),
-        "db_pool.idle_connections" => ("DB idle connections", "connections"),
-        "db_pool.in_use_connections" => ("DB in-use connections", "connections"),
+        "db_pool.max_connections" => ("Foreground DB max connections", "connections"),
+        "db_pool.open_connections" => ("Foreground DB open connections", "connections"),
+        "db_pool.idle_connections" => ("Foreground DB idle connections", "connections"),
+        "db_pool.in_use_connections" => ("Foreground DB in-use connections", "connections"),
         "dispatch.active_jobs" => ("Active jobs", "jobs"),
         "dispatch.queued_jobs" => ("Queued jobs", "jobs"),
         "dispatch.running_jobs" => ("Running jobs", "jobs"),

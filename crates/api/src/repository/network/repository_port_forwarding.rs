@@ -12,14 +12,15 @@ use vpsman_common::{
 
 use crate::{
     internal_operator::persisted_actor_id,
-    model::{AuditLogView, AuthContext},
+    model::AuthContext,
     model_port_forwarding::{
         normalize_port_forward_hostname, CreatePortForwardRuleRequest, PortForwardBulkAction,
         PortForwardBulkItem, PortForwardRuleCorruptView, PortForwardRuleListItem,
         PortForwardRuleRecord, PortForwardRuleView, PortForwardRuntimeRecord,
         UpdatePortForwardRuleRequest, UpdateTargetHostname,
     },
-    repository::{MemoryState, Repository},
+    repository::Repository,
+    repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx,
     unix_now,
 };
 
@@ -157,18 +158,6 @@ impl Repository {
         id: Uuid,
     ) -> Result<Option<PortForwardRuleIdentity>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .port_forward_rules
-                .read()
-                .await
-                .iter()
-                .find(|record| record.id == id)
-                .map(|record| PortForwardRuleIdentity {
-                    client_id: record.client_id.clone(),
-                    enabled: record.enabled,
-                    revision: record.revision,
-                    deleted_at: record.deleted_at.clone(),
-                })),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -198,8 +187,8 @@ impl Repository {
         &self,
         id: Uuid,
     ) -> Result<Option<String>> {
-        let Self::Postgres(pool) = self else {
-            return Ok(None);
+        let pool = match self {
+            Self::Postgres(pool) => pool,
         };
         let mapping = sqlx::query_scalar::<_, SqlJson<serde_json::Value>>(
             "SELECT mappings FROM port_forward_rules WHERE id = $1",
@@ -253,27 +242,11 @@ impl Repository {
             deleted_reason: None,
             removal_confirmed_at: None,
             forgotten_at: None,
-            forgotten_by: None,
             forget_reason: None,
         };
         validate_record(&candidate)?;
 
         match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                ensure_memory_port_forward_client_active(memory, &candidate.client_id).await?;
-                {
-                    let mut rules = memory.port_forward_rules.write().await;
-                    ensure_candidate_valid(&candidate, &rules, None)?;
-                    rules.push(candidate.clone());
-                }
-                memory.audits.write().await.push(port_forward_audit_view(
-                    "network.port_forward_rule_created",
-                    &candidate,
-                    operator,
-                ));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_port_forward_client(&mut tx, &candidate.client_id).await?;
@@ -324,41 +297,6 @@ impl Repository {
     ) -> Result<PortForwardRuleView> {
         let target_hostname = normalized_target_hostname_update(&request.target_hostname)?;
         let persisted = match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                let client_id = memory
-                    .port_forward_rules
-                    .read()
-                    .await
-                    .iter()
-                    .find(|record| record.id == id && record.deleted_at.is_none())
-                    .map(|record| record.client_id.clone())
-                    .context("port_forward_rule_not_found")?;
-                ensure_memory_port_forward_client_active(memory, &client_id).await?;
-                let candidate = {
-                    let mut rules = memory.port_forward_rules.write().await;
-                    let index = rules
-                        .iter()
-                        .position(|record| record.id == id && record.deleted_at.is_none())
-                        .context("port_forward_rule_not_found")?;
-                    anyhow::ensure!(
-                        rules[index].revision == request.expected_revision,
-                        "port_forward_rule_snapshot_stale"
-                    );
-                    let mut candidate = rules[index].clone();
-                    apply_update(&mut candidate, request, &target_hostname, operator);
-                    ensure_candidate_valid(&candidate, &rules, Some(id))?;
-                    rules[index] = candidate.clone();
-                    candidate
-                };
-                memory.audits.write().await.push(port_forward_audit_view(
-                    "network.port_forward_rule_updated",
-                    &candidate,
-                    operator,
-                ));
-                candidate
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let client_id = select_postgres_port_forward_rule_client_id(&mut tx, id)
@@ -372,7 +310,7 @@ impl Repository {
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
-                        forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                        forgotten_at::text AS forgotten_at, forget_reason
                     FROM port_forward_rules
                     WHERE id = $1
                     FOR UPDATE
@@ -416,7 +354,6 @@ impl Repository {
                     deleted_reason: current.try_get("deleted_reason")?,
                     removal_confirmed_at: current.try_get("removal_confirmed_at")?,
                     forgotten_at: current.try_get("forgotten_at")?,
-                    forgotten_by: current.try_get("forgotten_by")?,
                     forget_reason: current.try_get("forget_reason")?,
                 };
                 ensure_candidate_valid(&candidate, &existing, Some(id))?;
@@ -500,46 +437,6 @@ impl Repository {
     ) -> Result<PortForwardRuleView> {
         let reason = normalize_reason(reason);
         let persisted = match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                let client_id = memory
-                    .port_forward_rules
-                    .read()
-                    .await
-                    .iter()
-                    .find(|record| record.id == id && record.deleted_at.is_none())
-                    .map(|record| record.client_id.clone())
-                    .context("port_forward_rule_not_found")?;
-                ensure_memory_port_forward_client_active(memory, &client_id).await?;
-                let persisted = {
-                    let mut rules = memory.port_forward_rules.write().await;
-                    let record = rules
-                        .iter_mut()
-                        .find(|record| record.id == id && record.deleted_at.is_none())
-                        .context("port_forward_rule_not_found")?;
-                    anyhow::ensure!(
-                        record.revision == expected_revision,
-                        "port_forward_rule_snapshot_stale"
-                    );
-                    let retire_immediately = is_never_applied_disabled_draft(record);
-                    record.enabled = false;
-                    record.revision += 1;
-                    record.updated_at = unix_now().to_string();
-                    record.deleted_at = Some(record.updated_at.clone());
-                    record.deleted_by = persisted_actor_id(operator);
-                    record.deleted_reason = reason;
-                    record.removal_confirmed_at =
-                        retire_immediately.then(|| record.updated_at.clone());
-                    record.clone()
-                };
-                memory.audits.write().await.push(port_forward_audit_view(
-                    "network.port_forward_rule_deleted",
-                    &persisted,
-                    operator,
-                ));
-                persisted
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let client_id = select_postgres_port_forward_rule_client_id(&mut tx, id)
@@ -572,7 +469,7 @@ impl Repository {
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
-                        forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                        forgotten_at::text AS forgotten_at, forget_reason
                     "#,
                 )
                 .bind(id)
@@ -606,8 +503,8 @@ impl Repository {
         configuration_error: &str,
         operator: &AuthContext,
     ) -> Result<PortForwardRuleCorruptView> {
-        let Self::Postgres(pool) = self else {
-            anyhow::bail!("port_forward_rule_configuration_corrupt");
+        let pool = match self {
+            Self::Postgres(pool) => pool,
         };
         let reason = normalize_reason(reason);
         let mut tx = pool.begin().await?;
@@ -691,53 +588,6 @@ impl Repository {
     ) -> Result<PortForwardRuleView> {
         let reason = normalize_reason(reason).context("port_forward_forget_reason_required")?;
         let persisted = match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                let client_id = memory
-                    .port_forward_rules
-                    .read()
-                    .await
-                    .iter()
-                    .find(|record| record.id == id)
-                    .map(|record| record.client_id.clone())
-                    .context("port_forward_rule_not_found")?;
-                ensure_memory_port_forward_client_active(memory, &client_id).await?;
-                let persisted = {
-                    let mut rules = memory.port_forward_rules.write().await;
-                    let record = rules
-                        .iter_mut()
-                        .find(|record| record.id == id)
-                        .context("port_forward_rule_not_found")?;
-                    anyhow::ensure!(
-                        record.revision == expected_revision,
-                        "port_forward_rule_snapshot_stale"
-                    );
-                    anyhow::ensure!(
-                        record.deleted_at.is_some()
-                            && record.removal_confirmed_at.is_none()
-                            && record.forgotten_at.is_none(),
-                        "port_forward_rule_not_removal_pending"
-                    );
-                    record.revision += 1;
-                    record.updated_at = unix_now().to_string();
-                    record.forgotten_at = Some(record.updated_at.clone());
-                    record.forgotten_by = persisted_actor_id(operator);
-                    record.forget_reason = Some(reason);
-                    record.clone()
-                };
-                memory.audits.write().await.push(port_forward_audit_view(
-                    "network.port_forward_rule_forgotten",
-                    &persisted,
-                    operator,
-                ));
-                memory
-                    .port_forward_runtime
-                    .write()
-                    .await
-                    .remove(&persisted.client_id);
-                persisted
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let client_id = select_postgres_port_forward_rule_client_id(&mut tx, id)
@@ -776,7 +626,7 @@ impl Repository {
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
-                        forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                        forgotten_at::text AS forgotten_at, forget_reason
                     "#,
                 )
                 .bind(id)
@@ -835,49 +685,6 @@ impl Repository {
         }
 
         let mut persisted = match self {
-            Self::Memory(memory) => {
-                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                let selected =
-                    validate_bulk_snapshots(memory.port_forward_rules.read().await.clone(), items)?;
-                let mut client_ids = selected
-                    .iter()
-                    .map(|record| record.client_id.clone())
-                    .collect::<Vec<_>>();
-                client_ids.sort();
-                client_ids.dedup();
-                for client_id in &client_ids {
-                    ensure_memory_port_forward_client_active(memory, client_id).await?;
-                }
-                let changed = {
-                    let mut rules = memory.port_forward_rules.write().await;
-                    let selected_ids = selected.iter().map(|record| record.id).collect::<Vec<_>>();
-                    let now = unix_now().to_string();
-                    let mut candidates = rules.clone();
-                    for record in candidates
-                        .iter_mut()
-                        .filter(|record| selected_ids.contains(&record.id))
-                    {
-                        apply_bulk_action(record, action, &now, reason, operator)?;
-                    }
-                    validate_all_enabled_records(&candidates)?;
-                    let changed = candidates
-                        .iter()
-                        .filter(|record| selected_ids.contains(&record.id))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    *rules = candidates;
-                    changed
-                };
-                let audit_action = bulk_audit_action(action);
-                let mut audits = memory.audits.write().await;
-                audits.extend(
-                    changed
-                        .iter()
-                        .map(|record| port_forward_audit_view(audit_action, record, operator)),
-                );
-                changed
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let identity_rows =
@@ -907,7 +714,7 @@ impl Repository {
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
-                        forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                        forgotten_at::text AS forgotten_at, forget_reason
                     FROM port_forward_rules
                     WHERE id = ANY($1)
                     FOR UPDATE
@@ -961,7 +768,7 @@ impl Repository {
                             created_at::text AS created_at, updated_at::text AS updated_at,
                             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                             removal_confirmed_at::text AS removal_confirmed_at,
-                            forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                            forgotten_at::text AS forgotten_at, forget_reason
                         "#,
                     )
                     .bind(candidate.id)
@@ -1001,6 +808,7 @@ impl Repository {
             .collect())
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_port_forward_runtime_snapshot(
         &self,
         client_id: &str,
@@ -1011,162 +819,14 @@ impl Repository {
             "port_forward_runtime_too_many_rules"
         );
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                if !memory_port_forward_runtime_client_active(memory, client_id).await {
-                    return Ok(());
-                }
-                let snapshot = carry_forward_owned_table_evidence(
-                    snapshot,
-                    memory
-                        .port_forward_runtime
-                        .read()
-                        .await
-                        .get(client_id)
-                        .and_then(|record| record.snapshot.as_ref()),
-                );
-                let expected = config_from_records(
-                    &memory
-                        .port_forward_rules
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|record| record.client_id == client_id && record.enabled)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )?;
-                let confirms_desired = snapshot_confirms_desired(&snapshot, &expected);
-                memory.port_forward_runtime.write().await.insert(
-                    client_id.to_string(),
-                    PortForwardRuntimeRecord {
-                        snapshot: Some(snapshot),
-                        configuration_error: None,
-                    },
-                );
-                if confirms_desired {
-                    let now = unix_now().to_string();
-                    for rule in memory
-                        .port_forward_rules
-                        .write()
-                        .await
-                        .iter_mut()
-                        .filter(|rule| {
-                            rule.client_id == client_id
-                                && rule.deleted_at.is_some()
-                                && rule.removal_confirmed_at.is_none()
-                                && rule.forgotten_at.is_none()
-                        })
-                    {
-                        rule.removal_confirmed_at = Some(now.clone());
-                        rule.updated_at = now.clone();
-                    }
-                }
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                crate::repository_key_lifecycle::lock_postgres_agent_identity_lifecycle(&mut tx)
+                record_postgres_port_forward_runtime_snapshot_in_tx(&mut tx, client_id, snapshot)
                     .await?;
-                lock_postgres_port_forward_client(&mut tx, client_id).await?;
-                if !postgres_port_forward_runtime_client_active(&mut tx, client_id).await? {
-                    return Ok(());
-                }
-                let previous = sqlx::query_scalar::<_, SqlJson<serde_json::Value>>(
-                    "SELECT snapshot FROM port_forward_runtime_state WHERE client_id = $1",
-                )
-                .bind(client_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let previous = previous.and_then(|record| {
-                    match serde_json::from_value::<PortForwardRuntimeSnapshot>(record.0) {
-                        Ok(snapshot) => Some(snapshot),
-                        Err(error) => {
-                            warn!(
-                                event = "port_forward_runtime_snapshot_corrupt",
-                                client_id = %client_id,
-                                error = %error,
-                                "overwriting malformed persisted port-forward runtime snapshot"
-                            );
-                            None
-                        }
-                    }
-                });
-                let snapshot = carry_forward_owned_table_evidence(snapshot, previous.as_ref());
-                let expected = config_from_records(
-                    &select_postgres_port_forward_rules_for_client(&mut tx, client_id)
-                        .await?
-                        .into_iter()
-                        .filter(|record| record.enabled)
-                        .collect::<Vec<_>>(),
-                )?;
-                let confirms_desired = snapshot_confirms_desired(&snapshot, &expected);
-                sqlx::query(
-                    r#"
-                    INSERT INTO port_forward_runtime_state (client_id, snapshot, observed_at)
-                    VALUES ($1, $2, to_timestamp($3::double precision))
-                    ON CONFLICT (client_id) DO UPDATE
-                    SET snapshot = EXCLUDED.snapshot,
-                        observed_at = EXCLUDED.observed_at,
-                        updated_at = now()
-                    "#,
-                )
-                .bind(client_id)
-                .bind(SqlJson(&snapshot))
-                .bind(snapshot.observed_unix as f64)
-                .execute(&mut *tx)
-                .await?;
-                if confirms_desired {
-                    sqlx::query(
-                        r#"
-                        UPDATE port_forward_rules
-                        SET removal_confirmed_at = now(), updated_at = now()
-                        WHERE client_id = $1
-                          AND deleted_at IS NOT NULL
-                          AND removal_confirmed_at IS NULL
-                          AND forgotten_at IS NULL
-                        "#,
-                    )
-                    .bind(client_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
                 tx.commit().await?;
             }
         }
         Ok(())
-    }
-
-    pub(crate) async fn port_forwarding_blocks_agent_delete(
-        &self,
-        client_id: &str,
-    ) -> Result<bool> {
-        let records = self
-            .list_port_forward_rule_records_for_client(client_id, true)
-            .await?;
-        let desired_or_pending = records.iter().any(|record| {
-            record.enabled
-                || (record.deleted_at.is_some()
-                    && record.removal_confirmed_at.is_none()
-                    && record.forgotten_at.is_none())
-        });
-        if desired_or_pending {
-            return Ok(true);
-        }
-        let runtime = self
-            .list_port_forward_runtime_records(&[client_id.to_string()])
-            .await?;
-        Ok(runtime.get(client_id).is_some_and(|runtime| {
-            let Some(snapshot) = runtime.snapshot.as_ref() else {
-                return runtime.configuration_error.is_some();
-            };
-            snapshot.owned_table_present == Some(true)
-                || (snapshot.owned_table_present.is_none()
-                    && matches!(
-                        snapshot.status,
-                        PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Drifted
-                    )
-                    && (!snapshot.rules.is_empty() || snapshot.observed_hash.is_some()))
-        }))
     }
 
     async fn get_port_forward_rule_record(
@@ -1212,27 +872,6 @@ impl Repository {
         include_removal_pending: bool,
     ) -> Result<Vec<PortForwardRuleRecord>> {
         match self {
-            Self::Memory(memory) => {
-                let records = memory
-                    .port_forward_rules
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|record| {
-                        record.client_id == client_id
-                            && (record.deleted_at.is_none()
-                                || (include_removal_pending
-                                    && record.removal_confirmed_at.is_none()
-                                    && record.forgotten_at.is_none()))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                anyhow::ensure!(
-                    records.len() <= MAX_PORT_FORWARD_RULES,
-                    "port_forward_rule_limit_exceeded"
-                );
-                Ok(records)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1242,7 +881,7 @@ impl Repository {
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
-                        forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                        forgotten_at::text AS forgotten_at, forget_reason
                     FROM port_forward_rules
                     WHERE client_id = $1
                       AND (
@@ -1283,29 +922,6 @@ impl Repository {
     ) -> Result<Vec<PortForwardRuleRead>> {
         let limit = limit.max(1);
         match self {
-            Self::Memory(memory) => {
-                let mut records = memory
-                    .port_forward_rules
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|record| {
-                        record.deleted_at.is_none()
-                            || (include_removal_pending
-                                && record.removal_confirmed_at.is_none()
-                                && record.forgotten_at.is_none())
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                records.sort_by(|left, right| {
-                    right
-                        .updated_at
-                        .cmp(&left.updated_at)
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                records.truncate(limit);
-                Ok(records.into_iter().map(PortForwardRuleRead::Rule).collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1315,7 +931,7 @@ impl Repository {
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
-                        forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+                        forgotten_at::text AS forgotten_at, forget_reason
                     FROM port_forward_rules
                     WHERE deleted_at IS NULL
                        OR ($1 AND removal_confirmed_at IS NULL AND forgotten_at IS NULL)
@@ -1347,14 +963,6 @@ impl Repository {
             return Ok(HashMap::new());
         }
         match self {
-            Self::Memory(memory) => Ok(memory
-                .port_forward_runtime
-                .read()
-                .await
-                .iter()
-                .filter(|(client_id, _)| client_ids.contains(client_id))
-                .map(|(client_id, record)| (client_id.clone(), record.clone()))
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1405,6 +1013,88 @@ impl Repository {
     }
 }
 
+/// Applies an agent runtime snapshot inside the caller's telemetry projection
+/// transaction. Callers that also lock the client row must acquire this
+/// client's port-forward fence first; taking it again here is transaction-local
+/// and keeps this helper safe for callers that do not otherwise need the row.
+pub(crate) async fn record_postgres_port_forward_runtime_snapshot_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    snapshot: &PortForwardRuntimeSnapshot,
+) -> Result<()> {
+    anyhow::ensure!(
+        snapshot.rules.len() <= MAX_PORT_FORWARD_RULES,
+        "port_forward_runtime_too_many_rules"
+    );
+    lock_postgres_port_forward_client(tx, client_id).await?;
+    if !postgres_port_forward_runtime_client_active(tx, client_id).await? {
+        return Ok(());
+    }
+    let previous = sqlx::query_scalar::<_, SqlJson<serde_json::Value>>(
+        "SELECT snapshot FROM port_forward_runtime_state WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let previous = previous.and_then(|record| {
+        match serde_json::from_value::<PortForwardRuntimeSnapshot>(record.0) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warn!(
+                    event = "port_forward_runtime_snapshot_corrupt",
+                    client_id = %client_id,
+                    error = %error,
+                    "overwriting malformed persisted port-forward runtime snapshot"
+                );
+                None
+            }
+        }
+    });
+    let snapshot = carry_forward_owned_table_evidence(snapshot, previous.as_ref());
+    let expected = config_from_records(
+        &select_postgres_port_forward_rules_for_client(tx, client_id)
+            .await?
+            .into_iter()
+            .filter(|record| record.enabled)
+            .collect::<Vec<_>>(),
+    )?;
+    let confirms_desired = snapshot_confirms_desired(&snapshot, &expected);
+    let runtime_applied = sqlx::query(
+        r#"
+        INSERT INTO port_forward_runtime_state (client_id, snapshot, observed_at)
+        VALUES ($1, $2, to_timestamp($3::double precision))
+        ON CONFLICT (client_id) DO UPDATE
+        SET snapshot = EXCLUDED.snapshot,
+            observed_at = EXCLUDED.observed_at,
+            updated_at = now()
+        WHERE port_forward_runtime_state.observed_at <= EXCLUDED.observed_at
+        "#,
+    )
+    .bind(client_id)
+    .bind(SqlJson(&snapshot))
+    .bind(snapshot.observed_unix as f64)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if runtime_applied && confirms_desired {
+        sqlx::query(
+            r#"
+            UPDATE port_forward_rules
+            SET removal_confirmed_at = now(), updated_at = now()
+            WHERE client_id = $1
+              AND deleted_at IS NOT NULL
+              AND removal_confirmed_at IS NULL
+              AND forgotten_at IS NULL
+            "#,
+        )
+        .bind(client_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 fn config_from_records(records: &[PortForwardRuleRecord]) -> Result<AgentPortForwardingConfig> {
     let mut rules = records
         .iter()
@@ -1450,38 +1140,6 @@ fn carry_forward_owned_table_evidence(
         snapshot.owned_table_present = previous.and_then(|record| record.owned_table_present);
     }
     snapshot
-}
-
-async fn memory_port_forward_client_active(memory: &MemoryState, client_id: &str) -> bool {
-    if memory.hidden_clients.read().await.contains(client_id) {
-        return false;
-    }
-    memory
-        .agents
-        .read()
-        .await
-        .iter()
-        .any(|agent| agent.id == client_id)
-}
-
-async fn memory_port_forward_runtime_client_active(memory: &MemoryState, client_id: &str) -> bool {
-    if memory.hidden_clients.read().await.contains(client_id) {
-        return false;
-    }
-    memory.agents.read().await.iter().any(|agent| {
-        agent.id == client_id && !matches!(agent.status.as_str(), "revoked" | "deleted")
-    })
-}
-
-async fn ensure_memory_port_forward_client_active(
-    memory: &MemoryState,
-    client_id: &str,
-) -> Result<()> {
-    anyhow::ensure!(
-        memory_port_forward_client_active(memory, client_id).await,
-        "port_forward_client_inactive"
-    );
-    Ok(())
 }
 
 fn ensure_candidate_valid(
@@ -1554,26 +1212,6 @@ fn runtime_rule_from_record(record: &PortForwardRuleRecord) -> PortForwardRule {
         mappings: record.mappings.clone(),
         masquerade: record.masquerade,
     }
-}
-
-fn apply_update(
-    record: &mut PortForwardRuleRecord,
-    request: &UpdatePortForwardRuleRequest,
-    target_hostname: &Option<Option<String>>,
-    operator: &AuthContext,
-) {
-    record.actor_id = persisted_actor_id(operator);
-    record.name = request.name.trim().to_string();
-    record.protocol = request.protocol;
-    record.target_ip = request.target_ip;
-    if let Some(target_hostname) = target_hostname {
-        record.target_hostname.clone_from(target_hostname);
-    }
-    record.mappings = request.mappings.clone();
-    record.masquerade = request.masquerade;
-    record.enabled = request.enabled;
-    record.revision += 1;
-    record.updated_at = unix_now().to_string();
 }
 
 fn apply_bulk_action(
@@ -1790,22 +1428,6 @@ fn bulk_audit_action(action: PortForwardBulkAction) -> &'static str {
     }
 }
 
-fn port_forward_audit_view(
-    action: &str,
-    record: &PortForwardRuleRecord,
-    operator: &AuthContext,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: persisted_actor_id(operator),
-        action: action.to_string(),
-        target: format!("port_forward_rule:{}", record.id),
-        command_hash: None,
-        metadata: port_forward_audit_metadata(record, operator),
-        created_at: unix_now().to_string(),
-    }
-}
-
 fn port_forward_audit_metadata(
     record: &PortForwardRuleRecord,
     operator: &AuthContext,
@@ -1922,7 +1544,6 @@ fn port_forward_record_from_row(row: &sqlx::postgres::PgRow) -> Result<PortForwa
         deleted_reason: row.try_get("deleted_reason")?,
         removal_confirmed_at: row.try_get("removal_confirmed_at")?,
         forgotten_at: row.try_get("forgotten_at")?,
-        forgotten_by: row.try_get("forgotten_by")?,
         forget_reason: row.try_get("forget_reason")?,
     })
 }
@@ -1950,8 +1571,9 @@ pub(crate) async fn lock_postgres_port_forward_client(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
 ) -> Result<()> {
+    lock_postgres_client_lifecycles_in_tx(tx, &[client_id.to_string()]).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(client_id)
+        .bind(format!("vpsman:port-forwarding:{client_id}"))
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -2111,7 +1733,7 @@ async fn select_postgres_port_forward_rules_for_client_excluding(
             created_at::text AS created_at, updated_at::text AS updated_at,
             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
             removal_confirmed_at::text AS removal_confirmed_at,
-            forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+            forgotten_at::text AS forgotten_at, forget_reason
         FROM port_forward_rules
         WHERE client_id = $1 AND deleted_at IS NULL
         ORDER BY id
@@ -2152,7 +1774,7 @@ async fn select_postgres_port_forward_rule(
             created_at::text AS created_at, updated_at::text AS updated_at,
             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
             removal_confirmed_at::text AS removal_confirmed_at,
-            forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
+            forgotten_at::text AS forgotten_at, forget_reason
         FROM port_forward_rules
         WHERE id = $1
         FOR UPDATE

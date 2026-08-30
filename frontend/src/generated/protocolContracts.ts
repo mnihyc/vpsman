@@ -1093,6 +1093,7 @@ export type TrafficAccountingRecord = {
   cycle_start: string | null;
   cycle_end: string | null;
   reset_day: number | null;
+  reset_hour: number | null;
   rx_bytes: number;
   tx_bytes: number;
   total_bytes: number;
@@ -1267,7 +1268,7 @@ export type PolicyAlertRecord = {
   threshold_value: number | null;
   payload: GeneratedJsonValue;
   lifecycle_state: "triggered" | "persisting" | "unknown" | "resolved" | string;
-  last_confirmed_at: string | null;
+  last_confirmed_at: string;
   resolved_at: string | null;
   resolution_reason: string | null;
   observed_at: string;

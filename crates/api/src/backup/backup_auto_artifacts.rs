@@ -7,7 +7,10 @@ use crate::{
         backup_artifact_streaming_max_bytes, stage_retained_backup_artifact_stdout,
         StagedRetainedBackupArtifact,
     },
-    model::{AuthContext, BackupArtifactView, RecordBackupArtifactMetadataRequest, WsEvent},
+    model::{
+        AuthContext, BackupArtifactView, RecordBackupArtifactMetadataRequest,
+        ServerArtifactReservation, WsEvent,
+    },
     repository_backup_artifacts::backup_server_artifact,
     routes_backups::{
         validate_plain_backup_artifact, validate_plain_backup_artifact_file_with_limit,
@@ -89,12 +92,13 @@ pub(crate) async fn try_auto_record_backup_artifact(
         size_bytes: artifact_size_bytes,
         confirmed: true,
     };
-    reserve_backup_auto_artifact(state, &backup_request, artifact_id, &metadata).await?;
+    let reservation_token =
+        reserve_backup_auto_artifact(state, &backup_request, artifact_id, &metadata).await?;
     let created_object = if let Some(prepared) = staged.as_ref() {
         let artifact_size_bytes = match prepared.size_bytes.try_into() {
             Ok(size) => size,
             Err(error) => {
-                release_backup_auto_reservation(state, &object_key).await;
+                release_backup_auto_reservation(state, &object_key, reservation_token).await;
                 cleanup_staged_backup_artifact(staged.take()).await;
                 return Err(error).context("backup artifact size is invalid");
             }
@@ -123,12 +127,12 @@ pub(crate) async fn try_auto_record_backup_artifact(
                     false
                 }
                 Ok(_) => {
-                    release_backup_auto_reservation(state, &object_key).await;
+                    release_backup_auto_reservation(state, &object_key, reservation_token).await;
                     cleanup_staged_backup_artifact(staged.take()).await;
                     return Err(anyhow::anyhow!("backup_artifact_object_key_conflict"));
                 }
                 Err(_) => {
-                    release_backup_auto_reservation(state, &object_key).await;
+                    release_backup_auto_reservation(state, &object_key, reservation_token).await;
                     cleanup_staged_backup_artifact(staged.take()).await;
                     return Err(error);
                 }
@@ -141,7 +145,7 @@ pub(crate) async fn try_auto_record_backup_artifact(
         match put_backup_artifact_object(store, &object_key, artifact_bytes).await {
             Ok(created_object) => created_object,
             Err(error) => {
-                release_backup_auto_reservation(state, &object_key).await;
+                release_backup_auto_reservation(state, &object_key, reservation_token).await;
                 cleanup_staged_backup_artifact(staged.take()).await;
                 return Err(error);
             }
@@ -149,7 +153,13 @@ pub(crate) async fn try_auto_record_backup_artifact(
     };
     match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata, operator)
+        .record_backup_artifact_metadata(
+            &backup_request,
+            artifact_id,
+            &metadata,
+            Some(reservation_token),
+            operator,
+        )
         .await
     {
         Ok(artifact) => {
@@ -166,6 +176,7 @@ pub(crate) async fn try_auto_record_backup_artifact(
                 state,
                 store,
                 &object_key,
+                reservation_token,
                 &error.to_string(),
                 created_object,
             )
@@ -294,7 +305,7 @@ async fn reserve_backup_auto_artifact(
     backup_request: &crate::model::BackupRequestView,
     artifact_id: uuid::Uuid,
     request: &RecordBackupArtifactMetadataRequest,
-) -> Result<()> {
+) -> Result<uuid::Uuid> {
     let artifact = BackupArtifactView {
         id: artifact_id,
         client_id: backup_request.client_id.clone(),
@@ -305,16 +316,26 @@ async fn reserve_backup_auto_artifact(
         content_available: false,
         created_at: crate::unix_now().to_string(),
     };
-    state
+    match state
         .repo
         .reserve_server_artifact(backup_server_artifact(backup_request, &artifact))
-        .await
+        .await?
+    {
+        ServerArtifactReservation::Created(token) => Ok(token),
+        ServerArtifactReservation::AlreadyActiveIdentical | ServerArtifactReservation::Conflict => {
+            anyhow::bail!("server_artifact_object_key_conflict")
+        }
+    }
 }
 
-async fn release_backup_auto_reservation(state: &AppState, object_key: &str) {
+async fn release_backup_auto_reservation(
+    state: &AppState,
+    object_key: &str,
+    reservation_token: uuid::Uuid,
+) {
     let _ = state
         .repo
-        .discard_server_artifact_reservation(object_key)
+        .discard_server_artifact_reservation(object_key, reservation_token)
         .await;
 }
 
@@ -322,6 +343,7 @@ async fn cleanup_backup_auto_reserved_object_after_error(
     state: &AppState,
     store: &crate::object_store::BackupObjectStore,
     object_key: &str,
+    reservation_token: uuid::Uuid,
     error: &str,
     created_object: bool,
 ) {
@@ -330,14 +352,15 @@ async fn cleanup_backup_auto_reserved_object_after_error(
             Ok(()) => {
                 let _ = state
                     .repo
-                    .discard_server_artifact_reservation(object_key)
+                    .discard_server_artifact_reservation(object_key, reservation_token)
                     .await;
             }
             Err(delete_error) => {
                 let _ = state
                     .repo
-                    .mark_server_artifact_delete_failed(
+                    .fail_server_artifact_reservation(
                         object_key,
+                        reservation_token,
                         &format!("{error}; cleanup_delete_failed: {delete_error}"),
                     )
                     .await;
@@ -346,7 +369,7 @@ async fn cleanup_backup_auto_reserved_object_after_error(
     } else {
         let _ = state
             .repo
-            .discard_server_artifact_reservation(object_key)
+            .discard_server_artifact_reservation(object_key, reservation_token)
             .await;
     }
 }

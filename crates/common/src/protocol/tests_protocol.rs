@@ -58,27 +58,25 @@ fn server_hello_carries_server_version_and_build_number() {
 }
 
 #[test]
-fn legacy_runtime_reload_request_does_not_force_a_sync() {
+fn runtime_reload_request_defaults_to_no_sync() {
     let request: AgentRuntimeConfigReloadRequest = serde_json::from_value(serde_json::json!({
         "client_id": "edge-a",
         "current_content_hash": "ab",
-        "reason": "legacy-agent"
+        "reason": "agent-reconnect"
     }))
     .unwrap();
 
     assert!(!request.requires_authoritative_sync);
     assert!(request.reconcile_resources.is_empty());
-    assert!(!request.requires_port_forwarding_sync);
 }
 
 #[test]
-fn runtime_reload_scope_is_additive_and_accepts_legacy_forwarding_requests() {
+fn runtime_reload_scope_uses_the_explicit_resource_set() {
     let request: AgentRuntimeConfigReloadRequest = serde_json::from_value(serde_json::json!({
         "client_id": "edge-a",
         "current_content_hash": "ab",
         "reason": "reconnect",
-        "reconcile_resources": ["runtime_tunnels"],
-        "requires_port_forwarding_sync": true
+        "reconcile_resources": ["runtime_tunnels", "port_forwarding"]
     }))
     .unwrap();
     let scope = super::RuntimeConfigReconcileScope::from_reload_request(&request);
@@ -97,26 +95,21 @@ fn tunnel_deletion_reason_covers_runtime_tunnel_reconciliation() {
 }
 
 #[test]
-fn hello_payloads_remain_additive_across_rolling_updates() {
+fn hello_payloads_require_build_identity_and_accept_optional_capabilities() {
     let process_incarnation_id = uuid::Uuid::new_v4();
-    let legacy_agent = serde_json::json!({
+    let missing_agent_build = serde_json::json!({
         "client_id": "edge-a",
         "process_incarnation_id": process_incarnation_id,
-        "agent_version": "0.1.0",
+        "agent_version": "0.5.0",
         "os_release": "Linux",
         "arch": "x86_64"
     });
-    let decoded_agent: AgentHello = serde_json::from_value(legacy_agent).unwrap();
-    assert_eq!(decoded_agent.internal_build_number, 1);
-    assert!(decoded_agent.update_heartbeat.is_none());
-    assert!(decoded_agent.cpu_model.is_none());
-    assert!(decoded_agent.kernel_release.is_none());
-    assert!(decoded_agent.virtualization.is_none());
+    assert!(serde_json::from_value::<AgentHello>(missing_agent_build).is_err());
 
-    let future_agent = serde_json::json!({
+    let current_agent = serde_json::json!({
         "client_id": "edge-a",
         "process_incarnation_id": process_incarnation_id,
-        "agent_version": "0.2.0",
+        "agent_version": "0.5.0",
         "internal_build_number": 2000,
         "os_release": "Linux",
         "arch": "x86_64",
@@ -126,31 +119,37 @@ fn hello_payloads_remain_additive_across_rolling_updates() {
         "capabilities": {},
         "future_optional_capability": { "enabled": true }
     });
-    let decoded_agent: AgentHello = serde_json::from_value(future_agent).unwrap();
+    let decoded_agent: AgentHello = serde_json::from_value(current_agent).unwrap();
     assert_eq!(decoded_agent.internal_build_number, 2000);
     assert_eq!(decoded_agent.cpu_model.as_deref(), Some("Example CPU"));
     assert_eq!(decoded_agent.kernel_release.as_deref(), Some("6.12.0"));
     assert_eq!(decoded_agent.virtualization.as_deref(), Some("kvm"));
 
-    let legacy_server = serde_json::json!({
+    let missing_server_build = serde_json::json!({
         "server_id": "gateway-a",
-        "server_version": "0.1.0",
+        "server_version": "0.5.0",
         "accepted": true,
         "message": "accepted",
         "telemetry_interval_secs": 15
     });
-    let decoded_server: ServerHello = serde_json::from_value(legacy_server).unwrap();
-    assert_eq!(decoded_server.server_build_number, 1);
+    assert!(serde_json::from_value::<ServerHello>(missing_server_build).is_err());
 
-    let mut future_server = serde_json::to_value(decoded_server).unwrap();
+    let mut future_server = serde_json::json!({
+        "server_id": "gateway-a",
+        "server_version": "0.5.0",
+        "server_build_number": 3000,
+        "accepted": true,
+        "message": "accepted",
+        "telemetry_interval_secs": 15
+    });
     future_server["future_optional_policy"] = serde_json::json!("ignored");
     let decoded_server: ServerHello = serde_json::from_value(future_server).unwrap();
     assert!(decoded_server.accepted);
 }
 
 #[test]
-fn legacy_job_requests_default_to_the_minimum_protocol() {
-    let request: super::JobRequest = serde_json::from_value(serde_json::json!({
+fn command_frames_require_an_explicit_protocol_generation() {
+    let request = serde_json::from_value::<super::JobRequest>(serde_json::json!({
         "job_id": uuid::Uuid::new_v4(),
         "command": {
             "type": "shell",
@@ -158,14 +157,30 @@ fn legacy_job_requests_default_to_the_minimum_protocol() {
             "pty": false
         },
         "max_timeout_secs": 30
-    }))
-    .unwrap();
+    }));
 
-    assert_eq!(request.command_version, super::MIN_COMMAND_PROTOCOL_VERSION);
+    assert!(request.is_err());
+
+    let resume = serde_json::from_value::<super::CommandResume>(serde_json::json!({
+        "job_id": uuid::Uuid::new_v4(),
+        "payload_hash": "sha256:example",
+        "next_output_seq": 4
+    }));
+    assert!(resume.is_err());
+
+    let dispatch_result =
+        serde_json::from_value::<super::GatewayCommandDispatchResult>(serde_json::json!({
+            "client_id": "edge-a",
+            "job_id": uuid::Uuid::new_v4(),
+            "accepted": false,
+            "message": "rejected",
+            "outputs": []
+        }));
+    assert!(dispatch_result.is_err());
 }
 
 #[test]
-fn update_commands_keep_the_legacy_dispatch_protocol() {
+fn update_commands_use_the_frozen_dispatch_protocol() {
     let command = JobCommand::AgentUpdateCheck {
         version_url: Some("https://updates.example/version.json".to_string()),
         activate: false,
@@ -210,7 +225,7 @@ fn agent_lifecycle_commands_use_the_new_exclusive_confirmed_protocol() {
 }
 
 #[test]
-fn unchanged_network_interfaces_read_keeps_the_legacy_dispatch_protocol() {
+fn network_interfaces_read_uses_its_original_dispatch_protocol() {
     let command = JobCommand::NetworkInterfaces;
     assert_eq!(
         super::job_command_dispatch_protocol_version(&command),

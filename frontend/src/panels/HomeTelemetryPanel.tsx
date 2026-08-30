@@ -1619,16 +1619,18 @@ function trafficValue(
 }
 
 function trafficPointValue(
-  point: { rx_bytes: number; tx_bytes: number },
+  point: { rx_bytes: number | null; tx_bytes: number | null },
   sort: DashboardTrafficSort,
-): number {
+): number | null {
   if (sort === "rx") {
     return point.rx_bytes;
   }
   if (sort === "tx") {
     return point.tx_bytes;
   }
-  return point.rx_bytes + point.tx_bytes;
+  return point.rx_bytes === null || point.tx_bytes === null
+    ? null
+    : point.rx_bytes + point.tx_bytes;
 }
 
 function trafficSortLabel(sort: DashboardTrafficSort): string {

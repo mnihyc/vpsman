@@ -33,9 +33,7 @@ test -f "$bundle_root/compose.yml"
 test -f "$bundle_root/nginx.conf"
 test -f "$bundle_root/config/vpsman.toml"
 test -f "$bundle_root/docs/production-deployment.md"
-test -f "$bundle_root/docs/migration-compatibility.md"
 grep -qF '](docs/production-deployment.md)' "$bundle_root/README.md"
-grep -qF '](docs/migration-compatibility.md)' "$bundle_root/README.md"
 if grep -qF '](../docs/' "$bundle_root/README.md"; then
   echo "bundled README contains a broken parent-relative docs link" >&2
   exit 1

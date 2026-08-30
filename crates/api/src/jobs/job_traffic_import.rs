@@ -1,17 +1,9 @@
-use std::{
-    collections::BTreeMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        OnceLock,
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
-use futures_util::{stream, StreamExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{oneshot, Notify};
 use tracing::{debug, warn};
 use vpsman_common::{
     CommandOutput, JobCommand, NetworkTrafficImportBatch, NetworkTrafficImportBucket,
@@ -22,22 +14,21 @@ use vpsman_common::{
 use crate::{state::AppState, TargetDispatchOutcome};
 
 const NETWORK_TRAFFIC_IMPORT_FINALIZER_INTERVAL_SECS: u64 = 5;
-const NETWORK_TRAFFIC_IMPORT_FINALIZER_BATCH: i64 = 128;
-const NETWORK_TRAFFIC_IMPORT_FINALIZER_IN_FLIGHT: usize = 4;
 const NETWORK_TRAFFIC_IMPORT_FINALIZER_RETRY_AFTER_SECS: u64 = 30;
+// This lease is crash recovery, never a processing deadline. Renewal at one
+// third of the window leaves two complete renewal opportunities without
+// limiting how long a valid import may run.
+const NETWORK_TRAFFIC_IMPORT_FINALIZER_LEASE_SECS: u64 = 30;
+const NETWORK_TRAFFIC_IMPORT_FINALIZER_RENEW_SECS: u64 = 10;
 
 struct NetworkTrafficImportFinalizerState {
     notify: Notify,
-    started: AtomicBool,
-    sweep_lock: Mutex<()>,
 }
 
 impl Default for NetworkTrafficImportFinalizerState {
     fn default() -> Self {
         Self {
             notify: Notify::new(),
-            started: AtomicBool::new(false),
-            sweep_lock: Mutex::new(()),
         }
     }
 }
@@ -49,11 +40,10 @@ fn finalizer_state() -> &'static NetworkTrafficImportFinalizerState {
     NETWORK_TRAFFIC_IMPORT_FINALIZER_STATE.get_or_init(NetworkTrafficImportFinalizerState::default)
 }
 
-pub(crate) fn spawn_network_traffic_import_finalizer(state: AppState) {
+pub(crate) fn spawn_network_traffic_import_finalizer(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
     let finalizer = finalizer_state();
-    if finalizer.started.swap(true, Ordering::AcqRel) {
-        return;
-    }
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(
             NETWORK_TRAFFIC_IMPORT_FINALIZER_INTERVAL_SECS,
@@ -67,63 +57,101 @@ pub(crate) fn spawn_network_traffic_import_finalizer(state: AppState) {
                 warn!(%error, "durable vnStat import finalizer sweep failed");
             }
         }
-    });
+    })
 }
 
-pub(crate) fn wake_network_traffic_import_finalizer(state: AppState) {
+pub(crate) fn wake_network_traffic_import_finalizer() {
     finalizer_state().notify.notify_one();
-    if !finalizer_state().started.load(Ordering::Acquire) {
-        tokio::spawn(async move {
-            if let Err(error) = finalize_pending_network_traffic_imports(&state).await {
-                warn!(%error, "durable vnStat import finalizer wake failed");
-            }
-        });
-    }
 }
 
 pub(crate) async fn finalize_pending_network_traffic_imports(state: &AppState) -> Result<usize> {
-    let _guard = finalizer_state().sweep_lock.lock().await;
-    let pending = state
-        .repo
-        .list_pending_network_traffic_import_finalizations(NETWORK_TRAFFIC_IMPORT_FINALIZER_BATCH)
-        .await?;
-    let results = stream::iter(pending)
-        .map(|item| async move {
-            let result =
-                finalize_network_traffic_import_target(state, item.job_id, &item.client_id).await;
-            (item, result)
-        })
-        .buffer_unordered(NETWORK_TRAFFIC_IMPORT_FINALIZER_IN_FLIGHT)
-        .collect::<Vec<_>>()
-        .await;
     let mut finalized = 0_usize;
-    for (item, result) in results {
+    loop {
+        let Some(owner) = state
+            .repo
+            .claim_network_traffic_import_finalization(NETWORK_TRAFFIC_IMPORT_FINALIZER_LEASE_SECS)
+            .await?
+        else {
+            break;
+        };
+        if !owner.target_active {
+            if !owner.acknowledge().await? {
+                warn!("obsolete vnStat import work changed owner before acknowledgement");
+            }
+            continue;
+        }
+        let job_id = owner.job_id;
+        let client_id = owner.client_id.clone();
+        let final_seq = owner.final_seq;
+        let heartbeat_owner = owner.clone();
+        let (heartbeat_stop, heartbeat_stop_rx) = oneshot::channel();
+        let heartbeat = tokio::spawn(renew_network_traffic_import_owner_until_stopped(
+            heartbeat_owner,
+            heartbeat_stop_rx,
+        ));
+        let result =
+            finalize_network_traffic_import_target(state, job_id, &client_id, final_seq).await;
+        let _ = heartbeat_stop.send(());
+        match heartbeat.await {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => warn!(
+                %job_id,
+                %client_id,
+                "vnStat import finalization lease changed owner while work was active"
+            ),
+            Ok(Err(error)) => warn!(
+                %error,
+                %job_id,
+                %client_id,
+                "vnStat import finalization lease renewal failed"
+            ),
+            Err(error) => warn!(
+                %error,
+                %job_id,
+                %client_id,
+                "vnStat import finalization lease task failed"
+            ),
+        }
         match result {
-            Ok(true) => finalized += 1,
-            Ok(false) => {}
+            Ok(applied) => {
+                let acknowledged = owner.acknowledge().await?;
+                if applied && acknowledged {
+                    finalized += 1;
+                }
+                if !acknowledged {
+                    warn!(
+                        %job_id,
+                        %client_id,
+                        "vnStat import completed after its ownership token changed"
+                    );
+                }
+            }
             Err(error) => {
                 warn!(
                     %error,
-                    job_id = %item.job_id,
-                    client_id = %item.client_id,
+                    %job_id,
+                    %client_id,
                     "vnStat import finalization failed and remains queued for retry"
                 );
-                if let Err(message_error) = state
-                    .repo
-                    .defer_network_traffic_import_finalization(
-                        item.job_id,
-                        &item.client_id,
-                        "vnStat server import retry pending",
+                match owner
+                    .defer(
+                        &error.to_string(),
                         NETWORK_TRAFFIC_IMPORT_FINALIZER_RETRY_AFTER_SECS,
                     )
                     .await
                 {
-                    warn!(
-                        %message_error,
-                        job_id = %item.job_id,
-                        client_id = %item.client_id,
+                    Ok(true) => {}
+                    Ok(false) => warn!(
+                        %job_id,
+                        %client_id,
+                        "vnStat import retry was not deferred because ownership changed"
+                    ),
+                    Err(defer_error) => warn!(
+                        %defer_error,
+                        %job_id,
+                        %client_id,
                         "vnStat import retry state could not be recorded"
-                    );
+                    ),
                 }
             }
         }
@@ -134,18 +162,42 @@ pub(crate) async fn finalize_pending_network_traffic_imports(state: &AppState) -
     Ok(finalized)
 }
 
+async fn renew_network_traffic_import_owner_until_stopped(
+    owner: crate::repository_job_outputs::ClaimedNetworkTrafficImportFinalization,
+    mut stop: oneshot::Receiver<()>,
+) -> Result<bool> {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(
+                NETWORK_TRAFFIC_IMPORT_FINALIZER_RENEW_SECS,
+            )) => {
+                if !owner
+                    .renew(NETWORK_TRAFFIC_IMPORT_FINALIZER_LEASE_SECS)
+                    .await?
+                {
+                    return Ok(false);
+                }
+            }
+            _ = &mut stop => return Ok(true),
+        }
+    }
+}
+
 async fn finalize_network_traffic_import_target(
     state: &AppState,
     job_id: uuid::Uuid,
     client_id: &str,
+    final_seq: i32,
 ) -> Result<bool> {
-    let Some(candidate) = state
+    let candidate = state
         .repo
         .contiguous_final_job_output_candidate(job_id, client_id)
         .await?
-    else {
-        return Ok(false);
-    };
+        .ok_or_else(|| anyhow::anyhow!("claimed vnStat import lost its final output"))?;
+    anyhow::ensure!(
+        candidate.seq == final_seq,
+        "claimed vnStat import final output changed"
+    );
     let received_at = candidate
         .received_at
         .clone()
@@ -183,10 +235,7 @@ async fn finalize_network_traffic_import_target(
     {
         return Ok(false);
     }
-    let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
-    state
-        .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed)
-        .await?;
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
     Ok(true)
 }
 
@@ -425,7 +474,3 @@ fn command_output_matches(left: &CommandOutput, right: &CommandOutput) -> bool {
         && left.exit_code == right.exit_code
         && left.done == right.done
 }
-
-#[cfg(test)]
-#[path = "tests_job_traffic_import.rs"]
-mod tests;

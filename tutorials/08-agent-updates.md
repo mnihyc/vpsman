@@ -25,25 +25,16 @@ tag-derived version that appears in `version.json`, so an agent reports
 
 ## Rolling Update Contract
 
-The control plane and agents may be updated in either order. Non-breaking wire
-changes are additive, omitted command versions always mean the original v1
-shape, and each command family rejects unsupported versions as a completed
-`rejected` target instead of terminating the agent process. An unknown future
-command is rejected for that job while the existing gateway session and other
-supported operations remain available.
+The control plane, gateways, and agents use explicit required protocol versions.
+Deploy matching release artifacts as one coordinated update. Each command
+family reports an unsupported version as a completed `rejected` target instead
+of terminating the agent process; other supported operations remain available.
 
 The direct `agent_update` command is the permanent recovery path. It always
 uses the v1 command contract containing the complete HTTPS artifact URL and
 SHA-256 digest. Future incompatible update behavior must use a new command
 variant; required fields must never be added to the existing update variants.
-Published `version.json` schema 3 retains the schema-2 fields needed by
-existing agents, and those fields are additive-only. This keeps these two
-orders valid:
-
-- Control plane first: old agents continue telemetry and supported jobs; newer
-  command versions are visibly rejected until those agents are updated.
-- Agent first: the new agent continues using the v1 frame and hello contracts,
-  so an older gateway/API can accept it and dispatch the v1 update commands.
+Published `version.json` manifests must use schema 3.
 
 After a runtime config sync succeeds, the agent atomically records the last
 accepted config at
@@ -98,9 +89,9 @@ Record the external release metadata in the private API:
 ```sh
 cargo run -p vpsctl -- agent-update-release-record \
   --name vpsman-agent \
-  --version 0.1.0 \
+  --version X.Y.Z \
   --channel stable \
-  --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl \
+  --artifact-url https://github.com/<owner>/vpsman/releases/download/vX.Y.Z/vpsman-agent-linux-x86_64-musl \
   --sha256-hex <64_hex_sha256> \
   --size-bytes <artifact_size_bytes> \
   --confirmed
@@ -111,11 +102,11 @@ Add rollback metadata when the previous binary is also externally hosted:
 ```sh
 cargo run -p vpsctl -- agent-update-release-record \
   --name vpsman-agent \
-  --version 0.1.1 \
+  --version X.Y.Z \
   --channel stable \
-  --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl \
+  --artifact-url https://github.com/<owner>/vpsman/releases/download/vX.Y.Z/vpsman-agent-linux-x86_64-musl \
   --sha256-hex <64_hex_sha256> \
-  --rollback-artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl \
+  --rollback-artifact-url https://github.com/<owner>/vpsman/releases/download/vA.B.C/vpsman-agent-linux-x86_64-musl \
   --rollback-sha256-hex <64_hex_rollback_sha256> \
   --confirmed
 ```
@@ -173,7 +164,7 @@ URLs back into dispatch shortcuts.
 
 ```sh
 cargo run -p vpsctl -- agent-update \
-  --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl \
+  --artifact-url https://github.com/<owner>/vpsman/releases/download/vX.Y.Z/vpsman-agent-linux-x86_64-musl \
   --sha256-hex <64_hex_sha256> \
   --tags edge \
   --confirmed

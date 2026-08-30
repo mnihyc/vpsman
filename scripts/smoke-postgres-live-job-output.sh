@@ -210,7 +210,6 @@ run_worker_once() {
   if ! timeout 45 target/debug/vpsman-worker \
     --postgres-url "$postgres_url" \
     --migrations-dir "$ROOT_DIR/migrations" \
-    --worker-id "postgres-live-job-worker-$(date +%s%N)" \
     --once >"$worker_log" 2>&1; then
     smoke_dump_logs "worker once failed for scheduled resume smoke" \
       "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$worker_log" "$agent_log"

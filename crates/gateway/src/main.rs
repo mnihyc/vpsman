@@ -11,7 +11,10 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +23,7 @@ use clap::Parser;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
     time,
 };
 use tracing::{debug, info, warn};
@@ -187,6 +191,7 @@ async fn main() -> Result<()> {
         runtime_config.forward_config,
         args.telemetry_in_flight,
     );
+    let mut forward_consumers_task = api_client.start_forward_consumers();
     let state = GatewayState {
         forward_metrics: api_client.forward_metrics(),
         ..GatewayState::default()
@@ -195,24 +200,24 @@ async fn main() -> Result<()> {
         runtime_config.reconnect_grace_secs,
         runtime_config.dispatch_ack_secs,
     );
-    spawn_gateway_runtime_config_reloader(
+    let mut runtime_config_task = spawn_gateway_runtime_config_reloader(
         base_args,
         runtime_config,
         state.clone(),
         api_client.clone(),
     );
-    spawn_gateway_command_enqueue_cleanup(state.clone());
+    let mut enqueue_cleanup_task = spawn_gateway_command_enqueue_cleanup(state.clone());
     let critical_failure_state = state.clone();
     api_client.set_critical_failure_handler(move |client_id, reason| {
         let state = critical_failure_state.clone();
-        tokio::spawn(async move {
+        async move {
             request_agent_disconnect(&state, &client_id, reason).await;
-        });
+        }
     });
     let session_rejection_state = state.clone();
     api_client.set_session_rejection_handler(move |client_id, gateway_session_id| {
         let state = session_rejection_state.clone();
-        tokio::spawn(async move {
+        async move {
             if invalidate_agent_session_if_current(
                 &state,
                 &client_id,
@@ -233,26 +238,123 @@ async fn main() -> Result<()> {
                     "ignored API rejection for a superseded gateway session"
                 );
             }
-        });
+        }
+    });
+    let telemetry_route_refresh_state = state.clone();
+    api_client.set_telemetry_route_refresh_handler(move |client_id, gateway_session_id| {
+        let state = telemetry_route_refresh_state.clone();
+        async move {
+            refresh_client_route_after_committed_telemetry(&state, &client_id, gateway_session_id)
+                .await;
+        }
     });
     let agent_args = args.clone();
     let agent_state = state.clone();
     let agent_api_client = api_client.clone();
     let control_args = args.clone();
     let control_state = state.clone();
-    let shutdown_state = state.clone();
-    let shutdown_api_client = api_client.clone();
     let shutdown_flush = args.gateway_spool_config().shutdown_flush;
+    let (listener_shutdown, listener_shutdown_rx) = watch::channel(false);
+    let mut agent_listener = Box::pin(run_agent_listener(
+        agent_args,
+        agent_state,
+        agent_api_client,
+        listener_shutdown_rx.clone(),
+    ));
+    let mut control_listener = Box::pin(run_control_listener(
+        control_args,
+        control_state,
+        listener_shutdown_rx,
+    ));
 
-    tokio::select! {
-        result = run_agent_listener(agent_args, agent_state, agent_api_client) => result?,
-        result = run_control_listener(control_args, control_state) => result?,
-        _ = shutdown_signal() => {
-            request_all_agent_disconnects(&shutdown_state, "gateway_shutdown").await;
-            shutdown_api_client.shutdown_flush(shutdown_flush).await;
+    enum GatewayRuntimeExit {
+        Shutdown,
+        AgentListener(Result<()>),
+        ControlListener(Result<()>),
+        ForwardConsumers(std::result::Result<(), tokio::task::JoinError>),
+        RuntimeConfig(std::result::Result<(), tokio::task::JoinError>),
+        EnqueueCleanup(std::result::Result<(), tokio::task::JoinError>),
+    }
+
+    let exit = tokio::select! {
+        result = agent_listener.as_mut() => GatewayRuntimeExit::AgentListener(result),
+        result = control_listener.as_mut() => GatewayRuntimeExit::ControlListener(result),
+        result = &mut forward_consumers_task => GatewayRuntimeExit::ForwardConsumers(result),
+        result = &mut runtime_config_task => GatewayRuntimeExit::RuntimeConfig(result),
+        result = &mut enqueue_cleanup_task => GatewayRuntimeExit::EnqueueCleanup(result),
+        _ = shutdown_signal() => GatewayRuntimeExit::Shutdown,
+    };
+    let agent_listener_completed = matches!(&exit, GatewayRuntimeExit::AgentListener(_));
+    let control_listener_completed = matches!(&exit, GatewayRuntimeExit::ControlListener(_));
+    let forward_consumers_completed = matches!(&exit, GatewayRuntimeExit::ForwardConsumers(_));
+    let runtime_config_completed = matches!(&exit, GatewayRuntimeExit::RuntimeConfig(_));
+    let enqueue_cleanup_completed = matches!(&exit, GatewayRuntimeExit::EnqueueCleanup(_));
+    let mut runtime_error = match exit {
+        GatewayRuntimeExit::Shutdown => None,
+        GatewayRuntimeExit::AgentListener(result) => {
+            Some(listener_stopped("gateway agent listener", result))
+        }
+        GatewayRuntimeExit::ControlListener(result) => {
+            Some(listener_stopped("gateway control listener", result))
+        }
+        GatewayRuntimeExit::ForwardConsumers(result) => {
+            Some(background_task_stopped("gateway forward consumers", result))
+        }
+        GatewayRuntimeExit::RuntimeConfig(result) => Some(background_task_stopped(
+            "gateway runtime config reload",
+            result,
+        )),
+        GatewayRuntimeExit::EnqueueCleanup(result) => Some(background_task_stopped(
+            "gateway command enqueue cleanup",
+            result,
+        )),
+    };
+
+    // Stop every producer first. Agent connection owners finalize and enqueue
+    // their exact session-ended event before either listener reports drained.
+    let _ = listener_shutdown.send(true);
+    request_all_agent_disconnects(&state, "gateway_shutdown").await;
+    if !agent_listener_completed {
+        if let Err(error) = agent_listener.as_mut().await {
+            record_runtime_error(
+                &mut runtime_error,
+                error.context("gateway agent listener drain"),
+            );
         }
     }
-    Ok(())
+    if !control_listener_completed {
+        if let Err(error) = control_listener.as_mut().await {
+            record_runtime_error(
+                &mut runtime_error,
+                error.context("gateway control listener drain"),
+            );
+        }
+    }
+
+    // No connection finalizer can enqueue after both listener-owned JoinSets
+    // are empty. Only now close replay acceptance and flush forwarding.
+    api_client.shutdown_flush(shutdown_flush).await;
+    if !forward_consumers_completed {
+        if let Err(error) = (&mut forward_consumers_task).await {
+            record_runtime_error(
+                &mut runtime_error,
+                anyhow!(error).context("gateway forward consumer shutdown"),
+            );
+        }
+    }
+    if !runtime_config_completed {
+        runtime_config_task.abort();
+        let _ = (&mut runtime_config_task).await;
+    }
+    if !enqueue_cleanup_completed {
+        enqueue_cleanup_task.abort();
+        let _ = (&mut enqueue_cleanup_task).await;
+    }
+
+    match runtime_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 impl Args {
@@ -307,11 +409,7 @@ impl Args {
 
     fn apply_runtime_suite_config(&mut self, config: &SuiteConfig) {
         if env_absent("VPSMAN_GATEWAY_RECONNECT_GRACE_SECS") {
-            if let Some(value) = config
-                .gateway
-                .reconnect_grace_secs
-                .or(config.timeout.gateway_reconnect_grace_secs)
-            {
+            if let Some(value) = config.gateway.reconnect_grace_secs {
                 self.reconnect_grace_secs = value;
             }
         }
@@ -403,7 +501,7 @@ fn spawn_gateway_runtime_config_reloader(
     mut current: GatewayRuntimeConfig,
     state: GatewayState,
     api_client: GatewayControlClient,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_secs(5));
         loop {
@@ -433,10 +531,10 @@ fn spawn_gateway_runtime_config_reloader(
                 ),
             }
         }
-    });
+    })
 }
 
-fn spawn_gateway_command_enqueue_cleanup(state: GatewayState) {
+fn spawn_gateway_command_enqueue_cleanup(state: GatewayState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_secs(60));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -452,7 +550,30 @@ fn spawn_gateway_command_enqueue_cleanup(state: GatewayState) {
                 debug!(removed, "pruned expired gateway command enqueue markers");
             }
         }
-    });
+    })
+}
+
+fn background_task_stopped(
+    name: &str,
+    result: std::result::Result<(), tokio::task::JoinError>,
+) -> anyhow::Error {
+    match result {
+        Ok(()) => anyhow!("{name} task exited unexpectedly"),
+        Err(error) => anyhow!("{name} task failed: {error}"),
+    }
+}
+
+fn listener_stopped(name: &str, result: Result<()>) -> anyhow::Error {
+    match result {
+        Ok(()) => anyhow!("{name} stopped unexpectedly"),
+        Err(error) => error.context(format!("{name} failed")),
+    }
+}
+
+fn record_runtime_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
+    if slot.is_none() {
+        *slot = Some(error);
+    }
 }
 
 fn env_absent(name: &str) -> bool {
@@ -578,15 +699,36 @@ async fn run_agent_listener(
     args: Args,
     state: GatewayState,
     api_client: GatewayControlClient,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("failed to bind gateway on {}", args.bind))?;
     info!(bind = %args.bind, "gateway listening");
     let connection_permits = Arc::new(Semaphore::new(MAX_AGENT_CONNECTIONS));
+    let mut connections = JoinSet::new();
+    let (connection_shutdown, connection_shutdown_rx) = watch::channel(false);
+    let mut listener_error = None;
 
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let accepted = tokio::select! {
+            biased;
+            _ = wait_for_gateway_shutdown(&mut shutdown) => break,
+            accepted = listener.accept() => accepted,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(%error, "agent connection consumer failed after exact session finalization");
+                }
+                continue;
+            }
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                listener_error = Some(error);
+                break;
+            }
+        };
         let peer = canonicalize_peer_addr(peer);
         let Some(permit) =
             try_acquire_agent_connection_permit(&connection_permits, &api_client, peer)
@@ -597,12 +739,159 @@ async fn run_agent_listener(
         let args = args.clone();
         let state = state.clone();
         let api_client = api_client.clone();
-        tokio::spawn(async move {
+        let ownership = Arc::new(AgentConnectionOwnership::new(peer));
+        let mut connection_shutdown = connection_shutdown_rx.clone();
+        connections.spawn(async move {
             let _permit = permit;
-            if let Err(error) = handle_agent(stream, peer, args, state, api_client).await {
+            let gateway_id = args.gateway_id.clone();
+            let mut agent = tokio::spawn(handle_agent(
+                stream,
+                peer,
+                args,
+                state.clone(),
+                api_client.clone(),
+                ownership.clone(),
+            ));
+            let (result, reason) = tokio::select! {
+                biased;
+                joined = &mut agent => match joined {
+                    Ok(result) => {
+                        let reason = result.as_ref().err().map(session_end_reason);
+                        (Some(result), reason)
+                    }
+                    Err(error) => {
+                        warn!(%peer, %error, "agent session consumer stopped unexpectedly");
+                        (
+                            None,
+                            Some("agent_session_consumer_stopped_unexpectedly".to_string()),
+                        )
+                    }
+                },
+                _ = wait_for_gateway_shutdown(&mut connection_shutdown) => {
+                    agent.abort();
+                    let _ = agent.await;
+                    (None, Some("gateway_shutdown".to_string()))
+                }
+            };
+            ownership
+                .finalize(&state, &api_client, &gateway_id, reason)
+                .await;
+            if let Some(Err(error)) = result {
                 warn!(%peer, %error, "agent session ended with error");
             }
         });
+    }
+    drop(listener);
+    let _ = connection_shutdown.send(true);
+    while let Some(completed) = connections.join_next().await {
+        if let Err(error) = completed {
+            warn!(%error, "agent connection owner failed during shutdown drain");
+        }
+    }
+    match listener_error {
+        Some(error) => Err(error).context("gateway agent listener failed"),
+        None => Ok(()),
+    }
+}
+
+fn gateway_shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn wait_for_gateway_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    while !gateway_shutdown_requested(shutdown) {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+struct AgentConnectionIdentity {
+    client_id: Option<String>,
+    noise_public_key_hex: Option<String>,
+}
+
+struct AgentConnectionOwnership {
+    session_id: uuid::Uuid,
+    remote_ip: String,
+    identity: StdMutex<AgentConnectionIdentity>,
+    finalized: AtomicBool,
+}
+
+impl AgentConnectionOwnership {
+    fn new(peer: SocketAddr) -> Self {
+        Self {
+            session_id: uuid::Uuid::new_v4(),
+            remote_ip: peer.ip().to_string(),
+            identity: StdMutex::new(AgentConnectionIdentity {
+                client_id: None,
+                noise_public_key_hex: None,
+            }),
+            finalized: AtomicBool::new(false),
+        }
+    }
+
+    fn set_noise_public_key(&self, value: Option<String>) {
+        if let Ok(mut identity) = self.identity.lock() {
+            identity.noise_public_key_hex = value;
+        }
+    }
+
+    fn set_client_id(&self, value: String) {
+        if let Ok(mut identity) = self.identity.lock() {
+            identity.client_id = Some(value);
+        }
+    }
+
+    async fn finalize(
+        &self,
+        state: &GatewayState,
+        control: &GatewayControlClient,
+        gateway_id: &str,
+        reason: Option<String>,
+    ) {
+        if self.finalized.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (client_id, noise_public_key_hex) = self
+            .identity
+            .lock()
+            .map(|identity| {
+                (
+                    identity.client_id.clone(),
+                    identity.noise_public_key_hex.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let Some(client_id) = client_id else {
+            return;
+        };
+        if unregister_session_if_current(state, &client_id, self.session_id).await {
+            state
+                .disconnected_at
+                .write()
+                .await
+                .insert(client_id.clone(), std::time::Instant::now());
+        }
+        let end_event = GatewaySessionLifecycleIngest {
+            gateway_id: gateway_id.to_string(),
+            client_id: client_id.clone(),
+            session_id: self.session_id,
+            noise_public_key_hex,
+            agent_version: None,
+            remote_ip: Some(self.remote_ip.clone()),
+            reason,
+        };
+        control
+            .post(&client_id, "/internal/v1/gateway/session-ended", &end_event)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(
+                    %error,
+                    client_id,
+                    "failed to enqueue gateway session-ended event"
+                )
+            });
     }
 }
 
@@ -643,11 +932,13 @@ async fn handle_agent(
     args: Args,
     state: GatewayState,
     control: GatewayControlClient,
+    ownership: Arc<AgentConnectionOwnership>,
 ) -> Result<()> {
     let mut stream = accept_noise_stream(stream, &args).await?;
     let noise_public_key_hex = stream.remote_static().map(hex::encode);
+    ownership.set_noise_public_key(noise_public_key_hex.clone());
     let remote_ip = peer.ip().to_string();
-    let session_id = uuid::Uuid::new_v4();
+    let session_id = ownership.session_id;
     let mut client_id = None::<String>;
     let mut process_incarnation_id = None::<uuid::Uuid>;
     let (command_tx, mut command_rx) =
@@ -727,6 +1018,7 @@ async fn handle_agent(
                     session_id,
                     command_tx: &command_tx,
                     close_tx: &close_tx,
+                    ownership: &ownership,
                 };
                 if let Err(error) =
                     handle_agent_frame(
@@ -830,38 +1122,6 @@ async fn handle_agent(
         }
     };
 
-    if let Some(client_id) = client_id {
-        unregister_session_if_current(&state, &client_id, session_id).await;
-        state
-            .disconnected_at
-            .write()
-            .await
-            .insert(client_id.clone(), std::time::Instant::now());
-        let end_event = GatewaySessionLifecycleIngest {
-            gateway_id: args.gateway_id.clone(),
-            client_id,
-            session_id,
-            noise_public_key_hex,
-            agent_version: None,
-            remote_ip: Some(remote_ip),
-            reason: result.as_ref().err().map(session_end_reason),
-        };
-        let target_key = end_event.client_id.clone();
-        control
-            .post(
-                &target_key,
-                "/internal/v1/gateway/session-ended",
-                &end_event,
-            )
-            .await
-            .unwrap_or_else(|error| {
-                warn!(
-                    %error,
-                    client_id = %target_key,
-                    "failed to enqueue gateway session-ended event"
-                )
-            });
-    }
     result
 }
 
@@ -888,6 +1148,23 @@ async fn request_all_agent_disconnects(state: &GatewayState, reason: &str) {
 }
 
 async fn register_session(state: &GatewayState, client_id: &str, session: GatewaySession) {
+    let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
+    if state
+        .client_suspension_fences
+        .read()
+        .await
+        .get(client_id)
+        .copied()
+        .is_some_and(|fence| fence.active_at(std::time::Instant::now()))
+    {
+        let _ = session
+            .close_tx
+            .send(Some(GatewaySessionCloseRequest::Graceful(
+                "agent_suspended".to_string(),
+            )));
+        return;
+    }
     let previous = state
         .sessions
         .write()
@@ -903,6 +1180,8 @@ async fn register_session(state: &GatewayState, client_id: &str, session: Gatewa
 }
 
 async fn close_agent_session_now(state: &GatewayState, client_id: &str, reason: &str) -> bool {
+    let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let previous = state.sessions.write().await.remove(client_id);
     let Some(session) = previous else {
         return false;
@@ -921,6 +1200,8 @@ async fn invalidate_agent_session_if_current(
     gateway_session_id: uuid::Uuid,
     reason: &str,
 ) -> bool {
+    let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let session = {
         let mut sessions = state.sessions.write().await;
         if !sessions
@@ -942,17 +1223,45 @@ async fn invalidate_agent_session_if_current(
     true
 }
 
+async fn refresh_client_route_after_committed_telemetry(
+    state: &GatewayState,
+    client_id: &str,
+    gateway_session_id: uuid::Uuid,
+) -> bool {
+    let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
+    let sessions = state.sessions.read().await;
+    if !sessions
+        .get(client_id)
+        .is_some_and(|session| session.session_id == gateway_session_id)
+    {
+        return false;
+    }
+    drop(sessions);
+    state
+        .client_suspension_fences
+        .write()
+        .await
+        .remove(client_id);
+    true
+}
+
 async fn unregister_session_if_current(
     state: &GatewayState,
     client_id: &str,
     session_id: uuid::Uuid,
-) {
+) -> bool {
+    let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let mut sessions = state.sessions.write().await;
     if sessions
         .get(client_id)
         .is_some_and(|session| session.session_id == session_id)
     {
         sessions.remove(client_id);
+        true
+    } else {
+        false
     }
 }
 
@@ -987,6 +1296,7 @@ struct AgentFrameContext<'a> {
     session_id: uuid::Uuid,
     command_tx: &'a mpsc::Sender<GatewaySessionMessage>,
     close_tx: &'a watch::Sender<Option<GatewaySessionCloseRequest>>,
+    ownership: &'a AgentConnectionOwnership,
 }
 
 async fn handle_agent_frame(
@@ -1038,6 +1348,7 @@ async fn handle_agent_frame(
             }
             *client_id = Some(hello.client_id.clone());
             *process_incarnation_id = Some(hello.process_incarnation_id);
+            context.ownership.set_client_id(hello.client_id.clone());
             register_session(
                 context.state,
                 &hello.client_id,

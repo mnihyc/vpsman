@@ -1,5 +1,12 @@
 import { useCallback, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPut,
+  isApiUnauthorized,
+  LatestReadConsumer,
+} from "../api";
 import { TOPOLOGY_EVIDENCE_LIMIT } from "../constants";
 import type {
   AllocateTunnelEndpointsRequest,
@@ -89,6 +96,17 @@ export function useTopologyData(
     ospfUpdatePlans: 0,
     topologyGraph: 0,
   });
+  const topologyLoadConsumers = useRef<
+    Record<TopologySource, LatestReadConsumer>
+  >({
+    tunnelPlans: new LatestReadConsumer(),
+    networkAdapterDefinitions: new LatestReadConsumer(),
+    networkObservations: new LatestReadConsumer(),
+    networkTrends: new LatestReadConsumer(),
+    ospfRecommendations: new LatestReadConsumer(),
+    ospfUpdatePlans: new LatestReadConsumer(),
+    topologyGraph: new LatestReadConsumer(),
+  });
 
   const beginTopologyLoad = useCallback((source: TopologySource) => {
     const generation = topologyLoadGenerations.current[source] + 1;
@@ -126,39 +144,41 @@ export function useTopologyData(
         return;
       }
       const generation = beginTopologyLoad(source);
-      try {
-        const value = await request();
-        if (
-          apiTokenRef.current !== apiToken ||
-          topologyLoadGenerations.current[source] !== generation
-        ) {
-          return;
+      return topologyLoadConsumers.current[source].enqueue(async () => {
+        try {
+          const value = await request();
+          if (
+            apiTokenRef.current !== apiToken ||
+            topologyLoadGenerations.current[source] !== generation
+          ) {
+            return;
+          }
+          apply(value);
+          delete topologyErrors.current[source];
+          setTopologyError(summarizeTopologyErrors(topologyErrors.current));
+        } catch (error) {
+          if (
+            apiTokenRef.current !== apiToken ||
+            topologyLoadGenerations.current[source] !== generation
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            reset();
+            topologyErrors.current[source] = "Operator login required";
+          } else {
+            topologyErrors.current[source] =
+              error instanceof Error ? error.message : fallback;
+          }
+          setTopologyError(summarizeTopologyErrors(topologyErrors.current));
+          if (rethrow) {
+            throw error;
+          }
+        } finally {
+          finishTopologyLoad(source, generation);
         }
-        apply(value);
-        delete topologyErrors.current[source];
-        setTopologyError(summarizeTopologyErrors(topologyErrors.current));
-      } catch (error) {
-        if (
-          apiTokenRef.current !== apiToken ||
-          topologyLoadGenerations.current[source] !== generation
-        ) {
-          return;
-        }
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          reset();
-          topologyErrors.current[source] = "Operator login required";
-        } else {
-          topologyErrors.current[source] =
-            error instanceof Error ? error.message : fallback;
-        }
-        setTopologyError(summarizeTopologyErrors(topologyErrors.current));
-        if (rethrow) {
-          throw error;
-        }
-      } finally {
-        finishTopologyLoad(source, generation);
-      }
+      });
     },
     [apiToken, beginTopologyLoad, finishTopologyLoad, onUnauthorized],
   );
@@ -644,6 +664,7 @@ export function useTopologyData(
     apiTokenRef.current = "";
     for (const source of TOPOLOGY_SOURCE_ORDER) {
       topologyLoadGenerations.current[source] += 1;
+      topologyLoadConsumers.current[source].discardPending();
     }
     topologyPendingLoads.current.clear();
     topologyErrors.current = {};

@@ -17,8 +17,9 @@ use crate::repository_jobs::{
     skip_unstarted_queued_targets_for_client_in_tx,
 };
 use crate::repository_key_lifecycle::{
-    lock_postgres_agent_identity_lifecycle, public_key_sha256_hex, require_visible_memory_clients,
-    require_visible_postgres_clients_in_tx,
+    lock_postgres_client_lifecycles_in_tx, lock_postgres_definition_lifecycles_in_tx,
+    lock_postgres_definitions_and_clients_in_tx, lock_postgres_key_identities_in_tx,
+    public_key_sha256_hex, require_visible_postgres_clients_in_tx,
 };
 use crate::repository_port_forwarding::{
     archive_postgres_port_forwarding_for_agent_delete, lock_postgres_port_forward_client,
@@ -33,30 +34,13 @@ use crate::unix_now;
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
 const TAG_NATURAL_SORT_SETTING_KEY: &str = "order.namespace_natural_sort_enabled";
 
-pub(crate) fn display_name_key(display_name: &str) -> String {
-    display_name.trim().to_lowercase()
-}
-
 impl Repository {
     pub(crate) async fn ensure_visible_display_name_available(
         &self,
         display_name: &str,
         except_client_id: Option<&str>,
     ) -> Result<()> {
-        let key = display_name_key(display_name);
         match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                if agents.iter().any(|agent| {
-                    except_client_id.is_none_or(|except| agent.id != except)
-                        && !hidden.contains(&agent.id)
-                        && display_name_key(&agent.display_name) == key
-                }) {
-                    anyhow::bail!("display_name_already_exists");
-                }
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -101,67 +85,6 @@ impl Repository {
 
     pub(crate) async fn fleet_summary(&self) -> Result<FleetSummary> {
         match self {
-            Self::Memory(memory) => {
-                let (total, online, offline, never, suspended, revoked, stale, unknown) = {
-                    let agents = memory.agents.read().await;
-                    let hidden = memory.hidden_clients.read().await;
-                    let visible_agents = agents
-                        .iter()
-                        .filter(|agent| !hidden.contains(&agent.id))
-                        .collect::<Vec<_>>();
-                    let (
-                        mut online,
-                        mut offline,
-                        mut never,
-                        mut suspended,
-                        mut revoked,
-                        mut stale,
-                        mut unknown,
-                    ) = (
-                        0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize,
-                    );
-                    for agent in &visible_agents {
-                        match agent.status.as_str() {
-                            "online" if agent.last_seen_at.is_some() => online += 1,
-                            "offline" | "disconnected" => offline += 1,
-                            "never" => never += 1,
-                            "suspended" => suspended += 1,
-                            "revoked" => revoked += 1,
-                            "stale" => stale += 1,
-                            _ => unknown += 1,
-                        }
-                    }
-                    (
-                        visible_agents.len(),
-                        online,
-                        offline,
-                        never,
-                        suspended,
-                        revoked,
-                        stale,
-                        unknown,
-                    )
-                };
-                let running_jobs = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
-                    .count();
-                Ok(FleetSummary {
-                    total,
-                    online,
-                    offline,
-                    never,
-                    suspended,
-                    revoked,
-                    unknown,
-                    stale,
-                    warnings: offline + never + revoked + stale + unknown,
-                    running_jobs,
-                })
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -219,32 +142,22 @@ impl Repository {
 
     async fn list_agents_by_ids(&self, client_ids: Option<&[String]>) -> Result<Vec<AgentView>> {
         match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
-                let selected = client_ids.map(|client_ids| {
-                    client_ids
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<HashSet<_>>()
-                });
-                Ok(memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| {
-                        !hidden.contains(&agent.id)
-                            && selected
-                                .as_ref()
-                                .is_none_or(|selected| selected.contains(agent.id.as_str()))
-                    })
-                    .map(|agent| agent_with_ordered_tags(agent, &tag_order))
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH tags_by_client AS (
+                        SELECT
+                            ct.client_id,
+                            array_agg(
+                                t.name
+                                ORDER BY t.display_order, t.created_at, t.name
+                            ) AS tags
+                        FROM visible_clients tag_client
+                        JOIN client_tags ct ON ct.client_id = tag_client.id
+                        JOIN tags t ON t.id = ct.tag_id
+                        WHERE ($1::text[] IS NULL OR tag_client.id = ANY($1))
+                        GROUP BY ct.client_id
+                    )
                     SELECT
                         c.id,
                         c.display_name,
@@ -259,14 +172,12 @@ impl Repository {
                         c.stale_reason,
                         c.capabilities,
                         COALESCE(
-                            array_remove(array_agg(t.name ORDER BY t.display_order, t.created_at, t.name), NULL),
+                            tags_by_client.tags,
                             ARRAY[]::TEXT[]
                         ) AS tags
                     FROM visible_clients c
-                    LEFT JOIN client_tags ct ON ct.client_id = c.id
-                    LEFT JOIN tags t ON t.id = ct.tag_id
+                    LEFT JOIN tags_by_client ON tags_by_client.client_id = c.id
                     WHERE ($1::text[] IS NULL OR c.id = ANY($1))
-                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -305,39 +216,6 @@ impl Repository {
 
     pub(crate) async fn list_tags(&self) -> Result<Vec<TagView>> {
         match self {
-            Self::Memory(memory) => {
-                let mut names = memory.tag_order.read().await.names.clone();
-                let mut seen = names.iter().cloned().collect::<HashSet<_>>();
-                let hidden = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                for agent in agents.iter() {
-                    if hidden.contains(&agent.id) {
-                        continue;
-                    }
-                    for tag in &agent.tags {
-                        if seen.insert(tag.clone()) {
-                            names.push(tag.clone());
-                        }
-                    }
-                }
-                let tag_order = memory_tag_order_map(&names);
-                Ok(names
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, name)| TagView {
-                        clients: agents
-                            .iter()
-                            .filter(|agent| {
-                                !hidden.contains(&agent.id)
-                                    && agent.tags.iter().any(|tag| tag == &name)
-                            })
-                            .map(|agent| agent_with_ordered_tags(agent, &tag_order))
-                            .collect(),
-                        display_order: tag_display_order(index),
-                        name,
-                    })
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -391,27 +269,6 @@ impl Repository {
 
     pub(crate) async fn tag_order_state(&self) -> Result<TagOrderState> {
         let (ordered_tags, namespace_natural_sort_enabled) = match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                let discovered = agents
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .flat_map(|agent| agent.tags.iter().cloned())
-                    .collect::<Vec<_>>();
-                drop(agents);
-                drop(hidden);
-                let mut tag_order = memory.tag_order.write().await;
-                let natural_sort = tag_order.namespace_natural_sort_enabled;
-                insert_tags_into_last_namespace_blocks(
-                    &mut tag_order.names,
-                    &discovered,
-                    natural_sort,
-                );
-                let ordered_tags = ordered_tag_metadata(&tag_order.names);
-                (ordered_tags, tag_order.namespace_natural_sort_enabled)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -473,27 +330,6 @@ impl Repository {
 
     pub(crate) async fn create_tag_name(&self, name: String) -> Result<TagView> {
         match self {
-            Self::Memory(memory) => {
-                let mut tag_order = memory.tag_order.write().await;
-                let natural_sort = tag_order.namespace_natural_sort_enabled;
-                insert_tags_into_last_namespace_blocks(
-                    &mut tag_order.names,
-                    std::slice::from_ref(&name),
-                    natural_sort,
-                );
-                let display_order = tag_display_order(
-                    tag_order
-                        .names
-                        .iter()
-                        .position(|tag| tag == &name)
-                        .context("created tag missing from memory order")?,
-                );
-                Ok(TagView {
-                    name,
-                    display_order,
-                    clients: Vec::new(),
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 ensure_postgres_tags_in_order(&mut tx, std::slice::from_ref(&name)).await?;
@@ -510,39 +346,6 @@ impl Repository {
         updated_by: Uuid,
     ) -> Result<TagOrderState> {
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let hidden = memory.hidden_clients.read().await;
-                let agents = memory.agents.read().await;
-                let discovered = agents
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .flat_map(|agent| agent.tags.iter().cloned())
-                    .collect::<Vec<_>>();
-                drop(agents);
-                drop(hidden);
-                let mut tag_order = memory.tag_order.write().await;
-                let mut current = tag_order.names.clone();
-                for tag in discovered {
-                    if !current.iter().any(|known| known == &tag) {
-                        current.push(tag);
-                    }
-                }
-                let mut ordered = normalize_tag_order(current, &request.ordered_tags)?;
-                if request.namespace_natural_sort_enabled {
-                    normalize_tag_namespace_blocks(&mut ordered);
-                }
-                tag_order.names = ordered;
-                tag_order.namespace_natural_sort_enabled = request.namespace_natural_sort_enabled;
-                let ordered = tag_order.names.clone();
-                drop(tag_order);
-                Ok(TagOrderState {
-                    tags: self
-                        .tag_views_for_ordered_tags(&ordered_tag_metadata(&ordered))
-                        .await?,
-                    namespace_natural_sort_enabled: request.namespace_natural_sort_enabled,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_tag_order_setting(&mut tx).await?;
@@ -668,55 +471,17 @@ impl Repository {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn assign_agent_tag(&self, client_id: &str, tag: &str) -> Result<TagView> {
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
-                    .await?;
-                let display_order = {
-                    let mut tag_order = memory.tag_order.write().await;
-                    let natural_sort = tag_order.namespace_natural_sort_enabled;
-                    insert_tags_into_last_namespace_blocks(
-                        &mut tag_order.names,
-                        &[tag.to_string()],
-                        natural_sort,
-                    );
-                    tag_display_order(
-                        tag_order
-                            .names
-                            .iter()
-                            .position(|existing| existing == tag)
-                            .context("assigned tag missing from memory order")?,
-                    )
-                };
-                let mut agents = memory.agents.write().await;
-                if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
-                    if !agent.tags.iter().any(|existing| existing == tag) {
-                        agent.tags.push(tag.to_string());
-                    }
-                }
-                drop(agents);
-                let hidden = memory.hidden_clients.read().await;
-                Ok(TagView {
-                    name: tag.to_string(),
-                    display_order,
-                    clients: memory
-                        .agents
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|agent| {
-                            !hidden.contains(&agent.id)
-                                && agent.tags.iter().any(|existing| existing == tag)
-                        })
-                        .cloned()
-                        .collect(),
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &[format!("tag:{tag}")],
+                    &[client_id.to_string()],
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &[client_id.to_string()],
@@ -734,11 +499,6 @@ impl Repository {
                 .bind(client_id)
                 .bind(tag)
                 .execute(&mut *tx)
-                .await?;
-                crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-                    &mut tx,
-                    &[client_id.to_string()],
-                )
                 .await?;
                 let view = postgres_tag_view_in_tx(&mut tx, tag).await?;
                 tx.commit().await?;
@@ -779,78 +539,18 @@ impl Repository {
             ));
         }
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let target_client_ids = targets
-                    .iter()
-                    .map(|agent| agent.id.clone())
-                    .collect::<Vec<_>>();
-                require_visible_memory_clients(
-                    memory,
-                    &target_client_ids,
-                    "fixed_targets_not_found",
-                )
-                .await?;
-                let mut changed = 0_usize;
-                if matches!(request.action, BulkTagMutationAction::Add) {
-                    let mut tag_order = memory.tag_order.write().await;
-                    let natural_sort = tag_order.namespace_natural_sort_enabled;
-                    insert_tags_into_last_namespace_blocks(
-                        &mut tag_order.names,
-                        std::slice::from_ref(&request.tag),
-                        natural_sort,
-                    );
-                }
-                let hidden = memory.hidden_clients.read().await.clone();
-                let target_ids = targets
-                    .iter()
-                    .map(|agent| agent.id.as_str())
-                    .collect::<HashSet<_>>();
-                let mut agents = memory.agents.write().await;
-                for agent in agents.iter_mut().filter(|agent| {
-                    !hidden.contains(&agent.id) && target_ids.contains(agent.id.as_str())
-                }) {
-                    match request.action {
-                        BulkTagMutationAction::Add => {
-                            if !agent.tags.iter().any(|tag| tag == &request.tag) {
-                                agent.tags.push(request.tag.clone());
-                                changed += 1;
-                            }
-                        }
-                        BulkTagMutationAction::Remove => {
-                            let before = agent.tags.len();
-                            agent.tags.retain(|tag| tag != &request.tag);
-                            if agent.tags.len() != before {
-                                changed += 1;
-                            }
-                        }
-                    }
-                }
-                if changed > 0 {
-                    self.record_tag_mutation_event(
-                        tag_action_label(&request.action),
-                        &request.tag,
-                        &targets,
-                    )
-                    .await?;
-                }
-                Ok(tag_mutation_response(
-                    &request.tag,
-                    tag_action_label(&request.action),
-                    Some(&request.selector_expression),
-                    targets,
-                    changed,
-                    schedule_impacts,
-                    false,
-                ))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let target_client_ids = targets
                     .iter()
                     .map(|agent| agent.id.clone())
                     .collect::<Vec<_>>();
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &[format!("tag:{}", request.tag)],
+                    &target_client_ids,
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &target_client_ids,
@@ -897,11 +597,6 @@ impl Repository {
                     }
                 }
                 if changed > 0 {
-                    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-                        &mut tx,
-                        &target_client_ids,
-                    )
-                    .await?;
                     Self::record_postgres_tag_mutation_event_in_tx(
                         &mut tx,
                         tag_action_label(&request.action),
@@ -957,57 +652,45 @@ impl Repository {
             ));
         }
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                memory
-                    .tag_order
-                    .write()
-                    .await
-                    .names
-                    .retain(|existing| existing != tag);
-                let mut changed = 0_usize;
-                let mut agents = memory.agents.write().await;
-                for agent in agents.iter_mut() {
-                    let before = agent.tags.len();
-                    agent.tags.retain(|existing| existing != tag);
-                    if before != agent.tags.len() {
-                        changed += 1;
-                    }
-                }
-                if changed > 0 {
-                    self.record_tag_mutation_event("delete", tag, &affected)
-                        .await?;
-                }
-                Ok(tag_mutation_response(
-                    tag,
-                    "delete",
-                    None,
-                    affected,
-                    changed,
-                    schedule_impacts,
-                    false,
-                ))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                let mut affected_client_ids = affected
+                    .iter()
+                    .map(|agent| agent.id.clone())
+                    .collect::<Vec<_>>();
+                affected_client_ids.sort();
+                affected_client_ids.dedup();
+                lock_postgres_definition_lifecycles_in_tx(&mut tx, &[format!("tag:{tag}")]).await?;
+                let current_client_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT c.id
+                    FROM visible_clients c
+                    JOIN client_tags ct ON ct.client_id = c.id
+                    JOIN tags t ON t.id = ct.tag_id
+                    WHERE t.name = $1
+                    ORDER BY c.id
+                    "#,
+                )
+                .bind(tag)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(
+                    current_client_ids == affected_client_ids,
+                    "tag_mutation_snapshot_stale"
+                );
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &affected_client_ids).await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &affected_client_ids,
+                    "tag_mutation_snapshot_stale",
+                )
+                .await?;
                 lock_postgres_tag_order_setting(&mut tx).await?;
                 lock_postgres_tags_in_order(&mut tx).await?;
                 let result = sqlx::query("DELETE FROM tags WHERE name = $1")
                     .bind(tag)
                     .execute(&mut *tx)
                     .await?;
-                if result.rows_affected() > 0 {
-                    let affected_client_ids = affected
-                        .iter()
-                        .map(|agent| agent.id.clone())
-                        .collect::<Vec<_>>();
-                    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-                        &mut tx,
-                        &affected_client_ids,
-                    )
-                    .await?;
-                }
                 let changed = if result.rows_affected() > 0 {
                     affected.len()
                 } else {
@@ -1068,25 +751,14 @@ impl Repository {
             ));
         }
         match self {
-            Self::Memory(_) => {
-                self.assign_agent_tag(client_id, tag).await?;
-                if preview_changed > 0 {
-                    self.record_tag_mutation_event("assign", tag, &affected)
-                        .await?;
-                }
-                Ok(tag_mutation_response(
-                    tag,
-                    "assign",
-                    None,
-                    affected,
-                    preview_changed,
-                    schedule_impacts,
-                    false,
-                ))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &[format!("tag:{tag}")],
+                    &[client_id.to_string()],
+                )
+                .await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &[client_id.to_string()],
@@ -1107,11 +779,6 @@ impl Repository {
                 .await?
                 .rows_affected() as usize;
                 if changed > 0 {
-                    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-                        &mut tx,
-                        &[client_id.to_string()],
-                    )
-                    .await?;
                     Self::record_postgres_tag_mutation_event_in_tx(
                         &mut tx, "assign", tag, &affected,
                     )
@@ -1246,17 +913,6 @@ impl Repository {
         Ok(impacts)
     }
 
-    async fn record_tag_mutation_event(
-        &self,
-        action: &str,
-        tag: &str,
-        affected: &[AgentView],
-    ) -> Result<()> {
-        self.record_webhook_event(Self::tag_mutation_event(action, tag, affected))
-            .await?;
-        Ok(())
-    }
-
     async fn record_postgres_tag_mutation_event_in_tx(
         tx: &mut Transaction<'_, Postgres>,
         action: &str,
@@ -1305,17 +961,6 @@ impl Repository {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn suspend_agent(
-        &self,
-        client_id: &str,
-        reason: Option<&str>,
-        operator: &AuthContext,
-    ) -> Result<AgentSuspensionMutationResult> {
-        self.suspend_agent_with_protected_dispatches(client_id, reason, operator, &[])
-            .await
-    }
-
     pub(crate) async fn suspend_agent_with_protected_dispatches(
         &self,
         client_id: &str,
@@ -1334,112 +979,6 @@ impl Repository {
             "agent_suspend_reason_invalid"
         );
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
-                    .await?;
-                let prior_status = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .map(|agent| agent.status.clone())
-                    .context("agent_not_found")?;
-                match prior_status.as_str() {
-                    "never" | "disconnected" | "offline" | "stale" => {}
-                    "suspended" => anyhow::bail!("agent_already_suspended"),
-                    "online" => anyhow::bail!("agent_suspend_online"),
-                    _ => anyhow::bail!("agent_suspend_ineligible"),
-                }
-                let suspended_at = unix_now().to_string();
-                let record = AgentSuspensionRecord {
-                    suspended_at: suspended_at.clone(),
-                    suspended_by: Some(operator.operator.id),
-                    suspended_reason: reason.clone(),
-                    suspended_from_status: prior_status.clone(),
-                };
-                {
-                    let mut agents = memory.agents.write().await;
-                    let agent = agents
-                        .iter_mut()
-                        .find(|agent| agent.id == client_id)
-                        .context("agent_not_found")?;
-                    agent.status = "suspended".to_string();
-                }
-                memory
-                    .agent_suspensions
-                    .write()
-                    .await
-                    .insert(client_id.to_string(), record.clone());
-                let skipped_job_ids = self
-                    .skip_suspended_undelivered_targets_for_client_except(
-                        client_id,
-                        "target_suspended",
-                        "target_suspended: target skipped because VPS is suspended",
-                        protected_enqueued_job_ids,
-                    )
-                    .await?;
-                memory
-                    .client_status_history
-                    .write()
-                    .await
-                    .push(ClientStatusHistoryView {
-                        id: Uuid::new_v4(),
-                        client_id: client_id.to_string(),
-                        from_status: Some(prior_status.clone()),
-                        to_status: "suspended".to_string(),
-                        reason: "operator_suspended".to_string(),
-                        metadata: json!({
-                            "reason": &reason,
-                            "operator_id": operator.operator.id,
-                            "origin_kind": "operator_request",
-                            "component": "inventory-controller",
-                        }),
-                        created_at: suspended_at.clone(),
-                    });
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "agent.suspended".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "client_id": client_id,
-                        "from_status": prior_status,
-                        "to_status": "suspended",
-                        "reason": &reason,
-                        "skipped_unstarted_job_ids": &skipped_job_ids,
-                        "resolved_alert_count": 0,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "inventory-controller",
-                    }),
-                    created_at: suspended_at.clone(),
-                });
-                self.record_client_status_webhook_event(
-                    client_id,
-                    Some(&record.suspended_from_status),
-                    "suspended",
-                    "operator_suspended",
-                    json!({
-                        "reason": &reason,
-                        "operator_id": operator.operator.id,
-                        "origin_kind": "operator_request",
-                        "component": "inventory-controller",
-                    }),
-                )
-                .await?;
-                Ok(AgentSuspensionMutationResult {
-                    record: Some(record),
-                    skipped_unstarted_job_ids: skipped_job_ids,
-                    resolved_alert_count: 0,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 // The API installs a 60-second gateway lease before entering
@@ -1451,7 +990,7 @@ impl Repository {
                 sqlx::query("SELECT set_config('statement_timeout', '25s', true)")
                     .execute(&mut *tx)
                     .await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
                 crate::repository_policy_lifecycle::lock_client_policy_suppression_in_tx(
                     &mut tx, client_id,
                 )
@@ -1507,65 +1046,11 @@ impl Repository {
                 )
                 .await?;
                 finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &skipped_job_ids).await?;
-                crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-                    &mut tx,
-                    &[client_id.to_string()],
-                )
-                .await?;
                 let resolved_alert_count =
                     crate::repository_policy_lifecycle::suppress_client_policy_alerts_in_tx(
                         &mut tx, client_id,
                     )
                     .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE fleet_alert_notification_deliveries delivery
-                    SET status='canceled_disabled', error='client_suspended',
-                        delivery_lease_id=NULL, delivery_lease_until=NULL,
-                        next_attempt_at=NULL, delivered_at=NULL
-                    FROM alert_episodes episode
-                    WHERE episode.public_id=delivery.alert_id
-                      AND episode.client_id=$1
-                      AND delivery.status IN ('queued','failed','in_progress')
-                    "#,
-                )
-                .bind(client_id)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE webhook_rule_deliveries delivery
-                    SET status='canceled_disabled', error='client_suspended',
-                        delivery_lease_id=NULL, delivery_lease_until=NULL,
-                        next_attempt_at=NULL, delivered_at=NULL
-                    WHERE delivery.event_kind='alert.triggered'
-                      AND delivery.status IN ('queued','failed','in_progress')
-                      AND EXISTS (
-                            SELECT 1
-                            FROM jsonb_array_elements(delivery.matched_vps) matched
-                            WHERE matched->>'id'=$1
-                      )
-                    "#,
-                )
-                .bind(client_id)
-                .execute(&mut *tx)
-                .await?;
-                // Legacy/manual alert lifecycle rows may predate the canonical
-                // episode outbox. If such an event is still unprocessed at the
-                // suspension boundary, consume it neutrally so a later
-                // unsuspend cannot resurrect its pre-suspension trigger.
-                sqlx::query(
-                    r#"
-                    UPDATE webhook_events
-                    SET processed_at=COALESCE(processed_at,clock_timestamp())
-                    WHERE kind='alert.triggered'
-                      AND processed_at IS NULL
-                      AND $1=ANY(subject_client_ids)
-                    "#,
-                )
-                .bind(client_id)
-                .execute(&mut *tx)
-                .await?;
                 let transition_metadata = json!({
                     "reason": &reason,
                     "operator_id": operator.operator.id,
@@ -1595,6 +1080,12 @@ impl Repository {
                     transition_metadata.clone(),
                 )
                 .await?;
+                // Suspension and resolved lifecycle rows are the durable
+                // authority. Wake the sole delivery owners; they revalidate
+                // the exact client/episode immediately before external I/O.
+                sqlx::query("SELECT pg_notify('webhook_events', 'alert_notification')")
+                    .execute(&mut *tx)
+                    .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -1637,91 +1128,9 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<AgentSuspensionMutationResult> {
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
-                    .await?;
-                let record = memory
-                    .agent_suspensions
-                    .read()
-                    .await
-                    .get(client_id)
-                    .cloned()
-                    .context("agent_not_suspended")?;
-                {
-                    let mut agents = memory.agents.write().await;
-                    let agent = agents
-                        .iter_mut()
-                        .find(|agent| agent.id == client_id)
-                        .context("agent_not_found")?;
-                    anyhow::ensure!(agent.status == "suspended", "agent_not_suspended");
-                    agent.status = record.suspended_from_status.clone();
-                }
-                memory.agent_suspensions.write().await.remove(client_id);
-                let changed_at = unix_now().to_string();
-                memory
-                    .client_status_history
-                    .write()
-                    .await
-                    .push(ClientStatusHistoryView {
-                        id: Uuid::new_v4(),
-                        client_id: client_id.to_string(),
-                        from_status: Some("suspended".to_string()),
-                        to_status: record.suspended_from_status.clone(),
-                        reason: "operator_unsuspended".to_string(),
-                        metadata: json!({
-                            "operator_id": operator.operator.id,
-                            "origin_kind": "operator_request",
-                            "component": "inventory-controller",
-                        }),
-                        created_at: changed_at.clone(),
-                    });
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "agent.unsuspended".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "client_id": client_id,
-                        "from_status": "suspended",
-                        "to_status": &record.suspended_from_status,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "inventory-controller",
-                    }),
-                    created_at: changed_at.clone(),
-                });
-                self.record_client_status_webhook_event(
-                    client_id,
-                    Some("suspended"),
-                    &record.suspended_from_status,
-                    "operator_unsuspended",
-                    json!({
-                        "operator_id": operator.operator.id,
-                        "origin_kind": "operator_request",
-                        "component": "inventory-controller",
-                    }),
-                )
-                .await?;
-                self.mark_memory_tunnel_alerts_unknown_for_clients(
-                    &[client_id.to_string()],
-                    &changed_at,
-                )
-                .await?;
-                Ok(AgentSuspensionMutationResult {
-                    record: None,
-                    skipped_unstarted_job_ids: Vec::new(),
-                    resolved_alert_count: 0,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
                 let row = sqlx::query(
                     r#"
                     SELECT status, suspended_from_status
@@ -1774,11 +1183,6 @@ impl Repository {
                     &mut tx,
                     client_id,
                     &restored_status,
-                )
-                .await?;
-                crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-                    &mut tx,
-                    &[client_id.to_string()],
                 )
                 .await?;
                 crate::repository_operational_alerts::mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
@@ -1839,212 +1243,9 @@ impl Repository {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let _port_forward_lifecycle_guard = memory.port_forward_lifecycle.lock().await;
-                anyhow::ensure!(
-                    !self.port_forwarding_blocks_agent_delete(client_id).await?,
-                    "agent_port_forwarding_cleanup_required"
-                );
-                let deleted_at = unix_now().to_string();
-                let prior_status = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .map(|agent| agent.status.clone());
-                anyhow::ensure!(prior_status.is_some(), "agent_not_found");
-                let already_hidden = {
-                    let mut hidden = memory.hidden_clients.write().await;
-                    !hidden.insert(client_id.to_string())
-                };
-                let old_process_incarnation_id = memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .and_then(|agent| agent.process_incarnation_id);
-                let mut agents = memory.agents.write().await;
-                let found =
-                    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
-                        agent.status = "deleted".to_string();
-                        agent.process_incarnation_id = None;
-                        agent.stale_since = None;
-                        agent.stale_reason = None;
-                        true
-                    } else {
-                        false
-                    };
-                drop(agents);
-                anyhow::ensure!(found, "agent_not_found");
-                memory.agent_suspensions.write().await.remove(client_id);
-                if prior_status.as_deref() != Some("deleted") {
-                    memory
-                        .client_status_history
-                        .write()
-                        .await
-                        .push(ClientStatusHistoryView {
-                            id: Uuid::new_v4(),
-                            client_id: client_id.to_string(),
-                            from_status: prior_status,
-                            to_status: "deleted".to_string(),
-                            reason: "vps_deleted".to_string(),
-                            metadata: json!({
-                                "reason": &reason,
-                                "operator_id": operator.operator.id,
-                                "frontend_visible": false,
-                            }),
-                            created_at: deleted_at.clone(),
-                        });
-                }
-                let archived_port_forward_rule_count = {
-                    let deleted_reason = reason
-                        .as_deref()
-                        .map(|reason| format!("vps_deleted: {reason}"))
-                        .unwrap_or_else(|| "vps_deleted".to_string());
-                    let mut count = 0usize;
-                    for rule in memory
-                        .port_forward_rules
-                        .write()
-                        .await
-                        .iter_mut()
-                        .filter(|rule| {
-                            rule.client_id == client_id
-                                && rule.deleted_at.is_none()
-                                && !rule.enabled
-                        })
-                    {
-                        rule.revision += 1;
-                        rule.enabled = false;
-                        rule.deleted_at = Some(deleted_at.clone());
-                        rule.deleted_by = Some(operator.operator.id);
-                        rule.deleted_reason = Some(deleted_reason.clone());
-                        rule.removal_confirmed_at = Some(deleted_at.clone());
-                        rule.updated_at = deleted_at.clone();
-                        count += 1;
-                    }
-                    memory.port_forward_runtime.write().await.remove(client_id);
-                    count
-                };
-                if let Some(public_key) = memory.client_public_keys.write().await.remove(client_id)
-                {
-                    if !public_key.is_empty() {
-                        let fingerprint = public_key_sha256_hex(&public_key);
-                        let mut revocations = memory.client_key_revocations.write().await;
-                        if !revocations
-                            .iter()
-                            .any(|record| record.public_key_sha256_hex == fingerprint)
-                        {
-                            revocations.push(ClientKeyRevocationView {
-                                id: Uuid::new_v4(),
-                                client_id: client_id.to_string(),
-                                public_key_sha256_hex: fingerprint,
-                                reason: Some("vps_deleted".to_string()),
-                                revoked_by: Some(operator.operator.id),
-                                created_at: deleted_at.clone(),
-                            });
-                        }
-                    }
-                }
-                let tunnel_delete_reason =
-                    deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
-                let (soft_deleted_tunnel_plan_count, retired_tunnel_endpoint_pairs) = {
-                    let mut plans = memory.tunnel_plans.write().await;
-                    let mut count = 0usize;
-                    let mut endpoint_pairs = Vec::new();
-                    for plan in plans.iter_mut().filter(|plan| {
-                        plan.deleted_at.is_none()
-                            && (plan.left_client_id == client_id
-                                || plan.right_client_id == client_id)
-                    }) {
-                        endpoint_pairs
-                            .push((plan.left_client_id.clone(), plan.right_client_id.clone()));
-                        plan.deleted_at = Some(deleted_at.clone());
-                        plan.deleted_by = Some(operator.operator.id);
-                        plan.deleted_reason = Some(tunnel_delete_reason.clone());
-                        plan.enabled = false;
-                        plan.builtin_credentials = None;
-                        plan.updated_at = deleted_at.clone();
-                        count += 1;
-                    }
-                    (count, endpoint_pairs)
-                };
-                for session in memory.gateway_sessions.write().await.iter_mut() {
-                    if session.client_id == client_id && session.status == "active" {
-                        session.status = "ended".to_string();
-                        session.last_seen_at = deleted_at.clone();
-                        session.ended_at = Some(deleted_at.clone());
-                        session.end_reason = Some("vps_deleted".to_string());
-                    }
-                }
-                let agent_lost_job_ids =
-                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
-                        self.mark_active_targets_agent_lost_for_client(
-                            client_id,
-                            old_process_incarnation_id,
-                            None,
-                            "vps_deleted",
-                            "client was deleted before final command output",
-                        )
-                        .await?
-                    } else {
-                        Vec::new()
-                    };
-                let skipped_job_ids = self
-                    .skip_unstarted_queued_targets_for_client(
-                        client_id,
-                        "vps_deleted",
-                        "vps_deleted: target skipped before dispatch",
-                    )
-                    .await?;
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "agent.deleted".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "reason": reason,
-                        "already_hidden": already_hidden,
-                        "frontend_visible": false,
-                        "access_deactivated": true,
-                        "related_configuration_and_assignments_preserved": true,
-                        "frozen_monitoring_share_targets_preserved": true,
-                        "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
-                        "archived_port_forward_rule_count": archived_port_forward_rule_count,
-                        "agent_lost_job_ids": agent_lost_job_ids,
-                        "skipped_unstarted_job_ids": skipped_job_ids,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "inventory-controller",
-                    }),
-                    created_at: deleted_at.clone(),
-                });
-                self.reconcile_memory_agent_alert_transition(client_id, "deleted", &deleted_at)
-                    .await?;
-                let mut affected_tunnel_clients = retired_tunnel_endpoint_pairs
-                    .iter()
-                    .flat_map(|(left, right)| [left.clone(), right.clone()])
-                    .collect::<Vec<_>>();
-                affected_tunnel_clients.sort();
-                affected_tunnel_clients.dedup();
-                self.reconcile_memory_tunnel_alerts_for_clients(&affected_tunnel_clients)
-                    .await?;
-                Ok(DeleteAgentResult {
-                    client_id: client_id.to_string(),
-                    deleted_at,
-                    retired_tunnel_endpoint_pairs,
-                })
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
                 lock_postgres_port_forward_client(&mut tx, client_id).await?;
                 anyhow::ensure!(
                     !postgres_port_forwarding_blocks_agent_delete(&mut tx, client_id).await?,
@@ -2069,6 +1270,12 @@ impl Repository {
                 let public_key: Vec<u8> = client_row.try_get("public_key")?;
                 let prior_status: String = client_row.try_get("status")?;
                 if !public_key.is_empty() {
+                    let public_key_sha256_hex = public_key_sha256_hex(&public_key);
+                    lock_postgres_key_identities_in_tx(
+                        &mut tx,
+                        std::slice::from_ref(&public_key_sha256_hex),
+                    )
+                    .await?;
                     sqlx::query(
                         r#"
                         INSERT INTO client_key_revocations (
@@ -2080,7 +1287,7 @@ impl Repository {
                     )
                     .bind(Uuid::new_v4())
                     .bind(client_id)
-                    .bind(public_key_sha256_hex(&public_key))
+                    .bind(public_key_sha256_hex)
                     .bind(operator.operator.id)
                     .execute(&mut *tx)
                     .await?;
@@ -2275,40 +1482,6 @@ impl Repository {
         self.ensure_visible_display_name_available(display_name, Some(client_id))
             .await?;
         match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
-                    .await?;
-                let mut agents = memory.agents.write().await;
-                let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) else {
-                    anyhow::bail!("agent_not_found");
-                };
-                let old_display_name = agent.display_name.clone();
-                agent.display_name = display_name.to_string();
-                let updated = agent.clone();
-                drop(agents);
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "agent.alias_updated".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "client_id": client_id,
-                        "old_display_name": old_display_name,
-                        "new_display_name": display_name,
-                        "result": "succeeded",
-                        "operator_id": operator.operator.id,
-                        "operator_username": &operator.operator.username,
-                        "operator_role": &operator.operator.role,
-                        "operator_session_id": operator.audit_session_id(),
-                        "origin_kind": "operator_request",
-                        "component": "inventory-controller",
-                    }),
-                    created_at: unix_now().to_string(),
-                });
-                Ok(updated)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 require_visible_postgres_clients_in_tx(
@@ -2380,20 +1553,6 @@ impl Repository {
 
     pub(crate) async fn agent_by_id(&self, client_id: &str) -> Result<AgentView> {
         match self {
-            Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    anyhow::bail!("agent_not_found:{client_id}");
-                }
-                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
-                memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .find(|agent| agent.id == client_id)
-                    .map(|agent| agent_with_ordered_tags(agent, &tag_order))
-                    .with_context(|| format!("agent_not_found:{client_id}"))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -2507,16 +1666,6 @@ impl Repository {
             });
         };
         let candidates = match self {
-            Self::Memory(memory) => {
-                let agents = memory.agents.read().await;
-                let hidden = memory.hidden_clients.read().await;
-                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
-                agents
-                    .iter()
-                    .filter(|agent| !hidden.contains(&agent.id))
-                    .map(|agent| agent_with_ordered_tags(agent, &tag_order))
-                    .collect::<Vec<_>>()
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2585,21 +1734,6 @@ impl Repository {
     }
     pub(crate) async fn clients_for_tag(&self, tag: &str) -> Result<Vec<AgentView>> {
         match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
-                Ok(memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|agent| {
-                        !hidden.contains(&agent.id)
-                            && agent.tags.iter().any(|agent_tag| agent_tag == tag)
-                    })
-                    .map(|agent| agent_with_ordered_tags(agent, &tag_order))
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -3028,14 +2162,6 @@ fn tag_display_order(index: usize) -> i64 {
     (index as i64 + 1) * TAG_DISPLAY_ORDER_STEP
 }
 
-fn ordered_tag_metadata(ordered: &[String]) -> Vec<(String, i64)> {
-    ordered
-        .iter()
-        .enumerate()
-        .map(|(index, name)| (name.clone(), tag_display_order(index)))
-        .collect()
-}
-
 fn normalize_tag_order(current: Vec<String>, requested: &[String]) -> Result<Vec<String>> {
     let current_set = current.iter().cloned().collect::<HashSet<_>>();
     let mut seen = HashSet::new();
@@ -3055,35 +2181,6 @@ fn normalize_tag_order(current: Vec<String>, requested: &[String]) -> Result<Vec
         .collect::<Vec<_>>();
     insert_tags_into_last_namespace_blocks(&mut ordered, &omitted, false);
     Ok(ordered)
-}
-
-pub(crate) fn memory_tag_order_map(tags: &[String]) -> HashMap<String, usize> {
-    tags.iter()
-        .enumerate()
-        .map(|(index, tag)| (tag.clone(), index))
-        .collect()
-}
-
-fn agent_with_ordered_tags(agent: &AgentView, tag_order: &HashMap<String, usize>) -> AgentView {
-    let mut agent = agent.clone();
-    sort_agent_tags_by_order(&mut agent.tags, tag_order);
-    agent
-}
-
-pub(crate) fn sort_agent_tags_by_order(tags: &mut [String], tag_order: &HashMap<String, usize>) {
-    tags.sort_by(|left, right| compare_memory_tags(left, right, tag_order));
-}
-
-fn compare_memory_tags(
-    left: &str,
-    right: &str,
-    tag_order: &HashMap<String, usize>,
-) -> std::cmp::Ordering {
-    tag_order
-        .get(left)
-        .unwrap_or(&usize::MAX)
-        .cmp(tag_order.get(right).unwrap_or(&usize::MAX))
-        .then_with(|| left.cmp(right))
 }
 
 fn deleted_endpoint_tunnel_plan_reason(client_id: &str, operator_reason: Option<&str>) -> String {
@@ -3106,5 +2203,46 @@ fn schedule_impact_summary(added: usize, removed: usize) -> String {
             if added == 1 { "" } else { "s" },
             if removed == 1 { "" } else { "s" }
         ),
+    }
+}
+
+#[cfg(test)]
+mod list_agents_query_tests {
+    #[test]
+    fn suspension_changes_source_state_and_signals_delivery_consumers() {
+        let source = include_str!("repository_inventory.rs");
+        let (_, suspend) = source
+            .split_once("pub(crate) async fn suspend_agent_with_protected_dispatches")
+            .expect("agent suspension producer");
+        let (suspend, _) = suspend
+            .split_once("pub(crate) async fn unsuspend_agent")
+            .expect("agent suspension producer boundary");
+
+        assert!(suspend.contains("suppress_client_policy_alerts_in_tx"));
+        assert!(suspend.contains("insert_client_status_webhook_event_in_tx"));
+        assert!(suspend.contains("pg_notify('webhook_events', 'alert_notification')"));
+        assert!(!suspend.contains("UPDATE fleet_alert_notification_deliveries"));
+        assert!(!suspend.contains("UPDATE webhook_rule_deliveries"));
+    }
+
+    #[test]
+    fn fleet_live_tags_are_ordered_before_they_join_wide_client_rows() {
+        let source = include_str!("repository_inventory.rs");
+        let (_, query) = source
+            .split_once("WITH tags_by_client AS (")
+            .expect("agent tag aggregation");
+        let (query, _) = query
+            .split_once(".bind(client_ids.map")
+            .expect("agent query boundary");
+
+        assert!(query.contains("GROUP BY ct.client_id"));
+        assert!(query.contains("FROM visible_clients tag_client"));
+        assert!(query.contains("JOIN client_tags ct ON ct.client_id = tag_client.id"));
+        assert!(query.contains("$1::text[] IS NULL OR tag_client.id = ANY($1)"));
+        assert!(query.contains("ORDER BY t.display_order, t.created_at, t.name"));
+        assert!(query.contains("COALESCE("));
+        assert!(query.contains("tags_by_client.tags"));
+        assert!(query.contains("ARRAY[]::TEXT[]"));
+        assert!(!query.contains("GROUP BY c.id"));
     }
 }

@@ -137,10 +137,10 @@ impl AppState {
                 None,
             )
             .await?;
-        // `alert_episodes` is the single lifecycle owner after 0012. The
-        // operational-shaped reader projects every policy-owned condition and
-        // occurrence; joining the policy-shaped compatibility projection here
-        // would return each client-owned episode twice.
+        // `alert_episodes` is the single lifecycle owner. The operational
+        // reader projects every policy-owned condition and occurrence;
+        // joining the alternate policy-shaped view here would return each
+        // client-owned episode twice.
         let mut alerts = operational
             .iter()
             .take(FLEET_EVENT_SOURCE_HORIZON_MAX as usize)
@@ -162,21 +162,6 @@ impl AppState {
             alerts,
             truncated: operational.len() >= OPERATIONAL_ALERT_SOURCE_LIMIT || result_truncated,
         })
-    }
-
-    pub(crate) async fn list_fleet_alerts_selected(
-        &self,
-        query: FleetAlertQuery,
-        selector: Option<FleetAlertSelector<'_>>,
-    ) -> Result<FleetAlertSelection> {
-        self.list_fleet_alerts_selected_with_policy_source(
-            query,
-            selector,
-            PolicyAlertSource::CurrentFleet,
-            None,
-            None,
-        )
-        .await
     }
 
     pub(crate) async fn list_fleet_alerts_selected_with_visible_agents(

@@ -280,8 +280,8 @@ export type SystemDashboardCapacityRecord = {
   internal_http_read_secs: number | null;
   control_deadline_grace_secs: number | null;
   max_job_timeout_secs: number | null;
-  worker_schedule_job_max_timeout_secs: number | null;
-  agent_offline_secs: number | null;
+  schedule_job_max_timeout_secs: number | null;
+  agent_offline_timeout_secs: number | null;
 };
 
 export type SystemMetricSeriesRecord = {
@@ -442,8 +442,8 @@ export type DashboardTrafficClientRecord = {
 
 export type DashboardTrafficPointRecord = {
   bucket_start: string;
-  rx_bytes: number;
-  tx_bytes: number;
+  rx_bytes: number | null;
+  tx_bytes: number | null;
 };
 
 export type DashboardTrafficSeriesRecord = DashboardTrafficClientRecord & {
@@ -503,7 +503,7 @@ export type FleetAlertRecord = {
     state: "triggered" | "persisting" | "unknown" | "resolved" | string;
     trigger_generation: number;
     triggered_at: string;
-    last_confirmed_at: string | null;
+    last_confirmed_at: string;
     resolved_at: string | null;
     resolution_reason: string | null;
     resolution_note: string | null;
@@ -650,6 +650,7 @@ export type FleetAlertNotificationDeliveryRecord = {
   created_at: string;
   delivered_at: string | null;
   review_preview_hash?: string | null;
+  process_outcome?: "skipped_current_owner" | null;
 };
 
 export type FleetAlertNotificationDispatchRequest = {
@@ -723,6 +724,7 @@ export type WebhookRuleDeliveryRecord = {
   created_at: string;
   delivered_at: string | null;
   review_preview_hash?: string | null;
+  process_outcome?: "skipped_current_owner" | null;
 };
 
 export type WebhookRuleDryRunRecord = {
@@ -1053,8 +1055,6 @@ export type TelemetryRollupRecord = {
   disk_available_bytes_min: number;
   disk_used_ratio_avg: number;
   disk_used_ratio_max: number;
-  network_rx_bytes_max: number;
-  network_tx_bytes_max: number;
   connections_sample_count: number;
   tcp_sockets_latest: number | null;
   udp_sockets_latest: number | null;
@@ -1099,6 +1099,8 @@ export type CurrentPingView = {
 
 export type MonitoringCardView = {
   client: AgentView;
+  projection_pending_since?: string | null;
+  projection_checked_at?: string | null;
   product_name: string | null;
   billing: BillingPlanView | null;
   system_information: SystemInformationView | null;
@@ -1173,6 +1175,8 @@ export type ClientMonitoringView = {
   range: MonitoringRangeView;
   resources: TelemetryRollupRecord[];
   network: TelemetryNetworkRateRecord[];
+  network_current_detail: TelemetryNetworkRateRecord[];
+  tunnel_current_detail: TelemetryTunnelRecord[];
   traffic: TrafficAccountingRecord;
   traffic_history: TrafficHistoryPointView[];
   ping_targets: CurrentPingView[];
@@ -1246,6 +1250,7 @@ export type PublicNetworkPointView = {
 export type PublicTrafficMetricView = {
   configured: boolean;
   reset_day?: number;
+  reset_hour?: number | null;
   cycle_start?: string;
   cycle_end?: string;
   rx_bytes?: number;
@@ -1305,6 +1310,8 @@ export type PublicMonitoringCardView = {
   client_key: string;
   display_name: string;
   status: string;
+  projection_pending_since?: string | null;
+  projection_checked_at?: string | null;
   tags?: string[];
   product_name?: string;
   billing?: PublicBillingPlanView;
@@ -1633,8 +1640,8 @@ export type TelemetryTunnelRecord = {
   mtu: number | null;
   link_type: number | null;
   address: string | null;
-  rx_bytes: number;
-  tx_bytes: number;
+  rx_bytes: number | null;
+  tx_bytes: number | null;
   traffic_source?: string | null;
   traffic_status?: string | null;
   traffic_reason?: string | null;

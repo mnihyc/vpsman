@@ -110,8 +110,6 @@ import {
   timestampMillis,
 } from "../utils";
 import {
-  NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
-  NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX,
   VPS_RULE_FIELD_DEFINITIONS,
   VPS_RULE_KEYS,
   normalizeVpsRuleValue,
@@ -3084,7 +3082,16 @@ function normalizeVpsRuleTextOnBlur(text: string): string {
       line.content = `${parsed.key}=${canonicalValue}`;
     }
   });
-  return joinVpsRuleTextLines(lines);
+  return joinVpsRuleTextLines(
+    lines.filter((line, index) => {
+      const parsed = parsedLines[index];
+      return !(
+        parsed &&
+        keyCounts.get(parsed.key) === 1 &&
+        !line.content.slice(parsed.equals + 1).trim()
+      );
+    }),
+  );
 }
 
 function affectedAlertPolicyRules(
@@ -3193,6 +3200,8 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   port_speed_value_too_large: "Port speed is larger than the supported range.",
   network_rate_selector_source_invalid:
     "Live-rate selectors use host interfaces only; remove the tunnel: prefix.",
+  network_rate_selector_obsolete_all_invalid:
+    "Use * to select every eligible interface; [] is no longer supported.",
   traffic_selector_empty: "Enter at least one interface selector.",
   traffic_selector_empty_item:
     "Remove the empty selector entry between commas.",
@@ -3206,8 +3215,14 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   traffic_selector_direction_overlap:
     "Do not select the same interface direction more than once.",
   traffic_selector_too_many_items: "Use no more than 16 selectors.",
+  network_interfaces_pattern_invalid:
+    "Use exact interface names or one trailing * prefix wildcard.",
+  network_interfaces_pattern_duplicate: "Remove the duplicate interface pattern.",
+  network_interfaces_all_must_stand_alone:
+    "Use * by itself to select every reported interface.",
+  network_interfaces_too_many_patterns: "Use no more than 16 interface patterns.",
   traffic_reset_day_invalid:
-    "Traffic reset day must be -1 for continuous accumulation, or between 1 and 31.",
+    "Traffic reset time must be -1 for continuous accumulation, or a UTC day and hour such as 29 05:00.",
   byte_size_empty: "Enter a traffic quota or use -1 for unlimited.",
   byte_size_number_invalid: "Traffic quota must start with a valid number.",
   byte_size_unit_invalid: "Use bytes, KB, MB, GB, TB, KiB, MiB, GiB, or TiB.",
@@ -3712,7 +3727,7 @@ function VpsRulesPanel({
       if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
         throw new Error(`Unsupported VPS rule key: ${key}`);
       }
-      if (!value && key !== "network.rate.interfaces") {
+      if (!value) {
         throw new Error(`VPS rule ${key} cannot be empty; use explicit unset`);
       }
       if (Object.prototype.hasOwnProperty.call(values, key)) {

@@ -132,6 +132,9 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Check frontend protocol contracts
+        run: bash scripts/check-frontend-contracts.sh
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build

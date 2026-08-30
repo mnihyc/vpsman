@@ -183,24 +183,6 @@ pub(crate) async fn list_terminal_sessions(
             return Err(ApiError::bad_request("terminal_client_id_too_long"));
         }
     }
-    let sessions = state
-        .repo
-        .list_terminal_sessions(limit_or_default(query.limit), client_id, query.session_id)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "terminal_sessions_unavailable",
-            "Terminal sessions could not be loaded.",
-        ))?;
-    for session in &sessions {
-        state
-            .repo
-            .reconcile_terminal_job_by_id(session.job_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "terminal_session_reconcile_failed",
-                "Terminal session state could not be reconciled.",
-            ))?;
-    }
     Ok(Json(
         state
             .repo
@@ -231,17 +213,9 @@ pub(crate) async fn terminal_session_replay(
             "terminal_session_unavailable",
             "The terminal session could not be loaded.",
         ))?;
-    let session = sessions
+    sessions
         .first()
         .ok_or_else(|| ApiError::not_found("terminal_session_not_found"))?;
-    state
-        .repo
-        .reconcile_terminal_job_by_id(session.job_id)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "terminal_session_reconcile_failed",
-            "Terminal session state could not be reconciled.",
-        ))?;
     let replay = state
         .repo
         .terminal_session_replay(
@@ -298,17 +272,6 @@ pub(crate) async fn control_terminal_session(
         return Err(ApiError::bad_request("terminal_control_request_id_invalid"));
     }
     validate_terminal_control_action(session_id, &request.action)?;
-    let session = load_current_terminal_session(&state, &client_id, session_id).await?;
-    if matches!(session.state.as_str(), "opening" | "open") {
-        state
-            .repo
-            .reconcile_terminal_job_by_id(session.job_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "terminal_session_reconcile_failed",
-                "Terminal session state could not be reconciled.",
-            ))?;
-    }
     let authority =
         authorize_terminal_socket_context(&state, &client_id, session_id, operator).await?;
     let result = dispatch_bound_terminal_control(
@@ -357,7 +320,6 @@ async fn handle_terminal_socket(
         &auth.access_token,
         &client_id,
         session_id,
-        true,
     )
     .await
     {
@@ -414,7 +376,7 @@ async fn handle_terminal_socket(
 
     let (control_tx, control_rx) = mpsc::channel(TERMINAL_SOCKET_CONTROL_QUEUE);
     let (result_tx, mut result_rx) = mpsc::channel(TERMINAL_SOCKET_CONTROL_QUEUE);
-    tokio::spawn(run_terminal_control_worker(
+    let terminal_control_task = tokio::spawn(run_terminal_control_worker(
         state.clone(),
         client_id.clone(),
         session_id,
@@ -595,7 +557,6 @@ async fn handle_terminal_socket(
                     &auth.access_token,
                     &client_id,
                     session_id,
-                    false,
                 ).await {
                     Ok(_) => {
                         if socket.send(Message::Ping(Default::default())).await.is_err() {
@@ -683,6 +644,11 @@ async fn handle_terminal_socket(
             }
         }
     }
+    drop(control_tx);
+    drop(result_rx);
+    if let Err(error) = terminal_control_task.await {
+        tracing::warn!(%error, %client_id, %session_id, "terminal socket control consumer failed");
+    }
 }
 
 async fn receive_terminal_socket_auth(
@@ -715,7 +681,6 @@ async fn authenticate_terminal_socket(
     access_token: &str,
     client_id: &str,
     session_id: Uuid,
-    reconcile_on_attach: bool,
 ) -> Result<TerminalSocketAuthority, ApiError> {
     let operator = state
         .repo
@@ -729,15 +694,6 @@ async fn authenticate_terminal_socket(
         || !operator_has_scope(&operator.operator.scopes, SCOPE_TERMINAL_READ)
     {
         return Err(ApiError::forbidden("operator_scope_insufficient"));
-    }
-    if reconcile_on_attach {
-        let session = load_current_terminal_session(state, client_id, session_id).await?;
-        if matches!(session.state.as_str(), "opening" | "open") {
-            state
-                .repo
-                .reconcile_terminal_job_by_id(session.job_id)
-                .await?;
-        }
     }
     authorize_terminal_socket_context(state, client_id, session_id, operator).await
 }

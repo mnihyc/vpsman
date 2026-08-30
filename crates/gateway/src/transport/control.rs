@@ -8,7 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, UnixListener},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
+    task::JoinSet,
     time,
 };
 use tracing::{info, warn};
@@ -32,50 +33,140 @@ use crate::{
 
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) async fn run_control_listener(args: Args, state: GatewayState) -> Result<()> {
+pub(crate) async fn run_control_listener(
+    args: Args,
+    state: GatewayState,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     if let Some(path) = control_socket_path(&args.control_bind) {
         prepare_control_socket(&path)?;
         let listener = UnixListener::bind(&path)
             .with_context(|| format!("failed to bind gateway control socket {}", path.display()))?;
         info!(path = %path.display(), "gateway control listening on Unix socket");
+        let mut connections = JoinSet::new();
+        let (connection_shutdown, connection_shutdown_rx) = watch::channel(false);
+        let mut listener_error = None;
 
         loop {
-            let (stream, _) = listener.accept().await?;
+            let accepted = tokio::select! {
+                biased;
+                _ = wait_for_shutdown(&mut shutdown) => break,
+                accepted = listener.accept() => accepted,
+                completed = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        warn!(%error, "gateway Unix control connection consumer failed");
+                    }
+                    continue;
+                }
+            };
+            let (stream, _) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    listener_error = Some(error);
+                    break;
+                }
+            };
             let state = state.clone();
             let internal_token = args.internal_token.clone();
             let privilege_verifier_key_hex = args.privilege_verifier_key_hex.clone();
-            tokio::spawn(async move {
-                if let Err(error) = handle_control_connection(
-                    stream,
-                    state,
-                    internal_token,
-                    privilege_verifier_key_hex,
-                )
-                .await
-                {
-                    warn!(%error, "gateway Unix control request failed");
+            let mut connection_shutdown = connection_shutdown_rx.clone();
+            connections.spawn(async move {
+                tokio::select! {
+                    result = handle_control_connection(
+                        stream,
+                        state,
+                        internal_token,
+                        privilege_verifier_key_hex,
+                    ) => {
+                        if let Err(error) = result {
+                            warn!(%error, "gateway Unix control request failed");
+                        }
+                    }
+                    _ = wait_for_shutdown(&mut connection_shutdown) => {}
                 }
             });
         }
+        drop(listener);
+        let _ = connection_shutdown.send(true);
+        drain_control_connections(&mut connections, "Unix").await;
+        if let Some(error) = listener_error {
+            return Err(error).context("gateway Unix control listener failed");
+        }
+        return Ok(());
     }
     let listener = TcpListener::bind(&args.control_bind)
         .await
         .with_context(|| format!("failed to bind gateway control on {}", args.control_bind))?;
     info!(bind = %args.control_bind, "gateway control listening");
+    let mut connections = JoinSet::new();
+    let (connection_shutdown, connection_shutdown_rx) = watch::channel(false);
+    let mut listener_error = None;
 
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let accepted = tokio::select! {
+            biased;
+            _ = wait_for_shutdown(&mut shutdown) => break,
+            accepted = listener.accept() => accepted,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(%error, "gateway TCP control connection consumer failed");
+                }
+                continue;
+            }
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                listener_error = Some(error);
+                break;
+            }
+        };
         let state = state.clone();
         let internal_token = args.internal_token.clone();
         let privilege_verifier_key_hex = args.privilege_verifier_key_hex.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                handle_control_connection(stream, state, internal_token, privilege_verifier_key_hex)
-                    .await
-            {
-                warn!(%peer, %error, "gateway control request failed");
+        let mut connection_shutdown = connection_shutdown_rx.clone();
+        connections.spawn(async move {
+            tokio::select! {
+                result = handle_control_connection(
+                    stream,
+                    state,
+                    internal_token,
+                    privilege_verifier_key_hex,
+                ) => {
+                    if let Err(error) = result {
+                        warn!(%peer, %error, "gateway control request failed");
+                    }
+                }
+                _ = wait_for_shutdown(&mut connection_shutdown) => {}
             }
         });
+    }
+    drop(listener);
+    let _ = connection_shutdown.send(true);
+    drain_control_connections(&mut connections, "TCP").await;
+    match listener_error {
+        Some(error) => Err(error).context("gateway TCP control listener failed"),
+        None => Ok(()),
+    }
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    while !shutdown_requested(shutdown) {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn drain_control_connections(connections: &mut JoinSet<()>, transport: &str) {
+    while let Some(completed) = connections.join_next().await {
+        if let Err(error) = completed {
+            warn!(%error, transport, "gateway control connection consumer failed during drain");
+        }
     }
 }
 
@@ -387,7 +478,8 @@ async fn dispatch_gateway_command(
         .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs()));
 
     loop {
-        let dispatch_lifecycle = state.dispatch_lifecycle.read().await;
+        let lifecycle_owner = state.client_lifecycle_owner(&dispatch.client_id).await;
+        let client_lifecycle = lifecycle_owner.read().await;
         let fenced = state
             .client_suspension_fences
             .read()
@@ -457,13 +549,13 @@ async fn dispatch_gateway_command(
             }
             // Fence installation needs only to order against enqueue. Do not
             // retain the lifecycle guard while waiting for an agent ACK.
-            drop(dispatch_lifecycle);
+            drop(client_lifecycle);
             return time::timeout(Duration::from_secs(state.dispatch_ack_secs()), response_rx)
                 .await
                 .context("gateway command ack timed out")?
                 .context("gateway command response dropped");
         }
-        drop(dispatch_lifecycle);
+        drop(client_lifecycle);
         match grace_deadline {
             Some(deadline) if std::time::Instant::now() < deadline => {
                 time::sleep(Duration::from_millis(500)).await;
@@ -499,7 +591,8 @@ async fn prepare_gateway_client_suspension_fence(
     state: &GatewayState,
     prepare: GatewayClientSuspensionFencePrepare,
 ) -> GatewayClientSuspensionFenceResult {
-    let _dispatch_lifecycle = state.dispatch_lifecycle.write().await;
+    let lifecycle_owner = state.client_lifecycle_owner(&prepare.client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let now = Instant::now();
     let mut fences = state.client_suspension_fences.write().await;
     if let Some(mut existing) = fences.get(&prepare.client_id).copied() {
@@ -581,7 +674,8 @@ async fn promote_gateway_client_suspension_fence(
     state: &GatewayState,
     promote: GatewayClientSuspensionFencePromote,
 ) -> GatewayClientSuspensionFenceResult {
-    let _dispatch_lifecycle = state.dispatch_lifecycle.write().await;
+    let lifecycle_owner = state.client_lifecycle_owner(&promote.client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let now = Instant::now();
     let mut fences = state.client_suspension_fences.write().await;
     let accepted = fences
@@ -606,7 +700,8 @@ async fn clear_gateway_client_suspension_fence(
     state: &GatewayState,
     clear: GatewayClientSuspensionFenceClear,
 ) -> GatewayClientSuspensionFenceResult {
-    let _dispatch_lifecycle = state.dispatch_lifecycle.write().await;
+    let lifecycle_owner = state.client_lifecycle_owner(&clear.client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let mut fences = state.client_suspension_fences.write().await;
     let removable = fences.get(&clear.client_id).is_some_and(|fence| {
         clear
@@ -679,7 +774,8 @@ async fn disconnect_gateway_session(
     state: &GatewayState,
     disconnect: GatewaySessionDisconnect,
 ) -> Result<GatewaySessionDisconnectResult> {
-    let _dispatch_lifecycle = state.dispatch_lifecycle.write().await;
+    let lifecycle_owner = state.client_lifecycle_owner(&disconnect.client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
     let session = state.sessions.write().await.remove(&disconnect.client_id);
     let Some(session) = session else {
         return Ok(GatewaySessionDisconnectResult {

@@ -1,13 +1,8 @@
 use anyhow::Result;
-use chrono::Utc;
 use sqlx::Row;
 use vpsman_common::GatewaySessionLifecycleIngest;
 
-use crate::{
-    model::{AuditLogView, GatewaySessionView},
-    repository::{MemoryState, Repository},
-    unix_now,
-};
+use crate::{model::GatewaySessionView, repository::Repository};
 
 impl Repository {
     pub(crate) async fn active_gateway_session_matches(
@@ -18,25 +13,6 @@ impl Repository {
         process_incarnation_id: uuid::Uuid,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    return Ok(false);
-                }
-                let session_matches = memory.gateway_sessions.read().await.iter().any(|session| {
-                    session.gateway_id == gateway_id
-                        && session.client_id == client_id
-                        && session.id == session_id
-                        && session.status == "active"
-                });
-                if !session_matches {
-                    return Ok(false);
-                }
-                Ok(memory.agents.read().await.iter().any(|agent| {
-                    agent.id == client_id
-                        && !matches!(agent.status.as_str(), "revoked" | "deleted")
-                        && agent.process_incarnation_id == Some(process_incarnation_id)
-                }))
-            }
             Self::Postgres(pool) => {
                 let matches: bool = sqlx::query_scalar(
                     r#"
@@ -71,16 +47,6 @@ impl Repository {
         session_id: uuid::Uuid,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
-                    return Ok(false);
-                }
-                Ok(memory.gateway_sessions.read().await.iter().any(|session| {
-                    session.gateway_id == gateway_id
-                        && session.client_id == client_id
-                        && session.id == session_id
-                }))
-            }
             Self::Postgres(pool) => {
                 let matches: bool = sqlx::query_scalar(
                     r#"
@@ -110,84 +76,7 @@ impl Repository {
         event: &GatewaySessionLifecycleIngest,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                if memory
-                    .hidden_clients
-                    .read()
-                    .await
-                    .contains(&event.client_id)
-                {
-                    return Ok(());
-                }
-                if memory.agents.read().await.iter().any(|agent| {
-                    agent.id == event.client_id
-                        && matches!(agent.status.as_str(), "revoked" | "deleted")
-                }) {
-                    return Ok(());
-                }
-                if memory
-                    .gateway_sessions
-                    .read()
-                    .await
-                    .iter()
-                    .any(|session| session.id == event.session_id && session.status != "active")
-                {
-                    return Ok(());
-                }
-                let session_boundary_changed =
-                    !memory.gateway_sessions.read().await.iter().any(|session| {
-                        session.id == event.session_id
-                            && session.client_id == event.client_id
-                            && session.status == "active"
-                    });
-                expire_memory_active_other_sessions(memory, &event.client_id, event.session_id)
-                    .await;
-                upsert_memory_gateway_session(memory, event, "active", None).await;
-                if let Some(from_status) = set_memory_agent_status(
-                    memory,
-                    &event.client_id,
-                    "online",
-                    event.remote_ip.as_deref(),
-                    false,
-                )
-                .await
-                {
-                    let metadata = gateway_status_metadata(event, "online");
-                    let reason = if from_status == "suspended" {
-                        "agent_online_auto_unsuspend"
-                    } else {
-                        "gateway_session_started"
-                    };
-                    memory.audits.write().await.push(AuditLogView {
-                        id: uuid::Uuid::new_v4(),
-                        actor_id: None,
-                        action: "agent.status_online".to_string(),
-                        target: format!("client:{}", event.client_id),
-                        command_hash: None,
-                        metadata: metadata.clone(),
-                        created_at: unix_now().to_string(),
-                    });
-                    self.record_client_status_webhook_event(
-                        &event.client_id,
-                        Some(&from_status),
-                        "online",
-                        reason,
-                        metadata,
-                    )
-                    .await?;
-                } else if session_boundary_changed {
-                    self.mark_memory_tunnel_alerts_unknown_for_clients(
-                        std::slice::from_ref(&event.client_id),
-                        &Utc::now().to_rfc3339(),
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
             Self::Postgres(pool) => {
-                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
-                    .await?;
                 let mut tx = pool.begin().await?;
                 let prior_status: Option<String> = sqlx::query_scalar(
                     r#"
@@ -315,54 +204,7 @@ impl Repository {
         event: &GatewaySessionLifecycleIngest,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let should_transition_agent = memory
-                    .gateway_sessions
-                    .read()
-                    .await
-                    .iter()
-                    .find(|session| session.id == event.session_id)
-                    .is_none_or(|session| session.status == "active");
-                upsert_memory_gateway_session(memory, event, "ended", event.reason.clone()).await;
-                if should_transition_agent
-                    && !memory_has_active_other_session(memory, &event.client_id, event.session_id)
-                        .await
-                {
-                    if let Some(from_status) = set_memory_agent_status(
-                        memory,
-                        &event.client_id,
-                        "disconnected",
-                        None,
-                        false,
-                    )
-                    .await
-                    {
-                        let metadata = gateway_status_metadata(event, "disconnected");
-                        memory.audits.write().await.push(AuditLogView {
-                            id: uuid::Uuid::new_v4(),
-                            actor_id: None,
-                            action: "agent.status_disconnected".to_string(),
-                            target: format!("client:{}", event.client_id),
-                            command_hash: None,
-                            metadata: metadata.clone(),
-                            created_at: unix_now().to_string(),
-                        });
-                        self.record_client_status_webhook_event(
-                            &event.client_id,
-                            Some(&from_status),
-                            "disconnected",
-                            "gateway_session_ended",
-                            metadata,
-                        )
-                        .await?;
-                    }
-                }
-                Ok(())
-            }
             Self::Postgres(pool) => {
-                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
-                    .await?;
                 let mut tx = pool.begin().await?;
                 let prior_status: Option<String> = sqlx::query_scalar(
                     r#"
@@ -460,19 +302,6 @@ impl Repository {
     ) -> Result<Vec<GatewaySessionView>> {
         let limit = limit.clamp(1, 200);
         match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let mut sessions = memory.gateway_sessions.read().await.clone();
-                sessions.retain(|session| !hidden.contains(&session.client_id));
-                sessions.sort_by(|left, right| {
-                    right
-                        .last_seen_at
-                        .cmp(&left.last_seen_at)
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                sessions.truncate(limit as usize);
-                Ok(sessions)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -519,121 +348,6 @@ impl Repository {
     }
 }
 
-pub(crate) async fn upsert_memory_gateway_session(
-    memory: &MemoryState,
-    event: &GatewaySessionLifecycleIngest,
-    status: &str,
-    end_reason: Option<String>,
-) {
-    let now = unix_now().to_string();
-    let mut sessions = memory.gateway_sessions.write().await;
-    if let Some(session) = sessions
-        .iter_mut()
-        .find(|session| session.id == event.session_id)
-    {
-        session.gateway_id = event.gateway_id.clone();
-        session.client_id = event.client_id.clone();
-        session.noise_public_key_hex = event.noise_public_key_hex.clone();
-        session.remote_ip = event.remote_ip.clone();
-        if let Some(agent_version) = &event.agent_version {
-            session.agent_version = agent_version.clone();
-        }
-        session.status = status.to_string();
-        session.last_seen_at = now.clone();
-        if status == "ended" {
-            session.ended_at = Some(now);
-            if session.end_reason.is_none() {
-                session.end_reason = end_reason;
-            }
-        } else {
-            session.ended_at = None;
-            session.end_reason = None;
-        }
-        return;
-    }
-    sessions.push(GatewaySessionView {
-        id: event.session_id,
-        gateway_id: event.gateway_id.clone(),
-        client_id: event.client_id.clone(),
-        status: status.to_string(),
-        noise_public_key_hex: event.noise_public_key_hex.clone(),
-        remote_ip: event.remote_ip.clone(),
-        agent_version: event.agent_version.clone().unwrap_or_default(),
-        started_at: now.clone(),
-        last_seen_at: now.clone(),
-        ended_at: (status == "ended").then_some(now),
-        end_reason,
-    });
-}
-
-pub(crate) async fn expire_memory_active_other_sessions(
-    memory: &MemoryState,
-    client_id: &str,
-    session_id: uuid::Uuid,
-) {
-    let now = unix_now().to_string();
-    let mut sessions = memory.gateway_sessions.write().await;
-    for session in sessions.iter_mut() {
-        if session.client_id == client_id && session.id != session_id && session.status == "active"
-        {
-            session.status = "expired".to_string();
-            session.last_seen_at = now.clone();
-            session.ended_at.get_or_insert_with(|| now.clone());
-            session
-                .end_reason
-                .get_or_insert_with(|| "replaced_by_new_session".to_string());
-        }
-    }
-}
-
-async fn memory_has_active_other_session(
-    memory: &MemoryState,
-    client_id: &str,
-    session_id: uuid::Uuid,
-) -> bool {
-    memory.gateway_sessions.read().await.iter().any(|session| {
-        session.client_id == client_id && session.id != session_id && session.status == "active"
-    })
-}
-
-async fn set_memory_agent_status(
-    memory: &MemoryState,
-    client_id: &str,
-    status: &str,
-    remote_ip: Option<&str>,
-    override_stale: bool,
-) -> Option<String> {
-    if memory.hidden_clients.read().await.contains(client_id) {
-        return None;
-    }
-    let mut changed_from = None;
-    {
-        let mut agents = memory.agents.write().await;
-        let agent = agents.iter_mut().find(|agent| agent.id == client_id)?;
-        if matches!(agent.status.as_str(), "revoked" | "deleted") {
-            return None;
-        }
-        if agent.status == "suspended" && status != "online" {
-            return None;
-        }
-        if (override_stale || agent.status != "stale") && agent.status != status {
-            changed_from = Some(agent.status.clone());
-            agent.status = status.to_string();
-        }
-        if agent.registration_ip.is_none() {
-            agent.registration_ip = remote_ip.map(str::to_string);
-        }
-        if let Some(remote_ip) = remote_ip {
-            agent.last_ip = Some(remote_ip.to_string());
-        }
-        agent.last_seen_at = Some(unix_now().to_string());
-    }
-    if changed_from.as_deref() == Some("suspended") && status == "online" {
-        memory.agent_suspensions.write().await.remove(client_id);
-    }
-    changed_from
-}
-
 fn gateway_status_metadata(
     event: &GatewaySessionLifecycleIngest,
     result: &str,
@@ -648,7 +362,3 @@ fn gateway_status_metadata(
         "component": "gateway-session-lifecycle",
     })
 }
-
-#[cfg(test)]
-#[path = "tests_repository_gateway_sessions.rs"]
-mod tests;

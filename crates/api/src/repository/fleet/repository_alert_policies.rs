@@ -1,20 +1,25 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::OnceLock,
+};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, types::Json as SqlJson, Row};
+use tokio::sync::Notify;
 use uuid::Uuid;
 use vpsman_common::{
-    expression_references_vps_rules,
-    parse_persisted_vps_rule_value as parse_common_persisted_vps_rule_value,
-    parse_vps_rule_value as parse_common_vps_rule_value, Expression, ExpressionTruth,
-    ParsedVpsRuleValue, VpsRuleContext,
+    expression_references_vps_rules, ordinal_admission_mask_has_exact_shape,
+    parse_vps_rule_value as parse_common_vps_rule_value, projected_telemetry_tunnel_identity,
+    AgentMetrics, Expression, ExpressionTruth, NetworkInterfacePolicy, NetworkInterfaceSource,
+    ParsedVpsRuleValue, ProjectedTelemetryTunnelIdentity, VpsRuleContext,
 };
 
 use crate::{
-    model::{AgentView, AuditLogView, AuthContext, TelemetryRollupView, TelemetrySampleView},
+    model::{AgentView, AuthContext},
     model_alert_notifications::FleetAlertNotificationMatchRule,
     model_alert_policies::{
         AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
@@ -22,35 +27,43 @@ use crate::{
         PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse, PolicyDryRunRulePreview,
         PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest, PolicyRuleStateRecord,
         TrafficAccountingQuery, TrafficAccountingRecord, TrafficAccountingSelectorBreakdown,
-        TrafficCounterRollupRecord, TrafficCounterSampleRecord, VpsRuleChangePreview, VpsRuleQuery,
-        VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
-        VpsRulesDryRunRequest, VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE,
-        VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
-        VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        VpsRuleChangePreview, VpsRuleQuery, VpsRuleValueRecord, VpsRulesBulkUnsetRequest,
+        VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest, VpsRulesDryRunResponse,
+        VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_INTERFACES,
+        VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
     model_monitoring::TrafficHistoryPointView,
-    model_webhook_rules::WebhookEventCandidate,
-    repository::{MemoryState, Repository},
+    repository::Repository,
+    repository_ingest::{
+        admitted_network_interface, combined_metric_evidence_payload,
+        reconstruct_projected_policy_traffic_in_tx,
+    },
     repository_key_lifecycle::{
-        lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+        lock_postgres_definition_lifecycles_in_tx, lock_postgres_definitions_and_clients_in_tx,
         require_visible_postgres_clients_in_tx,
     },
     repository_network_traffic_import::{
-        is_intentional_vnstat_import_boundary, is_vnstat_import_source,
+        is_vnstat_import_source, lock_postgres_traffic_counter_streams,
     },
-    repository_operational_alerts::notification_rule_matches_alert,
-    repository_webhook_rules::webhook_event_row,
+    repository_telemetry_policy_activation::{
+        mark_telemetry_policy_activation_may_be_pending,
+        reconcile_telemetry_policy_activation_request_in_tx, wake_telemetry_policy_activation,
+    },
     selector_expression::{
         agent_matches_selector_expression_with_rules, parse_selector_expression,
         vps_rule_contexts_by_client,
     },
     unix_now,
-    util::{
-        compare_timestamps_desc, parse_timestamp_unix, parse_timestamp_utc,
-        timestamp_in_optional_bounds,
-    },
+};
+
+#[cfg(test)]
+use crate::{
+    model::TelemetryRollupView,
+    model_alert_policies::{TrafficCounterRollupRecord, TrafficCounterSampleRecord},
+    repository_network_traffic_import::is_intentional_vnstat_import_boundary,
+    util::parse_timestamp_utc,
 };
 
 const MAX_POLICY_NAME_BYTES: usize = 128;
@@ -58,14 +71,43 @@ const MAX_POLICY_NOTES_BYTES: usize = 1024;
 const MAX_RULE_NAME_BYTES: usize = 128;
 const MAX_SELECTOR_EXPRESSION_BYTES: usize = 4096;
 const MAX_CONDITION_EXPRESSION_BYTES: usize = 4096;
-const TRAFFIC_SAMPLE_STALE_SECS: i64 = 900;
-const POLICY_WEBHOOK_REPAIR_WINDOW_SECS: i64 = 3600;
-const POLICY_ALERT_TRIGGERED: &str = "triggered";
-const POLICY_ALERT_PERSISTING: &str = "persisting";
-const POLICY_ALERT_UNKNOWN: &str = "unknown";
-const POLICY_ALERT_RESOLVED: &str = "resolved";
 const MAX_POLICY_ALERT_CANDIDATE_ROWS: usize = 201;
-static POLICY_EVALUATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// These values bound one transaction/scheduler page. They are not backlog
+// throughput caps: the background evaluator immediately continues after a
+// full page and applies its configured interval only once every page is short.
+const POLICY_SCOPE_MAINTENANCE_PAGE: i64 = 200;
+const POLICY_EVIDENCE_MAINTENANCE_PAGE: i64 = 500;
+const POLICY_DUE_MAINTENANCE_PAGE: i64 = 200;
+static POLICY_EVALUATOR_WAKE: OnceLock<Notify> = OnceLock::new();
+
+pub(crate) fn wake_policy_evaluator() {
+    POLICY_EVALUATOR_WAKE.get_or_init(Notify::new).notify_one();
+}
+
+pub(crate) async fn wait_for_policy_evaluator_wake() {
+    POLICY_EVALUATOR_WAKE
+        .get_or_init(Notify::new)
+        .notified()
+        .await;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PolicyEvaluationPage {
+    scope_examined: usize,
+    evidence_examined: usize,
+    evidence_still_due: bool,
+    due_examined: usize,
+    due_transitioned: usize,
+}
+
+impl PolicyEvaluationPage {
+    fn may_have_more(self) -> bool {
+        self.scope_examined == POLICY_SCOPE_MAINTENANCE_PAGE as usize
+            || self.evidence_examined == POLICY_EVIDENCE_MAINTENANCE_PAGE as usize
+            || self.evidence_still_due
+            || self.due_examined == POLICY_DUE_MAINTENANCE_PAGE as usize
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PolicyAlertSelectionMode {
@@ -74,50 +116,18 @@ enum PolicyAlertSelectionMode {
     ConfirmedActive,
 }
 
-type PolicyVpsRuleInput = (String, String, Value);
-
-fn policy_alert_severity_rank(severity: &str) -> usize {
-    match severity {
-        "critical" => 0,
-        "warning" => 1,
-        "info" => 2,
-        _ => 3,
-    }
-}
-
-fn policy_alert_lifecycle_rank(lifecycle_state: &str) -> usize {
-    match lifecycle_state {
-        POLICY_ALERT_TRIGGERED | POLICY_ALERT_PERSISTING => 0,
-        _ => 1,
-    }
-}
-
-fn policy_alert_matches_selection(
-    alert: &PolicyAlertRecord,
-    mode: PolicyAlertSelectionMode,
-) -> bool {
-    match mode {
-        PolicyAlertSelectionMode::History => true,
-        PolicyAlertSelectionMode::CurrentFleet => {
-            alert.resolved_at.is_none() && alert.last_confirmed_at.is_some()
-        }
-        PolicyAlertSelectionMode::ConfirmedActive => {
-            alert.resolved_at.is_none()
-                && alert.last_confirmed_at.is_some()
-                && matches!(
-                    alert.lifecycle_state.as_str(),
-                    POLICY_ALERT_TRIGGERED | POLICY_ALERT_PERSISTING
-                )
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct TrafficSelector {
     source: String,
     interface: String,
     direction: String,
     canonical: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TrafficSelectorSpec {
+    All,
+    Exact(Vec<TrafficSelector>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,14 +150,140 @@ struct TrafficStreamRequest {
     cycle_start_unix: i64,
 }
 
+pub(crate) type TrafficStreamIdentity = (String, String);
+
+/// The current accepted sample's traffic counters. The traffic stream owner
+/// persists natural-minute state asynchronously; policy evaluation overlays
+/// this immutable event on the preceding durable stream snapshot so removing
+/// per-event stream DML cannot delay traffic-trigger semantics by one sample.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectedTrafficCounterOverlay {
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) counters: Vec<ProjectedTrafficCounter>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectedTrafficCounter {
+    pub(crate) source_kind: String,
+    pub(crate) interface: String,
+    pub(crate) rx_bytes: i64,
+    pub(crate) tx_bytes: i64,
+    pub(crate) sample_source: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct NetworkInterfaceInventory {
+    traffic_streams: BTreeSet<TrafficStreamIdentity>,
+    current_host_interfaces: BTreeSet<String>,
+    current_tunnel_interfaces: BTreeSet<String>,
+}
+
+fn projected_traffic_streams_with_policy(
+    metrics: &AgentMetrics,
+    policy: &NetworkInterfacePolicy,
+    network_admission_mask: &[u8],
+    tunnel_admission_mask: &[u8],
+    current_tunnel_identities: &HashSet<ProjectedTelemetryTunnelIdentity>,
+    managed_tunnel_interfaces: &HashSet<String>,
+) -> HashSet<TrafficStreamIdentity> {
+    let network_mask_is_exact =
+        ordinal_admission_mask_has_exact_shape(network_admission_mask, metrics.networks.len());
+    let tunnel_mask_is_exact =
+        ordinal_admission_mask_has_exact_shape(tunnel_admission_mask, metrics.tunnels.len());
+    let host_streams = metrics
+        .networks
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, network)| {
+            network_mask_is_exact
+                && (1..=64).contains(&network.interface.len())
+                && ordinal_mask_bit(network_admission_mask, *ordinal)
+                && admitted_network_interface(
+                    policy,
+                    NetworkInterfaceSource::Host,
+                    &network.interface,
+                    managed_tunnel_interfaces,
+                )
+        })
+        .map(|(_, network)| ("host".to_string(), network.interface.clone()));
+    let tunnel_streams = metrics
+        .tunnels
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, tunnel)| {
+            tunnel_mask_is_exact
+                && ordinal_mask_bit(tunnel_admission_mask, *ordinal)
+                && projected_telemetry_tunnel_identity(tunnel)
+                    .is_some_and(|identity| current_tunnel_identities.contains(&identity))
+                && admitted_network_interface(
+                    policy,
+                    NetworkInterfaceSource::Tunnel,
+                    &tunnel.interface,
+                    managed_tunnel_interfaces,
+                )
+        })
+        .map(|(_, tunnel)| ("tunnel".to_string(), tunnel.interface.clone()));
+    host_streams.chain(tunnel_streams).collect()
+}
+
+fn ordinal_mask_bit(mask: &[u8], ordinal: usize) -> bool {
+    mask.get(ordinal / 8)
+        .is_some_and(|byte| byte & (1_u8 << (ordinal % 8)) != 0)
+}
+
+#[cfg(test)]
+fn projected_traffic_streams(metrics: &AgentMetrics) -> HashSet<TrafficStreamIdentity> {
+    fn all_mask(item_count: usize) -> Vec<u8> {
+        let mut mask = vec![0xff; item_count.div_ceil(8)];
+        if let (Some(final_byte), remainder) = (mask.last_mut(), item_count % 8) {
+            if remainder != 0 {
+                *final_byte = ((1_u16 << remainder) - 1) as u8;
+            }
+        }
+        mask
+    }
+    let network_mask = all_mask(metrics.networks.len());
+    let tunnel_mask = all_mask(metrics.tunnels.len());
+    let current_tunnel_identities = metrics
+        .tunnels
+        .iter()
+        .filter_map(projected_telemetry_tunnel_identity)
+        .collect::<HashSet<_>>();
+    let managed_tunnel_interfaces = current_tunnel_identities
+        .iter()
+        .map(|identity| identity.interface.clone())
+        .collect();
+    projected_traffic_streams_with_policy(
+        metrics,
+        &NetworkInterfacePolicy::All,
+        &network_mask,
+        &tunnel_mask,
+        &current_tunnel_identities,
+        &managed_tunnel_interfaces,
+    )
+}
+
+fn projected_traffic_stream_contains(
+    streams: &HashSet<TrafficStreamIdentity>,
+    source_kind: &str,
+    interface: &str,
+) -> bool {
+    streams
+        .iter()
+        .any(|stream| stream.0 == source_kind && stream.1 == interface)
+}
+
 const NO_RESET_TRAFFIC_START_UNIX: i64 = 0;
 
-// Current monthly cycles use the transactionally maintained hourly transition
-// ledger for completed UTC hours and scan at most the current raw hour. The
-// coverage revision is part of the same transaction as every raw mutation. If
-// coverage is absent or deliberately marked dirty, this statement selects the
-// original raw-LAG oracle for the complete request set instead of returning a
-// potentially stale partial result.
+// Current monthly cycles read one transactionally maintained completed-hour
+// prefix and at most its single authoritative open hourly row. The stream head
+// supplies the current counter values, so the ordinary path never revisits raw
+// samples. A stream with no later samples remains a bounded last-known value as
+// wall time moves; crossing a reset boundary gives it a zero prefix for the new
+// cycle.
+// Coverage is decided independently for every stream. Every reader omits an
+// unready stream so the accounting assembler marks only that selector
+// incomplete; repair remains exclusively writer-owned.
 pub(crate) const MONTHLY_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
     WITH requested AS MATERIALIZED (
         SELECT client_id, source_kind, interface, cycle_start_unix
@@ -164,389 +300,140 @@ pub(crate) const MONTHLY_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
         )
     ),
     coverage AS MATERIALIZED (
-        SELECT NOT EXISTS (
-            SELECT 1
-            FROM requested
-            WHERE to_timestamp(cycle_start_unix) <> date_bin(
+        SELECT
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            requested.cycle_start_unix,
+            active.rx_bytes AS completed_cycle_rx,
+            active.tx_bytes AS completed_cycle_tx,
+            active.rx_reset_count AS completed_rx_resets,
+            active.tx_reset_count AS completed_tx_resets,
+            active.cycle_start AS active_cycle_start,
+            streams.latest_sample_observed_at,
+            streams.latest_sample_rx_bytes,
+            streams.latest_sample_tx_bytes,
+            streams.latest_sample_source,
+            CASE
+                WHEN active.cycle_start =
+                        to_timestamp(requested.cycle_start_unix)
+                THEN active.completed_through
+                ELSE to_timestamp(requested.cycle_start_unix)
+            END AS tail_start,
+            to_timestamp(requested.cycle_start_unix) = date_bin(
                 interval '1 hour',
-                to_timestamp(cycle_start_unix),
+                to_timestamp(requested.cycle_start_unix),
                 TIMESTAMPTZ '1970-01-01 00:00:00+00'
             )
-        ) AND NOT EXISTS (
-            SELECT 1
-            FROM requested
-            JOIN LATERAL (
-                SELECT 1 AS present
-                FROM traffic_counter_samples sample
-                WHERE sample.client_id = requested.client_id
-                  AND sample.source_kind = requested.source_kind
-                  AND sample.interface = requested.interface
-                  AND sample.observed_at <= to_timestamp($5)
-                ORDER BY sample.observed_at DESC
-                LIMIT 1
-            ) existing ON TRUE
-            LEFT JOIN traffic_counter_hourly_usage_streams streams
-              ON streams.client_id = requested.client_id
-             AND streams.source_kind = requested.source_kind
-             AND streams.interface = requested.interface
-            WHERE streams.client_id IS NULL
-               OR streams.source_revision <> streams.materialized_revision
-        ) AS valid
-    ),
-    fast_latest AS (
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            requested.cycle_start_unix,
-            sample.rx_bytes AS latest_rx,
-            sample.tx_bytes AS latest_tx,
-            EXTRACT(EPOCH FROM sample.observed_at)::bigint AS last_sample_unix
+            AND streams.client_id IS NOT NULL
+            AND streams.source_revision = streams.materialized_revision
+            AND streams.sample_edge_revision = streams.materialized_revision
+            AND streams.promoted_boundary_safe
+            AND active.client_id IS NOT NULL
+            AND active.source_revision = active.materialized_revision
+            AND (
+                (
+                    active.cycle_start =
+                        to_timestamp(requested.cycle_start_unix)
+                    AND active.completed_through <= date_bin(
+                        interval '1 hour',
+                        to_timestamp($5),
+                        TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                    )
+                    -- Each owner is self-ready; this head edge
+                    -- distinguishes inactivity from an unpublished
+                    -- completed prefix.
+                    AND streams.latest_sample_observed_at <
+                        active.completed_through + interval '1 hour'
+                )
+                OR (
+                    active.cycle_start <
+                        to_timestamp(requested.cycle_start_unix)
+                    AND streams.latest_sample_observed_at <
+                        to_timestamp(requested.cycle_start_unix)
+                )
+            ) AS valid
         FROM requested
-        JOIN coverage ON coverage.valid
-        JOIN LATERAL (
-            SELECT sample.observed_at, sample.rx_bytes, sample.tx_bytes
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND sample.observed_at <= to_timestamp($5)
-            ORDER BY sample.observed_at DESC
-            LIMIT 1
-        ) sample ON TRUE
+        LEFT JOIN traffic_counter_streams streams
+         ON streams.client_id = requested.client_id
+         AND streams.source_kind = requested.source_kind
+         AND streams.interface = requested.interface
+        LEFT JOIN traffic_counter_active_cycle_usage active
+          ON active.client_id = requested.client_id
+         AND active.source_kind = requested.source_kind
+         AND active.interface = requested.interface
     ),
-    fast_completed_usage AS (
+    fast_requested AS MATERIALIZED (
         SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            COALESCE(SUM(usage.rx_bytes), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(usage.tx_bytes), 0)::bigint AS cycle_tx,
-            COALESCE(SUM(usage.rx_reset_count), 0)::bigint AS rx_resets,
-            COALESCE(SUM(usage.tx_reset_count), 0)::bigint AS tx_resets
-        FROM requested
-        JOIN coverage ON coverage.valid
-        JOIN traffic_counter_hourly_usage usage
-          ON usage.client_id = requested.client_id
-         AND usage.source_kind = requested.source_kind
-         AND usage.interface = requested.interface
-         AND usage.bucket_start >= to_timestamp(requested.cycle_start_unix)
-         AND usage.bucket_start < date_bin(
-                interval '1 hour',
-                to_timestamp($5),
-                TIMESTAMPTZ '1970-01-01 00:00:00+00'
-             )
-        GROUP BY
-            requested.client_id,
-            requested.source_kind,
-            requested.interface
-    ),
-    fast_tail_samples AS (
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            requested.cycle_start_unix,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source
-        FROM requested
-        JOIN coverage ON coverage.valid
-        JOIN traffic_counter_samples sample
-          ON sample.client_id = requested.client_id
-         AND sample.source_kind = requested.source_kind
-         AND sample.interface = requested.interface
-         AND sample.observed_at >= date_bin(
-                interval '1 hour',
-                to_timestamp($5),
-                TIMESTAMPTZ '1970-01-01 00:00:00+00'
-             )
-         AND sample.observed_at <= to_timestamp($5)
-        UNION ALL
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            requested.cycle_start_unix,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source
-        FROM requested
-        JOIN coverage ON coverage.valid
-        JOIN LATERAL (
-            SELECT
-                sample.observed_at,
-                sample.rx_bytes,
-                sample.tx_bytes,
-                sample.rx_counter_epoch,
-                sample.tx_counter_epoch,
-                sample.sample_source
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND sample.observed_at < date_bin(
-                    interval '1 hour',
-                    to_timestamp($5),
-                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
-                  )
-            ORDER BY sample.observed_at DESC
-            LIMIT 1
-        ) sample ON TRUE
-    ),
-    fast_tail_sequenced AS (
-        SELECT
-            fast_tail_samples.*,
-            LAG(observed_at) OVER stream AS previous_observed_at,
-            LAG(rx_bytes) OVER stream AS previous_rx_bytes,
-            LAG(tx_bytes) OVER stream AS previous_tx_bytes,
-            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
-            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
-            LAG(sample_source) OVER stream AS previous_sample_source
-        FROM fast_tail_samples
-        WINDOW stream AS (
-            PARTITION BY client_id, source_kind, interface
-            ORDER BY observed_at
-        )
-    ),
-    fast_tail_usage AS (
-        SELECT
-            client_id,
-            source_kind,
-            interface,
-            COALESCE(SUM(
-                CASE
-                    WHEN observed_at >= to_timestamp(cycle_start_unix)
-                     AND previous_observed_at IS NOT NULL
-                     AND rx_counter_epoch = previous_rx_counter_epoch
-                     AND rx_bytes >= previous_rx_bytes
-                    THEN rx_bytes - previous_rx_bytes
-                    ELSE 0
-                END
-            ), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(
-                CASE
-                    WHEN observed_at >= to_timestamp(cycle_start_unix)
-                     AND previous_observed_at IS NOT NULL
-                     AND tx_counter_epoch = previous_tx_counter_epoch
-                     AND tx_bytes >= previous_tx_bytes
-                    THEN tx_bytes - previous_tx_bytes
-                    ELSE 0
-                END
-            ), 0)::bigint AS cycle_tx,
-            COUNT(*) FILTER (
-                WHERE observed_at >= to_timestamp(cycle_start_unix)
-                  AND previous_rx_counter_epoch IS NOT NULL
-                  AND rx_counter_epoch <> previous_rx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            )::bigint AS rx_resets,
-            COUNT(*) FILTER (
-                WHERE observed_at >= to_timestamp(cycle_start_unix)
-                  AND previous_tx_counter_epoch IS NOT NULL
-                  AND tx_counter_epoch <> previous_tx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            )::bigint AS tx_resets
-        FROM fast_tail_sequenced
-        GROUP BY client_id, source_kind, interface
+            client_id, source_kind, interface, cycle_start_unix,
+            CASE WHEN active_cycle_start = to_timestamp(cycle_start_unix)
+                 THEN completed_cycle_rx ELSE 0 END AS completed_cycle_rx,
+            CASE WHEN active_cycle_start = to_timestamp(cycle_start_unix)
+                 THEN completed_cycle_tx ELSE 0 END AS completed_cycle_tx,
+            CASE WHEN active_cycle_start = to_timestamp(cycle_start_unix)
+                 THEN completed_rx_resets ELSE 0 END AS completed_rx_resets,
+            CASE WHEN active_cycle_start = to_timestamp(cycle_start_unix)
+                 THEN completed_tx_resets ELSE 0 END AS completed_tx_resets,
+            tail_start,
+            latest_sample_observed_at,
+            latest_sample_rx_bytes,
+            latest_sample_tx_bytes,
+            latest_sample_source
+        FROM coverage
+        WHERE valid
     ),
     fast_usage AS (
         SELECT
-            latest.client_id,
-            latest.source_kind,
-            latest.interface,
-            COALESCE(completed.cycle_rx, 0)
-                + COALESCE(tail.cycle_rx, 0) AS cycle_rx,
-            COALESCE(completed.cycle_tx, 0)
-                + COALESCE(tail.cycle_tx, 0) AS cycle_tx,
-            latest.latest_rx,
-            latest.latest_tx,
-            latest.last_sample_unix,
-            1 + COALESCE(completed.rx_resets, 0)
-                + COALESCE(tail.rx_resets, 0) AS rx_counter_epochs_seen,
-            1 + COALESCE(completed.tx_resets, 0)
-                + COALESCE(tail.tx_resets, 0) AS tx_counter_epochs_seen
-        FROM fast_latest latest
-        LEFT JOIN fast_completed_usage completed
-          ON completed.client_id = latest.client_id
-         AND completed.source_kind = latest.source_kind
-         AND completed.interface = latest.interface
-        LEFT JOIN fast_tail_usage tail
-          ON tail.client_id = latest.client_id
-         AND tail.source_kind = latest.source_kind
-         AND tail.interface = latest.interface
-    ),
-    fallback_requested AS MATERIALIZED (
-        SELECT requested.*
-        FROM requested
-        JOIN coverage ON NOT coverage.valid
-    ),
-    fallback_cycle_samples AS (
-        SELECT
-            sample.client_id,
-            sample.source_kind,
-            sample.interface,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source,
-            requested.cycle_start_unix
-        FROM traffic_counter_samples sample
-        JOIN fallback_requested requested
-          ON requested.client_id = sample.client_id
-         AND requested.source_kind = sample.source_kind
-         AND requested.interface = sample.interface
-        WHERE sample.observed_at >= to_timestamp(requested.cycle_start_unix)
-          AND sample.observed_at <= to_timestamp($5)
-    ),
-    fallback_baseline_samples AS (
-        SELECT
             requested.client_id,
             requested.source_kind,
             requested.interface,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source,
-            requested.cycle_start_unix
-        FROM fallback_requested requested
-        JOIN LATERAL (
-            SELECT
-                sample.observed_at,
-                sample.rx_bytes,
-                sample.tx_bytes,
-                sample.rx_counter_epoch,
-                sample.tx_counter_epoch,
-                sample.sample_source
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND sample.observed_at < to_timestamp(requested.cycle_start_unix)
-              AND sample.observed_at <= to_timestamp($5)
-            ORDER BY sample.observed_at DESC
-            LIMIT 1
-        ) sample ON TRUE
-    ),
-    fallback_selected_samples AS (
-        SELECT * FROM fallback_cycle_samples
-        UNION ALL
-        SELECT * FROM fallback_baseline_samples
-    ),
-    fallback_sequenced_samples AS (
-        SELECT
-            fallback_selected_samples.*,
-            LAG(observed_at) OVER stream AS previous_observed_at,
-            LAG(rx_bytes) OVER stream AS previous_rx_bytes,
-            LAG(tx_bytes) OVER stream AS previous_tx_bytes,
-            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
-            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
-            LAG(sample_source) OVER stream AS previous_sample_source
-        FROM fallback_selected_samples
-        WINDOW stream AS (
-            PARTITION BY client_id, source_kind, interface
-            ORDER BY observed_at ASC
-        )
-    ),
-    fallback_usage AS (
-        SELECT
-            client_id,
-            source_kind,
-            interface,
-            COALESCE(SUM(
-                CASE
-                    WHEN observed_at >= to_timestamp(cycle_start_unix)
-                     AND previous_observed_at IS NOT NULL
-                     AND rx_counter_epoch = previous_rx_counter_epoch
-                     AND rx_bytes >= previous_rx_bytes
-                    THEN rx_bytes - previous_rx_bytes
-                    ELSE 0
-                END
-            ), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(
-                CASE
-                    WHEN observed_at >= to_timestamp(cycle_start_unix)
-                     AND previous_observed_at IS NOT NULL
-                     AND tx_counter_epoch = previous_tx_counter_epoch
-                     AND tx_bytes >= previous_tx_bytes
-                    THEN tx_bytes - previous_tx_bytes
-                    ELSE 0
-                END
-            ), 0)::bigint AS cycle_tx,
-            (1 + COUNT(*) FILTER (
-                WHERE previous_rx_counter_epoch IS NOT NULL
-                  AND rx_counter_epoch <> previous_rx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            ))::bigint AS rx_counter_epochs_seen,
-            (1 + COUNT(*) FILTER (
-                WHERE previous_tx_counter_epoch IS NOT NULL
-                  AND tx_counter_epoch <> previous_tx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            ))::bigint AS tx_counter_epochs_seen
-        FROM fallback_sequenced_samples
-        GROUP BY client_id, source_kind, interface
-    ),
-    fallback_latest AS (
-        SELECT DISTINCT ON (client_id, source_kind, interface)
-            client_id,
-            source_kind,
-            interface,
-            rx_bytes AS latest_rx,
-            tx_bytes AS latest_tx,
-            EXTRACT(EPOCH FROM observed_at)::bigint AS last_sample_unix
-        FROM fallback_sequenced_samples
-        ORDER BY client_id, source_kind, interface, observed_at DESC
-    ),
-    fallback_result AS (
-        SELECT
-            usage.client_id,
-            usage.source_kind,
-            usage.interface,
-            usage.cycle_rx,
-            usage.cycle_tx,
-            latest.latest_rx,
-            latest.latest_tx,
-            latest.last_sample_unix,
-            usage.rx_counter_epochs_seen,
-            usage.tx_counter_epochs_seen
-        FROM fallback_usage usage
-        JOIN fallback_latest latest
-          ON latest.client_id = usage.client_id
-         AND latest.source_kind = usage.source_kind
-         AND latest.interface = usage.interface
+            requested.completed_cycle_rx
+                + CASE WHEN requested.latest_sample_observed_at >=
+                            requested.tail_start
+                       THEN tail.rx_bytes ELSE 0 END AS cycle_rx,
+            requested.completed_cycle_tx
+                + CASE WHEN requested.latest_sample_observed_at >=
+                            requested.tail_start
+                       THEN tail.tx_bytes ELSE 0 END AS cycle_tx,
+            requested.latest_sample_rx_bytes AS latest_rx,
+            requested.latest_sample_tx_bytes AS latest_tx,
+            requested.latest_sample_source AS last_sample_source,
+            EXTRACT(EPOCH FROM requested.latest_sample_observed_at)::bigint
+                AS last_sample_unix,
+            1 + requested.completed_rx_resets
+                + CASE WHEN requested.latest_sample_observed_at >=
+                            requested.tail_start
+                       THEN tail.rx_reset_count ELSE 0 END
+                AS rx_counter_epochs_seen,
+            1 + requested.completed_tx_resets
+                + CASE WHEN requested.latest_sample_observed_at >=
+                            requested.tail_start
+                       THEN tail.tx_reset_count ELSE 0 END
+                AS tx_counter_epochs_seen
+        FROM fast_requested requested
+        LEFT JOIN traffic_counter_hourly_usage tail
+          ON tail.client_id = requested.client_id
+         AND tail.source_kind = requested.source_kind
+         AND tail.interface = requested.interface
+         AND tail.bucket_start = requested.tail_start
+        WHERE requested.latest_sample_observed_at <= to_timestamp($5)
+          AND (
+              requested.latest_sample_observed_at IS NULL
+              OR
+              requested.latest_sample_observed_at < requested.tail_start
+              OR tail.latest_observed_at = requested.latest_sample_observed_at
+          )
     )
     SELECT * FROM fast_usage
-    UNION ALL
-    SELECT * FROM fallback_result
     ORDER BY client_id, source_kind, interface
 "#;
 
-// Long-term rows are a non-overlapping ledger of valid counter transitions.
-// Healthy hourly coverage bounds the retained raw scan to the as-of hour;
-// promoted rows cover older time. Dirty coverage falls back to the complete
-// raw-LAG oracle, and intentional vnStat-to-live boundaries contribute neither
-// bytes nor resets.
+// Long-term traffic is the sum of the ready exact-hour stream owner and
+// its non-overlapping retained tier owners. An absent retained registry plus
+// absent tier summaries and an empty full-key rollup probe is the normal
+// zero-retained state for a new stream.
+// Every unready or overlapping authority is omitted; readers never inspect raw
+// samples or reconstruct writer-owned projections.
 pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
     WITH requested AS MATERIALIZED (
         SELECT client_id, source_kind, interface
@@ -556,458 +443,198 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
             $3::text[]
         ) AS request(client_id, source_kind, interface)
     ),
-    coverage AS MATERIALIZED (
+    retained_tiers AS MATERIALIZED (
         SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            NOT EXISTS (
-                SELECT 1
-                FROM traffic_counter_samples sample
-                WHERE sample.client_id = requested.client_id
-                  AND sample.source_kind = requested.source_kind
-                  AND sample.interface = requested.interface
-                  AND sample.observed_at <= to_timestamp($4)
-            ) OR (
-                streams.client_id IS NOT NULL
-                AND streams.source_revision = streams.materialized_revision
-                AND NOT EXISTS (
-                    -- The hourly ledger deliberately has no promoted-row
-                    -- dimension. Normal retention leaves one predecessor
-                    -- boundary with no older raw row. Fail closed for this
-                    -- stream if a promoted row has an exact predecessor.
-                    SELECT 1
-                    FROM traffic_counter_samples promoted
-                    WHERE promoted.client_id = requested.client_id
-                      AND promoted.source_kind = requested.source_kind
-                      AND promoted.interface = requested.interface
-                      AND promoted.inbound_promoted
-                      AND promoted.observed_at <= to_timestamp($4)
-                      AND EXISTS (
-                          SELECT 1
-                          FROM traffic_counter_samples predecessor
-                          WHERE predecessor.client_id = promoted.client_id
-                            AND predecessor.source_kind = promoted.source_kind
-                            AND predecessor.interface = promoted.interface
-                            AND predecessor.observed_at < promoted.observed_at
-                            AND predecessor.observed_at <= to_timestamp($4)
-                      )
-                )
-            ) AS valid
+            summary.*,
+            stream.first_exact_observed_at,
+            stream.last_exact_observed_at
         FROM requested
-        LEFT JOIN traffic_counter_hourly_usage_streams streams
-          ON streams.client_id = requested.client_id
-         AND streams.source_kind = requested.source_kind
-         AND streams.interface = requested.interface
+        JOIN traffic_counter_rollup_tier_summaries summary
+          ON summary.client_id = requested.client_id
+         AND summary.source_kind = requested.source_kind
+         AND summary.interface = requested.interface
+        JOIN traffic_counter_streams stream
+          ON stream.client_id = requested.client_id
+         AND stream.source_kind = requested.source_kind
+         AND stream.interface = requested.interface
     ),
-    fast_requested AS MATERIALIZED (
-        SELECT requested.*
-        FROM requested
-        JOIN coverage
-          ON coverage.client_id = requested.client_id
-         AND coverage.source_kind = requested.source_kind
-         AND coverage.interface = requested.interface
-        WHERE coverage.valid
-    ),
-    latest AS (
+    retained_tier_order AS MATERIALIZED (
         SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            sample.rx_bytes AS latest_rx,
-            sample.tx_bytes AS latest_tx,
-            EXTRACT(EPOCH FROM sample.observed_at)::bigint AS last_sample_unix
-        FROM requested
-        JOIN LATERAL (
-            SELECT
-                sample.observed_at,
-                sample.rx_bytes,
-                sample.tx_bytes
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND sample.observed_at <= to_timestamp($4)
-            ORDER BY sample.observed_at DESC
-            LIMIT 1
-        ) sample ON TRUE
-    ),
-    fast_completed_usage AS (
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            COALESCE(SUM(usage.rx_bytes), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(usage.tx_bytes), 0)::bigint AS cycle_tx,
-            COALESCE(SUM(usage.rx_reset_count), 0)::bigint AS rx_resets,
-            COALESCE(SUM(usage.tx_reset_count), 0)::bigint AS tx_resets
-        FROM fast_requested requested
-        JOIN traffic_counter_hourly_usage usage
-          ON usage.client_id = requested.client_id
-         AND usage.source_kind = requested.source_kind
-         AND usage.interface = requested.interface
-         AND usage.bucket_start < date_bin(
-                interval '1 hour',
-                to_timestamp($4),
-                TIMESTAMPTZ '1970-01-01 00:00:00+00'
-             )
-        GROUP BY
-            requested.client_id,
-            requested.source_kind,
-            requested.interface
-    ),
-    fast_tail_samples AS (
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source,
-            sample.inbound_promoted
-        FROM fast_requested requested
-        JOIN traffic_counter_samples sample
-          ON sample.client_id = requested.client_id
-         AND sample.source_kind = requested.source_kind
-         AND sample.interface = requested.interface
-         AND sample.observed_at >= date_bin(
-                interval '1 hour',
-                to_timestamp($4),
-                TIMESTAMPTZ '1970-01-01 00:00:00+00'
-             )
-         AND sample.observed_at <= to_timestamp($4)
-        UNION ALL
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source,
-            sample.inbound_promoted
-        FROM fast_requested requested
-        JOIN LATERAL (
-            SELECT
-                sample.observed_at,
-                sample.rx_bytes,
-                sample.tx_bytes,
-                sample.rx_counter_epoch,
-                sample.tx_counter_epoch,
-                sample.sample_source,
-                sample.inbound_promoted
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND sample.observed_at < date_bin(
-                    interval '1 hour',
-                    to_timestamp($4),
-                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
-                  )
-            ORDER BY sample.observed_at DESC
-            LIMIT 1
-        ) sample ON TRUE
-    ),
-    fast_tail_sequenced AS (
-        SELECT
-            fast_tail_samples.*,
-            LAG(rx_bytes) OVER stream AS previous_rx_bytes,
-            LAG(tx_bytes) OVER stream AS previous_tx_bytes,
-            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
-            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
-            LAG(sample_source) OVER stream AS previous_sample_source
-        FROM fast_tail_samples
-        WINDOW stream AS (
-            PARTITION BY client_id, source_kind, interface
-            ORDER BY observed_at
+            tier.*,
+            MIN(first_bucket_start) OVER finer AS finer_first_bucket_start,
+            MAX(last_bucket_end) OVER finer AS finer_last_bucket_end
+        FROM retained_tiers tier
+        WINDOW finer AS (
+            PARTITION BY client_id, source_kind, interface, origin_kind
+            ORDER BY bucket_secs
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
         )
     ),
-    fast_tail_usage AS (
+    retained_totals AS MATERIALIZED (
         SELECT
-            client_id,
-            source_kind,
-            interface,
-            COALESCE(SUM(
-                CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
-                           AND rx_bytes >= previous_rx_bytes
-                     THEN rx_bytes - previous_rx_bytes ELSE 0 END
-            ), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(
-                CASE WHEN tx_counter_epoch = previous_tx_counter_epoch
-                           AND tx_bytes >= previous_tx_bytes
-                     THEN tx_bytes - previous_tx_bytes ELSE 0 END
-            ), 0)::bigint AS cycle_tx,
-            COUNT(*) FILTER (
-                WHERE previous_rx_counter_epoch IS NOT NULL
-                  AND rx_counter_epoch <> previous_rx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            )::bigint AS rx_resets,
-            COUNT(*) FILTER (
-                WHERE previous_tx_counter_epoch IS NOT NULL
-                  AND tx_counter_epoch <> previous_tx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            )::bigint AS tx_resets
-        FROM fast_tail_sequenced
-        WHERE NOT inbound_promoted
-        GROUP BY client_id, source_kind, interface
-    ),
-    fast_raw_usage AS (
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            COALESCE(completed.cycle_rx, 0)
-                + COALESCE(tail.cycle_rx, 0) AS cycle_rx,
-            COALESCE(completed.cycle_tx, 0)
-                + COALESCE(tail.cycle_tx, 0) AS cycle_tx,
-            COALESCE(completed.rx_resets, 0)
-                + COALESCE(tail.rx_resets, 0) AS rx_resets,
-            COALESCE(completed.tx_resets, 0)
-                + COALESCE(tail.tx_resets, 0) AS tx_resets
-        FROM fast_requested requested
-        LEFT JOIN fast_completed_usage completed
-          ON completed.client_id = requested.client_id
-         AND completed.source_kind = requested.source_kind
-         AND completed.interface = requested.interface
-        LEFT JOIN fast_tail_usage tail
-          ON tail.client_id = requested.client_id
-         AND tail.source_kind = requested.source_kind
-         AND tail.interface = requested.interface
-    ),
-    fallback_requested AS MATERIALIZED (
-        SELECT requested.*
-        FROM requested
-        JOIN coverage
-          ON coverage.client_id = requested.client_id
-         AND coverage.source_kind = requested.source_kind
-         AND coverage.interface = requested.interface
-        WHERE NOT coverage.valid
-    ),
-    fallback_raw_selected AS (
-        SELECT
-            sample.client_id,
-            sample.source_kind,
-            sample.interface,
-            sample.observed_at,
-            sample.rx_bytes,
-            sample.tx_bytes,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
-            sample.sample_source,
-            sample.inbound_promoted
-        FROM traffic_counter_samples sample
-        JOIN fallback_requested requested
-          ON requested.client_id = sample.client_id
-         AND requested.source_kind = sample.source_kind
-         AND requested.interface = sample.interface
-        WHERE sample.observed_at <= to_timestamp($4)
-    ),
-    fallback_raw_sequenced AS (
-        SELECT
-            fallback_raw_selected.*,
-            LAG(rx_bytes) OVER stream AS previous_rx_bytes,
-            LAG(tx_bytes) OVER stream AS previous_tx_bytes,
-            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
-            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
-            LAG(sample_source) OVER stream AS previous_sample_source
-        FROM fallback_raw_selected
-        WINDOW stream AS (
-            PARTITION BY client_id, source_kind, interface
-            ORDER BY observed_at
-        )
-    ),
-    fallback_raw_usage AS (
-        SELECT
-            client_id,
-            source_kind,
-            interface,
-            COALESCE(SUM(
-                CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
-                           AND rx_bytes >= previous_rx_bytes
-                     THEN rx_bytes - previous_rx_bytes ELSE 0 END
-            ), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(
-                CASE WHEN tx_counter_epoch = previous_tx_counter_epoch
-                           AND tx_bytes >= previous_tx_bytes
-                     THEN tx_bytes - previous_tx_bytes ELSE 0 END
-            ), 0)::bigint AS cycle_tx,
-            COUNT(*) FILTER (
-                WHERE previous_rx_counter_epoch IS NOT NULL
-                  AND rx_counter_epoch <> previous_rx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            )::bigint AS rx_resets,
-            COUNT(*) FILTER (
-                WHERE previous_tx_counter_epoch IS NOT NULL
-                  AND tx_counter_epoch <> previous_tx_counter_epoch
-                  AND NOT (
-                      previous_sample_source LIKE 'vnstat_import:%'
-                      AND sample_source NOT LIKE 'vnstat_import:%'
-                  )
-            )::bigint AS tx_resets
-        FROM fallback_raw_sequenced
-        WHERE NOT inbound_promoted
-        GROUP BY client_id, source_kind, interface
-    ),
-    raw_usage AS (
-        SELECT * FROM fast_raw_usage
-        UNION ALL
-        SELECT * FROM fallback_raw_usage
-    ),
-    raw_bounds AS MATERIALIZED (
-        SELECT
-            requested.client_id,
-            requested.source_kind,
-            requested.interface,
-            earliest.observed_at AS first_exact_at,
-            latest.observed_at AS last_exact_at
-        FROM requested
-        LEFT JOIN LATERAL (
-            SELECT sample.observed_at
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND NOT sample.inbound_promoted
-            ORDER BY sample.observed_at ASC
-            LIMIT 1
-        ) earliest ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT sample.observed_at
-            FROM traffic_counter_samples sample
-            WHERE sample.client_id = requested.client_id
-              AND sample.source_kind = requested.source_kind
-              AND sample.interface = requested.interface
-              AND NOT sample.inbound_promoted
-            ORDER BY sample.observed_at DESC
-            LIMIT 1
-        ) latest ON TRUE
-    ),
-    finer_ranges AS MATERIALIZED (
-        SELECT
-            rollup.client_id,
-            rollup.source_kind,
-            rollup.interface,
-            rollup.origin_kind,
-            rollup.bucket_secs,
-            MIN(rollup.bucket_start) AS first_bucket_start,
-            MAX(rollup.bucket_start + make_interval(secs => rollup.bucket_secs))
-                AS last_bucket_end
-        FROM traffic_counter_rollups rollup
-        JOIN requested
-          ON requested.client_id = rollup.client_id
-         AND requested.source_kind = rollup.source_kind
-         AND requested.interface = rollup.interface
-        WHERE rollup.bucket_secs < 86400
-        GROUP BY
-            rollup.client_id,
-            rollup.source_kind,
-            rollup.interface,
-            rollup.origin_kind,
-            rollup.bucket_secs
-    ),
-    retained_usage AS (
-        SELECT
-            rollup.client_id,
-            rollup.source_kind,
-            rollup.interface,
-            COALESCE(SUM(rollup.rx_bytes), 0)::bigint AS cycle_rx,
-            COALESCE(SUM(rollup.tx_bytes), 0)::bigint AS cycle_tx,
-            COALESCE(SUM(rollup.rx_reset_count), 0)::bigint AS rx_resets,
-            COALESCE(SUM(rollup.tx_reset_count), 0)::bigint AS tx_resets
-        FROM traffic_counter_rollups rollup
-        JOIN requested
-          ON requested.client_id = rollup.client_id
-         AND requested.source_kind = rollup.source_kind
-         AND requested.interface = rollup.interface
-        JOIN raw_bounds
-          ON raw_bounds.client_id = rollup.client_id
-         AND raw_bounds.source_kind = rollup.source_kind
-         AND raw_bounds.interface = rollup.interface
-        WHERE rollup.bucket_start <= to_timestamp($4)
-          AND NOT EXISTS (
-                SELECT 1
-                FROM finer_ranges range
-                JOIN traffic_counter_rollups finer
-                  ON finer.client_id = range.client_id
-                 AND finer.source_kind = range.source_kind
-                 AND finer.interface = range.interface
-                 AND finer.origin_kind = range.origin_kind
-                 AND finer.bucket_secs = range.bucket_secs
-                 AND finer.bucket_start < rollup.bucket_start
-                        + make_interval(secs => rollup.bucket_secs)
-                 AND finer.bucket_start
-                        + make_interval(secs => finer.bucket_secs)
-                        > rollup.bucket_start
-                WHERE range.client_id = rollup.client_id
-                  AND range.source_kind = rollup.source_kind
-                  AND range.interface = rollup.interface
-                  AND range.origin_kind = rollup.origin_kind
-                  AND range.bucket_secs < rollup.bucket_secs
-                  AND range.first_bucket_start < rollup.bucket_start
-                        + make_interval(secs => rollup.bucket_secs)
-                  AND range.last_bucket_end > rollup.bucket_start
-          )
-          AND (
-                raw_bounds.first_exact_at IS NULL
-                OR rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
-                    <= raw_bounds.first_exact_at
-                OR rollup.bucket_start > raw_bounds.last_exact_at
-                OR NOT EXISTS (
-                    SELECT 1
-                    FROM traffic_counter_samples exact
-                    WHERE exact.client_id = rollup.client_id
-                      AND exact.source_kind = rollup.source_kind
-                      AND exact.interface = rollup.interface
-                      AND NOT exact.inbound_promoted
-                      AND (CASE WHEN exact.sample_source LIKE 'vnstat_import:%'
-                                THEN 'vnstat_import' ELSE 'live' END) = rollup.origin_kind
-                      AND exact.observed_at >= rollup.bucket_start
-                      AND exact.observed_at < rollup.bucket_start
-                            + make_interval(secs => rollup.bucket_secs)
+            tier.client_id,
+            tier.source_kind,
+            tier.interface,
+            COALESCE(SUM(tier.rx_bytes), 0)::bigint AS rx_bytes,
+            COALESCE(SUM(tier.tx_bytes), 0)::bigint AS tx_bytes,
+            COALESCE(SUM(tier.rx_reset_count), 0)::bigint
+                AS rx_reset_count,
+            COALESCE(SUM(tier.tx_reset_count), 0)::bigint
+                AS tx_reset_count,
+            COALESCE(SUM(tier.rollup_row_count), 0)::bigint
+                AS rollup_row_count,
+            COUNT(*)::integer AS tier_count,
+            MIN(tier.materialized_revision) AS minimum_revision,
+            MAX(tier.materialized_revision) AS maximum_revision,
+            bool_or(
+                (
+                    tier.finer_first_bucket_start IS NOT NULL
+                    AND tier.first_bucket_start < tier.finer_last_bucket_end
+                    AND tier.last_bucket_end > tier.finer_first_bucket_start
                 )
-          )
-        GROUP BY rollup.client_id, rollup.source_kind, rollup.interface
+                OR tier.latest_bucket_start > to_timestamp($4)
+                OR (
+                    tier.first_exact_observed_at IS NOT NULL
+                    AND tier.first_bucket_start <= tier.last_exact_observed_at
+                    AND tier.last_bucket_end > tier.first_exact_observed_at
+                )
+            ) AS ineligible
+        FROM retained_tier_order tier
+        GROUP BY tier.client_id, tier.source_kind, tier.interface
     )
     SELECT
-        latest.client_id,
-        latest.source_kind,
-        latest.interface,
-        COALESCE(raw_usage.cycle_rx, 0)
-            + COALESCE(retained_usage.cycle_rx, 0) AS cycle_rx,
-        COALESCE(raw_usage.cycle_tx, 0)
-            + COALESCE(retained_usage.cycle_tx, 0) AS cycle_tx,
-        latest.latest_rx,
-        latest.latest_tx,
-        latest.last_sample_unix,
-        1 + COALESCE(raw_usage.rx_resets, 0)
-            + COALESCE(retained_usage.rx_resets, 0) AS rx_counter_epochs_seen,
-        1 + COALESCE(raw_usage.tx_resets, 0)
-            + COALESCE(retained_usage.tx_resets, 0) AS tx_counter_epochs_seen
-    FROM latest
-    LEFT JOIN raw_usage
-      ON raw_usage.client_id = latest.client_id
-     AND raw_usage.source_kind = latest.source_kind
-     AND raw_usage.interface = latest.interface
-    LEFT JOIN retained_usage
-      ON retained_usage.client_id = latest.client_id
-     AND retained_usage.source_kind = latest.source_kind
-     AND retained_usage.interface = latest.interface
-    ORDER BY latest.client_id ASC, latest.source_kind ASC, latest.interface ASC
+        requested.client_id,
+        requested.source_kind,
+        requested.interface,
+        stream.usage_rx_bytes
+            + COALESCE(tier.rx_bytes, 0) AS cycle_rx,
+        stream.usage_tx_bytes
+            + COALESCE(tier.tx_bytes, 0) AS cycle_tx,
+        stream.latest_sample_rx_bytes AS latest_rx,
+        stream.latest_sample_tx_bytes AS latest_tx,
+        stream.latest_sample_source AS last_sample_source,
+        EXTRACT(EPOCH FROM stream.latest_sample_observed_at)::bigint
+            AS last_sample_unix,
+        1 + stream.usage_rx_reset_count
+            + COALESCE(tier.rx_reset_count, 0)
+                AS rx_counter_epochs_seen,
+        1 + stream.usage_tx_reset_count
+            + COALESCE(tier.tx_reset_count, 0)
+                AS tx_counter_epochs_seen
+    FROM requested
+    JOIN traffic_counter_streams stream
+      ON stream.client_id = requested.client_id
+     AND stream.source_kind = requested.source_kind
+     AND stream.interface = requested.interface
+    LEFT JOIN traffic_counter_rollup_summary_streams retained
+      ON retained.client_id = requested.client_id
+     AND retained.source_kind = requested.source_kind
+     AND retained.interface = requested.interface
+    LEFT JOIN retained_totals tier
+      ON tier.client_id = requested.client_id
+     AND tier.source_kind = requested.source_kind
+     AND tier.interface = requested.interface
+    WHERE stream.source_revision = stream.materialized_revision
+      AND stream.sample_edge_revision = stream.materialized_revision
+      AND stream.promoted_boundary_safe
+      AND stream.latest_sample_observed_at IS NOT NULL
+      AND stream.latest_sample_observed_at <= to_timestamp($4)
+      AND (
+            tier.client_id IS NOT NULL
+            OR NOT EXISTS (
+                SELECT 1
+                FROM traffic_counter_rollups rollup
+                WHERE rollup.client_id = requested.client_id
+                  AND rollup.source_kind = requested.source_kind
+                  AND rollup.interface = requested.interface
+            )
+      )
+      AND (
+            (
+                retained.client_id IS NULL
+                AND tier.client_id IS NULL
+            )
+            OR (
+                retained.client_id IS NOT NULL
+                AND retained.source_revision = retained.materialized_revision
+                AND retained.tier_count = COALESCE(tier.tier_count, 0)
+                AND retained.rollup_row_count =
+                    COALESCE(tier.rollup_row_count, 0)
+                AND NOT COALESCE(tier.ineligible, FALSE)
+                AND (
+                    tier.client_id IS NULL
+                    OR (
+                        tier.minimum_revision = retained.materialized_revision
+                        AND tier.maximum_revision =
+                            retained.materialized_revision
+                    )
+                )
+            )
+      )
+    ORDER BY client_id ASC, source_kind ASC, interface ASC
+"#;
+
+// The all-history range needs only one raw edge and the compact retained-tier
+// bounds for each selected traffic stream. Both sources are maintained in the
+// same transaction as their authoritative rows, so this stays exact without
+// walking a stream's complete retained history.
+pub(crate) const TRAFFIC_HISTORY_START_SQL: &str = r#"
+    WITH requested AS (
+        SELECT source_kind, interface
+        FROM UNNEST($2::text[], $3::text[])
+            AS stream(source_kind, interface)
+    ), bounded_starts AS (
+        SELECT raw.first_observed_at AS first_at
+        FROM requested
+        LEFT JOIN LATERAL (
+            SELECT sample.observed_at AS first_observed_at
+            FROM traffic_counter_samples sample
+            -- The two tuple bounds are the exact non-null primary-key prefix
+            -- for this stream. Unlike timestamp filtering, the prefix range
+            -- cannot walk unrelated streams before finding their first edge.
+            WHERE (
+                    sample.client_id,
+                    sample.source_kind,
+                    sample.interface,
+                    sample.observed_at
+                  ) >= (
+                    $1,
+                    requested.source_kind,
+                    requested.interface,
+                    '-infinity'::timestamptz
+                  )
+              AND (
+                    sample.client_id,
+                    sample.source_kind,
+                    sample.interface,
+                    sample.observed_at
+                  ) <= (
+                    $1,
+                    requested.source_kind,
+                    requested.interface,
+                    'infinity'::timestamptz
+                  )
+            ORDER BY
+                sample.client_id,
+                sample.source_kind,
+                sample.interface,
+                sample.observed_at
+            LIMIT 1
+        ) raw ON TRUE
+        UNION ALL
+        SELECT rollup.first_bucket_start AS first_at
+        FROM requested
+        LEFT JOIN LATERAL (
+            SELECT min(summary.first_bucket_start)
+                AS first_bucket_start
+            FROM traffic_counter_rollup_tier_summaries summary
+            WHERE summary.client_id = $1
+              AND summary.source_kind = requested.source_kind
+              AND summary.interface = requested.interface
+        ) rollup ON TRUE
+    )
+    SELECT extract(epoch FROM min(first_at))::double precision
+    FROM bounded_starts
 "#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1017,7 +644,7 @@ struct TrafficHistoryStream {
     direction_mask: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TrafficCounterStreamUsage {
     client_id: String,
     source_kind: String,
@@ -1026,9 +653,39 @@ struct TrafficCounterStreamUsage {
     cycle_tx: i64,
     latest_rx: i64,
     latest_tx: i64,
+    last_sample_source: String,
     last_sample_unix: i64,
     rx_counter_epochs_seen: i64,
     tx_counter_epochs_seen: i64,
+}
+
+/// Compact policy-facing traffic state owned by the exact-client telemetry
+/// projection cursor.  Natural-minute materialization remains the sole owner
+/// of normalized traffic history; this vector only carries the unmaterialized
+/// counter frontier needed to evaluate every accepted policy sample in order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ProjectedTrafficAccountingFrontierStream {
+    source_kind: String,
+    interface: String,
+    cycle_start_unix: i64,
+    cycle_rx: i64,
+    cycle_tx: i64,
+    latest_rx: i64,
+    latest_tx: i64,
+    last_sample_source: String,
+    last_sample_unix: i64,
+    rx_counter_epochs_seen: i64,
+    tx_counter_epochs_seen: i64,
+}
+
+pub(crate) type ProjectedTrafficAccountingFrontier = Vec<ProjectedTrafficAccountingFrontierStream>;
+
+pub(crate) struct ProjectedTrafficAccountingContext {
+    client_id: String,
+    rules: Vec<VpsRuleValueRecord>,
+    expands_all_streams: bool,
+    durable_streams: BTreeSet<TrafficStreamIdentity>,
+    current_tunnel_interfaces: HashSet<String>,
 }
 
 fn traffic_counter_stream_usage_from_row(row: PgRow) -> Result<TrafficCounterStreamUsage> {
@@ -1040,6 +697,7 @@ fn traffic_counter_stream_usage_from_row(row: PgRow) -> Result<TrafficCounterStr
         cycle_tx: row.try_get("cycle_tx")?,
         latest_rx: row.try_get("latest_rx")?,
         latest_tx: row.try_get("latest_tx")?,
+        last_sample_source: row.try_get("last_sample_source")?,
         last_sample_unix: row.try_get("last_sample_unix")?,
         rx_counter_epochs_seen: row.try_get("rx_counter_epochs_seen")?,
         tx_counter_epochs_seen: row.try_get("tx_counter_epochs_seen")?,
@@ -1048,6 +706,7 @@ fn traffic_counter_stream_usage_from_row(row: PgRow) -> Result<TrafficCounterStr
 
 type ParsedRuleValue = ParsedVpsRuleValue;
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct PolicyEvaluation {
     condition_true: bool,
@@ -1055,8 +714,6 @@ struct PolicyEvaluation {
     incomplete_reasons: Vec<String>,
     actual_value: Option<f64>,
     threshold_value: Option<f64>,
-    category: String,
-    payload: Value,
 }
 
 async fn preview_current_policy_rule(
@@ -1067,22 +724,21 @@ async fn preview_current_policy_rule(
     if matched_client_ids.is_empty() {
         return Ok((0, 0, 0, Vec::new()));
     }
+    if rule.evidence_source == "telemetry.combined" {
+        return preview_current_combined_telemetry_policy_rule(pool, rule, matched_client_ids)
+            .await;
+    }
     let rows = sqlx::query(
         r#"
-        WITH latest AS (
-            SELECT DISTINCT ON (evidence.source_kind, evidence.natural_key)
-                   evidence.subject_client_id, evidence.completeness,
-                   evidence.payload, evidence.subject_snapshot
-            FROM alert_policy_evidence evidence
-            WHERE evidence.source_kind=$1
-              AND evidence.subject_client_id=ANY($2::text[])
-            ORDER BY evidence.source_kind, evidence.natural_key,
-                     evidence.observed_at DESC, evidence.evidence_seq DESC
-        )
-        SELECT subject_client_id, completeness, payload, subject_snapshot
-        FROM latest
-        WHERE payload->>'source_present' IS DISTINCT FROM 'false'
-        ORDER BY subject_client_id
+        SELECT evidence.subject_client_id, evidence.completeness,
+               evidence.payload, evidence.subject_snapshot
+        FROM alert_policy_effective_current_evidence current_fact
+        JOIN alert_policy_evidence evidence
+          ON evidence.id=current_fact.evidence_id
+        WHERE current_fact.source_kind=$1
+          AND current_fact.subject_client_id=ANY($2::text[])
+          AND evidence.payload->>'source_present' IS DISTINCT FROM 'false'
+        ORDER BY current_fact.subject_client_id,current_fact.natural_key
         "#,
     )
     .bind(&rule.evidence_source)
@@ -1126,6 +782,113 @@ async fn preview_current_policy_rule(
             }
         }
     }
+    Ok((
+        true_count,
+        false_count,
+        incomplete_count,
+        incomplete_subjects.into_iter().collect(),
+    ))
+}
+
+/// Previews telemetry policies from the projection owner's canonical latest
+/// sample rather than requiring a policy evidence row to exist while every
+/// telemetry policy is disabled. Admission masks preserve the exact interface
+/// decision made when that sample was projected.
+async fn preview_current_combined_telemetry_policy_rule(
+    pool: &sqlx::PgPool,
+    rule: &PolicyRuleRequest,
+    matched_client_ids: &[String],
+) -> Result<(i64, i64, i64, Vec<String>)> {
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT head.client_id, sample.id, sample.accepted_seq, sample.payload,
+               sample.source_gateway_session_id,
+               sample.source_process_incarnation_id,
+               sample.source_telemetry_seq,
+               sample.reported_observed_unix,
+               sample.network_admission_mask,
+               sample.tunnel_admission_mask
+        FROM telemetry_projection_heads head
+        JOIN telemetry_samples sample
+          ON sample.id = head.latest_projected_sample_id
+         AND sample.client_id = head.client_id
+        WHERE head.client_id=ANY($1::text[])
+          AND head.latest_projected_sample_id IS NOT NULL
+        ORDER BY head.client_id
+        "#,
+    )
+    .bind(matched_client_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut true_count = 0_i64;
+    let mut false_count = 0_i64;
+    let mut incomplete_count = 0_i64;
+    let mut seen_subjects = HashSet::new();
+    let mut incomplete_subjects = BTreeSet::new();
+    for row in rows {
+        let client_id: String = row.try_get("client_id")?;
+        let sample_id: Uuid = row.try_get("id")?;
+        let accepted_seq: i64 = row.try_get("accepted_seq")?;
+        let metrics = row.try_get::<SqlJson<AgentMetrics>, _>("payload")?.0;
+        let gateway_session_id: Uuid = row.try_get("source_gateway_session_id")?;
+        let process_incarnation_id: Uuid = row.try_get("source_process_incarnation_id")?;
+        let telemetry_seq = u64::try_from(row.try_get::<i64, _>("source_telemetry_seq")?)
+            .context("negative latest telemetry projection source sequence")?;
+        let reported_observed_unix =
+            u64::try_from(row.try_get::<i64, _>("reported_observed_unix")?)
+                .context("negative latest telemetry projection reported observed time")?;
+        let network_admission_mask: Vec<u8> = row.try_get("network_admission_mask")?;
+        let tunnel_admission_mask: Vec<u8> = row.try_get("tunnel_admission_mask")?;
+
+        let traffic = reconstruct_projected_policy_traffic_in_tx(
+            &mut tx,
+            &client_id,
+            accepted_seq,
+            &metrics,
+            &network_admission_mask,
+            &tunnel_admission_mask,
+        )
+        .await?;
+        let Some(subject) = crate::repository_policy_lifecycle::load_policy_subject_snapshot_in_tx(
+            &mut tx, &client_id,
+        )
+        .await?
+        else {
+            continue;
+        };
+        let payload = combined_metric_evidence_payload(
+            &metrics,
+            &traffic,
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq,
+            sample_id,
+            reported_observed_unix,
+        );
+        seen_subjects.insert(client_id.clone());
+        match crate::repository_policy_lifecycle::policy_expression_truth_for_preview(
+            rule.rule_kind,
+            &rule.trigger_condition_expression,
+            &payload,
+            &subject,
+            true,
+        )? {
+            ExpressionTruth::True => true_count += 1,
+            ExpressionTruth::False => false_count += 1,
+            ExpressionTruth::Unknown => {
+                incomplete_count += 1;
+                incomplete_subjects.insert(client_id);
+            }
+        }
+    }
+    for client_id in matched_client_ids {
+        if !seen_subjects.contains(client_id) {
+            incomplete_count += 1;
+            incomplete_subjects.insert(client_id.clone());
+        }
+    }
+    tx.commit().await?;
     Ok((
         true_count,
         false_count,
@@ -1212,22 +975,6 @@ impl Repository {
             .flatten()
             .map(|limit| limit as i64);
         let mut rows = match self {
-            Self::Memory(memory) => memory
-                .vps_rule_values
-                .read()
-                .await
-                .iter()
-                .filter(|row| {
-                    allowed_clients.contains(&row.client_id)
-                        && query
-                            .client_id
-                            .as_deref()
-                            .is_none_or(|client_id| row.client_id == client_id)
-                        && query.key.as_deref().is_none_or(|key| row.key == key)
-                })
-                .cloned()
-                .map(canonicalize_vps_rule_record)
-                .collect::<Result<Vec<_>>>()?,
             Self::Postgres(pool) => sqlx::query(
                 r#"
                 SELECT
@@ -1317,25 +1064,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let allowed = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let mut rows = memory
-                    .vps_rule_values
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| {
-                        allowed.contains(row.client_id.as_str()) && keys.contains(&row.key)
-                    })
-                    .cloned()
-                    .map(canonicalize_vps_rule_record)
-                    .collect::<Result<Vec<_>>>()?;
-                rows.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1375,27 +1103,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let allowed = client_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<HashSet<_>>();
-                let mut rows = memory
-                    .vps_rule_values
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| allowed.contains(row.client_id.as_str()))
-                    .cloned()
-                    .map(canonicalize_vps_rule_record)
-                    .collect::<Result<Vec<_>>>()?;
-                rows.sort_by(|left, right| {
-                    left.client_id
-                        .cmp(&right.client_id)
-                        .then_with(|| left.key.cmp(&right.key))
-                });
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1429,19 +1136,109 @@ impl Repository {
             .list_vps_rules_for_clients(
                 client_ids,
                 &[
+                    VPS_RULE_KEY_NETWORK_INTERFACES,
                     VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
                     VPS_RULE_KEY_TRAFFIC_SELECTORS,
                 ],
             )
             .await?;
-        resolve_network_rate_interface_selection(client_ids, &rules)
+        self.network_rate_interface_selection_from_rules(client_ids, &rules)
+            .await
     }
 
-    pub(crate) fn network_rate_interface_selection_from_rules(
+    pub(crate) async fn network_rate_interface_selection_from_rules(
+        &self,
         client_ids: &[String],
         rules: &[VpsRuleValueRecord],
     ) -> Result<NetworkRateInterfaceSelection> {
-        resolve_network_rate_interface_selection(client_ids, rules)
+        let requested = client_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let configured_clients = rules
+            .iter()
+            .filter(|rule| {
+                rule.key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES
+                    && requested.contains(rule.client_id.as_str())
+            })
+            .map(|rule| rule.client_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let inventories = self
+            .network_interface_inventories_for_clients(&configured_clients, &[])
+            .await?;
+        resolve_network_rate_interface_selection(client_ids, rules, &inventories)
+    }
+
+    async fn network_interface_inventories_for_clients(
+        &self,
+        current_client_ids: &[String],
+        traffic_client_ids: &[String],
+    ) -> Result<HashMap<String, NetworkInterfaceInventory>> {
+        if current_client_ids.is_empty() && traffic_client_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT client_id, 'traffic' AS inventory_kind,
+                           source_kind, interface
+                    FROM traffic_counter_streams
+                    WHERE client_id = ANY($2::TEXT[])
+                    UNION ALL
+                    SELECT client_id, 'current_host' AS inventory_kind,
+                           'host' AS source_kind, interface
+                    FROM telemetry_network_current_identities_source($1::TEXT[])
+                    WHERE client_id = ANY($1::TEXT[])
+                    UNION ALL
+                    SELECT plan.left_client_id AS client_id,
+                           'current_tunnel' AS inventory_kind,
+                           'tunnel' AS source_kind,
+                           plan.plan ->> 'interface_name' AS interface
+                    FROM tunnel_plans plan
+                    WHERE plan.left_client_id = ANY($1::TEXT[])
+                      AND plan.enabled IS TRUE
+                      AND plan.deleted_at IS NULL
+                    UNION ALL
+                    SELECT plan.right_client_id AS client_id,
+                           'current_tunnel' AS inventory_kind,
+                           'tunnel' AS source_kind,
+                           plan.plan ->> 'interface_name' AS interface
+                    FROM tunnel_plans plan
+                    WHERE plan.right_client_id = ANY($1::TEXT[])
+                      AND plan.enabled IS TRUE
+                      AND plan.deleted_at IS NULL
+                    ORDER BY client_id, inventory_kind, source_kind, interface
+                    "#,
+                )
+                .bind(current_client_ids)
+                .bind(traffic_client_ids)
+                .fetch_all(pool)
+                .await?;
+                let mut by_client = HashMap::<String, NetworkInterfaceInventory>::new();
+                for row in rows {
+                    let inventory = by_client.entry(row.try_get("client_id")?).or_default();
+                    let inventory_kind: String = row.try_get("inventory_kind")?;
+                    let source_kind: String = row.try_get("source_kind")?;
+                    let interface: String = row.try_get("interface")?;
+                    match inventory_kind.as_str() {
+                        "traffic" => {
+                            inventory.traffic_streams.insert((source_kind, interface));
+                        }
+                        "current_host" => {
+                            inventory.current_host_interfaces.insert(interface);
+                        }
+                        "current_tunnel" => {
+                            inventory.current_tunnel_interfaces.insert(interface);
+                        }
+                        _ => anyhow::bail!("network_interface_inventory_kind_invalid"),
+                    }
+                }
+                Ok(by_client)
+            }
+        }
     }
 
     pub(crate) async fn dry_run_vps_rules(
@@ -1481,9 +1278,7 @@ impl Repository {
             )
             .await?;
         if preview.changed_row_count > 0 {
-            if let Err(error) = self.evaluate_policy_rules().await {
-                tracing::warn!(%error, "deferred policy evaluation after VPS rule update");
-            }
+            wake_policy_evaluator();
         }
         Ok(preview)
     }
@@ -1506,9 +1301,7 @@ impl Repository {
             )
             .await?;
         if preview.changed_row_count > 0 {
-            if let Err(error) = self.evaluate_policy_rules().await {
-                tracing::warn!(%error, "deferred policy evaluation after VPS rule removal");
-            }
+            wake_policy_evaluator();
         }
         Ok(preview)
     }
@@ -1523,27 +1316,38 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<VpsRulesDryRunResponse> {
         match self {
-            Self::Memory(memory) => {
-                // Keep rule mutations before the shared agent lifecycle lock. Agent/tag
-                // writers only take the latter, so there is no reverse lock order.
-                let _rule_mutation_guard = memory.vps_rule_mutation.lock().await;
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                let preview = self
-                    .vps_rule_preview(operation, selector_expression, values, keys)
-                    .await?;
-                validate_confirmed_vps_rule_preview(&preview, expected_preview_hash)?;
-                if preview.changed_row_count > 0 {
-                    apply_vps_rule_changes_memory(memory, &preview, operator).await?;
-                }
-                Ok(preview)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_vps_rule_mutations(&mut tx).await?;
-                // Lock target visibility/tags in the same order used by Memory. Keeping
-                // both locks in this transaction makes max_connections=1 safe and lets
-                // cancellation release them automatically by rolling the transaction back.
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                let (agents, stored) = postgres_vps_rule_snapshot_in_tx(&mut tx).await?;
+                let initial_preview = build_vps_rule_preview(
+                    operation,
+                    selector_expression,
+                    values,
+                    keys,
+                    &agents,
+                    &stored,
+                )?;
+                let target_client_ids = initial_preview
+                    .changes
+                    .iter()
+                    .map(|change| change.client_id.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let definition_identities = initial_preview
+                    .changes
+                    .iter()
+                    .map(|change| format!("vps-rule:{}:{}", change.client_id, change.key))
+                    .collect::<Vec<_>>();
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &definition_identities,
+                    &target_client_ids,
+                )
+                .await?;
+                // Rebuild after acquiring every reviewed owner. A tag/client
+                // mutation that won the race therefore produces the existing
+                // preview-stale response instead of changing the committed set.
                 let (agents, stored) = postgres_vps_rule_snapshot_in_tx(&mut tx).await?;
                 let preview = build_vps_rule_preview(
                     operation,
@@ -1555,6 +1359,7 @@ impl Repository {
                 )?;
                 validate_confirmed_vps_rule_preview(&preview, expected_preview_hash)?;
                 if preview.changed_row_count > 0 {
+                    lock_postgres_traffic_reset_rule_targets(&mut tx, &preview).await?;
                     apply_vps_rule_changes_postgres_in_tx(&mut tx, &preview, operator).await?;
                 }
                 tx.commit().await?;
@@ -1619,39 +1424,50 @@ impl Repository {
         Ok(records)
     }
 
-    /// Projects the unfiltered snapshot page without aggregating traffic for
-    /// clients that cannot survive its canonical client-id sort and limit.
-    /// `traffic_accounting_for_agents` emits exactly one row per supplied
-    /// visible agent, and `list_traffic_accounting` applies no other filter for
-    /// the full-snapshot query, so selecting the first client IDs here is
-    /// equivalent to sorting every projected row and truncating afterward.
-    pub(crate) async fn list_snapshot_traffic_accounting_with_context(
-        &self,
-        agents: &[AgentView],
-        rules: &[VpsRuleValueRecord],
-        limit: i64,
-    ) -> Result<Vec<TrafficAccountingRecord>> {
-        let mut selected_agents = agents.to_vec();
-        selected_agents.sort_by(|left, right| left.id.cmp(&right.id));
-        selected_agents.truncate(limit.clamp(1, 5000) as usize);
-        self.list_traffic_accounting_for_agents_with_rules(&selected_agents, rules)
-            .await
-    }
-
     async fn traffic_accounting_for_selected_agents_with_rules(
         &self,
         selected_agents: &[AgentView],
         rules: &[VpsRuleValueRecord],
         now: DateTime<Utc>,
     ) -> Result<Vec<TrafficAccountingRecord>> {
+        let client_ids = selected_agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>();
+        let selected = client_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut configured_clients = BTreeSet::new();
+        let mut all_stream_clients = BTreeSet::new();
+        for rule in rules.iter().filter(|rule| {
+            rule.key == VPS_RULE_KEY_TRAFFIC_SELECTORS && selected.contains(rule.client_id.as_str())
+        }) {
+            configured_clients.insert(rule.client_id.clone());
+            if traffic_selector_spec_from_rule(rule)? == TrafficSelectorSpec::All {
+                all_stream_clients.insert(rule.client_id.clone());
+            }
+        }
+        let interface_inventories = self
+            .network_interface_inventories_for_clients(
+                &configured_clients.into_iter().collect::<Vec<_>>(),
+                &all_stream_clients.into_iter().collect::<Vec<_>>(),
+            )
+            .await?;
         let cycle_starts = traffic_cycle_starts_for_clients(
             selected_agents.iter().map(|agent| agent.id.as_str()),
             rules,
             now,
         );
-        let stream_requests = traffic_stream_requests_from_rules(&cycle_starts, rules)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let stream_requests =
+            traffic_stream_requests_from_rules(&cycle_starts, rules, &interface_inventories)?
+                .into_iter()
+                .collect::<Vec<_>>();
+        // One indexed array lookup supplies every current-generation boundary
+        // for the requested client set.
+        let projected_streams = self
+            .latest_projected_traffic_streams(&client_ids, rules)
+            .await?;
         let traffic_usage = self
             .list_traffic_counter_usage_for_streams(&stream_requests, now.timestamp())
             .await?;
@@ -1660,7 +1476,127 @@ impl Repository {
             rules,
             &traffic_usage,
             now,
+            &projected_streams,
+            &interface_inventories,
         ))
+    }
+
+    async fn latest_projected_traffic_streams(
+        &self,
+        client_ids: &[String],
+        rules: &[VpsRuleValueRecord],
+    ) -> Result<HashMap<String, HashSet<TrafficStreamIdentity>>> {
+        if client_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH current_tunnels AS MATERIALIZED (
+                        SELECT
+                            identity.client_id,
+                            jsonb_agg(
+                                jsonb_build_object(
+                                    'plan_id', identity.telemetry_plan_id,
+                                    'plan_name', identity.telemetry_plan_name,
+                                    'interface', identity.interface,
+                                    'kind', identity.kind,
+                                    'endpoint_side',
+                                        identity.telemetry_endpoint_side,
+                                    'peer_client_id',
+                                        identity.telemetry_peer_client_id
+                                )
+                                ORDER BY identity.interface COLLATE "C"
+                            ) AS identities
+                        FROM telemetry_current_tunnels identity
+                        WHERE identity.client_id = ANY($1::TEXT[])
+                        GROUP BY identity.client_id
+                    ), managed_tunnel_interfaces AS MATERIALIZED (
+                        SELECT endpoint.client_id,
+                               array_agg(
+                                   DISTINCT endpoint.interface COLLATE "C"
+                                   ORDER BY endpoint.interface COLLATE "C"
+                               ) AS interfaces
+                        FROM (
+                            SELECT plan.left_client_id AS client_id,
+                                   plan.plan ->> 'interface_name' AS interface
+                            FROM tunnel_plans plan
+                            WHERE plan.left_client_id = ANY($1::TEXT[])
+                              AND plan.enabled IS TRUE
+                              AND plan.deleted_at IS NULL
+                            UNION ALL
+                            SELECT plan.right_client_id AS client_id,
+                                   plan.plan ->> 'interface_name' AS interface
+                            FROM tunnel_plans plan
+                            WHERE plan.right_client_id = ANY($1::TEXT[])
+                              AND plan.enabled IS TRUE
+                              AND plan.deleted_at IS NULL
+                        ) endpoint
+                        GROUP BY endpoint.client_id
+                    )
+                    SELECT
+                        projection.client_id,
+                        latest.payload,
+                        latest.network_admission_mask,
+                        latest.tunnel_admission_mask,
+                        COALESCE(
+                            current_tunnels.identities,
+                            '[]'::JSONB
+                        ) AS current_tunnel_identities,
+                        COALESCE(
+                            managed_tunnel_interfaces.interfaces,
+                            ARRAY[]::TEXT[]
+                        ) AS managed_tunnel_interfaces
+                    FROM telemetry_projection_heads projection
+                    JOIN telemetry_samples latest
+                      ON latest.id = projection.latest_projected_sample_id
+                     AND latest.client_id = projection.client_id
+                    LEFT JOIN current_tunnels
+                      ON current_tunnels.client_id = projection.client_id
+                    LEFT JOIN managed_tunnel_interfaces
+                      ON managed_tunnel_interfaces.client_id = projection.client_id
+                    WHERE projection.client_id = ANY($1::text[])
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let client_id: String = row.try_get("client_id")?;
+                        let payload: SqlJson<AgentMetrics> = row.try_get("payload")?;
+                        let network_admission_mask: Vec<u8> =
+                            row.try_get("network_admission_mask")?;
+                        let tunnel_admission_mask: Vec<u8> =
+                            row.try_get("tunnel_admission_mask")?;
+                        let current_tunnel_identities = row
+                            .try_get::<SqlJson<Vec<ProjectedTelemetryTunnelIdentity>>, _>(
+                                "current_tunnel_identities",
+                            )?
+                            .0
+                            .into_iter()
+                            .collect::<HashSet<_>>();
+                        let managed_tunnel_interfaces = row
+                            .try_get::<Vec<String>, _>("managed_tunnel_interfaces")?
+                            .into_iter()
+                            .collect::<HashSet<_>>();
+                        let policy = network_interface_policy_for_client(&client_id, rules)?;
+                        Ok((
+                            client_id,
+                            projected_traffic_streams_with_policy(
+                                &payload.0,
+                                &policy,
+                                &network_admission_mask,
+                                &tunnel_admission_mask,
+                                &current_tunnel_identities,
+                                &managed_tunnel_interfaces,
+                            ),
+                        ))
+                    })
+                    .collect()
+            }
+        }
     }
 
     pub(crate) async fn get_traffic_accounting(
@@ -1683,33 +1619,6 @@ impl Repository {
             return Ok(None);
         }
         match self {
-            Self::Memory(memory) => {
-                let samples = memory.traffic_counter_samples.read().await;
-                let rollups = memory.traffic_counter_rollups.read().await;
-                Ok(samples
-                    .iter()
-                    .filter(|sample| sample.client_id == client_id)
-                    .filter(|sample| {
-                        streams.iter().any(|stream| {
-                            stream.source_kind == sample.source_kind
-                                && stream.interface == sample.interface
-                        })
-                    })
-                    .filter_map(|sample| u64::try_from(sample.observed_unix).ok())
-                    .chain(
-                        rollups
-                            .iter()
-                            .filter(|rollup| rollup.client_id == client_id)
-                            .filter(|rollup| {
-                                streams.iter().any(|stream| {
-                                    stream.source_kind == rollup.source_kind
-                                        && stream.interface == rollup.interface
-                                })
-                            })
-                            .filter_map(|rollup| u64::try_from(rollup.bucket_start_unix).ok()),
-                    )
-                    .min())
-            }
             Self::Postgres(pool) => {
                 let source_kinds = streams
                     .iter()
@@ -1719,36 +1628,12 @@ impl Repository {
                     .iter()
                     .map(|stream| stream.interface.clone())
                     .collect::<Vec<_>>();
-                let value = sqlx::query_scalar::<_, Option<f64>>(
-                    r#"
-                    WITH requested AS (
-                        SELECT source_kind, interface
-                        FROM UNNEST($2::text[], $3::text[])
-                            AS stream(source_kind, interface)
-                    )
-                    SELECT min(history.observed_unix)::double precision
-                    FROM (
-                        SELECT extract(epoch FROM sample.observed_at) AS observed_unix
-                        FROM traffic_counter_samples sample
-                        JOIN requested
-                          ON requested.source_kind = sample.source_kind
-                         AND requested.interface = sample.interface
-                        WHERE sample.client_id = $1
-                        UNION ALL
-                        SELECT extract(epoch FROM rollup.bucket_start) AS observed_unix
-                        FROM traffic_counter_rollups rollup
-                        JOIN requested
-                          ON requested.source_kind = rollup.source_kind
-                         AND requested.interface = rollup.interface
-                        WHERE rollup.client_id = $1
-                    ) history
-                    "#,
-                )
-                .bind(client_id)
-                .bind(&source_kinds)
-                .bind(&interfaces)
-                .fetch_one(pool)
-                .await?;
+                let value = sqlx::query_scalar::<_, Option<f64>>(TRAFFIC_HISTORY_START_SQL)
+                    .bind(client_id)
+                    .bind(&source_kinds)
+                    .bind(&interfaces)
+                    .fetch_one(pool)
+                    .await?;
                 Ok(value
                     .filter(|value| value.is_finite() && *value >= 0.0)
                     .map(|value| value as u64))
@@ -1762,7 +1647,6 @@ impl Repository {
         start_unix: u64,
         end_unix: u64,
         step_secs: i32,
-        raw: bool,
     ) -> Result<Vec<TrafficHistoryPointView>> {
         let streams = self.traffic_history_streams(client_id).await?;
         if streams.is_empty() || start_unix > end_unix {
@@ -1770,51 +1654,6 @@ impl Repository {
         }
         let step_secs = step_secs.max(60);
         match self {
-            Self::Memory(memory) => {
-                if raw {
-                    let live_samples = raw_memory_traffic_samples(
-                        &memory.telemetry_samples.read().await,
-                        client_id,
-                        &streams,
-                    )?;
-                    let exact_samples = memory
-                        .traffic_counter_samples
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|sample| sample.client_id == client_id)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    Ok(aggregate_memory_raw_traffic_history(
-                        live_samples,
-                        &exact_samples,
-                        &streams,
-                        start_unix,
-                        end_unix,
-                        step_secs,
-                    ))
-                } else {
-                    let samples = memory
-                        .traffic_counter_samples
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|sample| sample.client_id == client_id)
-                        .cloned()
-                        .collect();
-                    let rollups = memory
-                        .traffic_counter_rollups
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|rollup| rollup.client_id == client_id)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    Ok(aggregate_memory_traffic_history(
-                        samples, &rollups, &streams, start_unix, end_unix, step_secs,
-                    ))
-                }
-            }
             Self::Postgres(pool) => {
                 let source_kinds = streams
                     .iter()
@@ -1828,252 +1667,8 @@ impl Repository {
                     .iter()
                     .map(|stream| stream.direction_mask)
                     .collect::<Vec<_>>();
-                let rows = if raw {
-                    sqlx::query(
-                        r#"
-                        WITH requested AS (
-                            SELECT source_kind, interface, direction_mask
-                            FROM UNNEST($2::text[], $3::text[], $4::integer[])
-                                AS stream(source_kind, interface, direction_mask)
-                        ), expanded_range AS (
-                            SELECT
-                                requested.source_kind,
-                                requested.interface,
-                                requested.direction_mask,
-                                fact.sample_id,
-                                fact.ordinal,
-                                fact.observed_at,
-                                fact.rx_bytes,
-                                fact.tx_bytes
-                            FROM telemetry_counter_facts fact
-                            JOIN requested
-                              ON requested.source_kind = fact.source_kind
-                             AND requested.interface = fact.interface
-                            WHERE fact.client_id = $1
-                              AND fact.observed_at >= to_timestamp($5)
-                              AND fact.observed_at <= to_timestamp($6)
-                        ), baseline AS (
-                            SELECT
-                                requested.source_kind,
-                                requested.interface,
-                                requested.direction_mask,
-                                previous.sample_id,
-                                previous.ordinal,
-                                previous.observed_at,
-                                previous.rx_bytes,
-                                previous.tx_bytes
-                            FROM requested
-                            JOIN LATERAL (
-                                SELECT
-                                    fact.sample_id,
-                                    fact.ordinal,
-                                    fact.observed_at,
-                                    fact.rx_bytes,
-                                    fact.tx_bytes
-                                FROM telemetry_counter_facts fact
-                                WHERE fact.client_id = $1
-                                  AND fact.observed_at < to_timestamp($5)
-                                  AND fact.source_kind = requested.source_kind
-                                  AND fact.interface = requested.interface
-                                ORDER BY fact.observed_at DESC, fact.sample_id DESC, fact.ordinal DESC
-                                LIMIT 1
-                            ) previous ON TRUE
-                        ), selected AS (
-                            SELECT * FROM expanded_range
-                            UNION ALL
-                            SELECT * FROM baseline
-                        ), sequenced AS (
-                            SELECT
-                                selected.*,
-                                lag(rx_bytes) OVER stream AS previous_rx_bytes,
-                                lag(tx_bytes) OVER stream AS previous_tx_bytes
-                            FROM selected
-                            WINDOW stream AS (
-                                PARTITION BY source_kind, interface
-                                ORDER BY observed_at, sample_id, ordinal
-                            )
-                        ), raw_deltas AS (
-                            SELECT
-                                floor(
-                                    extract(epoch FROM observed_at)::double precision
-                                        / $7::double precision
-                                )::bigint * $7::bigint AS bucket_epoch,
-                                direction_mask,
-                                rx_bytes,
-                                tx_bytes,
-                                previous_rx_bytes,
-                                previous_tx_bytes,
-                                (direction_mask & 1) <> 0 AS selected_rx,
-                                (direction_mask & 2) <> 0 AS selected_tx,
-                                rx_bytes >= previous_rx_bytes AS valid_rx,
-                                tx_bytes >= previous_tx_bytes AS valid_tx
-                            FROM sequenced
-                            WHERE observed_at >= to_timestamp($5)
-                              AND observed_at <= to_timestamp($6)
-                              AND previous_rx_bytes IS NOT NULL
-                        ), import_range AS (
-                            SELECT
-                                requested.source_kind,
-                                requested.interface,
-                                requested.direction_mask,
-                                sample.observed_at,
-                                sample.rx_bytes,
-                                sample.tx_bytes,
-                                sample.rx_counter_epoch,
-                                sample.tx_counter_epoch,
-                                sample.sample_source
-                            FROM traffic_counter_samples sample
-                            JOIN requested
-                              ON requested.source_kind = sample.source_kind
-                             AND requested.interface = sample.interface
-                            WHERE sample.client_id = $1
-                              AND sample.observed_at >= to_timestamp($5)
-                              AND sample.observed_at <= to_timestamp($6)
-                              AND sample.sample_source LIKE 'vnstat_import:%'
-                              -- Promoted exact rows are retained only as
-                              -- sequencing boundaries; their inbound delta is
-                              -- already represented by a rollup.
-                              AND NOT sample.inbound_promoted
-                        ), import_first AS (
-                            SELECT
-                                source_kind,
-                                interface,
-                                direction_mask,
-                                min(observed_at) AS observed_at
-                            FROM import_range
-                            GROUP BY source_kind, interface, direction_mask
-                        ), import_baseline AS (
-                            SELECT
-                                import_first.source_kind,
-                                import_first.interface,
-                                import_first.direction_mask,
-                                previous.observed_at,
-                                previous.rx_bytes,
-                                previous.tx_bytes,
-                                previous.rx_counter_epoch,
-                                previous.tx_counter_epoch,
-                                previous.sample_source
-                            FROM import_first
-                            JOIN LATERAL (
-                                SELECT
-                                    sample.observed_at,
-                                    sample.rx_bytes,
-                                    sample.tx_bytes,
-                                    sample.rx_counter_epoch,
-                                    sample.tx_counter_epoch,
-                                    sample.sample_source
-                                FROM traffic_counter_samples sample
-                                WHERE sample.client_id = $1
-                                  AND sample.source_kind = import_first.source_kind
-                                  AND sample.interface = import_first.interface
-                                  AND sample.observed_at < import_first.observed_at
-                                ORDER BY sample.observed_at DESC
-                                LIMIT 1
-                            ) previous ON TRUE
-                        ), import_selected AS (
-                            SELECT * FROM import_range
-                            UNION ALL
-                            SELECT * FROM import_baseline
-                        ), import_sequenced AS (
-                            SELECT
-                                import_selected.*,
-                                lag(rx_bytes) OVER stream AS previous_rx_bytes,
-                                lag(tx_bytes) OVER stream AS previous_tx_bytes,
-                                lag(rx_counter_epoch) OVER stream
-                                    AS previous_rx_counter_epoch,
-                                lag(tx_counter_epoch) OVER stream
-                                    AS previous_tx_counter_epoch
-                            FROM import_selected
-                            WINDOW stream AS (
-                                PARTITION BY source_kind, interface
-                                ORDER BY observed_at
-                            )
-                        ), import_deltas AS (
-                            SELECT
-                                floor(
-                                    extract(epoch FROM observed_at)::double precision
-                                        / $7::double precision
-                                )::bigint * $7::bigint AS bucket_epoch,
-                                direction_mask,
-                                rx_bytes,
-                                tx_bytes,
-                                previous_rx_bytes,
-                                previous_tx_bytes,
-                                (direction_mask & 1) <> 0 AS selected_rx,
-                                (direction_mask & 2) <> 0 AS selected_tx,
-                                (rx_counter_epoch = previous_rx_counter_epoch
-                                  AND rx_bytes >= previous_rx_bytes) AS valid_rx,
-                                (tx_counter_epoch = previous_tx_counter_epoch
-                                  AND tx_bytes >= previous_tx_bytes) AS valid_tx
-                            FROM import_sequenced
-                            WHERE observed_at >= to_timestamp($5)
-                              AND observed_at <= to_timestamp($6)
-                              AND sample_source LIKE 'vnstat_import:%'
-                              AND previous_rx_bytes IS NOT NULL
-                        ), deltas AS (
-                            -- Keep raw live and imported durable sequences
-                            -- independent; importing is restricted to the
-                            -- pre-live interval, so these facts are additive.
-                            SELECT * FROM raw_deltas
-                            UNION ALL
-                            SELECT * FROM import_deltas
-                        )
-                        SELECT
-                            to_timestamp(bucket_epoch)::text AS bucket_start,
-                            $7::integer AS bucket_secs,
-                            count(*) FILTER (
-                                WHERE (selected_rx AND valid_rx)
-                                   OR (selected_tx AND valid_tx)
-                            )::integer AS sample_count,
-                            count(*) FILTER (
-                                WHERE (selected_rx AND NOT valid_rx)
-                                   OR (selected_tx AND NOT valid_tx)
-                            )::integer AS reset_count,
-                            CASE
-                            WHEN count(*) FILTER (
-                                WHERE (selected_rx AND valid_rx)
-                                   OR (selected_tx AND valid_tx)
-                            ) = 0 THEN NULL
-                            WHEN bool_or(selected_rx) AND count(*) FILTER (
-                                WHERE selected_rx AND valid_rx
-                            ) = 0 THEN NULL
-                            ELSE
-                                COALESCE(sum(
-                                    CASE WHEN selected_rx AND valid_rx
-                                        THEN rx_bytes - previous_rx_bytes ELSE 0 END
-                                ), 0)::bigint
-                            END AS rx_bytes,
-                            CASE
-                            WHEN count(*) FILTER (
-                                WHERE (selected_rx AND valid_rx)
-                                   OR (selected_tx AND valid_tx)
-                            ) = 0 THEN NULL
-                            WHEN bool_or(selected_tx) AND count(*) FILTER (
-                                WHERE selected_tx AND valid_tx
-                            ) = 0 THEN NULL
-                            ELSE
-                                COALESCE(sum(
-                                    CASE WHEN selected_tx AND valid_tx
-                                        THEN tx_bytes - previous_tx_bytes ELSE 0 END
-                                ), 0)::bigint
-                            END AS tx_bytes
-                        FROM deltas
-                        GROUP BY bucket_epoch
-                        ORDER BY bucket_epoch
-                        "#,
-                    )
-                    .bind(client_id)
-                    .bind(&source_kinds)
-                    .bind(&interfaces)
-                    .bind(&direction_masks)
-                    .bind(start_unix as i64)
-                    .bind(end_unix as i64)
-                    .bind(step_secs)
-                    .fetch_all(pool)
-                    .await?
-                } else {
-                    sqlx::query(
-                        r#"
+                let rows = sqlx::query(
+                    r#"
                         WITH requested AS (
                             SELECT source_kind, interface, direction_mask
                             FROM UNNEST($2::text[], $3::text[], $4::integer[])
@@ -2083,12 +1678,22 @@ impl Repository {
                                 sample.source_kind,
                                 sample.interface,
                                 requested.direction_mask,
+                                FALSE AS baseline_only,
                                 sample.observed_at,
                                 sample.rx_bytes,
                                 sample.tx_bytes,
                                 sample.rx_counter_epoch,
                                 sample.tx_counter_epoch,
-                                sample.sample_source
+                                sample.sample_source,
+                                sample.usage_authoritative,
+                                sample.rx_usage_bytes,
+                                sample.tx_usage_bytes,
+                                sample.rx_valid_count,
+                                sample.tx_valid_count,
+                                sample.any_valid_count,
+                                sample.rx_reset_count,
+                                sample.tx_reset_count,
+                                sample.any_reset_count
                             FROM traffic_counter_samples sample
                             JOIN requested
                               ON requested.source_kind = sample.source_kind
@@ -2102,12 +1707,22 @@ impl Repository {
                                 requested.source_kind,
                                 requested.interface,
                                 requested.direction_mask,
+                                TRUE AS baseline_only,
                                 previous.observed_at,
                                 previous.rx_bytes,
                                 previous.tx_bytes,
                                 previous.rx_counter_epoch,
                                 previous.tx_counter_epoch,
-                                previous.sample_source
+                                previous.sample_source,
+                                previous.usage_authoritative,
+                                previous.rx_usage_bytes,
+                                previous.tx_usage_bytes,
+                                previous.rx_valid_count,
+                                previous.tx_valid_count,
+                                previous.any_valid_count,
+                                previous.rx_reset_count,
+                                previous.tx_reset_count,
+                                previous.any_reset_count
                             FROM requested
                             JOIN LATERAL (
                                 SELECT min(sample.observed_at) AS observed_at
@@ -2126,7 +1741,16 @@ impl Repository {
                                     tx_bytes,
                                     rx_counter_epoch,
                                     tx_counter_epoch,
-                                    sample_source
+                                    sample_source,
+                                    usage_authoritative,
+                                    rx_usage_bytes,
+                                    tx_usage_bytes,
+                                    rx_valid_count,
+                                    tx_valid_count,
+                                    any_valid_count,
+                                    rx_reset_count,
+                                    tx_reset_count,
+                                    any_reset_count
                                 FROM traffic_counter_samples sample
                                 WHERE sample.client_id = $1
                                   AND sample.source_kind = requested.source_kind
@@ -2159,44 +1783,92 @@ impl Repository {
                                 )::bigint * 60::bigint AS bucket_epoch,
                                 60::integer AS native_secs,
                                 direction_mask,
-                                CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
-                                           AND rx_bytes >= previous_rx_bytes
-                                     THEN rx_bytes - previous_rx_bytes ELSE 0 END::bigint
+                                CASE WHEN usage_authoritative
+                                     THEN rx_usage_bytes
+                                     WHEN rx_counter_epoch = previous_rx_counter_epoch
+                                      AND rx_bytes >= previous_rx_bytes
+                                     THEN rx_bytes - previous_rx_bytes
+                                     ELSE 0 END::bigint
                                     AS rx_bytes,
-                                CASE WHEN tx_counter_epoch = previous_tx_counter_epoch
-                                           AND tx_bytes >= previous_tx_bytes
-                                     THEN tx_bytes - previous_tx_bytes ELSE 0 END::bigint
+                                CASE WHEN usage_authoritative
+                                     THEN tx_usage_bytes
+                                     WHEN tx_counter_epoch = previous_tx_counter_epoch
+                                      AND tx_bytes >= previous_tx_bytes
+                                     THEN tx_bytes - previous_tx_bytes
+                                     ELSE 0 END::bigint
                                     AS tx_bytes,
-                                (rx_counter_epoch = previous_rx_counter_epoch
-                                  AND rx_bytes >= previous_rx_bytes)::integer AS rx_valid_count,
-                                (tx_counter_epoch = previous_tx_counter_epoch
-                                  AND tx_bytes >= previous_tx_bytes)::integer AS tx_valid_count,
-                                ((rx_counter_epoch = previous_rx_counter_epoch
-                                    AND rx_bytes >= previous_rx_bytes)
-                                  OR (tx_counter_epoch = previous_tx_counter_epoch
-                                    AND tx_bytes >= previous_tx_bytes))::integer
+                                CASE WHEN usage_authoritative
+                                     THEN rx_valid_count
+                                     WHEN rx_counter_epoch = previous_rx_counter_epoch
+                                      AND rx_bytes >= previous_rx_bytes
+                                     THEN 1 ELSE 0 END::integer
+                                    AS rx_valid_count,
+                                CASE WHEN usage_authoritative
+                                     THEN tx_valid_count
+                                     WHEN tx_counter_epoch = previous_tx_counter_epoch
+                                      AND tx_bytes >= previous_tx_bytes
+                                     THEN 1 ELSE 0 END::integer
+                                    AS tx_valid_count,
+                                CASE WHEN usage_authoritative
+                                     THEN any_valid_count
+                                     WHEN (rx_counter_epoch = previous_rx_counter_epoch
+                                           AND rx_bytes >= previous_rx_bytes)
+                                       OR (tx_counter_epoch = previous_tx_counter_epoch
+                                           AND tx_bytes >= previous_tx_bytes)
+                                     THEN 1 ELSE 0 END::integer
                                     AS any_valid_count,
-                                (NOT (
-                                    previous_sample_source LIKE 'vnstat_import:%'
-                                    AND sample_source NOT LIKE 'vnstat_import:%'
-                                 ) AND rx_counter_epoch <> previous_rx_counter_epoch)::integer
+                                CASE WHEN usage_authoritative
+                                     THEN rx_reset_count
+                                     WHEN previous_rx_counter_epoch IS NOT NULL
+                                      AND rx_counter_epoch <>
+                                            previous_rx_counter_epoch
+                                      AND NOT (
+                                          previous_sample_source LIKE
+                                                'vnstat_import:%'
+                                          AND sample_source NOT LIKE
+                                                'vnstat_import:%'
+                                      )
+                                     THEN 1 ELSE 0 END::integer
                                     AS rx_reset_count,
-                                (NOT (
-                                    previous_sample_source LIKE 'vnstat_import:%'
-                                    AND sample_source NOT LIKE 'vnstat_import:%'
-                                 ) AND tx_counter_epoch <> previous_tx_counter_epoch)::integer
+                                CASE WHEN usage_authoritative
+                                     THEN tx_reset_count
+                                     WHEN previous_tx_counter_epoch IS NOT NULL
+                                      AND tx_counter_epoch <>
+                                            previous_tx_counter_epoch
+                                      AND NOT (
+                                          previous_sample_source LIKE
+                                                'vnstat_import:%'
+                                          AND sample_source NOT LIKE
+                                                'vnstat_import:%'
+                                      )
+                                     THEN 1 ELSE 0 END::integer
                                     AS tx_reset_count,
-                                (NOT (
-                                    previous_sample_source LIKE 'vnstat_import:%'
-                                    AND sample_source NOT LIKE 'vnstat_import:%'
-                                 ) AND (
-                                    rx_counter_epoch <> previous_rx_counter_epoch
-                                    OR tx_counter_epoch <> previous_tx_counter_epoch
-                                 ))::integer AS any_reset_count
+                                CASE WHEN usage_authoritative
+                                     THEN any_reset_count
+                                     WHEN previous_rx_counter_epoch IS NOT NULL
+                                      AND (
+                                          rx_counter_epoch <>
+                                                previous_rx_counter_epoch
+                                          OR tx_counter_epoch <>
+                                                previous_tx_counter_epoch
+                                      )
+                                      AND NOT (
+                                          previous_sample_source LIKE
+                                                'vnstat_import:%'
+                                          AND sample_source NOT LIKE
+                                                'vnstat_import:%'
+                                      )
+                                     THEN 1 ELSE 0 END::integer
+                                    AS any_reset_count
                             FROM raw_sequenced
-                            WHERE observed_at >= to_timestamp($5)
+                            WHERE NOT baseline_only
+                              AND (
+                                  usage_authoritative
+                                  OR previous_rx_counter_epoch IS NOT NULL
+                                  OR previous_tx_counter_epoch IS NOT NULL
+                              )
+                              AND observed_at >= to_timestamp($5)
                               AND observed_at <= to_timestamp($6)
-                              AND previous_rx_bytes IS NOT NULL
                         ), retained_native AS (
                             SELECT
                                 floor(
@@ -2332,18 +2004,17 @@ impl Repository {
                         FROM output
                         GROUP BY output_epoch, output_secs
                         ORDER BY output_epoch, output_secs
-                        "#,
-                    )
-                    .bind(client_id)
-                    .bind(&source_kinds)
-                    .bind(&interfaces)
-                    .bind(&direction_masks)
-                    .bind(start_unix as i64)
-                    .bind(end_unix as i64)
-                    .bind(step_secs)
-                    .fetch_all(pool)
-                    .await?
-                };
+                    "#,
+                )
+                .bind(client_id)
+                .bind(&source_kinds)
+                .bind(&interfaces)
+                .bind(&direction_masks)
+                .bind(start_unix as i64)
+                .bind(end_unix as i64)
+                .bind(step_secs)
+                .fetch_all(pool)
+                .await?;
                 rows.into_iter()
                     .map(|row| {
                         let rx_bytes: Option<i64> = row.try_get("rx_bytes")?;
@@ -2366,24 +2037,34 @@ impl Repository {
     }
 
     async fn traffic_history_streams(&self, client_id: &str) -> Result<Vec<TrafficHistoryStream>> {
+        let client_ids = vec![client_id.to_string()];
         let rules = self
-            .list_vps_rules_matching(
-                &VpsRuleQuery {
-                    limit: None,
-                    client_id: Some(client_id.to_string()),
-                    selector_expression: None,
-                    key: Some(VPS_RULE_KEY_TRAFFIC_SELECTORS.to_string()),
-                    state: None,
-                },
-                None,
+            .list_vps_rules_for_clients(
+                &client_ids,
+                &[
+                    VPS_RULE_KEY_NETWORK_INTERFACES,
+                    VPS_RULE_KEY_TRAFFIC_SELECTORS,
+                ],
             )
             .await?;
-        let Some(rule) = rules.into_iter().next() else {
+        let Some(rule) = rules
+            .iter()
+            .find(|rule| rule.key == VPS_RULE_KEY_TRAFFIC_SELECTORS)
+        else {
             return Ok(Vec::new());
         };
-        let Ok(selectors) = traffic_selectors_from_rule(&rule) else {
-            return Ok(Vec::new());
+        let policy = network_interface_policy_for_client(client_id, &rules)?;
+        let selector_spec = traffic_selector_spec_from_rule(rule)?;
+        let traffic_clients = if selector_spec == TrafficSelectorSpec::All {
+            vec![client_id.to_string()]
+        } else {
+            Vec::new()
         };
+        let inventories_by_client = self
+            .network_interface_inventories_for_clients(&client_ids, &traffic_clients)
+            .await?;
+        let inventory = inventories_by_client.get(client_id);
+        let selectors = eligible_traffic_selectors(selector_spec, &policy, inventory);
         let mut streams = BTreeSet::<(String, String)>::new();
         for selector in selectors {
             streams.insert((selector.source, selector.interface));
@@ -2461,18 +2142,12 @@ impl Repository {
             let (true_count, false_count, incomplete_count, incomplete_subjects) =
                 if rule.rule_kind == AlertPolicyRuleKind::Occurrence {
                     (0, 0, 0, Vec::new())
-                } else if let Self::Postgres(pool) = self {
-                    preview_current_policy_rule(pool, rule, &matched_client_ids).await?
                 } else {
-                    // Memory does not own the durable neutral evidence stream.
-                    // Report unavailable current facts as incomplete rather
-                    // than fabricating false metric/state evaluations.
-                    (
-                        0,
-                        0,
-                        matched_client_ids.len() as i64,
-                        matched_client_ids.clone(),
-                    )
+                    match self {
+                        Self::Postgres(pool) => {
+                            preview_current_policy_rule(pool, rule, &matched_client_ids).await?
+                        }
+                    }
                 };
             incomplete_clients.extend(incomplete_subjects);
             rule_previews.push(PolicyDryRunRulePreview {
@@ -2517,8 +2192,26 @@ impl Repository {
         client_id: Option<&str>,
         allow_vps_rule_selectors: bool,
     ) -> Result<Vec<PolicyGroupRecord>> {
+        self.list_fleet_alert_policies_inner(
+            Some(limit),
+            enabled,
+            selector_expression,
+            client_id,
+            allow_vps_rule_selectors,
+        )
+        .await
+    }
+
+    async fn list_fleet_alert_policies_inner(
+        &self,
+        limit: Option<i64>,
+        enabled: Option<bool>,
+        selector_expression: Option<&str>,
+        client_id: Option<&str>,
+        allow_vps_rule_selectors: bool,
+    ) -> Result<Vec<PolicyGroupRecord>> {
         let definition_limit = if selector_expression.is_none() && client_id.is_none() {
-            Some(limit.clamp(1, 1000) as usize)
+            limit.map(|limit| limit.clamp(1, 1000) as usize)
         } else {
             None
         };
@@ -2608,19 +2301,39 @@ impl Repository {
                 .cmp(&left.enabled)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        groups.truncate(limit.clamp(1, 1000) as usize);
+        if let Some(limit) = limit {
+            groups.truncate(limit.clamp(1, 1000) as usize);
+        }
         Ok(groups)
     }
 
-    pub(crate) async fn list_fleet_alert_policies_with_context(
+    pub(crate) async fn list_all_fleet_alert_policies_with_context(
         &self,
-        limit: i64,
+        allow_vps_rule_selectors: bool,
+        agents: &[AgentView],
+        rules: &[VpsRuleValueRecord],
+    ) -> Result<Vec<PolicyGroupRecord>> {
+        self.list_fleet_alert_policies_with_context_inner(
+            None,
+            allow_vps_rule_selectors,
+            agents,
+            rules,
+        )
+        .await
+    }
+
+    async fn list_fleet_alert_policies_with_context_inner(
+        &self,
+        limit: Option<i64>,
         allow_vps_rule_selectors: bool,
         agents: &[AgentView],
         rules: &[VpsRuleValueRecord],
     ) -> Result<Vec<PolicyGroupRecord>> {
         let mut groups = self
-            .list_fleet_alert_policy_definitions(Some(limit.clamp(1, 1000) as usize), None)
+            .list_fleet_alert_policy_definitions(
+                limit.map(|limit| limit.clamp(1, 1000) as usize),
+                None,
+            )
             .await?;
         let expressions = groups
             .iter()
@@ -2647,7 +2360,9 @@ impl Repository {
                 .cmp(&left.enabled)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        groups.truncate(limit.clamp(1, 1000) as usize);
+        if let Some(limit) = limit {
+            groups.truncate(limit.clamp(1, 1000) as usize);
+        }
         Ok(groups)
     }
 
@@ -2657,7 +2372,6 @@ impl Repository {
         enabled: Option<bool>,
     ) -> Result<Vec<PolicyGroupRecord>> {
         let mut groups = match self {
-            Self::Memory(memory) => memory.policy_groups.read().await.clone(),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -2754,14 +2468,6 @@ impl Repository {
 
     async fn get_fleet_alert_policy_definition(&self, id: Uuid) -> Result<PolicyGroupRecord> {
         match self {
-            Self::Memory(memory) => memory
-                .policy_groups
-                .read()
-                .await
-                .iter()
-                .find(|group| group.id == id)
-                .cloned()
-                .context("fleet_alert_policy_not_found"),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -2866,66 +2572,58 @@ impl Repository {
             );
         }
         let now = unix_now().to_string();
-        let group = match self {
-            Self::Memory(memory) => {
-                let mut groups = memory.policy_groups.write().await;
-                let existing_group =
-                    select_existing_policy_group(&groups, request.id, request.name.trim())?;
-                let group = policy_group_from_request(
-                    request,
-                    &dry_run,
-                    &now,
-                    existing_group.as_ref(),
-                    operator,
-                )?;
-                let scope_changed = policy_group_scope_changed(existing_group.as_ref(), &group);
-                let invalidated_rule_ids =
-                    invalidated_policy_rule_ids(existing_group.as_ref(), &group);
-                let resolution_reason =
-                    policy_change_resolution_reason(existing_group.as_ref(), &group);
-                resolve_memory_policy_alerts_for_rules(
-                    memory,
-                    &invalidated_rule_ids,
-                    resolution_reason,
-                )
-                .await?;
-                let mut states = memory.policy_rule_states.write().await;
-                if let Some(existing) = existing_group.as_ref() {
-                    let existing_rule_ids = existing
-                        .rules
-                        .iter()
-                        .map(|rule| rule.id)
-                        .collect::<HashSet<_>>();
-                    states.retain(|state| {
-                        if !existing_rule_ids.contains(&state.policy_rule_id) {
-                            return true;
-                        }
-                        !scope_changed
-                            && group.rules.iter().any(|rule| {
-                                rule.id == state.policy_rule_id
-                                    && rule.rule_version == state.rule_version
-                            })
-                    });
-                }
-                groups.retain(|stored| stored.id != group.id && stored.name != group.name);
-                groups.push(group.clone());
-                drop(states);
-                drop(groups);
-                memory.audits.write().await.push(policy_group_audit(
-                    "fleet.alert_policy_upserted",
-                    &group,
-                    operator,
-                    now.clone(),
-                ));
-                group
-            }
+        let (group, telemetry_activation_changed) = match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_policy_group_identity_upserts_in_tx(&mut tx).await?;
-                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-                    .bind("vpsman.alert_policy_evidence_arm")
-                    .execute(&mut *tx)
+                let mut definition_identities =
+                    vec![format!("alert-policy-name:{}", request.name.trim())];
+                if let Some(id) = request.id {
+                    definition_identities.push(format!("alert-policy:{id}"));
+                }
+                lock_postgres_definition_lifecycles_in_tx(&mut tx, &definition_identities).await?;
+                let existing_uses_telemetry: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM policy_rules rule
+                        JOIN policy_groups policy ON policy.id=rule.group_id
+                        WHERE (($1::uuid IS NOT NULL AND policy.id=$1)
+                               OR policy.name=$2)
+                          AND rule.evidence_source='telemetry.combined'
+                    )
+                    "#,
+                )
+                .bind(request.id)
+                .bind(request.name.trim())
+                .fetch_one(&mut *tx)
+                .await?;
+                let requested_uses_telemetry = request
+                    .rules
+                    .iter()
+                    .any(|rule| rule.evidence_source.trim() == "telemetry.combined");
+                let touches_telemetry_activation =
+                    existing_uses_telemetry || requested_uses_telemetry;
+                if existing_uses_telemetry || requested_uses_telemetry {
+                    lock_postgres_definition_lifecycles_in_tx(
+                        &mut tx,
+                        &["alert-policy-telemetry-consumer".to_string()],
+                    )
                     .await?;
+                }
+                let telemetry_policy_was_enabled: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM policy_rules rule
+                        JOIN policy_groups policy ON policy.id=rule.group_id
+                        WHERE policy.enabled
+                          AND rule.enabled
+                          AND rule.evidence_source='telemetry.combined'
+                    )
+                    "#,
+                )
+                .fetch_one(&mut *tx)
+                .await?;
                 let armed_after_evidence_seq: i64 = sqlx::query_scalar(
                     "SELECT COALESCE(max(evidence_seq), 0) FROM alert_policy_evidence",
                 )
@@ -2973,11 +2671,26 @@ impl Repository {
                 let invalidated_rule_ids = invalidated_rule_ids.into_iter().collect::<Vec<_>>();
                 let resolution_reason =
                     policy_change_resolution_reason(existing_group.as_ref(), &group);
-                crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
-                    &mut tx,
-                    &invalidated_rule_ids,
-                )
-                .await?;
+                if !invalidated_rule_ids.is_empty() {
+                    sqlx::query(
+                        r#"
+                        SELECT id
+                        FROM policy_rules
+                        WHERE id=ANY($1::uuid[])
+                        ORDER BY id
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&invalidated_rule_ids)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                }
+                let drained_evidence_ids =
+                    crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
+                        &mut tx,
+                        &invalidated_rule_ids,
+                    )
+                    .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO policy_groups (
@@ -3122,11 +2835,28 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 }
+                let baseline_rule_ids = if telemetry_policy_was_enabled {
+                    retained_rule_ids.clone()
+                } else {
+                    group
+                        .rules
+                        .iter()
+                        .filter(|rule| rule.evidence_source != "telemetry.combined")
+                        .map(|rule| rule.id)
+                        .collect::<Vec<_>>()
+                };
                 crate::repository_policy_lifecycle::evaluate_policy_rule_baselines_in_tx(
                     &mut tx,
-                    &retained_rule_ids,
+                    &baseline_rule_ids,
                 )
                 .await?;
+                for evidence_id in drained_evidence_ids {
+                    crate::repository_policy_lifecycle::recompute_policy_evidence_pending_in_tx(
+                        &mut tx,
+                        evidence_id,
+                    )
+                    .await?;
+                }
                 group = policy_groups_for_identity_in_tx(&mut tx, Some(group.id), &group.name)
                     .await?
                     .into_iter()
@@ -3145,28 +2875,23 @@ impl Repository {
                 .bind(policy_group_metadata(&group, operator))
                 .execute(&mut *tx)
                 .await?;
+                let telemetry_activation_changed = if touches_telemetry_activation {
+                    reconcile_telemetry_policy_activation_request_in_tx(&mut tx).await?
+                } else {
+                    false
+                };
+                if telemetry_activation_changed {
+                    mark_telemetry_policy_activation_may_be_pending();
+                }
                 tx.commit().await?;
-                group
+                (group, telemetry_activation_changed)
             }
         };
         let policy_id = group.id;
-        if let Self::Postgres(pool) = self {
-            if let Err(error) =
-                crate::repository_policy_lifecycle::evaluate_due_policy_transitions(pool, 200).await
-            {
-                tracing::warn!(
-                    %error,
-                    %policy_id,
-                    "deferred policy evaluation after policy update"
-                );
-            }
-        } else if let Err(error) = self.evaluate_policy_rules().await {
-            tracing::warn!(
-                %error,
-                %policy_id,
-                "deferred policy evaluation after policy update"
-            );
+        if telemetry_activation_changed {
+            wake_telemetry_policy_activation();
         }
+        wake_policy_evaluator();
         let mut group = group;
         if let Err(error) = self
             .enrich_policy_group_summaries(std::slice::from_mut(&mut group))
@@ -3187,45 +2912,14 @@ impl Repository {
         reviewed_name: &str,
         operator: &AuthContext,
     ) -> Result<()> {
-        match self {
-            Self::Memory(memory) => {
-                let mut groups = memory.policy_groups.write().await;
-                let policy = groups
-                    .iter()
-                    .find(|policy| policy.id == policy_id)
-                    .cloned()
-                    .context("fleet_alert_policy_not_found")?;
-                anyhow::ensure!(
-                    policy.name == reviewed_name.trim(),
-                    "fleet_alert_policy_delete_review_stale"
-                );
-                let rule_ids = policy
-                    .rules
-                    .iter()
-                    .map(|rule| rule.id)
-                    .collect::<HashSet<_>>();
-                resolve_memory_policy_alerts_for_rules(memory, &rule_ids, "policy_deleted").await?;
-                groups.retain(|stored| stored.id != policy_id);
-                memory.policy_rule_states.write().await.retain(|state| {
-                    !policy
-                        .rules
-                        .iter()
-                        .any(|rule| rule.id == state.policy_rule_id)
-                });
-                memory.audits.write().await.push(policy_group_audit(
-                    "fleet.alert_policy_deleted",
-                    &policy,
-                    operator,
-                    unix_now().to_string(),
-                ));
-                drop(groups);
-            }
+        let telemetry_activation_changed = match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-                    .bind("vpsman.alert_policy_evidence_arm")
-                    .execute(&mut *tx)
-                    .await?;
+                lock_postgres_definition_lifecycles_in_tx(
+                    &mut tx,
+                    &[format!("alert-policy:{policy_id}")],
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     SELECT
@@ -3290,17 +2984,50 @@ impl Repository {
                 .map(policy_rule_from_row)
                 .collect::<Result<Vec<_>>>()?;
                 let policy = policy_group_from_row(row, rules)?;
+                let uses_telemetry = policy
+                    .rules
+                    .iter()
+                    .any(|rule| rule.evidence_source == "telemetry.combined");
+                if uses_telemetry {
+                    lock_postgres_definition_lifecycles_in_tx(
+                        &mut tx,
+                        &["alert-policy-telemetry-consumer".to_string()],
+                    )
+                    .await?;
+                }
                 let rule_ids = policy.rules.iter().map(|rule| rule.id).collect::<Vec<_>>();
-                crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
-                    &mut tx, &rule_ids,
-                )
-                .await?;
+                if !rule_ids.is_empty() {
+                    sqlx::query(
+                        r#"
+                        SELECT id
+                        FROM policy_rules
+                        WHERE id=ANY($1::uuid[])
+                        ORDER BY id
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&rule_ids)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                }
+                let drained_evidence_ids =
+                    crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
+                        &mut tx, &rule_ids,
+                    )
+                    .await?;
                 resolve_policy_alerts_for_rules_in_tx(&mut tx, &rule_ids, "policy_deleted").await?;
                 let deleted = sqlx::query("DELETE FROM policy_groups WHERE id = $1")
                     .bind(policy_id)
                     .execute(&mut *tx)
                     .await?;
                 anyhow::ensure!(deleted.rows_affected() == 1, "fleet_alert_policy_not_found");
+                for evidence_id in drained_evidence_ids {
+                    crate::repository_policy_lifecycle::recompute_policy_evidence_pending_in_tx(
+                        &mut tx,
+                        evidence_id,
+                    )
+                    .await?;
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -3314,9 +3041,22 @@ impl Repository {
                 .bind(policy_group_metadata(&policy, operator))
                 .execute(&mut *tx)
                 .await?;
+                let telemetry_activation_changed = if uses_telemetry {
+                    reconcile_telemetry_policy_activation_request_in_tx(&mut tx).await?
+                } else {
+                    false
+                };
+                if telemetry_activation_changed {
+                    mark_telemetry_policy_activation_may_be_pending();
+                }
                 tx.commit().await?;
+                telemetry_activation_changed
             }
+        };
+        if telemetry_activation_changed {
+            wake_telemetry_policy_activation();
         }
+        wake_policy_evaluator();
         Ok(())
     }
 
@@ -3378,268 +3118,73 @@ impl Repository {
         include_muted: Option<bool>,
         notification_rules: Option<&[FleetAlertNotificationMatchRule]>,
     ) -> Result<Vec<PolicyAlertRecord>> {
-        if matches!(self, Self::Memory(_)) {
-            return Ok(Vec::new());
-        }
         let allowed_client_id_values =
             allowed_client_ids.map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>());
-        if let Self::Postgres(pool) = self {
-            return list_unified_policy_alerts_postgres(
-                pool,
-                query,
-                result_limit,
-                prioritize_severity,
-                selection_mode,
-                allowed_client_id_values.as_deref(),
-                start_unix,
-                end_unix,
-                operator_state,
-                include_muted.unwrap_or(true),
-                notification_rules,
-            )
-            .await;
-        }
-        let mut alerts: Vec<PolicyAlertRecord> = match self {
-            Self::Memory(memory) => {
-                let hidden = memory.hidden_clients.read().await;
-                let states = memory.fleet_alert_states.read().await;
-                let now = crate::unix_now() as i64;
-                memory
-                    .policy_alerts
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|alert| {
-                        selection_mode == PolicyAlertSelectionMode::History
-                            || !hidden.contains(&alert.client_id)
-                    })
-                    .filter(|alert| policy_alert_matches_selection(alert, selection_mode))
-                    .filter(|alert| {
-                        let public_id = format!("policy-alert:{}", alert.id);
-                        let state = states.iter().find(|state| state.alert_id == public_id);
-                        let effective = match state {
-                            Some(state)
-                                if state.state == "muted"
-                                    && state.muted_until_unix.is_some_and(|until| until <= now) =>
-                            {
-                                "open"
-                            }
-                            Some(state) => state.state.as_str(),
-                            None => "open",
-                        };
-                        (include_muted.unwrap_or(true) || effective != "muted")
-                            && operator_state.is_none_or(|expected| effective == expected)
-                            && notification_rules.is_none_or(|rules| {
-                                notification_rule_matches_alert(
-                                    rules,
-                                    &alert.severity,
-                                    &alert.category,
-                                    effective,
-                                    Some(&alert.client_id),
-                                )
-                            })
-                    })
-                    .cloned()
-                    .collect()
-            }
-            Self::Postgres(_) => unreachable!("Postgres alerts use the unified lifecycle query"),
-        };
-        alerts.retain(|alert| {
-            query
-                .client_id
-                .as_deref()
-                .is_none_or(|client_id| alert.client_id == client_id)
-                && query
-                    .severity
-                    .as_deref()
-                    .is_none_or(|severity| alert.severity == severity)
-                && query
-                    .category
-                    .as_deref()
-                    .is_none_or(|category| alert.category == category)
-                && query
-                    .policy_group_id
-                    .is_none_or(|policy_group_id| alert.policy_group_id == policy_group_id)
-                && allowed_client_ids.is_none_or(|client_ids| client_ids.contains(&alert.client_id))
-                && timestamp_in_optional_bounds(
-                    if selection_mode == PolicyAlertSelectionMode::History {
-                        &alert.created_at
-                    } else {
-                        &alert.observed_at
-                    },
+        match self {
+            Self::Postgres(pool) => {
+                list_unified_policy_alerts_postgres(
+                    pool,
+                    query,
+                    result_limit,
+                    prioritize_severity,
+                    selection_mode,
+                    allowed_client_id_values.as_deref(),
                     start_unix,
                     end_unix,
+                    operator_state,
+                    include_muted.unwrap_or(true),
+                    notification_rules,
                 )
-                && policy_alert_matches_selection(alert, selection_mode)
-        });
-        alerts.sort_by(|left, right| {
-            if prioritize_severity {
-                policy_alert_lifecycle_rank(&left.lifecycle_state)
-                    .cmp(&policy_alert_lifecycle_rank(&right.lifecycle_state))
-                    .then_with(|| {
-                        policy_alert_severity_rank(&left.severity)
-                            .cmp(&policy_alert_severity_rank(&right.severity))
-                    })
-                    .then_with(|| compare_timestamps_desc(&left.observed_at, &right.observed_at))
-                    .then_with(|| right.id.cmp(&left.id))
-            } else {
-                compare_timestamps_desc(&left.created_at, &right.created_at)
-                    .then_with(|| right.id.cmp(&left.id))
+                .await
             }
-        });
-        if let Some(result_limit) = result_limit {
-            alerts.truncate(result_limit);
         }
-        Ok(alerts)
     }
 
-    pub(crate) async fn evaluate_policy_rules(&self) -> Result<usize> {
-        if let Self::Postgres(pool) = self {
-            crate::repository_policy_lifecycle::repair_missing_policy_evidence_receipts(pool, 500)
+    async fn evaluate_policy_rules_page(&self) -> Result<PolicyEvaluationPage> {
+        match self {
+            Self::Postgres(pool) => {
+                let scope_examined =
+                    crate::repository_policy_lifecycle::materialize_pending_policy_scope_revisions(
+                        pool,
+                        POLICY_SCOPE_MAINTENANCE_PAGE,
+                    )
+                    .await?;
+                let evidence =
+                    crate::repository_policy_lifecycle::evaluate_pending_policy_evidence_page(
+                        pool,
+                        POLICY_EVIDENCE_MAINTENANCE_PAGE,
+                    )
+                    .await?;
+                let due = crate::repository_policy_lifecycle::evaluate_due_policy_transitions_page(
+                    pool,
+                    POLICY_DUE_MAINTENANCE_PAGE,
+                )
                 .await?;
-            return crate::repository_policy_lifecycle::evaluate_due_policy_transitions(pool, 200)
-                .await;
+                Ok(PolicyEvaluationPage {
+                    scope_examined,
+                    evidence_examined: evidence.examined,
+                    evidence_still_due: evidence.still_due,
+                    due_examined: due.examined,
+                    due_transitioned: due.changed,
+                })
+            }
         }
-        // The Memory repository has no durable evidence/receipt/outbox owner.
-        // It is retained only for non-lifecycle unit fixtures and must never
-        // run the retired in-process alert state machine.
-        return Ok(0);
+    }
 
-        #[allow(unreachable_code)]
-        // Configuration writes and the periodic evaluator can otherwise repeat
-        // the same expensive fleet snapshot concurrently in one API process.
-        let _evaluation_guard = POLICY_EVALUATION_LOCK.lock().await;
-        let groups = self
-            .list_fleet_alert_policy_definitions(None, Some(true))
-            .await?;
-        if groups.is_empty() {
-            return Ok(0);
-        }
-        let agents = self.list_agents().await?;
-        let now = Utc::now();
-        let rules = self
-            .list_vps_rules_matching(
-                &VpsRuleQuery {
-                    limit: None,
-                    client_id: None,
-                    selector_expression: None,
-                    key: None,
-                    state: None,
-                },
-                None,
-            )
-            .await?;
-        let evaluated_vps_rule_inputs = policy_vps_rule_inputs_by_client(&rules);
-        let cycle_starts = traffic_cycle_starts_for_clients(
-            agents.iter().map(|agent| agent.id.as_str()),
-            &rules,
-            now,
-        );
-        let rule_contexts = vps_rule_contexts_by_client(&rules);
-        let mut matched_groups = Vec::with_capacity(groups.len());
-        let mut selector_failures = Vec::new();
-        for group in groups {
-            match resolve_agents_with_rule_contexts(
-                &agents,
-                &group.selector_expression,
-                &rule_contexts,
-            ) {
-                Ok(matched) => matched_groups.push((group, matched)),
-                Err(error) => selector_failures.push((group.id, group.name, error.to_string())),
+    /// Drains already-due durable work without turning the transaction page
+    /// sizes into throughput caps. The configured scheduler interval applies
+    /// only after every queue returned a short page.
+    pub(crate) async fn drain_policy_rule_backlog(&self) -> Result<usize> {
+        let mut transitioned = 0_usize;
+        loop {
+            let page = self.evaluate_policy_rules_page().await?;
+            transitioned = transitioned
+                .checked_add(page.due_transitioned)
+                .context("policy transition count overflow")?;
+            if !page.may_have_more() {
+                return Ok(transitioned);
             }
-        }
-        let mut stream_requests = traffic_stream_requests_from_rules(&cycle_starts, &rules);
-        for (group, matched) in &matched_groups {
-            for rule in group.rules.iter().filter(|rule| rule.enabled) {
-                if policy_condition_uses_traffic(&rule.trigger_condition_expression)
-                    .unwrap_or(false)
-                {
-                    if let Some(selector) = rule.traffic_selector.as_deref() {
-                        add_traffic_selector_requests(
-                            &mut stream_requests,
-                            matched.iter().map(|agent| agent.id.as_str()),
-                            &cycle_starts,
-                            selector,
-                        );
-                    }
-                }
-            }
-        }
-        let stream_requests = stream_requests.into_iter().collect::<Vec<_>>();
-        let traffic_usage = self
-            .list_traffic_counter_usage_for_streams(&stream_requests, now.timestamp())
-            .await?;
-        let traffic = traffic_accounting_for_agents(&agents, &rules, &traffic_usage, now);
-        let traffic_by_client = traffic
-            .iter()
-            .map(|record| (record.client_id.clone(), record))
-            .collect::<HashMap<_, _>>();
-        let rollup_client_ids = matched_groups
-            .iter()
-            .flat_map(|(_, matched)| matched.iter().map(|agent| agent.id.clone()))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let rollups = latest_rollups(
-            self.list_latest_telemetry_rollups_for_clients(&rollup_client_ids, None)
-                .await?,
-        );
-        let mut fired = 0_usize;
-        for (group, matched) in matched_groups {
-            for rule in group.rules.iter().filter(|rule| rule.enabled) {
-                let Self::Memory(memory) = self else {
-                    unreachable!("Postgres policy evaluation uses the unified lifecycle engine");
-                };
-                resolve_memory_policy_states_outside_scope(memory, &group, rule).await?;
-                let request = PolicyRuleRequest {
-                    id: Some(rule.id),
-                    name: rule.name.clone(),
-                    enabled: rule.enabled,
-                    rule_kind: rule.rule_kind,
-                    evidence_source: rule.evidence_source.clone(),
-                    correlation_mode: rule.correlation_mode,
-                    traffic_selector: rule.traffic_selector.clone(),
-                    trigger_condition_expression: rule.trigger_condition_expression.clone(),
-                    trigger_meta_condition: rule.trigger_meta_condition.clone(),
-                    resolve_condition_expression: rule.resolve_condition_expression.clone(),
-                    resolve_meta_condition: rule.resolve_meta_condition.clone(),
-                    severity: rule.severity.clone(),
-                    category: rule.category.clone(),
-                    title_template: rule.title_template.clone(),
-                    detail_template: rule.detail_template.clone(),
-                };
-                for agent in &matched {
-                    let override_traffic =
-                        traffic_override_for_rule(&agent.id, &request, &rules, &traffic_usage, now);
-                    let traffic_record = override_traffic
-                        .as_ref()
-                        .or_else(|| traffic_by_client.get(&agent.id).copied());
-                    let evaluation =
-                        evaluate_rule_for_client(&request, traffic_record, rollups.get(&agent.id));
-                    let evaluated_client_vps_rule_inputs = evaluated_vps_rule_inputs
-                        .get(&agent.id)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    if self
-                        .persist_policy_evaluation(
-                            &group,
-                            rule,
-                            agent,
-                            evaluated_client_vps_rule_inputs,
-                            evaluation,
-                            now,
-                        )
-                        .await?
-                    {
-                        fired += 1;
-                    }
-                }
-            }
-        }
-        if selector_failures.is_empty() {
-            Ok(fired)
-        } else {
-            Err(policy_selector_partial_failure(&selector_failures))
+            tokio::task::yield_now().await;
         }
     }
 
@@ -3682,12 +3227,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => Ok(aggregate_memory_traffic_counter_usage(
-                &memory.traffic_counter_samples.read().await,
-                &memory.traffic_counter_rollups.read().await,
-                requests,
-                now_unix,
-            )),
             Self::Postgres(pool) => {
                 let (no_reset_requests, monthly_requests): (Vec<_>, Vec<_>) = requests
                     .iter()
@@ -3741,9 +3280,9 @@ impl Repository {
                         .collect::<Vec<_>>();
                     // This statement is deliberately plan-sensitive: the request arrays are
                     // small for a detail read but can contain the whole fleet for a snapshot.
-                    // A cached generic plan estimates UNNEST at ten rows and can choose a
-                    // multi-million-row nested-loop/raw scan.  JIT compilation is also much
-                    // more expensive than the one-shot read on the API path.  Keep both
+                    // A cached generic plan estimates UNNEST at ten rows and can multiply
+                    // otherwise bounded probes across the wrong join order. JIT compilation
+                    // is also much more expensive than the one-shot read. Keep both
                     // mitigations transaction-local and use an unnamed statement so callers
                     // cannot inherit either setting and small/fleet requests remain
                     // cardinality-aware.
@@ -3899,17 +3438,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let ids = rule_ids.iter().copied().collect::<HashSet<_>>();
-                Ok(memory
-                    .policy_rule_states
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|state| ids.contains(&state.policy_rule_id))
-                    .cloned()
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -3957,31 +3485,6 @@ impl Repository {
             return Ok(HashSet::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let rule_ids = rule_ids.iter().copied().collect::<HashSet<_>>();
-                Ok(memory
-                    .policy_alerts
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|alert| {
-                        rule_ids.contains(&alert.policy_rule_id)
-                            && alert.resolved_at.is_none()
-                            && alert.last_confirmed_at.is_some()
-                            && matches!(
-                                alert.lifecycle_state.as_str(),
-                                POLICY_ALERT_TRIGGERED | POLICY_ALERT_PERSISTING
-                            )
-                    })
-                    .map(|alert| {
-                        (
-                            alert.policy_rule_id,
-                            alert.client_id.clone(),
-                            alert.trigger_generation,
-                        )
-                    })
-                    .collect())
-            }
             Self::Postgres(pool) => Ok(sqlx::query(
                 r#"
                 SELECT policy_rule_id, client_id, trigger_generation
@@ -3990,7 +3493,6 @@ impl Repository {
                   AND client_id IS NOT NULL
                   AND lifecycle_state IN ('triggered', 'persisting')
                   AND resolved_at IS NULL
-                  AND last_confirmed_at IS NOT NULL
                 "#,
             )
             .bind(rule_ids)
@@ -4007,181 +3509,30 @@ impl Repository {
             .collect::<Result<HashSet<_>>>()?),
         }
     }
+}
 
-    async fn persist_policy_evaluation(
-        &self,
-        group: &PolicyGroupRecord,
-        rule: &PolicyRuleRecord,
-        agent: &AgentView,
-        evaluated_vps_rule_inputs: &[PolicyVpsRuleInput],
-        evaluation: PolicyEvaluation,
-        now: DateTime<Utc>,
-    ) -> Result<bool> {
-        let now_text = now.to_rfc3339();
-        let selector = parse_policy_selector(&group.selector_expression)?;
-        match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                if require_visible_memory_clients(
-                    memory,
-                    std::slice::from_ref(&agent.id),
-                    "policy_alert_target_unavailable",
-                )
-                .await
-                .is_err()
-                {
-                    return Ok(false);
-                }
-                // Keep policy edits ordered before state/alert/event writes and
-                // reject an evaluator that loaded an obsolete policy snapshot.
-                let groups = memory.policy_groups.read().await;
-                if !memory_policy_snapshot_is_current(&groups, group, rule) {
-                    return Ok(false);
-                }
-                let (mut current_agents, current_vps_rules) = matching_memory_policy_agents(
-                    memory,
-                    std::slice::from_ref(&agent.id),
-                    &selector,
-                )
-                .await?;
-                if evaluated_vps_rule_inputs
-                    != policy_vps_rule_inputs(&current_vps_rules, &agent.id).as_slice()
-                {
-                    return Ok(false);
-                }
-                let Some(current_agent) = current_agents.remove(&agent.id) else {
-                    return Ok(false);
-                };
-                let mut states = memory.policy_rule_states.write().await;
-                let mut alerts = memory.policy_alerts.write().await;
-                let existing = states
-                    .iter()
-                    .find(|state| {
-                        state.policy_rule_id == rule.id
-                            && state.client_id == agent.id
-                            && state.rule_version == rule.rule_version
-                    })
-                    .cloned();
-                if policy_state_is_newer_than(existing.as_ref(), now) {
-                    return Ok(false);
-                }
-                let max_generation = alerts
-                    .iter()
-                    .filter(|alert| alert.policy_rule_id == rule.id && alert.client_id == agent.id)
-                    .map(|alert| alert.trigger_generation)
-                    .max()
-                    .unwrap_or(0);
-                let mut state = next_policy_rule_state(
-                    rule,
-                    &agent.id,
-                    &evaluation,
-                    existing.as_ref(),
-                    max_generation,
-                    now,
-                )?;
-                let eligible = policy_state_is_alert_eligible(&state);
-                let alert_index = alerts.iter().position(|alert| {
-                    alert.policy_rule_id == state.policy_rule_id
-                        && alert.client_id == state.client_id
-                        && alert.trigger_generation == state.trigger_generation
-                        && alert.resolved_at.is_none()
-                });
-                let mut inserted = false;
-                let mut resolved = false;
-                let mut alert = alert_index.map(|index| alerts[index].clone());
-                if evaluation.incomplete {
-                    if let Some(index) = alert_index {
-                        mark_policy_alert_unknown(&mut alerts[index]);
-                        alert = Some(alerts[index].clone());
-                    }
-                } else if !evaluation.condition_true {
-                    if let Some(index) =
-                        alert_index.filter(|index| alerts[*index].last_confirmed_at.is_some())
-                    {
-                        let state_last_evaluated_at = parse_policy_lifecycle_timestamp(
-                            &state.last_evaluated_at,
-                            "policy state last_evaluated_at",
-                        )?;
-                        resolve_policy_alert(
-                            &mut alerts[index],
-                            Utc::now(),
-                            Some(state_last_evaluated_at),
-                            "condition_recovered",
-                        )?;
-                        resolved = true;
-                        alert = Some(alerts[index].clone());
-                    }
-                } else if eligible {
-                    if let Some(index) = alert_index {
-                        mark_policy_alert_persisting(&mut alerts[index], &now_text);
-                        alert = Some(alerts[index].clone());
-                    } else {
-                        alert = Some(policy_alert_for_evaluation(
-                            group,
-                            rule,
-                            &current_agent,
-                            &state,
-                            &evaluation,
-                            &now_text,
-                        ));
-                        inserted = true;
-                    }
-                }
-                let event = if resolved {
-                    alert.as_ref().map(policy_alert_resolved_webhook_event)
-                } else {
-                    alert
-                        .as_ref()
-                        .filter(|alert| {
-                            alert.last_confirmed_at.is_some()
-                                && (inserted
-                                    || policy_webhook_repair_is_recent(&alert.observed_at, now))
-                        })
-                        .map(policy_alert_webhook_event)
-                };
-                let event_occurred_at = if resolved {
-                    alert
-                        .as_ref()
-                        .map(policy_alert_resolution_timestamp)
-                        .transpose()?
-                        .context("resolved policy alert is missing")?
-                } else {
-                    now
-                };
-                let event_row = event
-                    .map(|event| webhook_event_row(event, event_occurred_at))
-                    .transpose()?;
-                let mut events = if event_row.is_some() {
-                    Some(memory.webhook_events.write().await)
-                } else {
-                    None
-                };
-                if let Some(alert) = alert.as_ref() {
-                    state.last_fired_at = Some(alert.observed_at.clone());
-                }
-                states.retain(|stored| {
-                    !(stored.policy_rule_id == state.policy_rule_id
-                        && stored.client_id == state.client_id
-                        && stored.rule_version == state.rule_version)
-                });
-                states.push(state.clone());
-                if inserted {
-                    alerts.push(alert.expect("eligible policy evaluation must build an alert"));
-                }
-                if let (Some(events), Some(event)) = (events.as_mut(), event_row) {
-                    if !events.iter().any(|stored| {
-                        stored.kind == event.kind && stored.event_id == event.event_id
-                    }) {
-                        events.push(event);
-                    }
-                }
-                Ok(inserted)
-            }
-            Self::Postgres(_) => {
-                unreachable!("Postgres policy evaluation uses the unified lifecycle engine")
-            }
-        }
+async fn lock_postgres_traffic_reset_rule_targets(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    preview: &VpsRulesDryRunResponse,
+) -> Result<()> {
+    // Reset-day and reset-hour are one canonical rule value. Its trigger
+    // rebuilds both host and tunnel active-cycle prefixes, so it must join the
+    // same per-client traffic-ledger owner as live projection and vnStat
+    // replacement before the rule DML establishes its READ COMMITTED
+    // snapshot. BTreeSet supplies the canonical cross-client lock order.
+    let client_ids = preview
+        .changes
+        .iter()
+        .filter(|change| {
+            change.key == VPS_RULE_KEY_TRAFFIC_RESET_DAY
+                && matches!(change.action.as_str(), "set" | "unset")
+        })
+        .map(|change| change.client_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for client_id in client_ids {
+        lock_postgres_traffic_counter_streams(tx, client_id).await?;
     }
+    Ok(())
 }
 
 fn validate_confirmed_vps_rule_preview(
@@ -4196,15 +3547,6 @@ fn validate_confirmed_vps_rule_preview(
         preview.invalid_row_count == 0,
         "vps_rules_preview_contains_invalid_rows"
     );
-    Ok(())
-}
-
-async fn lock_postgres_vps_rule_mutations(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.vps_rule_mutation'))")
-        .execute(&mut **tx)
-        .await?;
     Ok(())
 }
 
@@ -4450,64 +3792,6 @@ fn build_vps_rule_preview(
     })
 }
 
-async fn apply_vps_rule_changes_memory(
-    memory: &crate::repository::MemoryState,
-    preview: &VpsRulesDryRunResponse,
-    operator: &AuthContext,
-) -> Result<()> {
-    anyhow::ensure!(
-        preview.invalid_row_count == 0,
-        "vps_rules_preview_contains_invalid_rows"
-    );
-    let target_client_ids = preview
-        .changes
-        .iter()
-        .map(|change| change.client_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    require_visible_memory_clients(
-        memory,
-        &target_client_ids,
-        "vps_rules_target_no_longer_available",
-    )
-    .await?;
-    let now = unix_now().to_string();
-    let mut rows = memory.vps_rule_values.write().await;
-    for change in &preview.changes {
-        if change.action == "unchanged" {
-            continue;
-        }
-        rows.retain(|row| !(row.client_id == change.client_id && row.key == change.key));
-        if change.action == "set" {
-            let raw = change.after.clone().context("vps rule set missing value")?;
-            let parsed = parse_vps_rule_value(&change.key, &raw)?;
-            rows.push(VpsRuleValueRecord {
-                client_id: change.client_id.clone(),
-                key: change.key.clone(),
-                value_raw: parsed.raw,
-                stored_value_raw: None,
-                value_json: parsed.json,
-                parsed_display: parsed.display,
-                state: "ok".to_string(),
-                validation_errors: Vec::new(),
-                source_kind: "operator".to_string(),
-                source_id: None,
-                updated_by: Some(operator.operator.id),
-                updated_at: now.clone(),
-            });
-        }
-    }
-    drop(rows);
-    memory.audits.write().await.push(vps_rules_audit(
-        "fleet.vps_rules_updated",
-        preview,
-        operator,
-        now,
-    ));
-    Ok(())
-}
-
 async fn apply_vps_rule_changes_postgres_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     preview: &VpsRulesDryRunResponse,
@@ -4567,11 +3851,6 @@ async fn apply_vps_rule_changes_postgres_in_tx(
             .await?;
         }
     }
-    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
-        tx,
-        &target_client_ids,
-    )
-    .await?;
     sqlx::query(
         r#"
         INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -4637,69 +3916,6 @@ fn validate_billing_rule_group(price: Option<&str>, cycle: Option<&str>) -> Resu
     Ok(())
 }
 
-async fn resolve_memory_policy_alerts_for_rules(
-    memory: &MemoryState,
-    rule_ids: &HashSet<Uuid>,
-    reason: &str,
-) -> Result<()> {
-    if rule_ids.is_empty() {
-        return Ok(());
-    }
-    let mut state_evaluated_at = HashMap::<(Uuid, String, i64), DateTime<Utc>>::new();
-    for state in memory
-        .policy_rule_states
-        .read()
-        .await
-        .iter()
-        .filter(|state| rule_ids.contains(&state.policy_rule_id))
-    {
-        let evaluated_at = parse_policy_lifecycle_timestamp(
-            &state.last_evaluated_at,
-            "policy state last_evaluated_at",
-        )?;
-        state_evaluated_at
-            .entry((
-                state.policy_rule_id,
-                state.client_id.clone(),
-                state.trigger_generation,
-            ))
-            .and_modify(|stored| *stored = (*stored).max(evaluated_at))
-            .or_insert(evaluated_at);
-    }
-    let mut alerts = memory.policy_alerts.write().await;
-    let mut resolved = Vec::new();
-    for alert in alerts.iter_mut().filter(|alert| {
-        rule_ids.contains(&alert.policy_rule_id)
-            && alert.resolved_at.is_none()
-            && alert.last_confirmed_at.is_some()
-    }) {
-        let evaluated_at = state_evaluated_at
-            .get(&(
-                alert.policy_rule_id,
-                alert.client_id.clone(),
-                alert.trigger_generation,
-            ))
-            .copied();
-        let resolved_at = resolve_policy_alert(alert, Utc::now(), evaluated_at, reason)?;
-        resolved.push((alert.clone(), resolved_at));
-    }
-    drop(alerts);
-    if resolved.is_empty() {
-        return Ok(());
-    }
-    let mut events = memory.webhook_events.write().await;
-    for (alert, resolved_at) in resolved {
-        let event = webhook_event_row(policy_alert_resolved_webhook_event(&alert), resolved_at)?;
-        if !events
-            .iter()
-            .any(|stored| stored.kind == event.kind && stored.event_id == event.event_id)
-        {
-            events.push(event);
-        }
-    }
-    Ok(())
-}
-
 async fn resolve_policy_alerts_for_rules_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     rule_ids: &[Uuid],
@@ -4711,207 +3927,7 @@ async fn resolve_policy_alerts_for_rules_in_tx(
     .await
 }
 
-fn memory_policy_snapshot_is_current(
-    groups: &[PolicyGroupRecord],
-    group: &PolicyGroupRecord,
-    rule: &PolicyRuleRecord,
-) -> bool {
-    groups.iter().any(|stored_group| {
-        stored_group.id == group.id
-            && stored_group.enabled
-            && stored_group.name == group.name
-            && stored_group.selector_expression == group.selector_expression
-            && stored_group.rules.iter().any(|stored_rule| {
-                stored_rule.id == rule.id
-                    && stored_rule.group_id == group.id
-                    && stored_rule.enabled
-                    && stored_rule.rule_version == rule.rule_version
-            })
-    })
-}
-
-async fn matching_memory_policy_agents(
-    memory: &MemoryState,
-    candidate_client_ids: &[String],
-    selector: &Expression,
-) -> Result<(HashMap<String, AgentView>, Vec<VpsRuleValueRecord>)> {
-    if candidate_client_ids.is_empty() {
-        return Ok((HashMap::new(), Vec::new()));
-    }
-    let candidates = candidate_client_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let hidden = memory.hidden_clients.read().await;
-    let agents = memory
-        .agents
-        .read()
-        .await
-        .iter()
-        .filter(|agent| {
-            candidates.contains(agent.id.as_str()) && !hidden.contains(agent.id.as_str())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    drop(hidden);
-    let rules = memory
-        .vps_rule_values
-        .read()
-        .await
-        .iter()
-        .filter(|row| candidates.contains(row.client_id.as_str()))
-        .cloned()
-        .map(canonicalize_vps_rule_record)
-        .collect::<Result<Vec<_>>>()?;
-    Ok((matching_policy_agents(&agents, &rules, selector), rules))
-}
-
-async fn resolve_memory_policy_states_outside_scope(
-    memory: &MemoryState,
-    group: &PolicyGroupRecord,
-    rule: &PolicyRuleRecord,
-) -> Result<()> {
-    let selector = parse_policy_selector(&group.selector_expression)?;
-    let _lifecycle = memory.agent_key_lifecycle.lock().await;
-    let groups = memory.policy_groups.read().await;
-    if !memory_policy_snapshot_is_current(&groups, group, rule) {
-        return Ok(());
-    }
-    let candidate_client_ids = memory
-        .policy_rule_states
-        .read()
-        .await
-        .iter()
-        .filter(|state| state.policy_rule_id == rule.id && state.rule_version == rule.rule_version)
-        .map(|state| state.client_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if candidate_client_ids.is_empty() {
-        return Ok(());
-    }
-    let matched_client_ids =
-        matching_memory_policy_agents(memory, &candidate_client_ids, &selector)
-            .await?
-            .0
-            .into_keys()
-            .collect::<HashSet<_>>();
-    let outside_client_ids = candidate_client_ids
-        .into_iter()
-        .filter(|client_id| !matched_client_ids.contains(client_id))
-        .collect::<HashSet<_>>();
-    if outside_client_ids.is_empty() {
-        return Ok(());
-    }
-    let mut states = memory.policy_rule_states.write().await;
-    let outside = states
-        .iter()
-        .filter(|state| {
-            state.policy_rule_id == rule.id
-                && state.rule_version == rule.rule_version
-                && outside_client_ids.contains(&state.client_id)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if outside.is_empty() {
-        return Ok(());
-    }
-    let outside_evaluated_at = outside
-        .iter()
-        .map(|state| {
-            Ok((
-                (state.client_id.clone(), state.trigger_generation),
-                parse_policy_lifecycle_timestamp(
-                    &state.last_evaluated_at,
-                    "policy state last_evaluated_at",
-                )?,
-            ))
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
-    states.retain(|state| {
-        state.policy_rule_id != rule.id
-            || state.rule_version != rule.rule_version
-            || !outside_client_ids.contains(&state.client_id)
-    });
-    drop(states);
-
-    let mut alerts = memory.policy_alerts.write().await;
-    let mut resolved = Vec::new();
-    for alert in alerts.iter_mut().filter(|alert| {
-        alert.policy_rule_id == rule.id
-            && outside_evaluated_at
-                .contains_key(&(alert.client_id.clone(), alert.trigger_generation))
-            && alert.resolved_at.is_none()
-            && alert.last_confirmed_at.is_some()
-    }) {
-        let evaluated_at = outside_evaluated_at
-            .get(&(alert.client_id.clone(), alert.trigger_generation))
-            .copied();
-        let resolved_at =
-            resolve_policy_alert(alert, Utc::now(), evaluated_at, "policy_scope_exited")?;
-        resolved.push((alert.clone(), resolved_at));
-    }
-    drop(alerts);
-    let mut events = memory.webhook_events.write().await;
-    for (alert, resolved_at) in resolved {
-        let event = webhook_event_row(policy_alert_resolved_webhook_event(&alert), resolved_at)?;
-        if !events
-            .iter()
-            .any(|stored| stored.kind == event.kind && stored.event_id == event.event_id)
-        {
-            events.push(event);
-        }
-    }
-    Ok(())
-}
-
-fn mark_policy_alert_persisting(alert: &mut PolicyAlertRecord, now: &str) {
-    alert.lifecycle_state = POLICY_ALERT_PERSISTING.to_string();
-    alert.last_confirmed_at = Some(now.to_string());
-    alert.resolved_at = None;
-    alert.resolution_reason = None;
-}
-
-fn mark_policy_alert_unknown(alert: &mut PolicyAlertRecord) {
-    alert.lifecycle_state = POLICY_ALERT_UNKNOWN.to_string();
-    alert.resolved_at = None;
-    alert.resolution_reason = None;
-}
-
-fn resolve_policy_alert(
-    alert: &mut PolicyAlertRecord,
-    after_lock: DateTime<Utc>,
-    state_last_evaluated_at: Option<DateTime<Utc>>,
-    reason: &str,
-) -> Result<DateTime<Utc>> {
-    let last_confirmed_at = alert
-        .last_confirmed_at
-        .as_deref()
-        .context("confirmed policy alert is missing last_confirmed_at")
-        .and_then(|value| {
-            parse_policy_lifecycle_timestamp(value, "policy alert last_confirmed_at")
-        })?;
-    let resolved_at = after_lock
-        .max(last_confirmed_at)
-        .max(state_last_evaluated_at.unwrap_or(last_confirmed_at));
-    alert.lifecycle_state = POLICY_ALERT_RESOLVED.to_string();
-    alert.resolved_at = Some(resolved_at.to_rfc3339());
-    alert.resolution_reason = Some(reason.to_string());
-    Ok(resolved_at)
-}
-
-fn parse_policy_lifecycle_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
-    parse_timestamp_utc(value).with_context(|| format!("invalid {field}: {value}"))
-}
-
-fn policy_alert_resolution_timestamp(alert: &PolicyAlertRecord) -> Result<DateTime<Utc>> {
-    alert
-        .resolved_at
-        .as_deref()
-        .context("resolved policy alert is missing resolved_at")
-        .and_then(|value| parse_policy_lifecycle_timestamp(value, "policy alert resolved_at"))
-}
-
+#[cfg(test)]
 fn next_policy_rule_state(
     rule: &PolicyRuleRecord,
     client_id: &str,
@@ -5006,207 +4022,9 @@ fn next_policy_rule_state(
     })
 }
 
+#[cfg(test)]
 fn policy_state_is_alert_eligible(state: &PolicyRuleStateRecord) -> bool {
     state.condition_true && state.window_satisfied && !state.incomplete
-}
-
-fn policy_state_is_newer_than(
-    state: Option<&PolicyRuleStateRecord>,
-    evaluation_time: DateTime<Utc>,
-) -> bool {
-    state
-        .and_then(|state| parse_timestamp_utc(&state.last_evaluated_at))
-        .is_some_and(|last_evaluated| last_evaluated > evaluation_time)
-}
-
-fn policy_webhook_repair_is_recent(observed_at: &str, evaluation_time: DateTime<Utc>) -> bool {
-    DateTime::parse_from_rfc3339(observed_at)
-        .or_else(|_| DateTime::parse_from_str(observed_at, "%Y-%m-%d %H:%M:%S%.f%#z"))
-        .ok()
-        .map(|observed_at| {
-            let age = evaluation_time.timestamp() - observed_at.timestamp();
-            (0..=POLICY_WEBHOOK_REPAIR_WINDOW_SECS).contains(&age)
-        })
-        .unwrap_or(false)
-}
-
-fn policy_alert_for_evaluation(
-    group: &PolicyGroupRecord,
-    rule: &PolicyRuleRecord,
-    agent: &AgentView,
-    state: &PolicyRuleStateRecord,
-    evaluation: &PolicyEvaluation,
-    now_text: &str,
-) -> PolicyAlertRecord {
-    let alert_id = Uuid::new_v4();
-    let title = if evaluation.category == "traffic" {
-        "Traffic quota threshold reached"
-    } else {
-        "Resource policy threshold reached"
-    }
-    .to_string();
-    let detail = format!(
-        "{} matched policy condition {}",
-        agent.display_name, rule.trigger_condition_expression
-    );
-    let mut payload = evaluation.payload.clone();
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "event".to_string(),
-            json!({
-                "kind": "alert.triggered",
-                "id": format!("policy-alert:{alert_id}"),
-                "occurred_at": now_text,
-            }),
-        );
-        object.insert(
-            "alert".to_string(),
-            json!({
-                "id": alert_id,
-                "public_id": format!("policy-alert:{alert_id}"),
-                "record_kind": "condition",
-                "producer_kind": "policy_rule",
-                "category": evaluation.category,
-                "severity": rule.severity,
-                "title": title,
-                "detail": detail,
-                "source_status": "policy_condition_reached",
-                "status": "policy_condition_reached",
-                "target_kind": "policy_rule",
-                "target_id": rule.id,
-                "client_id": agent.id,
-                "lifecycle_state": POLICY_ALERT_TRIGGERED,
-                "trigger_generation": state.trigger_generation,
-                "triggered_at": now_text,
-                "last_confirmed_at": now_text,
-                "resolved_at": null,
-                "resolution_reason": null,
-                "resolution_note": null,
-                "resolution_actor_id": null,
-            }),
-        );
-        object.insert(
-            "vps".to_string(),
-            json!({
-                "id": agent.id,
-                "name": agent.display_name,
-                "tags": agent.tags,
-            }),
-        );
-        object.insert(
-            "policy".to_string(),
-            json!({
-                "id": group.id,
-                "name": group.name,
-            }),
-        );
-        object.insert(
-            "policy_rule".to_string(),
-            json!({
-                "id": rule.id,
-                "name": rule.name,
-                "rule_version": rule.rule_version,
-                "trigger_condition_expression": rule.trigger_condition_expression,
-                "traffic_selector": rule.traffic_selector,
-                "rule_kind": rule.rule_kind,
-                "evidence_source": rule.evidence_source,
-                "system_seed_key": rule.system_seed_key,
-                "trigger_meta_condition": normalized_meta_condition_payload(
-                    rule.trigger_meta_condition.as_ref()
-                ),
-                "resolve_meta_condition": normalized_meta_condition_payload(
-                    rule.resolve_meta_condition.as_ref()
-                ),
-            }),
-        );
-    }
-    PolicyAlertRecord {
-        id: alert_id,
-        policy_group_id: group.id,
-        policy_rule_id: rule.id,
-        client_id: agent.id.clone(),
-        trigger_generation: state.trigger_generation,
-        severity: rule.severity.clone(),
-        category: evaluation.category.clone(),
-        title,
-        detail,
-        actual_value: evaluation.actual_value,
-        threshold_value: evaluation.threshold_value,
-        payload,
-        lifecycle_state: POLICY_ALERT_TRIGGERED.to_string(),
-        last_confirmed_at: Some(now_text.to_string()),
-        resolved_at: None,
-        resolution_reason: None,
-        observed_at: now_text.to_string(),
-        created_at: now_text.to_string(),
-    }
-}
-
-fn policy_alert_webhook_event(alert: &PolicyAlertRecord) -> WebhookEventCandidate {
-    WebhookEventCandidate {
-        kind: "alert.triggered".to_string(),
-        event_id: format!("policy-alert:{}", alert.id),
-        event_predicates: vec![
-            "alert.triggered".to_string(),
-            format!("alert.category:{}", alert.category),
-            format!("alert.severity:{}", alert.severity),
-        ],
-        subject_client_ids: vec![alert.client_id.clone()],
-        payload: alert.payload.clone(),
-        actor_id: None,
-    }
-}
-
-fn policy_alert_resolved_webhook_event(alert: &PolicyAlertRecord) -> WebhookEventCandidate {
-    let mut payload = alert.payload.clone();
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "event".to_string(),
-            json!({
-                "kind": "alert.resolved",
-                "id": format!("policy-alert:{}:resolved", alert.id),
-                "occurred_at": alert.resolved_at,
-            }),
-        );
-        object.insert(
-            "alert".to_string(),
-            json!({
-                "id": alert.id,
-                "public_id": format!("policy-alert:{}", alert.id),
-                "record_kind": "condition",
-                "producer_kind": "policy_rule",
-                "category": alert.category,
-                "severity": alert.severity,
-                "title": alert.title,
-                "detail": alert.detail,
-                "source_status": "policy_condition_resolved",
-                "status": "policy_condition_resolved",
-                "target_kind": "policy_rule",
-                "target_id": alert.policy_rule_id,
-                "client_id": alert.client_id,
-                "lifecycle_state": POLICY_ALERT_RESOLVED,
-                "trigger_generation": alert.trigger_generation,
-                "triggered_at": alert.created_at,
-                "last_confirmed_at": alert.last_confirmed_at,
-                "resolved_at": alert.resolved_at,
-                "resolution_reason": alert.resolution_reason,
-                "resolution_note": null,
-                "resolution_actor_id": null,
-            }),
-        );
-    }
-    WebhookEventCandidate {
-        kind: "alert.resolved".to_string(),
-        event_id: format!("policy-alert:{}:resolved", alert.id),
-        event_predicates: vec![
-            "alert.resolved".to_string(),
-            format!("alert.category:{}", alert.category),
-            format!("alert.severity:{}", alert.severity),
-        ],
-        subject_client_ids: vec![alert.client_id.clone()],
-        payload,
-        actor_id: None,
-    }
 }
 
 fn traffic_cycle_starts_for_clients<'a>(
@@ -5214,16 +4032,11 @@ fn traffic_cycle_starts_for_clients<'a>(
     rules: &[VpsRuleValueRecord],
     now: DateTime<Utc>,
 ) -> Vec<(String, i64)> {
-    let reset_days = rules
+    let reset_boundaries = rules
         .iter()
         .filter(|rule| rule.key == VPS_RULE_KEY_TRAFFIC_RESET_DAY)
         .filter_map(|rule| {
-            parse_persisted_vps_rule_value(&rule.key, &rule.value_raw)
-                .ok()?
-                .json
-                .get("day")
-                .and_then(Value::as_i64)
-                .map(|day| (rule.client_id.as_str(), day as i32))
+            parsed_traffic_reset(rule).map(|boundary| (rule.client_id.as_str(), boundary))
         })
         .collect::<HashMap<_, _>>();
     client_ids
@@ -5231,28 +4044,169 @@ fn traffic_cycle_starts_for_clients<'a>(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|client_id| {
-            let reset_day = reset_days.get(client_id).copied().unwrap_or(1);
+            let (reset_day, reset_hour) =
+                reset_boundaries.get(client_id).copied().unwrap_or((1, 0));
             (
                 client_id.to_string(),
                 if reset_day == -1 {
                     NO_RESET_TRAFFIC_START_UNIX
                 } else {
-                    cycle_bounds(reset_day, now).0.timestamp()
+                    cycle_bounds(reset_day, reset_hour, now).0.timestamp()
                 },
             )
         })
         .collect()
 }
 
-/// Builds the traffic portion of a telemetry policy fact from the same
-/// PostgreSQL transaction that accepted the telemetry sample. The ingest path
-/// already holds the client row and every traffic stream lock, so neither VPS
-/// rule context nor a later packet can leak into this snapshot.
-pub(crate) async fn postgres_traffic_accounting_snapshot_in_tx(
+fn parsed_traffic_reset(rule: &VpsRuleValueRecord) -> Option<(i32, i32)> {
+    let parsed = parse_vps_rule_value(&rule.key, &rule.value_raw).ok()?;
+    Some((
+        parsed.json.get("day")?.as_i64()? as i32,
+        parsed.json.get("hour")?.as_i64()? as i32,
+    ))
+}
+
+fn apply_projected_traffic_counter_overlay(
+    usage: &mut Vec<TrafficCounterStreamUsage>,
+    requests: &[TrafficStreamRequest],
+    overlay: &ProjectedTrafficCounterOverlay,
+    as_of: DateTime<Utc>,
+) {
+    if overlay.observed_at > as_of {
+        return;
+    }
+    let cycle_starts = requests
+        .iter()
+        .map(|request| {
+            (
+                (request.source_kind.as_str(), request.interface.as_str()),
+                request.cycle_start_unix,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let observed_unix = overlay.observed_at.timestamp();
+
+    for counter in &overlay.counters {
+        let Some(cycle_start_unix) = cycle_starts
+            .get(&(counter.source_kind.as_str(), counter.interface.as_str()))
+            .copied()
+        else {
+            continue;
+        };
+        let rx_bytes = counter.rx_bytes.max(0);
+        let tx_bytes = counter.tx_bytes.max(0);
+        if let Some(stream) = usage.iter_mut().find(|stream| {
+            stream.source_kind == counter.source_kind && stream.interface == counter.interface
+        }) {
+            if stream.last_sample_unix > observed_unix {
+                continue;
+            }
+            let intentional_import_boundary = is_vnstat_import_source(&stream.last_sample_source)
+                && !is_vnstat_import_source(&counter.sample_source);
+            if observed_unix >= cycle_start_unix && !intentional_import_boundary {
+                if rx_bytes >= stream.latest_rx {
+                    stream.cycle_rx = stream
+                        .cycle_rx
+                        .saturating_add(rx_bytes.saturating_sub(stream.latest_rx));
+                } else {
+                    stream.rx_counter_epochs_seen = stream.rx_counter_epochs_seen.saturating_add(1);
+                }
+                if tx_bytes >= stream.latest_tx {
+                    stream.cycle_tx = stream
+                        .cycle_tx
+                        .saturating_add(tx_bytes.saturating_sub(stream.latest_tx));
+                } else {
+                    stream.tx_counter_epochs_seen = stream.tx_counter_epochs_seen.saturating_add(1);
+                }
+            }
+            stream.latest_rx = rx_bytes;
+            stream.latest_tx = tx_bytes;
+            stream.last_sample_source.clone_from(&counter.sample_source);
+            stream.last_sample_unix = observed_unix;
+            continue;
+        }
+
+        let client_id = requests
+            .iter()
+            .find(|request| {
+                request.source_kind == counter.source_kind && request.interface == counter.interface
+            })
+            .map(|request| request.client_id.clone())
+            .unwrap_or_default();
+        usage.push(TrafficCounterStreamUsage {
+            client_id,
+            source_kind: counter.source_kind.clone(),
+            interface: counter.interface.clone(),
+            cycle_rx: 0,
+            cycle_tx: 0,
+            latest_rx: rx_bytes,
+            latest_tx: tx_bytes,
+            last_sample_source: counter.sample_source.clone(),
+            last_sample_unix: observed_unix,
+            rx_counter_epochs_seen: 1,
+            tx_counter_epochs_seen: 1,
+        });
+    }
+    usage.sort_by(|left, right| {
+        left.client_id
+            .cmp(&right.client_id)
+            .then_with(|| left.source_kind.cmp(&right.source_kind))
+            .then_with(|| left.interface.cmp(&right.interface))
+    });
+}
+
+impl ProjectedTrafficAccountingContext {
+    fn requests_and_inventory(
+        &self,
+        as_of: DateTime<Utc>,
+        metrics: &AgentMetrics,
+    ) -> Result<(Vec<TrafficStreamRequest>, NetworkInterfaceInventory)> {
+        let inventory = network_interface_inventory_from_metrics(
+            metrics,
+            self.durable_streams.clone(),
+            &self.current_tunnel_interfaces,
+        );
+        let inventories = HashMap::from([(self.client_id.clone(), inventory.clone())]);
+        let cycle_starts =
+            traffic_cycle_starts_for_clients([self.client_id.as_str()], &self.rules, as_of);
+        let requests =
+            traffic_stream_requests_from_rules(&cycle_starts, &self.rules, &inventories)?
+                .into_iter()
+                .collect();
+        Ok((requests, inventory))
+    }
+
+    fn accounting_record(
+        &self,
+        as_of: DateTime<Utc>,
+        usage: &[TrafficCounterStreamUsage],
+        inventory: &NetworkInterfaceInventory,
+        projected_streams: &HashSet<TrafficStreamIdentity>,
+    ) -> TrafficAccountingRecord {
+        traffic_accounting_for_client_with_freshness_and_candidates(
+            &self.client_id,
+            &self.rules,
+            usage,
+            as_of,
+            None,
+            Some(TrafficFreshnessBoundary {
+                projected_streams: Some(projected_streams),
+                online: true,
+            }),
+            Some(inventory),
+        )
+    }
+}
+
+/// Loads one immutable traffic-accounting definition snapshot for a claimed
+/// client suffix.  The only optional database expansion is the durable stream
+/// key set required by an explicit `traffic.selectors = *`; counters and
+/// normalized history remain owned by the minute materializer.
+pub(crate) async fn load_projected_traffic_accounting_context_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
-    as_of: DateTime<Utc>,
-) -> Result<TrafficAccountingRecord> {
+    current_tunnel_interfaces: &HashSet<String>,
+) -> Result<ProjectedTrafficAccountingContext> {
     let rule_rows = sqlx::query(
         r#"
         SELECT client_id, key, value_raw, value_json, source_kind, source_id,
@@ -5269,15 +4223,189 @@ pub(crate) async fn postgres_traffic_accounting_snapshot_in_tx(
         .into_iter()
         .map(vps_rule_from_row)
         .collect::<Result<Vec<_>>>()?;
-    let cycle_starts = traffic_cycle_starts_for_clients([client_id], &rules, as_of);
-    let requests = traffic_stream_requests_from_rules(&cycle_starts, &rules)
-        .into_iter()
-        .collect::<Vec<_>>();
-    let usage =
+    let expands_all_streams = rules
+        .iter()
+        .find(|rule| rule.key == VPS_RULE_KEY_TRAFFIC_SELECTORS)
+        .map(traffic_selector_spec_from_rule)
+        .transpose()?
+        .is_some_and(|spec| spec == TrafficSelectorSpec::All);
+    let durable_streams = if expands_all_streams {
+        postgres_traffic_stream_identities_in_tx(tx, client_id).await?
+    } else {
+        BTreeSet::new()
+    };
+    Ok(ProjectedTrafficAccountingContext {
+        client_id: client_id.to_string(),
+        rules,
+        expands_all_streams,
+        durable_streams,
+        current_tunnel_interfaces: current_tunnel_interfaces.clone(),
+    })
+}
+
+/// Refreshes only the normalized stream-key inventory used by an explicit
+/// wildcard selector.  Rules and current topology stay frozen to the claimed
+/// projection suffix; callers fence this read with the traffic-minute cursor.
+pub(crate) async fn refresh_projected_traffic_accounting_durable_streams_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    context: &mut ProjectedTrafficAccountingContext,
+) -> Result<()> {
+    if context.expands_all_streams {
+        context.durable_streams =
+            postgres_traffic_stream_identities_in_tx(tx, &context.client_id).await?;
+    }
+    Ok(())
+}
+
+fn frontier_requests_match(
+    frontier: &ProjectedTrafficAccountingFrontier,
+    requests: &[TrafficStreamRequest],
+) -> bool {
+    frontier.len() == requests.len()
+        && frontier.iter().zip(requests).all(|(stream, request)| {
+            stream.source_kind == request.source_kind
+                && stream.interface == request.interface
+                && stream.cycle_start_unix == request.cycle_start_unix
+        })
+}
+
+fn usage_from_projected_traffic_frontier(
+    client_id: &str,
+    frontier: &ProjectedTrafficAccountingFrontier,
+) -> Vec<TrafficCounterStreamUsage> {
+    frontier
+        .iter()
+        .map(|stream| TrafficCounterStreamUsage {
+            client_id: client_id.to_string(),
+            source_kind: stream.source_kind.clone(),
+            interface: stream.interface.clone(),
+            cycle_rx: stream.cycle_rx,
+            cycle_tx: stream.cycle_tx,
+            latest_rx: stream.latest_rx,
+            latest_tx: stream.latest_tx,
+            last_sample_source: stream.last_sample_source.clone(),
+            last_sample_unix: stream.last_sample_unix,
+            rx_counter_epochs_seen: stream.rx_counter_epochs_seen,
+            tx_counter_epochs_seen: stream.tx_counter_epochs_seen,
+        })
+        .collect()
+}
+
+fn projected_traffic_frontier_from_usage(
+    requests: &[TrafficStreamRequest],
+    usage: &[TrafficCounterStreamUsage],
+) -> ProjectedTrafficAccountingFrontier {
+    let cycle_starts = requests
+        .iter()
+        .map(|request| {
+            (
+                (request.source_kind.as_str(), request.interface.as_str()),
+                request.cycle_start_unix,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    usage
+        .iter()
+        .filter_map(|stream| {
+            let cycle_start_unix = cycle_starts
+                .get(&(stream.source_kind.as_str(), stream.interface.as_str()))
+                .copied()?;
+            Some(ProjectedTrafficAccountingFrontierStream {
+                source_kind: stream.source_kind.clone(),
+                interface: stream.interface.clone(),
+                cycle_start_unix,
+                cycle_rx: stream.cycle_rx,
+                cycle_tx: stream.cycle_tx,
+                latest_rx: stream.latest_rx,
+                latest_tx: stream.latest_tx,
+                last_sample_source: stream.last_sample_source.clone(),
+                last_sample_unix: stream.last_sample_unix,
+                rx_counter_epochs_seen: stream.rx_counter_epochs_seen,
+                tx_counter_epochs_seen: stream.tx_counter_epochs_seen,
+            })
+        })
+        .collect()
+}
+
+/// Advances a coherent compact frontier with exactly one admitted sample.  A
+/// request/cycle mismatch asks the caller to rebase from the minute owner; it
+/// is never papered over by a partial vector or a delayed policy evaluation.
+pub(crate) fn advance_projected_traffic_accounting_frontier(
+    context: &ProjectedTrafficAccountingContext,
+    as_of: DateTime<Utc>,
+    metrics: &AgentMetrics,
+    projected_streams: &HashSet<TrafficStreamIdentity>,
+    overlay: &ProjectedTrafficCounterOverlay,
+    frontier: &ProjectedTrafficAccountingFrontier,
+) -> Result<Option<(TrafficAccountingRecord, ProjectedTrafficAccountingFrontier)>> {
+    let (requests, inventory) = context.requests_and_inventory(as_of, metrics)?;
+    if !frontier_requests_match(frontier, &requests) {
+        return Ok(None);
+    }
+    let mut usage = usage_from_projected_traffic_frontier(&context.client_id, frontier);
+    apply_projected_traffic_counter_overlay(&mut usage, &requests, overlay, as_of);
+    let traffic = context.accounting_record(as_of, &usage, &inventory, projected_streams);
+    let frontier = projected_traffic_frontier_from_usage(&requests, &usage);
+    Ok(Some((traffic, frontier)))
+}
+
+/// Reconstructs a frontier from the durable minute snapshot plus the exact
+/// ordered raw suffix that has not crossed that cursor.  One snapshot query
+/// per request class replaces the former full accounting query per sample.
+pub(crate) async fn rebase_projected_traffic_accounting_frontier_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    context: &ProjectedTrafficAccountingContext,
+    as_of: DateTime<Utc>,
+    metrics: &AgentMetrics,
+    projected_streams: &HashSet<TrafficStreamIdentity>,
+    overlays: &[ProjectedTrafficCounterOverlay],
+) -> Result<(TrafficAccountingRecord, ProjectedTrafficAccountingFrontier)> {
+    let (requests, inventory) = context.requests_and_inventory(as_of, metrics)?;
+    let mut usage =
         postgres_traffic_counter_usage_snapshot_in_tx(tx, &requests, as_of.timestamp()).await?;
-    Ok(traffic_accounting_for_client(
-        client_id, &rules, &usage, as_of,
-    ))
+    for overlay in overlays {
+        apply_projected_traffic_counter_overlay(&mut usage, &requests, overlay, as_of);
+    }
+    let traffic = context.accounting_record(as_of, &usage, &inventory, projected_streams);
+    let frontier = projected_traffic_frontier_from_usage(&requests, &usage);
+    Ok((traffic, frontier))
+}
+
+fn network_interface_inventory_from_metrics(
+    metrics: &AgentMetrics,
+    traffic_streams: BTreeSet<TrafficStreamIdentity>,
+    current_tunnel_interfaces: &HashSet<String>,
+) -> NetworkInterfaceInventory {
+    NetworkInterfaceInventory {
+        traffic_streams,
+        current_host_interfaces: metrics
+            .networks
+            .iter()
+            .filter(|network| (1..=64).contains(&network.interface.len()))
+            .map(|network| network.interface.clone())
+            .collect(),
+        current_tunnel_interfaces: current_tunnel_interfaces.iter().cloned().collect(),
+    }
+}
+
+async fn postgres_traffic_stream_identities_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+) -> Result<BTreeSet<TrafficStreamIdentity>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_kind, interface
+        FROM traffic_counter_streams
+        WHERE client_id = $1
+        ORDER BY source_kind, interface
+        "#,
+    )
+    .bind(client_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("source_kind")?, row.try_get("interface")?)))
+        .collect()
 }
 
 async fn postgres_traffic_counter_usage_snapshot_in_tx(
@@ -5338,7 +4466,19 @@ async fn postgres_traffic_counter_usage_snapshot_in_tx(
             .iter()
             .map(|request| request.interface.clone())
             .collect::<Vec<_>>();
+        // This is the same plan-sensitive statement used by the public traffic
+        // accounting path.  Ingest runs it inside the transaction that owns the
+        // accepted sample, so apply the same transaction-local safeguards here:
+        // JIT compilation costs more than a healthy bounded read, and a cached
+        // generic UNNEST plan can multiply the bounded probes in a poor join order.
+        sqlx::query(
+            r#"SELECT set_config('jit', 'off', true),
+                      set_config('plan_cache_mode', 'force_custom_plan', true)"#,
+        )
+        .execute(&mut **tx)
+        .await?;
         let rows = sqlx::query(NO_RESET_TRAFFIC_COUNTER_USAGE_SQL)
+            .persistent(false)
             .bind(client_ids)
             .bind(source_kinds)
             .bind(interfaces)
@@ -5364,7 +4504,8 @@ async fn postgres_traffic_counter_usage_snapshot_in_tx(
 fn traffic_stream_requests_from_rules(
     cycle_starts: &[(String, i64)],
     rules: &[VpsRuleValueRecord],
-) -> BTreeSet<TrafficStreamRequest> {
+    interface_inventories: &HashMap<String, NetworkInterfaceInventory>,
+) -> Result<BTreeSet<TrafficStreamRequest>> {
     let cycle_starts = cycle_starts
         .iter()
         .map(|(client_id, cycle_start)| (client_id.as_str(), *cycle_start))
@@ -5377,9 +4518,12 @@ fn traffic_stream_requests_from_rules(
         let Some(cycle_start_unix) = cycle_starts.get(rule.client_id.as_str()).copied() else {
             continue;
         };
-        let Ok(selectors) = traffic_selectors_from_rule(rule) else {
-            continue;
-        };
+        let policy = network_interface_policy_for_client(&rule.client_id, rules)?;
+        let selectors = eligible_traffic_selectors(
+            traffic_selector_spec_from_rule(rule)?,
+            &policy,
+            interface_inventories.get(&rule.client_id),
+        );
         for selector in selectors {
             requests.insert(TrafficStreamRequest {
                 client_id: rule.client_id.clone(),
@@ -5389,43 +4533,17 @@ fn traffic_stream_requests_from_rules(
             });
         }
     }
-    requests
+    Ok(requests)
 }
 
-fn add_traffic_selector_requests<'a>(
-    requests: &mut BTreeSet<TrafficStreamRequest>,
-    client_ids: impl IntoIterator<Item = &'a str>,
-    cycle_starts: &[(String, i64)],
-    selector_expression: &str,
-) {
-    let Ok(selectors) = parse_persisted_traffic_selector_list(selector_expression) else {
-        return;
-    };
-    let cycle_starts = cycle_starts
-        .iter()
-        .map(|(client_id, cycle_start)| (client_id.as_str(), *cycle_start))
-        .collect::<HashMap<_, _>>();
-    for client_id in client_ids.into_iter().collect::<BTreeSet<_>>() {
-        let Some(cycle_start_unix) = cycle_starts.get(client_id).copied() else {
-            continue;
-        };
-        for selector in &selectors {
-            requests.insert(TrafficStreamRequest {
-                client_id: client_id.to_string(),
-                source_kind: selector.source.clone(),
-                interface: selector.interface.clone(),
-                cycle_start_unix,
-            });
-        }
-    }
-}
-
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct MemoryCounterEpochEndpoints<'a> {
     first: &'a TrafficCounterSampleRecord,
     last: &'a TrafficCounterSampleRecord,
 }
 
+#[cfg(test)]
 impl<'a> MemoryCounterEpochEndpoints<'a> {
     fn new(sample: &'a TrafficCounterSampleRecord) -> Self {
         Self {
@@ -5444,6 +4562,7 @@ impl<'a> MemoryCounterEpochEndpoints<'a> {
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct MemoryNoResetStreamAccumulator<'a> {
     latest: Option<&'a TrafficCounterSampleRecord>,
@@ -5451,6 +4570,7 @@ struct MemoryNoResetStreamAccumulator<'a> {
     tx_epochs: BTreeMap<i64, MemoryCounterEpochEndpoints<'a>>,
 }
 
+#[cfg(test)]
 impl<'a> MemoryNoResetStreamAccumulator<'a> {
     fn observe(&mut self, sample: &'a TrafficCounterSampleRecord) {
         if self
@@ -5470,7 +4590,8 @@ impl<'a> MemoryNoResetStreamAccumulator<'a> {
     }
 }
 
-fn memory_no_reset_direction_usage(
+#[cfg(test)]
+fn test_no_reset_direction_usage(
     epochs: &BTreeMap<i64, MemoryCounterEpochEndpoints<'_>>,
     rx_direction: bool,
 ) -> (i64, i64) {
@@ -5496,7 +4617,8 @@ fn memory_no_reset_direction_usage(
     (usage, epochs_seen)
 }
 
-fn aggregate_memory_no_reset_traffic_counter_usage(
+#[cfg(test)]
+fn aggregate_test_no_reset_traffic_counter_usage(
     samples: &[TrafficCounterSampleRecord],
     rollups: &[TrafficCounterRollupRecord],
     requests: &[TrafficStreamRequest],
@@ -5541,9 +4663,9 @@ fn aggregate_memory_no_reset_traffic_counter_usage(
         .filter_map(|(request, accumulator)| {
             let latest = accumulator.latest?;
             let (mut cycle_rx, mut rx_counter_epochs_seen) =
-                memory_no_reset_direction_usage(&accumulator.rx_epochs, true);
+                test_no_reset_direction_usage(&accumulator.rx_epochs, true);
             let (mut cycle_tx, mut tx_counter_epochs_seen) =
-                memory_no_reset_direction_usage(&accumulator.tx_epochs, false);
+                test_no_reset_direction_usage(&accumulator.tx_epochs, false);
             for rollup in rollups.iter().filter(|rollup| {
                 rollup.client_id == request.client_id
                     && rollup.source_kind == request.source_kind
@@ -5565,6 +4687,7 @@ fn aggregate_memory_no_reset_traffic_counter_usage(
                 cycle_tx,
                 latest_rx: latest.rx_bytes,
                 latest_tx: latest.tx_bytes,
+                last_sample_source: latest.sample_source.clone(),
                 last_sample_unix: latest.observed_unix,
                 rx_counter_epochs_seen,
                 tx_counter_epochs_seen,
@@ -5573,7 +4696,8 @@ fn aggregate_memory_no_reset_traffic_counter_usage(
         .collect()
 }
 
-fn aggregate_memory_traffic_counter_usage(
+#[cfg(test)]
+fn aggregate_test_traffic_counter_usage(
     samples: &[TrafficCounterSampleRecord],
     rollups: &[TrafficCounterRollupRecord],
     requests: &[TrafficStreamRequest],
@@ -5589,7 +4713,7 @@ fn aggregate_memory_traffic_counter_usage(
         .filter(|request| request.cycle_start_unix != NO_RESET_TRAFFIC_START_UNIX)
         .cloned()
         .collect::<Vec<_>>();
-    let mut rows = aggregate_memory_no_reset_traffic_counter_usage(
+    let mut rows = aggregate_test_no_reset_traffic_counter_usage(
         samples,
         rollups,
         &no_reset_requests,
@@ -5653,6 +4777,12 @@ fn aggregate_memory_traffic_counter_usage(
             continue;
         }
         let usage = derive_cycle_usage(&selected, request.cycle_start_unix, now_unix);
+        let last_sample_source = selected
+            .iter()
+            .max_by_key(|sample| sample.observed_unix)
+            .expect("non-empty selected traffic samples have a latest source")
+            .sample_source
+            .clone();
         let rx_counter_epochs_seen = unexpected_counter_epochs_seen(&selected, true);
         let tx_counter_epochs_seen = unexpected_counter_epochs_seen(&selected, false);
         rows.push(TrafficCounterStreamUsage {
@@ -5663,6 +4793,7 @@ fn aggregate_memory_traffic_counter_usage(
             cycle_tx: usage.cycle_tx,
             latest_rx: usage.latest_rx,
             latest_tx: usage.latest_tx,
+            last_sample_source,
             last_sample_unix: usage
                 .last_sample_unix
                 .expect("non-empty selected traffic samples have a latest timestamp"),
@@ -5679,6 +4810,7 @@ fn aggregate_memory_traffic_counter_usage(
     rows
 }
 
+#[cfg(test)]
 fn unexpected_counter_epochs_seen(
     samples: &[TrafficCounterSampleRecord],
     rx_direction: bool,
@@ -5709,143 +4841,8 @@ fn unexpected_counter_epochs_seen(
     epochs_seen
 }
 
-fn raw_memory_traffic_samples(
-    samples: &[TelemetrySampleView],
-    client_id: &str,
-    streams: &[TrafficHistoryStream],
-) -> Result<Vec<TrafficCounterSampleRecord>> {
-    let selected = streams
-        .iter()
-        .map(|stream| (stream.source_kind.as_str(), stream.interface.as_str()))
-        .collect::<HashSet<_>>();
-    let mut rows = Vec::new();
-    for sample in samples
-        .iter()
-        .filter(|sample| sample.client_id == client_id)
-    {
-        let metrics: vpsman_common::AgentMetrics =
-            serde_json::from_value(sample.payload.clone())
-                .context("stored raw telemetry payload is invalid")?;
-        let observed_unix = i64::try_from(
-            parse_timestamp_unix(&sample.observed_at)
-                .context("stored raw telemetry receive timestamp is invalid")?,
-        )
-        .context("stored raw telemetry receive timestamp exceeds supported range")?;
-        for network in metrics
-            .networks
-            .into_iter()
-            .filter(|network| selected.contains(&("host", network.interface.as_str())))
-        {
-            rows.push(TrafficCounterSampleRecord {
-                client_id: client_id.to_string(),
-                source_kind: "host".to_string(),
-                interface: network.interface,
-                observed_at: sample.observed_at.clone(),
-                observed_unix,
-                rx_bytes: i64::try_from(network.rx_bytes).unwrap_or(i64::MAX),
-                tx_bytes: i64::try_from(network.tx_bytes).unwrap_or(i64::MAX),
-                rx_counter_epoch: 0,
-                tx_counter_epoch: 0,
-                sample_source: "raw_agent_networks".to_string(),
-            });
-        }
-        for tunnel in metrics
-            .tunnels
-            .into_iter()
-            .filter(|tunnel| selected.contains(&("tunnel", tunnel.interface.as_str())))
-        {
-            rows.push(TrafficCounterSampleRecord {
-                client_id: client_id.to_string(),
-                source_kind: "tunnel".to_string(),
-                interface: tunnel.interface,
-                observed_at: sample.observed_at.clone(),
-                observed_unix,
-                rx_bytes: i64::try_from(tunnel.rx_bytes).unwrap_or(i64::MAX),
-                tx_bytes: i64::try_from(tunnel.tx_bytes).unwrap_or(i64::MAX),
-                rx_counter_epoch: 0,
-                tx_counter_epoch: 0,
-                sample_source: "raw_runtime_tunnel".to_string(),
-            });
-        }
-    }
-    Ok(rows)
-}
-
-fn aggregate_memory_raw_traffic_history(
-    live_samples: Vec<TrafficCounterSampleRecord>,
-    exact_samples: &[TrafficCounterSampleRecord],
-    streams: &[TrafficHistoryStream],
-    start_unix: u64,
-    end_unix: u64,
-    step_secs: i32,
-) -> Vec<TrafficHistoryPointView> {
-    // vnStat import is authoritative for the interval before live collection
-    // starts. Sequence it independently so the join cannot invent a transition
-    // between imported durable counters and partial-minute live observations.
-    let imported_samples = exact_samples
-        .iter()
-        .filter(|sample| is_vnstat_import_source(&sample.sample_source))
-        .cloned()
-        .collect::<Vec<_>>();
-    merge_traffic_history_points(
-        aggregate_memory_traffic_history(
-            live_samples,
-            &[],
-            streams,
-            start_unix,
-            end_unix,
-            step_secs,
-        ),
-        aggregate_memory_traffic_history(
-            imported_samples,
-            &[],
-            streams,
-            start_unix,
-            end_unix,
-            step_secs,
-        ),
-    )
-}
-
-fn merge_traffic_history_points(
-    primary: Vec<TrafficHistoryPointView>,
-    additional: Vec<TrafficHistoryPointView>,
-) -> Vec<TrafficHistoryPointView> {
-    let mut buckets = BTreeMap::<(i64, i32), TrafficHistoryPointView>::new();
-    for point in primary.into_iter().chain(additional) {
-        let bucket_unix = point.bucket_start.parse::<i64>().unwrap_or_default();
-        let entry = buckets
-            .entry((bucket_unix, point.bucket_secs))
-            .or_insert_with(|| TrafficHistoryPointView {
-                bucket_start: point.bucket_start.clone(),
-                bucket_secs: point.bucket_secs,
-                sample_count: 0,
-                reset_count: 0,
-                rx_bytes: None,
-                tx_bytes: None,
-                total_bytes: None,
-            });
-        entry.sample_count = entry.sample_count.saturating_add(point.sample_count);
-        entry.reset_count = entry.reset_count.saturating_add(point.reset_count);
-        entry.rx_bytes = add_optional_traffic_bytes(entry.rx_bytes, point.rx_bytes);
-        entry.tx_bytes = add_optional_traffic_bytes(entry.tx_bytes, point.tx_bytes);
-        entry.total_bytes = entry
-            .rx_bytes
-            .zip(entry.tx_bytes)
-            .map(|(rx, tx)| rx.saturating_add(tx));
-    }
-    buckets.into_values().collect()
-}
-
-fn add_optional_traffic_bytes(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.saturating_add(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-fn aggregate_memory_traffic_history(
+#[cfg(test)]
+fn aggregate_test_traffic_history(
     samples: Vec<TrafficCounterSampleRecord>,
     rollups: &[TrafficCounterRollupRecord],
     streams: &[TrafficHistoryStream],
@@ -6033,10 +5030,6 @@ fn parse_vps_rule_value(key: &str, value: &str) -> Result<ParsedRuleValue> {
     parse_common_vps_rule_value(key, value).map_err(anyhow::Error::msg)
 }
 
-fn parse_persisted_vps_rule_value(key: &str, value: &str) -> Result<ParsedRuleValue> {
-    parse_common_persisted_vps_rule_value(key, value).map_err(anyhow::Error::msg)
-}
-
 #[cfg(test)]
 fn parse_network_rate_interfaces(value: &str) -> Result<ParsedRuleValue> {
     parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, value)
@@ -6064,7 +5057,7 @@ fn network_rate_selector_spec_from_rule(
         rule.key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
         "network_rate_selector_storage_invalid"
     );
-    let parsed = parse_persisted_vps_rule_value(&rule.key, &rule.value_raw)?;
+    let parsed = parse_vps_rule_value(&rule.key, &rule.value_raw)?;
     let mode = parsed
         .json
         .get("mode")
@@ -6127,18 +5120,28 @@ fn traffic_selectors_from_parsed_rule(parsed: &ParsedRuleValue) -> Result<Vec<Tr
         .collect()
 }
 
-fn traffic_selectors_from_rule(rule: &VpsRuleValueRecord) -> Result<Vec<TrafficSelector>> {
+fn traffic_selector_spec_from_parsed_rule(parsed: &ParsedRuleValue) -> Result<TrafficSelectorSpec> {
+    match parsed.json.get("mode").and_then(Value::as_str) {
+        Some("all") => Ok(TrafficSelectorSpec::All),
+        Some("exact") => Ok(TrafficSelectorSpec::Exact(
+            traffic_selectors_from_parsed_rule(parsed)?,
+        )),
+        _ => anyhow::bail!("traffic_selector_storage_invalid"),
+    }
+}
+
+fn traffic_selector_spec_from_rule(rule: &VpsRuleValueRecord) -> Result<TrafficSelectorSpec> {
     anyhow::ensure!(
         rule.key == VPS_RULE_KEY_TRAFFIC_SELECTORS,
         "traffic_selector_storage_invalid"
     );
-    let parsed = parse_persisted_vps_rule_value(&rule.key, &rule.value_raw)?;
-    traffic_selectors_from_parsed_rule(&parsed)
+    parse_traffic_selector_spec(&rule.value_raw)
 }
 
 fn resolve_network_rate_interface_selection(
     client_ids: &[String],
     rules: &[VpsRuleValueRecord],
+    interface_inventories: &HashMap<String, NetworkInterfaceInventory>,
 ) -> Result<NetworkRateInterfaceSelection> {
     let rules_by_client = rules.iter().fold(
         HashMap::<&str, HashMap<&str, &VpsRuleValueRecord>>::new(),
@@ -6153,25 +5156,37 @@ fn resolve_network_rate_interface_selection(
     let mut selection = NetworkRateInterfaceSelection::default();
     for client_id in client_ids {
         let client_rules = rules_by_client.get(client_id.as_str());
+        let policy = network_interface_policy_from_rules(client_rules)?;
+        let inventory = interface_inventories.get(client_id);
         let rate_rule = client_rules
             .and_then(|rules| rules.get(VPS_RULE_KEY_NETWORK_RATE_INTERFACES))
             .copied();
-        let spec = rate_rule.map_or(
-            Ok(NetworkRateSelectorSpec::Reference(
-                NetworkRateSelectorReference::TrafficSelectors,
-            )),
-            network_rate_selector_spec_from_rule,
-        )?;
+        let Some(rate_rule) = rate_rule else {
+            selection.select_exact(client_id.clone(), BTreeSet::new());
+            continue;
+        };
+        let spec = network_rate_selector_spec_from_rule(rate_rule)?;
         match spec {
-            NetworkRateSelectorSpec::All => selection.select_all(client_id.clone()),
-            NetworkRateSelectorSpec::Exact(selectors) => {
-                selection.select_exact(client_id.clone(), host_rate_interfaces(&selectors))
-            }
+            NetworkRateSelectorSpec::All => selection.select_exact(
+                client_id.clone(),
+                all_eligible_host_rate_interfaces(&policy, inventory),
+            ),
+            NetworkRateSelectorSpec::Exact(selectors) => selection.select_exact(
+                client_id.clone(),
+                host_rate_interfaces(&selectors, &policy, inventory),
+            ),
             NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors) => {
                 let inherited = match client_rules
                     .and_then(|rules| rules.get(VPS_RULE_KEY_TRAFFIC_SELECTORS))
                 {
-                    Some(rule) => host_rate_interfaces(&traffic_selectors_from_rule(rule)?),
+                    Some(rule) => match traffic_selector_spec_from_rule(rule)? {
+                        TrafficSelectorSpec::All => {
+                            all_eligible_host_rate_interfaces(&policy, inventory)
+                        }
+                        TrafficSelectorSpec::Exact(selectors) => {
+                            host_rate_interfaces(&selectors, &policy, inventory)
+                        }
+                    },
                     None => BTreeSet::new(),
                 };
                 selection.select_exact(client_id.clone(), inherited);
@@ -6181,12 +5196,118 @@ fn resolve_network_rate_interface_selection(
     Ok(selection)
 }
 
-fn host_rate_interfaces(selectors: &[TrafficSelector]) -> BTreeSet<String> {
-    let mut selected = BTreeSet::new();
-    for selector in selectors
+fn network_interface_policy_from_rules(
+    rules: Option<&HashMap<&str, &VpsRuleValueRecord>>,
+) -> Result<NetworkInterfacePolicy> {
+    let parsed = rules
+        .and_then(|rules| rules.get(VPS_RULE_KEY_NETWORK_INTERFACES))
+        .map(|rule| parse_vps_rule_value(&rule.key, &rule.value_raw))
+        .transpose()?;
+    NetworkInterfacePolicy::from_rule_json(parsed.as_ref().map(|value| &value.json))
+        .map_err(anyhow::Error::msg)
+}
+
+fn network_interface_policy_for_client(
+    client_id: &str,
+    rules: &[VpsRuleValueRecord],
+) -> Result<NetworkInterfacePolicy> {
+    let parsed = rules
         .iter()
-        .filter(|selector| selector.source == "host")
-    {
+        .find(|rule| rule.client_id == client_id && rule.key == VPS_RULE_KEY_NETWORK_INTERFACES)
+        .map(|rule| parse_vps_rule_value(&rule.key, &rule.value_raw))
+        .transpose()?;
+    NetworkInterfacePolicy::from_rule_json(parsed.as_ref().map(|value| &value.json))
+        .map_err(anyhow::Error::msg)
+}
+
+fn known_stream_is_admitted(
+    policy: &NetworkInterfacePolicy,
+    inventory: Option<&NetworkInterfaceInventory>,
+    source: NetworkInterfaceSource,
+    interface: &str,
+) -> bool {
+    if !policy.matches(source, interface) {
+        return false;
+    }
+    !(*policy == NetworkInterfacePolicy::DefaultPhysical
+        && source == NetworkInterfaceSource::Host
+        && inventory
+            .is_some_and(|inventory| inventory.current_tunnel_interfaces.contains(interface)))
+}
+
+fn traffic_selector_source(source: &str) -> Option<NetworkInterfaceSource> {
+    match source {
+        "host" => Some(NetworkInterfaceSource::Host),
+        "tunnel" => Some(NetworkInterfaceSource::Tunnel),
+        _ => None,
+    }
+}
+
+fn eligible_traffic_selectors(
+    spec: TrafficSelectorSpec,
+    policy: &NetworkInterfacePolicy,
+    inventory: Option<&NetworkInterfaceInventory>,
+) -> Vec<TrafficSelector> {
+    match spec {
+        TrafficSelectorSpec::Exact(selectors) => selectors
+            .into_iter()
+            .filter(|selector| {
+                traffic_selector_source(&selector.source).is_some_and(|source| {
+                    known_stream_is_admitted(policy, inventory, source, &selector.interface)
+                })
+            })
+            .collect(),
+        TrafficSelectorSpec::All => inventory
+            .into_iter()
+            .flat_map(|inventory| &inventory.traffic_streams)
+            .filter_map(|(source, interface)| {
+                let source_kind = traffic_selector_source(source)?;
+                known_stream_is_admitted(policy, inventory, source_kind, interface).then(|| {
+                    TrafficSelector {
+                        source: source.clone(),
+                        interface: interface.clone(),
+                        direction: "total".to_string(),
+                        canonical: if source == "host" {
+                            interface.clone()
+                        } else {
+                            format!("{source}:{interface}")
+                        },
+                    }
+                })
+            })
+            .collect(),
+    }
+}
+
+fn all_eligible_host_rate_interfaces(
+    policy: &NetworkInterfacePolicy,
+    inventory: Option<&NetworkInterfaceInventory>,
+) -> BTreeSet<String> {
+    inventory
+        .into_iter()
+        .flat_map(|inventory| &inventory.current_host_interfaces)
+        .filter(|interface| {
+            known_stream_is_admitted(policy, inventory, NetworkInterfaceSource::Host, interface)
+        })
+        .cloned()
+        .collect()
+}
+
+fn host_rate_interfaces(
+    selectors: &[TrafficSelector],
+    policy: &NetworkInterfacePolicy,
+    inventory: Option<&NetworkInterfaceInventory>,
+) -> BTreeSet<String> {
+    let mut selected = BTreeSet::new();
+    for selector in selectors.iter().filter(|selector| {
+        selector.source == "host"
+            && known_stream_is_admitted(
+                policy,
+                inventory,
+                NetworkInterfaceSource::Host,
+                &selector.interface,
+            )
+    }) {
         selected.insert(selector.interface.clone());
     }
     selected
@@ -6194,7 +5315,15 @@ fn host_rate_interfaces(selectors: &[TrafficSelector]) -> BTreeSet<String> {
 
 fn parse_traffic_selector_list(input: &str) -> Result<Vec<TrafficSelector>> {
     let parsed = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input)?;
-    traffic_selectors_from_parsed_rule(&parsed)
+    match traffic_selector_spec_from_parsed_rule(&parsed)? {
+        TrafficSelectorSpec::Exact(selectors) => Ok(selectors),
+        TrafficSelectorSpec::All => anyhow::bail!("traffic_selector_expansion_required"),
+    }
+}
+
+fn parse_traffic_selector_spec(input: &str) -> Result<TrafficSelectorSpec> {
+    let parsed = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input)?;
+    traffic_selector_spec_from_parsed_rule(&parsed)
 }
 
 #[cfg(test)]
@@ -6202,11 +5331,6 @@ fn parse_traffic_selector(input: &str) -> Result<TrafficSelector> {
     let mut selectors = parse_traffic_selector_list(input)?;
     anyhow::ensure!(selectors.len() == 1, "traffic_selector_single_required");
     Ok(selectors.remove(0))
-}
-
-fn parse_persisted_traffic_selector_list(input: &str) -> Result<Vec<TrafficSelector>> {
-    let parsed = parse_persisted_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input)?;
-    traffic_selectors_from_parsed_rule(&parsed)
 }
 
 fn traffic_selector_direction_mask(selector: &TrafficSelector) -> u8 {
@@ -6294,97 +5418,23 @@ fn parse_policy_selector(selector: &str) -> Result<Expression> {
         .context("selector expression is empty")
 }
 
-fn matching_policy_agents(
-    agents: &[AgentView],
-    rules: &[VpsRuleValueRecord],
-    selector: &Expression,
-) -> HashMap<String, AgentView> {
-    let rules_by_client = vps_rule_contexts_by_client(rules);
-    agents
-        .iter()
-        .filter(|agent| {
-            agent_matches_selector_expression_with_rules(
-                agent,
-                selector,
-                rules_by_client.get(&agent.id),
-            )
-        })
-        .cloned()
-        .map(|agent| (agent.id.clone(), agent))
-        .collect()
-}
-
-fn policy_vps_rule_inputs_by_client(
-    rules: &[VpsRuleValueRecord],
-) -> HashMap<String, Vec<PolicyVpsRuleInput>> {
-    let mut inputs = HashMap::<String, Vec<PolicyVpsRuleInput>>::new();
-    for rule in rules {
-        inputs
-            .entry(rule.client_id.clone())
-            .or_default()
-            .push(policy_vps_rule_input(rule));
-    }
-    for client_inputs in inputs.values_mut() {
-        client_inputs.sort_by(|left, right| left.0.cmp(&right.0));
-    }
-    inputs
-}
-
-fn policy_vps_rule_inputs(
-    rules: &[VpsRuleValueRecord],
-    client_id: &str,
-) -> Vec<PolicyVpsRuleInput> {
-    let mut inputs = rules
-        .iter()
-        .filter(|rule| rule.client_id == client_id)
-        .map(policy_vps_rule_input)
-        .collect::<Vec<_>>();
-    inputs.sort_by(|left, right| left.0.cmp(&right.0));
-    inputs
-}
-
-fn policy_vps_rule_input(rule: &VpsRuleValueRecord) -> PolicyVpsRuleInput {
-    (
-        rule.key.clone(),
-        rule.value_raw.clone(),
-        rule.value_json.clone(),
-    )
-}
-
-fn policy_selector_partial_failure(failures: &[(Uuid, String, String)]) -> anyhow::Error {
-    const MAX_REPORTED_FAILURES: usize = 8;
-    const MAX_ERROR_CHARS: usize = 256;
-
-    let details = failures
-        .iter()
-        .take(MAX_REPORTED_FAILURES)
-        .map(|(policy_id, name, error)| {
-            let name = name.chars().take(MAX_POLICY_NAME_BYTES).collect::<String>();
-            let error = error.chars().take(MAX_ERROR_CHARS).collect::<String>();
-            format!("{policy_id} ({name}): {error}")
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    let omitted = failures.len().saturating_sub(MAX_REPORTED_FAILURES);
-    anyhow::anyhow!(
-        "fleet_alert_policy_evaluation_partial_failure: {} malformed persisted group selector(s): {}{}",
-        failures.len(),
-        details,
-        if omitted == 0 {
-            String::new()
-        } else {
-            format!("; {omitted} additional failure(s) omitted")
-        }
-    )
-}
-
+#[cfg(test)]
 fn traffic_accounting_for_client(
     client_id: &str,
     rules: &[VpsRuleValueRecord],
     traffic_usage: &[TrafficCounterStreamUsage],
     now: DateTime<Utc>,
 ) -> TrafficAccountingRecord {
-    traffic_accounting_for_client_with_selector_override(client_id, rules, traffic_usage, now, None)
+    let inventory = network_interface_inventory_from_usage(client_id, traffic_usage);
+    traffic_accounting_for_client_with_freshness_and_candidates(
+        client_id,
+        rules,
+        traffic_usage,
+        now,
+        None,
+        None,
+        Some(&inventory),
+    )
 }
 
 fn traffic_accounting_for_agents(
@@ -6392,37 +5442,29 @@ fn traffic_accounting_for_agents(
     rules: &[VpsRuleValueRecord],
     traffic_usage: &[TrafficCounterStreamUsage],
     now: DateTime<Utc>,
+    projected_streams: &HashMap<String, HashSet<TrafficStreamIdentity>>,
+    interface_inventories: &HashMap<String, NetworkInterfaceInventory>,
 ) -> Vec<TrafficAccountingRecord> {
     agents
         .iter()
-        .map(|agent| traffic_accounting_for_client(&agent.id, rules, traffic_usage, now))
+        .map(|agent| {
+            traffic_accounting_for_client_with_freshness_and_candidates(
+                &agent.id,
+                rules,
+                traffic_usage,
+                now,
+                None,
+                Some(TrafficFreshnessBoundary {
+                    projected_streams: projected_streams.get(&agent.id),
+                    online: agent.status == "online",
+                }),
+                interface_inventories.get(&agent.id),
+            )
+        })
         .collect()
 }
 
-fn traffic_override_for_rule(
-    client_id: &str,
-    rule: &PolicyRuleRequest,
-    rules: &[VpsRuleValueRecord],
-    traffic_usage: &[TrafficCounterStreamUsage],
-    now: DateTime<Utc>,
-) -> Option<TrafficAccountingRecord> {
-    if !policy_condition_uses_traffic(&rule.trigger_condition_expression).unwrap_or(false) {
-        return None;
-    }
-    let selector = rule
-        .traffic_selector
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(traffic_accounting_for_client_with_selector_override(
-        client_id,
-        rules,
-        traffic_usage,
-        now,
-        Some(selector),
-    ))
-}
-
+#[cfg(test)]
 fn traffic_accounting_for_client_with_selector_override(
     client_id: &str,
     rules: &[VpsRuleValueRecord],
@@ -6430,48 +5472,145 @@ fn traffic_accounting_for_client_with_selector_override(
     now: DateTime<Utc>,
     selector_override: Option<&str>,
 ) -> TrafficAccountingRecord {
+    let inventory = network_interface_inventory_from_usage(client_id, traffic_usage);
+    traffic_accounting_for_client_with_freshness_and_candidates(
+        client_id,
+        rules,
+        traffic_usage,
+        now,
+        selector_override,
+        None,
+        Some(&inventory),
+    )
+}
+
+#[cfg(test)]
+fn network_interface_inventory_from_usage(
+    client_id: &str,
+    traffic_usage: &[TrafficCounterStreamUsage],
+) -> NetworkInterfaceInventory {
+    let mut inventory = NetworkInterfaceInventory::default();
+    for usage in traffic_usage
+        .iter()
+        .filter(|usage| usage.client_id == client_id)
+    {
+        inventory
+            .traffic_streams
+            .insert((usage.source_kind.clone(), usage.interface.clone()));
+        if usage.source_kind == "host" {
+            inventory
+                .current_host_interfaces
+                .insert(usage.interface.clone());
+        } else if usage.source_kind == "tunnel" {
+            inventory
+                .current_tunnel_interfaces
+                .insert(usage.interface.clone());
+        }
+    }
+    inventory
+}
+
+/// Current traffic is exact stream membership in the canonical projected
+/// telemetry sample, not a fixed wall-age or timestamp-equality window.
+/// `online` preserves last-known counters for diagnosis while marking a
+/// disconnected client's evidence non-current. A missing projected sample
+/// cannot make imported/historical counters current.
+#[derive(Clone, Copy)]
+struct TrafficFreshnessBoundary<'a> {
+    projected_streams: Option<&'a HashSet<TrafficStreamIdentity>>,
+    online: bool,
+}
+
+#[cfg(test)]
+fn traffic_accounting_for_client_with_freshness(
+    client_id: &str,
+    rules: &[VpsRuleValueRecord],
+    traffic_usage: &[TrafficCounterStreamUsage],
+    now: DateTime<Utc>,
+    selector_override: Option<&str>,
+    freshness: Option<TrafficFreshnessBoundary<'_>>,
+) -> TrafficAccountingRecord {
+    let inventory = network_interface_inventory_from_usage(client_id, traffic_usage);
+    traffic_accounting_for_client_with_freshness_and_candidates(
+        client_id,
+        rules,
+        traffic_usage,
+        now,
+        selector_override,
+        freshness,
+        Some(&inventory),
+    )
+}
+
+fn traffic_accounting_for_client_with_freshness_and_candidates(
+    client_id: &str,
+    rules: &[VpsRuleValueRecord],
+    traffic_usage: &[TrafficCounterStreamUsage],
+    now: DateTime<Utc>,
+    selector_override: Option<&str>,
+    freshness: Option<TrafficFreshnessBoundary<'_>>,
+    interface_inventory: Option<&NetworkInterfaceInventory>,
+) -> TrafficAccountingRecord {
     let rule_map = rules
         .iter()
         .filter(|rule| rule.client_id == client_id)
         .map(|rule| (rule.key.as_str(), rule))
         .collect::<HashMap<_, _>>();
     let mut incomplete_reasons = Vec::new();
-    let reset_day = rule_map
+    let reset_boundary = rule_map
         .get(VPS_RULE_KEY_TRAFFIC_RESET_DAY)
-        .and_then(|rule| parse_persisted_vps_rule_value(&rule.key, &rule.value_raw).ok())
-        .and_then(|parsed| parsed.json.get("day").and_then(Value::as_i64))
-        .map(|value| value as i32);
+        .and_then(|rule| parsed_traffic_reset(rule));
+    let reset_day = reset_boundary.map(|(day, _)| day);
+    let reset_hour = reset_boundary.and_then(|(day, hour)| (day != -1).then_some(hour));
     if reset_day.is_none() {
         incomplete_reasons.push("traffic.reset_day missing".to_string());
     }
-    let (selectors, selector_error) = match selector_override {
-        Some(selector) => match parse_persisted_traffic_selector_list(selector) {
-            Ok(selectors) => (selectors, None),
+    let (selector_spec, selector_error, selector_configured) = match selector_override {
+        Some(selector) => match parse_traffic_selector_list(selector) {
+            Ok(selectors) => (Some(TrafficSelectorSpec::Exact(selectors)), None, true),
             Err(error) => (
-                Vec::new(),
+                None,
                 Some(format!("traffic.policy_selector invalid: {error}")),
+                true,
             ),
         },
         None => match rule_map.get(VPS_RULE_KEY_TRAFFIC_SELECTORS) {
-            Some(rule) => match traffic_selectors_from_rule(rule) {
-                Ok(selectors) => (selectors, None),
+            Some(rule) => match traffic_selector_spec_from_rule(rule) {
+                Ok(spec) => (Some(spec), None, true),
                 Err(error) => (
-                    Vec::new(),
+                    None,
                     Some(format!("traffic.selectors invalid: {error}")),
+                    true,
                 ),
             },
-            None => (Vec::new(), None),
+            None => (None, None, false),
         },
+    };
+    let selectors = if let Some(spec) = selector_spec {
+        match network_interface_policy_from_rules(Some(&rule_map)) {
+            Ok(policy) => eligible_traffic_selectors(spec, &policy, interface_inventory),
+            Err(error) => {
+                incomplete_reasons.push(format!("network.interfaces invalid: {error}"));
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
     };
     if let Some(error) = selector_error {
         incomplete_reasons.push(error);
     } else if selectors.is_empty() {
-        incomplete_reasons.push("traffic.selectors missing".to_string());
+        incomplete_reasons.push(if selector_configured {
+            "traffic.selectors have no eligible interfaces".to_string()
+        } else {
+            "traffic.selectors missing".to_string()
+        });
     }
     let quota_total = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL);
     let quota_rx = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_RX);
     let quota_tx = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TX);
-    let cycle_bounds = (reset_day != Some(-1)).then(|| cycle_bounds(reset_day.unwrap_or(1), now));
+    let cycle_bounds = (reset_day != Some(-1))
+        .then(|| cycle_bounds(reset_day.unwrap_or(1), reset_hour.unwrap_or(0), now));
     let mut rx_bytes = 0_i64;
     let mut tx_bytes = 0_i64;
     let mut total_bytes = 0_i64;
@@ -6565,7 +5704,16 @@ fn traffic_accounting_for_client_with_selector_override(
         ));
         let mut row_state = "ok".to_string();
         let mut row_reasons = Vec::new();
-        if sample_age.is_some_and(|age| age > TRAFFIC_SAMPLE_STALE_SECS) {
+        if freshness.is_some_and(|boundary| {
+            !boundary.online
+                || boundary.projected_streams.is_none_or(|streams| {
+                    !projected_traffic_stream_contains(
+                        streams,
+                        &selector.source,
+                        &selector.interface,
+                    )
+                })
+        }) {
             if row_state == "ok" {
                 row_state = "stale".to_string();
             }
@@ -6659,6 +5807,7 @@ fn traffic_accounting_for_client_with_selector_override(
         cycle_start: cycle_bounds.map(|(start, _)| start.to_rfc3339()),
         cycle_end: cycle_bounds.map(|(_, end)| end.to_rfc3339()),
         reset_day,
+        reset_hour,
         rx_bytes,
         tx_bytes,
         total_bytes,
@@ -6683,6 +5832,7 @@ fn traffic_accounting_for_client_with_selector_override(
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct CycleUsage {
     cycle_rx: i64,
@@ -6692,6 +5842,7 @@ struct CycleUsage {
     last_sample_unix: Option<i64>,
 }
 
+#[cfg(test)]
 fn derive_cycle_usage(
     samples: &[TrafficCounterSampleRecord],
     cycle_start_unix: i64,
@@ -6736,7 +5887,7 @@ fn derive_cycle_usage(
 fn quota_value(rule_map: &HashMap<&str, &VpsRuleValueRecord>, key: &str) -> Option<i64> {
     rule_map
         .get(key)
-        .and_then(|rule| parse_persisted_vps_rule_value(&rule.key, &rule.value_raw).ok())
+        .and_then(|rule| parse_vps_rule_value(&rule.key, &rule.value_raw).ok())
         .and_then(|parsed| parsed.json.get("bytes").and_then(Value::as_i64))
 }
 
@@ -6748,8 +5899,12 @@ fn percent(value: i64, quota: i64) -> f64 {
     }
 }
 
-fn cycle_bounds(reset_day: i32, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
-    let current_boundary = boundary_for_month(now.year(), now.month(), reset_day);
+fn cycle_bounds(
+    reset_day: i32,
+    reset_hour: i32,
+    now: DateTime<Utc>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let current_boundary = boundary_for_month(now.year(), now.month(), reset_day, reset_hour);
     if now >= current_boundary {
         let (next_year, next_month) = if now.month() == 12 {
             (now.year() + 1, 1)
@@ -6758,7 +5913,7 @@ fn cycle_bounds(reset_day: i32, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<
         };
         (
             current_boundary,
-            boundary_for_month(next_year, next_month, reset_day),
+            boundary_for_month(next_year, next_month, reset_day, reset_hour),
         )
     } else {
         let (prev_year, prev_month) = if now.month() == 1 {
@@ -6767,15 +5922,15 @@ fn cycle_bounds(reset_day: i32, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<
             (now.year(), now.month() - 1)
         };
         (
-            boundary_for_month(prev_year, prev_month, reset_day),
+            boundary_for_month(prev_year, prev_month, reset_day, reset_hour),
             current_boundary,
         )
     }
 }
 
-fn boundary_for_month(year: i32, month: u32, reset_day: i32) -> DateTime<Utc> {
+fn boundary_for_month(year: i32, month: u32, reset_day: i32, reset_hour: i32) -> DateTime<Utc> {
     let day = reset_day.clamp(1, days_in_month(year, month) as i32) as u32;
-    Utc.with_ymd_and_hms(year, month, day, 0, 0, 0)
+    Utc.with_ymd_and_hms(year, month, day, reset_hour.clamp(0, 23) as u32, 0, 0)
         .single()
         .expect("valid clamped UTC cycle boundary")
 }
@@ -6791,16 +5946,6 @@ fn days_in_month(year: i32, month: u32) -> u32 {
         .single()
         .expect("valid next month");
     (first_next - chrono::Duration::days(1)).day()
-}
-
-async fn lock_policy_group_identity_upserts_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind("vpsman:policy-group-identity-upserts")
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
 }
 
 async fn policy_groups_for_identity_in_tx(
@@ -7540,6 +6685,7 @@ fn canonical_policy_meta(
     }
 }
 
+#[cfg(test)]
 fn evaluate_rule_for_client(
     rule: &PolicyRuleRequest,
     traffic: Option<&TrafficAccountingRecord>,
@@ -7551,14 +6697,7 @@ fn evaluate_rule_for_client(
         Ok(parsed) => parsed,
         Err(error) => {
             incomplete_reasons.push(format!("condition expression invalid: {error}"));
-            return policy_evaluation_from_parts(
-                false,
-                incomplete_reasons,
-                None,
-                None,
-                "resource",
-                traffic,
-            );
+            return policy_evaluation_from_parts(false, incomplete_reasons, None, None);
         }
     };
     let result = match evaluate_policy_condition(&parsed, traffic, rollup, &mut incomplete_reasons)
@@ -7573,11 +6712,6 @@ fn evaluate_rule_for_client(
             }
         }
     };
-    let category = if parsed.uses_traffic {
-        "traffic"
-    } else {
-        "resource"
-    };
     let condition_true = result.truth == ExpressionTruth::True;
     if result.truth != ExpressionTruth::Unknown {
         incomplete_reasons.clear();
@@ -7589,46 +6723,22 @@ fn evaluate_rule_for_client(
         incomplete_reasons,
         result.actual_value,
         result.threshold_value,
-        category,
-        traffic,
     )
 }
 
+#[cfg(test)]
 fn policy_evaluation_from_parts(
     condition_true: bool,
     incomplete_reasons: Vec<String>,
     actual_value: Option<f64>,
     threshold_value: Option<f64>,
-    category: &str,
-    traffic: Option<&TrafficAccountingRecord>,
 ) -> PolicyEvaluation {
-    let payload = if let Some(traffic) = traffic {
-        json!({
-            "traffic": {
-                "selectors": traffic.selectors,
-                "cycle_start": traffic.cycle_start,
-                "cycle_end": traffic.cycle_end,
-                "rx_bytes": traffic.rx_bytes,
-                "tx_bytes": traffic.tx_bytes,
-                "total_bytes": traffic.total_bytes,
-                "quota_rx_bytes": traffic.quota_rx_bytes,
-                "quota_tx_bytes": traffic.quota_tx_bytes,
-                "quota_total_bytes": traffic.quota_total_bytes,
-                "cycle_percent": traffic.cycle_percent,
-                "reset_day": traffic.reset_day,
-            }
-        })
-    } else {
-        json!({})
-    };
     PolicyEvaluation {
         condition_true,
         incomplete: !incomplete_reasons.is_empty(),
         incomplete_reasons,
         actual_value,
         threshold_value,
-        category: category.to_string(),
-        payload,
     }
 }
 
@@ -7686,6 +6796,7 @@ struct PolicyConditionExpression {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(test)]
 struct ConditionEvaluation {
     truth: ExpressionTruth,
     actual_value: Option<f64>,
@@ -7865,6 +6976,7 @@ fn policy_correlation_mode_storage(mode: AlertPolicyCorrelationMode) -> &'static
     }
 }
 
+#[cfg(test)]
 fn trigger_sustained_seconds(condition: &Option<AlertPolicyMetaCondition>) -> Option<i64> {
     match condition {
         Some(AlertPolicyMetaCondition::Sustained { seconds }) => Some(*seconds),
@@ -7872,28 +6984,7 @@ fn trigger_sustained_seconds(condition: &Option<AlertPolicyMetaCondition>) -> Op
     }
 }
 
-fn normalized_meta_condition_payload(condition: Option<&AlertPolicyMetaCondition>) -> Value {
-    match condition {
-        None | Some(AlertPolicyMetaCondition::Immediate) => {
-            json!({"kind": "immediate", "window_seconds": 0})
-        }
-        Some(AlertPolicyMetaCondition::Sustained { seconds }) => {
-            json!({"kind": "sustained", "window_seconds": seconds})
-        }
-        Some(AlertPolicyMetaCondition::Count {
-            confirmations,
-            within_seconds,
-        }) => json!({
-            "kind": "count",
-            "confirmations": confirmations,
-            "window_seconds": within_seconds,
-        }),
-        Some(AlertPolicyMetaCondition::ElapsedSinceTrigger { seconds }) => {
-            json!({"kind": "elapsed_since_trigger", "window_seconds": seconds})
-        }
-    }
-}
-
+#[cfg(test)]
 fn evaluate_policy_condition(
     expression: &PolicyConditionExpression,
     traffic: Option<&TrafficAccountingRecord>,
@@ -7916,6 +7007,7 @@ fn evaluate_policy_condition(
     })
 }
 
+#[cfg(test)]
 fn evaluate_condition_node(
     node: &PolicyConditionNode,
     traffic: Option<&TrafficAccountingRecord>,
@@ -7977,6 +7069,7 @@ fn evaluate_condition_node(
     }
 }
 
+#[cfg(test)]
 fn evaluate_numeric_node(
     node: &PolicyNumericNode,
     traffic: Option<&TrafficAccountingRecord>,
@@ -8314,6 +7407,7 @@ fn parse_policy_number(raw: &str) -> Result<f64> {
     Ok(value)
 }
 
+#[cfg(test)]
 fn policy_identifier_value(
     identifier: &str,
     traffic: Option<&TrafficAccountingRecord>,
@@ -8438,25 +7532,12 @@ fn numeric_node_uses_traffic(node: &PolicyNumericNode) -> bool {
     }
 }
 
+#[cfg(test)]
 fn push_incomplete(reasons: &mut Vec<String>, reason: impl AsRef<str>) {
     let reason = reason.as_ref();
     if !reasons.iter().any(|stored| stored == reason) {
         reasons.push(reason.to_string());
     }
-}
-
-fn latest_rollups(rollups: Vec<TelemetryRollupView>) -> HashMap<String, TelemetryRollupView> {
-    let mut latest = HashMap::new();
-    for rollup in rollups {
-        let replace = latest
-            .get(&rollup.client_id)
-            .map(|stored: &TelemetryRollupView| rollup.bucket_start > stored.bucket_start)
-            .unwrap_or(true);
-        if replace {
-            latest.insert(rollup.client_id.clone(), rollup);
-        }
-    }
-    latest
 }
 
 fn preview_hash(value: &Value) -> String {
@@ -8470,35 +7551,11 @@ fn selector_hash(selectors: &[String]) -> String {
     hex::encode(&digest[..16])
 }
 
-fn canonicalize_vps_rule_record(mut record: VpsRuleValueRecord) -> Result<VpsRuleValueRecord> {
-    let stored_value_raw = record
-        .stored_value_raw
-        .clone()
-        .unwrap_or_else(|| record.value_raw.clone());
-    let parsed = parse_persisted_vps_rule_value(&record.key, &stored_value_raw)?;
-    if record.key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
-        anyhow::ensure!(
-            parsed.json == record.value_json,
-            "network_rate_selector_storage_invalid"
-        );
-    } else if record.key == VPS_RULE_KEY_TRAFFIC_SELECTORS {
-        anyhow::ensure!(
-            parsed.json == record.value_json,
-            "traffic_selector_storage_invalid"
-        );
-    }
-    record.value_raw = parsed.raw;
-    record.stored_value_raw = Some(stored_value_raw);
-    record.value_json = parsed.json;
-    record.parsed_display = parsed.display;
-    Ok(record)
-}
-
 fn vps_rule_from_row(row: sqlx::postgres::PgRow) -> Result<VpsRuleValueRecord> {
     let key: String = row.try_get("key")?;
     let raw: String = row.try_get("value_raw")?;
     let stored_json = row.try_get::<SqlJson<Value>, _>("value_json")?.0;
-    let parsed = parse_persisted_vps_rule_value(&key, &raw)?;
+    let parsed = parse_vps_rule_value(&key, &raw)?;
     if key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
         anyhow::ensure!(
             parsed.json == stored_json,
@@ -8667,7 +7724,7 @@ async fn list_unified_policy_alerts_postgres(
             e.evidence AS payload, e.lifecycle_state,
             e.last_confirmed_at::text AS last_confirmed_at,
             e.resolved_at::text AS resolved_at, e.resolution_reason,
-            COALESCE(e.last_confirmed_at,e.triggered_at)::text AS observed_at,
+            e.last_confirmed_at::text AS observed_at,
             e.created_at::text AS created_at
         FROM alert_episodes e
         LEFT JOIN fleet_alert_states triage ON triage.alert_id=e.public_id
@@ -8682,13 +7739,8 @@ async fn list_unified_policy_alerts_postgres(
           AND ($6::text[] IS NULL OR e.client_id=ANY($6))
           AND ($7::double precision IS NULL OR e.triggered_at>=to_timestamp($7))
           AND ($8::double precision IS NULL OR e.triggered_at<=to_timestamp($8))
-          AND ($14::boolean OR (
-              e.resolved_at IS NULL AND e.last_confirmed_at IS NOT NULL
-          ))
-          AND ($9::boolean=FALSE OR (
-              e.lifecycle_state IN ('triggered','persisting')
-              AND e.last_confirmed_at IS NOT NULL
-          ))
+          AND ($14::boolean OR e.resolved_at IS NULL)
+          AND ($9::boolean=FALSE OR e.lifecycle_state IN ('triggered','persisting'))
           AND (
             $10::text IS NULL OR CASE
               WHEN triage.state='muted' AND triage.muted_until_unix IS NOT NULL
@@ -8748,23 +7800,6 @@ async fn list_unified_policy_alerts_postgres(
     rows.into_iter().map(policy_alert_from_row).collect()
 }
 
-fn policy_group_audit(
-    action: &str,
-    policy: &PolicyGroupRecord,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: format!("fleet_alert_policy:{}", policy.id),
-        command_hash: None,
-        metadata: policy_group_metadata(policy, operator),
-        created_at,
-    }
-}
-
 fn policy_group_metadata(policy: &PolicyGroupRecord, operator: &AuthContext) -> Value {
     json!({
         "operator_id": operator.operator.id,
@@ -8776,34 +7811,6 @@ fn policy_group_metadata(policy: &PolicyGroupRecord, operator: &AuthContext) -> 
         "component": "alert-policy-controller",
         "policy": policy,
     })
-}
-
-fn vps_rules_audit(
-    action: &str,
-    preview: &VpsRulesDryRunResponse,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: "vps_rules".to_string(),
-        command_hash: Some(preview.preview_hash.clone()),
-        metadata: json!({
-            "preview_hash": &preview.preview_hash,
-            "matched_vps_count": preview.matched_vps_count,
-            "changed_row_count": preview.changed_row_count,
-            "result": "succeeded",
-            "operator_id": operator.operator.id,
-            "operator_username": &operator.operator.username,
-            "operator_role": &operator.operator.role,
-            "operator_session_id": operator.audit_session_id(),
-            "origin_kind": "operator_request",
-            "component": "vps-rules-controller",
-        }),
-        created_at,
-    }
 }
 
 #[cfg(test)]

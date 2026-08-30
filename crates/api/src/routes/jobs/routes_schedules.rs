@@ -419,14 +419,16 @@ pub(crate) async fn update_schedule_targets(
     }
     verify_schedule_privilege_for_stored_view(
         &state,
-        "schedule.targets.update",
         &schedule,
-        &selector_expression,
-        &target_client_ids,
-        schedule.enabled,
-        schedule.deferred_until.as_deref(),
-        false,
-        request.privilege_assertion.clone(),
+        StoredSchedulePrivilegeRequest {
+            action: "schedule.targets.update",
+            selector_expression: &selector_expression,
+            target_client_ids: &target_client_ids,
+            enabled: schedule.enabled,
+            deferred_until: schedule.deferred_until.as_deref(),
+            deleted: false,
+            assertion: request.privilege_assertion.clone(),
+        },
     )
     .await?;
     Ok(Json(
@@ -918,44 +920,49 @@ async fn verify_schedule_privilege_for_view(
 ) -> Result<(), ApiError> {
     verify_schedule_privilege_for_stored_view(
         state,
-        action,
         schedule,
-        &schedule.selector_expression,
-        &schedule.target_client_ids,
-        enabled,
-        deferred_until,
-        deleted,
-        assertion,
+        StoredSchedulePrivilegeRequest {
+            action,
+            selector_expression: &schedule.selector_expression,
+            target_client_ids: &schedule.target_client_ids,
+            enabled,
+            deferred_until,
+            deleted,
+            assertion,
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn verify_schedule_privilege_for_stored_view(
-    state: &AppState,
-    action: &str,
-    schedule: &ScheduleView,
-    selector_expression: &str,
-    target_client_ids: &[String],
+struct StoredSchedulePrivilegeRequest<'a> {
+    action: &'a str,
+    selector_expression: &'a str,
+    target_client_ids: &'a [String],
     enabled: bool,
-    deferred_until: Option<&str>,
+    deferred_until: Option<&'a str>,
     deleted: bool,
     assertion: Option<PrivilegeAssertion>,
+}
+
+async fn verify_schedule_privilege_for_stored_view(
+    state: &AppState,
+    schedule: &ScheduleView,
+    request: StoredSchedulePrivilegeRequest<'_>,
 ) -> Result<(), ApiError> {
-    let resolved_targets = if target_client_ids.is_empty() {
+    let resolved_targets = if request.target_client_ids.is_empty() {
         Vec::new()
     } else {
-        normalized_target_client_ids(target_client_ids)?
+        normalized_target_client_ids(request.target_client_ids)?
     };
     let schedule_id = schedule.id.to_string();
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
-        action,
+        action: request.action,
         schedule_id: Some(&schedule_id),
         definition_revision: Some(schedule.definition_revision),
         name: &schedule.name,
         command_type: &schedule.command_type,
         operation_payload_hash: &schedule.operation_payload_hash,
-        selector_expression,
+        selector_expression: request.selector_expression,
         resolved_targets: &resolved_targets,
         trigger_kind: match schedule.trigger_kind {
             ScheduleTriggerKind::Cron => "cron",
@@ -964,15 +971,15 @@ async fn verify_schedule_privilege_for_stored_view(
         cron_expr: schedule.cron_expr.as_deref(),
         timezone: schedule.timezone.as_deref(),
         event_expression: schedule.event_expression.as_deref(),
-        enabled,
+        enabled: request.enabled,
         catch_up_policy: schedule.catch_up_policy.as_deref(),
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,
         max_failures: schedule.max_failures,
-        deferred_until,
-        deleted,
+        deferred_until: request.deferred_until,
+        deleted: request.deleted,
     });
-    verify_privilege_intent(state, &privilege_intent, assertion).await
+    verify_privilege_intent(state, &privilege_intent, request.assertion).await
 }
 
 fn require_valid_schedule_operation(schedule: &ScheduleView) -> Result<&JobCommand, ApiError> {

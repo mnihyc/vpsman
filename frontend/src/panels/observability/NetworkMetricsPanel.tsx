@@ -1184,7 +1184,10 @@ function EndpointRow({
   tunnel: TelemetryTunnelRecord;
 }) {
   const formatBytes = useByteCountFormatter();
-  const traffic = `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
+  const traffic =
+    tunnel.rx_bytes === null || tunnel.tx_bytes === null
+      ? "Counters excluded by network.interfaces"
+      : `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
   const reachability = formatReachabilityObservation(observation);
   return (
     <div
@@ -1232,7 +1235,7 @@ function EndpointRow({
       </span>
       <span
         role="cell"
-        title={`Cumulative reported tunnel counters: ${traffic}`}
+        title={traffic}
       >
         <span aria-hidden="true" className="observabilityEndpointMobileLabel">
           Traffic

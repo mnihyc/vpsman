@@ -397,61 +397,62 @@ fn validate_non_overlapping(ranges: &[PortRange]) -> Result<(), PortForwardValid
 fn validate_cross_rule_overlaps(
     rules: &[PortForwardRule],
 ) -> Result<(), PortForwardValidationError> {
-    for (index, left) in rules.iter().enumerate() {
-        for right in &rules[index + 1..] {
-            if left.target_ip.is_ipv4() != right.target_ip.is_ipv4() {
-                continue;
-            }
-            if !left
-                .protocol
+    let mut claims = rules
+        .iter()
+        .flat_map(|rule| {
+            let ipv6 = rule.target_ip.is_ipv6();
+            rule.protocol
                 .transports()
                 .iter()
-                .any(|transport| right.protocol.transports().contains(transport))
-            {
-                continue;
-            }
-            if left.mappings.iter().any(|left_mapping| {
-                right
-                    .mappings
-                    .iter()
-                    .any(|right_mapping| left_mapping.incoming.overlaps(right_mapping.incoming))
-            }) {
-                return Err(PortForwardValidationError::CrossRuleOverlap);
-            }
-        }
+                .flat_map(move |transport| {
+                    rule.mappings
+                        .iter()
+                        .map(move |mapping| (ipv6, *transport, mapping.incoming))
+                })
+        })
+        .collect::<Vec<_>>();
+    claims.sort_unstable_by_key(|(ipv6, transport, range)| {
+        (*ipv6, *transport, range.start, range.end)
+    });
+    if claims.windows(2).any(|pair| {
+        pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1 && pair[0].2.overlaps(pair[1].2)
+    }) {
+        return Err(PortForwardValidationError::CrossRuleOverlap);
     }
     Ok(())
 }
 
 fn estimated_nft_program_bytes(rules: &[PortForwardRule]) -> usize {
     const BASE_BYTES: usize = 2 * 1024;
-    const STATEMENT_BYTES: usize = 384;
-    const MAP_BYTES: usize = 128;
+    const RULE_PROGRAM_BYTES: usize = 768;
+    const DISPATCH_ELEMENT_BYTES: usize = 96;
+    const COMPACT_MAP_ELEMENT_BYTES: usize = 48;
     const MAP_ELEMENT_BYTES: usize = 20;
 
     rules.iter().fold(BASE_BYTES, |total, rule| {
         let transports = rule.protocol.transports().len();
-        let statements = rule
-            .mappings
-            .len()
-            .saturating_mul(transports)
-            .saturating_mul(2)
-            .saturating_mul(STATEMENT_BYTES);
-        let maps = rule
+        let compact_elements = rule
             .mappings
             .iter()
-            .filter(|mapping| !mapping.target.is_single())
+            .filter(|mapping| mapping.target.is_single() && mapping.incoming != mapping.target)
+            .count()
+            .saturating_mul(COMPACT_MAP_ELEMENT_BYTES);
+        let shifted_elements = rule
+            .mappings
+            .iter()
+            .filter(|mapping| !mapping.target.is_single() && mapping.incoming != mapping.target)
             .fold(0_usize, |bytes, mapping| {
                 bytes.saturating_add(
-                    MAP_BYTES.saturating_add(
-                        usize::try_from(mapping.incoming.cardinality())
-                            .unwrap_or(usize::MAX)
-                            .saturating_mul(MAP_ELEMENT_BYTES),
-                    ),
+                    usize::try_from(mapping.incoming.cardinality())
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(MAP_ELEMENT_BYTES),
                 )
-            })
-            .saturating_mul(transports);
-        total.saturating_add(statements).saturating_add(maps)
+            });
+        let per_transport = RULE_PROGRAM_BYTES
+            .saturating_add(rule.mappings.len().saturating_mul(DISPATCH_ELEMENT_BYTES))
+            .saturating_add(compact_elements)
+            .saturating_add(shifted_elements);
+        total.saturating_add(per_transport.saturating_mul(transports))
     })
 }
 

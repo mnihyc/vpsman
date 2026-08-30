@@ -1,24 +1,25 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, BackupPolicyMetadata, BackupPolicyPrunePolicyView,
-        BackupPolicyView, BackupRequestStatus, CreateBackupPolicyRequest, ListQuery, ScheduleView,
+        AuthContext, BackupPolicyMetadata, BackupPolicyPrunePolicyView, BackupPolicyView,
+        CreateBackupPolicyRequest, ListQuery, ScheduleView,
     },
     repository::Repository,
+    repository_artifact_deletions::{
+        finish_owned_artifact_deletion_in_tx, lock_owned_artifact_deletion_in_tx,
+        ArtifactDeletionOwner,
+    },
     repository_schedules::{
-        apply_schedule_update_memory, backup_policy_schedule_by_id_postgres,
-        backup_policy_schedule_by_id_postgres_in_tx, create_schedule_record_postgres_in_tx,
-        ensure_schedule_snapshot, record_memory_schedule_audit,
-        schedule_update_preserves_target_snapshot, update_schedule_record_postgres_in_tx,
+        backup_policy_schedule_by_id_postgres, backup_policy_schedule_by_id_postgres_in_tx,
+        create_schedule_record_postgres_in_tx, update_schedule_record_postgres_in_tx,
         ScheduleCreateInput, ScheduleSnapshotExpectation,
     },
-    unix_now,
 };
 
 const DEFAULT_BACKUP_POLICY_RETENTION_DAYS: i32 = 30;
@@ -56,17 +57,6 @@ impl Repository {
         schedule_id: Uuid,
     ) -> Result<Option<BackupPolicyView>> {
         let schedule = match self {
-            Self::Memory(memory) => memory
-                .schedules
-                .read()
-                .await
-                .iter()
-                .find(|schedule| {
-                    schedule.id == schedule_id
-                        && schedule.deleted_at.is_none()
-                        && matches!(schedule.operation, Some(JobCommand::Backup { .. }))
-                })
-                .cloned(),
             Self::Postgres(pool) => {
                 backup_policy_schedule_by_id_postgres(pool, schedule_id).await?
             }
@@ -93,21 +83,6 @@ impl Repository {
         let rotation_generation = normalize_policy_generation(request.rotation_generation.clone());
         let schedule_request = backup_policy_schedule_input(&request);
         let (schedule, metadata) = match self {
-            Self::Memory(memory) => {
-                let schedule = self
-                    .create_schedule_record(schedule_request, operator)
-                    .await?;
-                let metadata = upsert_backup_policy_metadata_memory(
-                    memory,
-                    schedule.id,
-                    retention_days,
-                    keep_last,
-                    rotation_generation,
-                )
-                .await;
-                record_backup_policy_audit_memory(memory, &schedule, &metadata, operator).await;
-                (schedule, metadata)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let schedule =
@@ -148,45 +123,6 @@ impl Repository {
         let mut schedule_request = backup_policy_schedule_input(&request);
         schedule_request.expected_definition_revision = Some(expectation.definition_revision);
         let (schedule, metadata) = match self {
-            Self::Memory(memory) => {
-                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                if !schedule_update_preserves_target_snapshot(&schedule_request, Some(expectation))
-                {
-                    crate::repository_key_lifecycle::require_visible_memory_clients(
-                        memory,
-                        &schedule_request.target_client_ids,
-                        "schedule_fixed_targets_not_found",
-                    )
-                    .await?;
-                }
-                let mut schedules = memory.schedules.write().await;
-                let Some(schedule) = schedules.iter_mut().find(|schedule| {
-                    schedule.id == schedule_id
-                        && schedule.deleted_at.is_none()
-                        && matches!(schedule.operation, Some(JobCommand::Backup { .. }))
-                }) else {
-                    return Ok(None);
-                };
-                ensure_schedule_snapshot(schedule, Some(expectation))?;
-                let mut policies = memory.backup_policies.write().await;
-                let Some(metadata) = policies
-                    .iter_mut()
-                    .find(|metadata| metadata.schedule_id == schedule_id)
-                else {
-                    return Ok(None);
-                };
-                let schedule = apply_schedule_update_memory(schedule, &schedule_request)?;
-                metadata.retention_days = retention_days;
-                metadata.keep_last = keep_last;
-                metadata.rotation_generation = rotation_generation;
-                metadata.updated_at = unix_now().to_string();
-                let metadata = metadata.clone();
-                drop(policies);
-                drop(schedules);
-                record_memory_schedule_audit(memory, &schedule, operator, "schedule.updated").await;
-                record_backup_policy_audit_memory(memory, &schedule, &metadata, operator).await;
-                (schedule, metadata)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 if backup_policy_schedule_by_id_postgres_in_tx(&mut tx, schedule_id)
@@ -228,54 +164,6 @@ impl Repository {
         cutoff_unix: u64,
     ) -> Result<Vec<BackupPolicyPruneCandidate>> {
         match self {
-            Self::Memory(memory) => {
-                let artifacts = memory.backup_artifacts.read().await.clone();
-                let requests = memory.backup_requests.read().await.clone();
-                let mut candidates = requests
-                    .iter()
-                    .filter(|request| request.source_schedule_id == Some(policy.schedule_id))
-                    .filter_map(|request| {
-                        let artifact_id = request.artifact_id?;
-                        let artifact = artifacts
-                            .iter()
-                            .find(|artifact| artifact.id == artifact_id)?;
-                        Some(BackupPolicyPruneCandidate {
-                            request_id: request.id,
-                            artifact_id,
-                            client_id: request.client_id.clone(),
-                            object_key: artifact.object_key.clone(),
-                            created_at: artifact.created_at.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                candidates.sort_by(|left, right| {
-                    left.client_id
-                        .cmp(&right.client_id)
-                        .then_with(|| right.created_at.cmp(&left.created_at))
-                        .then_with(|| right.artifact_id.cmp(&left.artifact_id))
-                });
-                let mut selected = Vec::new();
-                let mut current_client = String::new();
-                let mut rank_for_client = 0_i32;
-                for candidate in candidates {
-                    if candidate.client_id != current_client {
-                        current_client = candidate.client_id.clone();
-                        rank_for_client = 0;
-                    }
-                    rank_for_client += 1;
-                    if rank_for_client > policy.keep_last
-                        && timestamp_before_unix_string(&candidate.created_at, cutoff_unix)
-                    {
-                        selected.push(candidate);
-                    }
-                }
-                selected.sort_by(|left, right| {
-                    left.created_at
-                        .cmp(&right.created_at)
-                        .then_with(|| left.artifact_id.cmp(&right.artifact_id))
-                });
-                Ok(selected)
-            }
             Self::Postgres(pool) => {
                 list_postgres_backup_policy_prune_candidates(
                     pool,
@@ -288,38 +176,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn prune_backup_policy_candidate_metadata(
-        &self,
-        candidate: &BackupPolicyPruneCandidate,
-    ) -> Result<i64> {
-        match self {
-            Self::Memory(memory) => {
-                {
-                    let mut stored_requests = memory.backup_requests.write().await;
-                    for request in stored_requests.iter_mut().filter(|request| {
-                        request.id == candidate.request_id
-                            && request.artifact_id == Some(candidate.artifact_id)
-                    }) {
-                        request.artifact_id = None;
-                        request.status = BackupRequestStatus::RequestedMetadataOnly
-                            .as_str()
-                            .to_string();
-                    }
-                }
-                {
-                    let mut artifacts = memory.backup_artifacts.write().await;
-                    let before = artifacts.len();
-                    artifacts.retain(|artifact| artifact.id != candidate.artifact_id);
-                    let pruned_rows = (before.saturating_sub(artifacts.len())) as i64;
-                    Ok(pruned_rows)
-                }
-            }
-            Self::Postgres(pool) => {
-                prune_postgres_backup_policy_candidate_metadata(pool, candidate).await
-            }
-        }
-    }
-
     pub(crate) async fn prune_backup_policy_candidates_metadata(
         &self,
         candidates: &[BackupPolicyPruneCandidate],
@@ -328,77 +184,30 @@ impl Repository {
             return Ok(0);
         }
         match self {
-            Self::Memory(memory) => {
-                let selected_artifact_ids = candidates
-                    .iter()
-                    .map(|candidate| candidate.artifact_id)
-                    .collect::<HashSet<_>>();
-                let selected_request_artifacts = candidates
-                    .iter()
-                    .map(|candidate| (candidate.request_id, candidate.artifact_id))
-                    .collect::<HashSet<_>>();
-                {
-                    let mut stored_requests = memory.backup_requests.write().await;
-                    for request in stored_requests.iter_mut().filter(|request| {
-                        request.artifact_id.is_some_and(|artifact_id| {
-                            selected_request_artifacts.contains(&(request.id, artifact_id))
-                        })
-                    }) {
-                        request.artifact_id = None;
-                        request.status = BackupRequestStatus::RequestedMetadataOnly
-                            .as_str()
-                            .to_string();
-                    }
-                }
-                let mut artifacts = memory.backup_artifacts.write().await;
-                let before = artifacts.len();
-                artifacts.retain(|artifact| !selected_artifact_ids.contains(&artifact.id));
-                Ok((before.saturating_sub(artifacts.len())) as i64)
-            }
             Self::Postgres(pool) => {
                 prune_postgres_backup_policy_candidates_metadata(pool, candidates).await
             }
         }
     }
 
-    pub(crate) async fn begin_backup_policy_candidate_object_delete(
-        &self,
-        candidate: &BackupPolicyPruneCandidate,
-    ) -> Result<bool> {
-        match self {
-            Self::Memory(_) => Ok(true),
-            Self::Postgres(pool) => {
-                Repository::mark_server_artifact_deleting_in_pool(pool, &candidate.object_key).await
-            }
-        }
-    }
-
     pub(crate) async fn finalize_backup_policy_candidate_object_delete(
         &self,
+        policy: &BackupPolicyView,
         candidate: &BackupPolicyPruneCandidate,
+        owner: &ArtifactDeletionOwner,
     ) -> Result<i64> {
+        ensure!(
+            owner.source_kind == "backup_policy"
+                && owner.source_id == policy.schedule_id
+                && owner.source_revision == policy.definition_revision
+                && owner.source_identity == candidate.deletion_identity()
+                && owner.object_key == candidate.object_key,
+            "backup policy artifact deletion review changed"
+        );
         match self {
-            Self::Memory(_) => self.prune_backup_policy_candidate_metadata(candidate).await,
             Self::Postgres(pool) => {
-                finalize_postgres_backup_policy_candidate_object_delete(pool, candidate).await
-            }
-        }
-    }
-
-    pub(crate) async fn mark_backup_policy_candidate_delete_failed(
-        &self,
-        candidate: &BackupPolicyPruneCandidate,
-        error: &str,
-    ) -> Result<()> {
-        match self {
-            Self::Memory(_) => Ok(()),
-            Self::Postgres(pool) => {
-                Repository::mark_server_artifact_delete_failed_in_pool(
-                    pool,
-                    &candidate.object_key,
-                    error,
-                )
-                .await
+                finalize_postgres_backup_policy_candidate_object_delete(pool, candidate, owner)
+                    .await
             }
         }
     }
@@ -472,18 +281,6 @@ impl Repository {
             "component": "backup-retention-controller",
         });
         match self {
-            Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "backup_policy.retention_pruned".to_string(),
-                    target: "backup_policy_retention".to_string(),
-                    command_hash: None,
-                    metadata,
-                    created_at: unix_now().to_string(),
-                });
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
@@ -513,15 +310,6 @@ impl Repository {
             return Ok(HashMap::new());
         }
         match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_policies
-                .read()
-                .await
-                .iter()
-                .filter(|metadata| schedule_ids.contains(&metadata.schedule_id))
-                .cloned()
-                .map(|metadata| (metadata.schedule_id, metadata))
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -553,49 +341,6 @@ impl Repository {
             }
         }
     }
-}
-
-async fn upsert_backup_policy_metadata_memory(
-    memory: &crate::repository::MemoryState,
-    schedule_id: Uuid,
-    retention_days: i32,
-    keep_last: i32,
-    rotation_generation: Option<String>,
-) -> BackupPolicyMetadata {
-    let metadata = BackupPolicyMetadata {
-        schedule_id,
-        retention_days,
-        keep_last,
-        rotation_generation,
-        updated_at: unix_now().to_string(),
-    };
-    let mut policies = memory.backup_policies.write().await;
-    if let Some(existing) = policies
-        .iter_mut()
-        .find(|existing| existing.schedule_id == schedule_id)
-    {
-        *existing = metadata.clone();
-    } else {
-        policies.push(metadata.clone());
-    }
-    metadata
-}
-
-async fn record_backup_policy_audit_memory(
-    memory: &crate::repository::MemoryState,
-    schedule: &ScheduleView,
-    metadata: &BackupPolicyMetadata,
-    operator: &AuthContext,
-) {
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "backup_policy.upserted".to_string(),
-        target: format!("backup_policy:{}", schedule.id),
-        command_hash: None,
-        metadata: backup_policy_audit_metadata(schedule, metadata, operator),
-        created_at: unix_now().to_string(),
-    });
 }
 
 async fn upsert_backup_policy_metadata_postgres_in_tx(
@@ -727,6 +472,14 @@ impl BackupPolicyPruneCandidate {
             "created_at": &self.created_at,
         })
     }
+
+    pub(crate) fn deletion_identity(&self) -> serde_json::Value {
+        serde_json::json!({
+            "request_id": self.request_id,
+            "backup_artifact_id": self.artifact_id,
+            "object_key": &self.object_key,
+        })
+    }
 }
 
 async fn list_postgres_backup_policy_prune_candidates(
@@ -777,58 +530,16 @@ async fn list_postgres_backup_policy_prune_candidates(
         .collect()
 }
 
-async fn prune_postgres_backup_policy_candidate_metadata(
-    pool: &sqlx::PgPool,
-    candidate: &BackupPolicyPruneCandidate,
-) -> Result<i64> {
-    let pruned_rows = sqlx::query_scalar::<_, i64>(
-        r#"
-        WITH doomed AS (
-            SELECT
-                $1::uuid AS request_id,
-                artifact.id AS artifact_id,
-                artifact.object_key
-            FROM backup_artifacts artifact
-            WHERE artifact.id = $2
-        ),
-        cleared_requests AS (
-            UPDATE backup_requests request
-            SET artifact_id = NULL,
-                status = 'requested_metadata_only'
-            FROM doomed
-            WHERE request.id = doomed.request_id
-              AND request.artifact_id = doomed.artifact_id
-            RETURNING request.id
-        ),
-        deleted_artifacts AS (
-            DELETE FROM backup_artifacts artifact
-            USING doomed
-            WHERE artifact.id = doomed.artifact_id
-            RETURNING artifact.object_key
-        ),
-        marked_artifacts AS (
-            UPDATE server_artifacts artifact
-            SET status = 'deleting'
-            FROM deleted_artifacts deleted
-            WHERE artifact.object_key = deleted.object_key
-              AND artifact.status = 'active'
-            RETURNING artifact.id
-        )
-        SELECT count(*)::bigint FROM deleted_artifacts
-        "#,
-    )
-    .bind(candidate.request_id)
-    .bind(candidate.artifact_id)
-    .fetch_one(pool)
-    .await?;
-    Ok(pruned_rows)
-}
-
 async fn finalize_postgres_backup_policy_candidate_object_delete(
     pool: &sqlx::PgPool,
     candidate: &BackupPolicyPruneCandidate,
+    owner: &ArtifactDeletionOwner,
 ) -> Result<i64> {
     let mut tx = pool.begin().await?;
+    ensure!(
+        lock_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "artifact deletion ownership lost before finalization"
+    );
     let pruned_rows = sqlx::query_scalar::<_, i64>(
         r#"
         WITH doomed AS (
@@ -863,7 +574,10 @@ async fn finalize_postgres_backup_policy_candidate_object_delete(
     .bind(&candidate.object_key)
     .fetch_one(&mut *tx)
     .await?;
-    Repository::mark_server_artifact_deleted_in_tx(&mut tx, &candidate.object_key).await?;
+    ensure!(
+        finish_owned_artifact_deletion_in_tx(&mut tx, owner).await?,
+        "artifact deletion ownership lost during finalization"
+    );
     tx.commit().await?;
     Ok(pruned_rows)
 }
@@ -908,14 +622,6 @@ async fn prune_postgres_backup_policy_candidates_metadata(
             USING doomed
             WHERE artifact.id = doomed.artifact_id
             RETURNING artifact.object_key
-        ),
-        marked_artifacts AS (
-            UPDATE server_artifacts artifact
-            SET status = 'deleting'
-            FROM deleted_artifacts deleted
-            WHERE artifact.object_key = deleted.object_key
-              AND artifact.status = 'active'
-            RETURNING artifact.id
         )
         SELECT count(*)::bigint FROM deleted_artifacts
         "#,
@@ -1000,11 +706,4 @@ fn backup_policy_schedule_input(request: &CreateBackupPolicyRequest) -> Schedule
         max_failures: request.max_failures,
         expected_definition_revision: None,
     }
-}
-
-fn timestamp_before_unix_string(value: &str, cutoff_unix: u64) -> bool {
-    value
-        .parse::<u64>()
-        .map(|observed| observed < cutoff_unix)
-        .unwrap_or(false)
 }

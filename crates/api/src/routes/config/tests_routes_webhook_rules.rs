@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn webhook_manual_dispatch_binds_commit_to_the_reviewed_event_identity() {
+    let request = |dry_run, confirmed, event_id: Option<&str>, preview_hash: Option<&str>| {
+        WebhookRuleDispatchRequest {
+            rule_id: None,
+            event_kind: "interval.30sec".to_string(),
+            event_id: event_id.map(str::to_string),
+            limit: Some(50),
+            dry_run: Some(dry_run),
+            preview_hash: preview_hash.map(str::to_string),
+            confirmed,
+        }
+    };
+
+    validate_webhook_rule_dispatch_request(&request(true, false, None, None))
+        .expect("a dry run owns generation of its review event identity");
+
+    for (event_id, preview_hash, expected_code) in [
+        (
+            Some("reviewed-event"),
+            None,
+            "webhook_rule_dispatch_preview_hash_required",
+        ),
+        (
+            None,
+            Some("review-hash"),
+            "webhook_rule_dispatch_event_id_required",
+        ),
+    ] {
+        let error =
+            validate_webhook_rule_dispatch_request(&request(false, true, event_id, preview_hash))
+                .expect_err("commit must retain both identities from its dry-run review");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, expected_code);
+    }
+
+    validate_webhook_rule_dispatch_request(&request(
+        false,
+        true,
+        Some("reviewed-event"),
+        Some("review-hash"),
+    ))
+    .expect("the exact reviewed event identity and hash may proceed");
+}
+
+#[test]
 fn webhook_rule_upsert_maps_name_conflicts_only() {
     let conflict = webhook_rule_upsert_error(anyhow::anyhow!("webhook_rule_name_conflict"));
     assert_eq!(conflict.status, StatusCode::CONFLICT);

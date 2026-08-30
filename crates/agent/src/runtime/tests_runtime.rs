@@ -1,4 +1,5 @@
 use super::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
 fn ping_targets_bound_telemetry_publish_cadence_to_one_minute() {
@@ -89,6 +90,50 @@ async fn telemetry_ticker_has_no_immediate_tick_and_skips_missed_ticks() {
         time::timeout(Duration::ZERO, ticker.tick()).await.is_err(),
         "Skip must not replay every missed telemetry tick"
     );
+}
+
+#[tokio::test]
+async fn telemetry_consumer_config_handoff_coalesces_to_latest_state() {
+    let initial = AgentConfig {
+        client_id: "initial".to_string(),
+        ..AgentConfig::default()
+    };
+    let (port_forwarding, _port_forwarding_consumer) = PortForwardingConsumer::channel();
+    let (config_tx, _sample_rx, mut consumer) = TelemetryCollectionConsumer::channel(
+        initial,
+        60,
+        uuid::Uuid::from_u128(1),
+        port_forwarding,
+    );
+    config_tx.send_replace(TelemetryCollectionConfig {
+        config: AgentConfig {
+            client_id: "superseded".to_string(),
+            ..AgentConfig::default()
+        },
+        interval_secs: 30,
+        revision: 1,
+    });
+    config_tx.send_replace(TelemetryCollectionConfig {
+        config: AgentConfig {
+            client_id: "latest".to_string(),
+            ..AgentConfig::default()
+        },
+        interval_secs: 15,
+        revision: 2,
+    });
+
+    consumer.config_rx.changed().await.unwrap();
+    let observed = consumer.config_rx.borrow_and_update().clone();
+    assert_eq!(observed.config.client_id, "latest");
+    assert_eq!(observed.interval_secs, 15);
+    assert_eq!(observed.revision, 2);
+}
+
+#[test]
+fn telemetry_publish_fence_rejects_a_superseded_config_revision() {
+    assert!(telemetry_sample_revision_is_current(7, 7));
+    assert!(!telemetry_sample_revision_is_current(8, 7));
+    assert!(!telemetry_sample_revision_is_current(7, 8));
 }
 
 #[test]
@@ -325,7 +370,7 @@ fn test_active_command(job_id: uuid::Uuid) -> ActiveCommand {
         pending_outputs: VecDeque::new(),
         next_output_seq: 0,
         finished: false,
-        _task: tokio::spawn(async move {
+        _consumer_supervisor: tokio::spawn(async move {
             let _ = job_id;
         }),
     }
@@ -421,18 +466,11 @@ fn runtime_config_sync_requires_v3_while_update_remains_a_v1_escape_hatch() {
 }
 
 #[test]
-fn legacy_identity_cache_forces_authoritative_reconnect_without_discarding_its_version() {
-    assert!(startup_requires_authoritative_runtime_config_sync(
-        Some(41),
-        true
-    ));
-    assert!(!startup_requires_authoritative_runtime_config_sync(
-        Some(41),
-        false
-    ));
-    assert!(startup_requires_authoritative_runtime_config_sync(
-        None, false
-    ));
+fn runtime_config_sync_is_required_only_without_an_accepted_cache() {
+    assert!(!startup_requires_authoritative_runtime_config_sync(Some(
+        41
+    )));
+    assert!(startup_requires_authoritative_runtime_config_sync(None));
 }
 
 #[test]
@@ -489,6 +527,22 @@ fn command_field_drift_becomes_a_terminal_rejection() {
     let output = unsupported_command_shape_output(&request).unwrap();
     assert_eq!(output.exit_code, Some(78));
     assert!(output.done);
+}
+
+#[test]
+fn command_frame_requires_an_explicit_protocol_generation() {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "job_id": uuid::Uuid::new_v4(),
+        "command": {
+            "type": "shell",
+            "argv": ["/bin/true"],
+            "pty": false
+        },
+        "max_timeout_secs": 30
+    }))
+    .unwrap();
+
+    assert!(decode_job_request_payload(&payload).is_err());
 }
 
 #[test]
@@ -1558,4 +1612,163 @@ fn unmanaged_update_schedule_uses_next_interval_slot() {
         next_unmanaged_update_due(&config, UNIX_EPOCH + Duration::from_secs(100), base_instant);
 
     assert_eq!(due.duration_since(base_instant), Duration::from_secs(200));
+}
+
+#[tokio::test]
+async fn unmanaged_update_handoff_coalesces_to_latest_request_for_the_single_update_owner() {
+    let (handle, mut consumer) = AgentUpdateConsumer::channel();
+    handle.request_unmanaged(AgentConfig {
+        client_id: "superseded".to_string(),
+        ..AgentConfig::default()
+    });
+    handle.request_unmanaged(AgentConfig {
+        client_id: "latest".to_string(),
+        ..AgentConfig::default()
+    });
+
+    consumer.unmanaged_rx.changed().await.unwrap();
+    let observed = consumer
+        .unmanaged_rx
+        .borrow_and_update()
+        .clone()
+        .expect("latest unmanaged update request");
+    assert_eq!(observed.client_id, "latest");
+}
+
+#[tokio::test]
+async fn scheduled_and_explicit_updates_are_serialized_by_one_execution_owner() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let version_url = format!("http://{}/manifest.json", listener.local_addr().unwrap());
+    let mut config = AgentConfig::default();
+    config.update.unmanaged_enabled = true;
+    config.update.unmanaged_version_url = version_url;
+    config.update.unmanaged_activate = false;
+
+    let (handle, consumer) = AgentUpdateConsumer::channel();
+    handle.request_unmanaged(config);
+    let consumer_owner = tokio::spawn(consumer.run());
+    let (mut scheduled_socket, _) = time::timeout(Duration::from_secs(1), listener.accept())
+        .await
+        .expect("scheduled update check must reach its manifest producer")
+        .unwrap();
+    let mut request = [0_u8; 4096];
+    time::timeout(Duration::from_secs(1), scheduled_socket.read(&mut request))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cancel_token = CommandCancelToken::default();
+    cancel_token.cancel("test explicit update cancellation".to_string());
+    let explicit_handle = handle.clone();
+    let mut explicit = tokio::spawn(async move {
+        explicit_handle
+            .execute(AgentUpdateOperation::Stage {
+                job_id: uuid::Uuid::new_v4(),
+                artifact_url: "file:///does/not/matter".to_string(),
+                sha256_hex: "ab".repeat(32),
+                max_timeout_secs: 30,
+                cancel_token,
+            })
+            .await
+    });
+    assert!(
+        time::timeout(Duration::from_millis(50), &mut explicit)
+            .await
+            .is_err(),
+        "the explicit update must not overtake an in-flight scheduled update"
+    );
+
+    scheduled_socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        .await
+        .unwrap();
+    scheduled_socket.shutdown().await.unwrap();
+    let explicit_result = time::timeout(Duration::from_secs(1), &mut explicit)
+        .await
+        .expect("the explicit update must run after the scheduled owner releases")
+        .unwrap();
+    assert!(explicit_result.is_err());
+
+    drop(handle);
+    time::timeout(Duration::from_secs(1), consumer_owner)
+        .await
+        .expect("the update owner must be joinable after all producers close")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn update_owner_shutdown_joins_the_in_flight_operation() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let version_url = format!("http://{}/manifest.json", listener.local_addr().unwrap());
+    let (handle, consumer) = AgentUpdateConsumer::channel();
+    let mut consumer_owner = tokio::spawn(consumer.run());
+    let explicit_handle = handle.clone();
+    let explicit = tokio::spawn(async move {
+        explicit_handle
+            .execute(AgentUpdateOperation::Check {
+                job_id: uuid::Uuid::new_v4(),
+                version_url,
+                activate: false,
+                restart_agent: false,
+                max_timeout_secs: 30,
+                cancel_token: CommandCancelToken::default(),
+                verification_tx: None,
+            })
+            .await
+    });
+    let (mut socket, _) = time::timeout(Duration::from_secs(1), listener.accept())
+        .await
+        .expect("the update owner must start the explicit operation")
+        .unwrap();
+    let mut request = [0_u8; 4096];
+    time::timeout(Duration::from_secs(1), socket.read(&mut request))
+        .await
+        .unwrap()
+        .unwrap();
+
+    handle.shutdown();
+    assert!(
+        time::timeout(Duration::from_millis(50), &mut consumer_owner)
+            .await
+            .is_err(),
+        "shutdown must not detach or abort the in-flight update"
+    );
+    socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        .await
+        .unwrap();
+    socket.shutdown().await.unwrap();
+    assert!(explicit.await.unwrap().is_err());
+    time::timeout(Duration::from_secs(1), &mut consumer_owner)
+        .await
+        .expect("the update owner must stop after its in-flight operation completes")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn panicked_command_consumer_transfers_a_failed_finished_event() {
+    let job_id = uuid::Uuid::new_v4();
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    supervise_command_task(
+        tokio::spawn(async { panic!("injected command consumer panic") }),
+        event_tx,
+        job_id,
+        "shell",
+        30,
+    )
+    .await;
+
+    let Some(CommandExecutionEvent::Finished(result)) = event_rx.recv().await else {
+        panic!("consumer panic must produce one authoritative terminal event");
+    };
+    assert_eq!(result.job_id, job_id);
+    assert_eq!(result.operation_type, "shell");
+    assert_eq!(result.max_timeout_secs, 30);
+    assert!(result
+        .result
+        .unwrap_err()
+        .to_string()
+        .contains("command consumer failed"));
 }

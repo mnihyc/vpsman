@@ -5,6 +5,7 @@ export const VPS_RULE_KEYS = [
   "billing.price",
   "billing.cycle",
   "network.port_speed",
+  "network.interfaces",
   "network.rate.interfaces",
   "traffic.reset_day",
   "traffic.quota.total",
@@ -27,7 +28,6 @@ export type VpsRuleFieldDefinition = {
 
 export const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX =
   "[traffic.selectors]";
-export const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER = `Default when unset: ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX}`;
 
 export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
   {
@@ -61,19 +61,26 @@ export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
     placeholder: "1.5 Gbps",
   },
   {
-    help: `Existing traffic-selector syntax for aggregate live rates and charts. By default, an absent or unset rule follows traffic.selectors. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store that reference explicitly, clear a previously edited value or enter [] to select every reported interface, or override with interface selectors such as eth0,eth1. Direction suffixes such as +rx, +tx, or +tx/rx are accepted but ignored here: live speed always keeps separate RX and TX values for every selected interface. Direction suffixes remain meaningful to traffic accounting only.`,
+    help: "Interface eligibility for stored rates, traffic accounting, selectors, and rollups. Blank uses the physical-interface default e*,w*. Use * for every reported host and tunnel interface, or comma-separated exact names and trailing-prefix patterns such as eth0,ens*,w*.",
+    inputMode: "text",
+    key: "network.interfaces",
+    label: "Eligible network interfaces",
+    placeholder: "Default when unset: e*,w*",
+  },
+  {
+    help: `Interfaces included in aggregate live rates and charts, after network.interfaces eligibility. Blank selects none. Use * for every eligible interface, ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to follow traffic.selectors, or exact host selectors such as eth0,eth1. Direction suffixes are accepted but live speed still keeps RX and TX separate.`,
     inputMode: "text",
     key: "network.rate.interfaces",
     label: "Live rate interfaces",
-    placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
+    placeholder: "Blank = none; * = all eligible",
   },
   {
-    help: "Day of month in UTC when traffic accounting resets. Use -1 to accumulate totals continuously from the earliest retained counter evidence.",
-    inputMode: "numeric",
+    help: "Day and UTC hour when traffic accounting resets each month, for example 29 05:00. A day without a time uses 00:00 UTC; minutes are rounded down to the hour after editing. Use -1 to accumulate totals continuously from the earliest retained counter evidence.",
+    inputMode: "text",
     key: "traffic.reset_day",
     label: "Reset day",
     orderedKind: "day",
-    placeholder: "-1 or 14",
+    placeholder: "-1 or 29 05:00",
   },
   {
     help: "Total traffic quota for the current reset cycle or continuously accumulated total. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
@@ -100,11 +107,11 @@ export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
     placeholder: "500GB",
   },
   {
-    help: "Traffic selectors as comma-separated interface+direction tokens. Bare interfaces total RX + TX; +rx or +tx selects one direction; +tx/rx uses the larger direction. +rx+tx and +tx+rx normalize to the bare-interface total.",
+    help: "Traffic selectors after network.interfaces eligibility. Use * for every eligible interface, or comma-separated interface+direction tokens. Bare interfaces total RX + TX; +rx or +tx selects one direction; +tx/rx uses the larger direction.",
     inputMode: "text",
     key: "traffic.selectors",
     label: "Interfaces / selectors",
-    placeholder: "ens3, eth0+tx/rx",
+    placeholder: "* or ens3, eth0+tx/rx",
   },
 ];
 
@@ -185,6 +192,25 @@ export function providerProductLabel(
   return fallback;
 }
 
+export function formatMonthlyTrafficResetUtc(
+  resetDay: number | null | undefined,
+  resetHour: number | null | undefined,
+): string | null {
+  if (
+    resetDay === null ||
+    resetDay === undefined ||
+    resetDay === -1 ||
+    !Number.isInteger(resetDay) ||
+    resetDay < 1 ||
+    resetDay > 31
+  ) {
+    return null;
+  }
+  const hour = resetHour ?? 0;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  return `${resetDay} ${String(hour).padStart(2, "0")}:00 UTC`;
+}
+
 /**
  * Canonicalizes the operator-facing text shape shared by rule editing and
  * selector equality. Validation remains authoritative on the control plane.
@@ -217,7 +243,7 @@ export function tryNormalizeVpsRuleValue(
       ? canonical
       : null;
   }
-  if (!trimmed) return key === "network.rate.interfaces" ? "[]" : null;
+  if (!trimmed) return null;
   if (trimmed === "-1") {
     return key === "billing.price" ||
       key === "traffic.reset_day" ||
@@ -264,15 +290,33 @@ export function tryNormalizeVpsRuleValue(
     return parseTrafficQuota(trimmed)?.canonical ?? null;
   }
   if (key === "traffic.reset_day") {
-    if (!/^[+-]?\d+$/.test(trimmed)) return null;
-    const day = Number(trimmed);
-    return day === -1 || (day >= 1 && day <= 31) ? String(day) : null;
+    const match = trimmed.match(/^([+-]?\d+)(?:\s+(\d{2}):(\d{2}))?$/);
+    if (!match) return null;
+    const day = Number(match[1]);
+    if (day === -1) return match[2] === undefined ? "-1" : null;
+    const hour = match[2] === undefined ? 0 : Number(match[2]);
+    const minute = match[3] === undefined ? 0 : Number(match[3]);
+    if (
+      day < 1 ||
+      day > 31 ||
+      hour < 0 ||
+      hour > 23 ||
+      minute < 0 ||
+      minute > 59
+    ) {
+      return null;
+    }
+    return `${day} ${String(hour).padStart(2, "0")}:00`;
+  }
+  if (key === "network.interfaces") {
+    return normalizeNetworkInterfacePatterns(trimmed);
   }
   if (key === "traffic.selectors" || key === "network.rate.interfaces") {
+    if (trimmed === "*") return "*";
+    if (key === "network.rate.interfaces" && trimmed === "[]") return null;
     if (
       key === "network.rate.interfaces" &&
-      (trimmed === "[]" ||
-        trimmed === NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX)
+      trimmed === NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX
     ) {
       return trimmed;
     }
@@ -316,7 +360,9 @@ export function vpsRuleOrderedIntegerValue(
   }
   if (key === "traffic.reset_day") {
     const canonical = tryNormalizeVpsRuleValue(key, input);
-    return canonical && canonical !== "-1" ? BigInt(canonical) : null;
+    return canonical && canonical !== "-1"
+      ? BigInt(canonical.slice(0, canonical.indexOf(" ")))
+      : null;
   }
   return null;
 }
@@ -425,6 +471,27 @@ function normalizeTrafficSelectorList(
     .join(",");
 }
 
+function normalizeNetworkInterfacePatterns(input: string): string | null {
+  if (input === "*") return "*";
+  const patterns = input.split(",").map((pattern) => pattern.trim());
+  if (
+    patterns.length === 0 ||
+    patterns.length > MAX_TRAFFIC_SELECTOR_ITEMS ||
+    patterns.some(
+      (pattern) =>
+        !pattern ||
+        utf8ByteLength(pattern) > MAX_TRAFFIC_INTERFACE_BYTES ||
+        /[,+:\s\p{Cc}]/u.test(pattern) ||
+        (pattern.includes("*") &&
+          (!pattern.endsWith("*") || pattern.indexOf("*") !== pattern.length - 1)),
+    ) ||
+    new Set(patterns).size !== patterns.length
+  ) {
+    return null;
+  }
+  return patterns.join(",");
+}
+
 function parseTrafficSelectorText(input: string): ParsedTrafficSelector | null {
   const compact = input.trim();
   const sourceSeparator = compact.indexOf(":");
@@ -451,7 +518,7 @@ function parseTrafficSelectorText(input: string): ParsedTrafficSelector | null {
   if (
     !interfaceName ||
     utf8ByteLength(interfaceName) > MAX_TRAFFIC_INTERFACE_BYTES ||
-    /[,+:\s\p{Cc}]/u.test(interfaceName) ||
+    /[,*+:\s\p{Cc}]/u.test(interfaceName) ||
     !new Set(["host", "tunnel"]).has(source) ||
     !new Set(["rx", "tx", "total", "tx/rx"]).has(direction)
   ) {

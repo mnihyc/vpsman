@@ -44,6 +44,38 @@ fn minute_rows(traffic: &ExpandedMinuteTraffic) -> Vec<(u64, u64, u64)> {
 }
 
 #[test]
+fn vnstat_policy_gate_is_inside_the_owner_transaction_before_every_ledger_mutation() {
+    let source = include_str!("repository_network_traffic_import.rs");
+    let import = source
+        .split_once("pub(crate) async fn import_vnstat_traffic_history")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn ensure_postgres_vnstat_interfaces_admitted")
+        .unwrap()
+        .0;
+    let transaction = import.find("let mut tx = pool.begin().await?").unwrap();
+    let client_lock = import
+        .find("lock_postgres_traffic_import_client(&mut tx, client_id).await?")
+        .unwrap();
+    let stream_lock = import
+        .find("lock_postgres_traffic_counter_streams(&mut tx, client_id).await?")
+        .unwrap();
+    let policy_gate = import
+        .find("ensure_postgres_vnstat_interfaces_admitted(")
+        .unwrap();
+    let first_mutation = import.find("DELETE FROM traffic_counter_rollups").unwrap();
+    assert!(
+        transaction < client_lock
+            && client_lock < stream_lock
+            && stream_lock < policy_gate
+            && policy_gate < first_mutation
+    );
+    assert!(!import[..policy_gate].contains("DELETE FROM traffic_counter"));
+    assert!(!import[..policy_gate].contains("INSERT INTO traffic_counter"));
+    assert!(!import[..policy_gate].contains("UPDATE traffic_counter"));
+}
+
+#[test]
 fn finer_rows_are_preserved_and_only_coarse_residual_is_distributed() {
     let start = 1_722_470_400;
     let end = start + 3_600;
@@ -574,9 +606,9 @@ fn prepared_import_for_test(
 }
 
 #[test]
-fn memory_import_rollups_replace_only_import_owned_rows() {
+fn import_rollup_fixture_replaces_only_import_owned_rows() {
     let utc_day_start_unix = 1_767_312_000; // 2026-01-01T00:00:00Z
-    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let raw_cutoff_unix = utc_day_start_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
     let start_unix = raw_cutoff_unix - 3_600;
     let end_unix = start_unix + 1_800;
     let prepared = prepared_import_for_test(
@@ -593,7 +625,7 @@ fn memory_import_rollups_replace_only_import_owned_rows() {
         }],
     );
 
-    let rows = prepare_memory_import_rollups(
+    let rows = prepare_test_import_rollups(
         "client-a",
         std::slice::from_ref(&prepared),
         utc_day_start_unix,
@@ -762,7 +794,7 @@ fn five_year_import_materializes_exact_bounded_rollups_and_raw_tail() {
             .timestamp(),
     )
     .unwrap();
-    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let raw_cutoff_unix = utc_day_start_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
     let prepared = prepared_import_for_test(
         start_unix,
         utc_day_start_unix,
@@ -794,7 +826,19 @@ fn five_year_import_materializes_exact_bounded_rollups_and_raw_tail() {
             .sum::<u64>(),
         old_minutes
     );
-    assert!(rollups.len() < 5_000);
+    let tier_366_start = utc_day_start_unix - 366 * 86_400;
+    let tier_181_start = utc_day_start_unix - 181 * 86_400;
+    let tier_91_start = utc_day_start_unix - 91 * 86_400;
+    let expected_rollup_rows = 1 // the exact predecessor bucket
+        + (tier_366_start - start_unix) / 86_400
+        + (tier_181_start - tier_366_start) / 21_600
+        + (tier_91_start - tier_181_start) / 10_800
+        + (raw_cutoff_unix - tier_91_start) / 3_600;
+    assert_eq!(
+        rollups.len(),
+        usize::try_from(expected_rollup_rows).unwrap(),
+        "the five-year shape must equal the rows implied by the four negotiated traffic tiers"
+    );
     for tier in [3_600, 10_800, 21_600, 86_400] {
         assert!(rollups.iter().any(|rollup| rollup.bucket_secs == tier));
     }
@@ -817,7 +861,10 @@ fn five_year_import_materializes_exact_bounded_rollups_and_raw_tail() {
         last.observed_unix,
         i64::try_from(utc_day_start_unix - 60).unwrap()
     );
-    assert_eq!(retained_count, 32 * 24 * 60 + 1);
+    assert_eq!(
+        retained_count,
+        u64::try_from(TRAFFIC_COUNTER_RAW_RETENTION_DAYS).unwrap() * 24 * 60 + 1
+    );
     assert_eq!(
         (first.rx_bytes, first.tx_bytes),
         (
@@ -837,7 +884,7 @@ fn five_year_import_materializes_exact_bounded_rollups_and_raw_tail() {
 #[test]
 fn direct_rollups_match_expanded_oracle_at_all_boundaries() {
     let utc_day_start_unix = 1_772_323_200; // 2026-03-01T00:00:00Z
-    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let raw_cutoff_unix = utc_day_start_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
     let tier_boundaries = [
         utc_day_start_unix - 366 * 86_400,
         utc_day_start_unix - 181 * 86_400,
@@ -883,9 +930,12 @@ fn direct_rollups_match_expanded_oracle_at_all_boundaries() {
 #[test]
 fn compact_raw_preparation_matches_sample_iterator_for_every_slice_path() {
     let start_unix = 1_772_323_200 - 20 * 86_400;
-    let end_unix = start_unix + 20 * 86_400;
-    let middle = start_unix + 7 * 86_400;
-    let raw_cutoff_unix = end_unix - 8 * 86_400;
+    // Exercise the exact largest accepted raw shape: one complete day,
+    // one partial boundary hour, and the optional sequencing predecessor.
+    let raw_days = TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64;
+    let end_unix = start_unix + raw_days * 86_400 + 3_600;
+    let middle = start_unix + 12 * 3_600;
+    let raw_cutoff_unix = end_unix - raw_days * 86_400;
     for include_baseline in [false, true] {
         let prepared = prepared_import_for_test(
             start_unix,
@@ -1045,9 +1095,35 @@ fn same_shape_raw_update_requires_an_exact_dense_locked_keyset() {
 }
 
 #[test]
+fn traffic_retention_effects_are_database_owned_and_import_has_no_duplicate_notify() {
+    let migration = include_str!("../../../../../migrations/0005_traffic_accounting.sql");
+    for contract in [
+        "publish_traffic_counter_samples_retention_effect",
+        "publish_traffic_counter_rollups_retention_effect",
+        "traffic_counter_samples_retention_insert",
+        "traffic_counter_samples_retention_update",
+        "traffic_counter_rollups_retention_insert",
+        "traffic_counter_rollups_retention_update",
+        "'effect', 'traffic_samples_published'",
+        "'effect', 'traffic_rollup_published'",
+        "SELECT DISTINCT new_row.bucket_secs",
+        "to_jsonb(old_row) = to_jsonb(new_row)",
+    ] {
+        assert!(migration.contains(contract), "missing {contract}");
+    }
+    assert!(migration.contains("WHERE NOT new_row.inbound_promoted"));
+    assert!(migration.contains("ARRAY[3600, 10800, 21600, 86400]"));
+
+    let source = include_str!("repository_network_traffic_import.rs");
+    assert!(!source.contains("notify_traffic_import_retention_effects_in_tx"));
+    assert!(!source.contains("'effect', 'traffic_samples_published'"));
+    assert!(!source.contains("'effect', 'traffic_rollup_published'"));
+}
+
+#[test]
 fn compact_rollup_arrays_preserve_direct_rollup_values() {
     let utc_day_start_unix = 1_772_323_200;
-    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let raw_cutoff_unix = utc_day_start_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
     let start_unix = utc_day_start_unix - 400 * 86_400;
     let prepared = prepared_import_for_test(
         start_unix,
@@ -1108,7 +1184,7 @@ fn postgres_preflight_revalidation_detects_every_mutable_descriptor_group() {
     .unwrap();
     let snapshot = PostgresImportSnapshot {
         utc_day_start_unix: 1_772_323_200,
-        raw_cutoff_unix: 1_772_323_200 - 32 * 86_400,
+        raw_cutoff_unix: 1_772_323_200 - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400,
         boundary_samples: vec![boundary],
         imported_raw_stats: vec![PostgresImportOwnedRawStats {
             interface: "eth0".to_string(),
@@ -1155,18 +1231,22 @@ fn postgres_preflight_revalidation_detects_every_mutable_descriptor_group() {
 fn imported_raw_recovery_guard_accepts_exact_canonical_maximum_only() {
     assert_eq!(
         POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE,
-        (usize::try_from(MIN_TRAFFIC_COUNTER_RETENTION_DAYS).unwrap() + 1) * 24 * 60
+        (usize::try_from(TRAFFIC_COUNTER_RAW_RETENTION_DAYS).unwrap() * 24 + 1) * 60 + 1
     );
-    assert_eq!(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE, 47_520);
+    assert_eq!(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE, 1_501);
+    let utc_day_start_unix = 1_772_323_200;
+    let current_hour_unix = utc_day_start_unix + 23 * 3_600;
+    let raw_cutoff_unix = current_hour_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
+    let last_observed_unix = current_hour_unix + 59 * 60;
     let mut snapshot = PostgresImportSnapshot {
-        utc_day_start_unix: 1_772_323_200,
-        raw_cutoff_unix: 1_772_323_200 - 32 * 86_400,
+        utc_day_start_unix,
+        raw_cutoff_unix,
         boundary_samples: Vec::new(),
         imported_raw_stats: vec![PostgresImportOwnedRawStats {
             interface: "eth0".to_string(),
             count: i64::try_from(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE).unwrap(),
-            first_observed_unix: Some(1_772_323_200 - 47_520 * 60),
-            last_observed_unix: Some(1_772_323_200 - 60),
+            first_observed_unix: Some(i64::try_from(raw_cutoff_unix - 60).unwrap()),
+            last_observed_unix: Some(i64::try_from(last_observed_unix).unwrap()),
         }],
     };
     ensure_postgres_import_owned_raw_is_bounded(&snapshot).unwrap();
@@ -1176,16 +1256,20 @@ fn imported_raw_recovery_guard_accepts_exact_canonical_maximum_only() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("network_traffic_import_recovery_required"));
-    assert!(error.contains("max_47520"));
+    assert!(error.contains("max_1501"));
 }
 
 #[test]
 fn five_year_raw_superset_is_bounded_at_maximum_for_all_sixteen_interfaces() {
     assert_eq!(NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES, 16);
     let utc_day_start_unix = 1_772_323_200;
-    let raw_cutoff_unix = utc_day_start_unix - 32 * 86_400;
+    let current_hour_unix = utc_day_start_unix + 23 * 3_600;
+    let raw_cutoff_unix = current_hour_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
     let start_unix = utc_day_start_unix - 5 * 365 * 86_400;
-    let end_unix = utc_day_start_unix + 86_400 - 60;
+    // Import coverage is end-exclusive. Ending at the next hour includes the
+    // current hour's :59 sample, so this exercises the exact worst case: the
+    // one-day floor-aligned window, one partial hour, and one predecessor.
+    let end_unix = current_hour_unix + 60 * 60;
     let base = prepared_import_for_test(
         start_unix,
         end_unix,

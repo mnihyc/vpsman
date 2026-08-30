@@ -6,6 +6,7 @@ import {
   apiPostPreview,
   apiPut,
   isApiUnauthorized,
+  LatestReadConsumer,
 } from "../api";
 import type {
   ApplyConfigurationSourceOverrideRequest,
@@ -97,10 +98,7 @@ export function useInventoryData(
     configurationSourcesEvidenceAvailable,
     setConfigurationSourcesEvidenceAvailable,
   ] = useState(false);
-  const loadTagInventoryInFlight = useRef<{
-    request: Promise<void>;
-    token: string;
-  } | null>(null);
+  const tagInventoryLoadConsumer = useRef(new LatestReadConsumer());
   const loadConfigurationPresetsInFlight = useRef<{
     request: Promise<void>;
     token: string;
@@ -119,12 +117,9 @@ export function useInventoryData(
   currentApiToken.current = apiToken;
 
   const loadTagInventory = useCallback(
-    async (forceFresh = false) => {
+    (_forceFresh = false): Promise<void> => {
       if (currentApiToken.current !== apiToken) {
-        return;
-      }
-      if (!forceFresh && loadTagInventoryInFlight.current?.token === apiToken) {
-        return loadTagInventoryInFlight.current.request;
+        return Promise.resolve();
       }
       const generation = tagInventoryLoadGeneration.current + 1;
       tagInventoryLoadGeneration.current = generation;
@@ -132,7 +127,7 @@ export function useInventoryData(
       const runtimeApplyGeneration =
         runtimeConfigApplyLoadGeneration.current + 1;
       runtimeConfigApplyLoadGeneration.current = runtimeApplyGeneration;
-      const request = (async () => {
+      return tagInventoryLoadConsumer.current.enqueue(async () => {
         setTagsLoading(true);
         tagInventoryError.current = null;
         setTagsError(null);
@@ -246,15 +241,7 @@ export function useInventoryData(
             setRuntimeConfigApplyLoading(false);
           }
         }
-      })();
-      loadTagInventoryInFlight.current = { request, token: apiToken };
-      try {
-        await request;
-      } finally {
-        if (loadTagInventoryInFlight.current?.request === request) {
-          loadTagInventoryInFlight.current = null;
-        }
-      }
+      });
     },
     [apiToken, onUnauthorized],
   );
@@ -839,7 +826,7 @@ export function useInventoryData(
     configurationSourcesLoadGeneration.current += 1;
     runtimeConfigApplyLoadGeneration.current += 1;
     tagOrderMutationGeneration.current += 1;
-    loadTagInventoryInFlight.current = null;
+    tagInventoryLoadConsumer.current.discardPending();
     loadConfigurationPresetsInFlight.current = null;
     loadConfigurationSourcesInFlight.current = null;
     currentApiToken.current = "";

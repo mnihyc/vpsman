@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use anyhow::{bail, Result};
 use serde_json::json;
 use sqlx::Row;
@@ -8,77 +6,15 @@ use vpsman_server_core::{JOB_STATUS_QUEUED, TARGET_STATUS_QUEUED};
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, CreateJobRequest, CreateMigrationLinkRequest, JobHistoryView,
-        JobTargetView, ListQuery, MigrationLinkStatus, MigrationLinkView, RestorePlanStatus,
-        RestorePlanView,
+        AuthContext, CreateJobRequest, CreateMigrationLinkRequest, ListQuery, MigrationLinkStatus,
+        MigrationLinkView, RestorePlanStatus, RestorePlanView,
     },
     repository::Repository,
     repository_jobs::{record_job_created_webhook_event_in_tx, JobCreatedWebhookEvent},
-    repository_key_lifecycle::{
-        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
-    },
+    repository_key_lifecycle::require_visible_postgres_clients_in_tx,
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
-
-fn compare_text_or_number(left: &str, right: &str) -> Ordering {
-    match (left.parse::<i128>(), right.parse::<i128>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
-}
-
-fn compare_migration_link(
-    left: &MigrationLinkView,
-    right: &MigrationLinkView,
-    sort: Option<&str>,
-) -> Ordering {
-    match sort.unwrap_or("created_at") {
-        "destination_root" | "destination" => left.destination_root.cmp(&right.destination_root),
-        "include_config" | "scope" => left.include_config.cmp(&right.include_config),
-        "paths" => left.paths.len().cmp(&right.paths.len()),
-        "restore_plan_id" | "plan" => left.restore_plan_id.cmp(&right.restore_plan_id),
-        "source_client_id" | "source" => left.source_client_id.cmp(&right.source_client_id),
-        "status" => left.status.cmp(&right.status),
-        "target_client_id" | "target" => left.target_client_id.cmp(&right.target_client_id),
-        _ => compare_text_or_number(&left.created_at, &right.created_at),
-    }
-}
-
-fn migration_link_matches_search(link: &MigrationLinkView, needle: &str) -> bool {
-    link.id.to_string().to_ascii_lowercase().contains(needle)
-        || link
-            .actor_id
-            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || link
-            .restore_plan_id
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(needle)
-        || link
-            .source_backup_request_id
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(needle)
-        || link.source_client_id.to_ascii_lowercase().contains(needle)
-        || link.target_client_id.to_ascii_lowercase().contains(needle)
-        || link.status.to_ascii_lowercase().contains(needle)
-        || link
-            .destination_root
-            .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || link
-            .note
-            .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains(needle))
-            .unwrap_or(false)
-        || link
-            .paths
-            .iter()
-            .any(|path| path.to_ascii_lowercase().contains(needle))
-}
 
 fn migration_link_order_by(sort: Option<&str>, descending: bool) -> &'static str {
     match (sort.unwrap_or("created_at"), descending) {
@@ -102,42 +38,6 @@ fn migration_link_order_by(sort: Option<&str>, descending: bool) -> &'static str
 }
 
 impl Repository {
-    #[cfg(test)]
-    pub(crate) async fn list_migration_links(&self, limit: i64) -> Result<Vec<MigrationLinkView>> {
-        match self {
-            Self::Memory(memory) => {
-                let links = memory.migration_links.read().await;
-                Ok(links.iter().rev().take(limit as usize).cloned().collect())
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        restore_plan_id,
-                        source_backup_request_id,
-                        source_client_id,
-                        target_client_id,
-                        paths,
-                        include_config,
-                        destination_root,
-                        status,
-                        note,
-                        created_at::text AS created_at
-                    FROM migration_links
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter().map(migration_link_from_row).collect()
-            }
-        }
-    }
-
     pub(crate) async fn query_migration_links(
         &self,
         query: &ListQuery,
@@ -145,39 +45,7 @@ impl Repository {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
         let descending = sort_descending(query.dir.as_deref(), true);
-        let q = query
-            .q
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
         match self {
-            Self::Memory(memory) => {
-                let q = q.map(|value| value.to_ascii_lowercase());
-                let mut links = memory
-                    .migration_links
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|link| {
-                        q.as_deref()
-                            .map(|needle| migration_link_matches_search(link, needle))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                links.sort_by(|left, right| {
-                    compare_migration_link(left, right, query.sort.as_deref())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if descending {
-                    links.reverse();
-                }
-                Ok(links
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(limit as usize)
-                    .collect())
-            }
             Self::Postgres(pool) => {
                 let order_by = migration_link_order_by(query.sort.as_deref(), descending);
                 let rows = sqlx::query(&format!(
@@ -226,13 +94,6 @@ impl Repository {
 
     pub(crate) async fn find_restore_plan(&self, id: Uuid) -> Result<Option<RestorePlanView>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .restore_plans
-                .read()
-                .await
-                .iter()
-                .find(|plan| plan.id == id)
-                .cloned()),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -271,31 +132,6 @@ impl Repository {
     ) -> Result<MigrationLinkView> {
         let view = migration_link_view_from_request(request, restore_plan, operator, status);
         match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    std::slice::from_ref(&view.target_client_id),
-                    "migration_target_unavailable",
-                )
-                .await?;
-                if memory
-                    .migration_links
-                    .read()
-                    .await
-                    .iter()
-                    .any(|link| link.restore_plan_id == view.restore_plan_id)
-                {
-                    anyhow::bail!("migration_link_already_exists");
-                }
-                memory.migration_links.write().await.push(view.clone());
-                memory.audits.write().await.push(migration_link_audit(
-                    &view,
-                    request.confirmed,
-                    operator,
-                    unix_now().to_string(),
-                ));
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 require_visible_postgres_clients_in_tx(
@@ -367,10 +203,9 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                return Ok(persisted);
+                Ok(persisted)
             }
         }
-        Ok(view)
     }
 
     pub(crate) async fn record_migration_run_restore_job(
@@ -398,119 +233,10 @@ impl Repository {
             .max_timeout_secs
             .unwrap_or(vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS)
             .max(1);
-        let persisted_link = match self {
-            Self::Memory(memory) => {
-                let _lifecycle = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    resolved_targets,
-                    "migration_target_unavailable",
-                )
-                .await?;
-                let created_at = unix_now().to_string();
-                let mut links = memory.migration_links.write().await;
-                let mut jobs = memory.jobs.write().await;
-                let existing_link = links
-                    .iter()
-                    .find(|existing| existing.restore_plan_id == requested_link.restore_plan_id)
-                    .cloned();
-                let (link, inserted_link) = match existing_link {
-                    Some(existing)
-                        if migration_link_matches_request(
-                            &existing,
-                            link_request,
-                            restore_plan,
-                        ) =>
-                    {
-                        (existing, false)
-                    }
-                    Some(_) => bail!("migration_link_conflicts_with_request"),
-                    None => (requested_link.clone(), true),
-                };
-                if jobs.iter().any(|job| job.id == job_id) {
-                    bail!("job_id_reused_with_different_request");
-                }
-                if inserted_link {
-                    links.push(link.clone());
-                }
-                jobs.push(JobHistoryView {
-                    id: job_id,
-                    actor_id: Some(operator.operator.id),
-                    command_type: command_type.clone(),
-                    source_schedule_id: None,
-                    causation_id: None,
-                    schedule_lineage: Vec::new(),
-                    privileged: job_request.privileged,
-                    status: JOB_STATUS_QUEUED.to_string(),
-                    target_count: resolved_targets.len() as i32,
-                    payload_hash: command_hash.to_string(),
-                    max_timeout_secs,
-                    created_at: created_at.clone(),
-                    completed_at: None,
-                });
-                memory
-                    .job_request_fingerprints
-                    .write()
-                    .await
-                    .insert(job_id, request_fingerprint.to_string());
-                memory
-                    .job_operations
-                    .write()
-                    .await
-                    .insert(job_id, operation.clone());
-                memory
-                    .job_timeouts
-                    .write()
-                    .await
-                    .insert(job_id, max_timeout_secs);
-                memory
-                    .job_targets
-                    .write()
-                    .await
-                    .extend(
-                        resolved_targets
-                            .iter()
-                            .cloned()
-                            .map(|client_id| JobTargetView {
-                                job_id,
-                                client_id,
-                                status: TARGET_STATUS_QUEUED.to_string(),
-                                message: None,
-                                exit_code: None,
-                                started_at: None,
-                                deadline_at: None,
-                                completed_at: None,
-                                process_incarnation_id: None,
-                            }),
-                    );
-                let mut audits = memory.audits.write().await;
-                if inserted_link {
-                    audits.push(migration_link_audit(
-                        &link,
-                        link_request.confirmed,
-                        operator,
-                        created_at.clone(),
-                    ));
-                }
-                audits.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
-                    action: "job.dispatch_requested".to_string(),
-                    target: "api:/api/v1/jobs".to_string(),
-                    command_hash: Some(command_hash.to_string()),
-                    metadata: migration_job_audit_metadata(
-                        job_id,
-                        &link,
-                        restore_plan,
-                        job_request,
-                        operator,
-                        resolved_targets,
-                    ),
-                    created_at,
-                });
-                link
-            }
+        match self {
             Self::Postgres(pool) => {
+                let target_write_order =
+                    crate::repository_jobs::canonical_target_write_order(resolved_targets);
                 let mut tx = pool.begin().await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
@@ -672,7 +398,7 @@ impl Repository {
                 .bind(max_timeout_secs as i64)
                 .execute(&mut *tx)
                 .await?;
-                for client_id in resolved_targets {
+                for client_id in target_write_order {
                     sqlx::query(
                         r#"
                         INSERT INTO job_targets (
@@ -749,22 +475,9 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                return Ok(persisted_link);
+                Ok(persisted_link)
             }
-        };
-        self.record_job_created_webhook_event(JobCreatedWebhookEvent {
-            job_id,
-            command_type: &command_type,
-            status: JOB_STATUS_QUEUED,
-            privileged: job_request.privileged,
-            command_hash,
-            resolved_targets,
-            actor_id: Some(operator.operator.id),
-            source_schedule_id: None,
-            operation: Some(&operation),
-        })
-        .await?;
-        Ok(persisted_link)
+        }
     }
 }
 
@@ -807,23 +520,6 @@ fn migration_link_from_row(row: sqlx::postgres::PgRow) -> Result<MigrationLinkVi
         note: row.try_get("note")?,
         created_at: row.try_get("created_at")?,
     })
-}
-
-fn migration_link_audit(
-    view: &MigrationLinkView,
-    confirmed: bool,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "migration.linked_metadata_only".to_string(),
-        target: format!("migration_link:{}", view.id),
-        command_hash: None,
-        metadata: migration_link_metadata_from_view(view, confirmed, operator),
-        created_at,
-    }
 }
 
 fn migration_link_view_from_request(

@@ -132,8 +132,6 @@ SQL
   VPSMAN_POSTGRES_URL="$postgres_url" \
   VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     target/debug/vpsman-worker --once \
-      --worker-id pg-backup-prune-worker \
-      --worker-lease-secs 60 \
       --backup-policy-prune-enabled \
       --backup-policy-prune-limit 10 \
       --backup-policy-prune-delete-objects \
@@ -144,12 +142,6 @@ SQL
     cat "$SMOKE_TMPDIR/backup-policy-prune-worker.log" >&2 || true
     exit 1
   }
-  policy_prune_worker_lease_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM worker_leases WHERE task_name = 'backup_policy_retention_prune' AND owner = 'pg-backup-prune-worker' AND lease_expires_at <= now()")"
-  if [[ "$policy_prune_worker_lease_count" != "1" ]]; then
-    echo "expected backup policy retention worker lease evidence" >&2
-    docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT task_name, owner, lease_expires_at FROM worker_leases ORDER BY task_name" >&2 || true
-    exit 1
-  fi
   policy_prune_api_json="$(api_post "/api/v1/backup-policies/prune" "$(jq -n --arg schedule_id "$backup_prune_policy_schedule_id" '{
     schedule_id: $schedule_id,
     dry_run: true,

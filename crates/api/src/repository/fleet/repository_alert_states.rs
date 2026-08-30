@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -6,7 +6,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    model::{AuditLogView, AuthContext},
+    model::AuthContext,
     model_alert_states::{
         BulkFleetAlertStateItem, BulkUpdateFleetAlertStatesRequest,
         BulkUpdateFleetAlertStatesResponse, FleetAlertStateView, UpdateFleetAlertStateRequest,
@@ -36,19 +36,6 @@ impl Repository {
     ) -> Result<Vec<FleetAlertStateView>> {
         let state = normalize_optional_state(state)?;
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory
-                    .fleet_alert_states
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| state.as_deref().is_none_or(|state| row.state == state))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                sort_alert_states(&mut rows);
-                rows.truncate(limit.clamp(1, 1000) as usize);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -85,19 +72,6 @@ impl Repository {
             return Ok(Vec::new());
         }
         match self {
-            Self::Memory(memory) => {
-                let alert_ids = alert_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-                let mut rows = memory
-                    .fleet_alert_states
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|row| alert_ids.contains(row.alert_id.as_str()))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                sort_alert_states(&mut rows);
-                Ok(rows)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -189,43 +163,6 @@ impl Repository {
         let now_unix = unix_now();
         let now = now_unix.to_string();
         match self {
-            Self::Memory(memory) => {
-                let mut states = memory.fleet_alert_states.write().await;
-                validate_expected_revisions(&states, &items, enforce_expected_revision)?;
-                let mut next_states = states.clone();
-                let mut changed = Vec::with_capacity(items.len());
-                for item in &items {
-                    let current = next_states
-                        .iter()
-                        .find(|state| state.alert_id == item.alert_id)
-                        .cloned();
-                    let next = transition_alert_state(
-                        current.as_ref(),
-                        &item.alert_id,
-                        action,
-                        muted_for_secs,
-                        reason,
-                        now_unix,
-                        &now,
-                        operator,
-                    )?;
-                    if let Some(stored) = next_states
-                        .iter_mut()
-                        .find(|state| state.alert_id == item.alert_id)
-                    {
-                        *stored = next.clone();
-                    } else {
-                        next_states.push(next.clone());
-                    }
-                    changed.push(next);
-                }
-                let mut audits = memory.audits.write().await;
-                *states = next_states;
-                audits.extend(changed.iter().map(|state| {
-                    alert_state_audit(state, operator, now.clone(), batch_id, items.len(), action)
-                }));
-                Ok(changed)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let alert_ids = items
@@ -569,15 +506,6 @@ fn normalize_state(state: &str) -> Result<&'static str> {
     }
 }
 
-fn sort_alert_states(states: &mut [FleetAlertStateView]) {
-    states.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| left.alert_id.cmp(&right.alert_id))
-    });
-}
-
 fn alert_state_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertStateView> {
     Ok(FleetAlertStateView {
         alert_id: row.try_get("alert_id")?,
@@ -590,25 +518,6 @@ fn alert_state_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertStateVie
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
-}
-
-fn alert_state_audit(
-    state: &FleetAlertStateView,
-    operator: &AuthContext,
-    created_at: String,
-    batch_id: Uuid,
-    batch_size: usize,
-    batch_action: &str,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "fleet.alert_state_updated".to_string(),
-        target: format!("fleet_alert:{}", state.alert_id),
-        command_hash: None,
-        metadata: alert_state_metadata(state, operator, batch_id, batch_size, batch_action),
-        created_at,
-    }
 }
 
 fn alert_state_metadata(

@@ -47,7 +47,7 @@ const tunnelPortSpeedRules: VpsRuleValueRecord[] = [
 const explicitAllNetworkRateRule: VpsRuleValueRecord = {
   client_id: "agent-sfo-01",
   key: "network.rate.interfaces",
-  parsed_display: "all reported interfaces",
+  parsed_display: "all eligible interfaces",
   source_id: null,
   source_kind: "operator",
   state: "ok",
@@ -55,7 +55,7 @@ const explicitAllNetworkRateRule: VpsRuleValueRecord = {
   updated_by: "fixture-admin",
   validation_errors: [],
   value_json: { mode: "all" },
-  value_raw: "[]",
+  value_raw: "*",
 };
 
 const bulkTargetUpdateSchedules: Array<
@@ -277,7 +277,7 @@ test.beforeEach(async ({ page }, testInfo) => {
       : undefined,
     vpsRuleValuesAdditional: testInfo.tags.includes("@vps-rules-prefill-race")
       ? tunnelPortSpeedRules
-      : testInfo.tags.includes("@vps-rules-prefill-empty")
+      : testInfo.tags.includes("@vps-rules-explicit-all")
         ? [explicitAllNetworkRateRule]
         : undefined,
   });
@@ -2661,13 +2661,13 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
     hasText: "Bulk rule editor",
   });
   const resetDay = vpsRuleTextbox(editor, "Reset day");
-  await expect(resetDay).toHaveValue("14");
-  await expect(resetDay).toHaveAttribute("placeholder", "-1 or 14");
+  await expect(resetDay).toHaveValue("14 05:00");
+  await expect(resetDay).toHaveAttribute("placeholder", "-1 or 29 05:00");
   await expect(resetDay).toBeEnabled();
   await expect(resetDay).not.toHaveAttribute("title", /\S/);
   await expect(resetDay.locator("..")).toHaveAttribute(
     "title",
-    /-1 to accumulate totals continuously/,
+    /minutes are rounded down to the hour.*-1 to accumulate totals continuously/,
   );
   await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("3TB");
   await expect(vpsRuleTextbox(editor, "Interfaces / selectors")).toHaveValue(
@@ -2690,6 +2690,42 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
     "id:agent-sfo-01",
   );
   await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("3TB");
+});
+
+test("canonicalizes the monthly traffic reset hour without constraining typing", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "traffic-reset normalization is viewport-independent",
+  );
+
+  await page.goto("/#/config/rules/agent-sfo-01");
+  await waitForConsoleShell(page);
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  const resetDay = vpsRuleTextbox(editor, "Reset day");
+  const rawValues = editor.getByLabel("VPS rule set values");
+  await expect(resetDay).toHaveValue("14 05:00");
+
+  await resetDay.fill("29 05:37");
+  await expect(resetDay).toHaveValue("29 05:37");
+  await resetDay.blur();
+  await expect(resetDay).toHaveValue("29 05:00");
+  expect(await rawValues.inputValue()).toContain("traffic.reset_day=29 05:00");
+
+  await resetDay.fill("29");
+  await resetDay.blur();
+  await expect(resetDay).toHaveValue("29 00:00");
+
+  await resetDay.fill("29 05");
+  await resetDay.blur();
+  await expect(resetDay).toHaveValue("29 05");
+
+  await resetDay.fill("-1");
+  await resetDay.blur();
+  await expect(resetDay).toHaveValue("-1");
 });
 
 test("clears a single-VPS rule prefill for multi-target and empty matches", async ({
@@ -2898,15 +2934,15 @@ test("reconciles a confirmed one-VPS unset into the prefilled fields", async ({
   );
   await editor.getByRole("button", { name: "Set values", exact: true }).click();
   await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("");
-  await expect(vpsRuleTextbox(editor, "Reset day")).toHaveValue("14");
+  await expect(vpsRuleTextbox(editor, "Reset day")).toHaveValue("14 05:00");
   expect(
     await editor.getByLabel("VPS rule set values").inputValue(),
   ).not.toContain("traffic.quota.total=");
 });
 
 test(
-  "keeps explicit all-interface rules distinct from absent prefilled rules",
-  { tag: "@vps-rules-prefill-empty" },
+  "keeps explicit star distinct from an unset live-rate rule after clearing",
+  { tag: "@vps-rules-explicit-all" },
   async ({ page }, testInfo) => {
     test.skip(
       testInfo.project.name.includes("mobile"),
@@ -2920,22 +2956,22 @@ test(
     });
     const liveRateInterfaces = vpsRuleTextbox(editor, "Live rate interfaces");
     const rawValues = editor.getByLabel("VPS rule set values");
-    await expect(liveRateInterfaces).toHaveValue("[]");
+    await expect(liveRateInterfaces).toHaveValue("*");
     await expect(vpsRuleTextbox(editor, "Billing price")).toHaveValue("");
     let rawText = await rawValues.inputValue();
-    expect(rawText).toContain("network.rate.interfaces=[]");
+    expect(rawText).toContain("network.rate.interfaces=*");
     expect(rawText).not.toContain("billing.price=");
 
     await liveRateInterfaces.fill("");
     await expect(liveRateInterfaces).toHaveValue("");
     expect(await rawValues.inputValue()).toContain("network.rate.interfaces=");
     await liveRateInterfaces.blur();
-    await expect(liveRateInterfaces).toHaveValue("[]");
+    await expect(liveRateInterfaces).toHaveValue("");
     await vpsRuleTextbox(editor, "Total quota").fill("");
     await vpsRuleTextbox(editor, "Total quota").blur();
     await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("");
     rawText = await rawValues.inputValue();
-    expect(rawText).toContain("network.rate.interfaces=[]");
+    expect(rawText).not.toContain("network.rate.interfaces=");
     expect(rawText).not.toContain("traffic.quota.total=");
   },
 );
@@ -3029,7 +3065,7 @@ test(
         "broken line ",
         "traffic.reset_day=tomorrow ",
         "product.name=Storage-Box 4",
-        "network.rate.interfaces=[]",
+        "",
       ].join("\n"),
     );
   },
@@ -3188,7 +3224,7 @@ test(
         .getByRole("button", { name: /Apply/ }),
     ).toHaveCount(0);
     await vpsRuleTextbox(editor, "Billing price").fill("");
-    await vpsRuleTextbox(editor, "Reset day").fill("14");
+    await vpsRuleTextbox(editor, "Reset day").fill("14 05:00");
     await vpsRuleTextbox(editor, "Total quota").fill("3TB");
     await vpsRuleTextbox(editor, "Interfaces / selectors").fill(
       "eth0+tx, ens3",
@@ -5475,7 +5511,7 @@ test("revokes selected non-current bearer sessions from Audit", async ({
   expectPrivilegeAssertion((revokeRequest as { body?: unknown }).body);
 });
 
-test("keeps legacy invalid schedule cadences visible and blocks only automatic runs", async ({
+test("keeps malformed persisted schedule cadences visible and blocks only automatic runs", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -5495,11 +5531,11 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
         deleted_at: null,
         enabled: true,
         failure_count: 0,
-        id: "legacy-invalid-schedule",
+        id: "persisted-invalid-schedule",
         last_error: null,
         last_run_at: null,
         max_failures: 3,
-        name: "legacy impossible cadence",
+        name: "persisted impossible cadence",
         next_run_at: "",
         next_runs: [],
         operation: { argv: ["uptime"], pty: false, type: "shell" },
@@ -5526,14 +5562,14 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
         last_run_at: null,
         max_failures: 9,
         missing_path_policy: "skip",
-        name: "legacy invalid backup cadence",
+        name: "persisted invalid backup cadence",
         next_run_at: "",
         next_runs: [],
         paths: ["/etc", "/srv/data"],
         retention_days: 45,
         retry_delay_secs: 777,
         rotation_generation: "quarterly-2026",
-        schedule_id: "legacy-invalid-backup-policy",
+        schedule_id: "persisted-invalid-backup-policy",
         selector_expression: "id:agent-sfo-01",
         target_client_ids: ["agent-sfo-01"],
         timezone: "UTC",
@@ -5550,7 +5586,7 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
   await expect(scheduleGrid).toContainText(
     "Edit required; automatic runs blocked",
   );
-  await selectGridRow(page, "Schedule records", "legacy-invalid-schedule");
+  await selectGridRow(page, "Schedule records", "persisted-invalid-schedule");
   await scheduleGrid
     .locator(".gridToolbarActions")
     .getByRole("button", { name: "Actions", exact: true })
@@ -5578,14 +5614,14 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
   await selectGridRow(
     page,
     "Backup policy records",
-    "legacy-invalid-backup-policy",
+    "persisted-invalid-backup-policy",
   );
   await runGridAction(page, "Backup policy records", "Edit policy");
   await expect(
     page.getByRole("heading", { name: "Edit backup policy" }),
   ).toBeVisible();
   await expect(page.getByLabel("Backup policy name")).toHaveValue(
-    "legacy invalid backup cadence",
+    "persisted invalid backup cadence",
   );
   await expect(page.getByLabel("Backup policy selected paths")).toHaveValue(
     "/etc\n/srv/data",
@@ -5621,7 +5657,7 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
       keep_last: 11,
       max_failures: 9,
       missing_path_policy: "skip",
-      name: "legacy invalid backup cadence",
+      name: "persisted invalid backup cadence",
       paths: ["/etc", "/srv/data"],
       privilege_assertion: expect.any(Object),
       retention_days: 45,
@@ -5631,7 +5667,7 @@ test("keeps legacy invalid schedule cadences visible and blocks only automatic r
       target_client_ids: ["agent-sfo-01"],
       timezone: "UTC",
     },
-    schedule_id: "legacy-invalid-backup-policy",
+    schedule_id: "persisted-invalid-backup-policy",
   });
   await expect(policyGrid).not.toContainText("Invalid cadence");
   await expect(policyGrid).toContainText("30 2 * * * · UTC");
@@ -5787,9 +5823,6 @@ test("keeps malformed schedule operations visible with only repair and removal a
 
 test(
   "updates only a schedule's frozen targets through the table action",
-  {
-    tag: "@bulk-resolve-delay",
-  },
   async ({ page }, testInfo) => {
     test.skip(
       testInfo.project.name.includes("mobile"),
@@ -5853,6 +5886,13 @@ test(
       "title",
       /only fixed target IDs change/i,
     );
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __vpsmanGateNextBulkResolve: () => void;
+        }
+      ).__vpsmanGateNextBulkResolve();
+    });
     await updateTargets.click();
     await grid
       .locator(".gridToolbarActions")
@@ -5866,6 +5906,13 @@ test(
       page.getByRole("menuitem", { name: "Update targets", exact: true }),
     ).toBeDisabled();
     await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __vpsmanReleaseNextBulkResolve: () => void;
+        }
+      ).__vpsmanReleaseNextBulkResolve();
+    });
 
     const prompt = page.getByRole("region", {
       name: "Update schedule targets",
@@ -9404,6 +9451,7 @@ test("shows telemetry only for explicitly saved tunnel endpoints", async ({
     .getByLabel("VPS instance records data grid")
     .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
     .first();
+  await expect(detail).not.toContainText("Network bytes");
   const providerFact = detail
     .locator(".timeline")
     .filter({ has: page.getByText("Provider", { exact: true }) });
@@ -9439,63 +9487,65 @@ test("shows telemetry only for explicitly saved tunnel endpoints", async ({
   await expect(page.getByText(/promotion workflow/i)).toHaveCount(0);
 });
 
-test("keeps each expanded VPS network evidence scoped to that VPS", async ({
-  page,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name.includes("mobile"),
-    "desktop supports multiple simultaneous inline VPS details",
-  );
+test(
+  "keeps each expanded VPS network evidence scoped to that VPS",
+  { tag: "@vps-rules-explicit-all" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop supports multiple simultaneous inline VPS details",
+    );
 
-  await page.goto("/");
-  await openConsoleSubpage(page, "Fleet", "Instances");
-  const grid = page.getByLabel("VPS instance records data grid");
-  const edgeRow = grid
-    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
-    .first();
-  const coreRow = grid
-    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
-    .first();
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    const grid = page.getByLabel("VPS instance records data grid");
+    const edgeRow = grid
+      .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+      .first();
+    const coreRow = grid
+      .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+      .first();
 
-  await activate(edgeRow.getByLabel("Expand VPS instance records row"));
-  await activate(coreRow.getByLabel("Expand VPS instance records row"));
+    await activate(edgeRow.getByLabel("Expand VPS instance records row"));
+    await activate(coreRow.getByLabel("Expand VPS instance records row"));
 
-  const edgeDetail = grid
-    .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
-    .first();
-  const coreDetail = grid
-    .locator(".gridExpandedRow", { hasText: "core-fra-02" })
-    .first();
-  await activate(coreDetail.getByRole("tab", { name: "System" }));
-  await expect(coreDetail.getByLabel("VPS system information")).toContainText(
-    "System information unavailable",
-  );
-  await activate(edgeDetail.getByRole("tab", { name: "Telemetry" }));
-  await activate(coreDetail.getByRole("tab", { name: "Telemetry" }));
-  const edgeRate = edgeDetail
-    .locator(".timeline")
-    .filter({ hasText: /^Network rate/ });
-  const coreRate = coreDetail
-    .locator(".timeline")
-    .filter({ hasText: /^Network rate/ });
+    const edgeDetail = grid
+      .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
+      .first();
+    const coreDetail = grid
+      .locator(".gridExpandedRow", { hasText: "core-fra-02" })
+      .first();
+    await activate(coreDetail.getByRole("tab", { name: "System" }));
+    await expect(
+      coreDetail.getByLabel("VPS system information"),
+    ).toContainText("System information unavailable");
+    await activate(edgeDetail.getByRole("tab", { name: "Telemetry" }));
+    await activate(coreDetail.getByRole("tab", { name: "Telemetry" }));
+    const edgeRate = edgeDetail
+      .locator(".timeline")
+      .filter({ hasText: /^Network rate/ });
+    const coreRate = coreDetail
+      .locator(".timeline")
+      .filter({ hasText: /^Network rate/ });
 
-  await expect(edgeRate).toContainText("RX 2.4 MB/s / TX 2.3 MB/s");
-  await expect(coreRate).toContainText("Awaiting selected rate");
-  await activate(edgeDetail.getByRole("tab", { name: "Network" }));
-  await activate(coreDetail.getByRole("tab", { name: "Network" }));
-  await expect(
-    edgeDetail.locator(".telemetryInterfaceRow", { hasText: "eth0" }),
-  ).toHaveCount(1);
-  await expect(
-    coreDetail.locator(".telemetryInterfaceRow", { hasText: "eth0" }),
-  ).toHaveCount(1);
-  await expect(
-    coreDetail.locator(".telemetryTunnelRow", { hasText: "tunab" }),
-  ).toHaveCount(1);
-  await expect(
-    coreDetail.locator(".telemetryTunnelRow", { hasText: "ovpn42" }),
-  ).toHaveCount(1);
-});
+    await expect(edgeRate).toContainText("RX 2.4 MB/s / TX 2.3 MB/s");
+    await expect(coreRate).toContainText("Awaiting selected rate");
+    await activate(edgeDetail.getByRole("tab", { name: "Network" }));
+    await activate(coreDetail.getByRole("tab", { name: "Network" }));
+    await expect(
+      edgeDetail.locator(".telemetryInterfaceRow", { hasText: "eth0" }),
+    ).toHaveCount(1);
+    await expect(
+      coreDetail.locator(".telemetryInterfaceRow", { hasText: "eth0" }),
+    ).toHaveCount(1);
+    await expect(
+      coreDetail.locator(".telemetryTunnelRow", { hasText: "tunab" }),
+    ).toHaveCount(1);
+    await expect(
+      coreDetail.locator(".telemetryTunnelRow", { hasText: "ovpn42" }),
+    ).toHaveCount(1);
+  },
+);
 
 test("shows grouped execution summaries for job output details", async ({
   page,
@@ -10125,6 +10175,29 @@ test("shows audit filters and retention compliance posture", async ({
   await expect(editor).toContainText("Audit logs");
   await expect(editor).toContainText("Retention days");
   await expect(editor).toContainText("Metadata only");
+
+  await editor.getByRole("combobox").selectOption("network_observations");
+  const finalHorizon = editor.getByLabel("Final retention horizon");
+  await expect(finalHorizon).toHaveAttribute("min", "1");
+  await finalHorizon.fill("1");
+  await activate(editor.getByRole("button", { name: "Save policy" }));
+  await expect(
+    page.getByText("Saved Network observations retention policy"),
+  ).toBeVisible();
+  const retentionPolicyRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { historyRetentionPolicies: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.historyRetentionPolicies.at(-1);
+  });
+  expect(retentionPolicyRequest).toMatchObject({
+    confirmed: true,
+    domain: "network_observations",
+    retention_days: 1,
+  });
+  await editor.getByRole("combobox").selectOption("audit_logs");
 
   const exportScope = page.getByLabel("History retention export scope");
   await expect(exportScope).toContainText("Export scope");

@@ -9,7 +9,7 @@ use vpsman_common::{
 };
 
 use crate::{
-    model::{AuditLogView, AuthContext, JobOutputView},
+    model::{AuthContext, JobOutputView},
     model_command_templates::{
         CommandTemplateView, JobOutputComparisonGroupView, JobOutputComparisonRowView,
         JobOutputComparisonView, UpsertCommandTemplateRequest,
@@ -41,25 +41,6 @@ impl Repository {
             })
             .collect::<Vec<_>>();
         let mut user_rows = match self {
-            Self::Memory(memory) => {
-                let mut rows = memory.command_templates.read().await.clone();
-                rows.retain(|row| {
-                    command_template_matches_filters(
-                        row,
-                        scope_kind,
-                        scope_value,
-                        command_type,
-                        display_group,
-                    )
-                });
-                rows.sort_by(|left, right| {
-                    right
-                        .updated_at
-                        .cmp(&left.updated_at)
-                        .then_with(|| left.name.cmp(&right.name))
-                });
-                rows.into_iter().take(limit as usize).collect()
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -106,7 +87,6 @@ impl Repository {
         request: &UpsertCommandTemplateRequest,
         operator: &AuthContext,
     ) -> Result<CommandTemplateView> {
-        let now = unix_now().to_string();
         ensure!(
             !command_template_name_scope_is_builtin(
                 &request.name,
@@ -117,56 +97,6 @@ impl Repository {
         );
         let parts = command_template_parts(request)?;
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory.command_templates.write().await;
-                if let Some(existing) = rows.iter_mut().find(|row| {
-                    row.name == request.name
-                        && row.scope_kind == request.scope_kind
-                        && row.scope_value == request.scope_value
-                }) {
-                    existing.command_type = parts.command_type.clone();
-                    existing.display_group = parts.display_group.clone();
-                    existing.operation = parts.operation.clone();
-                    existing.defaults = normalized_defaults(request);
-                    existing.actor_id = Some(operator.operator.id);
-                    existing.built_in = false;
-                    existing.updated_at = now.clone();
-                    let view = existing.clone();
-                    drop(rows);
-                    record_memory_command_template_audit(
-                        memory,
-                        &view,
-                        operator,
-                        "command_template.upserted",
-                    )
-                    .await;
-                    return Ok(view);
-                }
-                let view = CommandTemplateView {
-                    id: Uuid::new_v4(),
-                    name: request.name.clone(),
-                    built_in: false,
-                    scope_kind: request.scope_kind.clone(),
-                    scope_value: request.scope_value.clone(),
-                    command_type: parts.command_type.clone(),
-                    display_group: parts.display_group.clone(),
-                    operation: parts.operation.clone(),
-                    defaults: normalized_defaults(request),
-                    actor_id: Some(operator.operator.id),
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                rows.push(view.clone());
-                drop(rows);
-                record_memory_command_template_audit(
-                    memory,
-                    &view,
-                    operator,
-                    "command_template.upserted",
-                )
-                .await;
-                Ok(view)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let existing_id = sqlx::query_scalar::<_, Uuid>(
@@ -285,26 +215,6 @@ impl Repository {
             "command_template_builtin_immutable"
         );
         match self {
-            Self::Memory(memory) => {
-                let mut rows = memory.command_templates.write().await;
-                let Some(index) = rows.iter().position(|row| row.id == template_id) else {
-                    return Ok(None);
-                };
-                ensure!(
-                    rows[index].name == reviewed_name.trim(),
-                    "command_template_delete_review_stale"
-                );
-                let view = rows.remove(index);
-                drop(rows);
-                record_memory_command_template_audit(
-                    memory,
-                    &view,
-                    operator,
-                    "command_template.deleted",
-                )
-                .await;
-                Ok(Some(view))
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let current_name = sqlx::query_scalar::<_, String>(
@@ -805,24 +715,6 @@ fn normalized_defaults(request: &UpsertCommandTemplateRequest) -> serde_json::Va
     } else {
         serde_json::json!({})
     }
-}
-
-async fn record_memory_command_template_audit(
-    memory: &crate::repository::MemoryState,
-    template: &CommandTemplateView,
-    operator: &AuthContext,
-    action: &'static str,
-) {
-    let metadata = command_template_audit_metadata(template, operator);
-    memory.audits.write().await.push(AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: format!("command_template:{}", template.id),
-        command_hash: None,
-        metadata,
-        created_at: unix_now().to_string(),
-    });
 }
 
 fn command_template_audit_metadata(

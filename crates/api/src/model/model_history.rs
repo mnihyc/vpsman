@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use vpsman_common::{
     DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT, DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
-    DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS, DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
-    MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
+    DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS, MIN_NETWORK_OBSERVATION_ROLLUP_RETENTION_DAYS,
+    MIN_TRAFFIC_COUNTER_ROLLUP_RETENTION_DAYS,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,27 +77,87 @@ impl HistoryDomain {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HistoryRetentionDomain {
+    AuditLogs,
+    SystemMetricRollups,
+    TelemetryRollups,
+    TelemetryNetworkRates,
+    TelemetryPingRollups,
+    TrafficCounterRollups,
+    JobOutputs,
+    NetworkObservations,
+    ClientStatusHistory,
+    GatewaySessions,
+}
+
+impl HistoryRetentionDomain {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::AuditLogs,
+        Self::SystemMetricRollups,
+        Self::TelemetryRollups,
+        Self::TelemetryNetworkRates,
+        Self::TelemetryPingRollups,
+        Self::TrafficCounterRollups,
+        Self::JobOutputs,
+        Self::NetworkObservations,
+        Self::ClientStatusHistory,
+        Self::GatewaySessions,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AuditLogs => "audit_logs",
+            Self::SystemMetricRollups => "system_metric_rollups",
+            Self::TelemetryRollups => "telemetry_rollups",
+            Self::TelemetryNetworkRates => "telemetry_network_rates",
+            Self::TelemetryPingRollups => "telemetry_ping_rollups",
+            Self::TrafficCounterRollups => "traffic_counter_rollups",
+            Self::JobOutputs => "job_outputs",
+            Self::NetworkObservations => "network_observations",
+            Self::ClientStatusHistory => "client_status_history",
+            Self::GatewaySessions => "gateway_sessions",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "audit_logs" | "audit" => Some(Self::AuditLogs),
+            "system_metric_rollups" | "system_metrics" | "system" => {
+                Some(Self::SystemMetricRollups)
+            }
+            "telemetry_rollups" | "telemetry" => Some(Self::TelemetryRollups),
+            "telemetry_network_rates" => Some(Self::TelemetryNetworkRates),
+            "telemetry_ping_rollups" | "ping" | "ping_metrics" => Some(Self::TelemetryPingRollups),
+            "traffic_counter_rollups" => Some(Self::TrafficCounterRollups),
+            "job_outputs" | "jobs" => Some(Self::JobOutputs),
+            "network_observations" | "network" => Some(Self::NetworkObservations),
+            "client_status_history" => Some(Self::ClientStatusHistory),
+            "gateway_sessions" => Some(Self::GatewaySessions),
+            _ => None,
+        }
+    }
 
     pub(crate) fn default_retention_days(self) -> i32 {
         match self {
             Self::JobOutputs => 30,
             Self::SystemMetricRollups => 3650,
-            Self::TelemetrySamples => DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
             Self::TelemetryRollups
             | Self::TelemetryNetworkRates
             | Self::TelemetryPingRollups
-            | Self::TrafficCounterSamples => DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
+            | Self::TrafficCounterRollups => DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
             Self::NetworkObservations => DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
-            Self::TopologyHistory => 180,
             Self::ClientStatusHistory | Self::GatewaySessions => 365,
             Self::AuditLogs => 365,
-            Self::BackupArtifacts => 3650,
         }
     }
 
     pub(crate) fn minimum_retention_days(self) -> i32 {
         match self {
-            Self::TrafficCounterSamples => MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
+            Self::NetworkObservations => MIN_NETWORK_OBSERVATION_ROLLUP_RETENTION_DAYS,
+            Self::TrafficCounterRollups => MIN_TRAFFIC_COUNTER_ROLLUP_RETENTION_DAYS,
             _ => 1,
         }
     }
@@ -106,21 +166,30 @@ impl HistoryDomain {
         match self {
             Self::NetworkObservations => DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT,
             Self::JobOutputs => 5_000,
-            Self::TelemetrySamples
+            Self::SystemMetricRollups
             | Self::TelemetryRollups
             | Self::TelemetryNetworkRates
-            | Self::TrafficCounterSamples => DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
-            Self::TelemetryPingRollups => DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
-            Self::SystemMetricRollups
-            | Self::TopologyHistory
-            | Self::ClientStatusHistory
-            | Self::GatewaySessions => 2_000,
-            Self::AuditLogs | Self::BackupArtifacts => 1_000,
+            | Self::TelemetryPingRollups
+            | Self::TrafficCounterRollups => DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
+            Self::ClientStatusHistory | Self::GatewaySessions => 2_000,
+            Self::AuditLogs => 1_000,
         }
     }
 
     pub(crate) fn object_backed(self) -> bool {
-        matches!(self, Self::JobOutputs | Self::BackupArtifacts)
+        matches!(self, Self::JobOutputs)
+    }
+
+    pub(crate) fn supports_disable(self) -> bool {
+        !matches!(
+            self,
+            Self::SystemMetricRollups
+                | Self::TelemetryRollups
+                | Self::TelemetryNetworkRates
+                | Self::TelemetryPingRollups
+                | Self::TrafficCounterRollups
+                | Self::NetworkObservations
+        )
     }
 }
 
@@ -205,7 +274,7 @@ pub(crate) struct HistoryExportView {
 
 #[derive(Clone, Debug)]
 pub(crate) struct HistoryRetentionPrunePlan {
-    pub(crate) domain: HistoryDomain,
+    pub(crate) domain: HistoryRetentionDomain,
     pub(crate) prune_limit: i32,
     pub(crate) enabled: bool,
 }

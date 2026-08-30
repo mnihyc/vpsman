@@ -55,8 +55,6 @@ pub struct SuiteGatewayConfig {
 pub struct SuiteWorkerConfig {
     pub tick_secs: Option<u64>,
     pub once: Option<bool>,
-    pub worker_id: Option<String>,
-    pub worker_lease_secs: Option<i32>,
     pub agent_offline_timeout_secs: Option<i64>,
     pub notification_delivery_limit: Option<i64>,
     pub notification_retention_days: Option<i64>,
@@ -65,7 +63,6 @@ pub struct SuiteWorkerConfig {
     pub webhook_rule_delivery_limit: Option<i64>,
     pub webhook_rule_materialize_limit: Option<i64>,
     pub webhook_rule_retention_days: Option<i64>,
-    pub webhook_rule_telemetry_event_retention_days: Option<i64>,
     pub webhook_rule_retention_prune_limit: Option<i64>,
     pub webhook_rule_timeout_secs: Option<u64>,
     pub backup_policy_prune_enabled: Option<bool>,
@@ -116,9 +113,6 @@ pub struct SuiteCapacityConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SuiteTimeoutConfig {
     pub max_job_timeout_secs: Option<u64>,
-    pub worker_schedule_job_max_timeout_secs: Option<u64>,
-    pub agent_offline_secs: Option<i64>,
-    pub gateway_reconnect_grace_secs: Option<u64>,
     pub internal_http_connect_secs: Option<u64>,
     pub internal_http_write_secs: Option<u64>,
     pub internal_http_read_secs: Option<u64>,
@@ -203,25 +197,11 @@ impl SuiteConfig {
                 .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
             "worker.schedule_job_max_timeout_secs",
         )?;
-        validate_optional_u64(
-            self.timeout.worker_schedule_job_max_timeout_secs,
-            1,
-            self.timeout
-                .max_job_timeout_secs
-                .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
-            "timeout.worker_schedule_job_max_timeout_secs",
-        )?;
         validate_optional_i64(
             self.worker.agent_offline_timeout_secs,
             1,
             86_400,
             "worker.agent_offline_timeout_secs",
-        )?;
-        validate_optional_i64(
-            self.timeout.agent_offline_secs,
-            1,
-            86_400,
-            "timeout.agent_offline_secs",
         )?;
         validate_optional_u64(
             self.gateway.reconnect_grace_secs,
@@ -234,12 +214,6 @@ impl SuiteConfig {
             300,
             30 * 24 * 60 * 60,
             "gateway.command_output_event_ttl_secs",
-        )?;
-        validate_optional_u64(
-            self.timeout.gateway_reconnect_grace_secs,
-            0,
-            3600,
-            "timeout.gateway_reconnect_grace_secs",
         )?;
         validate_optional_u64(
             self.timeout.internal_http_connect_secs,
@@ -370,7 +344,6 @@ impl SuiteConfig {
                 "capacity.worker_db_pool".to_string(),
                 "capacity.gateway_telemetry_in_flight".to_string(),
                 "worker.once".to_string(),
-                "worker.worker_id".to_string(),
                 "timeout.internal_http_connect_secs".to_string(),
                 "timeout.internal_http_write_secs".to_string(),
             ],
@@ -383,7 +356,6 @@ impl SuiteConfig {
                 "timeout.control_deadline_grace_secs".to_string(),
                 "gateway.reconnect_grace_secs".to_string(),
                 "gateway.command_output_event_ttl_secs".to_string(),
-                "timeout.gateway_reconnect_grace_secs".to_string(),
                 "timeout.max_job_timeout_secs".to_string(),
                 "api.job_output_artifact_min_bytes".to_string(),
                 "api.artifact_max_bytes".to_string(),
@@ -392,14 +364,11 @@ impl SuiteConfig {
                 "api.operator_auth_*".to_string(),
                 "worker.schedule_job_max_timeout_secs".to_string(),
                 "worker.tick_secs".to_string(),
-                "worker.worker_lease_secs".to_string(),
                 "worker.agent_offline_timeout_secs".to_string(),
                 "worker.notification_*".to_string(),
                 "worker.webhook_rule_*".to_string(),
                 "worker.backup_policy_prune_*".to_string(),
                 "worker.require_registered_agent_updates".to_string(),
-                "timeout.worker_schedule_job_max_timeout_secs".to_string(),
-                "timeout.agent_offline_secs".to_string(),
                 "network.tunnel_*_allocation_pool_cidr".to_string(),
             ],
         }

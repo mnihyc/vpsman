@@ -141,10 +141,8 @@ pub(crate) async fn delete_agent(
         client_id: client_id.clone(),
         gateway_id: "inventory_delete".to_string(),
     });
-    let terminal_reconciliation = terminal_reconciliation_outcome(
-        state.process_job_terminal_events(500).await,
-        "VPS deletion",
-    );
+    crate::job_dispatcher::wake_job_terminal_event_consumer();
+    let terminal_reconciliation = terminal_reconciliation_outcome(Ok(()), "VPS deletion");
     Ok(Json(DeleteAgentResponse {
         client_id: deleted.client_id,
         deleted: true,
@@ -758,14 +756,7 @@ pub(crate) async fn bulk_mutate_tags(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    match &request.action {
-        crate::model::BulkTagMutationAction::Add => {
-            validate_persisted_tag_name(&request.tag)?;
-        }
-        crate::model::BulkTagMutationAction::Remove => {
-            validate_legacy_tag_name_for_cleanup(&request.tag)?;
-        }
-    }
+    validate_persisted_tag_name(&request.tag)?;
     validate_bulk_selector_expression(&request.selector_expression)?;
     let allow_vps_rule_selectors = operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ);
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
@@ -835,7 +826,7 @@ pub(crate) async fn delete_tag(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    validate_legacy_tag_name_for_cleanup(&tag)?;
+    validate_persisted_tag_name(&tag)?;
     let allow_vps_rule_selectors = operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ);
     if request.confirmed {
         let preview = state
@@ -1088,14 +1079,6 @@ fn validate_telemetry_sample_query(query: &TelemetrySampleQuery) -> Result<(), A
 }
 
 fn validate_persisted_tag_name(tag: &str) -> Result<(), ApiError> {
-    validate_legacy_tag_name_for_cleanup(tag)?;
-    if tag.split(':').any(str::is_empty) {
-        return Err(ApiError::bad_request("invalid_tag_name"));
-    }
-    Ok(())
-}
-
-fn validate_legacy_tag_name_for_cleanup(tag: &str) -> Result<(), ApiError> {
     if tag.is_empty() || tag.len() > 128 {
         return Err(ApiError::bad_request("invalid_tag_name"));
     }
@@ -1106,6 +1089,9 @@ fn validate_legacy_tag_name_for_cleanup(tag: &str) -> Result<(), ApiError> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
     {
+        return Err(ApiError::bad_request("invalid_tag_name"));
+    }
+    if tag.split(':').any(str::is_empty) {
         return Err(ApiError::bad_request("invalid_tag_name"));
     }
     Ok(())

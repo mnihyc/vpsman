@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::time::Duration;
-use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     is_fleet_alert_notification_delivery_process_status, payload_hash,
@@ -30,6 +29,7 @@ use crate::{
 
 const NOTIFICATION_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const NOTIFICATION_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
+const NOTIFICATION_PROCESS_OUTCOME_SKIPPED_CURRENT_OWNER: &str = "skipped_current_owner";
 const NOTIFICATION_DELIVERY_LEASE_MARGIN_SECS: i64 = 60;
 const MAX_NOTIFICATION_ERROR_BYTES: usize = 1024;
 const MAX_NOTIFICATION_DELIVERY_ATTEMPTS: i32 = 4;
@@ -144,53 +144,60 @@ impl AppState {
                 })
                 .collect());
         }
-        let delivery_ids = filtered_deliveries
-            .iter()
-            .map(|delivery| delivery.id)
-            .collect::<Vec<_>>();
-        let expected_ids = delivery_ids.iter().copied().collect::<HashSet<_>>();
-        let lease_id = Uuid::new_v4();
-        let lease_secs = notification_delivery_lease_secs(delivery_ids.len());
-        let claimed_deliveries = self
-            .repo
-            .claim_fleet_alert_notification_deliveries_for_process(
-                &delivery_ids,
-                lease_id,
-                lease_secs,
-            )
-            .await?;
-        let claimed_ids = claimed_deliveries
-            .iter()
-            .map(|delivery| delivery.id)
-            .collect::<HashSet<_>>();
-        anyhow::ensure!(
-            claimed_ids == expected_ids,
-            "fleet_alert_notification_process_claim_mismatch"
-        );
+        let lease_secs = notification_delivery_lease_secs();
         let mut processed = Vec::new();
-        for delivery in claimed_deliveries {
+        for requested_delivery in filtered_deliveries {
+            let delivery_id = requested_delivery.id;
+            let lease_id = Uuid::new_v4();
+            let Some(delivery) = self
+                .repo
+                .claim_fleet_alert_notification_delivery_for_process(
+                    delivery_id,
+                    lease_id,
+                    lease_secs,
+                )
+                .await?
+            else {
+                // The reviewed row remains owned by the automatic oldest-first
+                // consumer (or has already left its reviewed status). Report
+                // that request-local outcome without changing durable state.
+                let mut skipped = requested_delivery;
+                skipped.process_outcome =
+                    Some(NOTIFICATION_PROCESS_OUTCOME_SKIPPED_CURRENT_OWNER.to_string());
+                processed.push(skipped);
+                continue;
+            };
+            anyhow::ensure!(
+                delivery.id == delivery_id,
+                "fleet_alert_notification_process_claim_mismatch"
+            );
             if !self
                 .repo
                 .fleet_alert_notification_channel_enabled(delivery.channel_id)
                 .await?
             {
-                processed.push(
-                    self.repo
-                        .cancel_claimed_fleet_alert_notification_delivery(
-                            delivery.id,
-                            lease_id,
-                            "fleet alert notification channel disabled",
-                            None,
-                        )
-                        .await?,
-                );
+                let canceled = self
+                    .repo
+                    .cancel_claimed_fleet_alert_notification_delivery(
+                        delivery.id,
+                        lease_id,
+                        "fleet alert notification channel disabled",
+                    )
+                    .await?;
+                self.repo
+                    .record_fleet_alert_notification_process_audit(
+                        std::slice::from_ref(&canceled),
+                        operator,
+                    )
+                    .await?;
+                processed.push(canceled);
                 continue;
             }
             let actor_authorized = self
                 .fleet_alert_delivery_actor_authorized(delivery.actor_id)
                 .await?;
-            let (result, mut send_guard) = if actor_authorized {
-                let mut send_guard = self
+            let (result, eligibility_revision) = if actor_authorized {
+                let send_eligibility = self
                     .repo
                     .begin_fleet_alert_notification_send(
                         delivery.id,
@@ -199,8 +206,8 @@ impl AppState {
                         lease_id,
                     )
                     .await?;
-                if !send_guard.is_deliverable() {
-                    let cancellation_reason = if send_guard.channel_enabled() {
+                if !send_eligibility.is_deliverable() {
+                    let cancellation_reason = if send_eligibility.channel_enabled() {
                         "fleet alert resolved or client suspended"
                     } else {
                         "fleet alert notification channel disabled"
@@ -211,20 +218,21 @@ impl AppState {
                             delivery.id,
                             lease_id,
                             cancellation_reason,
-                            Some(&mut send_guard),
                         )
-                        .await;
-                    if let Err(error) = send_guard.release().await {
-                        warn!(
-                            delivery_id = %delivery.id,
-                            error = %error,
-                            "failed to release fleet alert notification suspension fence"
-                        );
-                    }
-                    processed.push(canceled?);
+                        .await?;
+                    self.repo
+                        .record_fleet_alert_notification_process_audit(
+                            std::slice::from_ref(&canceled),
+                            operator,
+                        )
+                        .await?;
+                    processed.push(canceled);
                     continue;
                 }
-                (deliver_notification(&delivery).await, Some(send_guard))
+                (
+                    deliver_notification(&delivery).await,
+                    send_eligibility.revision(),
+                )
             } else {
                 (Err(anyhow::anyhow!("actor_authority_revoked")), None)
             };
@@ -261,24 +269,16 @@ impl AppState {
                     status,
                     error.as_deref(),
                     next_attempt_after_secs,
-                    send_guard.as_mut(),
+                    eligibility_revision,
                 )
-                .await;
-            if let Some(send_guard) = send_guard {
-                if let Err(error) = send_guard.release().await {
-                    warn!(
-                        delivery_id = %delivery.id,
-                        error = %error,
-                        "failed to release fleet alert notification suspension fence"
-                    );
-                }
-            }
-            processed.push(completion?);
-        }
-        if !dry_run && !processed.is_empty() {
-            self.repo
-                .record_fleet_alert_notification_process_audit(&processed, operator)
                 .await?;
+            self.repo
+                .record_fleet_alert_notification_process_audit(
+                    std::slice::from_ref(&completion),
+                    operator,
+                )
+                .await?;
+            processed.push(completion);
         }
         Ok(processed)
     }
@@ -491,6 +491,7 @@ fn dry_run_delivery(
         created_at: unix_now().to_string(),
         delivered_at: None,
         review_preview_hash: None,
+        process_outcome: None,
     }
 }
 
@@ -668,10 +669,8 @@ async fn deliver_webhook_payload(delivery: &FleetAlertNotificationDeliveryView) 
     .context("fleet alert notification delivery timed out")?
 }
 
-fn notification_delivery_lease_secs(delivery_count: usize) -> i64 {
-    i64::try_from(delivery_count)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(NOTIFICATION_WEBHOOK_TIMEOUT_SECS as i64)
+fn notification_delivery_lease_secs() -> i64 {
+    (NOTIFICATION_WEBHOOK_TIMEOUT_SECS as i64)
         .saturating_add(NOTIFICATION_DELIVERY_LEASE_MARGIN_SECS)
         .max(NOTIFICATION_DELIVERY_LEASE_MARGIN_SECS)
 }

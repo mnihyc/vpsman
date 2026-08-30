@@ -10,14 +10,16 @@ pub const VPS_RULE_KEY_TRAFFIC_SELECTORS: &str = "traffic.selectors";
 pub const VPS_RULE_KEY_BILLING_PRICE: &str = "billing.price";
 pub const VPS_RULE_KEY_BILLING_CYCLE: &str = "billing.cycle";
 pub const VPS_RULE_KEY_NETWORK_PORT_SPEED: &str = "network.port_speed";
+pub const VPS_RULE_KEY_NETWORK_INTERFACES: &str = "network.interfaces";
 pub const VPS_RULE_KEY_NETWORK_RATE_INTERFACES: &str = "network.rate.interfaces";
 pub const VPS_RULE_KEY_PRODUCT_NAME: &str = "product.name";
 pub const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX: &str = "[traffic.selectors]";
 
-pub const SUPPORTED_VPS_RULE_KEYS: [&str; 10] = [
+pub const SUPPORTED_VPS_RULE_KEYS: [&str; 11] = [
     VPS_RULE_KEY_BILLING_PRICE,
     VPS_RULE_KEY_BILLING_CYCLE,
     VPS_RULE_KEY_NETWORK_PORT_SPEED,
+    VPS_RULE_KEY_NETWORK_INTERFACES,
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
     VPS_RULE_KEY_PRODUCT_NAME,
     VPS_RULE_KEY_TRAFFIC_RESET_DAY,
@@ -40,6 +42,75 @@ pub struct ParsedVpsRuleValue {
     pub display: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkInterfaceSource {
+    Host,
+    Tunnel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NetworkInterfacePolicy {
+    DefaultPhysical,
+    All,
+    Patterns(Vec<String>),
+}
+
+impl NetworkInterfacePolicy {
+    pub fn from_rule_json(value: Option<&Value>) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::DefaultPhysical);
+        };
+        match value.get("mode").and_then(Value::as_str) {
+            Some("all") => Ok(Self::All),
+            Some("patterns") => {
+                let patterns = value
+                    .get("patterns")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "network_interfaces_patterns_invalid".to_string())?;
+                ensure(
+                    !patterns.is_empty() && patterns.len() <= MAX_TRAFFIC_SELECTOR_ITEMS,
+                    "network_interfaces_patterns_invalid",
+                )?;
+                let mut parsed = Vec::with_capacity(patterns.len());
+                let mut seen = BTreeSet::new();
+                for pattern in patterns {
+                    let pattern = pattern
+                        .as_str()
+                        .ok_or_else(|| "network_interfaces_pattern_invalid".to_string())?;
+                    validate_network_interface_pattern(pattern)?;
+                    ensure(
+                        pattern != "*" && seen.insert(pattern),
+                        "network_interfaces_pattern_invalid",
+                    )?;
+                    parsed.push(pattern.to_string());
+                }
+                Ok(Self::Patterns(parsed))
+            }
+            _ => Err("network_interfaces_mode_invalid".to_string()),
+        }
+    }
+
+    pub fn matches(&self, source: NetworkInterfaceSource, interface: &str) -> bool {
+        match self {
+            Self::DefaultPhysical => {
+                source == NetworkInterfaceSource::Host
+                    && (interface.starts_with('e') || interface.starts_with('w'))
+            }
+            Self::All => true,
+            Self::Patterns(patterns) => patterns
+                .iter()
+                .any(|pattern| network_interface_pattern_matches(pattern, interface)),
+        }
+    }
+}
+
+pub fn network_interface_pattern_matches(pattern: &str, interface: &str) -> bool {
+    pattern == "*"
+        || pattern
+            .strip_suffix('*')
+            .map_or(interface == pattern, |prefix| interface.starts_with(prefix))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct TrafficSelector {
     source: String,
@@ -49,37 +120,20 @@ struct TrafficSelector {
 }
 
 pub fn parse_vps_rule_value(key: &str, value: &str) -> Result<ParsedVpsRuleValue, String> {
-    parse_vps_rule_value_with_options(key, value, false)
-}
-
-pub fn parse_persisted_vps_rule_value(
-    key: &str,
-    value: &str,
-) -> Result<ParsedVpsRuleValue, String> {
-    parse_vps_rule_value_with_options(key, value, true)
-}
-
-fn parse_vps_rule_value_with_options(
-    key: &str,
-    value: &str,
-    allow_direction_overlap: bool,
-) -> Result<ParsedVpsRuleValue, String> {
     let key = normalize_vps_rule_key(key)?;
     ensure(
         value.len() <= MAX_VPS_RULE_VALUE_BYTES,
         "vps_rules_value_too_long",
     )?;
     let raw = value.trim();
-    ensure(
-        !raw.is_empty() || key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-        "vps_rules_empty_value_invalid",
-    )?;
+    ensure(!raw.is_empty(), "vps_rules_empty_value_invalid")?;
     match key {
         VPS_RULE_KEY_TRAFFIC_RESET_DAY => parse_traffic_reset_day(raw),
         VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL
         | VPS_RULE_KEY_TRAFFIC_QUOTA_RX
         | VPS_RULE_KEY_TRAFFIC_QUOTA_TX => parse_traffic_quota(raw),
-        VPS_RULE_KEY_TRAFFIC_SELECTORS => parse_traffic_selectors(raw, allow_direction_overlap),
+        VPS_RULE_KEY_TRAFFIC_SELECTORS => parse_traffic_selectors(raw),
+        VPS_RULE_KEY_NETWORK_INTERFACES => parse_network_interfaces(raw),
         VPS_RULE_KEY_NETWORK_RATE_INTERFACES => parse_network_rate_interfaces(raw),
         VPS_RULE_KEY_BILLING_PRICE => parse_billing_price(raw),
         VPS_RULE_KEY_BILLING_CYCLE => parse_billing_cycle(raw),
@@ -99,22 +153,53 @@ fn normalize_vps_rule_key(key: &str) -> Result<&str, String> {
 }
 
 fn parse_traffic_reset_day(raw: &str) -> Result<ParsedVpsRuleValue, String> {
-    let day = raw
+    let parts = raw.split_whitespace().collect::<Vec<_>>();
+    ensure((1..=2).contains(&parts.len()), "traffic_reset_day_invalid")?;
+    let day = parts[0]
         .parse::<i32>()
-        .map_err(|_| "traffic.reset_day must be an integer".to_string())?;
+        .map_err(|_| "traffic_reset_day_invalid".to_string())?;
     ensure(
         day == -1 || (1..=31).contains(&day),
         "traffic_reset_day_invalid",
     )?;
-    let canonical = day.to_string();
+    if day == -1 {
+        ensure(parts.len() == 1, "traffic_reset_day_invalid")?;
+        return Ok(ParsedVpsRuleValue {
+            raw: "-1".to_string(),
+            json: json!({"day": -1, "hour": 0}),
+            display: "-".to_string(),
+        });
+    }
+    let hour = if let Some(time) = parts.get(1) {
+        let time = time.split(':').collect::<Vec<_>>();
+        ensure(time.len() == 2, "traffic_reset_day_invalid")?;
+        ensure(
+            time[0].len() == 2
+                && time[1].len() == 2
+                && time
+                    .iter()
+                    .all(|part| part.chars().all(|ch| ch.is_ascii_digit())),
+            "traffic_reset_day_invalid",
+        )?;
+        let hour = time[0]
+            .parse::<i32>()
+            .map_err(|_| "traffic_reset_day_invalid".to_string())?;
+        let minute = time[1]
+            .parse::<i32>()
+            .map_err(|_| "traffic_reset_day_invalid".to_string())?;
+        ensure(
+            (0..=23).contains(&hour) && (0..=59).contains(&minute),
+            "traffic_reset_day_invalid",
+        )?;
+        hour
+    } else {
+        0
+    };
+    let canonical = format!("{day} {hour:02}:00");
     Ok(ParsedVpsRuleValue {
         raw: canonical,
-        json: json!({"day": day}),
-        display: if day == -1 {
-            "-".to_string()
-        } else {
-            format!("{day} UTC")
-        },
+        json: json!({"day": day, "hour": hour}),
+        display: format!("{day} {hour:02}:00 UTC"),
     })
 }
 
@@ -152,17 +237,38 @@ fn parse_traffic_quota(raw: &str) -> Result<ParsedVpsRuleValue, String> {
     })
 }
 
-fn parse_traffic_selectors(
-    raw: &str,
-    allow_direction_overlap: bool,
-) -> Result<ParsedVpsRuleValue, String> {
-    let selectors = parse_traffic_selector_list(raw, allow_direction_overlap)?;
+fn parse_traffic_selectors(raw: &str) -> Result<ParsedVpsRuleValue, String> {
+    if raw == "*" {
+        return Ok(ParsedVpsRuleValue {
+            raw: "*".to_string(),
+            json: json!({"mode": "all"}),
+            display: "All eligible interfaces".to_string(),
+        });
+    }
+    let selectors = parse_traffic_selector_list(raw)?;
     Ok(ParsedVpsRuleValue {
         raw: canonical_selector_list(&selectors),
         json: json!({
+            "mode": "exact",
             "selectors": selectors.iter().map(traffic_selector_json).collect::<Vec<_>>()
         }),
         display: format!("{} selectors", selectors.len()),
+    })
+}
+
+fn parse_network_interfaces(raw: &str) -> Result<ParsedVpsRuleValue, String> {
+    if raw == "*" {
+        return Ok(ParsedVpsRuleValue {
+            raw: "*".to_string(),
+            json: json!({"mode": "all"}),
+            display: "All reported interfaces".to_string(),
+        });
+    }
+    let patterns = parse_network_interface_patterns(raw)?;
+    Ok(ParsedVpsRuleValue {
+        raw: patterns.join(","),
+        json: json!({"mode": "patterns", "patterns": patterns}),
+        display: format!("{} interface patterns", patterns.len()),
     })
 }
 
@@ -177,14 +283,15 @@ fn parse_network_rate_interfaces(raw: &str) -> Result<ParsedVpsRuleValue, String
             display: "Traffic selectors (referenced)".to_string(),
         });
     }
-    if raw.is_empty() || raw == "[]" {
+    if raw == "*" {
         return Ok(ParsedVpsRuleValue {
-            raw: "[]".to_string(),
+            raw: "*".to_string(),
             json: json!({"mode": "all"}),
-            display: "All reported interfaces".to_string(),
+            display: "All eligible interfaces".to_string(),
         });
     }
-    let selectors = parse_traffic_selector_list(raw, false)?;
+    ensure(raw != "[]", "network_rate_selector_obsolete_all_invalid")?;
+    let selectors = parse_traffic_selector_list(raw)?;
     ensure(
         selectors.iter().all(|selector| selector.source == "host"),
         "network_rate_selector_source_invalid",
@@ -525,10 +632,7 @@ fn parse_billing_month(input: &str) -> Result<u8, String> {
     Ok(month)
 }
 
-fn parse_traffic_selector_list(
-    input: &str,
-    allow_direction_overlap: bool,
-) -> Result<Vec<TrafficSelector>, String> {
+fn parse_traffic_selector_list(input: &str) -> Result<Vec<TrafficSelector>, String> {
     let raw = input.trim();
     ensure(!raw.is_empty(), "traffic_selector_empty")?;
     let mut selectors = Vec::new();
@@ -544,12 +648,10 @@ fn parse_traffic_selector_list(
         let selected = selected_directions
             .entry((selector.source.clone(), selector.interface.clone()))
             .or_default();
-        if !allow_direction_overlap {
-            ensure(
-                *selected & requested_directions == 0,
-                "traffic_selector_direction_overlap",
-            )?;
-        }
+        ensure(
+            *selected & requested_directions == 0,
+            "traffic_selector_direction_overlap",
+        )?;
         *selected |= requested_directions;
         selectors.push(selector);
     }
@@ -581,6 +683,7 @@ fn parse_traffic_selector(item: &str) -> Result<TrafficSelector, String> {
     ensure(!interface.is_empty(), "traffic_selector_interface_required")?;
     ensure(
         interface.len() <= MAX_TRAFFIC_INTERFACE_BYTES
+            && !interface.contains('*')
             && !interface.chars().any(|character| {
                 character == ','
                     || character == '+'
@@ -615,6 +718,46 @@ fn parse_traffic_selector(item: &str) -> Result<TrafficSelector, String> {
         direction,
         canonical,
     })
+}
+
+fn parse_network_interface_patterns(input: &str) -> Result<Vec<String>, String> {
+    let mut patterns = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in input.split(',') {
+        let pattern = item.trim();
+        validate_network_interface_pattern(pattern)?;
+        ensure(pattern != "*", "network_interfaces_all_must_stand_alone")?;
+        ensure(
+            seen.insert(pattern.to_string()),
+            "network_interfaces_pattern_duplicate",
+        )?;
+        patterns.push(pattern.to_string());
+    }
+    ensure(
+        !patterns.is_empty() && patterns.len() <= MAX_TRAFFIC_SELECTOR_ITEMS,
+        "network_interfaces_too_many_patterns",
+    )?;
+    Ok(patterns)
+}
+
+fn validate_network_interface_pattern(pattern: &str) -> Result<(), String> {
+    ensure(
+        !pattern.is_empty()
+            && pattern.len() <= MAX_TRAFFIC_INTERFACE_BYTES
+            && !pattern.chars().any(|character| {
+                character == ','
+                    || character == '+'
+                    || character == ':'
+                    || character.is_whitespace()
+                    || character.is_control()
+            })
+            && match pattern.matches('*').count() {
+                0 => true,
+                1 => pattern.ends_with('*'),
+                _ => false,
+            },
+        "network_interfaces_pattern_invalid",
+    )
 }
 
 fn traffic_selector_direction_mask(selector: &TrafficSelector) -> u8 {
@@ -657,7 +800,7 @@ mod tests {
     #[test]
     fn normalizes_operator_facing_rule_values() {
         let cases = [
-            (VPS_RULE_KEY_TRAFFIC_RESET_DAY, "014", "14"),
+            (VPS_RULE_KEY_TRAFFIC_RESET_DAY, "014", "14 00:00"),
             (VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, " 04.00 tb ", "4TB"),
             (VPS_RULE_KEY_NETWORK_PORT_SPEED, "1.500gbps", "1.5 Gbps"),
             (VPS_RULE_KEY_BILLING_PRICE, "29.9 cny / M", "29.90 CNY/m"),
@@ -723,6 +866,23 @@ mod tests {
             day_only.json,
             json!({"day": 7, "month": null, "display": "7"})
         );
+    }
+
+    #[test]
+    fn traffic_reset_accepts_hour_and_never_persists_minute_precision() {
+        let parsed = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "29 05:37").unwrap();
+        assert_eq!(parsed.raw, "29 05:00");
+        assert_eq!(parsed.json, json!({"day": 29, "hour": 5}));
+        assert_eq!(parsed.display, "29 05:00 UTC");
+
+        let day_only = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "29").unwrap();
+        assert_eq!(day_only.raw, "29 00:00");
+        assert_eq!(day_only.json, json!({"day": 29, "hour": 0}));
+
+        let no_reset = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "-1").unwrap();
+        assert_eq!(no_reset.raw, "-1");
+        assert_eq!(no_reset.json, json!({"day": -1, "hour": 0}));
+        assert!(parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "-1 05:00").is_err());
     }
 
     #[test]
@@ -858,6 +1018,84 @@ mod tests {
             parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth0+tx/rx,eth0+rx").unwrap_err(),
             "traffic_selector_direction_overlap"
         );
+    }
+
+    #[test]
+    fn interface_policy_grammar_is_bounded_and_case_sensitive() {
+        let patterns =
+            parse_vps_rule_value(VPS_RULE_KEY_NETWORK_INTERFACES, " w*, eth0, ens* ").unwrap();
+        assert_eq!(patterns.raw, "w*,eth0,ens*");
+        assert_eq!(
+            patterns.json,
+            json!({"mode": "patterns", "patterns": ["w*", "eth0", "ens*"]})
+        );
+        let policy = NetworkInterfacePolicy::from_rule_json(Some(&patterns.json)).unwrap();
+        assert!(policy.matches(NetworkInterfaceSource::Host, "wlan0"));
+        assert!(policy.matches(NetworkInterfaceSource::Tunnel, "ens-tunnel"));
+        assert!(!policy.matches(NetworkInterfaceSource::Host, "WLAN0"));
+        assert!(!policy.matches(NetworkInterfaceSource::Host, "eth1"));
+
+        let default = NetworkInterfacePolicy::from_rule_json(None).unwrap();
+        assert!(default.matches(NetworkInterfaceSource::Host, "eth0"));
+        assert!(default.matches(NetworkInterfaceSource::Host, "wlan0"));
+        assert!(!default.matches(NetworkInterfaceSource::Host, "lo"));
+        assert!(!default.matches(NetworkInterfaceSource::Tunnel, "eth-tunnel"));
+
+        let all = parse_vps_rule_value(VPS_RULE_KEY_NETWORK_INTERFACES, "*").unwrap();
+        assert_eq!(all.json, json!({"mode": "all"}));
+        assert!(NetworkInterfacePolicy::from_rule_json(Some(&all.json))
+            .unwrap()
+            .matches(NetworkInterfaceSource::Tunnel, "wg0"));
+
+        for invalid in [
+            "",
+            "*,eth0",
+            "eth*0",
+            "eth**",
+            "host:eth0",
+            "eth0+rx",
+            "e*,e*",
+        ] {
+            assert!(
+                parse_vps_rule_value(VPS_RULE_KEY_NETWORK_INTERFACES, invalid).is_err(),
+                "input={invalid:?}"
+            );
+        }
+        assert!(parse_vps_rule_value(
+            VPS_RULE_KEY_NETWORK_INTERFACES,
+            &(0..17)
+                .map(|index| format!("eth{index}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn selector_all_is_explicit_and_exact_selectors_cannot_contain_wildcards() {
+        let traffic_all = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, "*").unwrap();
+        assert_eq!(traffic_all.raw, "*");
+        assert_eq!(traffic_all.json, json!({"mode": "all"}));
+
+        let traffic_exact =
+            parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth0+rx").unwrap();
+        assert_eq!(traffic_exact.json["mode"], "exact");
+
+        let rate_all = parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "*").unwrap();
+        assert_eq!(rate_all.raw, "*");
+        assert_eq!(rate_all.json, json!({"mode": "all"}));
+        for invalid in ["", "[]", "eth*", "*,eth0"] {
+            assert!(
+                parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, invalid).is_err(),
+                "input={invalid:?}"
+            );
+        }
+        for invalid in ["eth*", "*,eth0", "tunnel:wg*"] {
+            assert!(
+                parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, invalid).is_err(),
+                "input={invalid:?}"
+            );
+        }
     }
 
     #[test]

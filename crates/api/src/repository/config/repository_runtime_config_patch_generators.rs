@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, RenderRuntimeConfigPatchGeneratorRequest,
+        AuthContext, RenderRuntimeConfigPatchGeneratorRequest,
         RuntimeConfigPatchGeneratorRenderView, RuntimeConfigPatchGeneratorView,
         UpsertRuntimeConfigPatchGeneratorRequest,
     },
@@ -21,15 +21,6 @@ impl Repository {
         self.ensure_builtin_runtime_config_patch_generators()
             .await?;
         match self {
-            Self::Memory(memory) => {
-                let mut generators = memory.runtime_config_patch_generators.read().await.clone();
-                generators.sort_by(|left, right| {
-                    left.category
-                        .cmp(&right.category)
-                        .then_with(|| left.name.cmp(&right.name))
-                });
-                Ok(generators)
-            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -83,61 +74,40 @@ impl Repository {
             &generator.field_schema,
         )?;
         match self {
-            Self::Memory(memory) => {
-                self.ensure_builtin_runtime_config_patch_generators()
-                    .await?;
-                // Hold primary and audit state together so cancellation cannot persist only one.
-                let mut generators = memory.runtime_config_patch_generators.write().await;
-                let mut audits = memory.audits.write().await;
-                if request.id.is_none() {
-                    if let Some(existing) = generators.iter().find(|existing| {
-                        runtime_config_patch_generator_material_matches(existing, &generator)
-                    }) {
-                        return Ok(existing.clone());
-                    }
-                }
-                let saved = if let Some(existing) =
-                    generators.iter_mut().find(|existing| existing.id == id)
-                {
-                    anyhow::ensure!(
-                        !existing.built_in,
-                        "runtime_config_patch_generator_builtin_immutable"
-                    );
-                    let created_at = existing.created_at.clone();
-                    *existing = RuntimeConfigPatchGeneratorView {
-                        id: generator.id,
-                        name: generator.name.clone(),
-                        category: generator.category.clone(),
-                        domain: generator.domain.clone(),
-                        description: generator.description.clone(),
-                        field_schema: generator.field_schema.clone(),
-                        raw_generator_body: generator.raw_generator_body.clone(),
-                        docs_metadata: generator.docs_metadata.clone(),
-                        built_in: false,
-                        actor_id: generator.actor_id,
-                        created_at,
-                        updated_at: generator.updated_at.clone(),
-                    };
-                    existing.clone()
-                } else {
-                    generators.push(generator.clone());
-                    generator.clone()
-                };
-                audits.push(runtime_config_patch_generator_audit(
-                    "runtime_config_patch_generator.saved",
-                    &saved,
-                    operator,
-                    unix_now().to_string(),
-                ));
-                Ok(saved)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 if request.id.is_none() {
-                    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-                        .bind("vpsman.runtime_config_patch_generator.idless_upsert")
-                        .execute(&mut *tx)
-                        .await?;
+                    // An id-less retry is idempotent only for this complete
+                    // material identity. PostgreSQL's JSONB rendering
+                    // canonicalizes nested object key order before hashing, so
+                    // equivalent generators share one owner without
+                    // serializing unrelated definitions.
+                    sqlx::query(
+                        r#"
+                        SELECT pg_advisory_xact_lock(hashtextextended(
+                            'vpsman:runtime-config-patch-generator-material:' ||
+                            jsonb_build_array(
+                                $1::text,
+                                $2::text,
+                                $3::text,
+                                $4::text,
+                                $5::jsonb,
+                                $6::text,
+                                $7::jsonb
+                            )::text,
+                            0
+                        ))
+                        "#,
+                    )
+                    .bind(&generator.name)
+                    .bind(&generator.category)
+                    .bind(&generator.domain)
+                    .bind(&generator.description)
+                    .bind(SqlJson(&generator.field_schema))
+                    .bind(&generator.raw_generator_body)
+                    .bind(SqlJson(&generator.docs_metadata))
+                    .execute(&mut *tx)
+                    .await?;
                     let existing = sqlx::query(
                         r#"
                         SELECT
@@ -296,36 +266,6 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                self.ensure_builtin_runtime_config_patch_generators()
-                    .await?;
-                let mut generators = memory.runtime_config_patch_generators.write().await;
-                let existing = generators
-                    .iter()
-                    .find(|generator| generator.id == generator_id)
-                    .cloned()
-                    .with_context(|| "runtime_config_patch_generator_not_found")?;
-                anyhow::ensure!(
-                    !existing.built_in,
-                    "runtime_config_patch_generator_builtin_immutable"
-                );
-                anyhow::ensure!(
-                    existing.name == reviewed_name.trim(),
-                    "runtime_config_patch_generator_delete_review_stale"
-                );
-                generators.retain(|generator| generator.id != generator_id);
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(runtime_config_patch_generator_audit(
-                        "runtime_config_patch_generator.deleted",
-                        &existing,
-                        operator,
-                        unix_now().to_string(),
-                    ));
-                Ok(())
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let current = sqlx::query(
@@ -398,42 +338,8 @@ impl Repository {
 
     async fn ensure_builtin_runtime_config_patch_generators(&self) -> Result<()> {
         match self {
-            Self::Memory(memory) => {
-                let mut seeded = memory.runtime_config_patch_generators_seeded.write().await;
-                if *seeded {
-                    return Ok(());
-                }
-                let mut generators = memory.runtime_config_patch_generators.write().await;
-                for generator in builtin_patch_generators() {
-                    if !generators
-                        .iter()
-                        .any(|existing| existing.id == generator.id)
-                    {
-                        generators.push(generator);
-                    }
-                }
-                *seeded = true;
-                Ok(())
-            }
             Self::Postgres(_) => Ok(()),
         }
-    }
-}
-
-fn runtime_config_patch_generator_audit(
-    action: &str,
-    generator: &RuntimeConfigPatchGeneratorView,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: action.to_string(),
-        target: format!("runtime_config_patch_generator:{}", generator.id),
-        command_hash: None,
-        metadata: runtime_config_patch_generator_audit_metadata(generator, operator),
-        created_at,
     }
 }
 
@@ -476,20 +382,6 @@ fn patch_generator_from_row(row: sqlx::postgres::PgRow) -> Result<RuntimeConfigP
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
-}
-
-fn runtime_config_patch_generator_material_matches(
-    existing: &RuntimeConfigPatchGeneratorView,
-    candidate: &RuntimeConfigPatchGeneratorView,
-) -> bool {
-    !existing.built_in
-        && existing.name == candidate.name
-        && existing.category == candidate.category
-        && existing.domain == candidate.domain
-        && existing.description == candidate.description
-        && existing.field_schema == candidate.field_schema
-        && existing.raw_generator_body == candidate.raw_generator_body
-        && existing.docs_metadata == candidate.docs_metadata
 }
 
 fn validate_patch_generator_renderable(body: &str, field_schema: &JsonValue) -> Result<()> {
@@ -568,208 +460,4 @@ fn toml_literal(value: &JsonValue) -> Result<String> {
         JsonValue::Null => String::new(),
         JsonValue::Object(_) => anyhow::bail!("generator object values are not supported"),
     })
-}
-
-fn builtin_patch_generators() -> Vec<RuntimeConfigPatchGeneratorView> {
-    vec![
-        predefined_patch_generator(
-            "55555555-5555-4555-8555-555555555555",
-            "Autonomous updater enabled",
-            "update",
-            "agent_update",
-            "Enable agent autonomous self-update from an external version manifest.",
-            serde_json::json!({
-                "fields": {
-                    "unmanaged_version_url": {"type": "string", "default": "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"},
-                    "unmanaged_interval_secs": {"type": "integer", "minimum": 300, "maximum": 604800, "default": 86400},
-                    "unmanaged_jitter_secs": {"type": "integer", "minimum": 0, "maximum": 604800, "default": 86400},
-                    "unmanaged_activate": {"type": "boolean", "default": true},
-                    "unmanaged_restart_agent": {"type": "boolean", "default": true}
-                }
-            }),
-            "[update]\nunmanaged_enabled = true\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
-        ),
-        predefined_patch_generator(
-            "66666666-6666-4666-8666-666666666666",
-            "Autonomous updater disabled",
-            "update",
-            "agent_update",
-            "Disable agent autonomous self-update while keeping manifest URL and interval values explicit in runtime config.",
-            serde_json::json!({
-                "fields": {
-                    "unmanaged_version_url": {"type": "string", "default": "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"},
-                    "unmanaged_interval_secs": {"type": "integer", "minimum": 300, "maximum": 604800, "default": 86400},
-                    "unmanaged_jitter_secs": {"type": "integer", "minimum": 0, "maximum": 604800, "default": 86400},
-                    "unmanaged_activate": {"type": "boolean", "default": true},
-                    "unmanaged_restart_agent": {"type": "boolean", "default": true}
-                }
-            }),
-            "[update]\nunmanaged_enabled = false\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
-        ),
-        predefined_patch_generator(
-            "44444444-4444-4444-8444-444444444444",
-            "Declared tunnel observation",
-            "network",
-            "observation",
-            "Adjust observation timing for explicitly enabled tunnel plans. This never discovers tunnels or changes routing configuration.",
-            serde_json::json!({
-                "fields": {
-                    "latency_monitoring_enabled": {"type": "boolean", "default": true},
-                    "latency_monitoring_interval_secs": {"type": "number", "minimum": 15, "maximum": 3600, "default": 60},
-                    "latency_down_windows": {"type": "number", "minimum": 1, "maximum": 60, "default": 3}
-                }
-            }),
-            "[network]\nlatency_monitoring_enabled = {{latency_monitoring_enabled}}\nlatency_monitoring_interval_secs = {{latency_monitoring_interval_secs}}\nlatency_down_windows = {{latency_down_windows}}\n",
-        ),
-    ]
-}
-
-fn predefined_patch_generator(
-    id: &str,
-    name: &str,
-    category: &str,
-    domain: &str,
-    description: &str,
-    field_schema: JsonValue,
-    raw_generator_body: &str,
-) -> RuntimeConfigPatchGeneratorView {
-    RuntimeConfigPatchGeneratorView {
-        id: Uuid::parse_str(id).expect("predefined patch generator UUID must parse"),
-        name: name.to_string(),
-        category: category.to_string(),
-        domain: domain.to_string(),
-        description: description.to_string(),
-        field_schema,
-        raw_generator_body: raw_generator_body.to_string(),
-        docs_metadata: serde_json::json!({
-            "expandable": true,
-            "affected_sections": [category],
-            "patch_only": true,
-            "predefined": true
-        }),
-        built_in: true,
-        actor_id: None,
-        created_at: "0".to_string(),
-        updated_at: "0".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        model::{OperatorPreferences, OperatorView},
-        repository::MemoryState,
-    };
-
-    fn operator() -> AuthContext {
-        AuthContext {
-            operator: OperatorView {
-                id: Uuid::nil(),
-                username: "test".to_string(),
-                role: "admin".to_string(),
-                scopes: Vec::new(),
-                preferences: OperatorPreferences::default(),
-                totp_enabled: false,
-                status: "active".to_string(),
-                session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-                created_at: unix_now().to_string(),
-                disabled_at: None,
-                deleted_at: None,
-            },
-            session_id: None,
-        }
-    }
-
-    fn request(description: &str) -> UpsertRuntimeConfigPatchGeneratorRequest {
-        UpsertRuntimeConfigPatchGeneratorRequest {
-            id: None,
-            name: "Retry-safe generator".to_string(),
-            category: "update".to_string(),
-            domain: "agent_update".to_string(),
-            description: description.to_string(),
-            field_schema: serde_json::json!({}),
-            raw_generator_body: "[update]\nunmanaged_enabled = false\n".to_string(),
-            docs_metadata: serde_json::json!({"patch_only": true}),
-            confirmed: true,
-        }
-    }
-
-    #[tokio::test]
-    async fn idless_generator_exact_retry_reuses_identity_without_reapplying() {
-        let memory = MemoryState::default();
-        let repo = Repository::Memory(memory.clone());
-        let operator = operator();
-
-        let first = repo
-            .upsert_runtime_config_patch_generator(&request("retry fixture"), &operator)
-            .await
-            .unwrap();
-        let retried = repo
-            .upsert_runtime_config_patch_generator(&request("retry fixture"), &operator)
-            .await
-            .unwrap();
-
-        assert_eq!(retried.id, first.id);
-        assert_eq!(retried.created_at, first.created_at);
-        assert_eq!(retried.updated_at, first.updated_at);
-        assert_eq!(
-            memory
-                .runtime_config_patch_generators
-                .read()
-                .await
-                .iter()
-                .filter(|generator| !generator.built_in)
-                .count(),
-            1
-        );
-        assert_eq!(memory.audits.read().await.len(), 1);
-
-        let changed = repo
-            .upsert_runtime_config_patch_generator(&request("changed material"), &operator)
-            .await
-            .unwrap();
-        assert_ne!(changed.id, first.id);
-    }
-
-    #[tokio::test]
-    async fn canceled_generator_upsert_cannot_commit_before_its_audit() {
-        let memory = MemoryState::default();
-        let repo = Repository::Memory(memory.clone());
-        repo.list_runtime_config_patch_generators().await.unwrap();
-        let audit_guard = memory.audits.write().await;
-        let task = tokio::spawn({
-            let repo = repo.clone();
-            let operator = operator();
-            async move {
-                repo.upsert_runtime_config_patch_generator(
-                    &request("cancellation fixture"),
-                    &operator,
-                )
-                .await
-            }
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if memory.runtime_config_patch_generators.try_write().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("generator upsert did not reach the blocked audit acquisition");
-
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        drop(audit_guard);
-
-        assert!(memory
-            .runtime_config_patch_generators
-            .read()
-            .await
-            .iter()
-            .all(|generator| generator.built_in));
-        assert!(memory.audits.read().await.is_empty());
-    }
 }

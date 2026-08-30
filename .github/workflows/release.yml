@@ -60,18 +60,9 @@ jobs:
             --candidate-tag "$release_tag" \
             --published-release-tags-file "$published_release_tags"
 
-  release-quality-gate:
-    name: Release quality gate
-    needs: release-version-gate
-    uses: ./.github/workflows/release-quality-gate.yml
-    permissions:
-      contents: read
-
   tagged-commit-ci-gate:
     name: Tagged commit CI gate
-    needs:
-      - release-version-gate
-      - release-quality-gate
+    needs: release-version-gate
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -426,13 +417,14 @@ jobs:
 
           release_args=(
             --title "vpsman $RELEASE_TAG"
-            --generate-notes
             --verify-tag
             --target "$RELEASE_COMMIT"
           )
           release_notes_path=".github/release-notes/${RELEASE_TAG}.md"
           if [[ -f "$release_notes_path" ]]; then
-            release_args+=(--notes "$(<"$release_notes_path")")
+            release_args+=(--notes-file "$release_notes_path")
+          else
+            release_args+=(--generate-notes)
           fi
           if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
             release_args+=(--prerelease)

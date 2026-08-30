@@ -81,6 +81,13 @@ pub(crate) struct NewServerArtifact {
     pub(crate) metadata: serde_json::Value,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServerArtifactReservation {
+    Created(Uuid),
+    AlreadyActiveIdentical,
+    Conflict,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ServerArtifactCleanupCandidate {
     pub(crate) id: Uuid,
@@ -93,7 +100,6 @@ pub(crate) struct ServerArtifactCleanupCandidate {
     pub(crate) client_id: Option<String>,
     pub(crate) stream: Option<String>,
     pub(crate) seq: Option<i32>,
-    pub(crate) backup_artifact_id: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) reference_protected: bool,
 }

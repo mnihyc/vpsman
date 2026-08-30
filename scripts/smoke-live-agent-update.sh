@@ -288,7 +288,7 @@ assert_runtime_config_cache_valid() {
     return 1
   fi
   if ! jq -e '
-    .schema_version == 1
+    .schema_version == 2
       and (.content_hash | type == "string" and length == 64)
       and (.config_json | type == "string" and length > 0)
   ' "$runtime_config_cache" >/dev/null; then

@@ -4,18 +4,17 @@ use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, Expression, ExpressionContext,
-    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS,
-    SERVER_JOB_STATUS_CANCELED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
-    SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS, SERVER_JOB_STATUS_QUEUED,
+    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 use crate::{
     model::{
         ArtifactCleanupPreviewObjectView, ArtifactCleanupPreviewView, AuthContext,
-        NewServerArtifact, ServerArtifactCleanupCandidate, ServerJobView,
+        NewServerArtifact, ServerArtifactCleanupCandidate, ServerArtifactReservation,
+        ServerJobView,
     },
     repository::Repository,
-    unix_now,
 };
 
 const ARTIFACT_CLEANUP_CANDIDATE_PAGE_SIZE: i64 = 500;
@@ -23,26 +22,83 @@ const ARTIFACT_CLEANUP_CANDIDATE_PAGE_SIZE: i64 = 500;
 impl Repository {
     pub(crate) async fn register_server_artifact(&self, artifact: NewServerArtifact) -> Result<()> {
         match self {
-            Self::Memory(memory) => upsert_memory_server_artifact(memory, artifact, "active").await,
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                insert_server_artifact_in_tx(&mut tx, &artifact, "active").await?;
+                register_active_server_artifact_in_tx(&mut tx, &artifact).await?;
                 tx.commit().await?;
                 Ok(())
             }
         }
     }
 
-    pub(crate) async fn reserve_server_artifact(&self, artifact: NewServerArtifact) -> Result<()> {
+    pub(crate) async fn reserve_server_artifact(
+        &self,
+        artifact: NewServerArtifact,
+    ) -> Result<ServerArtifactReservation> {
         match self {
-            Self::Memory(memory) => {
-                upsert_memory_server_artifact(memory, artifact, "creating").await
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                insert_server_artifact_in_tx(&mut tx, &artifact, "creating").await?;
+                ensure!(
+                    artifact.size_bytes >= 0,
+                    "server_artifact_size_bytes_invalid"
+                );
+                let reservation_token = Uuid::new_v4();
+                let inserted = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO server_artifacts (
+                        id,
+                        domain,
+                        object_key,
+                        sha256_hex,
+                        size_bytes,
+                        status,
+                        reservation_token,
+                        job_id,
+                        client_id,
+                        stream,
+                        seq,
+                        backup_request_id,
+                        backup_artifact_id,
+                        release_id,
+                        metadata
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, 'creating', $6,
+                        $7, $8, $9, $10, $11, $12, $13, $14
+                    )
+                    ON CONFLICT (object_key) DO NOTHING
+                    RETURNING reservation_token
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(&artifact.domain)
+                .bind(&artifact.object_key)
+                .bind(&artifact.sha256_hex)
+                .bind(artifact.size_bytes)
+                .bind(reservation_token)
+                .bind(artifact.job_id)
+                .bind(&artifact.client_id)
+                .bind(&artifact.stream)
+                .bind(artifact.seq)
+                .bind(artifact.backup_request_id)
+                .bind(artifact.backup_artifact_id)
+                .bind(artifact.release_id)
+                .bind(&artifact.metadata)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let outcome = if inserted.is_some() {
+                    ServerArtifactReservation::Created(reservation_token)
+                } else {
+                    let identical_active =
+                        existing_active_artifact_matches_in_tx(&mut tx, &artifact).await?;
+                    if identical_active {
+                        ServerArtifactReservation::AlreadyActiveIdentical
+                    } else {
+                        ServerArtifactReservation::Conflict
+                    }
+                };
                 tx.commit().await?;
-                Ok(())
+                Ok(outcome)
             }
         }
     }
@@ -55,15 +111,6 @@ impl Repository {
         size_bytes: i64,
     ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                Ok(memory.server_artifacts.read().await.iter().any(|artifact| {
-                    artifact.domain == domain
-                        && artifact.object_key == object_key
-                        && artifact.sha256_hex == sha256_hex
-                        && artifact.size_bytes == size_bytes
-                        && artifact.status == "active"
-                }))
-            }
             Self::Postgres(pool) => {
                 let exists: bool = sqlx::query_scalar(
                     r#"
@@ -89,89 +136,89 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn activate_server_artifact_reservation(
+        &self,
+        artifact: NewServerArtifact,
+        reservation_token: Uuid,
+    ) -> Result<()> {
+        match self {
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                activate_server_artifact_reservation_in_tx(&mut tx, &artifact, reservation_token)
+                    .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) async fn upsert_server_artifact_in_tx(
         tx: &mut Transaction<'_, Postgres>,
         artifact: &NewServerArtifact,
         status: &str,
+        reservation_token: Option<Uuid>,
     ) -> Result<()> {
-        insert_server_artifact_in_tx(tx, artifact, status).await
+        ensure!(status == "active", "server_artifact_status_invalid");
+        match reservation_token {
+            Some(token) => activate_server_artifact_reservation_in_tx(tx, artifact, token).await,
+            None => register_active_server_artifact_in_tx(tx, artifact).await,
+        }
     }
 
-    pub(crate) async fn mark_server_artifact_deleted_in_tx(
-        tx: &mut Transaction<'_, Postgres>,
+    pub(crate) async fn discard_server_artifact_reservation(
+        &self,
         object_key: &str,
-    ) -> Result<()> {
-        mark_server_artifact_deleted_in_tx(tx, object_key).await
-    }
-
-    pub(crate) async fn discard_server_artifact_reservation(&self, object_key: &str) -> Result<()> {
+        reservation_token: Uuid,
+    ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                memory.server_artifacts.write().await.retain(|artifact| {
-                    !(artifact.object_key == object_key && artifact.status == "creating")
-                });
-            }
             Self::Postgres(pool) => {
-                sqlx::query(
+                let deleted = sqlx::query(
                     r#"
                     DELETE FROM server_artifacts
                     WHERE object_key = $1
                       AND status = 'creating'
+                      AND reservation_token = $2
                     "#,
                 )
                 .bind(object_key)
+                .bind(reservation_token)
                 .execute(pool)
                 .await?;
+                Ok(deleted.rows_affected() == 1)
             }
         }
-        Ok(())
     }
 
-    pub(crate) async fn mark_server_artifact_delete_failed(
+    pub(crate) async fn fail_server_artifact_reservation(
         &self,
         object_key: &str,
+        reservation_token: Uuid,
         error: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self {
-            Self::Memory(memory) => {
-                if let Some(artifact) =
-                    memory
-                        .server_artifacts
-                        .write()
-                        .await
-                        .iter_mut()
-                        .find(|artifact| {
-                            artifact.object_key == object_key
-                                && matches!(
-                                    artifact.status.as_str(),
-                                    "creating" | "active" | "deleting" | "delete_failed"
-                                )
-                        })
-                {
-                    artifact.status = "delete_failed".to_string();
-                }
-                let _ = error;
-                Ok(())
-            }
             Self::Postgres(pool) => {
-                mark_server_artifact_delete_failed_in_pool(pool, object_key, error).await
+                let failed = sqlx::query(
+                    r#"
+                    UPDATE server_artifacts
+                    SET status = 'delete_failed',
+                        reservation_token = NULL,
+                        metadata = metadata || jsonb_build_object(
+                            'delete_error', left($3, 1000),
+                            'delete_failed_at', now()::text
+                        )
+                    WHERE object_key = $1
+                      AND status = 'creating'
+                      AND reservation_token = $2
+                    "#,
+                )
+                .bind(object_key)
+                .bind(reservation_token)
+                .bind(error)
+                .execute(pool)
+                .await?;
+                Ok(failed.rows_affected() == 1)
             }
         }
-    }
-
-    pub(crate) async fn mark_server_artifact_delete_failed_in_pool(
-        pool: &sqlx::PgPool,
-        object_key: &str,
-        error: &str,
-    ) -> Result<()> {
-        mark_server_artifact_delete_failed_in_pool(pool, object_key, error).await
-    }
-
-    pub(crate) async fn mark_server_artifact_deleting_in_pool(
-        pool: &sqlx::PgPool,
-        object_key: &str,
-    ) -> Result<bool> {
-        mark_server_artifact_deleting_in_pool(pool, object_key).await
     }
 
     pub(crate) async fn preview_artifact_cleanup(
@@ -218,29 +265,6 @@ impl Repository {
         );
         let job_id = Uuid::new_v4();
         match self {
-            Self::Memory(memory) => {
-                let now = unix_now().to_string();
-                let view = ServerJobView {
-                    id: job_id,
-                    job_type: SERVER_JOB_TYPE_ARTIFACT_CLEANUP.to_string(),
-                    status: SERVER_JOB_STATUS_QUEUED.to_string(),
-                    expression: Some(preview.expression),
-                    preview_hash: Some(preview.preview_hash),
-                    matched_count: preview.matched_count,
-                    matched_bytes: preview.matched_bytes,
-                    deleted_count: 0,
-                    deleted_bytes: 0,
-                    error: None,
-                    created_by: Some(operator.operator.id),
-                    metadata: json!({ "domains": preview.domains }),
-                    created_at: now,
-                    started_at: None,
-                    completed_at: None,
-                    canceled_at: None,
-                };
-                memory.server_jobs.write().await.push(view.clone());
-                Ok(view)
-            }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
@@ -320,17 +344,7 @@ impl Repository {
 
     pub(crate) async fn list_server_jobs(&self, limit: i64) -> Result<Vec<ServerJobView>> {
         let limit = limit.clamp(1, 200);
-        self.expire_stale_running_artifact_cleanup_jobs().await?;
         match self {
-            Self::Memory(memory) => Ok(memory
-                .server_jobs
-                .read()
-                .await
-                .iter()
-                .rev()
-                .take(limit as usize)
-                .cloned()
-                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -368,20 +382,7 @@ impl Repository {
     }
 
     pub(crate) async fn cancel_server_job(&self, job_id: Uuid) -> Result<Option<ServerJobView>> {
-        self.expire_stale_running_artifact_cleanup_jobs().await?;
         match self {
-            Self::Memory(memory) => {
-                let mut jobs = memory.server_jobs.write().await;
-                let Some(job) = jobs.iter_mut().find(|job| job.id == job_id) else {
-                    return Ok(None);
-                };
-                if job.status == SERVER_JOB_STATUS_QUEUED {
-                    job.status = SERVER_JOB_STATUS_CANCELED.to_string();
-                    job.canceled_at = Some(unix_now().to_string());
-                    job.completed_at = job.canceled_at.clone();
-                }
-                Ok(Some(job.clone()))
-            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -419,73 +420,12 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn expire_stale_running_artifact_cleanup_jobs(&self) -> Result<i64> {
-        let cutoff_unix = unix_now().saturating_sub(ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS as u64);
-        match self {
-            Self::Memory(memory) => {
-                let mut expired = 0_i64;
-                let now = unix_now().to_string();
-                let mut jobs = memory.server_jobs.write().await;
-                for job in jobs.iter_mut().filter(|job| {
-                    job.job_type == SERVER_JOB_TYPE_ARTIFACT_CLEANUP
-                        && job.status == SERVER_JOB_STATUS_RUNNING
-                }) {
-                    let Some(started_at) = job.started_at.as_deref() else {
-                        continue;
-                    };
-                    let Ok(started_unix) = started_at.parse::<u64>() else {
-                        continue;
-                    };
-                    if started_unix >= cutoff_unix {
-                        continue;
-                    }
-                    job.status = SERVER_JOB_STATUS_FAILED.to_string();
-                    job.error = Some("artifact_cleanup_running_timeout".to_string());
-                    job.completed_at = Some(now.clone());
-                    expired += 1;
-                }
-                Ok(expired)
-            }
-            Self::Postgres(pool) => expire_stale_artifact_cleanup_jobs_in_pool(pool).await,
-        }
-    }
-
     async fn artifact_cleanup_matches(
         &self,
         domains: &[String],
         expression: Option<&Expression>,
     ) -> Result<Vec<ServerArtifactCleanupCandidate>> {
         match self {
-            Self::Memory(memory) => {
-                let internal_domains = artifact_cleanup_internal_domains(domains);
-                let backup_requests = memory.backup_requests.read().await.clone();
-                let backup_artifacts = memory.backup_artifacts.read().await.clone();
-                let artifacts = memory.server_artifacts.read().await;
-                let mut matched = Vec::new();
-                for artifact in artifacts.iter().filter(|artifact| {
-                    matches!(
-                        artifact.status.as_str(),
-                        "creating" | "active" | "deleting" | "delete_failed"
-                    ) && internal_domains.contains(&artifact.domain)
-                }) {
-                    let mut artifact = artifact.clone();
-                    artifact.reference_protected = artifact.domain == "backup_artifact"
-                        && backup_requests.iter().any(|request| {
-                            request.artifact_id.is_some_and(|request_artifact_id| {
-                                artifact.backup_artifact_id == Some(request_artifact_id)
-                                    || backup_artifacts.iter().any(|backup_artifact| {
-                                        backup_artifact.id == request_artifact_id
-                                            && backup_artifact.object_key == artifact.object_key
-                                    })
-                            })
-                        });
-                    if artifact_matches_cleanup_expression(&artifact, expression) {
-                        ensure_artifact_cleanup_match_capacity(matched.len())?;
-                        matched.push(artifact);
-                    }
-                }
-                Ok(matched)
-            }
             Self::Postgres(pool) => {
                 let internal_domains = artifact_cleanup_internal_domains(domains);
                 let mut tx = pool.begin().await?;
@@ -508,7 +448,6 @@ impl Repository {
                             artifact.client_id,
                             artifact.stream,
                             artifact.seq,
-                            artifact.backup_artifact_id,
                             artifact.created_at::text AS created_at,
                             CASE
                                 WHEN artifact.domain = 'backup_artifact' THEN EXISTS (
@@ -565,16 +504,55 @@ impl Repository {
     }
 }
 
-async fn insert_server_artifact_in_tx(
+async fn existing_active_artifact_matches_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     artifact: &NewServerArtifact,
-    status: &str,
+) -> Result<bool> {
+    let identical = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM server_artifacts
+            WHERE object_key = $1
+              AND status = 'active'
+              AND domain = $2
+              AND sha256_hex = $3
+              AND size_bytes = $4
+              AND job_id IS NOT DISTINCT FROM $5
+              AND client_id IS NOT DISTINCT FROM $6
+              AND stream IS NOT DISTINCT FROM $7
+              AND seq IS NOT DISTINCT FROM $8
+              AND backup_request_id IS NOT DISTINCT FROM $9
+              AND backup_artifact_id IS NOT DISTINCT FROM $10
+              AND release_id IS NOT DISTINCT FROM $11
+        )
+        "#,
+    )
+    .bind(&artifact.object_key)
+    .bind(&artifact.domain)
+    .bind(&artifact.sha256_hex)
+    .bind(artifact.size_bytes)
+    .bind(artifact.job_id)
+    .bind(&artifact.client_id)
+    .bind(&artifact.stream)
+    .bind(artifact.seq)
+    .bind(artifact.backup_request_id)
+    .bind(artifact.backup_artifact_id)
+    .bind(artifact.release_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(identical)
+}
+
+async fn register_active_server_artifact_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    artifact: &NewServerArtifact,
 ) -> Result<()> {
     ensure!(
         artifact.size_bytes >= 0,
         "server_artifact_size_bytes_invalid"
     );
-    let row = sqlx::query(
+    let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO server_artifacts (
             id,
@@ -583,6 +561,7 @@ async fn insert_server_artifact_in_tx(
             sha256_hex,
             size_bytes,
             status,
+            reservation_token,
             job_id,
             client_id,
             stream,
@@ -592,26 +571,8 @@ async fn insert_server_artifact_in_tx(
             release_id,
             metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-        ON CONFLICT (object_key)
-        DO UPDATE SET
-            status = EXCLUDED.status,
-            sha256_hex = EXCLUDED.sha256_hex,
-            size_bytes = EXCLUDED.size_bytes,
-            metadata = EXCLUDED.metadata,
-            tombstoned_at = NULL,
-            deleted_at = NULL
-        WHERE server_artifacts.domain = EXCLUDED.domain
-          AND server_artifacts.sha256_hex = EXCLUDED.sha256_hex
-          AND server_artifacts.size_bytes = EXCLUDED.size_bytes
-          AND server_artifacts.job_id IS NOT DISTINCT FROM EXCLUDED.job_id
-          AND server_artifacts.client_id IS NOT DISTINCT FROM EXCLUDED.client_id
-          AND server_artifacts.stream IS NOT DISTINCT FROM EXCLUDED.stream
-          AND server_artifacts.seq IS NOT DISTINCT FROM EXCLUDED.seq
-          AND server_artifacts.backup_request_id IS NOT DISTINCT FROM EXCLUDED.backup_request_id
-          AND server_artifacts.backup_artifact_id IS NOT DISTINCT FROM EXCLUDED.backup_artifact_id
-          AND server_artifacts.release_id IS NOT DISTINCT FROM EXCLUDED.release_id
-          AND server_artifacts.status IN ('creating', 'active', 'delete_failed')
+        VALUES ($1, $2, $3, $4, $5, 'active', NULL, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (object_key) DO NOTHING
         RETURNING id
         "#,
     )
@@ -620,7 +581,6 @@ async fn insert_server_artifact_in_tx(
     .bind(&artifact.object_key)
     .bind(&artifact.sha256_hex)
     .bind(artifact.size_bytes)
-    .bind(status)
     .bind(artifact.job_id)
     .bind(&artifact.client_id)
     .bind(&artifact.stream)
@@ -631,69 +591,64 @@ async fn insert_server_artifact_in_tx(
     .bind(&artifact.metadata)
     .fetch_optional(&mut **tx)
     .await?;
-    ensure!(row.is_some(), "server_artifact_object_key_conflict");
+    if inserted.is_none() {
+        ensure!(
+            existing_active_artifact_matches_in_tx(tx, artifact).await?,
+            "server_artifact_object_key_conflict"
+        );
+    }
     Ok(())
 }
 
-async fn mark_server_artifact_deleting_in_pool(
-    pool: &sqlx::PgPool,
-    object_key: &str,
-) -> Result<bool> {
-    let updated = sqlx::query(
-        r#"
-        UPDATE server_artifacts
-        SET status = 'deleting',
-            metadata = metadata - 'delete_error' - 'delete_failed_at'
-        WHERE object_key = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
-        "#,
-    )
-    .bind(object_key)
-    .execute(pool)
-    .await?;
-    Ok(updated.rows_affected() > 0)
-}
-
-async fn mark_server_artifact_delete_failed_in_pool(
-    pool: &sqlx::PgPool,
-    object_key: &str,
-    error: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE server_artifacts
-        SET status = 'delete_failed',
-            metadata = metadata || jsonb_build_object(
-                'delete_error', left($2, 1000),
-                'delete_failed_at', now()::text
-            )
-        WHERE object_key = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
-        "#,
-    )
-    .bind(object_key)
-    .bind(error)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn mark_server_artifact_deleted_in_tx(
+async fn activate_server_artifact_reservation_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    object_key: &str,
+    artifact: &NewServerArtifact,
+    reservation_token: Uuid,
 ) -> Result<()> {
-    sqlx::query(
+    ensure!(
+        artifact.size_bytes >= 0,
+        "server_artifact_size_bytes_invalid"
+    );
+    let activated = sqlx::query(
         r#"
         UPDATE server_artifacts
-        SET status = 'deleted',
-            deleted_at = now()
+        SET status = 'active',
+            reservation_token = NULL,
+            metadata = $12
         WHERE object_key = $1
-          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+          AND status = 'creating'
+          AND reservation_token = $2
+          AND domain = $3
+          AND sha256_hex = $4
+          AND size_bytes = $5
+          AND job_id IS NOT DISTINCT FROM $6
+          AND client_id IS NOT DISTINCT FROM $7
+          AND stream IS NOT DISTINCT FROM $8
+          AND seq IS NOT DISTINCT FROM $9
+          AND backup_request_id IS NOT DISTINCT FROM $10
+          AND backup_artifact_id IS NOT DISTINCT FROM $11
+          AND release_id IS NOT DISTINCT FROM $13
         "#,
     )
-    .bind(object_key)
+    .bind(&artifact.object_key)
+    .bind(reservation_token)
+    .bind(&artifact.domain)
+    .bind(&artifact.sha256_hex)
+    .bind(artifact.size_bytes)
+    .bind(artifact.job_id)
+    .bind(&artifact.client_id)
+    .bind(&artifact.stream)
+    .bind(artifact.seq)
+    .bind(artifact.backup_request_id)
+    .bind(artifact.backup_artifact_id)
+    .bind(&artifact.metadata)
+    .bind(artifact.release_id)
     .execute(&mut **tx)
     .await?;
+    ensure!(
+        activated.rows_affected() == 1,
+        "server_artifact_reservation_not_owned"
+    );
     Ok(())
 }
 
@@ -852,56 +807,6 @@ fn artifact_cleanup_internal_domains(domains: &[String]) -> Vec<String> {
     internal
 }
 
-pub(crate) async fn upsert_memory_server_artifact(
-    memory: &crate::repository::MemoryState,
-    artifact: NewServerArtifact,
-    status: &str,
-) -> Result<()> {
-    ensure!(
-        artifact.size_bytes >= 0,
-        "server_artifact_size_bytes_invalid"
-    );
-    let mut artifacts = memory.server_artifacts.write().await;
-    if let Some(existing) = artifacts
-        .iter_mut()
-        .find(|existing| existing.object_key == artifact.object_key)
-    {
-        ensure!(
-            existing.domain == artifact.domain
-                && existing.sha256_hex == artifact.sha256_hex
-                && existing.size_bytes == artifact.size_bytes
-                && existing.job_id == artifact.job_id
-                && existing.client_id == artifact.client_id
-                && existing.stream == artifact.stream
-                && existing.seq == artifact.seq
-                && existing.backup_artifact_id == artifact.backup_artifact_id
-                && matches!(
-                    existing.status.as_str(),
-                    "creating" | "active" | "delete_failed"
-                ),
-            "server_artifact_object_key_conflict"
-        );
-        existing.status = status.to_string();
-        return Ok(());
-    }
-    artifacts.push(ServerArtifactCleanupCandidate {
-        id: Uuid::new_v4(),
-        domain: artifact.domain,
-        object_key: artifact.object_key,
-        sha256_hex: artifact.sha256_hex,
-        size_bytes: artifact.size_bytes,
-        status: status.to_string(),
-        job_id: artifact.job_id,
-        client_id: artifact.client_id,
-        stream: artifact.stream,
-        seq: artifact.seq,
-        backup_artifact_id: artifact.backup_artifact_id,
-        created_at: unix_now().to_string(),
-        reference_protected: false,
-    });
-    Ok(())
-}
-
 fn server_artifact_candidate_from_row(
     row: sqlx::postgres::PgRow,
 ) -> std::result::Result<ServerArtifactCleanupCandidate, sqlx::Error> {
@@ -916,7 +821,6 @@ fn server_artifact_candidate_from_row(
         client_id: row.try_get("client_id")?,
         stream: row.try_get("stream")?,
         seq: row.try_get("seq")?,
-        backup_artifact_id: row.try_get("backup_artifact_id")?,
         created_at: row.try_get("created_at")?,
         reference_protected: row.try_get("reference_protected")?,
     })
@@ -943,32 +847,6 @@ fn server_job_from_row(
         completed_at: row.try_get("completed_at")?,
         canceled_at: row.try_get("canceled_at")?,
     })
-}
-
-async fn expire_stale_artifact_cleanup_jobs_in_pool(pool: &sqlx::PgPool) -> Result<i64> {
-    let result = sqlx::query(
-        r#"
-        UPDATE server_jobs
-        SET
-            status = $3,
-            error = 'artifact_cleanup_running_timeout',
-            completed_at = now(),
-            metadata = metadata || jsonb_build_object(
-                'running_timeout_secs', $4::bigint
-            )
-        WHERE job_type = $1
-          AND status = $2
-          AND started_at IS NOT NULL
-          AND started_at <= now() - ($4::bigint * interval '1 second')
-        "#,
-    )
-    .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
-    .bind(SERVER_JOB_STATUS_RUNNING)
-    .bind(SERVER_JOB_STATUS_FAILED)
-    .bind(ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() as i64)
 }
 
 #[cfg(test)]

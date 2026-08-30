@@ -257,8 +257,12 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await editConfirmation
     .getByRole("button", { name: "Apply shared-view changes" })
     .click();
-  await expect(grid.getByText("Customer status live", { exact: true })).toBeVisible();
-  await expect(page.getByText(/existing public URL.*were preserved/i)).toBeVisible();
+  await expect(
+    grid.getByText("Customer status live", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/existing public URL.*were preserved/i),
+  ).toBeVisible();
 
   await activeRow.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Copy URL", exact: true }).click();
@@ -310,7 +314,9 @@ test("target refresh keeps Edit gated across a delayed failed reload", async ({
     .filter({ hasText: "Customer status" })
     .first();
   await activeRow.click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Update targets", exact: true }).click();
+  await page
+    .getByRole("menuitem", { name: "Update targets", exact: true })
+    .click();
   await page
     .getByRole("region", { name: "Confirm shared-view target update" })
     .getByRole("button", { name: "Update targets", exact: true })
@@ -742,9 +748,12 @@ test("public cards keep an intentionally empty network-rate selection neutral", 
   await expect(card.getByText("Network rates not selected")).toBeVisible();
   await expect(card.getByText("Needs attention")).toHaveCount(0);
   await expect(
-    card.getByLabel("Current network rate for Shared edge").getByText("-"),
-  ).toHaveCount(2);
+    card
+      .getByLabel("Current network rate for Shared edge")
+      .locator(":scope > .vpsMonitorFlowFact > strong"),
+  ).toHaveText(["-", "-"]);
   const realtimeSpeed = page
+    .getByLabel("Shared fleet current totals")
     .getByText("Realtime speed", { exact: true })
     .locator("..");
   await expect(realtimeSpeed).toContainText("↓ -");
@@ -1287,6 +1296,22 @@ test("public monitoring never presents uncounted disk telemetry as zero usage", 
   await expect(
     detail.getByRole("region", { name: "Aggregate disk used chart" }),
   ).toContainText("Disk history is unavailable for this range");
+});
+
+test("public monitoring distinguishes server-confirmed projection delay from telemetry freshness", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, {
+    projectionDelayMs: 10_001,
+    projectionDelayTrafficOnly: true,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online · Warning shared monitoring card/,
+  });
+  await expect(card).toContainText("Telemetry delayed");
+  await expect(card).toContainText("Updated");
 });
 
 test("public monitoring does not present an unconfigured traffic cycle as authoritative", async ({
@@ -2170,6 +2195,8 @@ async function installPublicMonitoringApiMock(
     pingLossRatio = 0,
     pingStateCoverage = false,
     pingTargetName = "Customer gateway",
+    projectionDelayMs,
+    projectionDelayTrafficOnly = false,
     retainTrafficHistory = false,
     supplementalVisibility = edgeCases,
     tieredHistory = false,
@@ -2193,6 +2220,8 @@ async function installPublicMonitoringApiMock(
     pingLossRatio?: number | null;
     pingStateCoverage?: boolean;
     pingTargetName?: string;
+    projectionDelayMs?: number;
+    projectionDelayTrafficOnly?: boolean;
     retainTrafficHistory?: boolean;
     supplementalVisibility?: boolean;
     tieredHistory?: boolean;
@@ -2214,8 +2243,8 @@ async function installPublicMonitoringApiMock(
       billing: supplementalVisibility,
       detail_history: detailAllowed,
       identity_context: identityContext,
-      network: true,
-      ping: true,
+      network: !projectionDelayTrafficOnly,
+      ping: !projectionDelayTrafficOnly,
       resources: false,
       system_information: supplementalVisibility,
       traffic: true,
@@ -2224,6 +2253,12 @@ async function installPublicMonitoringApiMock(
   const card: PublicMonitoringCardView = {
     client_key: publicClientKey,
     display_name: "Shared edge",
+    projection_checked_at:
+      projectionDelayMs === undefined ? undefined : new Date(now).toISOString(),
+    projection_pending_since:
+      projectionDelayMs === undefined
+        ? undefined
+        : new Date(now - projectionDelayMs).toISOString(),
     product_name: identityContext ? "Storage-Box 4" : undefined,
     network: {
       observed_at: networkRateExpected ? observedAt : null,
@@ -2795,8 +2830,7 @@ async function installPublicMonitoringApiMock(
           connections_observed_at: observedAt,
           cpu_cores: profile.cores,
           cpu_usage_avg: profile.cpu,
-          disk_available_bytes:
-            profile.diskTotal * (1 - profile.diskRatio),
+          disk_available_bytes: profile.diskTotal * (1 - profile.diskRatio),
           disk_sample_count: 1,
           disk_total_bytes: profile.diskTotal,
           disk_used_ratio_avg: profile.diskRatio,

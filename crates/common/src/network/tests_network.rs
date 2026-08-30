@@ -64,6 +64,22 @@ fn tunnel_mtu_defaults_are_kind_aware_1500_underlay_baselines() {
 }
 
 #[test]
+fn tunnel_plan_name_input_boundary_accepts_128_bytes_and_rejects_129() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.name = "p".repeat(128);
+    assert!(plan_tunnel(&input).is_ok());
+
+    // The total persisted identity is bounded, not only its trimmed view.
+    // This 129-byte value previously passed because validation measured the
+    // 128-byte trimmed suffix.
+    input.name = format!(" {}", "p".repeat(128));
+    assert_eq!(
+        plan_tunnel(&input).unwrap_err(),
+        NetworkPlanError::InvalidPlanIdentity
+    );
+}
+
+#[test]
 fn openvpn_listener_bind_matches_the_initiators_destination_family() {
     let mut input = plan_input(TunnelKind::Openvpn, RuntimeTunnelManager::AgentBuiltin);
     input.runtime_control.openvpn.listener_side = TunnelEndpointSide::Left;
@@ -642,31 +658,4 @@ fn published_network_wire_names_remain_stable() {
     let encoded_result = serde_json::to_value(result).unwrap();
     assert_eq!(encoded_result["adapter_template_id"], LEFT_ROUTING_ADAPTER);
     assert!(encoded_result.get("adapter_definition_id").is_none());
-}
-
-#[test]
-fn internal_definition_aliases_are_accepted_without_changing_canonical_output() {
-    let decoded: TunnelOspfConfig = serde_json::from_value(serde_json::json!({
-        "mode": "reviewed",
-        "planned_latency_ms": 20.0,
-        "planned_packet_loss_ratio": 0.01,
-        "preference": 1.0,
-        "policy": OspfCostPolicy::default(),
-        "min_cost_delta": 5,
-        "healthy_windows": 2,
-        "left_adapter_definition_id": LEFT_ROUTING_ADAPTER,
-        "right_adapter_definition_id": RIGHT_ROUTING_ADAPTER
-    }))
-    .unwrap();
-    assert_eq!(
-        decoded.left_adapter_definition_id.as_deref(),
-        Some(LEFT_ROUTING_ADAPTER)
-    );
-    assert_eq!(
-        decoded.right_adapter_definition_id.as_deref(),
-        Some(RIGHT_ROUTING_ADAPTER)
-    );
-    let encoded = serde_json::to_value(decoded).unwrap();
-    assert!(encoded.get("left_adapter_definition_id").is_none());
-    assert_eq!(encoded["left_adapter_template_id"], LEFT_ROUTING_ADAPTER);
 }

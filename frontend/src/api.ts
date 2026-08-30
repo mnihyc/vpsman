@@ -42,6 +42,76 @@ export class ApiResponseError extends Error {
   }
 }
 
+/**
+ * Owns one browser-local aggregate read at a time. Producers replace the
+ * pending work with their latest desired read; the active consumer drains that
+ * trailing work immediately. This is deliberately not a timer, retry policy,
+ * cache, or cross-browser concurrency limit.
+ */
+export class LatestReadConsumer<T = void> {
+  private running = false;
+  private pending: {
+    run: () => Promise<T>;
+    waiters: Array<{
+      reject: (reason: unknown) => void;
+      resolve: (value: T) => void;
+    }>;
+  } | null = null;
+
+  enqueue(work: () => Promise<T>): Promise<T> {
+    const result = new Promise<T>((resolve, reject) => {
+      if (this.pending === null) {
+        this.pending = { run: work, waiters: [{ reject, resolve }] };
+      } else {
+        this.pending.run = work;
+        this.pending.waiters.push({ reject, resolve });
+      }
+    });
+    if (!this.running) {
+      this.running = true;
+      void this.drain();
+    }
+    return result;
+  }
+
+  discardPending(result?: T): void {
+    for (const waiter of this.pending?.waiters ?? []) {
+      waiter.resolve(result as T);
+    }
+    this.pending = null;
+  }
+
+  private async drain(): Promise<void> {
+    try {
+      for (;;) {
+        const work = this.pending;
+        if (work === null) {
+          // Close the handoff against already-queued producer microtasks without
+          // adding a polling interval or delaying a real request.
+          await Promise.resolve();
+          if (this.pending === null) return;
+          continue;
+        }
+        this.pending = null;
+        try {
+          const result = await work.run();
+          for (const waiter of work.waiters) waiter.resolve(result);
+        } catch (error) {
+          for (const waiter of work.waiters) waiter.reject(error);
+        }
+      }
+    } finally {
+      this.running = false;
+      if (this.pending !== null) {
+        // A producer may run in the promise-finalization handoff. Give that
+        // already-recorded latest work a new owner without synthesizing work.
+        this.running = true;
+        void this.drain();
+      }
+    }
+  }
+}
+
 function apiErrorGuidance(status: number, code: string): string {
   if (code === "hostname_resolution_timeout") {
     return "The control plane DNS lookup exceeded its five-second limit; verify resolver reachability and retry.";
@@ -63,9 +133,6 @@ function apiErrorGuidance(status: number, code: string): string {
   }
   if (code.includes("capability") || code.includes("unsupported")) {
     return "The selected VPS does not currently advertise the required capability; inspect its agent status before retrying.";
-  }
-  if (code === "heavy_read_admission_busy") {
-    return "Keep the current data visible while the console retries after the active read pressure clears.";
   }
   switch (status) {
     case 400:
@@ -123,7 +190,6 @@ export function buildListPath(path: string, query: ListQueryParams): string {
 }
 
 const GET_RETRY_DELAYS_MS = [150, 500, 1_000];
-const HEAVY_READ_RETRY_DELAYS_MS = [250, 750, 1_500];
 const PREVIEW_POST_RETRY_DELAYS_MS = [
   150, 500, 1_000, 2_000, 4_000, 8_000, 13_000,
 ];
@@ -133,25 +199,11 @@ async function fetchGetWithTransientRetry(
   apiToken: string,
 ): Promise<Response> {
   let transportAttempt = 0;
-  let admissionAttempt = 0;
   for (;;) {
     try {
-      const response = await fetch(path, {
+      return await fetch(path, {
         headers: buildAuthHeaders(apiToken),
       });
-      if (response.status !== 429) {
-        return response;
-      }
-      const admissionError = await apiErrorFromResponse(response.clone());
-      if (admissionError.code !== "heavy_read_admission_busy") {
-        return response;
-      }
-      const delay = HEAVY_READ_RETRY_DELAYS_MS[admissionAttempt];
-      if (delay === undefined) {
-        return response;
-      }
-      admissionAttempt += 1;
-      await wait(delay + Math.floor(Math.random() * Math.min(delay, 250)));
     } catch (error) {
       const delay = GET_RETRY_DELAYS_MS[transportAttempt];
       if (delay === undefined || !isTransientFetchFailure(error)) {
@@ -363,16 +415,6 @@ export function isApiUnauthorized(
   error: unknown,
 ): error is ApiUnauthorizedError {
   return error instanceof ApiUnauthorizedError;
-}
-
-export function isHeavyReadAdmissionBusy(
-  error: unknown,
-): error is ApiResponseError {
-  return (
-    error instanceof ApiResponseError &&
-    error.status === 429 &&
-    error.code === "heavy_read_admission_busy"
-  );
 }
 
 export async function apiErrorFromResponse(

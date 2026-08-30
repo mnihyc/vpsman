@@ -416,8 +416,8 @@ vpsctl_json telemetry-rollups --client-id pg-agent-a --bucket-secs 60 --limit 10
   ($rows | map(.disk_available_bytes_min) | min) == 4294967296 and
   (((($rows | map(.disk_used_ratio_avg * .disk_sample_count) | add) / 2) - 0.55) | abs) < 0.000000001 and
   (((($rows | map(.disk_used_ratio_max) | max) - 0.6) | abs) < 0.000000001) and
-  ($rows | map(.network_rx_bytes_max) | max) == 4000 and
-  ($rows | map(.network_tx_bytes_max) | max) == 8000
+  all($rows[]; (has("network_rx_bytes_max") | not)) and
+  all($rows[]; (has("network_tx_bytes_max") | not))
 ' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag group:pg-persistent --confirmed >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag persistent --confirmed >/dev/null
@@ -688,7 +688,6 @@ docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c "UP
 notification_channel_id="11111111-1111-4111-8111-111111111177"
 queued_notification_id="11111111-1111-4111-8111-111111111178"
 old_notification_id="11111111-1111-4111-8111-111111111179"
-contended_notification_id="11111111-1111-4111-8111-111111111180"
 docker exec -i "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 >/dev/null <<SQL
 INSERT INTO fleet_alert_notification_channels (
   id,
@@ -805,7 +804,7 @@ SQL
 VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
 VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
-  target/debug/vpsman-worker --once --worker-id pg-postgres-smoke --notification-retention-days 30 >"$SMOKE_TMPDIR/worker-once.log" 2>&1
+  target/debug/vpsman-worker --once --notification-retention-days 30 >"$SMOKE_TMPDIR/worker-once.log" 2>&1
 scheduled_run_count="0"
 scheduled_run_job_id=""
 deadline=$((SECONDS + 10))
@@ -822,7 +821,6 @@ if [[ -z "$scheduled_run_job_id" ]]; then
   cat "$SMOKE_TMPDIR/worker-once.log" >&2 || true
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT now() AS db_now, count(*) AS due_count FROM schedules WHERE enabled = TRUE AND next_run_at <= now()" >&2 || true
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT id, name, enabled, next_run_at, catch_up_policy, catch_up_limit, failure_count, last_error FROM schedules" >&2 || true
-  docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT task_name, owner, lease_expires_at, updated_at FROM worker_leases" >&2 || true
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT id, command_type, status, target_count, source_schedule_id FROM jobs ORDER BY created_at DESC LIMIT 10" >&2 || true
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT action, metadata FROM audit_logs ORDER BY created_at DESC LIMIT 10" >&2 || true
   exit 1
@@ -835,12 +833,6 @@ fi
 api_get "/api/v1/schedules" | jq -e --arg schedule_id "$schedule_id" '
   any(.[]; .id == $schedule_id and .catch_up_policy == "run_all_limited" and .catch_up_limit == 2 and .failure_count == 0 and .last_error == null)
 ' >/dev/null
-worker_lease_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM worker_leases WHERE task_name IN ('schedules','alert_notifications') AND owner = 'pg-postgres-smoke' AND lease_expires_at <= now()")"
-if [[ "$worker_lease_count" != "2" ]]; then
-  echo "expected released worker lease evidence for scheduler and alert singleton tasks" >&2
-  docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT task_name, owner, lease_expires_at FROM worker_leases ORDER BY task_name" >&2 || true
-  exit 1
-fi
 api_get "/api/v1/jobs/$scheduled_run_job_id" | jq -e --arg job_id "$scheduled_run_job_id" '
   .id == $job_id and (.command_type | startswith("scheduled_")) and (.status == "queued" or .status == "running")
 ' >/dev/null
@@ -864,65 +856,6 @@ if [[ "$notification_audit_count" -lt "2" ]]; then
   echo "expected worker notification process and prune audits" >&2
   exit 1
 fi
-docker exec -i "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 >/dev/null <<SQL
-INSERT INTO fleet_alert_notification_deliveries (
-  id,
-  channel_id,
-  channel_name,
-  alert_id,
-  alert_severity,
-  alert_category,
-  status,
-  delivery_kind,
-  target,
-  dedupe_key,
-  payload,
-  error,
-  cooldown_until_unix,
-  attempt_count,
-  last_attempt_at,
-  created_at,
-  delivered_at,
-  actor_id
-)
-VALUES (
-  '$contended_notification_id',
-  '$notification_channel_id',
-  'pg-worker-webhook',
-  'agent_status:agent:contended',
-  'warning',
-  'agent_status',
-  'queued',
-  'webhook',
-  'http://127.0.0.1:9/vpsman/postgres-persistence-contended',
-  'pg-worker-contended-dedupe',
-  '{"schema":"vpsman.fleet_alert.notification.v1","alert":{"id":"agent_status:agent:contended"}}'::jsonb,
-  NULL,
-  0,
-  0,
-  NULL,
-  now(),
-  NULL,
-  '$operator_id'
-);
-SQL
-docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c \
-  "UPDATE worker_leases SET owner = 'pg-held-worker', lease_expires_at = now() + interval '60 seconds', updated_at = now() WHERE task_name = 'alert_notifications'" \
-  >/dev/null
-VPSMAN_POSTGRES_URL="$postgres_url" \
-VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
-VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1 \
-  target/debug/vpsman-worker --once --worker-id pg-competing-worker --notification-retention-days 30 >/dev/null
-contended_notification_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM fleet_alert_notification_deliveries WHERE id = '$contended_notification_id' AND status = 'queued' AND attempt_count = 0")"
-if [[ "$contended_notification_count" != "1" ]]; then
-  echo "expected competing worker to leave queued notification untouched while lease is active" >&2
-  docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT task_name, owner, lease_expires_at FROM worker_leases ORDER BY task_name" >&2 || true
-  docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT id, status, attempt_count, error FROM fleet_alert_notification_deliveries WHERE id = '$contended_notification_id'" >&2 || true
-  exit 1
-fi
-docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c \
-  "UPDATE worker_leases SET lease_expires_at = now(), updated_at = now() WHERE task_name = 'alert_notifications' AND owner = 'pg-held-worker'" \
-  >/dev/null
 backup_json="$(vpsctl_json backup-request \
   --client-id pg-agent-a \
   --paths /etc/hostname \
@@ -1201,8 +1134,8 @@ api_get "/api/v1/telemetry/rollups?client_id=pg-agent-a&bucket_secs=60&limit=10"
   ($rows | map(.disk_sample_count) | add) == 2 and
   (($rows | map(.disk_available_bytes_avg * .disk_sample_count) | add) / 2) == 4831838208 and
   (((($rows | map(.disk_used_ratio_avg * .disk_sample_count) | add) / 2) - 0.55) | abs) < 0.000000001 and
-  ($rows | map(.network_rx_bytes_max) | max) == 4000 and
-  ($rows | map(.network_tx_bytes_max) | max) == 8000
+  all($rows[]; (has("network_rx_bytes_max") | not)) and
+  all($rows[]; (has("network_tx_bytes_max") | not))
 ' >/dev/null
 assert_persisted_network_rate_counters
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"tag:edge"}' \
@@ -1304,5 +1237,5 @@ jq -n \
   '{
     postgres_persistence_smoke: "ok",
     api_url: $api_url,
-    checks: ["auth_session", "agents", "direct_identity_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "port_forwarding", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
+    checks: ["auth_session", "agents", "direct_identity_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "port_forwarding", "schedule", "backup_policy", "backup_policy_retention_prune", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
   }'

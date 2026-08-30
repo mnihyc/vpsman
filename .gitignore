@@ -5,9 +5,10 @@
 /frontend/tmp/
 /frontend/test-results/
 /frontend/playwright-report/
+/.playwright-cli/
 /output/
 /state/
-/.tmp/
+/.tmp
 /deploy/runtime/
 /deploy/.env
 /deploy/.env.*
@@ -26,6 +27,8 @@
 *.crt
 *.p12
 *.bak
+__pycache__/
+*.pyc
 
 # Local agent/private release planning artifacts.
 /TO_AGENTS.md

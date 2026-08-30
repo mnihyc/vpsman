@@ -3,7 +3,7 @@ use serde_json::json;
 use super::{redact_suite_config_value, SuiteConfig};
 
 #[test]
-fn suite_config_bounds_gateway_telemetry_admission() {
+fn suite_config_bounds_gateway_telemetry_http_ownership() {
     let configured = SuiteConfig::parse(
         r#"
 version = 1
@@ -12,7 +12,7 @@ version = 1
 gateway_telemetry_in_flight = 8
 "#,
     )
-    .expect("bounded gateway telemetry admission");
+    .expect("bounded gateway telemetry HTTP ownership");
     assert_eq!(configured.capacity.gateway_telemetry_in_flight, Some(8));
     assert!(configured
         .validation_summary()

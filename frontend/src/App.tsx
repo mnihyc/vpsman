@@ -1989,7 +1989,6 @@ export function App() {
         fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
         configurationSources={dashboard.configurationSources}
         fleetAlerts={dashboard.fleetAlerts}
-        fleetAlertStates={dashboard.fleetAlertStates}
         fleetPageResetKey={fleetViews.fleetQuery}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         currentPolicyAlerts={dashboard.currentPolicyAlerts}
@@ -1998,6 +1997,7 @@ export function App() {
         }
         currentPolicyAlertsTruncated={dashboard.currentPolicyAlertsTruncated}
         policyAlerts={dashboard.policyAlerts}
+        policyAlertsTruncated={dashboard.policyAlertsTruncated}
         policyAlertsEvidenceAvailable={dashboard.policyAlertsEvidenceAvailable}
         trafficAccounting={dashboard.trafficAccounting}
         vpsRuleValues={dashboard.vpsRuleValues}
@@ -2005,8 +2005,14 @@ export function App() {
           dashboard.fleetAlertNotificationChannels
         }
         fleetAlertNotifications={dashboard.fleetAlertNotifications}
+        fleetAlertNotificationsTruncated={
+          dashboard.fleetAlertNotificationsTruncated
+        }
         webhookRules={dashboard.webhookRules}
         webhookRuleDeliveries={dashboard.webhookRuleDeliveries}
+        webhookRuleDeliveriesTruncated={
+          dashboard.webhookRuleDeliveriesTruncated
+        }
         lastLiveEvent={dashboard.lastLiveEvent}
         onCreateJob={dashboard.createJob}
         onBulkMutateTags={dashboard.bulkMutateTags}
@@ -2165,6 +2171,7 @@ export function App() {
         currentPolicyAlertsTruncated={dashboard.currentPolicyAlertsTruncated}
         policyAlerts={dashboard.policyAlerts}
         policyAlertsEvidenceAvailable={dashboard.policyAlertsEvidenceAvailable}
+        policyAlertsTruncated={dashboard.policyAlertsTruncated}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         configurationSources={dashboard.configurationSources}
@@ -2283,6 +2290,9 @@ export function App() {
           dashboard.fleetAlertNotificationChannels
         }
         fleetAlertNotifications={dashboard.fleetAlertNotifications}
+        fleetAlertNotificationsTruncated={
+          dashboard.fleetAlertNotificationsTruncated
+        }
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         fleetAlerts={dashboard.fleetAlerts}
         fleetAlertsEvidenceAvailable={dashboard.fleetAlertsEvidenceAvailable}
@@ -2321,6 +2331,7 @@ export function App() {
         currentPolicyAlertsTruncated={dashboard.currentPolicyAlertsTruncated}
         policyFocusId={policyFocusId}
         policyAlerts={dashboard.policyAlerts}
+        policyAlertsTruncated={dashboard.policyAlertsTruncated}
         policyAlertsEvidenceAvailable={dashboard.policyAlertsEvidenceAvailable}
       />
     );
@@ -2338,6 +2349,9 @@ export function App() {
         onRotateWebhookDeliveryHistory={dashboard.rotateWebhookDeliveryHistory}
         onUpsertWebhookRule={dashboard.upsertWebhookRule}
         webhookRuleDeliveries={dashboard.webhookRuleDeliveries}
+        webhookRuleDeliveriesTruncated={
+          dashboard.webhookRuleDeliveriesTruncated
+        }
         webhookRules={dashboard.webhookRules}
       />
     );

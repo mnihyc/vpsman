@@ -578,7 +578,7 @@ read_release_manifest_selection() {
       object_open = 0
     }
     END {
-      valid = !invalid && schema_count == 1 && (schema == "2" || schema == "3")
+      valid = !invalid && schema_count == 1 && schema == "3"
       valid = valid && project_count == 1 && project == "vpsman"
       valid = valid && tag_count == 1 && tag != ""
       valid = valid && selected_count == 1 && selected_url != ""

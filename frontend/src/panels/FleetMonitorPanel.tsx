@@ -45,7 +45,10 @@ import {
 } from "../monitorCardDensity";
 import { countryTagValue, regionTagValue } from "../tagDisplay";
 import { selectorExpressionForClientIds } from "../searchExpression";
-import { providerProductLabel } from "../vpsRules";
+import {
+  formatMonthlyTrafficResetUtc,
+  providerProductLabel,
+} from "../vpsRules";
 import {
   displayNameOrUnnamed,
   formatBillingRenewal,
@@ -129,6 +132,8 @@ export const monitorSortOptions: Array<{
   { label: "Provider", value: "provider" },
 ];
 const NETWORK_SNAPSHOT_COHERENCE_MS = 180_000;
+const TELEMETRY_PROJECTION_WARNING_MS = 10_000;
+const PING_MISSED_CHECK_WINDOW_MS = 3 * 60_000;
 
 export function FleetMonitorPanel({
   agents,
@@ -240,7 +245,7 @@ export function FleetMonitorPanel({
         const loadedIds = new Set<string>();
         for (;;) {
           const page = await apiGet<MonitoringCardsPageView>(
-            `/api/v1/monitoring/cards?limit=1000&offset=${offset}${embedded ? "&include_history=false" : ""}`,
+            `/api/v1/monitoring/cards?limit=1000&offset=${offset}${embedded ? "&include_history=false" : "&history_mode=selected_aggregate"}`,
             apiToken,
           );
           if (!active) return;
@@ -429,7 +434,25 @@ export function FleetMonitorPanel({
       ),
     [agentIds, monitoringCards],
   );
-  const cardAgents = agents;
+  // Cards own liveness because it is evaluated alongside projected evidence.
+  // The fleet snapshot remains authoritative for identity, capabilities,
+  // tags, and every other core field so an older card cannot regress them.
+  const cardAgents = useMemo(
+    () =>
+      agents.map((agent) => {
+        const cardAgent = cardsByClient.get(agent.id)?.client;
+        return cardAgent
+          ? {
+              ...agent,
+              last_seen_at: cardAgent.last_seen_at,
+              stale_reason: cardAgent.stale_reason,
+              stale_since: cardAgent.stale_since,
+              status: cardAgent.status,
+            }
+          : agent;
+      }),
+    [agents, cardsByClient],
+  );
   const rollups = latestRollupsByClient([
     ...telemetryRollups,
     ...monitoringCards.flatMap((card) =>
@@ -496,6 +519,7 @@ export function FleetMonitorPanel({
     () =>
       monitorFleetCounts(
         cardAgents,
+        cardsByClient,
         cardSignals,
         rollups,
         rates,
@@ -503,9 +527,11 @@ export function FleetMonitorPanel({
         primaryPingByClient,
         networkRateExpectedByClient,
         monitoringLoading,
+        Boolean(monitoringError),
       ),
     [
       cardAgents,
+      cardsByClient,
       cardSignals,
       primaryPingByClient,
       rates,
@@ -513,18 +539,22 @@ export function FleetMonitorPanel({
       trafficByClient,
       networkRateExpectedByClient,
       monitoringLoading,
+      monitoringError,
     ],
   );
   const fleetSnapshot = monitorFleetSnapshot(
     cardAgents,
+    cardsByClient,
     rates,
     trafficByClient,
+    Boolean(monitoringError),
   );
   const filteredAgents = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return cardAgents.filter((agent) => {
       const category = monitorFleetCategory(
         agent,
+        cardsByClient,
         cardSignals,
         rollups,
         rates,
@@ -532,6 +562,7 @@ export function FleetMonitorPanel({
         primaryPingByClient,
         networkRateExpectedByClient,
         monitoringLoading,
+        Boolean(monitoringError),
       );
       if (statusFilter !== "all" && category !== statusFilter) return false;
       if (
@@ -569,11 +600,13 @@ export function FleetMonitorPanel({
     trafficByClient,
     networkRateExpectedByClient,
     monitoringLoading,
+    monitoringError,
   ]);
   const sortedAgents = useMemo(
     () =>
       [...filteredAgents].sort(
         compareMonitorAgents({
+          cards: cardsByClient,
           mode: sortMode,
           rates,
           rollups,
@@ -582,9 +615,11 @@ export function FleetMonitorPanel({
           primaryPing: primaryPingByClient,
           networkRateExpected: networkRateExpectedByClient,
           evidenceLoading: monitoringLoading,
+          evidenceUntrusted: Boolean(monitoringError),
         }),
       ),
     [
+      cardsByClient,
       cardSignals,
       filteredAgents,
       primaryPingByClient,
@@ -594,6 +629,7 @@ export function FleetMonitorPanel({
       trafficByClient,
       networkRateExpectedByClient,
       monitoringLoading,
+      monitoringError,
     ],
   );
   const visibleAgents =
@@ -684,8 +720,12 @@ export function FleetMonitorPanel({
     fleetSnapshot.locations,
     fleetSnapshot.unspecifiedLocations,
   );
-  const rxSummary = `↓ ${formatRateOrUnavailable(fleetSnapshot.rxBps, formatByteRateFromBitsPerSecond)}`;
-  const txSummary = `↑ ${formatRateOrUnavailable(fleetSnapshot.txBps, formatByteRateFromBitsPerSecond)} · ${fleetSnapshot.freshNetworkCount} fresh`;
+  const rxSummary = fleetSnapshot.networkRatesUntrusted
+    ? "↓ -"
+    : `↓ ${formatRateOrUnavailable(fleetSnapshot.rxBps, formatByteRateFromBitsPerSecond)}`;
+  const txSummary = fleetSnapshot.networkRatesUntrusted
+    ? "↑ - · Monitoring refresh failed"
+    : `↑ ${formatRateOrUnavailable(fleetSnapshot.txBps, formatByteRateFromBitsPerSecond)} · ${fleetSnapshot.freshNetworkCount} fresh`;
   const trafficTotal =
     fleetSnapshot.trafficCount > 0
       ? formatBytes(fleetSnapshot.trafficBytes)
@@ -772,7 +812,11 @@ export function FleetMonitorPanel({
             <em>{locationSummary}</em>
           </span>
           <span
-            title={`Aggregate current rates from fresh selected interfaces. RX ${rxSummary}; TX ${txSummary}`}
+            title={
+              fleetSnapshot.networkRatesUntrusted
+                ? "Monitoring refresh failed. Last-known card rates remain visible but are not aggregated as current until refresh succeeds"
+                : `Aggregate current rates from fresh selected interfaces. RX ${rxSummary}; TX ${txSummary}`
+            }
           >
             <small>Realtime speed</small>
             <strong>{rxSummary}</strong>
@@ -906,6 +950,7 @@ export function FleetMonitorPanel({
                   density={density}
                   key={agent.id}
                   monitoringState={monitoringState}
+                  monitoringError={monitoringError}
                   networkRateExpected={
                     monitoringCard?.network_rate_expected ?? true
                   }
@@ -913,6 +958,12 @@ export function FleetMonitorPanel({
                   primaryPing={monitoringCard?.primary_ping ?? null}
                   primaryPingHistory={
                     monitoringCard?.primary_ping_history ?? []
+                  }
+                  projectionCheckedAt={
+                    monitoringCard?.projection_checked_at ?? null
+                  }
+                  projectionPendingSince={
+                    monitoringCard?.projection_pending_since ?? null
                   }
                   rateHistory={rateHistory.get(agent.id) ?? []}
                   rates={rates.get(agent.id) ?? []}
@@ -926,6 +977,7 @@ export function FleetMonitorPanel({
                   }
                   statusCategory={monitorFleetCategory(
                     agent,
+                    cardsByClient,
                     cardSignals,
                     rollups,
                     rates,
@@ -933,6 +985,7 @@ export function FleetMonitorPanel({
                     primaryPingByClient,
                     networkRateExpectedByClient,
                     monitoringLoading,
+                    Boolean(monitoringError),
                   )}
                   showCountryFlags={showCountryFlags}
                   systemInformation={monitoringCard?.system_information ?? null}
@@ -958,11 +1011,14 @@ export type VpsMonitorCardProps = {
   agent: AgentView;
   billing: BillingPlanView | null;
   density: FleetMonitorDensity;
+  monitoringError: string | null;
   monitoringState: MonitoringEvidenceState;
   networkRateExpected: boolean;
   onOpenVpsDetail: (agent: AgentView) => void;
   primaryPing: CurrentPingView | null;
   primaryPingHistory: PingRollupView[];
+  projectionCheckedAt: string | null;
+  projectionPendingSince: string | null;
   portSpeed: PortSpeedView | null;
   productName: string | null;
   rateHistory: TelemetryNetworkRateRecord[];
@@ -1020,11 +1076,14 @@ export function VpsMonitorCard({
   agent,
   billing,
   density,
+  monitoringError,
   monitoringState,
   networkRateExpected,
   onOpenVpsDetail,
   primaryPing,
   primaryPingHistory,
+  projectionCheckedAt,
+  projectionPendingSince,
   portSpeed,
   productName,
   rateHistory,
@@ -1099,13 +1158,33 @@ export function VpsMonitorCard({
     displayState,
     networkFreshness,
   );
+  const latestTelemetryAt = latestTimestamp([
+    resourceFreshness,
+    networkFreshness,
+  ]);
+  const pingWarning = pingWarningRank(primaryPing);
   const pingTelemetryState = monitorTelemetryState(displayState, pingFreshness);
-  const telemetryState = monitorTelemetrySummary(
+  const observedTelemetryState = monitorTelemetrySummary(
     resourceTelemetryState,
     networkTelemetryState,
-    latestTimestamp([resourceFreshness, networkFreshness]),
+    latestTelemetryAt,
     networkRateExpected,
   );
+  const projectionProblem = monitorTelemetryProjectionProblem(
+    agent,
+    latestTelemetryAt,
+    projectionPendingSince,
+    projectionCheckedAt,
+  );
+  const refreshProblem: MonitorTelemetryState | null = monitoringError
+    ? {
+        kind: "untrusted",
+        label: "Monitoring refresh failed",
+        title: `${monitoringError}. Last-known monitoring values remain visible, but cannot be trusted as current until refresh succeeds`,
+      }
+    : null;
+  const telemetryState: MonitorTelemetryState =
+    refreshProblem ?? projectionProblem ?? observedTelemetryState;
   const lastContact = agent.last_seen_at ?? agent.stale_since ?? null;
   const rxHistory = networkDirectionHistory(rateHistory, "rx");
   const txHistory = networkDirectionHistory(rateHistory, "tx");
@@ -1127,7 +1206,6 @@ export function VpsMonitorCard({
         ? `Quota exceeded at ${quotaPercent.toFixed(quotaPercent >= 10 ? 0 : 1)}%`
         : (traffic.incomplete_reasons[0] ?? `Traffic evidence ${traffic.state}`)
       : null;
-  const pingWarning = pingWarningRank(primaryPing);
   const connectionsTelemetryState = monitorTelemetryState(
     displayState,
     rollup?.connections_observed_at ?? null,
@@ -1194,7 +1272,12 @@ export function VpsMonitorCard({
     trafficConfigured && traffic
       ? traffic.reset_day === -1
         ? null
-        : formatTrafficReset(traffic.cycle_end)
+        : [
+            formatTrafficReset(traffic.cycle_end),
+            formatMonthlyTrafficResetUtc(traffic.reset_day, traffic.reset_hour),
+          ]
+            .filter(Boolean)
+            .join(" · ")
       : null;
   const trafficHeadingContext = trafficReset;
   const trafficEvidenceInHeading =
@@ -1287,7 +1370,10 @@ export function VpsMonitorCard({
           }
           meterMax={100}
           meterValue={cpuUsed}
-          stale={resourceTelemetryState.kind === "stale"}
+          stale={
+            resourceTelemetryState.kind !== "fresh" ||
+            Boolean(projectionProblem || refreshProblem)
+          }
           title="CPU time used during the latest reporting interval; unavailable until the agent has two valid CPU counter samples"
           value={formatPercent(cpuUsed)}
         />
@@ -1304,7 +1390,10 @@ export function VpsMonitorCard({
           )}
           meterMax={100}
           meterValue={memoryUsedPercent}
-          stale={resourceTelemetryState.kind === "stale"}
+          stale={
+            resourceTelemetryState.kind !== "fresh" ||
+            Boolean(projectionProblem || refreshProblem)
+          }
           title="Used memory as a percentage of reported total memory"
           value={formatPercent(memoryUsedPercent)}
         />
@@ -1315,7 +1404,10 @@ export function VpsMonitorCard({
           meterCaption={formatMaximumCapacityCaption(diskTotal, formatBytes)}
           meterMax={100}
           meterValue={diskUsedPercent}
-          stale={resourceTelemetryState.kind === "stale"}
+          stale={
+            resourceTelemetryState.kind !== "fresh" ||
+            Boolean(projectionProblem || refreshProblem)
+          }
           title="Used disk space as a percentage of reported total disk space"
           value={formatPercent(diskUsedPercent)}
         />
@@ -1334,7 +1426,10 @@ export function VpsMonitorCard({
               />
             ) : undefined
           }
-          stale={resourceTelemetryState.kind === "stale"}
+          stale={
+            resourceTelemetryState.kind !== "fresh" ||
+            Boolean(projectionProblem || refreshProblem)
+          }
           title="Linux load average, not CPU utilization. The bar shows 1-minute load divided by reported CPU cores; full means one runnable task per core"
           value={formatLoad(load)}
           showCaption={density === "comfortable"}
@@ -1349,7 +1444,10 @@ export function VpsMonitorCard({
           sparkline={
             <MiniSparkline label="RX activity" tone="rx" values={rxHistory} />
           }
-          stale={networkTelemetryState.kind === "stale"}
+          stale={
+            networkTelemetryState.kind !== "fresh" ||
+            Boolean(projectionProblem || refreshProblem)
+          }
           title={networkMetricTitle(
             "received",
             currentRates.length,
@@ -1366,7 +1464,10 @@ export function VpsMonitorCard({
           sparkline={
             <MiniSparkline label="TX activity" tone="tx" values={txHistory} />
           }
-          stale={networkTelemetryState.kind === "stale"}
+          stale={
+            networkTelemetryState.kind !== "fresh" ||
+            Boolean(projectionProblem || refreshProblem)
+          }
           title={networkMetricTitle(
             "sent",
             currentRates.length,
@@ -1756,7 +1857,7 @@ export function MiniSparkline({
 }
 
 type MonitorTelemetryState = {
-  kind: "fresh" | "missing" | "partial" | "stale";
+  kind: "delayed" | "fresh" | "missing" | "partial" | "stale" | "untrusted";
   label: string;
   title: string;
 };
@@ -1781,14 +1882,36 @@ function monitorTelemetryState(
         "The latest telemetry timestamp is invalid and cannot be treated as current",
     };
   }
-  const ageMs = Math.max(0, Date.now() - latestMs);
-  const stale = displayState.label !== "Online" || ageMs > 3 * 60_000;
+  const stale = displayState.label !== "Online";
   return {
     kind: stale ? "stale" : "fresh",
     label: `Telemetry ${stale ? "stale" : "current"} · ${formatTime(latestAt)}`,
     title: stale
       ? "Last-known telemetry is retained for diagnosis and is not current state"
-      : "Latest telemetry is within the current-state freshness window",
+      : "Latest telemetry is the current projected evidence for this online VPS",
+  };
+}
+
+function monitorTelemetryProjectionProblem(
+  agent: AgentView,
+  latestAt: string | null,
+  pendingSinceValue: string | null,
+  checkedAtValue: string | null,
+): MonitorTelemetryState | null {
+  if (agentDisplayState(agent).label !== "Online" || !pendingSinceValue) {
+    return null;
+  }
+  const pendingSince = timestampMillis(pendingSinceValue);
+  const checkedAt = timestampMillis(checkedAtValue ?? "");
+  if (!Number.isFinite(pendingSince) || !Number.isFinite(checkedAt)) {
+    return null;
+  }
+  if (checkedAt - pendingSince <= TELEMETRY_PROJECTION_WARNING_MS) return null;
+  return {
+    kind: "delayed",
+    label: `Telemetry delayed${latestAt ? ` · ${formatTime(latestAt)}` : ""}`,
+    title:
+      "The VPS is online, but accepted telemetry has not reached the monitoring card within ten seconds; last-known values remain visible and refresh continues",
   };
 }
 
@@ -1830,7 +1953,7 @@ function monitorTelemetrySummary(
     kind: "fresh",
     label: `Telemetry current${latestLabel}`,
     title:
-      "Latest resource and network telemetry are within the current-state freshness window",
+      "Latest resource and network telemetry are the current projected evidence for this online VPS",
   };
 }
 
@@ -2215,7 +2338,9 @@ function recentPingValues(records: PingRollupView[]) {
 }
 
 function compareMonitorAgents({
+  cards,
   evidenceLoading,
+  evidenceUntrusted,
   mode,
   networkRateExpected,
   primaryPing,
@@ -2224,7 +2349,9 @@ function compareMonitorAgents({
   signals,
   traffic,
 }: {
+  cards: Map<string, MonitoringCardView>;
   evidenceLoading: boolean;
+  evidenceUntrusted: boolean;
   mode: FleetMonitorSort;
   networkRateExpected: Map<string, boolean>;
   primaryPing: Map<string, CurrentPingView>;
@@ -2261,6 +2388,7 @@ function compareMonitorAgents({
       const warningDelta =
         monitorWarningRank(
           right,
+          cards,
           signals,
           rollups,
           rates,
@@ -2268,9 +2396,11 @@ function compareMonitorAgents({
           primaryPing.get(right.id),
           networkRateExpected,
           evidenceLoading,
+          evidenceUntrusted,
         ) -
         monitorWarningRank(
           left,
+          cards,
           signals,
           rollups,
           rates,
@@ -2278,24 +2408,13 @@ function compareMonitorAgents({
           primaryPing.get(left.id),
           networkRateExpected,
           evidenceLoading,
+          evidenceUntrusted,
         );
       return warningDelta || nameDelta;
     }
     return compareMonitorMetricValues(
-      monitorMetricSortValue(
-        mode,
-        left.id,
-        rates,
-        rollups,
-        traffic,
-      ),
-      monitorMetricSortValue(
-        mode,
-        right.id,
-        rates,
-        rollups,
-        traffic,
-      ),
+      monitorMetricSortValue(mode, left.id, rates, rollups, traffic),
+      monitorMetricSortValue(mode, right.id, rates, rollups, traffic),
       nameDelta,
     );
   };
@@ -2356,9 +2475,7 @@ export function compareMonitorMetricValues(
   return right - left || nameDelta;
 }
 
-function networkRateTotal(
-  rates: TelemetryNetworkRateRecord[],
-): number | null {
+function networkRateTotal(rates: TelemetryNetworkRateRecord[]): number | null {
   const current = coherentNetworkRates(rates);
   if (current.length === 0) return null;
   return finiteMetric(
@@ -2420,6 +2537,7 @@ function regionSortValue(agent: AgentView) {
 
 function monitorWarningRank(
   agent: AgentView,
+  cards: Map<string, MonitoringCardView>,
   signals: CardSignalContext,
   rollups: Map<string, TelemetryRollupRecord>,
   rates: Map<string, TelemetryNetworkRateRecord[]>,
@@ -2427,6 +2545,7 @@ function monitorWarningRank(
   primaryPing: CurrentPingView | undefined,
   networkRateExpected: Map<string, boolean>,
   evidenceLoading = false,
+  evidenceUntrusted = false,
 ) {
   const localSignals =
     signals.records.get(agent.id) ?? defaultCardSignal(signals.global);
@@ -2434,13 +2553,17 @@ function monitorWarningRank(
     monitorStatusRank(agent) * 10 +
     (evidenceLoading
       ? 0
-      : monitorEvidenceWarningRank(
-          agent,
-          rollups,
-          rates,
-          traffic,
-          primaryPing,
-          networkRateExpected,
+      : Math.max(
+          evidenceUntrusted ? 1 : 0,
+          monitorEvidenceWarningRank(
+            agent,
+            cards,
+            rollups,
+            rates,
+            traffic,
+            primaryPing,
+            networkRateExpected,
+          ),
         ) * 5) +
     signalToneRank(localSignals.alertTone) +
     signalToneRank(localSignals.backupTone) +
@@ -2488,6 +2611,7 @@ function monitorStatusTone(
 
 function monitorFleetCategory(
   agent: AgentView,
+  cards: Map<string, MonitoringCardView>,
   signals: CardSignalContext,
   rollups: Map<string, TelemetryRollupRecord>,
   rates: Map<string, TelemetryNetworkRateRecord[]>,
@@ -2495,6 +2619,7 @@ function monitorFleetCategory(
   primaryPing: Map<string, CurrentPingView>,
   networkRateExpected: Map<string, boolean>,
   evidenceLoading = false,
+  evidenceUntrusted = false,
 ): Exclude<FleetMonitorStatusFilter, "all"> {
   const status = monitorStatusTone(agent);
   if (status === "offline") return "offline";
@@ -2504,14 +2629,16 @@ function monitorFleetCategory(
     status === "stale" ||
     status === "warning" ||
     (!evidenceLoading &&
-      monitorEvidenceWarningRank(
-        agent,
-        rollups,
-        rates,
-        traffic.get(agent.id),
-        primaryPing.get(agent.id),
-        networkRateExpected,
-      ) > 0) ||
+      (evidenceUntrusted ||
+        monitorEvidenceWarningRank(
+          agent,
+          cards,
+          rollups,
+          rates,
+          traffic.get(agent.id),
+          primaryPing.get(agent.id),
+          networkRateExpected,
+        ) > 0)) ||
     local.alertTone === "critical" ||
     local.alertTone === "warning" ||
     local.backupTone === "critical" ||
@@ -2524,6 +2651,7 @@ function monitorFleetCategory(
 
 function monitorFleetCounts(
   agents: AgentView[],
+  cards: Map<string, MonitoringCardView>,
   signals: CardSignalContext,
   rollups: Map<string, TelemetryRollupRecord>,
   rates: Map<string, TelemetryNetworkRateRecord[]>,
@@ -2531,12 +2659,14 @@ function monitorFleetCounts(
   primaryPing: Map<string, CurrentPingView>,
   networkRateExpected: Map<string, boolean>,
   evidenceLoading = false,
+  evidenceUntrusted = false,
 ) {
   const counts = { offline: 0, online: 0, total: agents.length, warning: 0 };
   for (const agent of agents) {
     counts[
       monitorFleetCategory(
         agent,
+        cards,
         signals,
         rollups,
         rates,
@@ -2544,6 +2674,7 @@ function monitorFleetCounts(
         primaryPing,
         networkRateExpected,
         evidenceLoading,
+        evidenceUntrusted,
       )
     ] += 1;
   }
@@ -2552,8 +2683,10 @@ function monitorFleetCounts(
 
 function monitorFleetSnapshot(
   agents: AgentView[],
+  cards: Map<string, MonitoringCardView>,
   rates: Map<string, TelemetryNetworkRateRecord[]>,
   traffic: Map<string, TrafficAccountingRecord>,
+  networkRatesUntrusted = false,
 ) {
   const locations = new Set<string>();
   let unspecifiedLocations = 0;
@@ -2571,8 +2704,15 @@ function monitorFleetSnapshot(
       currentRates.map((rate) => rate.bucket_start),
     );
     if (
+      !networkRatesUntrusted &&
       monitorTelemetryState(agentDisplayState(agent), observedAt).kind ===
-      "fresh"
+        "fresh" &&
+      monitorTelemetryProjectionProblem(
+        agent,
+        observedAt,
+        cards.get(agent.id)?.projection_pending_since ?? null,
+        cards.get(agent.id)?.projection_checked_at ?? null,
+      ) === null
     ) {
       rxBps += sumNetworkRate(currentRates, "rx") ?? 0;
       txBps += sumNetworkRate(currentRates, "tx") ?? 0;
@@ -2593,6 +2733,7 @@ function monitorFleetSnapshot(
     locations: Array.from(locations).sort((left, right) =>
       left.localeCompare(right),
     ),
+    networkRatesUntrusted,
     rxBps: freshNetworkCount > 0 ? rxBps : null,
     trafficBytes,
     trafficCount,
@@ -2613,18 +2754,24 @@ function formatLocationSummary(locations: string[], unspecified = 0) {
 
 function monitorEvidenceWarningRank(
   agent: AgentView,
+  cards: Map<string, MonitoringCardView>,
   rollups: Map<string, TelemetryRollupRecord>,
   rates: Map<string, TelemetryNetworkRateRecord[]>,
   traffic: TrafficAccountingRecord | undefined,
   primaryPing: CurrentPingView | undefined,
   networkRateExpected: Map<string, boolean>,
 ) {
+  const rollup = rollups.get(agent.id);
+  const card = cards.get(agent.id);
+  const currentRates = coherentNetworkRates(rates.get(agent.id) ?? []);
   return Math.max(
     monitorTelemetryWarningRank(
       agent,
-      rollups.get(agent.id),
-      rates.get(agent.id) ?? [],
+      rollup,
+      currentRates,
       networkRateExpected.get(agent.id) ?? true,
+      card?.projection_pending_since ?? null,
+      card?.projection_checked_at ?? null,
     ),
     trafficWarningRank(traffic),
     pingWarningRank(primaryPing),
@@ -2649,7 +2796,8 @@ function pingWarningRank(ping: CurrentPingView | null | undefined) {
   const checkedAt = ping.checked_at
     ? timestampMillis(ping.checked_at)
     : Number.NaN;
-  return !Number.isFinite(checkedAt) || Date.now() - checkedAt > 3 * 60_000
+  return !Number.isFinite(checkedAt) ||
+    Date.now() - checkedAt > PING_MISSED_CHECK_WINDOW_MS
     ? 1
     : 0;
 }
@@ -2659,6 +2807,8 @@ function monitorTelemetryWarningRank(
   rollup: TelemetryRollupRecord | undefined,
   rates: TelemetryNetworkRateRecord[],
   networkRateExpected: boolean,
+  projectionPendingSince: string | null,
+  projectionCheckedAt: string | null,
 ) {
   const displayState = agentDisplayState(agent);
   const resource = monitorTelemetryState(
@@ -2680,8 +2830,19 @@ function monitorTelemetryWarningRank(
     ]),
     networkRateExpected,
   );
+  const projectionProblem = monitorTelemetryProjectionProblem(
+    agent,
+    latestTimestamp([
+      rollup?.latest_observed_at,
+      ...coherentNetworkRates(rates).map((rate) => rate.bucket_start),
+    ]),
+    projectionPendingSince,
+    projectionCheckedAt,
+  );
   if (summary.kind === "missing" || summary.kind === "stale") return 2;
-  return summary.kind === "partial" ? 1 : 0;
+  return summary.kind === "partial" || projectionProblem?.kind === "delayed"
+    ? 1
+    : 0;
 }
 
 function trafficRawSortValue(traffic: TrafficAccountingRecord | undefined) {
@@ -2871,7 +3032,11 @@ function formatTrafficTitle(
     traffic.reset_day === -1
       ? "traffic accumulated across retained counter evidence"
       : "authoritative traffic-accounting cycle";
-  return `${state} ${window}. RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${overage}`;
+  const reset = formatMonthlyTrafficResetUtc(
+    traffic.reset_day,
+    traffic.reset_hour,
+  );
+  return `${state} ${window}${reset ? ` resetting at ${reset}` : ""}. RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${overage}`;
 }
 
 export function formatTrafficReset(cycleEnd: string | null | undefined) {

@@ -17,10 +17,10 @@ exploit details. Follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 
 ## Development
 
-Before starting a product update, follow the durable
-[development and update maintenance checklist](DEVELOPMENT.md). It defines the
-required design review, migration/protocol discipline, validation, release
-verification, and cleanup lifecycle.
+Before starting a product update, review the repository's [build
+notes](docs/build.md) and the documentation for the affected product area.
+Keep schema and protocol changes explicit, validate the affected workflows,
+and include release verification and cleanup in the change.
 
 Use the repository-pinned Rust and Node toolchains. The common local gates are:
 
@@ -37,8 +37,7 @@ npm audit --audit-level=moderate
 
 Run the narrowest relevant smoke tests while iterating. Changes to release
 paths, migrations, protocol behavior, or cross-component contracts should also
-run the matching checks documented in [docs/build.md](docs/build.md) and
-`scripts/release-check.sh`.
+run the matching checks documented in [docs/build.md](docs/build.md).
 
 ## Change Guidelines
 

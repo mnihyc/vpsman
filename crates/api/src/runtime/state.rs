@@ -4,7 +4,10 @@ use std::{
     net::SocketAddr,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak,
+    },
     time::Duration,
 };
 
@@ -12,7 +15,7 @@ use anyhow::Result;
 use axum::http::HeaderMap;
 use futures_util::FutureExt;
 use tokio::{
-    sync::{broadcast, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore},
+    sync::{broadcast, Mutex as AsyncMutex, Notify},
     time::Instant,
 };
 use tracing::warn;
@@ -24,16 +27,18 @@ use crate::{
         backup_auto_artifact_error_is_permanent, backup_auto_artifact_request_failure_reason,
     },
     client_ip::TrustedProxyConfig,
+    dashboard_telemetry_resident::DashboardTelemetryResident,
     error::ApiError,
     gateway_client::GatewayDispatchClient,
     model::{AuthContext, ClientMonitoringView, WsEvent},
-    model_dashboard::DashboardOverviewView,
+    model_dashboard::{DashboardOverviewView, SystemDashboardView},
     model_fleet_snapshot::FleetSnapshotResponse,
     model_home_snapshot::HomeSnapshotResponse,
     model_monitoring::MonitoringCardsPageView,
     object_store::BackupObjectStore,
     repository::Repository,
-    repository_jobs::TerminalizationBatch,
+    repository_artifact_deletions::ReviewedArtifactDeletionProducer,
+    repository_jobs::{ClaimedJobTerminalEnrichment, TerminalizationBatch},
     routes_ingest::{
         record_network_routing_terminal_result, try_auto_record_backup_artifact_for_job_target,
     },
@@ -41,20 +46,22 @@ use crate::{
 };
 
 pub(crate) const DEFAULT_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
+// One fleet-wide boundary serves both resident live-overlay collection and
+// browser invalidation. Keeping the duration in one owner prevents the two
+// stages from silently acquiring different freshness semantics.
+pub(crate) const FLEET_TELEMETRY_INVALIDATION_WINDOW: Duration = Duration::from_secs(2);
 const MIN_ARTIFACT_MAX_BYTES: usize = 1024 * 1024;
 const MAX_ARTIFACT_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
 const DEFAULT_OPERATOR_AUTH_USERNAME_FAILED_ATTEMPT_LIMIT: i64 = 8;
 const DEFAULT_OPERATOR_AUTH_IP_FAILED_ATTEMPT_LIMIT: i64 = 8;
 const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
 const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 15 * 60;
-const HEAVY_READ_IN_FLIGHT: usize = 2;
-const HEAVY_READ_WAITING: usize = 4;
-const HEAVY_READ_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 // Telemetry snapshots are deliberately short-lived.  This is long enough for
 // a burst of browser tabs to reuse one completed read, but below the UI's
 // normal refresh cadence and far below any retention/ACL mutation window.
-// Invalidation also clears these entries whenever ingest publishes a fleet
-// telemetry change.
+// The WebSocket coalescer clears these entries at its telemetry boundary just
+// before clients are told to refetch.  Per-sample notices only mark that
+// boundary pending, so staggered agents cannot continuously defeat this TTL.
 const MONITORING_READ_CACHE_TTL: Duration = Duration::from_secs(1);
 const MAX_SINGLEFLIGHT_ENTRIES: usize = 512;
 static SUITE_CONFIG_LAST_KNOWN_GOOD: OnceLock<StdRwLock<HashMap<PathBuf, SuiteConfig>>> =
@@ -74,9 +81,8 @@ pub(crate) struct WsEventBus {
     monitoring_cards_singleflight: Singleflight<MonitoringCardsPageView>,
     client_monitoring_singleflight: Singleflight<ClientMonitoringView>,
     dashboard_overview_singleflight: Singleflight<DashboardOverviewView>,
+    system_dashboard_singleflight: Singleflight<SystemDashboardView>,
     home_snapshot_singleflight: Singleflight<HomeSnapshotResponse>,
-    heavy_read_permits: Arc<Semaphore>,
-    heavy_read_waiters: Arc<Semaphore>,
 }
 
 pub(crate) struct WsInvalidationDriver {
@@ -95,9 +101,8 @@ impl WsEventBus {
                 monitoring_cards_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
                 client_monitoring_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
                 dashboard_overview_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
+                system_dashboard_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
                 home_snapshot_singleflight: Singleflight::with_ttl(MONITORING_READ_CACHE_TTL),
-                heavy_read_permits: Arc::new(Semaphore::new(HEAVY_READ_IN_FLIGHT)),
-                heavy_read_waiters: Arc::new(Semaphore::new(HEAVY_READ_WAITING)),
             },
             WsInvalidationDriver { pending },
         )
@@ -179,6 +184,25 @@ impl WsEventBus {
             .await
     }
 
+    pub(crate) async fn singleflight_system_dashboard<F, Fut>(
+        &self,
+        key: String,
+        load: F,
+    ) -> Result<SystemDashboardView, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<SystemDashboardView, ApiError>> + Send + 'static,
+    {
+        self.system_dashboard_singleflight
+            .run(
+                key,
+                "system_dashboard_panicked",
+                "The system dashboard could not be prepared.",
+                load,
+            )
+            .await
+    }
+
     pub(crate) async fn singleflight_home_snapshot<F, Fut>(
         &self,
         key: String,
@@ -202,40 +226,26 @@ impl WsEventBus {
         self.public_events.subscribe()
     }
 
-    pub(crate) async fn acquire_heavy_read_permit(&self) -> Result<OwnedSemaphorePermit, ApiError> {
-        if let Ok(permit) = Arc::clone(&self.heavy_read_permits).try_acquire_owned() {
-            return Ok(permit);
-        }
-        let waiting = Arc::clone(&self.heavy_read_waiters)
-            .try_acquire_owned()
-            .map_err(|_| ApiError::too_many_requests("heavy_read_admission_busy"))?;
-        let permit = tokio::time::timeout(
-            HEAVY_READ_WAIT_TIMEOUT,
-            Arc::clone(&self.heavy_read_permits).acquire_owned(),
-        )
-        .await
-        .map_err(|_| ApiError::too_many_requests("heavy_read_admission_busy"))?
-        .map_err(|_| {
-            ApiError::internal(
-                "heavy_read_admission_closed",
-                "Read admission is unavailable.",
-                anyhow::anyhow!("heavy read admission semaphore closed"),
-            )
-        })?;
-        drop(waiting);
-        Ok(permit)
-    }
-
     pub(crate) fn publish(&self, event: WsEvent) {
         let _ = self.public_events.send(event);
     }
 
+    #[cfg(test)]
     pub(crate) fn invalidate_fleet_telemetry(&self) {
+        self.invalidate_fleet_telemetry_read_cache();
+        self.notify_fleet_telemetry();
+    }
+
+    pub(crate) fn invalidate_fleet_telemetry_read_cache(&self) {
         self.fleet_snapshot_singleflight.clear();
         self.monitoring_cards_singleflight.clear();
         self.client_monitoring_singleflight.clear();
         self.dashboard_overview_singleflight.clear();
+        self.system_dashboard_singleflight.clear();
         self.home_snapshot_singleflight.clear();
+    }
+
+    pub(crate) fn notify_fleet_telemetry(&self) {
         let Some(pending) = self.invalidations.upgrade() else {
             return;
         };
@@ -295,7 +305,9 @@ impl SharedApiError {
 }
 
 struct SingleflightEntry<T> {
+    generation: u64,
     result: AsyncMutex<Option<CachedSingleflightResult<T>>>,
+    completed: AtomicBool,
     ready: Notify,
     #[cfg(test)]
     participants: std::sync::atomic::AtomicUsize,
@@ -306,10 +318,12 @@ struct CachedSingleflightResult<T> {
     expires_at: Option<Instant>,
 }
 
-impl<T> Default for SingleflightEntry<T> {
-    fn default() -> Self {
+impl<T> SingleflightEntry<T> {
+    fn new(generation: u64) -> Self {
         Self {
+            generation,
             result: AsyncMutex::new(None),
+            completed: AtomicBool::new(false),
             ready: Notify::new(),
             #[cfg(test)]
             participants: std::sync::atomic::AtomicUsize::new(0),
@@ -319,6 +333,7 @@ impl<T> Default for SingleflightEntry<T> {
 
 struct Singleflight<T> {
     entries: Arc<AsyncMutex<HashMap<String, Arc<SingleflightEntry<T>>>>>,
+    generation: Arc<AtomicU64>,
     cache_ttl: Duration,
 }
 
@@ -326,6 +341,7 @@ impl<T> Clone for Singleflight<T> {
     fn clone(&self) -> Self {
         Self {
             entries: Arc::clone(&self.entries),
+            generation: Arc::clone(&self.generation),
             cache_ttl: self.cache_ttl,
         }
     }
@@ -335,6 +351,7 @@ impl<T> Default for Singleflight<T> {
     fn default() -> Self {
         Self {
             entries: Arc::new(AsyncMutex::new(HashMap::new())),
+            generation: Arc::new(AtomicU64::new(0)),
             cache_ttl: Duration::ZERO,
         }
     }
@@ -344,31 +361,18 @@ impl<T: Send + 'static> Singleflight<T> {
     fn with_ttl(cache_ttl: Duration) -> Self {
         Self {
             entries: Arc::new(AsyncMutex::new(HashMap::new())),
+            generation: Arc::new(AtomicU64::new(0)),
             cache_ttl,
         }
     }
 
     fn clear(&self) {
-        let entries = Arc::clone(&self.entries);
-        let cleared = {
-            match entries.try_lock() {
-                Ok(mut guard) => {
-                    guard.clear();
-                    true
-                }
-                Err(_) => false,
-            }
-        };
-        if !cleared {
-            // Invalidation is called from synchronous mutation paths.  Do not
-            // block them on a read that is completing; schedule the bounded
-            // clear and let the in-flight caller finish with its pre-mutation
-            // snapshot.  No post-mutation request can observe it after this
-            // task runs, and the one-second TTL is an additional backstop.
-            tokio::spawn(async move {
-                entries.lock().await.clear();
-            });
-        }
+        // Keep an in-flight entry discoverable so invalidation cannot fan one
+        // expensive read out into duplicate leaders.  The generation makes
+        // every completed value from before this point stale immediately;
+        // callers that started afterward join the old leader, then coalesce
+        // behind one trailing computation instead of consuming its result.
+        self.generation.fetch_add(1, AtomicOrdering::AcqRel);
     }
 }
 
@@ -376,6 +380,25 @@ impl<T> Singleflight<T>
 where
     T: Clone + Send + 'static,
 {
+    async fn invoke<F, Fut>(
+        panic_code: &'static str,
+        panic_public_message: &'static str,
+        load: F,
+    ) -> std::result::Result<T, SharedApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = std::result::Result<T, ApiError>> + Send + 'static,
+    {
+        match std::panic::catch_unwind(AssertUnwindSafe(load)) {
+            Ok(future) => AssertUnwindSafe(future)
+                .catch_unwind()
+                .await
+                .map_err(|_| SharedApiError::panicked(panic_code, panic_public_message))
+                .and_then(|result| result.map_err(SharedApiError::from_api_error)),
+            Err(_) => Err(SharedApiError::panicked(panic_code, panic_public_message)),
+        }
+    }
+
     async fn run<F, Fut>(
         &self,
         key: String,
@@ -387,112 +410,158 @@ where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = std::result::Result<T, ApiError>> + Send + 'static,
     {
-        let (entry, leader) = loop {
-            let existing = {
-                let entries = self.entries.lock().await;
-                entries.get(&key).cloned()
-            };
-            if let Some(entry) = existing {
-                let now = Instant::now();
-                let cached = entry.result.lock().await;
-                match cached.as_ref() {
-                    None => {
-                        drop(cached);
+        let request_generation = self.generation.load(AtomicOrdering::Acquire);
+        let mut load = Some(load);
+        'request: loop {
+            let (entry, leader) = loop {
+                let existing = {
+                    let entries = self.entries.lock().await;
+                    entries.get(&key).cloned()
+                };
+                if let Some(entry) = existing {
+                    // Completion publication is the zero-TTL singleflight
+                    // boundary.  A caller that observed the entry before it
+                    // was published is an overlapping follower even if the
+                    // result lands before it acquires the result mutex.
+                    if !entry.completed.load(AtomicOrdering::Acquire) {
                         break (entry, false);
                     }
-                    Some(result) if result.expires_at.is_none_or(|expires_at| expires_at > now) => {
-                        return result.value.clone().map_err(SharedApiError::into_api_error);
-                    }
-                    Some(_) => {
-                        drop(cached);
-                        let mut entries = self.entries.lock().await;
-                        if entries
-                            .get(&key)
-                            .is_some_and(|current| Arc::ptr_eq(current, &entry))
-                        {
-                            entries.remove(&key);
+                    let now = Instant::now();
+                    let cached = entry.result.lock().await;
+                    match cached.as_ref() {
+                        None => {
+                            drop(cached);
+                            break (entry, false);
                         }
-                        continue;
+                        Some(result)
+                            if entry.generation >= request_generation
+                                && result.expires_at.is_some_and(|expires_at| expires_at > now) =>
+                        {
+                            return result.value.clone().map_err(SharedApiError::into_api_error);
+                        }
+                        Some(_) => {
+                            drop(cached);
+                            let mut entries = self.entries.lock().await;
+                            if entries
+                                .get(&key)
+                                .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                            {
+                                entries.remove(&key);
+                            }
+                            drop(entries);
+                            continue;
+                        }
                     }
                 }
-            }
 
-            let mut entries = self.entries.lock().await;
-            // Opportunistically discard expired completed entries.  The map is
-            // otherwise unbounded when callers use many selectors/clients.
-            let now = Instant::now();
-            entries.retain(|_, candidate| {
-                candidate.result.try_lock().map_or(true, |cached| {
-                    cached.as_ref().is_none_or(|result| {
-                        result.expires_at.is_none_or(|expires_at| expires_at > now)
+                let mut entries = self.entries.lock().await;
+                // Opportunistically discard stale or expired completed entries.
+                // In-flight entries remain discoverable regardless of their
+                // generation so invalidation never creates parallel leaders.
+                let now = Instant::now();
+                let generation = self.generation.load(AtomicOrdering::Acquire);
+                entries.retain(|_, candidate| {
+                    if !candidate.completed.load(AtomicOrdering::Acquire) {
+                        return true;
+                    }
+                    candidate.result.try_lock().map_or(true, |cached| {
+                        cached.as_ref().is_some_and(|result| {
+                            candidate.generation >= generation
+                                && result.expires_at.is_some_and(|expires_at| expires_at > now)
+                        })
                     })
-                })
-            });
-            if entries.len() >= MAX_SINGLEFLIGHT_ENTRIES {
-                if let Some(evict_key) = entries.iter().find_map(|(candidate_key, candidate)| {
-                    candidate.result.try_lock().ok().and_then(|cached| {
-                        cached
-                            .as_ref()
-                            .filter(|result| result.expires_at.is_some())
-                            .map(|_| candidate_key.clone())
-                    })
-                }) {
-                    entries.remove(&evict_key);
-                }
-            }
-            if let Some(entry) = entries.get(&key).cloned() {
-                drop(entries);
-                let _ = entry;
-                continue;
-            }
-            let entry = Arc::new(SingleflightEntry::default());
-            entries.insert(key.clone(), Arc::clone(&entry));
-            break (entry, true);
-        };
-        #[cfg(test)]
-        entry
-            .participants
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        if leader {
-            let entries = Arc::clone(&self.entries);
-            let task_entry = Arc::clone(&entry);
-            let cache_ttl = self.cache_ttl;
-            tokio::spawn(async move {
-                let result = match std::panic::catch_unwind(AssertUnwindSafe(load)) {
-                    Ok(future) => AssertUnwindSafe(future)
-                        .catch_unwind()
-                        .await
-                        .map_err(|_| SharedApiError::panicked(panic_code, panic_public_message))
-                        .and_then(|result| result.map_err(SharedApiError::from_api_error)),
-                    Err(_) => Err(SharedApiError::panicked(panic_code, panic_public_message)),
-                };
-                let cache_result = result.is_ok() && !cache_ttl.is_zero();
-                *task_entry.result.lock().await = Some(CachedSingleflightResult {
-                    value: result,
-                    expires_at: cache_result.then(|| Instant::now() + cache_ttl),
                 });
-                if !cache_result {
-                    let mut entries = entries.lock().await;
-                    if entries
-                        .get(&key)
-                        .is_some_and(|current| Arc::ptr_eq(current, &task_entry))
+                // Recheck the requested key before capacity eviction. Another
+                // caller may have inserted and even completed it between the
+                // first lookup and this map lock; evicting that exact result
+                // would defeat same-key coalescing at the hard bound.
+                if entries.contains_key(&key) {
+                    drop(entries);
+                    continue;
+                }
+                if entries.len() >= MAX_SINGLEFLIGHT_ENTRIES {
+                    // Any completed entry is safe to evict at the hard bound:
+                    // attached callers retain its Arc and can still consume
+                    // the result.  The atomic completion flag avoids treating
+                    // a briefly busy result mutex as an in-flight load.
+                    if let Some(evict_key) =
+                        entries.iter().find_map(|(candidate_key, candidate)| {
+                            candidate
+                                .completed
+                                .load(AtomicOrdering::Acquire)
+                                .then(|| candidate_key.clone())
+                        })
                     {
-                        entries.remove(&key);
+                        entries.remove(&evict_key);
                     }
                 }
-                task_entry.ready.notify_waiters();
-            });
-        }
+                if entries.len() >= MAX_SINGLEFLIGHT_ENTRIES {
+                    // The hard bound limits only deduplication metadata. If all
+                    // registered keys are genuinely in flight, a new distinct
+                    // request executes directly instead of waiting forever or
+                    // returning 429. Same-key callers joined above and still
+                    // share their existing leader.
+                    drop(entries);
+                    let load = load
+                        .take()
+                        .expect("an unregistered singleflight caller loads only once");
+                    return Self::invoke(panic_code, panic_public_message, load)
+                        .await
+                        .map_err(SharedApiError::into_api_error);
+                }
+                let entry = Arc::new(SingleflightEntry::new(generation));
+                entries.insert(key.clone(), Arc::clone(&entry));
+                break (entry, true);
+            };
+            #[cfg(test)]
+            entry
+                .participants
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        loop {
-            let ready = entry.ready.notified();
-            tokio::pin!(ready);
-            ready.as_mut().enable();
-            if let Some(result) = entry.result.lock().await.as_ref() {
-                return result.value.clone().map_err(SharedApiError::into_api_error);
+            if leader {
+                let entries = Arc::clone(&self.entries);
+                let generation = Arc::clone(&self.generation);
+                let task_entry = Arc::clone(&entry);
+                let task_key = key.clone();
+                let cache_ttl = self.cache_ttl;
+                let load = load.take().expect("singleflight caller can lead only once");
+                tokio::spawn(async move {
+                    let result = Self::invoke(panic_code, panic_public_message, load).await;
+                    let cache_result = result.is_ok()
+                        && !cache_ttl.is_zero()
+                        && generation.load(AtomicOrdering::Acquire) == task_entry.generation;
+                    *task_entry.result.lock().await = Some(CachedSingleflightResult {
+                        value: result,
+                        expires_at: cache_result.then(|| Instant::now() + cache_ttl),
+                    });
+                    task_entry.completed.store(true, AtomicOrdering::Release);
+                    if !cache_result
+                        || generation.load(AtomicOrdering::Acquire) != task_entry.generation
+                    {
+                        let mut entries = entries.lock().await;
+                        if entries
+                            .get(&task_key)
+                            .is_some_and(|current| Arc::ptr_eq(current, &task_entry))
+                        {
+                            entries.remove(&task_key);
+                        }
+                    }
+                    task_entry.ready.notify_waiters();
+                });
             }
-            ready.await;
+
+            loop {
+                let ready = entry.ready.notified();
+                tokio::pin!(ready);
+                ready.as_mut().enable();
+                if let Some(result) = entry.result.lock().await.as_ref() {
+                    if entry.generation < request_generation {
+                        continue 'request;
+                    }
+                    return result.value.clone().map_err(SharedApiError::into_api_error);
+                }
+                ready.await;
+            }
         }
     }
 
@@ -576,9 +645,11 @@ fn load_suite_config_last_known_good(path: &Path) -> Option<SuiteConfig> {
 pub(crate) struct AppState {
     pub(crate) repo: Repository,
     pub(crate) events: WsEventBus,
+    pub(crate) dashboard_telemetry: DashboardTelemetryResident,
     pub(crate) internal_token: Option<String>,
     pub(crate) gateway: GatewayDispatchClient,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
+    pub(crate) reviewed_artifact_deletions: ReviewedArtifactDeletionProducer,
     pub(crate) update_release_policy: UpdateReleasePolicy,
     pub(crate) job_output_artifact_min_bytes: usize,
     pub(crate) artifact_max_bytes: usize,
@@ -593,6 +664,8 @@ pub(crate) struct DispatcherRuntimeConfig {
     pub(crate) in_flight: usize,
     pub(crate) dispatch_ack_secs: u64,
     pub(crate) event_post_secs: u64,
+    pub(crate) internal_http_connect_secs: u64,
+    pub(crate) internal_http_write_secs: u64,
     pub(crate) internal_http_read_secs: u64,
     pub(crate) control_deadline_grace_secs: u64,
     pub(crate) max_job_timeout_secs: u64,
@@ -624,6 +697,8 @@ impl Default for DispatcherRuntimeConfig {
             in_flight: 64,
             dispatch_ack_secs: 30,
             event_post_secs: 15,
+            internal_http_connect_secs: 10,
+            internal_http_write_secs: 10,
             internal_http_read_secs: 15,
             control_deadline_grace_secs: 30,
             max_job_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
@@ -632,13 +707,39 @@ impl Default for DispatcherRuntimeConfig {
 }
 
 impl DispatcherRuntimeConfig {
+    /// A durable owner may be claimed only when this process can start it in
+    /// the current wave. `batch_limit` still bounds one database claim when
+    /// operators configure a smaller transaction than the execution pool.
+    pub(crate) fn immediate_claim_limit(&self) -> i64 {
+        self.batch_limit.min(self.in_flight as i64).max(1)
+    }
+
     pub(crate) fn control_deadline_extra_secs(&self) -> u64 {
-        self.dispatch_ack_secs
-            .max(self.internal_http_read_secs)
+        self.gateway_dispatch_attempt_timeout_secs()
             .saturating_add(self.event_post_secs)
             .saturating_add(self.control_deadline_grace_secs)
     }
 
+    /// The gateway client performs these four independently bounded I/O
+    /// phases in sequence. A durable dispatch owner must therefore cover the
+    /// sum, not only the longest individual timeout.
+    pub(crate) fn gateway_dispatch_attempt_timeout_secs(&self) -> u64 {
+        self.internal_http_connect_secs
+            .saturating_add(self.internal_http_write_secs.saturating_mul(2))
+            .saturating_add(self.dispatch_ack_secs.max(self.internal_http_read_secs))
+    }
+
+    /// Five seconds is reserved only for local response decoding and the
+    /// token-fenced database completion after the bounded gateway I/O. It is
+    /// not a throughput delay and is never slept.
+    pub(crate) fn gateway_dispatch_attempt_lease_secs(&self) -> u64 {
+        self.gateway_dispatch_attempt_timeout_secs()
+            .saturating_add(5)
+            .clamp(1, 7200)
+    }
+
+    /// Internal durable lanes renew this lease while external work is active;
+    /// they do not need to inherit the gateway's connect/write phases.
     pub(crate) fn dispatch_lease_secs(&self) -> u64 {
         self.dispatch_ack_secs
             .max(self.internal_http_read_secs)
@@ -695,6 +796,8 @@ impl AppState {
         config.in_flight = config.in_flight.clamp(1, 512);
         config.dispatch_ack_secs = config.dispatch_ack_secs.clamp(1, 3600);
         config.event_post_secs = config.event_post_secs.clamp(1, 3600);
+        config.internal_http_connect_secs = config.internal_http_connect_secs.clamp(1, 300);
+        config.internal_http_write_secs = config.internal_http_write_secs.clamp(1, 300);
         config.internal_http_read_secs = config.internal_http_read_secs.clamp(1, 3600);
         config.control_deadline_grace_secs = config.control_deadline_grace_secs.clamp(0, 3600);
         config.max_job_timeout_secs = config
@@ -862,12 +965,9 @@ impl AppState {
                 return parsed.clamp(1, self.max_job_timeout_secs());
             }
         }
-        let configured = self.current_suite_config().and_then(|suite| {
-            suite
-                .worker
-                .schedule_job_max_timeout_secs
-                .or(suite.timeout.worker_schedule_job_max_timeout_secs)
-        });
+        let configured = self
+            .current_suite_config()
+            .and_then(|suite| suite.worker.schedule_job_max_timeout_secs);
         configured
             .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
             .clamp(1, self.max_job_timeout_secs())
@@ -993,153 +1093,31 @@ impl AppState {
         self.events.publish(event);
     }
 
-    pub(crate) fn invalidate_fleet_telemetry(&self) {
-        self.events.invalidate_fleet_telemetry();
-    }
-
     pub(crate) fn invalidate_job_details(&self, job_id: uuid::Uuid) {
         self.events.invalidate_job_details(job_id);
-    }
-
-    pub(crate) async fn terminal_job_status_after_refresh(
-        &self,
-        job_id: uuid::Uuid,
-        refreshed: Option<String>,
-    ) -> Result<Option<String>> {
-        if let Some(status) = refreshed {
-            return Ok(
-                (!matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING))
-                    .then_some(status),
-            );
-        }
-        let Some(job) = self.repo.get_job(job_id).await? else {
-            return Ok(None);
-        };
-        if job.completed_at.is_some()
-            && !matches!(job.status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING)
-        {
-            Ok(Some(job.status))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub(crate) async fn publish_job_finished_after_refresh(
-        &self,
-        job_id: uuid::Uuid,
-        refreshed: Option<String>,
-    ) -> Result<()> {
-        if let Some(status) = self
-            .terminal_job_status_after_refresh(job_id, refreshed)
-            .await?
-        {
-            self.publish(WsEvent::JobFinished { job_id, status });
-        }
-        Ok(())
     }
 
     pub(crate) async fn process_job_terminal_events(
         &self,
         limit: i64,
     ) -> Result<TerminalizationBatch> {
+        let lease_secs = self.dispatcher_runtime_config().dispatch_lease_secs() as i64;
         let mut remaining = limit.clamp(1, 1000);
         let mut processed = TerminalizationBatch::default();
         loop {
             let batch = self
                 .repo
-                .process_pending_job_terminal_events(remaining, 60)
+                .process_pending_job_terminal_events(remaining, lease_secs)
                 .await?;
             let handled = batch.targets.len().saturating_add(batch.jobs.len());
             if handled == 0 {
                 break;
             }
-            for event in &batch.targets {
-                debug_assert_ne!(event.job_id, uuid::Uuid::nil());
-                debug_assert!(!event.client_id.is_empty());
-                debug_assert!(!event.outcome.status.is_empty());
-                let enrichment_result = async {
-                    if let Err(error) = record_network_routing_terminal_result(
-                        self,
-                        event.job_id,
-                        &event.client_id,
-                        &event.outcome.status,
-                        None,
-                    )
-                    .await
-                    {
-                        if network_routing_terminal_error_is_permanent(error.code)
-                            || error
-                                .error
-                                .to_string()
-                                .starts_with("invalid_job_operation:")
-                        {
-                            warn!(
-                                code = error.code,
-                                error = ?error.error,
-                                event_id = %event.event_id,
-                                job_id = %event.job_id,
-                                client_id = %event.client_id,
-                                "discarding invalid durable network-routing terminal result"
-                            );
-                        } else {
-                            return Err(error.error);
-                        }
-                    }
-                    if event.outcome.status == TARGET_STATUS_COMPLETED {
-                        if let Err(error) = try_auto_record_backup_artifact_for_job_target(
-                            self,
-                            event.job_id,
-                            &event.client_id,
-                        )
-                        .await
-                        {
-                            if let Some(reason) =
-                                backup_auto_artifact_request_failure_reason(&error.error)
-                            {
-                                self.repo
-                                    .mark_open_backup_request_artifact_validation_failed(
-                                        event.job_id,
-                                        &event.client_id,
-                                        reason,
-                                    )
-                                    .await?;
-                            }
-                            if backup_auto_artifact_error_is_permanent(&error.error) {
-                                warn!(
-                                    error = ?error.error,
-                                    event_id = %event.event_id,
-                                    job_id = %event.job_id,
-                                    client_id = %event.client_id,
-                                    "discarding invalid durable backup-artifact enrichment"
-                                );
-                            } else {
-                                return Err(error.error);
-                            }
-                        }
-                    }
-                    Ok::<_, anyhow::Error>(())
-                }
-                .await;
-                match enrichment_result {
-                    Ok(()) => {
-                        self.repo
-                            .mark_job_terminal_event_processed(event.event_id)
-                            .await?;
-                    }
-                    Err(error) => {
-                        warn!(
-                            %error,
-                            event_id = %event.event_id,
-                            job_id = %event.job_id,
-                            client_id = %event.client_id,
-                            "durable job target enrichment deferred for retry"
-                        );
-                        self.repo
-                            .mark_job_terminal_event_failed(event.event_id, &error.to_string())
-                            .await?;
-                    }
-                }
-            }
+            debug_assert!(batch.targets.iter().all(|event| {
+                event.job_id != uuid::Uuid::nil()
+                    && !event.client_id.is_empty()
+                    && !event.outcome.status.is_empty()
+            }));
             for event in &batch.jobs {
                 if !matches!(
                     event.status.as_str(),
@@ -1160,18 +1138,63 @@ impl AppState {
         Ok(processed)
     }
 
-    pub(crate) async fn process_job_terminal_events_or_publish_refresh(
+    pub(crate) async fn enrich_job_terminal_target(
         &self,
-        limit: i64,
-        job_id: uuid::Uuid,
-        refreshed: Option<String>,
+        work: &ClaimedJobTerminalEnrichment,
     ) -> Result<()> {
-        let batch = self.process_job_terminal_events(limit).await?;
-        if matches!(&self.repo, Repository::Memory(_))
-            && !batch.jobs.iter().any(|event| event.job_id == job_id)
+        if let Err(error) = record_network_routing_terminal_result(
+            self,
+            work.job_id,
+            &work.client_id,
+            &work.status,
+            None,
+        )
+        .await
         {
-            self.publish_job_finished_after_refresh(job_id, refreshed)
-                .await?;
+            if network_routing_terminal_error_is_permanent(error.code)
+                || error
+                    .error
+                    .to_string()
+                    .starts_with("invalid_job_operation:")
+            {
+                warn!(
+                    code = error.code,
+                    error = ?error.error,
+                    event_id = %work.event_id,
+                    job_id = %work.job_id,
+                    client_id = %work.client_id,
+                    "discarding invalid durable network-routing terminal result"
+                );
+            } else {
+                return Err(error.error);
+            }
+        }
+        if work.status == TARGET_STATUS_COMPLETED {
+            if let Err(error) =
+                try_auto_record_backup_artifact_for_job_target(self, work.job_id, &work.client_id)
+                    .await
+            {
+                if let Some(reason) = backup_auto_artifact_request_failure_reason(&error.error) {
+                    self.repo
+                        .mark_open_backup_request_artifact_validation_failed(
+                            work.job_id,
+                            &work.client_id,
+                            reason,
+                        )
+                        .await?;
+                }
+                if backup_auto_artifact_error_is_permanent(&error.error) {
+                    warn!(
+                        error = ?error.error,
+                        event_id = %work.event_id,
+                        job_id = %work.job_id,
+                        client_id = %work.client_id,
+                        "discarding invalid durable backup-artifact enrichment"
+                    );
+                } else {
+                    return Err(error.error);
+                }
+            }
         }
         Ok(())
     }

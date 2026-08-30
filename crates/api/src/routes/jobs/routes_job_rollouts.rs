@@ -84,18 +84,23 @@ pub(crate) async fn resume_job_rollout(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "jobs:write")
         .await?;
-    if !request.confirmed {
-        return Err(ApiError::conflict(
-            "job_rollout_resume_requires_confirmation",
-        ));
-    }
+    require_rollout_resume_confirmation(request.confirmed)?;
     let rollout = state
         .repo
         .resume_job_rollout(job_id, &operator, request.reason.as_deref())
         .await
         .map_err(map_rollout_error)?;
-    crate::job_dispatcher::wake_job_dispatcher(state);
+    crate::job_dispatcher::wake_job_dispatcher();
     Ok(Json(rollout))
+}
+
+pub(crate) fn require_rollout_resume_confirmation(confirmed: bool) -> Result<(), ApiError> {
+    if !confirmed {
+        return Err(ApiError::conflict(
+            "job_rollout_resume_requires_confirmation",
+        ));
+    }
+    Ok(())
 }
 
 fn map_rollout_error(error: anyhow::Error) -> ApiError {

@@ -44,7 +44,7 @@ require_tool() {
     fail "missing required tool: $1"
 }
 
-for tool in bash cmp cp date diff flock ln mv python3 sha256sum sha384sum stat tar unzip zip; do
+for tool in bash cmp cp date diff flock ln mv python3 sha256sum stat tar unzip zip; do
   require_tool "$tool"
 done
 
@@ -186,29 +186,6 @@ case "${1:-}" in
           *pg_isready*)
             exit 0
             ;;
-          *"SELECT to_regclass("*"alert_expression_migration_meta"*)
-            printf '%s\n' "${VPSMAN_SMOKE_ALERT_EXPRESSION_META_EXISTS:-f}"
-            ;;
-          *"SELECT to_regclass("*"webhook_rule_deliveries"*)
-            printf '%s\n' "${VPSMAN_SMOKE_WEBHOOK_DELIVERIES_EXISTS:-t}"
-            ;;
-          *"SELECT to_regclass("*)
-            printf '%s\n' "${VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS:-f}"
-            ;;
-          *"SELECT count(*) FROM _sqlx_migrations WHERE NOT success"*)
-            printf '0\n'
-            ;;
-          *"SELECT completed_at IS NOT NULL FROM alert_expression_migration_meta"*)
-            printf '%s\n' "${VPSMAN_SMOKE_ALERT_EXPRESSION_MIGRATION_COMPLETE:-f}"
-            ;;
-          *"SELECT count(*) FROM webhook_rule_deliveries"*)
-            printf '%s\n' "${VPSMAN_SMOKE_NONTERMINAL_WEBHOOK_DELIVERIES:-0}"
-            ;;
-          *"SELECT version, encode(checksum"*)
-            if [[ -n "${VPSMAN_SMOKE_MIGRATION_ROWS_FILE:-}" ]]; then
-              cat "$VPSMAN_SMOKE_MIGRATION_ROWS_FILE"
-            fi
-            ;;
           *"pg_dump --format=custom"*)
             printf 'vpsman updater smoke database dump partial\n'
             if [[ "${VPSMAN_SMOKE_FAIL_PG_DUMP:-0}" == "1" ]]; then
@@ -336,8 +313,8 @@ import zipfile
 
 with zipfile.ZipFile(sys.argv[1], "a") as archive:
     archive.writestr(
-        "migrations/0012_policy_owned_alerts_event_schedules.sql",
-        "-- alert-policy cutover updater smoke fixture\n",
+        "build-smoke-marker.txt",
+        "version-specific updater smoke fixture\n",
     )
 PY
 cat >"$RELEASE_V988_DIR/vpsctl-linux-x86_64-musl" <<'SH'
@@ -618,82 +595,11 @@ grep -Fq 'first-start accepts only latest or an exact release tag' \
 
 VERSION_FLOW="$SMOKE_ROOT/version-flow"
 MUTATION_FAILURE="$SMOKE_ROOT/mutation-failure"
-WEBHOOK_DRAIN_REFUSAL="$SMOKE_ROOT/webhook-drain-refusal"
-WEBHOOK_FRESH_SKIP="$SMOKE_ROOT/webhook-fresh-skip"
-WEBHOOK_COMPLETED_SKIP="$SMOKE_ROOT/webhook-completed-skip"
 cp -a "$FIRST_START" "$VERSION_FLOW"
 cp -a "$FIRST_START" "$MUTATION_FAILURE"
-cp -a "$FIRST_START" "$WEBHOOK_DRAIN_REFUSAL"
-prepare_deployment "$WEBHOOK_FRESH_SKIP"
-cp -a "$FIRST_START" "$WEBHOOK_COMPLETED_SKIP"
-version_flow_migration_rows="$SMOKE_ROOT/version-flow-migration-rows.txt"
-: >"$version_flow_migration_rows"
-
-: >"$WEBHOOK_FRESH_SKIP/docker.log"
-if ! RELEASE_DIR="$RELEASE_V988_DIR" \
-  VPSMAN_SMOKE_BUILD_TAG=v9.8.8 \
-  VPSMAN_SMOKE_WEBHOOK_DELIVERIES_EXISTS=f \
-  VPSMAN_SMOKE_TIMESTAMP=20260726T010050Z \
-  run_updater "$WEBHOOK_FRESH_SKIP" first-start v9.8.8 \
-  >"$WEBHOOK_FRESH_SKIP/update.log" 2>&1; then
-  fail "fresh 0012 first-start did not skip the webhook-delivery preflight"
-fi
-[[ "$(<"$WEBHOOK_FRESH_SKIP/RELEASE_TAG")" == "v9.8.8" ]] ||
-  fail "fresh 0012 first-start did not activate its release"
-if grep -Fq 'SELECT count(*) FROM webhook_rule_deliveries' \
-  "$WEBHOOK_FRESH_SKIP/docker.log"; then
-  fail "fresh 0012 first-start queried an absent webhook-delivery relation"
-fi
-
-: >"$WEBHOOK_COMPLETED_SKIP/docker.log"
-if ! RELEASE_DIR="$RELEASE_V988_DIR" \
-  VPSMAN_SMOKE_BUILD_TAG=v9.8.8 \
-  VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS=t \
-  VPSMAN_SMOKE_MIGRATION_ROWS_FILE="$version_flow_migration_rows" \
-  VPSMAN_SMOKE_ALERT_EXPRESSION_META_EXISTS=t \
-  VPSMAN_SMOKE_ALERT_EXPRESSION_MIGRATION_COMPLETE=t \
-  VPSMAN_SMOKE_NONTERMINAL_WEBHOOK_DELIVERIES=2 \
-  VPSMAN_SMOKE_TIMESTAMP=20260726T010051Z \
-  run_updater "$WEBHOOK_COMPLETED_SKIP" v9.8.8 \
-  >"$WEBHOOK_COMPLETED_SKIP/update.log" 2>&1; then
-  fail "completed 0012 cutover did not skip the legacy delivery preflight"
-fi
-[[ "$(<"$WEBHOOK_COMPLETED_SKIP/RELEASE_TAG")" == "v9.8.8" ]] ||
-  fail "completed 0012 cutover did not activate its release"
-if grep -Fq 'SELECT count(*) FROM webhook_rule_deliveries' \
-  "$WEBHOOK_COMPLETED_SKIP/docker.log"; then
-  fail "completed 0012 cutover rechecked post-cutover webhook deliveries"
-fi
-
-webhook_drain_state_before="$(release_state_digest "$WEBHOOK_DRAIN_REFUSAL")"
-: >"$WEBHOOK_DRAIN_REFUSAL/docker.log"
-if RELEASE_DIR="$RELEASE_V988_DIR" \
-  VPSMAN_SMOKE_BUILD_TAG=v9.8.8 \
-  VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS=t \
-  VPSMAN_SMOKE_MIGRATION_ROWS_FILE="$version_flow_migration_rows" \
-  VPSMAN_SMOKE_NONTERMINAL_WEBHOOK_DELIVERIES=2 \
-  run_updater "$WEBHOOK_DRAIN_REFUSAL" v9.8.8 \
-  >"$WEBHOOK_DRAIN_REFUSAL/update.log" 2>&1; then
-  fail "0012 update accepted nonterminal webhook deliveries"
-fi
-grep -Fq '0012 requires webhook deliveries to drain before upgrade; 2 queued, in-progress, or retryable failed deliveries remain' \
-  "$WEBHOOK_DRAIN_REFUSAL/update.log" ||
-  fail "0012 webhook-delivery drain refusal was not actionable"
-[[ "$(release_state_digest "$WEBHOOK_DRAIN_REFUSAL")" == "$webhook_drain_state_before" ]] ||
-  fail "0012 webhook-delivery preflight mutated release or backup state"
-if grep -Eq '^(stop|up .* (api|gateway|worker|frontend)( |$))' \
-  "$WEBHOOK_DRAIN_REFUSAL/docker.log"; then
-  fail "0012 webhook-delivery preflight stopped or started application services"
-fi
-assert_no_active_transaction \
-  "$WEBHOOK_DRAIN_REFUSAL" \
-  "0012 webhook-delivery preflight"
-
 : >"$VERSION_FLOW/docker.log"
 if ! RELEASE_DIR="$RELEASE_V988_DIR" \
   VPSMAN_SMOKE_BUILD_TAG=v9.8.8 \
-  VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS=t \
-  VPSMAN_SMOKE_MIGRATION_ROWS_FILE="$version_flow_migration_rows" \
   VPSMAN_SMOKE_TIMESTAMP=20260726T010101Z \
   run_updater "$VERSION_FLOW" v9.8.8 \
   >"$VERSION_FLOW/update.log" 2>&1; then
@@ -716,8 +622,6 @@ assert_no_active_transaction "$VERSION_FLOW" "successful update"
 
 : >"$VERSION_FLOW/docker.log"
 if ! VPSMAN_SMOKE_BUILD_TAG=v9.8.7 \
-  VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS=t \
-  VPSMAN_SMOKE_MIGRATION_ROWS_FILE="$version_flow_migration_rows" \
   VPSMAN_SMOKE_TIMESTAMP=20260726T010102Z \
   run_updater "$VERSION_FLOW" rollback \
   >"$VERSION_FLOW/rollback.log" 2>&1; then
@@ -742,8 +646,6 @@ assert_no_active_transaction "$VERSION_FLOW" "successful rollback"
 if RELEASE_DIR="$RELEASE_V988_DIR" \
   VPSMAN_SMOKE_BUILD_TAG=v9.8.8 \
   VPSMAN_SMOKE_FAIL_FINALIZE_MV=1 \
-  VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS=t \
-  VPSMAN_SMOKE_MIGRATION_ROWS_FILE="$version_flow_migration_rows" \
   VPSMAN_SMOKE_TIMESTAMP=20260726T010103Z \
   run_updater "$MUTATION_FAILURE" v9.8.8 \
   >"$MUTATION_FAILURE/update.log" 2>&1; then
@@ -912,14 +814,8 @@ done
 
 FAILED_FIRST_START="$SMOKE_ROOT/failed-first-start"
 prepare_deployment "$FAILED_FIRST_START"
-migration_rows="$FAILED_FIRST_START/migration-rows.txt"
-printf '1 %s\n' \
-  "$(sha384sum "$SERVER_STAGE/migrations/0001_smoke.sql" | awk '{print $1}')" \
-  >"$migration_rows"
 if (
   export VPSMAN_SMOKE_FAIL_APPLICATION_UP=1
-  export VPSMAN_SMOKE_MIGRATION_LEDGER_STATUS=t
-  export VPSMAN_SMOKE_MIGRATION_ROWS_FILE="$migration_rows"
   run_updater "$FAILED_FIRST_START" first-start v9.8.7
 ) >"$FAILED_FIRST_START/update.log" 2>&1; then
   fail "failed first-start unexpectedly passed readiness"
@@ -1251,4 +1147,4 @@ grep -Fq 'unsafe server archive path' "$MALICIOUS/update.log" ||
   fail "path-traversal archive escaped its transaction directory"
 
 printf '%s\n' \
-  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_gateway_public_key_output","first_start_privilege_salt_output","manual_database_backup","version_manifest_asset_selection","atomic_validated_backup","webhook_delivery_fresh_skip","webhook_delivery_completed_skip","webhook_delivery_drain_preflight","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
+  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_gateway_public_key_output","first_start_privilege_salt_output","manual_database_backup","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
