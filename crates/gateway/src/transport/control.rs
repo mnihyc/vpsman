@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -15,25 +15,28 @@ use tokio::{
 };
 use tracing::{info, warn};
 use vpsman_common::{
-    verify_privilege_assertion, GatewayClientSuspensionFenceBatchResult,
-    GatewayClientSuspensionFenceClear, GatewayClientSuspensionFenceClearBatchRequest,
-    GatewayClientSuspensionFencePrepare, GatewayClientSuspensionFencePrepareBatchRequest,
-    GatewayClientSuspensionFencePromote, GatewayClientSuspensionFencePromoteBatchRequest,
-    GatewayClientSuspensionFenceResult, GatewayCommandCancel, GatewayCommandCancelResult,
-    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationBatchItemResult, GatewayPrivilegeVerificationBatchRequest,
-    GatewayPrivilegeVerificationBatchResult, GatewayPrivilegeVerificationResult,
-    GatewaySessionDisconnect, GatewaySessionDisconnectBatchRequest,
-    GatewaySessionDisconnectBatchResult, GatewaySessionDisconnectResult, GatewayTerminalControl,
-    GatewayTerminalControlResult, PrivilegeAssertionError,
-    GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS, GATEWAY_CONTROL_BATCH_MAX_ITEMS,
+    verify_privilege_assertion, GatewayClientDispatchFenceAcquire,
+    GatewayClientDispatchFenceAcquireResult, GatewayClientDispatchFenceBatchResult,
+    GatewayClientDispatchFenceClear, GatewayClientDispatchFenceClearBatchRequest,
+    GatewayClientDispatchFencePrepare, GatewayClientDispatchFencePrepareBatchRequest,
+    GatewayClientDispatchFencePromote, GatewayClientDispatchFencePromoteBatchRequest,
+    GatewayClientDispatchFencePurpose, GatewayClientDispatchFenceResult, GatewayCommandCancel,
+    GatewayCommandCancelResult, GatewayCommandDispatch, GatewayCommandDispatchResult,
+    GatewayPrivilegeVerification, GatewayPrivilegeVerificationBatchItemResult,
+    GatewayPrivilegeVerificationBatchRequest, GatewayPrivilegeVerificationBatchResult,
+    GatewayPrivilegeVerificationResult, GatewaySessionDisconnect,
+    GatewaySessionDisconnectBatchRequest, GatewaySessionDisconnectBatchResult,
+    GatewaySessionDisconnectResult, GatewayTerminalControl, GatewayTerminalControlResult,
+    PrivilegeAssertionError, TerminalControlAction, GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS,
+    GATEWAY_CONTROL_BATCH_MAX_ITEMS,
 };
 
 use crate::{
     state::{
-        GatewayCancelCommand, GatewayClientSuspensionFence, GatewayCommand,
-        GatewayCommandEnqueueMarker, GatewaySessionCloseRequest, GatewaySessionMessage,
-        GatewayState, GatewayTerminalControlCommand,
+        GatewayCancelCommand, GatewayClientDispatchFence, GatewayClientDispatchFenceFallback,
+        GatewayClientDispatchFenceState, GatewayCommand, GatewayCommandEnqueueMarker,
+        GatewaySessionCloseRequest, GatewaySessionMessage, GatewayState,
+        GatewayTerminalControlCommand,
     },
     Args,
 };
@@ -221,12 +224,10 @@ where
                 | "/internal/v1/gateway/command/cancel"
                 | "/internal/v1/gateway/session/disconnect"
                 | "/internal/v1/gateway/session/disconnect/batch"
-                | "/internal/v1/gateway/client/suspension-fence/prepare"
-                | "/internal/v1/gateway/client/suspension-fence/promote"
-                | "/internal/v1/gateway/client/suspension-fence/clear"
-                | "/internal/v1/gateway/client/suspension-fence/batch/prepare"
-                | "/internal/v1/gateway/client/suspension-fence/batch/promote"
-                | "/internal/v1/gateway/client/suspension-fence/batch/clear"
+                | "/internal/v1/gateway/client/dispatch-fence/acquire"
+                | "/internal/v1/gateway/client/dispatch-fence/batch/prepare"
+                | "/internal/v1/gateway/client/dispatch-fence/batch/promote"
+                | "/internal/v1/gateway/client/dispatch-fence/batch/clear"
                 | "/internal/v1/gateway/terminal/control"
                 | "/internal/v1/gateway/metrics"
                 | "/internal/v1/gateway/privilege/verify"
@@ -328,57 +329,26 @@ where
                 .await?
             }
         }
-    } else if request.path == "/internal/v1/gateway/client/suspension-fence/prepare" {
-        let prepare: GatewayClientSuspensionFencePrepare = match serde_json::from_slice(
-            &request.body,
-        ) {
-            Ok(prepare) => prepare,
-            Err(error) => {
-                write_http_json(
-                        &mut stream,
-                        "400 Bad Request",
-                        &serde_json::json!({"error": format!("invalid_suspension_fence_prepare:{error}")}),
-                    )
-                    .await?;
-                return Ok(());
-            }
-        };
-        let result = prepare_gateway_client_suspension_fence(&state, prepare).await;
-        write_http_json(&mut stream, "200 OK", &result).await?;
-    } else if request.path == "/internal/v1/gateway/client/suspension-fence/promote" {
-        let promote: GatewayClientSuspensionFencePromote = match serde_json::from_slice(
-            &request.body,
-        ) {
-            Ok(promote) => promote,
-            Err(error) => {
-                write_http_json(
-                        &mut stream,
-                        "400 Bad Request",
-                        &serde_json::json!({"error": format!("invalid_suspension_fence_promote:{error}")}),
-                    )
-                    .await?;
-                return Ok(());
-            }
-        };
-        let result = promote_gateway_client_suspension_fence(&state, promote).await;
-        write_http_json(&mut stream, "200 OK", &result).await?;
-    } else if request.path == "/internal/v1/gateway/client/suspension-fence/clear" {
-        let clear: GatewayClientSuspensionFenceClear = match serde_json::from_slice(&request.body) {
-            Ok(clear) => clear,
+    } else if request.path == "/internal/v1/gateway/client/dispatch-fence/acquire" {
+        let acquire: GatewayClientDispatchFenceAcquire = match serde_json::from_slice(&request.body)
+        {
+            Ok(acquire) => acquire,
             Err(error) => {
                 write_http_json(
                     &mut stream,
                     "400 Bad Request",
-                    &serde_json::json!({"error": format!("invalid_suspension_fence_clear:{error}")}),
+                    &serde_json::json!({"error": format!("invalid_dispatch_fence_acquire:{error}")}),
                 )
                 .await?;
                 return Ok(());
             }
         };
-        let result = clear_gateway_client_suspension_fence(&state, clear).await;
-        write_http_json(&mut stream, "200 OK", &result).await?;
-    } else if request.path == "/internal/v1/gateway/client/suspension-fence/batch/prepare" {
-        let batch: GatewayClientSuspensionFencePrepareBatchRequest = match serde_json::from_slice(
+        match acquire_gateway_client_dispatch_fence(&state, acquire).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => write_gateway_error(&mut stream, error).await?,
+        }
+    } else if request.path == "/internal/v1/gateway/client/dispatch-fence/batch/prepare" {
+        let batch: GatewayClientDispatchFencePrepareBatchRequest = match serde_json::from_slice(
             &request.body,
         ) {
             Ok(batch) => batch,
@@ -386,13 +356,13 @@ where
                 write_http_json(
                         &mut stream,
                         "400 Bad Request",
-                        &serde_json::json!({"error": format!("invalid_suspension_fence_prepare_batch:{error}")}),
+                        &serde_json::json!({"error": format!("invalid_dispatch_fence_prepare_batch:{error}")}),
                     )
                     .await?;
                 return Ok(());
             }
         };
-        match prepare_gateway_client_suspension_fence_batch(&state, batch).await {
+        match prepare_gateway_client_dispatch_fence_batch(&state, batch).await {
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => {
                 write_http_json(
@@ -403,8 +373,8 @@ where
                 .await?
             }
         }
-    } else if request.path == "/internal/v1/gateway/client/suspension-fence/batch/promote" {
-        let batch: GatewayClientSuspensionFencePromoteBatchRequest = match serde_json::from_slice(
+    } else if request.path == "/internal/v1/gateway/client/dispatch-fence/batch/promote" {
+        let batch: GatewayClientDispatchFencePromoteBatchRequest = match serde_json::from_slice(
             &request.body,
         ) {
             Ok(batch) => batch,
@@ -412,13 +382,13 @@ where
                 write_http_json(
                         &mut stream,
                         "400 Bad Request",
-                        &serde_json::json!({"error": format!("invalid_suspension_fence_promote_batch:{error}")}),
+                        &serde_json::json!({"error": format!("invalid_dispatch_fence_promote_batch:{error}")}),
                     )
                     .await?;
                 return Ok(());
             }
         };
-        match promote_gateway_client_suspension_fence_batch(&state, batch).await {
+        match promote_gateway_client_dispatch_fence_batch(&state, batch).await {
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => {
                 write_http_json(
@@ -429,8 +399,8 @@ where
                 .await?
             }
         }
-    } else if request.path == "/internal/v1/gateway/client/suspension-fence/batch/clear" {
-        let batch: GatewayClientSuspensionFenceClearBatchRequest = match serde_json::from_slice(
+    } else if request.path == "/internal/v1/gateway/client/dispatch-fence/batch/clear" {
+        let batch: GatewayClientDispatchFenceClearBatchRequest = match serde_json::from_slice(
             &request.body,
         ) {
             Ok(batch) => batch,
@@ -438,13 +408,13 @@ where
                 write_http_json(
                         &mut stream,
                         "400 Bad Request",
-                        &serde_json::json!({"error": format!("invalid_suspension_fence_clear_batch:{error}")}),
+                        &serde_json::json!({"error": format!("invalid_dispatch_fence_clear_batch:{error}")}),
                     )
                     .await?;
                 return Ok(());
             }
         };
-        match clear_gateway_client_suspension_fence_batch(&state, batch).await {
+        match clear_gateway_client_dispatch_fence_batch(&state, batch).await {
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => {
                 write_http_json(
@@ -522,6 +492,32 @@ async fn dispatch_terminal_control(
     state: &GatewayState,
     control: GatewayTerminalControl,
 ) -> Result<GatewayTerminalControlResult> {
+    let constructive = matches!(
+        &control.request.action,
+        TerminalControlAction::Input { .. } | TerminalControlAction::Resize { .. }
+    );
+    let lifecycle_owner = if constructive {
+        Some(state.client_lifecycle_owner(&control.client_id).await)
+    } else {
+        None
+    };
+    let client_lifecycle = match lifecycle_owner.as_ref() {
+        Some(owner) => Some(owner.read().await),
+        None => None,
+    };
+    if constructive {
+        let deletion_fenced = {
+            let now = Instant::now();
+            let mut fences = state.client_dispatch_fences.write().await;
+            normalize_expired_dispatch_fence(&mut fences, &control.client_id, now);
+            fences.get(&control.client_id).is_some_and(|fence| {
+                fence.purpose == GatewayClientDispatchFencePurpose::Deletion && fence.active_at(now)
+            })
+        };
+        if deletion_fenced {
+            return Err(anyhow!("agent_lifecycle_fenced:{}", control.client_id));
+        }
+    }
     let Some(session) = state.sessions.read().await.get(&control.client_id).cloned() else {
         return Err(anyhow!("agent_not_online:{}", control.client_id));
     };
@@ -550,6 +546,9 @@ async fn dispatch_terminal_control(
                 anyhow!("agent_session_closed:{}", control.client_id)
             }
         })?;
+    // Deletion preparation only needs to order against enqueue; the agent ACK
+    // may take the normal control timeout without retaining lifecycle owner.
+    drop(client_lifecycle);
     let ack = time::timeout(Duration::from_secs(state.dispatch_ack_secs()), response_rx)
         .await
         .context("gateway terminal control timed out")?
@@ -666,16 +665,44 @@ async fn dispatch_gateway_command(
     loop {
         let lifecycle_owner = state.client_lifecycle_owner(&dispatch.client_id).await;
         let client_lifecycle = lifecycle_owner.read().await;
-        let fenced = state
-            .client_suspension_fences
+        if dispatch.expected_gateway_epoch != Some(state.client_dispatch_fence_epoch) {
+            return Err(anyhow!(
+                "agent_gateway_epoch_recheck_required:{}",
+                state.client_dispatch_fence_epoch
+            ));
+        }
+        let current_fence = state
+            .client_dispatch_fences
             .read()
             .await
             .get(&dispatch.client_id)
-            .copied()
-            .is_some_and(|fence| fence.active_at(Instant::now()));
-        if fenced {
-            return Err(anyhow!("agent_suspended:{}", dispatch.client_id));
+            .cloned();
+        if current_fence.is_some_and(|fence| !fence.active_at(Instant::now())) {
+            let mut fences = state.client_dispatch_fences.write().await;
+            normalize_expired_dispatch_fence(&mut fences, &dispatch.client_id, Instant::now());
+            drop(fences);
+            drop(client_lifecycle);
+            continue;
         }
+        match current_fence {
+            Some(fence) if fence.requires_durable_recheck() => {
+                if dispatch.lifecycle_recheck.as_ref() != Some(&fence.owner()) {
+                    return Err(durable_lifecycle_recheck_required(fence.owner()));
+                }
+            }
+            Some(_) => return Err(anyhow!("agent_suspended:{}", dispatch.client_id)),
+            None if dispatch.lifecycle_recheck.is_some() => {
+                return Err(anyhow!(
+                    "agent_lifecycle_recheck_stale:{}",
+                    dispatch.client_id
+                ));
+            }
+            None => {}
+        }
+        // A durable-recheck barrier deliberately remains installed. Every
+        // dispatch that may have crossed the lease gap independently proves
+        // DB eligibility; a second delayed request cannot piggyback on the
+        // first request's proof.
         let session = {
             let sessions = state.sessions.read().await;
             sessions.get(&dispatch.client_id).cloned()
@@ -756,6 +783,17 @@ async fn dispatch_gateway_command(
     }
 }
 
+fn durable_lifecycle_recheck_required(
+    owner: vpsman_common::GatewayClientDispatchFenceOwner,
+) -> anyhow::Error {
+    anyhow!(
+        "agent_lifecycle_recheck_required:{}:{}:{}",
+        owner.gateway_epoch,
+        owner.generation,
+        owner.token
+    )
+}
+
 async fn rollback_failed_command_enqueue(
     state: &GatewayState,
     enqueue_key: (String, uuid::Uuid),
@@ -791,21 +829,21 @@ async fn rollback_failed_command_enqueue(
     }
 }
 
-fn validate_suspension_fence_batch<'a>(
+fn validate_dispatch_fence_batch<'a>(
     item_count: usize,
     client_ids: impl IntoIterator<Item = &'a str>,
 ) -> std::result::Result<(), String> {
-    if !(1..=GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS).contains(&item_count) {
+    if !(1..=GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS).contains(&item_count) {
         return Err(format!(
-            "suspension_fence_batch_size_out_of_range:expected=1..={}:actual={item_count}",
-            GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS
+            "dispatch_fence_batch_size_out_of_range:expected=1..={}:actual={item_count}",
+            GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS
         ));
     }
     let mut unique_client_ids = HashSet::with_capacity(item_count);
     for client_id in client_ids {
         if !unique_client_ids.insert(client_id) {
             return Err(format!(
-                "suspension_fence_batch_duplicate_client_id:{client_id}"
+                "dispatch_fence_batch_duplicate_client_id:{client_id}"
             ));
         }
     }
@@ -835,112 +873,326 @@ fn validate_gateway_control_batch<'a>(
     Ok(())
 }
 
-async fn prepare_gateway_client_suspension_fence_batch(
+async fn prepare_gateway_client_dispatch_fence_batch(
     state: &GatewayState,
-    batch: GatewayClientSuspensionFencePrepareBatchRequest,
-) -> std::result::Result<GatewayClientSuspensionFenceBatchResult, String> {
-    validate_suspension_fence_batch(
+    batch: GatewayClientDispatchFencePrepareBatchRequest,
+) -> std::result::Result<GatewayClientDispatchFenceBatchResult, String> {
+    validate_dispatch_fence_batch(
         batch.items.len(),
         batch.items.iter().map(|item| item.client_id.as_str()),
     )?;
     let mut results = Vec::with_capacity(batch.items.len());
     for prepare in batch.items {
-        results.push(prepare_gateway_client_suspension_fence(state, prepare).await);
+        results.push(prepare_gateway_client_dispatch_fence(state, prepare).await);
     }
-    Ok(GatewayClientSuspensionFenceBatchResult { results })
+    Ok(GatewayClientDispatchFenceBatchResult { results })
 }
 
-async fn promote_gateway_client_suspension_fence_batch(
+async fn promote_gateway_client_dispatch_fence_batch(
     state: &GatewayState,
-    batch: GatewayClientSuspensionFencePromoteBatchRequest,
-) -> std::result::Result<GatewayClientSuspensionFenceBatchResult, String> {
-    validate_suspension_fence_batch(
+    batch: GatewayClientDispatchFencePromoteBatchRequest,
+) -> std::result::Result<GatewayClientDispatchFenceBatchResult, String> {
+    validate_dispatch_fence_batch(
         batch.items.len(),
         batch.items.iter().map(|item| item.client_id.as_str()),
     )?;
     let mut results = Vec::with_capacity(batch.items.len());
     for promote in batch.items {
-        results.push(promote_gateway_client_suspension_fence(state, promote).await);
+        results.push(promote_gateway_client_dispatch_fence(state, promote).await);
     }
-    Ok(GatewayClientSuspensionFenceBatchResult { results })
+    Ok(GatewayClientDispatchFenceBatchResult { results })
 }
 
-async fn clear_gateway_client_suspension_fence_batch(
+async fn clear_gateway_client_dispatch_fence_batch(
     state: &GatewayState,
-    batch: GatewayClientSuspensionFenceClearBatchRequest,
-) -> std::result::Result<GatewayClientSuspensionFenceBatchResult, String> {
-    validate_suspension_fence_batch(
+    batch: GatewayClientDispatchFenceClearBatchRequest,
+) -> std::result::Result<GatewayClientDispatchFenceBatchResult, String> {
+    validate_dispatch_fence_batch(
         batch.items.len(),
         batch.items.iter().map(|item| item.client_id.as_str()),
     )?;
     let mut results = Vec::with_capacity(batch.items.len());
     for clear in batch.items {
-        results.push(clear_gateway_client_suspension_fence(state, clear).await);
+        results.push(clear_gateway_client_dispatch_fence(state, clear).await);
     }
-    Ok(GatewayClientSuspensionFenceBatchResult { results })
+    Ok(GatewayClientDispatchFenceBatchResult { results })
 }
 
-async fn prepare_gateway_client_suspension_fence(
+async fn acquire_gateway_client_dispatch_fence(
     state: &GatewayState,
-    prepare: GatewayClientSuspensionFencePrepare,
-) -> GatewayClientSuspensionFenceResult {
+    acquire: GatewayClientDispatchFenceAcquire,
+) -> Result<GatewayClientDispatchFenceAcquireResult> {
+    let lifecycle_owner = state.client_lifecycle_owner(&acquire.client_id).await;
+    let _client_lifecycle = lifecycle_owner.write().await;
+    {
+        let mut fences = state.client_dispatch_fences.write().await;
+        normalize_expired_dispatch_fence(&mut fences, &acquire.client_id, Instant::now());
+    }
+    if let Some(existing) = state
+        .client_dispatch_fences
+        .read()
+        .await
+        .get(&acquire.client_id)
+        .cloned()
+    {
+        if existing.token == acquire.token {
+            anyhow::ensure!(
+                existing.purpose == acquire.purpose,
+                "dispatch_fence_token_purpose_conflict"
+            );
+            return Ok(GatewayClientDispatchFenceAcquireResult {
+                client_id: acquire.client_id,
+                owner: existing.owner(),
+            });
+        }
+        let replaceable = existing.requires_durable_recheck()
+            || (matches!(existing.state, GatewayClientDispatchFenceState::Persistent)
+                && (existing.purpose == GatewayClientDispatchFencePurpose::Suspension
+                    || (existing.purpose == GatewayClientDispatchFencePurpose::Deletion
+                        && acquire.purpose == GatewayClientDispatchFencePurpose::Deletion)));
+        anyhow::ensure!(replaceable, "dispatch_fence_conflict");
+    }
+    let mut generations = state.client_dispatch_fence_generations.write().await;
+    let generation = generations.entry(acquire.client_id.clone()).or_default();
+    if generation.latest_token == Some(acquire.token) {
+        anyhow::ensure!(
+            generation.latest_purpose == Some(acquire.purpose),
+            "dispatch_fence_token_purpose_conflict"
+        );
+    } else {
+        generation.latest_generation = generation
+            .latest_generation
+            .checked_add(1)
+            .context("client dispatch-fence generation exhausted")?;
+        generation.latest_token = Some(acquire.token);
+        generation.latest_purpose = Some(acquire.purpose);
+    }
+    Ok(GatewayClientDispatchFenceAcquireResult {
+        client_id: acquire.client_id,
+        owner: vpsman_common::GatewayClientDispatchFenceOwner {
+            token: acquire.token,
+            gateway_epoch: state.client_dispatch_fence_epoch,
+            generation: generation.latest_generation,
+        },
+    })
+}
+
+pub(crate) fn normalize_expired_dispatch_fence(
+    fences: &mut HashMap<String, GatewayClientDispatchFence>,
+    client_id: &str,
+    now: Instant,
+) {
+    let Some(fence) = fences.get(client_id).cloned() else {
+        return;
+    };
+    if !fence.lease_expired_at(now) {
+        return;
+    }
+    // Expiry loses continuous gateway ownership; it never decides whether a
+    // replaced durable suspension is still authoritative. Keep the complete
+    // exact transition (including its fallback) as a cheap durable-recheck
+    // barrier until DB state lets its owner finalize or compensate it.
+    let fallback = fence.fallback();
+    fences.insert(
+        client_id.to_string(),
+        GatewayClientDispatchFence {
+            state: GatewayClientDispatchFenceState::DurableRecheck { fallback },
+            ..fence
+        },
+    );
+}
+
+async fn prepare_gateway_client_dispatch_fence(
+    state: &GatewayState,
+    prepare: GatewayClientDispatchFencePrepare,
+) -> GatewayClientDispatchFenceResult {
     let lifecycle_owner = state.client_lifecycle_owner(&prepare.client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
     let now = Instant::now();
-    let mut fences = state.client_suspension_fences.write().await;
-    if let Some(mut existing) = fences.get(&prepare.client_id).copied() {
-        if existing.active_at(now) {
-            let same_token = existing.token == prepare.token;
-            if same_token && existing.expires_at.is_some() {
-                existing.expires_at =
-                    Some(now + Duration::from_secs(prepare.lease_secs.clamp(1, 300)));
+    if prepare.gateway_epoch != state.client_dispatch_fence_epoch {
+        return GatewayClientDispatchFenceResult {
+            client_id: prepare.client_id,
+            accepted: false,
+            fenced: false,
+            ownership_continuous: false,
+            message: "dispatch_fence_gateway_epoch_stale".to_string(),
+            enqueued_job_ids: Vec::new(),
+        };
+    }
+    let generation = state
+        .client_dispatch_fence_generations
+        .read()
+        .await
+        .get(&prepare.client_id)
+        .copied()
+        .unwrap_or_default();
+    let mut fences = state.client_dispatch_fences.write().await;
+    normalize_expired_dispatch_fence(&mut fences, &prepare.client_id, now);
+    if let Some(mut existing) = fences.get(&prepare.client_id).cloned() {
+        let same_owner = existing.token == prepare.token
+            && existing.gateway_epoch == prepare.gateway_epoch
+            && existing.generation == prepare.generation
+            && existing.purpose == prepare.purpose;
+        let replaces_recoverable_fence = !same_owner
+            && (existing.requires_durable_recheck()
+                || (matches!(existing.state, GatewayClientDispatchFenceState::Persistent)
+                    && (existing.purpose == GatewayClientDispatchFencePurpose::Suspension
+                        || (existing.purpose == GatewayClientDispatchFencePurpose::Deletion
+                            && prepare.purpose == GatewayClientDispatchFencePurpose::Deletion))));
+        if same_owner {
+            if prepare.generation <= generation.retired_generation {
+                return GatewayClientDispatchFenceResult {
+                    client_id: prepare.client_id,
+                    accepted: false,
+                    fenced: true,
+                    ownership_continuous: false,
+                    message: "dispatch_fence_generation_retired".to_string(),
+                    enqueued_job_ids: Vec::new(),
+                };
+            }
+            if matches!(
+                existing.state,
+                GatewayClientDispatchFenceState::Prepared { .. }
+            ) {
+                existing.state = GatewayClientDispatchFenceState::Prepared {
+                    expires_at: now + Duration::from_secs(prepare.lease_secs.clamp(1, 300)),
+                    fallback: existing.fallback(),
+                };
                 fences.insert(prepare.client_id.clone(), existing);
             }
             drop(fences);
-            let enqueued_job_ids = if same_token {
-                protected_enqueued_job_ids(state, &prepare.client_id, now).await
-            } else {
-                Vec::new()
-            };
-            return GatewayClientSuspensionFenceResult {
+            let enqueued_job_ids = protected_enqueued_job_ids(state, &prepare.client_id, now).await;
+            return GatewayClientDispatchFenceResult {
                 client_id: prepare.client_id,
-                accepted: same_token,
+                accepted: true,
                 fenced: true,
-                message: if same_token {
-                    "suspension_fence_already_prepared".to_string()
+                ownership_continuous: !existing.requires_durable_recheck(),
+                message: if existing.requires_durable_recheck() {
+                    "dispatch_fence_requires_durable_recheck".to_string()
                 } else {
-                    "suspension_fence_conflict".to_string()
+                    "dispatch_fence_already_owned".to_string()
                 },
                 enqueued_job_ids,
             };
         }
-        fences.remove(&prepare.client_id);
+        if prepare.renewal {
+            return GatewayClientDispatchFenceResult {
+                client_id: prepare.client_id,
+                accepted: false,
+                fenced: true,
+                ownership_continuous: false,
+                message: if existing.fallback().is_some_and(|replaced| {
+                    replaced.token == prepare.token
+                        && replaced.gateway_epoch == prepare.gateway_epoch
+                        && replaced.generation == prepare.generation
+                        && replaced.purpose == prepare.purpose
+                }) {
+                    "dispatch_fence_owner_is_fallback".to_string()
+                } else {
+                    "dispatch_fence_conflict".to_string()
+                },
+                enqueued_job_ids: Vec::new(),
+            };
+        }
+        let initial_authorized = generation.latest_generation == prepare.generation
+            && generation.latest_token == Some(prepare.token)
+            && prepare.generation > generation.retired_generation;
+        if !initial_authorized {
+            return GatewayClientDispatchFenceResult {
+                client_id: prepare.client_id,
+                accepted: false,
+                fenced: true,
+                ownership_continuous: false,
+                message: "dispatch_fence_generation_stale".to_string(),
+                enqueued_job_ids: Vec::new(),
+            };
+        }
+        if replaces_recoverable_fence {
+            let replaced_generation = existing.generation;
+            fences.insert(
+                prepare.client_id.clone(),
+                GatewayClientDispatchFence {
+                    token: prepare.token,
+                    gateway_epoch: prepare.gateway_epoch,
+                    generation: prepare.generation,
+                    purpose: prepare.purpose,
+                    state: GatewayClientDispatchFenceState::Prepared {
+                        expires_at: now + Duration::from_secs(prepare.lease_secs.clamp(1, 300)),
+                        fallback: Some(GatewayClientDispatchFenceFallback {
+                            token: existing.token,
+                            gateway_epoch: existing.gateway_epoch,
+                            generation: existing.generation,
+                            purpose: existing.purpose,
+                            requires_durable_recheck: existing.requires_durable_recheck(),
+                        }),
+                    },
+                },
+            );
+            drop(fences);
+            state
+                .retire_client_dispatch_fence_generation(
+                    &prepare.client_id,
+                    prepare.gateway_epoch,
+                    replaced_generation,
+                )
+                .await;
+            let enqueued_job_ids = protected_enqueued_job_ids(state, &prepare.client_id, now).await;
+            return GatewayClientDispatchFenceResult {
+                client_id: prepare.client_id,
+                accepted: true,
+                fenced: true,
+                ownership_continuous: false,
+                message: "dispatch_fence_replaced_recoverable_owner".to_string(),
+                enqueued_job_ids,
+            };
+        }
+        return GatewayClientDispatchFenceResult {
+            client_id: prepare.client_id,
+            accepted: false,
+            fenced: true,
+            ownership_continuous: false,
+            message: "dispatch_fence_conflict".to_string(),
+            enqueued_job_ids: Vec::new(),
+        };
+    }
+    let initial_authorized = !prepare.renewal
+        && generation.latest_generation == prepare.generation
+        && generation.latest_token == Some(prepare.token)
+        && prepare.generation > generation.retired_generation;
+    if !initial_authorized {
+        return GatewayClientDispatchFenceResult {
+            client_id: prepare.client_id,
+            accepted: false,
+            fenced: false,
+            ownership_continuous: false,
+            message: "dispatch_fence_generation_stale".to_string(),
+            enqueued_job_ids: Vec::new(),
+        };
     }
     let lease_secs = prepare.lease_secs.clamp(1, 300);
     fences.insert(
         prepare.client_id.clone(),
-        GatewayClientSuspensionFence {
+        GatewayClientDispatchFence {
             token: prepare.token,
-            expires_at: Some(now + Duration::from_secs(lease_secs)),
+            gateway_epoch: prepare.gateway_epoch,
+            generation: prepare.generation,
+            purpose: prepare.purpose,
+            state: GatewayClientDispatchFenceState::Prepared {
+                expires_at: now + Duration::from_secs(lease_secs),
+                fallback: None,
+            },
         },
     );
     drop(fences);
 
-    let session = state.sessions.write().await.remove(&prepare.client_id);
-    if let Some(session) = session {
-        let _ = session
-            .close_tx
-            .send(Some(GatewaySessionCloseRequest::Graceful(
-                "agent_suspended".to_string(),
-            )));
-    }
     let enqueued_job_ids =
         protected_enqueued_job_ids(state, &prepare.client_id, Instant::now()).await;
-    GatewayClientSuspensionFenceResult {
+    GatewayClientDispatchFenceResult {
         client_id: prepare.client_id,
         accepted: true,
         fenced: true,
-        message: "suspension_fence_prepared".to_string(),
+        ownership_continuous: false,
+        message: "dispatch_fence_prepared".to_string(),
         enqueued_job_ids,
     }
 }
@@ -964,61 +1216,222 @@ async fn protected_enqueued_job_ids(
     job_ids
 }
 
-async fn promote_gateway_client_suspension_fence(
+async fn promote_gateway_client_dispatch_fence(
     state: &GatewayState,
-    promote: GatewayClientSuspensionFencePromote,
-) -> GatewayClientSuspensionFenceResult {
+    promote: GatewayClientDispatchFencePromote,
+) -> GatewayClientDispatchFenceResult {
     let lifecycle_owner = state.client_lifecycle_owner(&promote.client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
     let now = Instant::now();
-    let mut fences = state.client_suspension_fences.write().await;
-    let accepted = fences
+    if promote.gateway_epoch != state.client_dispatch_fence_epoch {
+        let fenced = state
+            .client_dispatch_fences
+            .read()
+            .await
+            .get(&promote.client_id)
+            .cloned()
+            .is_some_and(|fence| fence.active_at(now));
+        return GatewayClientDispatchFenceResult {
+            client_id: promote.client_id,
+            accepted: false,
+            fenced,
+            ownership_continuous: false,
+            message: "dispatch_fence_gateway_epoch_stale".to_string(),
+            enqueued_job_ids: Vec::new(),
+        };
+    }
+    let retired_generation = state
+        .client_dispatch_fence_generations
+        .read()
+        .await
+        .get(&promote.client_id)
+        .map(|generation| generation.retired_generation)
+        .unwrap_or_default();
+    if promote.generation <= retired_generation {
+        let fenced = state
+            .client_dispatch_fences
+            .read()
+            .await
+            .get(&promote.client_id)
+            .is_some_and(|fence| fence.active_at(now));
+        return GatewayClientDispatchFenceResult {
+            client_id: promote.client_id,
+            accepted: false,
+            fenced,
+            ownership_continuous: false,
+            message: "dispatch_fence_generation_retired".to_string(),
+            enqueued_job_ids: Vec::new(),
+        };
+    }
+    let mut fences = state.client_dispatch_fences.write().await;
+    let exact_before_normalize = fences.get(&promote.client_id).is_some_and(|fence| {
+        fence.token == promote.token
+            && fence.gateway_epoch == promote.gateway_epoch
+            && fence.generation == promote.generation
+            && fence.purpose == promote.purpose
+    });
+    if !exact_before_normalize {
+        normalize_expired_dispatch_fence(&mut fences, &promote.client_id, now);
+    }
+    let mut ownership_continuous = false;
+    let directly_owned = fences
         .get_mut(&promote.client_id)
-        .filter(|fence| fence.token == promote.token && fence.active_at(now))
-        .map(|fence| fence.expires_at = None)
+        .filter(|fence| {
+            fence.token == promote.token
+                && fence.gateway_epoch == promote.gateway_epoch
+                && fence.generation == promote.generation
+                && fence.purpose == promote.purpose
+        })
+        .map(|fence| {
+            ownership_continuous = fence.active_at(now) && !fence.requires_durable_recheck();
+            fence.state = GatewayClientDispatchFenceState::Persistent;
+        })
         .is_some();
-    GatewayClientSuspensionFenceResult {
+    let owned_as_fallback = !directly_owned
+        && fences.get(&promote.client_id).is_some_and(|fence| {
+            fence.fallback().is_some_and(|replaced| {
+                replaced.token == promote.token
+                    && replaced.gateway_epoch == promote.gateway_epoch
+                    && replaced.generation == promote.generation
+                    && replaced.purpose == promote.purpose
+            })
+        });
+    let fenced = fences
+        .get(&promote.client_id)
+        .cloned()
+        .is_some_and(|fence| fence.active_at(now));
+    drop(fences);
+    let enqueued_job_ids = if directly_owned {
+        protected_enqueued_job_ids(state, &promote.client_id, now).await
+    } else {
+        Vec::new()
+    };
+    GatewayClientDispatchFenceResult {
         client_id: promote.client_id,
-        accepted,
-        fenced: accepted,
-        message: if accepted {
-            "suspension_fence_promoted".to_string()
+        accepted: directly_owned,
+        fenced,
+        ownership_continuous,
+        message: if directly_owned {
+            "dispatch_fence_promoted".to_string()
+        } else if owned_as_fallback {
+            "dispatch_fence_owner_is_fallback".to_string()
         } else {
-            "suspension_fence_prepare_missing_or_expired".to_string()
+            "dispatch_fence_owner_superseded_or_missing".to_string()
         },
-        enqueued_job_ids: Vec::new(),
+        enqueued_job_ids,
     }
 }
 
-async fn clear_gateway_client_suspension_fence(
+async fn clear_gateway_client_dispatch_fence(
     state: &GatewayState,
-    clear: GatewayClientSuspensionFenceClear,
-) -> GatewayClientSuspensionFenceResult {
+    clear: GatewayClientDispatchFenceClear,
+) -> GatewayClientDispatchFenceResult {
     let lifecycle_owner = state.client_lifecycle_owner(&clear.client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
-    let mut fences = state.client_suspension_fences.write().await;
-    let removable = fences.get(&clear.client_id).is_some_and(|fence| {
-        clear
-            .expected_token
-            .is_none_or(|token| fence.token == token && fence.expires_at.is_some())
+    let now = Instant::now();
+    if clear.gateway_epoch != state.client_dispatch_fence_epoch {
+        let fenced = state
+            .client_dispatch_fences
+            .read()
+            .await
+            .get(&clear.client_id)
+            .cloned()
+            .is_some_and(|fence| fence.active_at(now));
+        return GatewayClientDispatchFenceResult {
+            client_id: clear.client_id,
+            accepted: false,
+            fenced,
+            ownership_continuous: false,
+            message: "dispatch_fence_gateway_epoch_stale".to_string(),
+            enqueued_job_ids: Vec::new(),
+        };
+    }
+    let retired_before = state
+        .client_dispatch_fence_generations
+        .read()
+        .await
+        .get(&clear.client_id)
+        .map(|generation| generation.retired_generation)
+        .unwrap_or_default();
+    let mut fences = state.client_dispatch_fences.write().await;
+    let directly_owned = fences.get(&clear.client_id).is_some_and(|fence| {
+        fence.token == clear.expected_token
+            && fence.gateway_epoch == clear.gateway_epoch
+            && fence.generation == clear.expected_generation
     });
-    if removable {
-        fences.remove(&clear.client_id);
+    let owned_as_fallback = !directly_owned
+        && fences.get(&clear.client_id).is_some_and(|fence| {
+            fence.fallback().is_some_and(|replaced| {
+                replaced.token == clear.expected_token
+                    && replaced.gateway_epoch == clear.gateway_epoch
+                    && replaced.generation == clear.expected_generation
+            })
+        });
+    let restored = directly_owned
+        && clear.restore_fallback
+        && fences
+            .get(&clear.client_id)
+            .is_some_and(|fence| fence.fallback().is_some());
+    let retired_owner_visible =
+        clear.expected_generation <= retired_before && (directly_owned || owned_as_fallback);
+    if directly_owned && !retired_owner_visible {
+        let current = fences[&clear.client_id];
+        if clear.restore_fallback {
+            if let Some(replaced) = current.fallback() {
+                fences.insert(
+                    clear.client_id.clone(),
+                    GatewayClientDispatchFence {
+                        token: replaced.token,
+                        gateway_epoch: replaced.gateway_epoch,
+                        generation: replaced.generation,
+                        purpose: replaced.purpose,
+                        state: if replaced.requires_durable_recheck {
+                            GatewayClientDispatchFenceState::DurableRecheck { fallback: None }
+                        } else {
+                            GatewayClientDispatchFenceState::Persistent
+                        },
+                    },
+                );
+            } else {
+                fences.remove(&clear.client_id);
+            }
+        } else {
+            fences.remove(&clear.client_id);
+        }
     }
     let fenced = fences
         .get(&clear.client_id)
-        .copied()
-        .is_some_and(|fence| fence.active_at(Instant::now()));
-    GatewayClientSuspensionFenceResult {
+        .cloned()
+        .is_some_and(|fence| fence.active_at(now));
+    let should_retire = !retired_owner_visible && !owned_as_fallback;
+    let accepted = !retired_owner_visible && (directly_owned || (!fenced && !owned_as_fallback));
+    drop(fences);
+    if should_retire {
+        state
+            .retire_client_dispatch_fence_generation(
+                &clear.client_id,
+                clear.gateway_epoch,
+                clear.expected_generation,
+            )
+            .await;
+    }
+    GatewayClientDispatchFenceResult {
         client_id: clear.client_id,
-        accepted: removable || !fenced,
+        accepted,
         fenced,
-        message: if removable {
-            format!("suspension_fence_cleared:{}", clear.reason)
+        ownership_continuous: false,
+        message: if retired_owner_visible {
+            "dispatch_fence_generation_retired".to_string()
+        } else if restored {
+            format!("dispatch_fence_restored:{}", clear.reason)
+        } else if directly_owned {
+            format!("dispatch_fence_cleared:{}", clear.reason)
+        } else if owned_as_fallback {
+            "dispatch_fence_clear_owner_is_fallback".to_string()
         } else if fenced {
-            "suspension_fence_clear_token_mismatch".to_string()
+            "dispatch_fence_clear_token_mismatch".to_string()
         } else {
-            "suspension_fence_already_clear".to_string()
+            "dispatch_fence_already_clear".to_string()
         },
         enqueued_job_ids: Vec::new(),
     }
@@ -1070,6 +1483,37 @@ async fn disconnect_gateway_session(
 ) -> Result<GatewaySessionDisconnectResult> {
     let lifecycle_owner = state.client_lifecycle_owner(&disconnect.client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
+    if let Some(required_owner) = disconnect.required_dispatch_fence_owner {
+        let retired = required_owner.gateway_epoch != state.client_dispatch_fence_epoch
+            || state
+                .client_dispatch_fence_generations
+                .read()
+                .await
+                .get(&disconnect.client_id)
+                .is_some_and(|generation| {
+                    required_owner.generation <= generation.retired_generation
+                });
+        let still_owned = state
+            .client_dispatch_fences
+            .read()
+            .await
+            .get(&disconnect.client_id)
+            .cloned()
+            .is_some_and(|fence| {
+                !retired
+                    && fence.owner() == required_owner
+                    && fence.purpose == GatewayClientDispatchFencePurpose::Deletion
+                    && matches!(fence.state, GatewayClientDispatchFenceState::Persistent)
+            });
+        if !still_owned {
+            return Ok(GatewaySessionDisconnectResult {
+                client_id: disconnect.client_id,
+                accepted: true,
+                disconnected: false,
+                message: "dispatch_fence_owner_superseded".to_string(),
+            });
+        }
+    }
     let session = state.sessions.write().await.remove(&disconnect.client_id);
     let Some(session) = session else {
         return Ok(GatewaySessionDisconnectResult {
@@ -1119,7 +1563,12 @@ where
     let message = error.to_string();
     let status = if message.contains("agent_not_online") {
         "404 Not Found"
-    } else if message.contains("agent_suspended") {
+    } else if message.contains("agent_suspended")
+        || message.contains("agent_lifecycle_fenced")
+        || message.contains("agent_lifecycle_recheck_required")
+        || message.contains("agent_lifecycle_recheck_stale")
+        || message.contains("agent_gateway_epoch_recheck_required")
+    {
         "409 Conflict"
     } else if message.contains("agent_session_command_queue_full") {
         "503 Service Unavailable"

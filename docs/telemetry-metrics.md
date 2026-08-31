@@ -215,11 +215,11 @@ or `w`, except an interface owned by an enabled managed-tunnel plan endpoint.
 `*` admits all interfaces; comma-separated exact or trailing-prefix patterns
 such as `eth0,ens*,w*` admit only their matches.
 
-An unset `network.rate.interfaces` selects no aggregate live rates. Use `*` for
-all eligible host interfaces, `[traffic.selectors]` to follow that rule, or an
-exact host selector list. `traffic.selectors=*` likewise means every eligible
-stored traffic stream. Direction suffixes affect traffic accounting but live
-rate views continue to show RX and TX separately.
+An unset `network.rate.interfaces` follows `traffic.selectors`; `[]` explicitly
+selects none. Use `*` for all eligible host interfaces,
+`[traffic.selectors]` to store the reference explicitly, or an exact host
+selector list. Direction suffixes affect traffic accounting but live rate
+views continue to show RX and TX separately.
 
 The eligibility boundary governs cards, dashboards, snapshots, retained
 history, exports, and rollups. A recently reported excluded interface remains

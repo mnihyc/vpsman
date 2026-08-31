@@ -4750,7 +4750,7 @@ use crate::{
         PingTargetRecord, PreviewConfigurationPresetRequest,
         PreviewConfigurationSourceOverrideRequest, RuntimeConfigOverrideCandidate,
         RuntimeConfigOverrideReplacement, SchedulePrivilegeMutationRequest, ScheduleTriggerKind,
-        UpdateTagOrderRequest, UpsertAgentIdentityRequest,
+        UpdateOperatorRequest, UpdateTagOrderRequest, UpsertAgentIdentityRequest,
         UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     model_agent_updates::CreateAgentUpdateReleaseRequest,
@@ -29007,6 +29007,224 @@ async fn set_dashboard_projection_network_exact(pool: &PgPool, client_id: &str, 
 }
 
 #[tokio::test]
+async fn postgres_network_rate_selector_tristate_and_upgrade_rebuild_are_exact() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "network-rate-selector-tristate";
+    let unaffected_client_id = "network-rate-selector-no-rules";
+    insert_client(&db.pool, client_id, None).await;
+    insert_client(&db.pool, unaffected_client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES (
+            $1, 'traffic.selectors', 'eth0,docker0',
+            '{
+                "mode":"exact",
+                "selectors":[
+                    {"source":"host","interface":"eth0","direction":"total","canonical":"eth0"},
+                    {"source":"host","interface":"docker0","direction":"total","canonical":"docker0"}
+                ]
+            }'::JSONB
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let inherited: (bool, Vec<String>, Vec<String>) = sqlx::query_as(
+        r#"
+        SELECT (selection).select_all, (selection).interfaces, (selection).patterns
+        FROM (
+            SELECT public.telemetry_dashboard_effective_network_selection($1)
+                AS selection
+        ) resolved
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(inherited, (false, vec!["eth0".to_string()], Vec::new()));
+
+    // Isolate the one-time upgrade behavior from the ordinary rule trigger,
+    // then replay the correction body after clearing this owner's event.
+    sqlx::query(
+        r#"
+        DELETE FROM telemetry_dashboard_ready_owners ready
+        USING telemetry_dashboard_projection_fences fence
+        WHERE ready.owner_id = fence.owner_id
+          AND fence.client_id = $1
+          AND fence.domain = 'network'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM telemetry_dashboard_generation_events WHERE client_id=$1 AND domain='network'",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/0014_network_rate_selector_default.sql"
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let rebuild: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*)
+             FROM telemetry_dashboard_generation_events
+             WHERE client_id=$1 AND domain='network'),
+            (SELECT count(*)
+             FROM telemetry_dashboard_ready_owners ready
+             JOIN telemetry_dashboard_projection_fences fence
+               ON fence.owner_id=ready.owner_id
+             WHERE fence.client_id=$1 AND fence.domain='network')
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rebuild, (1, 1));
+    let unaffected_rebuild: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*)
+             FROM telemetry_dashboard_generation_events
+             WHERE client_id=$1 AND domain='network'),
+            (SELECT count(*)
+             FROM telemetry_dashboard_ready_owners ready
+             JOIN telemetry_dashboard_projection_fences fence
+               ON fence.owner_id=ready.owner_id
+             WHERE fence.client_id=$1 AND fence.domain='network')
+        "#,
+    )
+    .bind(unaffected_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(unaffected_rebuild, (0, 0));
+
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES ($1, 'network.rate.interfaces', '[]',
+                '{"mode":"exact","selectors":[]}'::JSONB)
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let none: (bool, Vec<String>, Vec<String>) = sqlx::query_as(
+        r#"
+        SELECT (selection).select_all, (selection).interfaces, (selection).patterns
+        FROM (SELECT public.telemetry_dashboard_effective_network_selection($1) AS selection) resolved
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(none, (false, Vec::new(), Vec::new()));
+
+    sqlx::query(
+        r#"
+        UPDATE vps_rule_values
+        SET value_raw='*', value_json='{"mode":"all"}'::JSONB
+        WHERE client_id=$1 AND key='network.rate.interfaces'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let all_eligible: (bool, Vec<String>, Vec<String>) = sqlx::query_as(
+        r#"
+        SELECT (selection).select_all, (selection).interfaces, (selection).patterns
+        FROM (SELECT public.telemetry_dashboard_effective_network_selection($1) AS selection) resolved
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        all_eligible,
+        (false, Vec::new(), vec!["e*".to_string(), "w*".to_string()])
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE vps_rule_values
+        SET value_raw='eth1', value_json='{
+            "mode":"exact",
+            "selectors":[
+                {"source":"host","interface":"eth1","direction":"total","canonical":"eth1"}
+            ]
+        }'::JSONB
+        WHERE client_id=$1 AND key='network.rate.interfaces'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let exact: (bool, Vec<String>, Vec<String>) = sqlx::query_as(
+        r#"
+        SELECT (selection).select_all, (selection).interfaces, (selection).patterns
+        FROM (SELECT public.telemetry_dashboard_effective_network_selection($1) AS selection) resolved
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(exact, (false, vec!["eth1".to_string()], Vec::new()));
+
+    sqlx::query(
+        r#"
+        UPDATE vps_rule_values
+        SET value_raw='[traffic.selectors]', value_json='{
+            "mode":"reference",
+            "reference":{"rule":"traffic.selectors"}
+        }'::JSONB
+        WHERE client_id=$1 AND key='network.rate.interfaces'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let explicit_reference: (bool, Vec<String>, Vec<String>) = sqlx::query_as(
+        r#"
+        SELECT (selection).select_all, (selection).interfaces, (selection).patterns
+        FROM (SELECT public.telemetry_dashboard_effective_network_selection($1) AS selection) resolved
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        explicit_reference,
+        (false, vec!["eth0".to_string()], Vec::new())
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_telemetry_projector_skips_owned_exact_next_rows_and_preserves_suffix_order() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -29512,8 +29730,8 @@ async fn postgres_network_interface_reads_hide_tunnel_collisions_but_bound_vps_d
     insert_client(&db.pool, client_id, None).await;
     insert_client(&db.pool, peer_client_id, None).await;
     // This test exercises dashboard generation invalidation, so select every
-    // currently admitted host rate explicitly. The production default for an
-    // absent rate rule is intentionally the empty selection.
+    // currently admitted host rate explicitly instead of depending on this
+    // client's absent traffic.selectors rule.
     sqlx::query(
         r#"
         INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
@@ -33622,7 +33840,7 @@ async fn postgres_sqlx_metadata_is_private_and_application_connections_are_publi
         .await
         .unwrap();
     assert_eq!(application_schema, "public");
-    assert_eq!(private_ledger_rows, 13);
+    assert_eq!(private_ledger_rows, 14);
     assert_eq!(public_internal_relations, 0);
 
     db.cleanup().await;
@@ -36885,6 +37103,7 @@ async fn postgres_refresh_rotation_precedes_operator_session_revocation_mutation
                     .reset_operator_password(
                         target_id,
                         "replacement-target-password-123",
+                        false,
                         &mutation_actor,
                     )
                     .await
@@ -36892,7 +37111,7 @@ async fn postgres_refresh_rotation_precedes_operator_session_revocation_mutation
             }),
             RevokingMutation::TotpClear => tokio::spawn(async move {
                 mutation_repo
-                    .clear_operator_totps(&[target_id], &mutation_actor)
+                    .clear_operator_totps(&[target_id], false, &mutation_actor)
                     .await
                     .map(|outcomes| {
                         matches!(
@@ -36903,7 +37122,7 @@ async fn postgres_refresh_rotation_precedes_operator_session_revocation_mutation
             }),
             RevokingMutation::Disable => tokio::spawn(async move {
                 mutation_repo
-                    .set_operator_statuses(&[target_id], "disabled", &mutation_actor)
+                    .set_operator_statuses(&[target_id], "disabled", false, &mutation_actor)
                     .await
                     .map(|outcomes| {
                         matches!(
@@ -36981,7 +37200,7 @@ async fn postgres_session_revoke_response_is_the_persisted_transaction_snapshot(
 
     let mut outcomes = db
         .repo
-        .revoke_operator_sessions(&[target.session_id], &actor)
+        .revoke_operator_sessions(&[target.session_id], true, &actor)
         .await
         .unwrap();
     let crate::repository_auth::AccessBatchMutationOutcome::Applied {
@@ -37020,6 +37239,241 @@ async fn postgres_session_revoke_response_is_the_persisted_transaction_snapshot(
     assert_eq!(revoked.refresh_expires_at, persisted.5);
     assert!(revoked.revoked);
     assert_eq!(revoked.revoked_at, persisted.6);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_operator_mutations_recheck_admin_risk_under_repository_locks() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin-risk-lock-owner".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator.clone(),
+        session_id: Some(auth.session_id),
+    };
+    let target = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "admin-risk-stale-snapshot".to_string(),
+                password: "target-password-123".to_string(),
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    let target_session = db.repo.issue_session(target.clone()).await.unwrap();
+    sqlx::query(
+        r#"
+        UPDATE operators
+        SET role = 'admin',
+            totp_enabled = true,
+            totp_secret_ciphertext_hex = '00',
+            totp_secret_nonce_hex = '000000000000000000000000',
+            totp_secret_salt_hex = '00000000000000000000000000000000',
+            totp_last_accepted_step = 1
+        WHERE id = $1
+        "#,
+    )
+    .bind(target.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let password_hash_before: String =
+        sqlx::query_scalar("SELECT password_hash FROM operators WHERE id = $1")
+            .bind(target.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    let update_error = db
+        .repo
+        .update_operator(
+            target.id,
+            &UpdateOperatorRequest {
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: target.session_refresh_ttl_secs,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .expect_err("a stale viewer preflight must not authorize changing a locked admin");
+    assert_eq!(
+        update_error.to_string(),
+        "admin_risk_acknowledgement_required"
+    );
+
+    let password_error = db
+        .repo
+        .reset_operator_password(target.id, "replacement-password-123", false, &actor)
+        .await
+        .expect_err("a stale viewer preflight must not authorize resetting a locked admin");
+    assert_eq!(
+        password_error.to_string(),
+        "admin_risk_acknowledgement_required"
+    );
+    let status_outcomes = db
+        .repo
+        .set_operator_statuses(&[target.id], "disabled", false, &actor)
+        .await
+        .unwrap();
+    assert!(matches!(
+        status_outcomes.as_slice(),
+        [crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "admin_risk_acknowledgement_required"
+        }] if *target_id == target.id
+    ));
+    let missing_operator = Uuid::new_v4();
+    let totp_outcomes = db
+        .repo
+        .clear_operator_totps(&[missing_operator, target.id], false, &actor)
+        .await
+        .unwrap();
+    assert_eq!(totp_outcomes.len(), 2);
+    assert!(matches!(
+        &totp_outcomes[0],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "operator_not_found"
+        } if *target_id == missing_operator
+    ));
+    assert!(matches!(
+        &totp_outcomes[1],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "admin_risk_acknowledgement_required"
+        } if *target_id == target.id
+    ));
+    let session_outcomes = db
+        .repo
+        .revoke_operator_sessions(&[target_session.session_id], false, &actor)
+        .await
+        .unwrap();
+    assert!(matches!(
+        session_outcomes.as_slice(),
+        [crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "admin_risk_acknowledgement_required"
+        }] if *target_id == target_session.session_id
+    ));
+
+    let persisted = sqlx::query_as::<_, (String, String, String, bool)>(
+        "SELECT role, status, password_hash, totp_enabled FROM operators WHERE id = $1",
+    )
+    .bind(target.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted.0, "admin");
+    assert_eq!(persisted.1, "active");
+    assert_eq!(persisted.2, password_hash_before);
+    assert!(persisted.3);
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT revoked_at IS NOT NULL FROM operator_sessions WHERE id = $1",
+    )
+    .bind(target_session.session_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    let requested_admin = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "admin-risk-requested-role".to_string(),
+                password: "target-password-123".to_string(),
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    let requested_error = db
+        .repo
+        .update_operator(
+            requested_admin.id,
+            &UpdateOperatorRequest {
+                role: "admin".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: requested_admin.session_refresh_ttl_secs,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .expect_err("the repository must enforce acknowledgement for a requested admin role");
+    assert_eq!(
+        requested_error.to_string(),
+        "admin_risk_acknowledgement_required"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT role FROM operators WHERE id = $1")
+            .bind(requested_admin.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "viewer"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE operators
+        SET totp_enabled = true,
+            totp_secret_ciphertext_hex = '00',
+            totp_secret_nonce_hex = '000000000000000000000000',
+            totp_secret_salt_hex = '00000000000000000000000000000000',
+            totp_last_accepted_step = 1
+        WHERE id = $1
+        "#,
+    )
+    .bind(requested_admin.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mixed_outcomes = db
+        .repo
+        .clear_operator_totps(&[target.id, requested_admin.id], false, &actor)
+        .await
+        .unwrap();
+    assert!(matches!(
+        &mixed_outcomes[0],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "admin_risk_acknowledgement_required"
+        } if *target_id == target.id
+    ));
+    assert!(matches!(
+        &mixed_outcomes[1],
+        crate::repository_auth::AccessBatchMutationOutcome::Applied { target_id, .. }
+            if *target_id == requested_admin.id
+    ));
 
     db.cleanup().await;
 }
@@ -37086,7 +37540,7 @@ async fn postgres_access_batch_owners_preserve_order_partial_invariants_and_audi
     ];
     let status_outcomes = db
         .repo
-        .set_operator_statuses(&requested_statuses, "disabled", &actor)
+        .set_operator_statuses(&requested_statuses, "disabled", true, &actor)
         .await
         .unwrap();
     assert_eq!(status_outcomes.len(), requested_statuses.len());
@@ -37185,7 +37639,7 @@ async fn postgres_access_batch_owners_preserve_order_partial_invariants_and_audi
     let missing_totp = Uuid::new_v4();
     let totp_outcomes = db
         .repo
-        .clear_operator_totps(&[missing_totp, totp_target.id], &actor)
+        .clear_operator_totps(&[missing_totp, totp_target.id], false, &actor)
         .await
         .unwrap();
     assert!(matches!(
@@ -37240,7 +37694,7 @@ async fn postgres_access_batch_owners_preserve_order_partial_invariants_and_audi
     let session_ids = vec![missing_session, auth.session_id, other_session.session_id];
     let session_outcomes = db
         .repo
-        .revoke_operator_sessions(&session_ids, &actor)
+        .revoke_operator_sessions(&session_ids, true, &actor)
         .await
         .unwrap();
     assert!(matches!(

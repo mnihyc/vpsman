@@ -9,7 +9,8 @@ use std::{
 
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use vpsman_common::{
-    CommandOutput, GatewayCommandCancelResult, GatewayCommandDispatchResult, JobAck, JobCancelAck,
+    CommandOutput, GatewayClientDispatchFenceOwner, GatewayClientDispatchFencePurpose,
+    GatewayCommandCancelResult, GatewayCommandDispatchResult, JobAck, JobCancelAck,
     JobCancelRequest, JobRequest, PrivilegeAssertionReplayCache, TerminalControlAck,
     TerminalControlRequest,
 };
@@ -24,9 +25,12 @@ pub(crate) const SESSION_COMMAND_QUEUE_CAPACITY: usize = 1024;
 pub(crate) struct GatewayState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
     pub(crate) client_lifecycle_owners: Arc<GatewayClientLifecycleOwners>,
-    pub(crate) client_suspension_fences: Arc<RwLock<HashMap<String, GatewayClientSuspensionFence>>>,
+    pub(crate) client_dispatch_fence_epoch: uuid::Uuid,
+    pub(crate) client_dispatch_fence_generations:
+        Arc<RwLock<HashMap<String, GatewayClientDispatchFenceGeneration>>>,
+    pub(crate) client_dispatch_fences: Arc<RwLock<HashMap<String, GatewayClientDispatchFence>>>,
     /// Recent dispatch markers are indexed by their lifecycle owner so a
-    /// suspension fence reads only that client's jobs. Global expiry cleanup
+    /// dispatch fence reads only that client's jobs. Global expiry cleanup
     /// remains a background maintenance concern.
     pub(crate) command_enqueues:
         Arc<RwLock<HashMap<String, HashMap<uuid::Uuid, GatewayCommandEnqueueMarker>>>>,
@@ -42,7 +46,9 @@ impl Default for GatewayState {
         Self {
             sessions: Arc::default(),
             client_lifecycle_owners: Arc::default(),
-            client_suspension_fences: Arc::default(),
+            client_dispatch_fence_epoch: uuid::Uuid::new_v4(),
+            client_dispatch_fence_generations: Arc::default(),
+            client_dispatch_fences: Arc::default(),
             command_enqueues: Arc::default(),
             privilege_assertions: Arc::default(),
             disconnected_at: Arc::default(),
@@ -54,11 +60,46 @@ impl Default for GatewayState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct GatewayClientSuspensionFence {
+pub(crate) struct GatewayClientDispatchFence {
     pub(crate) token: uuid::Uuid,
-    /// `None` is the persistent, post-commit state. A prepared fence expires
-    /// automatically if its API caller dies before the database mutation.
-    pub(crate) expires_at: Option<Instant>,
+    pub(crate) gateway_epoch: uuid::Uuid,
+    pub(crate) generation: u64,
+    pub(crate) purpose: GatewayClientDispatchFencePurpose,
+    pub(crate) state: GatewayClientDispatchFenceState,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GatewayClientDispatchFenceFallback {
+    pub(crate) token: uuid::Uuid,
+    pub(crate) gateway_epoch: uuid::Uuid,
+    pub(crate) generation: u64,
+    pub(crate) purpose: GatewayClientDispatchFencePurpose,
+    pub(crate) requires_durable_recheck: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GatewayClientDispatchFenceState {
+    /// Precommit ownership with a finite lease and an optional prior stable
+    /// owner to restore only after an explicit known rollback.
+    Prepared {
+        expires_at: Instant,
+        fallback: Option<GatewayClientDispatchFenceFallback>,
+    },
+    /// Postcommit suspension/deletion ownership.
+    Persistent,
+    /// Lease continuity was lost. Commands remain usable only after each
+    /// exact request repeats the durable DB eligibility check.
+    DurableRecheck {
+        fallback: Option<GatewayClientDispatchFenceFallback>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GatewayClientDispatchFenceGeneration {
+    pub(crate) latest_generation: u64,
+    pub(crate) latest_token: Option<uuid::Uuid>,
+    pub(crate) latest_purpose: Option<GatewayClientDispatchFencePurpose>,
+    pub(crate) retired_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,15 +108,63 @@ pub(crate) struct GatewayCommandEnqueueMarker {
     pub(crate) expires_at: Instant,
 }
 
-impl GatewayClientSuspensionFence {
-    pub(crate) fn active_at(self, now: Instant) -> bool {
-        self.expires_at.is_none_or(|expires_at| expires_at > now)
+impl GatewayClientDispatchFence {
+    pub(crate) fn active_at(&self, now: Instant) -> bool {
+        match self.state {
+            GatewayClientDispatchFenceState::Prepared { expires_at, .. } => expires_at > now,
+            GatewayClientDispatchFenceState::Persistent
+            | GatewayClientDispatchFenceState::DurableRecheck { .. } => true,
+        }
+    }
+
+    pub(crate) fn lease_expired_at(&self, now: Instant) -> bool {
+        matches!(
+            self.state,
+            GatewayClientDispatchFenceState::Prepared { expires_at, .. } if expires_at <= now
+        )
+    }
+
+    pub(crate) fn requires_durable_recheck(&self) -> bool {
+        matches!(
+            self.state,
+            GatewayClientDispatchFenceState::DurableRecheck { .. }
+        )
+    }
+
+    pub(crate) fn fallback(&self) -> Option<GatewayClientDispatchFenceFallback> {
+        match self.state {
+            GatewayClientDispatchFenceState::Prepared { fallback, .. }
+            | GatewayClientDispatchFenceState::DurableRecheck { fallback } => fallback,
+            GatewayClientDispatchFenceState::Persistent => None,
+        }
+    }
+
+    pub(crate) fn owner(&self) -> GatewayClientDispatchFenceOwner {
+        GatewayClientDispatchFenceOwner {
+            token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            generation: self.generation,
+        }
     }
 }
 
 impl GatewayState {
     pub(crate) async fn client_lifecycle_owner(&self, client_id: &str) -> Arc<RwLock<()>> {
         self.client_lifecycle_owners.owner(client_id).await
+    }
+
+    pub(crate) async fn retire_client_dispatch_fence_generation(
+        &self,
+        client_id: &str,
+        gateway_epoch: uuid::Uuid,
+        generation: u64,
+    ) {
+        if gateway_epoch != self.client_dispatch_fence_epoch {
+            return;
+        }
+        let mut generations = self.client_dispatch_fence_generations.write().await;
+        let state = generations.entry(client_id.to_string()).or_default();
+        state.retired_generation = state.retired_generation.max(generation);
     }
 
     pub(crate) fn reconnect_grace_secs(&self) -> u64 {

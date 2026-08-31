@@ -264,7 +264,7 @@ export function ConfigPanel({
   onOpenJobHistory: () => void;
   onOpenPrivilegeUnlock: () => void;
   onOpenAlerts: () => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: (() => Promise<void>) | null;
   onBulkUnsetVpsRules: (
     request: VpsRulesBulkUnsetRequest,
   ) => Promise<VpsRulesDryRunResponse>;
@@ -350,22 +350,24 @@ export function ConfigPanel({
             <span>{configSubtitle(subpage)}</span>
           </div>
           <div className="headerActionStack">
-            <button
-              className="secondaryAction"
-              disabled={loading || pending}
-              onClick={() =>
-                void runPanelAction(setPending, setActionError, onRefresh)
-              }
-              title={
-                loading || pending
-                  ? "Wait for the current configuration request to finish"
-                  : "Refresh configuration inventory and retained runtime evidence"
-              }
-              type="button"
-            >
-              <RefreshCw size={15} />
-              <span>Refresh</span>
-            </button>
+            {onRefresh ? (
+              <button
+                className="secondaryAction"
+                disabled={loading || pending}
+                onClick={() =>
+                  void runPanelAction(setPending, setActionError, onRefresh)
+                }
+                title={
+                  loading || pending
+                    ? "Wait for the current configuration request to finish"
+                    : "Refresh the data displayed by this configuration page"
+                }
+                type="button"
+              >
+                <RefreshCw size={15} />
+                <span>Refresh</span>
+              </button>
+            ) : null}
             <ActionFeedback
               message={configPageFeedbackMessage}
               tone={configPageFeedbackTone}
@@ -3216,8 +3218,6 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   port_speed_value_too_large: "Port speed is larger than the supported range.",
   network_rate_selector_source_invalid:
     "Live-rate selectors use host interfaces only; remove the tunnel: prefix.",
-  network_rate_selector_obsolete_all_invalid:
-    "Use * to select every eligible interface; [] is no longer supported.",
   traffic_selector_empty: "Enter at least one interface selector.",
   traffic_selector_empty_item:
     "Remove the empty selector entry between commas.",

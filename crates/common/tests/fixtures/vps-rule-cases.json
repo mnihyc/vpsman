@@ -26,6 +26,7 @@
     { "name": "rate_interface_total_and_max_aliases", "key": "network.rate.interfaces", "input": " eth0+TX+RX, ens3+RX/TX ", "canonical": "eth0,ens3+tx/rx" },
     { "name": "rate_interface_reference", "key": "network.rate.interfaces", "input": "[traffic.selectors]", "canonical": "[traffic.selectors]" },
     { "name": "rate_interface_explicit_all", "key": "network.rate.interfaces", "input": " * ", "canonical": "*" },
+    { "name": "rate_interface_explicit_none", "key": "network.rate.interfaces", "input": " [] ", "canonical": "[]" },
     { "name": "eligible_interface_patterns", "key": "network.interfaces", "input": " w*, eth0, ens* ", "canonical": "w*,eth0,ens*" },
     { "name": "eligible_interfaces_explicit_all", "key": "network.interfaces", "input": " * ", "canonical": "*" },
     { "name": "quota_above_javascript_safe_integer", "key": "traffic.quota.total", "input": " 9007199254740993 B ", "canonical": "9007199254740993B" },
@@ -54,7 +55,6 @@
     { "name": "selector_mixed_direction_forms", "key": "traffic.selectors", "input": "eth0+rx/tx+rx", "error_contains": "traffic_selector_direction_invalid" },
     { "name": "selector_interface_utf8_byte_limit", "key": "traffic.selectors", "input": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé", "error_contains": "traffic_selector_interface_invalid" },
     { "name": "selector_embedded_wildcard", "key": "traffic.selectors", "input": "eth*", "error_contains": "traffic_selector_interface_invalid" },
-    { "name": "rate_obsolete_all_token", "key": "network.rate.interfaces", "input": "[]", "error_contains": "network_rate_selector_obsolete_all_invalid" },
     { "name": "eligible_interface_interior_wildcard", "key": "network.interfaces", "input": "eth*0", "error_contains": "network_interfaces_pattern_invalid" },
     { "name": "eligible_interface_duplicate", "key": "network.interfaces", "input": "e*,e*", "error_contains": "network_interfaces_pattern_duplicate" },
     { "name": "eligible_interface_source_syntax", "key": "network.interfaces", "input": "host:eth0", "error_contains": "network_interfaces_pattern_invalid" }

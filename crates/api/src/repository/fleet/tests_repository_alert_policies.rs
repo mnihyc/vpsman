@@ -422,13 +422,16 @@ fn port_speed_is_display_only_but_strictly_normalized() {
 }
 
 #[test]
-fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
+fn live_rate_selector_preserves_explicit_all_none_and_reference_states() {
     let all = parse_network_rate_interfaces("*").unwrap();
     assert_eq!(all.raw, "*");
     assert_eq!(all.json["mode"], "all");
-    for invalid in ["", "[]"] {
-        assert!(parse_network_rate_interfaces(invalid).is_err());
-    }
+    assert!(parse_network_rate_interfaces("").is_err());
+
+    let none = parse_network_rate_interfaces("[]").unwrap();
+    assert_eq!(none.raw, "[]");
+    assert_eq!(none.json["mode"], "exact");
+    assert_eq!(none.json["selectors"], json!([]));
 
     let referenced = parse_network_rate_interfaces("[traffic.selectors]").unwrap();
     assert_eq!(referenced.raw, "[traffic.selectors]");
@@ -472,7 +475,7 @@ fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
 }
 
 #[test]
-fn live_rate_selector_requires_a_rule_and_intersects_interface_eligibility() {
+fn live_rate_selector_inherits_when_absent_and_intersects_interface_eligibility() {
     let client_ids = vec![
         "v-1".to_string(),
         "v-2".to_string(),
@@ -482,6 +485,7 @@ fn live_rate_selector_requires_a_rule_and_intersects_interface_eligibility() {
         "v-7".to_string(),
         "v-8".to_string(),
         "v-9".to_string(),
+        "v-10".to_string(),
     ];
     let stored_reference = parsed_rule_for(
         "v-4",
@@ -511,8 +515,10 @@ fn live_rate_selector_requires_a_rule_and_intersects_interface_eligibility() {
             "[traffic.selectors]",
         ),
         parsed_rule_for("v-7", VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth7+rx"),
+        parsed_rule_for("v-8", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "[]"),
         parsed_rule_for("v-9", VPS_RULE_KEY_NETWORK_INTERFACES, "*"),
         parsed_rule_for("v-9", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "*"),
+        parsed_rule_for("v-10", VPS_RULE_KEY_TRAFFIC_SELECTORS, "*"),
     ];
     let mut inventories = HashMap::<String, NetworkInterfaceInventory>::new();
     for (client_id, source, interface) in [
@@ -527,6 +533,8 @@ fn live_rate_selector_requires_a_rule_and_intersects_interface_eligibility() {
         ("v-7", "host", "eth7"),
         ("v-9", "host", "docker0"),
         ("v-9", "tunnel", "wg0"),
+        ("v-10", "host", "eth10"),
+        ("v-10", "host", "docker10"),
     ] {
         let inventory = inventories.entry(client_id.to_string()).or_default();
         inventory
@@ -562,13 +570,14 @@ fn live_rate_selector_requires_a_rule_and_intersects_interface_eligibility() {
     assert!(selected.allows("v-4", "eth4"));
     assert!(!selected.allows("v-6", "wg0"));
     assert!(!selected.expects_rates("v-6"));
-    assert!(!selected.allows("v-7", "eth7"));
-    assert!(!selected.expects_rates("v-7"));
-    assert!(!selected.allows("v-7", "anything"));
+    assert!(selected.allows("v-7", "eth7"));
+    assert!(selected.expects_rates("v-7"));
     assert!(!selected.allows("v-8", "anything"));
     assert!(!selected.expects_rates("v-8"));
     assert!(selected.allows("v-9", "docker0"));
     assert!(!selected.allows("v-9", "wg0"));
+    assert!(selected.allows("v-10", "eth10"));
+    assert!(!selected.allows("v-10", "docker10"));
 
     let mut changed_rules = rules.clone();
     changed_rules

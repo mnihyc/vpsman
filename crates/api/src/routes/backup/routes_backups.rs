@@ -1332,12 +1332,8 @@ pub(crate) async fn download_backup_artifact(
                 "backup_artifact_object_hash_mismatch",
             )
         })?;
-    let body = streaming_artifact_file_body(
-        object_file.path,
-        "backup_artifact_object_not_found",
-        object_file.cleanup_after_stream,
-    )
-    .await?;
+    let body =
+        streaming_artifact_file_body(object_file, "backup_artifact_object_not_found").await?;
 
     let mut response = Response::new(body);
     response.headers_mut().insert(
@@ -1556,9 +1552,7 @@ async fn verify_staged_backup_artifact_object(
                 "backup_artifact_object_integrity_mismatch",
             )
         })?;
-    if object_file.cleanup_after_stream {
-        let _ = tokio::fs::remove_file(&object_file.path).await;
-    }
+    drop(object_file);
     Ok(())
 }
 

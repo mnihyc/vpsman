@@ -28,6 +28,7 @@ expected_files=(
   0011_fleet_settings.sql
   0012_alert_lifecycle.sql
   0013_seed_defaults.sql
+  0014_network_rate_selector_default.sql
 )
 
 [[ -d "$MIGRATIONS_DIR" ]] || fail "missing migrations directory"
@@ -460,11 +461,35 @@ grep -Fq 'FROM public.vps_rule_values' <<<"$network_selection_body" ||
   fail "dashboard network selection is not bound to the clean rule schema"
 grep -Fq "key = 'network.interfaces'" <<<"$network_selection_body" ||
   fail "dashboard network selection bypasses the interface admission rule"
-grep -Fq "IF rate_rule IS NULL" <<<"$network_selection_body" ||
-  fail "an absent network-rate rule does not select the empty set"
 if grep -Eq 'to_regclass|EXECUTE' <<<"$network_selection_body"; then
   fail "dashboard network selection silently falls back around its schema owner"
 fi
+network_selection_correction="$MIGRATIONS_DIR/0014_network_rate_selector_default.sql"
+network_selection_correction_body="$(
+  sed -n '/CREATE OR REPLACE FUNCTION public.telemetry_dashboard_effective_network_selection(/,/^\$\$;/p' \
+    "$network_selection_correction"
+)"
+grep -Fq "rate_mode := COALESCE(rate_rule ->> 'mode', 'reference');" \
+  <<<"$network_selection_correction_body" ||
+  fail "an absent network-rate rule does not inherit traffic.selectors"
+grep -Fq "COALESCE(rate_rule -> 'selectors', '[]'::JSONB)" \
+  <<<"$network_selection_correction_body" ||
+  fail "an explicit empty network-rate selector is not preserved"
+if grep -Fq "IF rate_rule IS NULL" <<<"$network_selection_correction_body"; then
+  fail "incremental network-rate correction still treats absence as none"
+fi
+grep -Fq 'INSERT INTO public.telemetry_dashboard_generation_events (' \
+  "$network_selection_correction" ||
+  fail "network-rate correction does not use the generation-event consumer"
+grep -Fq 'FROM public.telemetry_dashboard_network_projection_heads head' \
+  "$network_selection_correction" ||
+  fail "network-rate correction does not bound rebuilds to existing network owners"
+grep -Fq "rule.key = 'network.rate.interfaces'" \
+  "$network_selection_correction" ||
+  fail "network-rate correction does not target omitted rate rules"
+grep -Fq "rule.key = 'traffic.selectors'" \
+  "$network_selection_correction" ||
+  fail "network-rate correction queues owners whose effective selection cannot change"
 network_admission_body="$(
   sed -n '/CREATE FUNCTION public.telemetry_interface_is_admitted_resolved(/,/^\$\$;/p' \
     "$dashboard_schema"
@@ -964,9 +989,9 @@ grep -Fq 'postgres_sqlx_metadata_is_private_and_application_connections_are_publ
   fail "private SQLx catalog contract does not inspect exactly one ledger"
 grep -Fq 'assert_eq!(application_schema, "public");' "$SQLX_CATALOG_TEST" ||
   fail "private SQLx catalog contract does not prove the application schema"
-grep -Fq 'assert_eq!(private_ledger_rows, 13);' "$SQLX_CATALOG_TEST" ||
-  fail "private SQLx catalog contract does not prove all clean migrations"
+grep -Fq 'assert_eq!(private_ledger_rows, 14);' "$SQLX_CATALOG_TEST" ||
+  fail "private SQLx catalog contract does not prove all ordinary migrations"
 grep -Fq 'assert_eq!(public_internal_relations, 0);' "$SQLX_CATALOG_TEST" ||
   fail "private SQLx catalog contract does not reject public internal relations"
 
-printf '{"migration_audit":"ok","model":"domain_declarative","migration_count":13,"schema_files":12,"seed_statements":31}\n'
+printf '{"migration_audit":"ok","model":"domain_baseline_incremental","migration_count":14,"schema_files":12,"seed_statements":31}\n'

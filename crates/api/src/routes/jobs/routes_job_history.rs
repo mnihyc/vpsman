@@ -1326,7 +1326,12 @@ pub(crate) async fn compare_job_outputs(
     Ok(Json(
         state
             .repo
-            .compare_job_outputs(job_id, mode)
+            .compare_job_outputs(
+                job_id,
+                mode,
+                state.backup_object_store.as_ref(),
+                state.artifact_max_bytes(),
+            )
             .await
             .map_err(ApiError::internal_mapper(
                 "job_output_comparison_unavailable",
@@ -1429,12 +1434,7 @@ pub(crate) async fn download_job_output_chunk(
                 "job_output_artifact_integrity_mismatch",
             )
         })?;
-    let body = streaming_artifact_file_body(
-        object_file.path,
-        "job_output_artifact_not_found",
-        object_file.cleanup_after_stream,
-    )
-    .await?;
+    let body = streaming_artifact_file_body(object_file, "job_output_artifact_not_found").await?;
     let mut response = Response::new(body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,

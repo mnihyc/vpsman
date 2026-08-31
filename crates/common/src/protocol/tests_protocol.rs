@@ -87,20 +87,29 @@ fn runtime_reload_scope_uses_the_explicit_resource_set() {
 }
 
 #[test]
-fn suspension_fence_batch_protocol_preserves_request_and_result_order() {
+fn dispatch_fence_batch_protocol_preserves_request_and_result_order() {
     let first_token = uuid::Uuid::new_v4();
     let second_token = uuid::Uuid::new_v4();
-    let request = super::GatewayClientSuspensionFencePrepareBatchRequest {
+    let gateway_epoch = uuid::Uuid::new_v4();
+    let request = super::GatewayClientDispatchFencePrepareBatchRequest {
         items: vec![
-            super::GatewayClientSuspensionFencePrepare {
+            super::GatewayClientDispatchFencePrepare {
                 client_id: "client-b".to_string(),
                 token: first_token,
+                gateway_epoch,
+                generation: 1,
+                renewal: false,
                 lease_secs: 60,
+                purpose: super::GatewayClientDispatchFencePurpose::Suspension,
             },
-            super::GatewayClientSuspensionFencePrepare {
+            super::GatewayClientDispatchFencePrepare {
                 client_id: "client-a".to_string(),
                 token: second_token,
+                gateway_epoch,
+                generation: 2,
+                renewal: false,
                 lease_secs: 60,
+                purpose: super::GatewayClientDispatchFencePurpose::Deletion,
             },
         ],
     };
@@ -110,26 +119,29 @@ fn suspension_fence_batch_protocol_preserves_request_and_result_order() {
     assert_eq!(encoded["items"][0]["token"], first_token.to_string());
     assert_eq!(encoded["items"][1]["token"], second_token.to_string());
 
-    let decoded: super::GatewayClientSuspensionFenceBatchResult =
+    let decoded: super::GatewayClientDispatchFenceBatchResult =
         serde_json::from_value(serde_json::json!({
             "results": [
                 {
                     "client_id": "client-b",
                     "accepted": false,
                     "fenced": true,
-                    "message": "suspension_fence_conflict"
+                    "message": "dispatch_fence_conflict"
                 },
                 {
                     "client_id": "client-a",
                     "accepted": true,
                     "fenced": true,
-                    "message": "suspension_fence_prepared"
+                    "ownership_continuous": true,
+                    "message": "dispatch_fence_prepared"
                 }
             ]
         }))
         .unwrap();
     assert_eq!(decoded.results[0].client_id, "client-b");
     assert_eq!(decoded.results[1].client_id, "client-a");
+    assert!(!decoded.results[0].ownership_continuous);
+    assert!(decoded.results[1].ownership_continuous);
 }
 
 #[test]
@@ -139,10 +151,12 @@ fn lifecycle_batch_protocol_preserves_target_order() {
             super::GatewaySessionDisconnect {
                 client_id: "client-b".to_string(),
                 reason: "vps_deleted".to_string(),
+                required_dispatch_fence_owner: None,
             },
             super::GatewaySessionDisconnect {
                 client_id: "client-a".to_string(),
                 reason: "vps_deleted".to_string(),
+                required_dispatch_fence_owner: None,
             },
         ],
     };

@@ -199,9 +199,10 @@ pub(crate) async fn ingest_telemetry(
     match state.repo.record_telemetry_outcome(&event).await? {
         TelemetryRecordOutcome::Recorded => {
             // The forwarding gateway is the route owner. Its successful HTTP
-            // delivery path applies this post-commit refresh only while the
-            // exact originating session remains current, avoiding a second
-            // API-to-gateway control request and fencing a later suspension.
+            // delivery path applies this post-commit refresh only to the exact
+            // stable route owner observed before this request and while the
+            // originating session remains current. A later owner therefore
+            // wins without a second API-to-gateway control request.
             Ok(Json(TelemetryIngestResponse {
                 accepted: true,
                 message: "telemetry recorded".to_string(),

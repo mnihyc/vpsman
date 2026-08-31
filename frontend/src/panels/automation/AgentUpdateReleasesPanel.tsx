@@ -43,6 +43,7 @@ function parseOptionalPositiveInteger(
 
 export function AgentUpdateReleasesPanel({
   agents,
+  error,
   jobs,
   loading,
   onCreateAgentUpdateRelease,
@@ -57,6 +58,7 @@ export function AgentUpdateReleasesPanel({
   suiteConfigLoading,
 }: {
   agents: AgentView[];
+  error: string | null;
   jobs: JobHistoryRecord[];
   loading: boolean;
   onCreateAgentUpdateRelease: (
@@ -397,6 +399,11 @@ export function AgentUpdateReleasesPanel({
           </button>
         </div>
       </div>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={error}
+        tone="danger"
+      />
       <div className="releaseWorkflowBar">
         <div>
           <strong>{registryModel.label}</strong>

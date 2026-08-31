@@ -72,7 +72,7 @@ export function resolveNetworkRateInterfaces(
     (rule) => rule.key === "network.rate.interfaces",
   );
   if (!rateRule) {
-    return exactResolution(eligibility, "network.rate.interfaces", new Set());
+    return resolveTrafficSelectorReference(rules, eligibility);
   }
   if (rateRule.state !== "ok") {
     return invalidResolution(eligibility, "network.rate.interfaces");

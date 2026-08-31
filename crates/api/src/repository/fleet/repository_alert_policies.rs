@@ -1157,18 +1157,20 @@ impl Repository {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        let configured_clients = rules
+        let selection_clients = rules
             .iter()
             .filter(|rule| {
-                rule.key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES
-                    && requested.contains(rule.client_id.as_str())
+                matches!(
+                    rule.key.as_str(),
+                    VPS_RULE_KEY_NETWORK_RATE_INTERFACES | VPS_RULE_KEY_TRAFFIC_SELECTORS
+                ) && requested.contains(rule.client_id.as_str())
             })
             .map(|rule| rule.client_id.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         let inventories = self
-            .network_interface_inventories_for_clients(&configured_clients, &[])
+            .network_interface_inventories_for_clients(&selection_clients, &[])
             .await?;
         resolve_network_rate_interface_selection(client_ids, rules, &inventories)
     }
@@ -5630,11 +5632,12 @@ fn resolve_network_rate_interface_selection(
         let rate_rule = client_rules
             .and_then(|rules| rules.get(VPS_RULE_KEY_NETWORK_RATE_INTERFACES))
             .copied();
-        let Some(rate_rule) = rate_rule else {
-            selection.select_exact(client_id.clone(), BTreeSet::new());
-            continue;
-        };
-        let spec = network_rate_selector_spec_from_rule(rate_rule)?;
+        let spec = rate_rule.map_or(
+            Ok(NetworkRateSelectorSpec::Reference(
+                NetworkRateSelectorReference::TrafficSelectors,
+            )),
+            network_rate_selector_spec_from_rule,
+        )?;
         match spec {
             NetworkRateSelectorSpec::All => selection.select_exact(
                 client_id.clone(),

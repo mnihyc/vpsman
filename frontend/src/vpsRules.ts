@@ -68,11 +68,11 @@ export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
     placeholder: "Default when unset: e*,w*",
   },
   {
-    help: `Interfaces included in aggregate live rates and charts, after network.interfaces eligibility. Blank selects none. Use * for every eligible interface, ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to follow traffic.selectors, or exact host selectors such as eth0,eth1. Direction suffixes are accepted but live speed still keeps RX and TX separate.`,
+    help: `Interfaces included in aggregate live rates and charts, after network.interfaces eligibility. Blank or unset follows traffic.selectors; [] explicitly selects none. Use * for every eligible interface, ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store the reference explicitly, or exact host selectors such as eth0,eth1. Direction suffixes are accepted but live speed still keeps RX and TX separate.`,
     inputMode: "text",
     key: "network.rate.interfaces",
     label: "Live rate interfaces",
-    placeholder: "Blank = none; * = all eligible",
+    placeholder: "Blank = traffic.selectors; [] = none",
   },
   {
     help: "Day and UTC hour when traffic accounting resets each month, for example 29 05:00. A day without a time uses 00:00 UTC; minutes are rounded down to the hour after editing. Use -1 to accumulate totals continuously from the earliest retained counter evidence.",
@@ -313,7 +313,7 @@ export function tryNormalizeVpsRuleValue(
   }
   if (key === "traffic.selectors" || key === "network.rate.interfaces") {
     if (trimmed === "*") return "*";
-    if (key === "network.rate.interfaces" && trimmed === "[]") return null;
+    if (key === "network.rate.interfaces" && trimmed === "[]") return "[]";
     if (
       key === "network.rate.interfaces" &&
       trimmed === NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX

@@ -25,10 +25,10 @@ use tracing::warn;
 use vpsman_common::{
     create_private_file_new_async, ensure_private_dir_async, open_private_file_read_async,
     payload_hash, repair_private_file_permissions_async, AgentUpdateVerificationResult,
-    GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
-    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
-    GatewayForwardEventKindCounters, GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest,
-    OutputStream,
+    GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayClientDispatchFenceOwner,
+    GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
+    GatewayForwardDropReasonCounters, GatewayForwardEventKindCounters,
+    GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest, OutputStream,
 };
 
 type CriticalForwardingFailureFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -38,8 +38,12 @@ type GatewaySessionRejectionFuture = Pin<Box<dyn Future<Output = ()> + Send + 's
 type GatewaySessionRejectionHandler =
     Arc<dyn Fn(String, uuid::Uuid) -> GatewaySessionRejectionFuture + Send + Sync + 'static>;
 type TelemetryRouteRefreshFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type TelemetryRouteRefreshHandler =
-    Arc<dyn Fn(String, uuid::Uuid) -> TelemetryRouteRefreshFuture + Send + Sync + 'static>;
+type TelemetryRouteRefreshHandler = Arc<
+    dyn Fn(String, uuid::Uuid, GatewayClientDispatchFenceOwner) -> TelemetryRouteRefreshFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V2\n";
 const SPOOL_SCHEMA_VERSION: u16 = 2;
 const MAX_SPOOL_HEADER_BYTES: usize = 1024 * 1024;
@@ -134,13 +138,15 @@ impl GatewayControlClient {
 
     pub(crate) fn set_telemetry_route_refresh_handler<F, Fut>(&self, handler: F)
     where
-        F: Fn(String, uuid::Uuid) -> Fut + Send + Sync + 'static,
+        F: Fn(String, uuid::Uuid, GatewayClientDispatchFenceOwner) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         if let Ok(mut slot) = self.forwarder.telemetry_route_refresh_handler.write() {
-            *slot = Some(Arc::new(move |client_id, gateway_session_id| {
-                Box::pin(handler(client_id, gateway_session_id))
-            }));
+            *slot = Some(Arc::new(
+                move |client_id, gateway_session_id, observed_owner| {
+                    Box::pin(handler(client_id, gateway_session_id, observed_owner))
+                },
+            ));
         }
     }
 
@@ -168,7 +174,7 @@ impl GatewayControlClient {
         path: &str,
         value: &T,
     ) -> Result<()> {
-        self.post_with_session_fence(target_key, path, value, None)
+        self.post_with_session_fence(target_key, path, value, None, None)
             .await
     }
 
@@ -179,8 +185,26 @@ impl GatewayControlClient {
         path: &str,
         value: &T,
     ) -> Result<()> {
-        self.post_with_session_fence(target_key, path, value, Some(gateway_session_id))
+        self.post_with_session_fence(target_key, path, value, Some(gateway_session_id), None)
             .await
+    }
+
+    pub(crate) async fn post_telemetry_for_session<T: serde::Serialize>(
+        &self,
+        target_key: &str,
+        gateway_session_id: uuid::Uuid,
+        path: &str,
+        value: &T,
+        observed_route_owner: Option<GatewayClientDispatchFenceOwner>,
+    ) -> Result<()> {
+        self.post_with_session_fence(
+            target_key,
+            path,
+            value,
+            Some(gateway_session_id),
+            observed_route_owner,
+        )
+        .await
     }
 
     async fn post_with_session_fence<T: serde::Serialize>(
@@ -189,6 +213,7 @@ impl GatewayControlClient {
         path: &str,
         value: &T,
         gateway_session_id: Option<uuid::Uuid>,
+        telemetry_route_refresh_owner: Option<GatewayClientDispatchFenceOwner>,
     ) -> Result<()> {
         let Some(api_url) = &self.api_url else {
             anyhow::bail!("gateway API URL is required for event forwarding");
@@ -211,6 +236,7 @@ impl GatewayControlClient {
                     critical,
                     command_output: None,
                     gateway_session_id,
+                    telemetry_route_refresh_owner: telemetry_route_refresh_owner.map(Box::new),
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
                     enqueue_seq: 0,
@@ -247,6 +273,7 @@ impl GatewayControlClient {
                     critical: true,
                     command_output: Some(CommandOutputReplayRef::from(value)),
                     gateway_session_id: None,
+                    telemetry_route_refresh_owner: None,
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
                     enqueue_seq: 0,
@@ -630,6 +657,10 @@ struct GatewayForwardEvent {
     critical: bool,
     command_output: Option<CommandOutputReplayRef>,
     gateway_session_id: Option<uuid::Uuid>,
+    // In-memory only: spooled replays cannot own a live gateway route. The
+    // API response may clear only this stable suspension owner, never a fence
+    // installed after the telemetry request was queued.
+    telemetry_route_refresh_owner: Option<Box<GatewayClientDispatchFenceOwner>>,
     created_at: time::Instant,
     created_unix: u64,
     enqueue_seq: u64,
@@ -3325,6 +3356,7 @@ async fn forward_event_handle(
             break GatewayForwardOutcome::NotDelivered;
         }
         handle.event.gateway_session_id = None;
+        handle.event.telemetry_route_refresh_owner = None;
         match spool
             .persist_spool_event(
                 target_key,
@@ -3755,6 +3787,9 @@ async fn refresh_telemetry_route_after_commit(
     let Some(gateway_session_id) = event.gateway_session_id else {
         return;
     };
+    let Some(observed_owner) = event.telemetry_route_refresh_owner.as_deref().copied() else {
+        return;
+    };
     let Ok(response) = serde_json::from_str::<GatewayIngestResponse>(response_body) else {
         return;
     };
@@ -3766,7 +3801,7 @@ async fn refresh_telemetry_route_after_commit(
         .ok()
         .and_then(|slot| slot.as_ref().cloned());
     if let Some(handler) = handler {
-        handler(target_key.to_string(), gateway_session_id).await;
+        handler(target_key.to_string(), gateway_session_id, observed_owner).await;
     }
 }
 
@@ -4093,6 +4128,7 @@ fn decode_spooled_event(path: &Path, bytes: &[u8]) -> Result<GatewayForwardEvent
         critical: header.critical,
         command_output: header.command_output,
         gateway_session_id: None,
+        telemetry_route_refresh_owner: None,
         created_at,
         created_unix: header.created_unix,
         enqueue_seq: header.enqueue_seq,

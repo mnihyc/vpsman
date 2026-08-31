@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::model::*;
 use crate::repository::Repository;
+use crate::security::admin_risk_acknowledgement_required;
 use crate::state::OperatorAuthThrottleConfig;
 use crate::{
     generate_token, hash_operator_password, normalize_operator_scopes, token_hash, unix_now,
@@ -1142,11 +1143,20 @@ impl Repository {
                 let Some(target) = target else {
                     return Ok(None);
                 };
+                let current_status: String = target.try_get("status")?;
+                let current_role: String = target.try_get("role")?;
+                if admin_risk_acknowledgement_required(
+                    &current_role,
+                    Some(&role),
+                    request.admin_risk_acknowledged,
+                ) {
+                    anyhow::bail!("admin_risk_acknowledgement_required");
+                }
                 ensure_postgres_active_admin_remains(
                     &mut tx,
                     operator_id,
-                    target.try_get("status")?,
-                    target.try_get("role")?,
+                    current_status,
+                    current_role,
                     Some(&role),
                     None,
                 )
@@ -1194,6 +1204,7 @@ impl Repository {
         &self,
         operator_ids: &[Uuid],
         status: &str,
+        admin_risk_acknowledged: bool,
         actor: &AuthContext,
     ) -> Result<Vec<AccessBatchMutationOutcome<OperatorView>>> {
         let status = status.trim();
@@ -1247,6 +1258,14 @@ impl Repository {
                         || (status == "active" && operator.status != "disabled")
                     {
                         rejection_codes.insert(*operator_id, "operator_not_found");
+                        continue;
+                    }
+                    if admin_risk_acknowledgement_required(
+                        &operator.role,
+                        None,
+                        admin_risk_acknowledged,
+                    ) {
+                        rejection_codes.insert(*operator_id, "admin_risk_acknowledgement_required");
                         continue;
                     }
                     if status != "active" && operator.status == "active" && operator.role == "admin"
@@ -1381,6 +1400,7 @@ impl Repository {
         &self,
         operator_id: Uuid,
         password: &str,
+        admin_risk_acknowledged: bool,
         actor: &AuthContext,
     ) -> Result<Option<OperatorView>> {
         let password_hash = hash_operator_password(password)?;
@@ -1399,6 +1419,20 @@ impl Repository {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let target = sqlx::query(
+                    "SELECT role FROM operators WHERE id = $1 AND status <> 'deleted' FOR UPDATE",
+                )
+                .bind(operator_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(target) = target else {
+                    return Ok(None);
+                };
+                let current_role: String = target.try_get("role")?;
+                if admin_risk_acknowledgement_required(&current_role, None, admin_risk_acknowledged)
+                {
+                    anyhow::bail!("admin_risk_acknowledgement_required");
+                }
                 let row = sqlx::query(
                     r#"
                     UPDATE operators
@@ -1421,9 +1455,7 @@ impl Repository {
                 .bind(password_hash)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
+                let row = row.context("locked operator disappeared during password reset")?;
                 sqlx::query(
                     "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = $1",
                 )
@@ -1448,6 +1480,7 @@ impl Repository {
     pub(crate) async fn clear_operator_totps(
         &self,
         operator_ids: &[Uuid],
+        admin_risk_acknowledged: bool,
         actor: &AuthContext,
     ) -> Result<Vec<AccessBatchMutationOutcome<OperatorView>>> {
         match self {
@@ -1479,7 +1512,16 @@ impl Repository {
                 for operator_id in operator_ids {
                     match locked.get(operator_id) {
                         Some(operator) if operator.status != "deleted" => {
-                            applied_ids.push(*operator_id)
+                            if admin_risk_acknowledgement_required(
+                                &operator.role,
+                                None,
+                                admin_risk_acknowledged,
+                            ) {
+                                rejection_codes
+                                    .insert(*operator_id, "admin_risk_acknowledgement_required");
+                            } else {
+                                applied_ids.push(*operator_id);
+                            }
                         }
                         _ => {
                             rejection_codes.insert(*operator_id, "operator_not_found");
@@ -1492,7 +1534,10 @@ impl Repository {
                         .iter()
                         .map(|operator_id| AccessBatchMutationOutcome::Rejected {
                             target_id: *operator_id,
-                            code: "operator_not_found",
+                            code: rejection_codes
+                                .get(operator_id)
+                                .copied()
+                                .unwrap_or("operator_not_found"),
                         })
                         .collect());
                 }
@@ -1757,6 +1802,7 @@ impl Repository {
     pub(crate) async fn revoke_operator_sessions(
         &self,
         session_ids: &[Uuid],
+        admin_risk_acknowledged: bool,
         actor: &AuthContext,
     ) -> Result<Vec<AccessBatchMutationOutcome<OperatorSessionView>>> {
         let current_session_id = actor
@@ -1765,33 +1811,80 @@ impl Repository {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let locked_rows = sqlx::query(
+                // The operator role is the authority being acknowledged. Lock it
+                // before session rows, matching every operator-wide revocation.
+                let authority_rows = sqlx::query(
                     r#"
-                    SELECT session.id
-                    FROM operator_sessions AS session
-                    WHERE session.id = ANY($1)
-                    ORDER BY session.id
-                    FOR UPDATE
+                    SELECT target_operator.id, target_operator.role
+                    FROM operators AS target_operator
+                    WHERE target_operator.id IN (
+                        SELECT session.operator_id
+                        FROM operator_sessions AS session
+                        WHERE session.id = ANY($1)
+                    )
+                    ORDER BY target_operator.id
+                    FOR SHARE OF target_operator
                     "#,
                 )
                 .bind(session_ids)
                 .fetch_all(&mut *tx)
                 .await?;
-                let locked_ids = locked_rows
+                let authority = authority_rows
                     .iter()
-                    .map(|row| row.try_get::<Uuid, _>("id"))
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                let locked_id_set = locked_ids
+                    .map(|row| {
+                        Ok((
+                            row.try_get::<Uuid, _>("id")?,
+                            row.try_get::<String, _>("role")?,
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let locked_rows = sqlx::query(
+                    r#"
+                    SELECT session.id, session.operator_id
+                    FROM operator_sessions AS session
+                    WHERE session.id = ANY($1)
+                    ORDER BY session.id
+                    FOR UPDATE OF session
+                    "#,
+                )
+                .bind(session_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let locked = locked_rows
                     .iter()
-                    .copied()
-                    .collect::<std::collections::HashSet<_>>();
-                if locked_ids.is_empty() {
+                    .map(|row| {
+                        Ok((
+                            row.try_get::<Uuid, _>("id")?,
+                            row.try_get::<Uuid, _>("operator_id")?,
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let mut applied_ids = Vec::with_capacity(session_ids.len());
+                let mut rejection_codes = HashMap::new();
+                for session_id in session_ids {
+                    let Some(operator_id) = locked.get(session_id) else {
+                        rejection_codes.insert(*session_id, "operator_session_not_found");
+                        continue;
+                    };
+                    let role = authority.get(operator_id).with_context(|| {
+                        format!("operator session {session_id} omitted its authority owner")
+                    })?;
+                    if admin_risk_acknowledgement_required(role, None, admin_risk_acknowledged) {
+                        rejection_codes.insert(*session_id, "admin_risk_acknowledgement_required");
+                    } else {
+                        applied_ids.push(*session_id);
+                    }
+                }
+                if applied_ids.is_empty() {
                     tx.rollback().await?;
                     return Ok(session_ids
                         .iter()
                         .map(|session_id| AccessBatchMutationOutcome::Rejected {
                             target_id: *session_id,
-                            code: "operator_session_not_found",
+                            code: rejection_codes
+                                .get(session_id)
+                                .copied()
+                                .unwrap_or("operator_session_not_found"),
                         })
                         .collect());
                 }
@@ -1822,7 +1915,7 @@ impl Repository {
                     JOIN operators o ON o.id = revoked.operator_id
                     "#,
                 )
-                .bind(&locked_ids)
+                .bind(&applied_ids)
                 .fetch_all(&mut *tx)
                 .await?;
                 let views = rows
@@ -1847,7 +1940,7 @@ impl Repository {
                         ))
                     })
                     .collect::<Result<HashMap<_, _>>>()?;
-                let audit_ids = locked_ids
+                let audit_ids = applied_ids
                     .iter()
                     .map(|_| Uuid::new_v4())
                     .collect::<Vec<_>>();
@@ -1875,7 +1968,7 @@ impl Repository {
                     "#,
                 )
                 .bind(&audit_ids)
-                .bind(&locked_ids)
+                .bind(&applied_ids)
                 .bind(actor.operator.id)
                 .bind(&actor.operator.username)
                 .bind(&actor.operator.role)
@@ -1885,10 +1978,10 @@ impl Repository {
                 let outcomes = session_ids
                     .iter()
                     .map(|session_id| {
-                        if !locked_id_set.contains(session_id) {
+                        if let Some(code) = rejection_codes.get(session_id) {
                             Ok(AccessBatchMutationOutcome::Rejected {
                                 target_id: *session_id,
-                                code: "operator_session_not_found",
+                                code,
                             })
                         } else {
                             Ok(AccessBatchMutationOutcome::Applied {

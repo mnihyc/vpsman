@@ -1,5 +1,6 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { ConsoleDetailPanel } from "../components/ConsoleDetailPanel";
+import { ActionFeedback } from "../components/ActionFeedback";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
@@ -122,6 +123,7 @@ export function RemoteOperationsPanel({
   fileTransferSourcesTruncated,
   initialTargetIntent,
   loading,
+  readError,
   onCreateFileTransferHandoff,
   onCreateJob,
   onDownloadFileBundle,
@@ -174,6 +176,7 @@ export function RemoteOperationsPanel({
     requestId: string;
   } | null;
   loading: boolean;
+  readError: string | null;
   onCreateFileTransferHandoff: (
     clientId: string,
     sessionId: string,
@@ -377,6 +380,25 @@ export function RemoteOperationsPanel({
 
   return (
     <section className="workspace singleColumn">
+      {readError ? (
+        <div className="fleetPanel">
+          <div className="sectionHeader">
+            <ActionFeedback
+              className="localActionFeedback"
+              message={readError}
+              tone="danger"
+            />
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading}
+              onClick={onRefresh}
+              type="button"
+            >
+              Retry displayed data
+            </button>
+          </div>
+        </div>
+      ) : null}
       <Suspense
         fallback={
           <div

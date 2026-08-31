@@ -1279,9 +1279,11 @@ export function App() {
     : dashboard.runtimeConfigApplyEvidenceAvailable
       ? "available"
       : "unavailable";
-  const configInventoryEvidenceState = dashboard.tagsLoading
+  const configInventoryEvidenceState =
+    dashboard.runtimeConfigPatchGeneratorsLoading
     ? "loading"
-    : dashboard.tagInventoryEvidenceAvailable && dashboard.tagsError === null
+    : dashboard.runtimeConfigPatchGeneratorsEvidenceAvailable &&
+        dashboard.runtimeConfigPatchGeneratorsError === null
       ? "available"
       : "unavailable";
   const homeEvidenceLoading =
@@ -2029,6 +2031,7 @@ export function App() {
         onOpenJobDispatchPreset={openJobDispatchPreset}
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
+        onRefreshTagOrder={dashboard.loadTagOrder}
         onLoadEffectiveAgentConfig={dashboard.loadEffectiveAgentConfig}
         onLoadConfigurationSources={dashboard.loadConfigurationSources}
         onSelectAgent={setSelectedAgentId}
@@ -2059,6 +2062,8 @@ export function App() {
         selectedAgent={selectedAgent}
         summary={visibleSummary}
         tags={dashboard.tags}
+        tagOrderError={dashboard.tagOrderError}
+        tagOrderLoading={dashboard.tagOrderLoading}
         targetAgents={dashboard.agents}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryRollups={dashboard.telemetryRollups}
@@ -2070,12 +2075,19 @@ export function App() {
   }
 
   function renderTagsPanel(panelSubpage: string) {
+    const assignmentsOwnSchedules = panelSubpage === "assignments";
     return (
       <FleetGroupsPanel
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
-        error={dashboard.tagsError}
-        loading={dashboard.tagsLoading}
+        error={combineErrors(
+          dashboard.tagOrderError,
+          assignmentsOwnSchedules ? dashboard.schedulesError : null,
+        )}
+        loading={
+          dashboard.tagOrderLoading ||
+          (assignmentsOwnSchedules && dashboard.schedulesLoading)
+        }
         namespaceNaturalSortEnabled={dashboard.namespaceNaturalSortEnabled}
         onAssignTag={dashboard.assignTag}
         onCreateTag={dashboard.createTag}
@@ -2083,7 +2095,12 @@ export function App() {
         onDeleteTag={dashboard.deleteTag}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSchedules={() => selectView("Automation", "schedules")}
-        onRefresh={dashboard.loadTagOrder}
+        onRefresh={() => {
+          void dashboard.loadTagOrder();
+          if (assignmentsOwnSchedules) {
+            void dashboard.loadSchedules();
+          }
+        }}
         onResolveBulk={dashboard.resolveBulkPreview}
         onUpdateTagOrder={dashboard.updateTagOrder}
         privilegeMaterial={privilegeMaterial}
@@ -2186,6 +2203,32 @@ export function App() {
   }
 
   function renderConfigPanel(panelSubpage: string) {
+    const overviewOwnsInventory = panelSubpage === "overview";
+    const bulkOwnsPatchGenerators = panelSubpage === "bulk";
+    const configReadError = overviewOwnsInventory
+      ? combineErrors(
+          dashboard.apiError,
+          dashboard.runtimeConfigPatchGeneratorsError,
+          dashboard.runtimeConfigApplyError,
+          dashboard.configurationPresetsError,
+          dashboard.configurationSourcesError,
+          dashboard.jobsError,
+        )
+      : bulkOwnsPatchGenerators
+        ? combineErrors(
+            dashboard.apiError,
+            dashboard.runtimeConfigPatchGeneratorsError,
+          )
+        : dashboard.apiError;
+    const configReadLoading = overviewOwnsInventory
+      ? dashboard.runtimeConfigPatchGeneratorsLoading ||
+        dashboard.runtimeConfigApplyLoading ||
+        dashboard.configurationPresetsLoading ||
+        dashboard.configurationSourcesLoading ||
+        dashboard.jobsLoading
+      : bulkOwnsPatchGenerators
+        ? dashboard.runtimeConfigPatchGeneratorsLoading
+        : false;
     return (
       <ConfigPanel
         activeSubpage={panelSubpage}
@@ -2213,24 +2256,13 @@ export function App() {
           dashboard.configPolicyEvidenceAvailable
         }
         inventoryEvidenceState={configInventoryEvidenceState}
-        error={combineErrors(
-          dashboard.apiError,
-          dashboard.tagsError,
-          dashboard.configurationPresetsError,
-          dashboard.configurationSourcesError,
-          dashboard.runtimeConfigApplyError,
-        )}
+        error={configReadError}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         runtimeConfigPatchGenerators={dashboard.runtimeConfigPatchGenerators}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
-        loading={
-          dashboard.tagsLoading ||
-          dashboard.configurationPresetsLoading ||
-          dashboard.configurationSourcesLoading ||
-          dashboard.runtimeConfigApplyLoading
-        }
+        loading={configReadLoading}
         onApplyRuntimeConfigBulkOverride={
           dashboard.applyRuntimeConfigBulkOverride
         }
@@ -2250,12 +2282,20 @@ export function App() {
         onOpenJobHistory={openJobHistory}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenAlerts={() => selectView("Observability", "alerts")}
-        onRefresh={async () => {
-          await Promise.all([
-            dashboard.loadTagInventory(),
-            dashboard.loadConfigurationInventory(),
-          ]);
-        }}
+        onRefresh={
+          overviewOwnsInventory
+            ? async () => {
+                await Promise.all([
+                  dashboard.loadRuntimeConfigApplyStates(),
+                  dashboard.loadRuntimeConfigPatchGenerators(),
+                  dashboard.loadConfigurationInventory(),
+                  dashboard.loadJobHistory(),
+                ]);
+              }
+            : bulkOwnsPatchGenerators
+              ? dashboard.loadRuntimeConfigPatchGenerators
+              : null
+        }
         onBulkUnsetVpsRules={dashboard.bulkUnsetVpsRules}
         onBulkUpsertVpsRules={dashboard.bulkUpsertVpsRules}
         onDryRunVpsRules={dashboard.dryRunVpsRules}
@@ -2415,6 +2455,7 @@ export function App() {
       <section className="workspace singleColumn">
         <AgentUpdateReleasesPanel
           agents={dashboard.agents}
+          error={dashboard.jobsError}
           jobs={dashboard.jobs}
           loading={dashboard.jobsLoading}
           onCreateAgentUpdateRelease={dashboard.createAgentUpdateRelease}
@@ -2465,9 +2506,12 @@ export function App() {
       <section className="workspace singleColumn">
         <RolloutsPanel
           agents={dashboard.agents}
+          jobHistoryError={dashboard.jobsError}
+          jobHistoryLoading={dashboard.jobsLoading}
           jobs={dashboard.jobs}
           onCancelJob={dashboard.cancelJob}
           onLoadRollouts={dashboard.loadJobRollouts}
+          onRetryJobHistory={dashboard.loadJobHistory}
           onOpenJobDetails={openJobDetails}
           onUpdateRollout={dashboard.updateJobRollout}
           requestsEnabled={dashboard.documentVisible}
@@ -2485,6 +2529,7 @@ export function App() {
         commandTemplates={dashboard.commandTemplates}
         commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         jobs={dashboard.jobs}
+        error={dashboard.jobsError}
         loading={dashboard.jobsLoading}
         onOpenDispatchPreset={openJobDispatchPreset}
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
@@ -2643,6 +2688,7 @@ export function App() {
         fileTransferSources={dashboard.fileTransferSources}
         fileTransferSourcesTruncated={dashboard.fileTransferSourcesTruncated}
         loading={dashboard.jobsLoading}
+        readError={dashboard.jobsError}
         initialTargetIntent={
           workflowTargetIntent?.destination === "terminal" ||
           workflowTargetIntent?.destination === "processes"
@@ -2675,6 +2721,8 @@ export function App() {
         onRefresh={() => {
           if (panelSubpage === "terminal") {
             void dashboard.loadTerminalSessions();
+          } else if (panelSubpage === "files") {
+            void dashboard.loadFileTransfers();
           } else if (panelSubpage === "transfers") {
             void dashboard.loadFileTransfers();
             void dashboard.loadFileTransferSources();
@@ -2749,8 +2797,8 @@ export function App() {
         canManageAlertEventSchedules={canManageAlertEventSchedules}
         commandTemplates={dashboard.commandTemplates}
         commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
-        error={dashboard.schedulesError}
-        loading={dashboard.schedulesLoading}
+        error={combineErrors(dashboard.schedulesError, dashboard.jobsError)}
+        loading={dashboard.schedulesLoading || dashboard.jobsLoading}
         onApplyScheduleNow={dashboard.applyScheduleNow}
         onCreateSchedule={dashboard.createSchedule}
         onDeferSchedule={dashboard.deferSchedule}
@@ -2760,7 +2808,12 @@ export function App() {
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenScheduledRuns={() => selectView("Jobs", "scheduled_runs")}
         onPreviewEventTemplate={dashboard.previewEventScheduleTemplate}
-        onRefresh={dashboard.loadSchedules}
+        onRefresh={async () => {
+          await Promise.all([
+            dashboard.loadSchedules(),
+            dashboard.loadCommandTemplates(),
+          ]);
+        }}
         onResolveManyTargets={dashboard.resolveManyJobTargets}
         onResolveTargets={dashboard.resolveJobTargets}
         onUpdateSchedule={dashboard.updateSchedule}
@@ -3109,6 +3162,10 @@ export function App() {
         onClearOperatorTotps={dashboard.clearOperatorTotps}
         onCreateOperator={dashboard.createOperator}
         onLoadSuiteConfig={() => void dashboard.loadSuiteConfig()}
+        onRefreshPreferencesSources={() => {
+          void dashboard.loadCurrentOperatorProfile();
+          void dashboard.loadTagOrder();
+        }}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onResetOperatorPassword={dashboard.resetOperatorPassword}
         onRevokeOperatorSessions={dashboard.revokeOperatorSessions}
@@ -3128,6 +3185,8 @@ export function App() {
         suiteConfigError={dashboard.suiteConfigError}
         suiteConfigLoading={dashboard.suiteConfigLoading}
         tags={dashboard.tags}
+        tagsError={dashboard.tagOrderError}
+        tagsLoading={dashboard.tagOrderLoading}
       />
     );
   }

@@ -1979,6 +1979,91 @@ test("reviews notification and webhook queue mutations before commit", async ({
   });
 });
 
+test(
+  "preserves an in-flight preference edit and hydrates an untouched draft",
+  { tag: "@preferences-refresh-draft-race" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "preference draft ownership is shared and covered in the desktop form",
+    );
+
+    await page.goto("/");
+    await waitForConsoleShell(page);
+    await openConsoleSubpage(page, "System", "Preferences");
+
+    const refresh = page.getByTitle(
+      "Refresh the current operator profile and tag registry",
+    );
+    const nameDisplay = page.getByLabel("Name display");
+    const comparison = page.getByLabel("Bulk output comparison default");
+    const status = page.locator(".consoleStatusBadge").filter({
+      hasText: /^(Saved|Unsaved changes)$/,
+    });
+
+    await expect(nameDisplay).toHaveValue("name_id_suffix");
+    await expect(comparison).toHaveValue("binary");
+    await expect(status).toHaveText("Saved");
+
+    await page.evaluate(() => {
+      const originalFetch = window.fetch;
+      const refreshedPreferences = [
+        { bulk_output_compare_mode: "text" },
+        {
+          bulk_output_compare_mode: "text",
+          vps_name_display_mode: "name",
+        },
+      ];
+      window.fetch = async (input, init) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        if (
+          new URL(request.url, window.location.href).pathname ===
+            "/api/v1/auth/me" &&
+          request.method === "GET"
+        ) {
+          const response = await originalFetch(input, init);
+          await new Promise((resolve) => window.setTimeout(resolve, 300));
+          const payload = (await response.json()) as {
+            preferences: Record<string, unknown>;
+          };
+          Object.assign(payload.preferences, refreshedPreferences.shift());
+          return new Response(JSON.stringify(payload), {
+            headers: response.headers,
+            status: response.status,
+            statusText: response.statusText,
+          });
+        }
+        return originalFetch(input, init);
+      };
+    });
+
+    await refresh.click();
+    await expect(refresh).toBeDisabled();
+    await nameDisplay.selectOption("name");
+    await expect(status).toHaveText("Unsaved changes");
+
+    await expect(refresh).toContainText("Refresh");
+    await expect(refresh).toBeDisabled();
+    await expect(nameDisplay).toHaveValue("name");
+    await expect(comparison).toHaveValue("binary");
+    await expect(status).toHaveText("Unsaved changes");
+
+    await page.getByRole("button", { name: "Reset draft" }).click();
+    await expect(nameDisplay).toHaveValue("name_id_suffix");
+    await expect(comparison).toHaveValue("text");
+    await expect(status).toHaveText("Saved");
+    await expect(refresh).toBeEnabled();
+
+    await refresh.click();
+    await expect(refresh).toBeDisabled();
+    await expect(refresh).toBeEnabled();
+    await expect(nameDisplay).toHaveValue("name");
+    await expect(comparison).toHaveValue("text");
+    await expect(status).toHaveText("Saved");
+  },
+);
+
 test("clears browser-local console selections without deleting session or privilege records", async ({
   page,
 }, testInfo) => {

@@ -970,7 +970,7 @@ impl Repository {
                         false
                     };
                 // Liveness is part of acceptance, not the deferred telemetry
-                // projection.  The route clears its suspension fence as soon
+                // projection.  The route clears its dispatch fence as soon
                 // as this method returns, so heartbeat/status/IP and the
                 // corresponding status transition must already be committed.
                 let resulting_status: String = sqlx::query_scalar(

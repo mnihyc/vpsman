@@ -69,6 +69,11 @@ export function useInventoryData(
   >([]);
   const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] =
     useState<RuntimeConfigPatchGeneratorRecord[]>([]);
+  const [tagOrderError, setTagOrderError] = useState<string | null>(null);
+  const [
+    runtimeConfigPatchGeneratorsError,
+    setRuntimeConfigPatchGeneratorsError,
+  ] = useState<string | null>(null);
   const [tagsError, setTagsError] = useState<string | null>(null);
   const [runtimeConfigApplyError, setRuntimeConfigApplyError] = useState<
     string | null
@@ -80,6 +85,11 @@ export function useInventoryData(
     string | null
   >(null);
   const [tagsLoading, setTagsLoading] = useState(false);
+  const [tagOrderLoading, setTagOrderLoading] = useState(false);
+  const [
+    runtimeConfigPatchGeneratorsLoading,
+    setRuntimeConfigPatchGeneratorsLoading,
+  ] = useState(false);
   const [configurationPresetsLoading, setConfigurationPresetsLoading] =
     useState(false);
   const [configurationSourcesLoading, setConfigurationSourcesLoading] =
@@ -88,6 +98,10 @@ export function useInventoryData(
     useState(false);
   const [tagInventoryEvidenceAvailable, setTagInventoryEvidenceAvailable] =
     useState(false);
+  const [
+    runtimeConfigPatchGeneratorsEvidenceAvailable,
+    setRuntimeConfigPatchGeneratorsEvidenceAvailable,
+  ] = useState(false);
   const [
     runtimeConfigApplyEvidenceAvailable,
     setRuntimeConfigApplyEvidenceAvailable,
@@ -118,7 +132,8 @@ export function useInventoryData(
   const tagOrderSourceError = useRef<string | null>(null);
   const patchGeneratorSourceError = useRef<string | null>(null);
   const tagLoadSequence = useRef(0);
-  const tagLoadsPending = useRef(new Set<number>());
+  const tagOrderLoadsPending = useRef(new Set<number>());
+  const patchGeneratorLoadsPending = useRef(new Set<number>());
   const configurationPresetsLoadGeneration = useRef(0);
   const configurationSourcesLoadGeneration = useRef(0);
   const runtimeConfigApplyLoadGeneration = useRef(0);
@@ -127,6 +142,11 @@ export function useInventoryData(
   currentApiToken.current = apiToken;
 
   const publishTagInventoryState = useCallback(() => {
+    setRuntimeConfigPatchGeneratorsEvidenceAvailable(
+      patchGeneratorSourceAvailable.current,
+    );
+    setTagOrderError(tagOrderSourceError.current);
+    setRuntimeConfigPatchGeneratorsError(patchGeneratorSourceError.current);
     setTagInventoryEvidenceAvailable(
       tagOrderSourceAvailable.current && patchGeneratorSourceAvailable.current,
     );
@@ -137,17 +157,39 @@ export function useInventoryData(
     setTagsError(errors.length > 0 ? errors.join("; ") : null);
   }, []);
 
-  const beginTagLoad = useCallback(() => {
+  const beginTagLoad = useCallback((source: "tagOrder" | "patchGenerators") => {
     const operation = ++tagLoadSequence.current;
-    tagLoadsPending.current.add(operation);
+    const pending =
+      source === "tagOrder"
+        ? tagOrderLoadsPending.current
+        : patchGeneratorLoadsPending.current;
+    pending.add(operation);
+    setTagOrderLoading(tagOrderLoadsPending.current.size > 0);
+    setRuntimeConfigPatchGeneratorsLoading(
+      patchGeneratorLoadsPending.current.size > 0,
+    );
     setTagsLoading(true);
     return operation;
   }, []);
 
-  const finishTagLoad = useCallback((operation: number) => {
-    tagLoadsPending.current.delete(operation);
-    setTagsLoading(tagLoadsPending.current.size > 0);
-  }, []);
+  const finishTagLoad = useCallback(
+    (source: "tagOrder" | "patchGenerators", operation: number) => {
+      const pending =
+        source === "tagOrder"
+          ? tagOrderLoadsPending.current
+          : patchGeneratorLoadsPending.current;
+      pending.delete(operation);
+      setTagOrderLoading(tagOrderLoadsPending.current.size > 0);
+      setRuntimeConfigPatchGeneratorsLoading(
+        patchGeneratorLoadsPending.current.size > 0,
+      );
+      setTagsLoading(
+        tagOrderLoadsPending.current.size > 0 ||
+          patchGeneratorLoadsPending.current.size > 0,
+      );
+    },
+    [],
+  );
 
   const loadTagOrder = useCallback((): Promise<void> => {
     if (currentApiToken.current !== apiToken) {
@@ -156,7 +198,7 @@ export function useInventoryData(
     const generation = tagOrderLoadGeneration.current + 1;
     tagOrderLoadGeneration.current = generation;
     const mutationGeneration = tagOrderMutationGeneration.current;
-    const tagLoadOperation = beginTagLoad();
+    const tagLoadOperation = beginTagLoad("tagOrder");
     tagOrderSourceError.current = null;
     publishTagInventoryState();
     return tagOrderLoadConsumer.current
@@ -199,7 +241,7 @@ export function useInventoryData(
           publishTagInventoryState();
         }
       })
-      .finally(() => finishTagLoad(tagLoadOperation));
+      .finally(() => finishTagLoad("tagOrder", tagLoadOperation));
   }, [
     apiToken,
     beginTagLoad,
@@ -214,7 +256,7 @@ export function useInventoryData(
     }
     const generation = patchGeneratorLoadGeneration.current + 1;
     patchGeneratorLoadGeneration.current = generation;
-    const tagLoadOperation = beginTagLoad();
+    const tagLoadOperation = beginTagLoad("patchGenerators");
     patchGeneratorSourceError.current = null;
     publishTagInventoryState();
     return patchGeneratorLoadConsumer.current
@@ -257,7 +299,7 @@ export function useInventoryData(
           publishTagInventoryState();
         }
       })
-      .finally(() => finishTagLoad(tagLoadOperation));
+      .finally(() => finishTagLoad("patchGenerators", tagLoadOperation));
   }, [
     apiToken,
     beginTagLoad,
@@ -893,13 +935,16 @@ export function useInventoryData(
     patchGeneratorSourceAvailable.current = false;
     tagOrderSourceError.current = null;
     patchGeneratorSourceError.current = null;
-    tagLoadsPending.current.clear();
+    tagOrderLoadsPending.current.clear();
+    patchGeneratorLoadsPending.current.clear();
     setTags([]);
     setNamespaceNaturalSortEnabled(false);
     setConfigurationPresets([]);
     setConfigurationSources([]);
     setRuntimeConfigApplyStates([]);
     setRuntimeConfigPatchGenerators([]);
+    setTagOrderError(null);
+    setRuntimeConfigPatchGeneratorsError(null);
     setTagsError(null);
     setConfigurationPresetsError(null);
     setConfigurationPresetsEvidenceAvailable(false);
@@ -907,11 +952,14 @@ export function useInventoryData(
     setConfigurationSourcesEvidenceAvailable(false);
     setRuntimeConfigApplyError(null);
     setTagInventoryEvidenceAvailable(false);
+    setRuntimeConfigPatchGeneratorsEvidenceAvailable(false);
     setRuntimeConfigApplyEvidenceAvailable(false);
     setRuntimeConfigApplyLoading(false);
     setConfigurationPresetsLoading(false);
     setConfigurationSourcesLoading(false);
     setTagsLoading(false);
+    setTagOrderLoading(false);
+    setRuntimeConfigPatchGeneratorsLoading(false);
   }, []);
 
   return {
@@ -949,6 +997,9 @@ export function useInventoryData(
     runtimeConfigApplyLoading,
     runtimeConfigApplyStates,
     runtimeConfigPatchGenerators,
+    runtimeConfigPatchGeneratorsError,
+    runtimeConfigPatchGeneratorsEvidenceAvailable,
+    runtimeConfigPatchGeneratorsLoading,
     previewConfigurationPreset,
     previewConfigurationSourceOverride,
     previewRuntimeConfigBulkOverride,
@@ -958,6 +1009,8 @@ export function useInventoryData(
     resolveManyJobTargets,
     resolveJobTargets,
     tagInventoryEvidenceAvailable,
+    tagOrderError,
+    tagOrderLoading,
     tags,
     tagsError,
     tagsLoading,

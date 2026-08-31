@@ -80,7 +80,7 @@ function viewNeedsFinishedJobClassification(
   return (
     (view === "Fleet" &&
       (subpage === "monitor" || subpage.startsWith("instance_detail"))) ||
-    (view === "Config" && subpage !== "sources") ||
+    (view === "Config" && subpage === "overview") ||
     (view === "Backups" &&
       backupProjectionSourcesForRoute(view, subpage).includes("requests")) ||
     (view === "Network" &&
@@ -118,7 +118,7 @@ function jobProjectionSourcesForRoute(
       : [];
   }
   if (view === "Config") {
-    return subpage === "sources" ? [] : ["jobHistory"];
+    return subpage === "overview" ? ["jobHistory"] : [];
   }
   if (view === "Remote Operations") {
     if (subpage === "terminal") return ["terminalSessions"];
@@ -147,7 +147,9 @@ function jobProjectionSourcesForRoute(
   }
   if (view === "Automation") {
     if (subpage === "schedules") return ["commandTemplates"];
-    if (subpage === "rollouts") return ["jobHistory", "jobRollouts"];
+    // Rollout records are loaded and reported by the mounted rollout panel;
+    // route ownership covers only the job-history labels it visibly consumes.
+    if (subpage === "rollouts") return ["jobHistory"];
     if (subpage === "agent_updates") {
       return ["jobHistory", "agentUpdateReleases"];
     }
@@ -674,7 +676,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
       const currentSubpage = activeSubpageRef.current;
       if (
         job.command_type === "runtime_config_sync" &&
-        ((currentView === "Config" && currentSubpage !== "sources") ||
+        ((currentView === "Config" && currentSubpage === "overview") ||
           (currentView === "Fleet" &&
             currentSubpage.startsWith("instance_detail")) ||
           (currentView === "Network" && currentSubpage === "graph"))
@@ -1255,7 +1257,9 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
         void jobs.loadFileTransfers();
       } else if (activeSubpage.startsWith("group")) {
         void inventory.loadTagOrder();
-        void schedules.loadSchedules();
+        if (activeSubpage === "group_assignments") {
+          void schedules.loadSchedules();
+        }
       } else if (activeSubpage.startsWith("instance_detail")) {
         void inventory.loadRuntimeConfigApplyStates();
         void jobs.loadJobHistory();
@@ -1266,9 +1270,12 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
         void topology.loadNetworkTrends();
       }
     } else if (activeView === "Config") {
-      if (activeSubpage !== "sources") {
-        void inventory.loadTagInventory();
+      if (activeSubpage === "overview") {
+        void inventory.loadRuntimeConfigApplyStates();
+        void inventory.loadRuntimeConfigPatchGenerators();
         void jobs.loadJobHistory();
+      } else if (activeSubpage === "bulk_patch") {
+        void inventory.loadRuntimeConfigPatchGenerators();
       }
     } else if (activeView === "Remote Operations") {
       if (activeSubpage === "terminal") {
@@ -1410,9 +1417,9 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     backups.loadBackups,
     backups.loadMigrationLinks,
     backups.loadRestorePlans,
-    inventory.loadTagInventory,
     inventory.loadTagOrder,
     inventory.loadRuntimeConfigApplyStates,
+    inventory.loadRuntimeConfigPatchGenerators,
     jobs.loadFileTransfers,
     jobs.loadAgentUpdateReleases,
     jobs.loadCommandTemplates,
@@ -2043,6 +2050,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     loadConfigurationInventory: inventory.loadConfigurationInventory,
     loadConfigurationSources: inventory.loadConfigurationSources,
     loadRuntimeConfigApplyStates: inventory.loadRuntimeConfigApplyStates,
+    loadRuntimeConfigPatchGenerators:
+      inventory.loadRuntimeConfigPatchGenerators,
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
     queryNetworkObservations: topology.queryNetworkObservations,
@@ -2135,12 +2144,20 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,
     tagInventoryEvidenceAvailable: inventory.tagInventoryEvidenceAvailable,
+    tagOrderError: inventory.tagOrderError,
+    tagOrderLoading: inventory.tagOrderLoading,
     runtimeConfigApplyEvidenceAvailable:
       inventory.runtimeConfigApplyEvidenceAvailable,
     runtimeConfigApplyError: inventory.runtimeConfigApplyError,
     runtimeConfigApplyLoading: inventory.runtimeConfigApplyLoading,
     runtimeConfigApplyStates: inventory.runtimeConfigApplyStates,
     runtimeConfigPatchGenerators: inventory.runtimeConfigPatchGenerators,
+    runtimeConfigPatchGeneratorsError:
+      inventory.runtimeConfigPatchGeneratorsError,
+    runtimeConfigPatchGeneratorsEvidenceAvailable:
+      inventory.runtimeConfigPatchGeneratorsEvidenceAvailable,
+    runtimeConfigPatchGeneratorsLoading:
+      inventory.runtimeConfigPatchGeneratorsLoading,
     telemetryRollups: fleet.telemetryRollups,
     topologyError: activeTopologyError,
     topologyGraph: topology.topologyGraph,

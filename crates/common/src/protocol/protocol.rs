@@ -1132,7 +1132,16 @@ pub struct GatewayCommandDispatch {
     pub client_id: String,
     pub request: JobRequest,
     pub expected_process_incarnation_id: Uuid,
+    /// Captured before the durable DB eligibility read. A gateway restart
+    /// invalidates that proof and forces the dispatcher to read DB again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_gateway_epoch: Option<Uuid>,
     pub payload_hash: String,
+    /// An expired lifecycle lease forces the dispatcher back through its
+    /// durable database eligibility check. The exact gateway owner returned
+    /// by that rejection proves the retry happened after the lease gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_recheck: Option<GatewayClientDispatchFenceOwner>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1158,6 +1167,10 @@ pub struct GatewayTerminalControlResult {
 pub struct GatewaySessionDisconnect {
     pub client_id: String,
     pub reason: String,
+    /// Lifecycle finalizers may disconnect only while their exact committed
+    /// fence still owns the client. Generic operational disconnects omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_dispatch_fence_owner: Option<GatewayClientDispatchFenceOwner>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1181,50 +1194,97 @@ pub struct GatewaySessionDisconnectBatchResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFencePrepare {
+pub struct GatewayClientDispatchFencePrepare {
     pub client_id: String,
     pub token: Uuid,
+    pub gateway_epoch: Uuid,
+    pub generation: u64,
+    /// Initial installation is authorized by a separately acquired
+    /// generation. Renewal/proof may only touch the already exact owner.
+    #[serde(default)]
+    pub renewal: bool,
     pub lease_secs: u64,
+    pub purpose: GatewayClientDispatchFencePurpose,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFencePromote {
+pub struct GatewayClientDispatchFenceAcquire {
     pub client_id: String,
     pub token: Uuid,
+    pub purpose: GatewayClientDispatchFencePurpose,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GatewayClientDispatchFenceOwner {
+    pub token: Uuid,
+    pub gateway_epoch: Uuid,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFenceClear {
+pub struct GatewayClientDispatchFenceAcquireResult {
     pub client_id: String,
-    /// Compensation supplies the prepare token so it cannot clear an older
-    /// persistent fence. A committed manual/online lifecycle transition uses
-    /// `None` to clear the authoritative fence for the client.
-    pub expected_token: Option<Uuid>,
+    pub owner: GatewayClientDispatchFenceOwner,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientDispatchFencePromote {
+    pub client_id: String,
+    pub token: Uuid,
+    pub gateway_epoch: Uuid,
+    pub generation: u64,
+    pub purpose: GatewayClientDispatchFencePurpose,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientDispatchFenceClear {
+    pub client_id: String,
+    /// Every clear is exact-token scoped. A lifecycle transition can never
+    /// erase a newer target owner.
+    pub expected_token: Uuid,
+    pub gateway_epoch: Uuid,
+    pub expected_generation: u64,
+    /// A rejected/rolled-back transition restores the persistent suspension
+    /// fence it temporarily replaced; a committed transition removes it.
+    #[serde(default)]
+    pub restore_fallback: bool,
     pub reason: String,
 }
 
-pub const GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS: usize = 500;
+pub const GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS: usize = 500;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFencePrepareBatchRequest {
-    pub items: Vec<GatewayClientSuspensionFencePrepare>,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayClientDispatchFencePurpose {
+    Suspension,
+    Deletion,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFencePromoteBatchRequest {
-    pub items: Vec<GatewayClientSuspensionFencePromote>,
+pub struct GatewayClientDispatchFencePrepareBatchRequest {
+    pub items: Vec<GatewayClientDispatchFencePrepare>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFenceClearBatchRequest {
-    pub items: Vec<GatewayClientSuspensionFenceClear>,
+pub struct GatewayClientDispatchFencePromoteBatchRequest {
+    pub items: Vec<GatewayClientDispatchFencePromote>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFenceResult {
+pub struct GatewayClientDispatchFenceClearBatchRequest {
+    pub items: Vec<GatewayClientDispatchFenceClear>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientDispatchFenceResult {
     pub client_id: String,
     pub accepted: bool,
     pub fenced: bool,
+    /// `true` only when prepare found and renewed the same active token and
+    /// purpose. A fresh install cannot prove uninterrupted ownership to a
+    /// database transaction that is about to commit.
+    #[serde(default)]
+    pub ownership_continuous: bool,
     pub message: String,
     /// Jobs whose command enqueue linearized before fence installation. The
     /// API must not relabel these as never dispatched.
@@ -1233,8 +1293,8 @@ pub struct GatewayClientSuspensionFenceResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayClientSuspensionFenceBatchResult {
-    pub results: Vec<GatewayClientSuspensionFenceResult>,
+pub struct GatewayClientDispatchFenceBatchResult {
+    pub results: Vec<GatewayClientDispatchFenceResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

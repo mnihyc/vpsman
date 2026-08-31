@@ -43,11 +43,11 @@ use crate::{
         GatewayControlClient, GatewayForwardConfig, GatewayHttpTimeouts, GatewaySpoolConfig,
         DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS, DEFAULT_TELEMETRY_IN_FLIGHT,
     },
-    control::run_control_listener,
+    control::{normalize_expired_dispatch_fence, run_control_listener},
     state::{
-        cancel_ack_result, finish_pending_command_response, GatewaySession,
-        GatewaySessionCloseRequest, GatewaySessionMessage, GatewayState, PendingCommand,
-        SESSION_COMMAND_QUEUE_CAPACITY,
+        cancel_ack_result, finish_pending_command_response, GatewayClientDispatchFenceState,
+        GatewaySession, GatewaySessionCloseRequest, GatewaySessionMessage, GatewayState,
+        PendingCommand, SESSION_COMMAND_QUEUE_CAPACITY,
     },
 };
 
@@ -241,13 +241,20 @@ async fn main() -> Result<()> {
         }
     });
     let telemetry_route_refresh_state = state.clone();
-    api_client.set_telemetry_route_refresh_handler(move |client_id, gateway_session_id| {
-        let state = telemetry_route_refresh_state.clone();
-        async move {
-            refresh_client_route_after_committed_telemetry(&state, &client_id, gateway_session_id)
+    api_client.set_telemetry_route_refresh_handler(
+        move |client_id, gateway_session_id, observed_owner| {
+            let state = telemetry_route_refresh_state.clone();
+            async move {
+                refresh_client_route_after_committed_telemetry(
+                    &state,
+                    &client_id,
+                    gateway_session_id,
+                    Some(observed_owner),
+                )
                 .await;
-        }
-    });
+            }
+        },
+    );
     let agent_args = args.clone();
     let agent_state = state.clone();
     let agent_api_client = api_client.clone();
@@ -1151,17 +1158,58 @@ async fn register_session_after_accepted_hello(
     state: &GatewayState,
     client_id: &str,
     session: GatewaySession,
-) {
+    observed_fence: Option<crate::state::GatewayClientDispatchFence>,
+) -> bool {
     let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
-    // The API accepted this exact hello only after committing the durable
-    // online/auto-unsuspend transition. Reconcile the gateway-local fence
-    // under the same per-client owner that installs the accepted session.
-    state
-        .client_suspension_fences
-        .write()
-        .await
-        .remove(client_id);
+    let mut fences = state.client_dispatch_fences.write().await;
+    normalize_expired_dispatch_fence(&mut fences, client_id, std::time::Instant::now());
+    let removed_fence = if let Some(fence) = fences.get(client_id).cloned() {
+        let observed_exact_stable_owner = observed_fence.as_ref().is_some_and(|observed| {
+            observed.owner() == fence.owner()
+                && !matches!(
+                    observed.state,
+                    GatewayClientDispatchFenceState::Prepared { .. }
+                )
+        });
+        let accepted_hello_owns_current_fence = match fence.purpose {
+            vpsman_common::GatewayClientDispatchFencePurpose::Suspension => {
+                observed_exact_stable_owner
+            }
+            vpsman_common::GatewayClientDispatchFencePurpose::Deletion => {
+                observed_exact_stable_owner
+                    && matches!(
+                        fence.state,
+                        GatewayClientDispatchFenceState::DurableRecheck { .. }
+                    )
+            }
+        };
+        if !accepted_hello_owns_current_fence {
+            let _ = session
+                .close_tx
+                .send(Some(GatewaySessionCloseRequest::Graceful(
+                    "client_lifecycle_fenced".to_string(),
+                )));
+            return false;
+        }
+        // The API accepted hello is DB-lifecycle ordered and authoritative
+        // only for the exact gateway owner observed before that DB request.
+        // A later suspension/deletion owner must win. Retiring the removed
+        // generation prevents a delayed renewal from resurrecting it.
+        fences.remove(client_id)
+    } else {
+        None
+    };
+    drop(fences);
+    if let Some(fence) = removed_fence {
+        state
+            .retire_client_dispatch_fence_generation(
+                client_id,
+                fence.gateway_epoch,
+                fence.generation,
+            )
+            .await;
+    }
     let previous = state
         .sessions
         .write()
@@ -1174,6 +1222,21 @@ async fn register_session_after_accepted_hello(
                 "replaced_by_new_session".to_string(),
             )));
     }
+    true
+}
+
+async fn snapshot_client_dispatch_fence(
+    state: &GatewayState,
+    client_id: &str,
+) -> Option<crate::state::GatewayClientDispatchFence> {
+    let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
+    let _client_lifecycle = lifecycle_owner.read().await;
+    state
+        .client_dispatch_fences
+        .read()
+        .await
+        .get(client_id)
+        .cloned()
 }
 
 async fn close_agent_session_now(state: &GatewayState, client_id: &str, reason: &str) -> bool {
@@ -1224,6 +1287,7 @@ async fn refresh_client_route_after_committed_telemetry(
     state: &GatewayState,
     client_id: &str,
     gateway_session_id: uuid::Uuid,
+    observed_owner: Option<vpsman_common::GatewayClientDispatchFenceOwner>,
 ) -> bool {
     let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
@@ -1235,12 +1299,52 @@ async fn refresh_client_route_after_committed_telemetry(
         return false;
     }
     drop(sessions);
-    state
-        .client_suspension_fences
-        .write()
-        .await
-        .remove(client_id);
+    let Some(observed_owner) = observed_owner else {
+        return true;
+    };
+    let mut fences = state.client_dispatch_fences.write().await;
+    let removed_fence = fences
+        .get(client_id)
+        .cloned()
+        .filter(|fence| {
+            fence.purpose == vpsman_common::GatewayClientDispatchFencePurpose::Suspension
+                && fence.owner() == observed_owner
+                && !matches!(
+                    fence.state,
+                    GatewayClientDispatchFenceState::Prepared { .. }
+                )
+        })
+        .and_then(|_| fences.remove(client_id));
+    drop(fences);
+    if let Some(fence) = removed_fence {
+        state
+            .retire_client_dispatch_fence_generation(
+                client_id,
+                fence.gateway_epoch,
+                fence.generation,
+            )
+            .await;
+    }
     true
+}
+
+async fn snapshot_stable_suspension_route_owner(
+    state: &GatewayState,
+    client_id: &str,
+) -> Option<vpsman_common::GatewayClientDispatchFenceOwner> {
+    state
+        .client_dispatch_fences
+        .read()
+        .await
+        .get(client_id)
+        .filter(|fence| {
+            fence.purpose == vpsman_common::GatewayClientDispatchFencePurpose::Suspension
+                && !matches!(
+                    fence.state,
+                    GatewayClientDispatchFenceState::Prepared { .. }
+                )
+        })
+        .map(crate::state::GatewayClientDispatchFence::owner)
 }
 
 async fn unregister_session_if_current(
@@ -1325,6 +1429,8 @@ async fn handle_agent_frame(
                 arch = %hello.arch,
                 "agent hello"
             );
+            let observed_fence =
+                snapshot_client_dispatch_fence(context.state, &hello.client_id).await;
             let ingest = GatewayAgentHelloIngest {
                 gateway_id: context.args.gateway_id.clone(),
                 gateway_session_id: context.session_id,
@@ -1346,7 +1452,7 @@ async fn handle_agent_frame(
             *client_id = Some(hello.client_id.clone());
             *process_incarnation_id = Some(hello.process_incarnation_id);
             context.ownership.set_client_id(hello.client_id.clone());
-            register_session_after_accepted_hello(
+            let registered = register_session_after_accepted_hello(
                 context.state,
                 &hello.client_id,
                 GatewaySession {
@@ -1355,8 +1461,15 @@ async fn handle_agent_frame(
                     sender: context.command_tx.clone(),
                     close_tx: context.close_tx.clone(),
                 },
+                observed_fence,
             )
             .await;
+            if !registered {
+                anyhow::bail!(
+                    "agent lifecycle change is in progress for {}",
+                    hello.client_id
+                );
+            }
             context
                 .state
                 .disconnected_at
@@ -1395,13 +1508,19 @@ async fn handle_agent_frame(
                 telemetry,
             };
             let target_key = ingest.telemetry.client_id.clone();
+            // Only a stable owner observed before this API request may consume
+            // its successful DB result. Normal telemetry carries no route
+            // refresh work, so the post-commit path remains off its hot path.
+            let observed_route_owner =
+                snapshot_stable_suspension_route_owner(context.state, &target_key).await;
             context
                 .control
-                .post_for_session(
+                .post_telemetry_for_session(
                     &target_key,
                     context.session_id,
                     "/internal/v1/gateway/telemetry",
                     &ingest,
+                    observed_route_owner,
                 )
                 .await?;
         }

@@ -33,6 +33,27 @@ pub struct VerifiedObjectFile {
     pub cleanup_after_stream: bool,
 }
 
+impl VerifiedObjectFile {
+    /// Transfers a temporary spool's cleanup to the streaming response state.
+    /// Until this synchronous handoff, dropping this owner removes the spool,
+    /// including when an async caller is cancelled between awaits.
+    pub fn take_streaming_cleanup_path(&mut self) -> Option<PathBuf> {
+        if !self.cleanup_after_stream {
+            return None;
+        }
+        self.cleanup_after_stream = false;
+        Some(self.path.clone())
+    }
+}
+
+impl Drop for VerifiedObjectFile {
+    fn drop(&mut self) {
+        if self.cleanup_after_stream {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 impl BackupObjectStore {
     pub fn filesystem(root: PathBuf) -> Result<Self> {
         Ok(Self::Filesystem(FilesystemBackupObjectStore::new(root)?))
@@ -511,57 +532,56 @@ impl S3BackupObjectStore {
                     spool_root.display()
                 )
             })?;
-        let temp_path = spool_root.join(format!("{}.part", Uuid::new_v4()));
-        let mut file = create_private_file_new_async(&temp_path)
+        let pending_spool = VerifiedObjectFile {
+            path: spool_root.join(format!("{}.part", Uuid::new_v4())),
+            cleanup_after_stream: true,
+        };
+        let mut file = create_private_file_new_async(&pending_spool.path)
             .await
-            .with_context(|| format!("failed to create S3 spool file {}", temp_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "failed to create S3 spool file {}",
+                    pending_spool.path.display()
+                )
+            })?;
         let mut hasher = Sha256::new();
         let mut written = 0_u64;
         loop {
             let chunk = match response.chunk().await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
-                Err(error) => {
-                    let _ = tokio::fs::remove_file(&temp_path).await;
-                    return Err(error).context("failed to read S3 response");
-                }
+                Err(error) => return Err(error).context("failed to read S3 response"),
             };
             written = written
                 .checked_add(chunk.len() as u64)
                 .context("S3 response body size overflow")?;
             if written > max_bytes as u64 {
-                let _ = tokio::fs::remove_file(&temp_path).await;
                 bail!("S3 response body exceeded {max_bytes} bytes");
             }
             if written > expected_size_bytes {
-                let _ = tokio::fs::remove_file(&temp_path).await;
                 bail!("S3 object size mismatch");
             }
             hasher.update(&chunk);
-            if let Err(error) = file.write_all(&chunk).await {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(error).with_context(|| {
-                    format!("failed to write S3 spool file {}", temp_path.display())
-                });
-            }
+            file.write_all(&chunk).await.with_context(|| {
+                format!(
+                    "failed to write S3 spool file {}",
+                    pending_spool.path.display()
+                )
+            })?;
         }
         if written != expected_size_bytes {
-            let _ = tokio::fs::remove_file(&temp_path).await;
             bail!("S3 object size mismatch");
         }
         if hex::encode(hasher.finalize()) != expected_sha256_hex {
-            let _ = tokio::fs::remove_file(&temp_path).await;
             bail!("S3 object hash mismatch");
         }
-        if let Err(error) = file.sync_data().await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(error)
-                .with_context(|| format!("failed to sync S3 spool file {}", temp_path.display()));
-        }
-        Ok(VerifiedObjectFile {
-            path: temp_path,
-            cleanup_after_stream: true,
-        })
+        file.sync_data().await.with_context(|| {
+            format!(
+                "failed to sync S3 spool file {}",
+                pending_spool.path.display()
+            )
+        })?;
+        Ok(pending_spool)
     }
 
     async fn delete_best_effort(&self, object_key: &str) {

@@ -1,5 +1,6 @@
 use super::*;
-use crate::state::GatewayClientSuspensionFence;
+use crate::state::{GatewayClientDispatchFence, GatewayClientDispatchFenceState};
+use vpsman_common::GatewayClientDispatchFencePurpose;
 
 #[tokio::test]
 async fn stale_reconnect_cleanup_does_not_remove_newer_session() {
@@ -157,6 +158,22 @@ fn shutdown_joins_connection_owners_before_forwarding_flush() {
     assert!(listener.contains(".finalize("));
 }
 
+fn runtime_test_fence(
+    state: &GatewayState,
+    token: uuid::Uuid,
+    generation: u64,
+    purpose: GatewayClientDispatchFencePurpose,
+    fence_state: GatewayClientDispatchFenceState,
+) -> GatewayClientDispatchFence {
+    GatewayClientDispatchFence {
+        token,
+        gateway_epoch: state.client_dispatch_fence_epoch,
+        generation,
+        purpose,
+        state: fence_state,
+    }
+}
+
 #[tokio::test]
 async fn registering_replacement_session_closes_displaced_session() {
     let state = GatewayState::default();
@@ -166,28 +183,34 @@ async fn registering_replacement_session_closes_displaced_session() {
     let (newer_close_tx, _newer_close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
     let newer_session_id = uuid::Uuid::new_v4();
 
-    register_session_after_accepted_hello(
-        &state,
-        "client-a",
-        GatewaySession {
-            session_id: uuid::Uuid::new_v4(),
-            process_incarnation_id: uuid::Uuid::new_v4(),
-            sender: older_tx,
-            close_tx: older_close_tx,
-        },
-    )
-    .await;
-    register_session_after_accepted_hello(
-        &state,
-        "client-a",
-        GatewaySession {
-            session_id: newer_session_id,
-            process_incarnation_id: uuid::Uuid::new_v4(),
-            sender: newer_tx,
-            close_tx: newer_close_tx,
-        },
-    )
-    .await;
+    assert!(
+        register_session_after_accepted_hello(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id: uuid::Uuid::new_v4(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender: older_tx,
+                close_tx: older_close_tx,
+            },
+            None,
+        )
+        .await
+    );
+    assert!(
+        register_session_after_accepted_hello(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id: newer_session_id,
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender: newer_tx,
+                close_tx: newer_close_tx,
+            },
+            None,
+        )
+        .await
+    );
 
     older_close_rx.changed().await.unwrap();
     assert_eq!(
@@ -208,53 +231,252 @@ async fn registering_replacement_session_closes_displaced_session() {
 }
 
 #[tokio::test]
-async fn accepted_hello_clears_the_local_fence_and_registers_under_one_client_owner() {
-    let state = std::sync::Arc::new(GatewayState::default());
-    let fence_token = uuid::Uuid::new_v4();
-    state.client_suspension_fences.write().await.insert(
-        "client-a".to_string(),
-        GatewayClientSuspensionFence {
-            token: fence_token,
-            expires_at: None,
-        },
+async fn accepted_hello_clears_and_retires_only_the_exact_observed_suspension_owner() {
+    let state = GatewayState::default();
+    let fence = runtime_test_fence(
+        &state,
+        uuid::Uuid::new_v4(),
+        1,
+        GatewayClientDispatchFencePurpose::Suspension,
+        GatewayClientDispatchFenceState::Persistent,
     );
-    let lifecycle_owner = state.client_lifecycle_owner("client-a").await;
-    let lifecycle_guard = lifecycle_owner.write().await;
+    state
+        .client_dispatch_fences
+        .write()
+        .await
+        .insert("client-a".to_string(), fence);
     let session_id = uuid::Uuid::new_v4();
     let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
     let (close_tx, _close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
 
-    let registration = {
-        let state = std::sync::Arc::clone(&state);
-        tokio::spawn(async move {
-            register_session_after_accepted_hello(
+    assert!(
+        register_session_after_accepted_hello(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id,
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender,
+                close_tx,
+            },
+            Some(fence),
+        )
+        .await
+    );
+    assert!(!state
+        .client_dispatch_fences
+        .read()
+        .await
+        .contains_key("client-a"));
+    assert_eq!(
+        state.client_dispatch_fence_generations.read().await["client-a"].retired_generation,
+        fence.generation
+    );
+    assert_eq!(
+        state
+            .sessions
+            .read()
+            .await
+            .get("client-a")
+            .map(|session| session.session_id),
+        Some(session_id)
+    );
+}
+
+#[tokio::test]
+async fn delayed_accepted_hello_cannot_clear_a_newer_suspension_owner() {
+    let state = GatewayState::default();
+    let older = runtime_test_fence(
+        &state,
+        uuid::Uuid::new_v4(),
+        1,
+        GatewayClientDispatchFencePurpose::Suspension,
+        GatewayClientDispatchFenceState::Prepared {
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            fallback: None,
+        },
+    );
+    let newer = runtime_test_fence(
+        &state,
+        uuid::Uuid::new_v4(),
+        2,
+        GatewayClientDispatchFencePurpose::Suspension,
+        GatewayClientDispatchFenceState::Persistent,
+    );
+    state
+        .client_dispatch_fences
+        .write()
+        .await
+        .insert("client-a".to_string(), newer);
+
+    for observed in [None, Some(older)] {
+        let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        let (close_tx, mut close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+        assert!(
+            !register_session_after_accepted_hello(
                 &state,
                 "client-a",
                 GatewaySession {
-                    session_id,
+                    session_id: uuid::Uuid::new_v4(),
                     process_incarnation_id: uuid::Uuid::new_v4(),
                     sender,
                     close_tx,
                 },
+                observed,
             )
-            .await;
-        })
-    };
-    tokio::task::yield_now().await;
+            .await
+        );
+        close_rx.changed().await.unwrap();
+        assert_eq!(
+            state.client_dispatch_fences.read().await["client-a"].owner(),
+            newer.owner()
+        );
+        assert!(!state.sessions.read().await.contains_key("client-a"));
+    }
 
-    assert_eq!(
-        state.client_suspension_fences.read().await["client-a"].token,
-        fence_token
-    );
-    assert!(!state.sessions.read().await.contains_key("client-a"));
-
-    drop(lifecycle_guard);
-    tokio::time::timeout(std::time::Duration::from_secs(1), registration)
+    // The same token/generation is not sufficient: a suspension can commit
+    // after hello DB acceptance but before its gateway promotion.
+    state
+        .client_dispatch_fences
+        .write()
         .await
-        .expect("accepted registration must not wait on remote control")
-        .expect("accepted registration task");
+        .insert("client-a".to_string(), newer);
+    let observed_prepared = GatewayClientDispatchFence {
+        state: GatewayClientDispatchFenceState::Prepared {
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            fallback: None,
+        },
+        ..newer
+    };
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, mut close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    assert!(
+        !register_session_after_accepted_hello(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id: uuid::Uuid::new_v4(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender,
+                close_tx,
+            },
+            Some(observed_prepared),
+        )
+        .await
+    );
+    close_rx.changed().await.unwrap();
+    assert_eq!(
+        state.client_dispatch_fences.read().await["client-a"].owner(),
+        newer.owner()
+    );
+}
+
+#[tokio::test]
+async fn deletion_hello_rejects_active_or_persistent_owner_but_converges_expired_exact_owner() {
+    for fence_state in [
+        GatewayClientDispatchFenceState::Prepared {
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            fallback: None,
+        },
+        GatewayClientDispatchFenceState::Persistent,
+    ] {
+        let state = GatewayState::default();
+        let fence = runtime_test_fence(
+            &state,
+            uuid::Uuid::new_v4(),
+            1,
+            GatewayClientDispatchFencePurpose::Deletion,
+            fence_state,
+        );
+        state
+            .client_dispatch_fences
+            .write()
+            .await
+            .insert("client-a".to_string(), fence);
+        let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        let (close_tx, mut close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+        assert!(
+            !register_session_after_accepted_hello(
+                &state,
+                "client-a",
+                GatewaySession {
+                    session_id: uuid::Uuid::new_v4(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
+                    sender,
+                    close_tx,
+                },
+                Some(fence),
+            )
+            .await
+        );
+        close_rx.changed().await.unwrap();
+        assert_eq!(
+            state.client_dispatch_fences.read().await["client-a"].owner(),
+            fence.owner()
+        );
+    }
+
+    let state = GatewayState::default();
+    let expired = runtime_test_fence(
+        &state,
+        uuid::Uuid::new_v4(),
+        1,
+        GatewayClientDispatchFencePurpose::Deletion,
+        GatewayClientDispatchFenceState::Prepared {
+            expires_at: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            fallback: None,
+        },
+    );
+    state
+        .client_dispatch_fences
+        .write()
+        .await
+        .insert("client-a".to_string(), expired);
+    let first_session_id = uuid::Uuid::new_v4();
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, mut close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    assert!(
+        !register_session_after_accepted_hello(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id: first_session_id,
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender,
+                close_tx,
+            },
+            Some(expired),
+        )
+        .await
+    );
+    close_rx.changed().await.unwrap();
+    let normalized = state.client_dispatch_fences.read().await["client-a"];
+    assert!(matches!(
+        normalized.state,
+        GatewayClientDispatchFenceState::DurableRecheck { .. }
+    ));
+
+    // The next accepted reconnect observes the stable durable-recheck owner
+    // and converges without a worker or permanent rejection.
+    let session_id = uuid::Uuid::new_v4();
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, _close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    assert!(
+        register_session_after_accepted_hello(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id,
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender,
+                close_tx,
+            },
+            Some(normalized),
+        )
+        .await
+    );
     assert!(!state
-        .client_suspension_fences
+        .client_dispatch_fences
         .read()
         .await
         .contains_key("client-a"));
@@ -326,11 +548,10 @@ async fn api_rejection_only_terminates_the_exact_current_session() {
 }
 
 #[tokio::test]
-async fn committed_telemetry_refreshes_only_the_exact_current_session_route() {
+async fn committed_telemetry_refresh_requires_the_exact_session_and_observed_stable_owner() {
     let state = GatewayState::default();
     let stale_session_id = uuid::Uuid::new_v4();
     let current_session_id = uuid::Uuid::new_v4();
-    let fence_token = uuid::Uuid::new_v4();
     let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
     let (close_tx, _close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
     state.sessions.write().await.insert(
@@ -342,32 +563,215 @@ async fn committed_telemetry_refreshes_only_the_exact_current_session_route() {
             close_tx,
         },
     );
-    state.client_suspension_fences.write().await.insert(
-        "client-a".to_string(),
-        GatewayClientSuspensionFence {
-            token: fence_token,
-            expires_at: None,
-        },
+    let current = runtime_test_fence(
+        &state,
+        uuid::Uuid::new_v4(),
+        2,
+        GatewayClientDispatchFencePurpose::Suspension,
+        GatewayClientDispatchFenceState::Persistent,
+    );
+    state
+        .client_dispatch_fences
+        .write()
+        .await
+        .insert("client-a".to_string(), current);
+    assert_eq!(
+        snapshot_stable_suspension_route_owner(&state, "client-a").await,
+        Some(current.owner())
     );
 
     assert!(
-        !refresh_client_route_after_committed_telemetry(&state, "client-a", stale_session_id,)
-            .await
+        refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            current_session_id,
+            None,
+        )
+        .await
     );
     assert_eq!(
-        state.client_suspension_fences.read().await["client-a"].token,
-        fence_token
+        state.client_dispatch_fences.read().await["client-a"].owner(),
+        current.owner()
+    );
+
+    let older = vpsman_common::GatewayClientDispatchFenceOwner {
+        token: uuid::Uuid::new_v4(),
+        gateway_epoch: state.client_dispatch_fence_epoch,
+        generation: 1,
+    };
+    assert!(
+        refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            current_session_id,
+            Some(older),
+        )
+        .await
+    );
+    assert_eq!(
+        state.client_dispatch_fences.read().await["client-a"].owner(),
+        current.owner()
     );
 
     assert!(
-        refresh_client_route_after_committed_telemetry(&state, "client-a", current_session_id,)
-            .await
+        !refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            stale_session_id,
+            Some(current.owner()),
+        )
+        .await
+    );
+    assert_eq!(
+        state.client_dispatch_fences.read().await["client-a"].owner(),
+        current.owner()
+    );
+
+    state.client_dispatch_fences.write().await.insert(
+        "client-a".to_string(),
+        GatewayClientDispatchFence {
+            state: GatewayClientDispatchFenceState::Prepared {
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                fallback: None,
+            },
+            ..current
+        },
+    );
+    assert!(
+        refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            current_session_id,
+            Some(current.owner()),
+        )
+        .await
+    );
+    assert!(matches!(
+        state.client_dispatch_fences.read().await["client-a"].state,
+        GatewayClientDispatchFenceState::Prepared { .. }
+    ));
+    assert_eq!(
+        snapshot_stable_suspension_route_owner(&state, "client-a").await,
+        None
+    );
+
+    state
+        .client_dispatch_fences
+        .write()
+        .await
+        .insert("client-a".to_string(), current);
+    assert!(
+        refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            current_session_id,
+            Some(current.owner()),
+        )
+        .await
     );
     assert!(!state
-        .client_suspension_fences
+        .client_dispatch_fences
         .read()
         .await
         .contains_key("client-a"));
+    assert_eq!(
+        state.client_dispatch_fence_generations.read().await["client-a"].retired_generation,
+        current.generation
+    );
+}
+
+#[tokio::test]
+async fn committed_telemetry_refresh_clears_an_exact_durable_recheck_suspension_owner() {
+    let state = GatewayState::default();
+    let session_id = uuid::Uuid::new_v4();
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, _close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    state.sessions.write().await.insert(
+        "client-a".to_string(),
+        GatewaySession {
+            session_id,
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            sender,
+            close_tx,
+        },
+    );
+    let fence = runtime_test_fence(
+        &state,
+        uuid::Uuid::new_v4(),
+        1,
+        GatewayClientDispatchFencePurpose::Suspension,
+        GatewayClientDispatchFenceState::DurableRecheck { fallback: None },
+    );
+    state
+        .client_dispatch_fences
+        .write()
+        .await
+        .insert("client-a".to_string(), fence);
+    assert_eq!(
+        snapshot_stable_suspension_route_owner(&state, "client-a").await,
+        Some(fence.owner())
+    );
+
+    assert!(
+        refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            session_id,
+            Some(fence.owner()),
+        )
+        .await
+    );
+    assert!(!state
+        .client_dispatch_fences
+        .read()
+        .await
+        .contains_key("client-a"));
+}
+
+#[tokio::test]
+async fn committed_telemetry_cannot_clear_an_inflight_deletion_fence() {
+    let state = GatewayState::default();
+    let session_id = uuid::Uuid::new_v4();
+    let token = uuid::Uuid::new_v4();
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, _close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    state.sessions.write().await.insert(
+        "client-a".to_string(),
+        GatewaySession {
+            session_id,
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            sender,
+            close_tx,
+        },
+    );
+    state.client_dispatch_fences.write().await.insert(
+        "client-a".to_string(),
+        runtime_test_fence(
+            &state,
+            token,
+            1,
+            GatewayClientDispatchFencePurpose::Deletion,
+            GatewayClientDispatchFenceState::Prepared {
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                fallback: None,
+            },
+        ),
+    );
+
+    let observed_owner = state.client_dispatch_fences.read().await["client-a"].owner();
+    assert!(
+        refresh_client_route_after_committed_telemetry(
+            &state,
+            "client-a",
+            session_id,
+            Some(observed_owner),
+        )
+        .await
+    );
+    assert_eq!(
+        state.client_dispatch_fences.read().await["client-a"].token,
+        token
+    );
 }
 
 #[test]

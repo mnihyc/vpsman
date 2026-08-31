@@ -14,21 +14,24 @@ use tokio::{
     net::{TcpStream, UnixStream},
     time,
 };
-#[cfg(test)]
-use vpsman_common::GatewayClientSuspensionFenceResult;
 use vpsman_common::{
-    GatewayClientSuspensionFenceBatchResult, GatewayClientSuspensionFenceClear,
-    GatewayClientSuspensionFenceClearBatchRequest, GatewayClientSuspensionFencePrepare,
-    GatewayClientSuspensionFencePrepareBatchRequest, GatewayClientSuspensionFencePromote,
-    GatewayClientSuspensionFencePromoteBatchRequest, GatewayCommandCancel,
-    GatewayCommandCancelResult, GatewayCommandDispatch, GatewayCommandDispatchResult,
-    GatewayForwardMetricsSnapshot, GatewayPrivilegeVerification,
+    GatewayClientDispatchFenceAcquire, GatewayClientDispatchFenceAcquireResult,
+    GatewayClientDispatchFenceBatchResult, GatewayClientDispatchFenceClear,
+    GatewayClientDispatchFenceClearBatchRequest, GatewayClientDispatchFenceOwner,
+    GatewayClientDispatchFencePrepare, GatewayClientDispatchFencePrepareBatchRequest,
+    GatewayClientDispatchFencePromote, GatewayClientDispatchFencePromoteBatchRequest,
+    GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
+    GatewayCommandDispatchResult, GatewayForwardMetricsSnapshot, GatewayPrivilegeVerification,
     GatewayPrivilegeVerificationBatchItem, GatewayPrivilegeVerificationBatchRequest,
     GatewayPrivilegeVerificationBatchResult, GatewayPrivilegeVerificationResult,
-    GatewaySessionDisconnect, GatewaySessionDisconnectBatchRequest,
-    GatewaySessionDisconnectBatchResult, GatewaySessionDisconnectResult, GatewayTerminalControl,
+    GatewaySessionDisconnect, GatewaySessionDisconnectResult, GatewayTerminalControl,
     GatewayTerminalControlResult, JobCancelRequest, JobRequest, PrivilegeAssertion,
     TerminalControlRequest,
+};
+#[cfg(test)]
+use vpsman_common::{
+    GatewayClientDispatchFencePurpose, GatewayClientDispatchFenceResult,
+    GatewaySessionDisconnectBatchRequest, GatewaySessionDisconnectBatchResult,
 };
 
 const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -57,6 +60,7 @@ pub(crate) struct GatewayDispatchClient {
     control_url: Option<String>,
     internal_token: Option<String>,
     timeouts: Arc<StdRwLock<GatewayClientTimeouts>>,
+    command_gateway_epoch: Arc<StdRwLock<Option<uuid::Uuid>>>,
     #[cfg(test)]
     test_privilege_auto_approve: bool,
 }
@@ -92,6 +96,7 @@ impl GatewayDispatchClient {
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
             timeouts: Arc::new(StdRwLock::new(timeouts)),
+            command_gateway_epoch: Arc::default(),
             #[cfg(test)]
             test_privilege_auto_approve: false,
         }
@@ -143,6 +148,8 @@ impl GatewayDispatchClient {
         client_id: &str,
         request: JobRequest,
         expected_process_incarnation_id: uuid::Uuid,
+        expected_gateway_epoch: Option<uuid::Uuid>,
+        lifecycle_recheck: Option<GatewayClientDispatchFenceOwner>,
         payload_hash: String,
         timeouts: GatewayClientTimeouts,
     ) -> Result<GatewayCommandDispatchResult> {
@@ -156,12 +163,27 @@ impl GatewayDispatchClient {
                 client_id: client_id.to_string(),
                 request,
                 expected_process_incarnation_id,
+                expected_gateway_epoch,
                 payload_hash,
+                lifecycle_recheck,
             },
             self.internal_token.as_deref(),
             timeouts,
         )
         .await
+    }
+
+    pub(crate) fn command_gateway_epoch(&self) -> Option<uuid::Uuid> {
+        self.command_gateway_epoch
+            .read()
+            .map(|epoch| *epoch)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn observe_command_gateway_epoch(&self, epoch: uuid::Uuid) {
+        if let Ok(mut observed) = self.command_gateway_epoch.write() {
+            *observed = Some(epoch);
+        }
     }
 
     pub(crate) async fn cancel(
@@ -252,6 +274,26 @@ impl GatewayDispatchClient {
         client_id: &str,
         reason: &str,
     ) -> Result<GatewaySessionDisconnectResult> {
+        self.disconnect_session_with_owner(client_id, reason, None)
+            .await
+    }
+
+    pub(crate) async fn disconnect_session_if_fence_owned(
+        &self,
+        client_id: &str,
+        reason: &str,
+        owner: GatewayClientDispatchFenceOwner,
+    ) -> Result<GatewaySessionDisconnectResult> {
+        self.disconnect_session_with_owner(client_id, reason, Some(owner))
+            .await
+    }
+
+    async fn disconnect_session_with_owner(
+        &self,
+        client_id: &str,
+        reason: &str,
+        required_dispatch_fence_owner: Option<GatewayClientDispatchFenceOwner>,
+    ) -> Result<GatewaySessionDisconnectResult> {
         #[cfg(test)]
         if self.test_privilege_auto_approve {
             return Ok(GatewaySessionDisconnectResult {
@@ -271,6 +313,7 @@ impl GatewayDispatchClient {
             &GatewaySessionDisconnect {
                 client_id: client_id.to_string(),
                 reason: reason.to_string(),
+                required_dispatch_fence_owner,
             },
             self.internal_token.as_deref(),
             self.timeouts(),
@@ -278,6 +321,7 @@ impl GatewayDispatchClient {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn disconnect_sessions(
         &self,
         items: Vec<GatewaySessionDisconnect>,
@@ -310,20 +354,50 @@ impl GatewayDispatchClient {
         .await
     }
 
-    pub(crate) async fn prepare_client_suspension_fences(
+    pub(crate) async fn acquire_client_dispatch_fence(
         &self,
-        items: Vec<GatewayClientSuspensionFencePrepare>,
-    ) -> Result<GatewayClientSuspensionFenceBatchResult> {
+        acquire: GatewayClientDispatchFenceAcquire,
+    ) -> Result<GatewayClientDispatchFenceAcquireResult> {
         #[cfg(test)]
         if self.test_privilege_auto_approve {
-            return Ok(GatewayClientSuspensionFenceBatchResult {
+            return Ok(GatewayClientDispatchFenceAcquireResult {
+                client_id: acquire.client_id,
+                owner: GatewayClientDispatchFenceOwner {
+                    token: acquire.token,
+                    gateway_epoch: uuid::Uuid::nil(),
+                    generation: 1,
+                },
+            });
+        }
+        let control_url = self
+            .control_url
+            .as_deref()
+            .context("gateway control URL is not configured")?;
+        post_gateway_control(
+            control_url,
+            "/internal/v1/gateway/client/dispatch-fence/acquire",
+            &acquire,
+            self.internal_token.as_deref(),
+            self.timeouts(),
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_client_dispatch_fences(
+        &self,
+        items: Vec<GatewayClientDispatchFencePrepare>,
+    ) -> Result<GatewayClientDispatchFenceBatchResult> {
+        #[cfg(test)]
+        if self.test_privilege_auto_approve {
+            return Ok(GatewayClientDispatchFenceBatchResult {
                 results: items
                     .into_iter()
-                    .map(|item| GatewayClientSuspensionFenceResult {
+                    .map(|item| GatewayClientDispatchFenceResult {
                         client_id: item.client_id,
                         accepted: true,
                         fenced: true,
-                        message: "test suspension fence prepared".to_string(),
+                        ownership_continuous: true,
+                        message: "test dispatch fence prepared".to_string(),
                         enqueued_job_ids: Vec::new(),
                     })
                     .collect(),
@@ -335,28 +409,29 @@ impl GatewayDispatchClient {
             .context("gateway control URL is not configured")?;
         post_gateway_control(
             control_url,
-            "/internal/v1/gateway/client/suspension-fence/batch/prepare",
-            &GatewayClientSuspensionFencePrepareBatchRequest { items },
+            "/internal/v1/gateway/client/dispatch-fence/batch/prepare",
+            &GatewayClientDispatchFencePrepareBatchRequest { items },
             self.internal_token.as_deref(),
             self.timeouts(),
         )
         .await
     }
 
-    pub(crate) async fn promote_client_suspension_fences(
+    pub(crate) async fn promote_client_dispatch_fences(
         &self,
-        items: Vec<GatewayClientSuspensionFencePromote>,
-    ) -> Result<GatewayClientSuspensionFenceBatchResult> {
+        items: Vec<GatewayClientDispatchFencePromote>,
+    ) -> Result<GatewayClientDispatchFenceBatchResult> {
         #[cfg(test)]
         if self.test_privilege_auto_approve {
-            return Ok(GatewayClientSuspensionFenceBatchResult {
+            return Ok(GatewayClientDispatchFenceBatchResult {
                 results: items
                     .into_iter()
-                    .map(|item| GatewayClientSuspensionFenceResult {
+                    .map(|item| GatewayClientDispatchFenceResult {
                         client_id: item.client_id,
                         accepted: true,
                         fenced: true,
-                        message: "test suspension fence promoted".to_string(),
+                        ownership_continuous: true,
+                        message: "test dispatch fence promoted".to_string(),
                         enqueued_job_ids: Vec::new(),
                     })
                     .collect(),
@@ -368,28 +443,29 @@ impl GatewayDispatchClient {
             .context("gateway control URL is not configured")?;
         post_gateway_control(
             control_url,
-            "/internal/v1/gateway/client/suspension-fence/batch/promote",
-            &GatewayClientSuspensionFencePromoteBatchRequest { items },
+            "/internal/v1/gateway/client/dispatch-fence/batch/promote",
+            &GatewayClientDispatchFencePromoteBatchRequest { items },
             self.internal_token.as_deref(),
             self.timeouts(),
         )
         .await
     }
 
-    pub(crate) async fn clear_client_suspension_fences(
+    pub(crate) async fn clear_client_dispatch_fences(
         &self,
-        items: Vec<GatewayClientSuspensionFenceClear>,
-    ) -> Result<GatewayClientSuspensionFenceBatchResult> {
+        items: Vec<GatewayClientDispatchFenceClear>,
+    ) -> Result<GatewayClientDispatchFenceBatchResult> {
         #[cfg(test)]
         if self.test_privilege_auto_approve {
-            return Ok(GatewayClientSuspensionFenceBatchResult {
+            return Ok(GatewayClientDispatchFenceBatchResult {
                 results: items
                     .into_iter()
-                    .map(|item| GatewayClientSuspensionFenceResult {
+                    .map(|item| GatewayClientDispatchFenceResult {
                         client_id: item.client_id,
                         accepted: true,
                         fenced: false,
-                        message: "test suspension fence cleared".to_string(),
+                        ownership_continuous: false,
+                        message: "test dispatch fence cleared".to_string(),
                         enqueued_job_ids: Vec::new(),
                     })
                     .collect(),
@@ -401,8 +477,8 @@ impl GatewayDispatchClient {
             .context("gateway control URL is not configured")?;
         post_gateway_control(
             control_url,
-            "/internal/v1/gateway/client/suspension-fence/batch/clear",
-            &GatewayClientSuspensionFenceClearBatchRequest { items },
+            "/internal/v1/gateway/client/dispatch-fence/batch/clear",
+            &GatewayClientDispatchFenceClearBatchRequest { items },
             self.internal_token.as_deref(),
             self.timeouts(),
         )

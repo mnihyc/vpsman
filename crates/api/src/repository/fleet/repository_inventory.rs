@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -1044,6 +1047,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn mutate_agent_suspensions(
         &self,
         action: AgentSuspensionAction,
@@ -1076,6 +1080,7 @@ impl Repository {
                     reason,
                     operator,
                     protected_job_ids,
+                    || async { Ok(()) },
                 )
                 .await
             {
@@ -1097,37 +1102,45 @@ impl Repository {
             .iter()
             .any(|outcome| matches!(outcome, AgentSuspensionRepositoryOutcome::Applied { .. }))
         {
-            match self {
-                Self::Postgres(pool) => {
-                    // Durable webhook rows belong to each exact-client
-                    // transaction; one wake covers the complete public batch.
-                    if let Err(error) =
-                        sqlx::query("SELECT pg_notify('webhook_events', 'alert_notification')")
-                            .execute(pool)
-                            .await
-                    {
-                        // The worker periodically recovers durable webhook
-                        // rows. A failed advisory wake cannot invalidate
-                        // already committed target outcomes.
-                        tracing::warn!(
-                            %error,
-                            "failed to wake webhook delivery after suspension batch"
-                        );
-                    }
-                }
-            }
+            self.wake_agent_suspension_consumers().await;
         }
         Ok(outcomes)
     }
 
-    async fn mutate_agent_suspension_target(
+    pub(crate) async fn wake_agent_suspension_consumers(&self) {
+        match self {
+            Self::Postgres(pool) => {
+                // Durable webhook rows belong to each exact-client
+                // transaction; one wake covers the complete public batch.
+                if let Err(error) =
+                    sqlx::query("SELECT pg_notify('webhook_events', 'alert_notification')")
+                        .execute(pool)
+                        .await
+                {
+                    // The worker periodically recovers durable webhook rows.
+                    // A failed advisory wake cannot invalidate committed work.
+                    tracing::warn!(
+                        %error,
+                        "failed to wake webhook delivery after suspension batch"
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn mutate_agent_suspension_target<BeforeCommit, BeforeCommitFuture>(
         &self,
         action: AgentSuspensionAction,
         client_id: &str,
         reason: Option<&str>,
         operator: &AuthContext,
         protected_enqueued_job_ids: &[Uuid],
-    ) -> Result<AgentSuspensionRepositoryOutcome> {
+        before_commit: BeforeCommit,
+    ) -> Result<AgentSuspensionRepositoryOutcome>
+    where
+        BeforeCommit: FnOnce() -> BeforeCommitFuture,
+        BeforeCommitFuture: Future<Output = Result<()>>,
+    {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -1390,6 +1403,14 @@ impl Repository {
                 .await;
                 match mutation {
                     Ok(outcome) => {
+                        if matches!(&outcome, AgentSuspensionRepositoryOutcome::Applied { .. }) {
+                            if let Err(error) = before_commit().await {
+                                tx.rollback().await?;
+                                return Err(error.context(
+                                    "VPS suspension dispatch ownership changed before commit",
+                                ));
+                            }
+                        }
                         tx.commit().await?;
                         Ok(outcome)
                     }
@@ -1418,6 +1439,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn delete_agents(
         &self,
         client_ids: &[String],
@@ -1431,7 +1453,7 @@ impl Repository {
         let mut outcomes = Vec::with_capacity(client_ids.len());
         for client_id in client_ids {
             match self
-                .delete_agent_target(client_id, reason.as_deref(), operator)
+                .delete_agent_target(client_id, reason.as_deref(), operator, || async { Ok(()) })
                 .await
             {
                 Ok(outcome) => outcomes.push(outcome),
@@ -1451,12 +1473,17 @@ impl Repository {
         Ok(outcomes)
     }
 
-    async fn delete_agent_target(
+    pub(crate) async fn delete_agent_target<BeforeCommit, BeforeCommitFuture>(
         &self,
         client_id: &str,
         reason: Option<&str>,
         operator: &AuthContext,
-    ) -> Result<DeleteAgentRepositoryOutcome> {
+        before_commit: BeforeCommit,
+    ) -> Result<DeleteAgentRepositoryOutcome>
+    where
+        BeforeCommit: FnOnce() -> BeforeCommitFuture,
+        BeforeCommitFuture: Future<Output = Result<()>>,
+    {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -1746,6 +1773,14 @@ impl Repository {
                 .await;
                 match mutation {
                     Ok(outcome) => {
+                        if matches!(&outcome, DeleteAgentRepositoryOutcome::Applied(_)) {
+                            if let Err(error) = before_commit().await {
+                                tx.rollback().await?;
+                                return Err(error.context(
+                                    "VPS deletion dispatch ownership changed before commit",
+                                ));
+                            }
+                        }
                         tx.commit().await?;
                         Ok(outcome)
                     }
@@ -2574,6 +2609,14 @@ mod list_agents_query_tests {
         assert!(suspension_target.contains("&[client_id.to_string()]"));
         assert!(deletion_target.contains("pool.begin()"));
         assert!(deletion_target.contains("let exact_client_ids = vec![client_id.to_string()]"));
+        for target in [suspension_target, deletion_target] {
+            let proof = target
+                .find("before_commit().await")
+                .expect("exact gateway ownership proof");
+            let commit = target.find("tx.commit().await").expect("database commit");
+            assert!(proof < commit, "ownership must be proved before commit");
+            assert!(target.contains("tx.rollback().await"));
+        }
         assert!(
             !deletion_target.contains("lock_postgres_port_forward_clients(&mut tx, client_ids)")
         );

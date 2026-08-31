@@ -72,6 +72,16 @@ pub(crate) fn validate_operator_role(role: &str) -> Result<(), ApiError> {
     }
 }
 
+pub(crate) fn admin_risk_acknowledgement_required(
+    current_role: &str,
+    requested_role: Option<&str>,
+    admin_risk_acknowledged: bool,
+) -> bool {
+    !admin_risk_acknowledged
+        && (current_role.trim() == "admin"
+            || requested_role.is_some_and(|role| role.trim() == "admin"))
+}
+
 pub(crate) fn normalize_operator_scopes(
     role: &str,
     scopes: &[String],

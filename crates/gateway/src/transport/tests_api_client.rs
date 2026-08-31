@@ -41,6 +41,7 @@ fn test_event(path: &str, body: &[u8]) -> GatewayForwardEvent {
         critical: gateway_event_critical(kind, body),
         command_output: None,
         gateway_session_id: None,
+        telemetry_route_refresh_owner: None,
         created_at: time::Instant::now(),
         created_unix: unix_now(),
         enqueue_seq: TEST_ENQUEUE_SEQ.fetch_add(1, Ordering::Relaxed),
@@ -460,17 +461,23 @@ async fn successful_or_unrelated_responses_do_not_reject_the_session_fence() {
 }
 
 #[tokio::test]
-async fn only_newly_recorded_telemetry_refreshes_the_exact_forwarded_route() {
+async fn only_newly_recorded_telemetry_with_an_observed_owner_refreshes_the_exact_route() {
     let session_id = uuid::Uuid::new_v4();
+    let observed_owner = GatewayClientDispatchFenceOwner {
+        token: uuid::Uuid::new_v4(),
+        gateway_epoch: uuid::Uuid::new_v4(),
+        generation: 7,
+    };
     let refreshes = Arc::new(StdMutex::new(Vec::new()));
     let recorded = refreshes.clone();
-    let handler: TelemetryRouteRefreshHandler = Arc::new(move |client_id, refreshed_session_id| {
-        recorded
-            .lock()
-            .unwrap()
-            .push((client_id, refreshed_session_id));
-        Box::pin(async {})
-    });
+    let handler: TelemetryRouteRefreshHandler =
+        Arc::new(move |client_id, refreshed_session_id, refreshed_owner| {
+            recorded
+                .lock()
+                .unwrap()
+                .push((client_id, refreshed_session_id, refreshed_owner));
+            Box::pin(async {})
+        });
     let handler = StdRwLock::new(Some(handler));
     let rejections = StdRwLock::new(None);
 
@@ -481,6 +488,7 @@ async fn only_newly_recorded_telemetry_refreshes_the_exact_forwarded_route() {
     )
     .await;
     recorded_event.gateway_session_id = Some(session_id);
+    recorded_event.telemetry_route_refresh_owner = Some(Box::new(observed_owner));
     assert_eq!(
         forward_once_with_route_refresh(&recorded_event, &rejections, &handler).await,
         GatewayForwardOutcome::Delivered
@@ -493,14 +501,27 @@ async fn only_newly_recorded_telemetry_refreshes_the_exact_forwarded_route() {
     )
     .await;
     duplicate_event.gateway_session_id = Some(session_id);
+    duplicate_event.telemetry_route_refresh_owner = Some(Box::new(observed_owner));
     assert_eq!(
         forward_once_with_route_refresh(&duplicate_event, &rejections, &handler).await,
         GatewayForwardOutcome::Delivered
     );
 
+    let mut unowned_event = test_event("/internal/v1/gateway/telemetry", br#"{}"#);
+    unowned_event.api_url = single_response_server(
+        "200 OK",
+        r#"{"accepted":true,"message":"telemetry_recorded","refresh_route":true}"#,
+    )
+    .await;
+    unowned_event.gateway_session_id = Some(session_id);
+    assert_eq!(
+        forward_once_with_route_refresh(&unowned_event, &rejections, &handler).await,
+        GatewayForwardOutcome::Delivered
+    );
+
     assert_eq!(
         refreshes.lock().unwrap().as_slice(),
-        &[("client-a".to_string(), session_id)]
+        &[("client-a".to_string(), session_id, observed_owner)]
     );
 }
 

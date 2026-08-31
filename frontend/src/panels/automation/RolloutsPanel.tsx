@@ -57,22 +57,28 @@ type ReviewAction = {
 
 export function RolloutsPanel({
   agents,
+  jobHistoryError,
+  jobHistoryLoading,
   jobs,
   rollouts: initialRollouts,
   rolloutsTruncated,
   requestsEnabled,
   onCancelJob,
   onLoadRollouts,
+  onRetryJobHistory,
   onOpenJobDetails,
   onUpdateRollout,
 }: {
   agents: AgentView[];
+  jobHistoryError: string | null;
+  jobHistoryLoading: boolean;
   jobs: JobHistoryRecord[];
   rollouts: JobRolloutRecord[];
   rolloutsTruncated: boolean;
   requestsEnabled: boolean;
   onCancelJob: (jobId: string, reason: string) => Promise<CancelJobResponse>;
   onLoadRollouts: () => Promise<JobRolloutRecord[]>;
+  onRetryJobHistory: () => Promise<JobHistoryRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onUpdateRollout: (
     jobId: string,
@@ -336,10 +342,15 @@ export function RolloutsPanel({
       {
         cell: (rollout) => {
           const job = jobById.get(rollout.job_id);
+          const operationLabel = job
+            ? readableToken(job.command_type)
+            : jobHistoryLoading
+              ? "Loading operation evidence"
+              : "Unknown operation";
           return (
             <span className="historyPrimary">
-              <strong title={job?.command_type ?? "Unknown operation"}>
-                {job ? readableToken(job.command_type) : "Unknown operation"}
+              <strong title={job?.command_type ?? operationLabel}>
+                {operationLabel}
               </strong>
               <small className="monoValue" title={rollout.job_id}>
                 {shortId(rollout.job_id)}
@@ -446,7 +457,7 @@ export function RolloutsPanel({
         sortValue: (rollout) => rollout.updated_at,
       },
     ],
-    [jobById],
+    [jobById, jobHistoryLoading],
   );
 
   const activeCount = rollouts.filter(
@@ -506,6 +517,27 @@ export function RolloutsPanel({
             />
           </div>
         </div>
+        {jobHistoryError || jobHistoryLoading ? (
+          <div className="headerActionStack">
+            <ActionFeedback
+              className="localActionFeedback"
+              message={
+                jobHistoryError ?? "Loading rollout operation evidence"
+              }
+              tone={jobHistoryError ? "danger" : "progress"}
+            />
+            {jobHistoryError ? (
+              <button
+                className="secondaryAction compactAction"
+                disabled={jobHistoryLoading}
+                onClick={() => void onRetryJobHistory()}
+                type="button"
+              >
+                Retry operation evidence
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div
           aria-label="Rollout summary"
@@ -622,6 +654,7 @@ export function RolloutsPanel({
               : null
           }
           job={jobById.get(selected.job_id) ?? null}
+          jobLoading={jobHistoryLoading}
           onAbort={() => reviewRolloutAction("abort", selected)}
           onClose={closeRollout}
           onOpenJob={() => onOpenJobDetails(selected.job_id)}
@@ -679,6 +712,7 @@ function RolloutDetail({
   agentNameById,
   feedback,
   job,
+  jobLoading,
   onAbort,
   onClose,
   onOpenJob,
@@ -690,6 +724,7 @@ function RolloutDetail({
   agentNameById: Map<string, string>;
   feedback: FeedbackState | null;
   job: JobHistoryRecord | null;
+  jobLoading: boolean;
   onAbort: () => void;
   onClose: () => void;
   onOpenJob: () => void;
@@ -781,6 +816,11 @@ function RolloutDetail({
     [agentNameById],
   );
   const progress = rolloutProgress(rollout);
+  const operationLabel = job
+    ? readableToken(job.command_type)
+    : jobLoading
+      ? "Loading operation evidence"
+      : "Unknown operation";
   return (
     <ConsoleDetailPanel
       actions={
@@ -843,7 +883,7 @@ function RolloutDetail({
           )}
         </>
       }
-      description={`${job ? readableToken(job.command_type) : "Unknown operation"} · ${progress.total} VPS · ${rollout.total_batches} stages`}
+      description={`${operationLabel} · ${progress.total} VPS · ${rollout.total_batches} stages`}
       onClose={onClose}
       title={`Rollout ${shortId(rollout.job_id)}`}
     >

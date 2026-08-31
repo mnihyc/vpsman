@@ -85,6 +85,193 @@ function liveSnapshotCount(requests: TrackedRequest[]): number {
   }).length;
 }
 
+test("Config and Fleet Groups hydrate and refresh only rendered shared sources", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "request ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+
+  const sharedPaths = [
+    "/api/v1/configuration-presets",
+    "/api/v1/configuration-sources",
+    "/api/v1/jobs",
+    "/api/v1/runtime-config/apply-state",
+    "/api/v1/runtime-config/patch-generators",
+    "/api/v1/schedules",
+    "/api/v1/tags/order",
+  ];
+  const expectSources = async (expected: string[]) => {
+    await expect
+      .poll(async () => {
+        const requests = await trackedRequests(page);
+        return expected.every((path) => pathCount(requests, path) > 0);
+      })
+      .toBe(true);
+    await page.waitForTimeout(100);
+    const requests = await trackedRequests(page);
+    expect(
+      sharedPaths.map((path) => [path, pathCount(requests, path) > 0]),
+    ).toEqual(
+      sharedPaths.map((path) => [path, expected.includes(path)]),
+    );
+  };
+
+  await clearTrackedRequests(page);
+  await openConsoleSubpage(page, "Config", "Overview");
+  await expectSources([
+    "/api/v1/configuration-presets",
+    "/api/v1/configuration-sources",
+    "/api/v1/jobs",
+    "/api/v1/runtime-config/apply-state",
+    "/api/v1/runtime-config/patch-generators",
+  ]);
+
+  await clearTrackedRequests(page);
+  await openConsoleSubpage(page, "Config", "VPS override patch");
+  await expectSources(["/api/v1/runtime-config/patch-generators"]);
+
+  await clearTrackedRequests(page);
+  await openConsoleSubpage(page, "Fleet", "Groups");
+  await expectSources(["/api/v1/tags/order"]);
+  await clearTrackedRequests(page);
+  await activate(
+    page
+      .locator(".fleetPanel")
+      .filter({ has: page.getByRole("heading", { name: "Fleet groups" }) })
+      .getByRole("button", { exact: true, name: "Refresh" }),
+  );
+  await expectSources(["/api/v1/tags/order"]);
+
+  await clearTrackedRequests(page);
+  await openConsoleSubpage(page, "Fleet", "Assignments");
+  await expectSources(["/api/v1/schedules", "/api/v1/tags/order"]);
+  await clearTrackedRequests(page);
+  await activate(
+    page
+      .locator(".fleetPanel")
+      .filter({
+        has: page.getByRole("heading", { name: "Group assignments" }),
+      })
+      .getByRole("button", { exact: true, name: "Refresh" }),
+  );
+  await expectSources(["/api/v1/schedules", "/api/v1/tags/order"]);
+
+  await clearTrackedRequests(page);
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let failNextTagOrderRead = true;
+    let releaseFailure: (() => void) | null = null;
+    Object.defineProperty(window, "__vpsmanReleaseTagOrderFailure", {
+      configurable: true,
+      value: () => releaseFailure?.(),
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      if (
+        failNextTagOrderRead &&
+        method === "GET" &&
+        url.pathname === "/api/v1/tags/order"
+      ) {
+        failNextTagOrderRead = false;
+        await new Promise<void>((resolve) => {
+          releaseFailure = resolve;
+        });
+        return new Response(JSON.stringify({ error: "tag_order_unavailable" }), {
+          headers: { "content-type": "application/json" },
+          status: 503,
+        });
+      }
+      return originalFetch(input, init);
+    };
+  });
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  await expect(page.getByText("Refreshing group display order")).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanReleaseTagOrderFailure: () => void;
+      }
+    ).__vpsmanReleaseTagOrderFailure();
+  });
+  await expect(page.getByRole("button", { name: "Retry group ordering" })).toBeVisible();
+  await activate(page.getByRole("button", { name: "Retry group ordering" }));
+  await expect
+    .poll(async () =>
+      pathCount(await trackedRequests(page), "/api/v1/tags/order"),
+    )
+    .toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: "Retry group ordering" })).toHaveCount(0);
+});
+
+test("Rollouts reports its independent job-history loading owner", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "request ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let holdNextJobHistory = true;
+    let releaseJobHistory: (() => void) | null = null;
+    Object.defineProperty(window, "__vpsmanReleaseRolloutJobHistory", {
+      configurable: true,
+      value: () => releaseJobHistory?.(),
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      if (
+        holdNextJobHistory &&
+        method === "GET" &&
+        url.pathname === "/api/v1/jobs"
+      ) {
+        holdNextJobHistory = false;
+        await new Promise<void>((resolve) => {
+          releaseJobHistory = resolve;
+        });
+      }
+      return originalFetch(input, init);
+    };
+  });
+
+  await openConsoleSubpage(page, "Automation", "Rollouts");
+  await expect(page.getByText("Loading rollout operation evidence")).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanReleaseRolloutJobHistory: () => void;
+      }
+    ).__vpsmanReleaseRolloutJobHistory();
+  });
+  await expect(page.getByText("Loading rollout operation evidence")).toHaveCount(0);
+});
+
 test("Network overview activation has one bounded exact subpage owner", async ({
   page,
 }, testInfo) => {

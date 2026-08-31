@@ -1,14 +1,17 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::oneshot,
     task::JoinHandle,
 };
 use uuid::Uuid;
 
-use crate::object_store::{validate_object_key, BackupObjectStore, S3BackupObjectStoreSettings};
+use crate::object_store::{
+    validate_object_key, BackupObjectStore, S3BackupObjectStoreSettings, VerifiedObjectFile,
+};
 
 #[tokio::test]
 async fn filesystem_object_store_writes_under_safe_relative_key() {
@@ -228,8 +231,60 @@ async fn s3_verified_object_file_spools_hash_checked_temp_file() {
 
     assert!(verified.cleanup_after_stream);
     assert_eq!(tokio::fs::read(&verified.path).await.unwrap(), payload);
-    tokio::fs::remove_file(&verified.path).await.unwrap();
+    let spool_path = verified.path.clone();
+    drop(verified);
+    assert!(!tokio::fs::try_exists(spool_path).await.unwrap());
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_cleanup_removes_returned_spool_from_dropped_consumer() {
+    let path = std::env::temp_dir().join(format!("vpsman-verified-owner-{}.part", Uuid::new_v4()));
+    tokio::fs::write(&path, b"comparison spool").await.unwrap();
+    let verified = VerifiedObjectFile {
+        path: path.clone(),
+        cleanup_after_stream: true,
+    };
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let consumer = tokio::spawn(async move {
+        let _ = entered_tx.send(());
+        std::future::pending::<()>().await;
+        drop(verified);
+    });
+    entered_rx.await.unwrap();
+
+    consumer.abort();
+    let _ = consumer.await;
+    assert!(!tokio::fs::try_exists(path).await.unwrap());
+}
+
+#[tokio::test]
+async fn cancellation_cleanup_removes_pending_s3_spool() {
+    let object_key = "backups/client-a/cancelled-spool.bin";
+    let object_path = "/root/vpsman-artifacts/backups/client-a/cancelled-spool.bin";
+    let prefix = format!("cancelled-spool-{}", Uuid::new_v4()).into_bytes();
+    let expected_size = prefix.len() + 1024;
+    let (endpoint, body_started, server) =
+        spawn_stalled_s3(object_path, prefix.clone(), expected_size).await;
+    let store = s3_store(&endpoint);
+    let request = tokio::spawn(async move {
+        store
+            .verified_object_file(
+                object_key,
+                &"0".repeat(64),
+                expected_size as u64,
+                expected_size,
+            )
+            .await
+    });
+    body_started.await.unwrap();
+    let spool_path = wait_for_s3_spool_prefix(&prefix).await;
+
+    request.abort();
+    let _ = request.await;
+    assert!(!tokio::fs::try_exists(&spool_path).await.unwrap());
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -285,6 +340,61 @@ async fn spawn_fake_s3(expected: Vec<ExpectedS3Request>) -> (String, JoinHandle<
         }
     });
     (endpoint, server)
+}
+
+async fn spawn_stalled_s3(
+    expected_path: &'static str,
+    body_prefix: Vec<u8>,
+    content_length: usize,
+) -> (String, oneshot::Receiver<()>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/root", listener.local_addr().unwrap());
+    let (body_started_tx, body_started_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, expected_path);
+        assert!(request.body.is_empty());
+        assert_header_prefix(&request.headers, "authorization", "AWS4-HMAC-SHA256 ");
+        socket
+            .write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.write_all(&body_prefix).await.unwrap();
+        socket.flush().await.unwrap();
+        let _ = body_started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    (endpoint, body_started_rx, server)
+}
+
+async fn wait_for_s3_spool_prefix(prefix: &[u8]) -> PathBuf {
+    let spool_root = std::env::temp_dir().join("vpsman-object-store-spool");
+    for _ in 0..100 {
+        if let Ok(mut entries) = tokio::fs::read_dir(&spool_root).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("part") {
+                    continue;
+                }
+                let Ok(mut file) = tokio::fs::File::open(&path).await else {
+                    continue;
+                };
+                let mut observed = vec![0_u8; prefix.len()];
+                let Ok(read) = file.read(&mut observed).await else {
+                    continue;
+                };
+                if read == prefix.len() && observed == prefix {
+                    return path;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("cancelled S3 request did not create its pending spool");
 }
 
 async fn read_http_request(socket: &mut TcpStream) -> HttpRequest {

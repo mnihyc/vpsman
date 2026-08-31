@@ -70,6 +70,7 @@ import {
   shortId,
 } from "../utils";
 import { parseLatestFileStatus } from "../fileBrowser";
+import { JOB_TERMINAL_STATUSES } from "../generated/protocolContracts";
 import { retryableLazy } from "../lazyImport";
 import { scrollIntoViewWithMotion } from "../motion";
 
@@ -233,6 +234,13 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+function isTerminalJobStatus(status: JobHistoryRecord["status"] | null) {
+  return (
+    status !== null &&
+    (JOB_TERMINAL_STATUSES as readonly string[]).includes(status)
+  );
+}
+
 function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -369,6 +377,10 @@ export function JobsPanel({
   const targetLoadGenerationRef = useRef(0);
   const comparisonLoadGenerationRef = useRef(0);
   const selectedJobIdRef = useRef<string | null>(null);
+  const selectedJobStatusRef = useRef<{
+    jobId: string;
+    status: JobHistoryRecord["status"] | null;
+  } | null>(null);
   const activeDetailRequestRef = useRef<{
     jobId: string;
     promise: Promise<void>;
@@ -525,15 +537,24 @@ export function JobsPanel({
       (row) => row.group_id === selectedComparisonGroupId,
     );
   }, [outputComparison, selectedComparisonGroupId]);
+  const selectedJobStatus = selectedJobId
+    ? (jobs.find((job) => job.id === selectedJobId)?.status ?? null)
+    : null;
 
   useEffect(() => {
     setComparisonMode(preferences.bulk_output_compare_mode);
   }, [preferences.bulk_output_compare_mode]);
 
   const loadTargetDetails = useCallback(
-    async (jobId: string, initialLoad: boolean) => {
+    async (
+      jobId: string,
+      initialLoad: boolean,
+      loadComparison: boolean,
+    ) => {
       const generation = ++targetLoadGenerationRef.current;
-      const comparisonGeneration = ++comparisonLoadGenerationRef.current;
+      const comparisonGeneration = loadComparison
+        ? ++comparisonLoadGenerationRef.current
+        : null;
       if (initialLoad) {
         setTargets([]);
         setOutputs([]);
@@ -547,11 +568,18 @@ export function JobsPanel({
         setDownloadError(null);
         setSelectedComparisonGroupId(null);
       }
-      const [targetResult, outputResult, comparisonResult] =
-        await Promise.allSettled([
-          onLoadTargets(jobId),
-          onLoadOutputs(jobId),
-          onLoadOutputComparison(jobId, comparisonMode),
+      const comparisonRequest = loadComparison
+        ? Promise.allSettled([
+            onLoadOutputComparison(jobId, comparisonMode),
+          ] as const).then(([result]) => result)
+        : Promise.resolve(null);
+      const [[targetResult, outputResult], comparisonResult] =
+        await Promise.all([
+          Promise.allSettled([
+            onLoadTargets(jobId),
+            onLoadOutputs(jobId),
+          ] as const),
+          comparisonRequest,
         ]);
       if (
         generation !== targetLoadGenerationRef.current ||
@@ -575,7 +603,10 @@ export function JobsPanel({
           errorMessage(outputResult.reason, "Job output unavailable"),
         );
       }
-      if (comparisonGeneration === comparisonLoadGenerationRef.current) {
+      if (
+        comparisonResult &&
+        comparisonGeneration === comparisonLoadGenerationRef.current
+      ) {
         if (comparisonResult.status === "fulfilled") {
           setOutputComparison(comparisonResult.value);
           setComparisonError(null);
@@ -629,7 +660,10 @@ export function JobsPanel({
         return;
       }
       detailRefreshPendingRef.current = false;
-      void trackDetailRequest(jobId, loadTargetDetails(jobId, false));
+      // Output invalidations may arrive for every chunk. Refresh only the
+      // lightweight target/output projections here; Binary exact comparison
+      // reads complete logical streams and has its own explicit owners.
+      void trackDetailRequest(jobId, loadTargetDetails(jobId, false, false));
     },
     [loadTargetDetails, trackDetailRequest],
   );
@@ -640,7 +674,7 @@ export function JobsPanel({
       selectedJobIdRef.current = jobId;
       detailRefreshPendingRef.current = false;
       setSelectedJobId(jobId);
-      void trackDetailRequest(jobId, loadTargetDetails(jobId, true));
+      void trackDetailRequest(jobId, loadTargetDetails(jobId, true, true));
     },
     [loadTargetDetails, trackDetailRequest],
   );
@@ -1352,35 +1386,38 @@ export function JobsPanel({
     [],
   );
 
-  async function compareSelectedJobOutputs(
-    jobId: string,
-    mode: JobOutputCompareMode = comparisonMode,
-  ) {
-    const generation = ++comparisonLoadGenerationRef.current;
-    setComparisonLoading(true);
-    setComparisonError(null);
-    try {
-      const comparison = await onLoadOutputComparison(jobId, mode);
-      if (generation !== comparisonLoadGenerationRef.current) {
-        return;
+  const compareSelectedJobOutputs = useCallback(
+    async (
+      jobId: string,
+      mode: JobOutputCompareMode = comparisonMode,
+    ) => {
+      const generation = ++comparisonLoadGenerationRef.current;
+      setComparisonLoading(true);
+      setComparisonError(null);
+      try {
+        const comparison = await onLoadOutputComparison(jobId, mode);
+        if (generation !== comparisonLoadGenerationRef.current) {
+          return;
+        }
+        setOutputComparison(comparison);
+      } catch (loadError) {
+        if (generation !== comparisonLoadGenerationRef.current) {
+          return;
+        }
+        setOutputComparison(null);
+        setComparisonError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Output comparison unavailable",
+        );
+      } finally {
+        if (generation === comparisonLoadGenerationRef.current) {
+          setComparisonLoading(false);
+        }
       }
-      setOutputComparison(comparison);
-    } catch (loadError) {
-      if (generation !== comparisonLoadGenerationRef.current) {
-        return;
-      }
-      setOutputComparison(null);
-      setComparisonError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Output comparison unavailable",
-      );
-    } finally {
-      if (generation === comparisonLoadGenerationRef.current) {
-        setComparisonLoading(false);
-      }
-    }
-  }
+    },
+    [comparisonMode, onLoadOutputComparison],
+  );
 
   function changeComparisonMode(mode: JobOutputCompareMode) {
     setComparisonMode(mode);
@@ -1389,6 +1426,28 @@ export function JobsPanel({
       void compareSelectedJobOutputs(selectedJobId, mode);
     }
   }
+
+  useEffect(() => {
+    if (!selectedJobId) {
+      selectedJobStatusRef.current = null;
+      return;
+    }
+    const previous = selectedJobStatusRef.current;
+    selectedJobStatusRef.current = {
+      jobId: selectedJobId,
+      status: selectedJobStatus,
+    };
+    if (
+      previous?.jobId === selectedJobId &&
+      !isTerminalJobStatus(previous.status) &&
+      isTerminalJobStatus(selectedJobStatus)
+    ) {
+      // A job has one nonterminal -> terminal edge. Recompute once after that
+      // edge so the retained summary includes final output without rereading
+      // every growing artifact for each chunk invalidation.
+      void compareSelectedJobOutputs(selectedJobId);
+    }
+  }, [compareSelectedJobOutputs, selectedJobId, selectedJobStatus]);
 
   useEffect(() => {
     if (

@@ -29,9 +29,9 @@ use crate::{
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_auth::{AccessBatchMutationOutcome, OperatorLoginAttempt},
     security::{
-        bearer_token, normalize_operator_scopes, validate_operator_credentials,
-        validate_operator_role, DEFAULT_REFRESH_TOKEN_TTL_SECS, MAX_REFRESH_TOKEN_TTL_SECS,
-        MIN_REFRESH_TOKEN_TTL_SECS,
+        admin_risk_acknowledgement_required, bearer_token, normalize_operator_scopes,
+        validate_operator_credentials, validate_operator_role, DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        MAX_REFRESH_TOKEN_TTL_SECS, MIN_REFRESH_TOKEN_TTL_SECS,
     },
     state::AppState,
 };
@@ -907,7 +907,12 @@ async fn mutate_operator_statuses(
     } else {
         state
             .repo
-            .set_operator_statuses(&approved, request.status.as_str(), actor)
+            .set_operator_statuses(
+                &approved,
+                request.status.as_str(),
+                request.admin_risk_acknowledged,
+                actor,
+            )
             .await
             .map_err(operator_management_error)?
     };
@@ -1313,12 +1318,14 @@ pub(crate) async fn reset_operator_password(
     .await?;
     state
         .repo
-        .reset_operator_password(operator_id, &request.password, &actor)
+        .reset_operator_password(
+            operator_id,
+            &request.password,
+            request.admin_risk_acknowledged,
+            &actor,
+        )
         .await
-        .map_err(ApiError::internal_mapper(
-            "operator_password_reset_failed",
-            "The operator password could not be reset.",
-        ))?
+        .map_err(operator_password_reset_error)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_not_found"))
 }
@@ -1423,7 +1430,7 @@ async fn mutate_operator_totp_clears(
     } else {
         state
             .repo
-            .clear_operator_totps(&approved, actor)
+            .clear_operator_totps(&approved, request.admin_risk_acknowledged, actor)
             .await
             .map_err(ApiError::internal_mapper(
                 "operator_totp_clear_failed",
@@ -1580,7 +1587,7 @@ async fn mutate_operator_session_revocations(
     } else {
         state
             .repo
-            .revoke_operator_sessions(&approved, actor)
+            .revoke_operator_sessions(&approved, request.admin_risk_acknowledged, actor)
             .await
             .map_err(ApiError::internal_mapper(
                 "operator_session_revoke_failed",
@@ -1712,7 +1719,12 @@ fn normalized_requested_scopes(scopes: &[String]) -> Vec<String> {
 }
 
 fn operator_management_error(error: anyhow::Error) -> ApiError {
-    if error.to_string().contains("last_active_admin_required") {
+    if error
+        .to_string()
+        .contains("admin_risk_acknowledgement_required")
+    {
+        ApiError::bad_request("admin_risk_acknowledgement_required")
+    } else if error.to_string().contains("last_active_admin_required") {
         ApiError::conflict("last_active_admin_required")
     } else {
         ApiError::internal(
@@ -1723,14 +1735,27 @@ fn operator_management_error(error: anyhow::Error) -> ApiError {
     }
 }
 
+fn operator_password_reset_error(error: anyhow::Error) -> ApiError {
+    if error
+        .to_string()
+        .contains("admin_risk_acknowledgement_required")
+    {
+        ApiError::bad_request("admin_risk_acknowledgement_required")
+    } else {
+        ApiError::internal(
+            "operator_password_reset_failed",
+            "The operator password could not be reset.",
+            error,
+        )
+    }
+}
+
 fn require_admin_risk_if_needed(
     current_role: &str,
     requested_role: Option<&str>,
     admin_risk_acknowledged: bool,
 ) -> Result<(), ApiError> {
-    let touches_admin =
-        current_role.trim() == "admin" || requested_role.is_some_and(|role| role.trim() == "admin");
-    if touches_admin && !admin_risk_acknowledged {
+    if admin_risk_acknowledgement_required(current_role, requested_role, admin_risk_acknowledged) {
         Err(ApiError::bad_request("admin_risk_acknowledgement_required"))
     } else {
         Ok(())
@@ -1740,6 +1765,33 @@ fn require_admin_risk_if_needed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_risk_acknowledgement_covers_locked_current_and_requested_roles() {
+        assert_eq!(
+            require_admin_risk_if_needed("admin", Some("viewer"), false)
+                .expect_err("changing a current administrator requires acknowledgement")
+                .code,
+            "admin_risk_acknowledgement_required"
+        );
+        assert_eq!(
+            require_admin_risk_if_needed("viewer", Some("admin"), false)
+                .expect_err("requesting an administrator role requires acknowledgement")
+                .code,
+            "admin_risk_acknowledgement_required"
+        );
+        assert!(require_admin_risk_if_needed("viewer", Some("viewer"), false).is_ok());
+        assert!(require_admin_risk_if_needed("admin", Some("viewer"), true).is_ok());
+        assert_eq!(
+            operator_management_error(anyhow::anyhow!("admin_risk_acknowledgement_required")).code,
+            "admin_risk_acknowledgement_required"
+        );
+        assert_eq!(
+            operator_password_reset_error(anyhow::anyhow!("admin_risk_acknowledgement_required"))
+                .code,
+            "admin_risk_acknowledgement_required"
+        );
+    }
 
     #[test]
     fn access_batch_validators_enforce_the_shared_bound_and_unique_targets() {

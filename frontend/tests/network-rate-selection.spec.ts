@@ -6,6 +6,10 @@ import {
   resolveNetworkRateInterfaces,
   selectedNetworkRates,
 } from "../src/networkRateSelection";
+import {
+  tryNormalizeVpsRuleValue,
+  VPS_RULE_FIELD_DEFINITIONS,
+} from "../src/vpsRules";
 import type {
   TelemetryNetworkRateRecord,
   VpsRuleValueRecord,
@@ -53,7 +57,7 @@ test("live-rate selection follows an explicit traffic-selector reference", () =>
   );
 });
 
-test("a missing live-rate rule selects none rather than inheriting traffic selectors", () => {
+test("a missing live-rate rule inherits traffic selectors after eligibility", () => {
   const rules = [
     rule("traffic.selectors", {
       mode: "exact",
@@ -62,16 +66,51 @@ test("a missing live-rate rule selects none rather than inheriting traffic selec
   ];
   expect(resolveNetworkRateInterfaces(rules)).toMatchObject({
     mode: "exact",
-    source: "network.rate.interfaces",
+    source: "traffic.selectors",
     valid: true,
   });
-  expect(selectedNetworkRates(rates, rules)).toEqual([]);
-  expect(networkRateSelectionLabel(rules)).toBe(
-    "No live-rate interfaces selected",
+  expect(selectedNetworkRates(rates, rules)).toEqual([rates[0]]);
+  expect(networkRateSelectionLabel(rules)).toContain(
+    "referenced from traffic.selectors",
   );
 
   expect(selectedNetworkRates(rates, [])).toEqual([]);
   expect(networkRateSelectionLabel([])).toBe("No live-rate interfaces selected");
+});
+
+test("an explicit empty live-rate selector selects none", () => {
+  const rules = [
+    rule("network.rate.interfaces", { mode: "exact", selectors: [] }, "[]"),
+    rule("traffic.selectors", {
+      mode: "exact",
+      selectors: [selector("eth0", "rx")],
+    }),
+  ];
+
+  expect(resolveNetworkRateInterfaces(rules)).toMatchObject({
+    mode: "exact",
+    source: "network.rate.interfaces",
+    valid: true,
+  });
+  expect(selectedNetworkRates(rates, rules)).toEqual([]);
+  expect(networkRateSelectionLabel(rules)).toBe("No live-rate interfaces selected");
+});
+
+test("live-rate rule input preserves unset, explicit none, all, and reference", () => {
+  expect(tryNormalizeVpsRuleValue("network.rate.interfaces", "")).toBeNull();
+  expect(tryNormalizeVpsRuleValue("network.rate.interfaces", " [] ")).toBe("[]");
+  expect(tryNormalizeVpsRuleValue("network.rate.interfaces", " * ")).toBe("*");
+  expect(
+    tryNormalizeVpsRuleValue(
+      "network.rate.interfaces",
+      "[traffic.selectors]",
+    ),
+  ).toBe("[traffic.selectors]");
+  const definition = VPS_RULE_FIELD_DEFINITIONS.find(
+    (candidate) => candidate.key === "network.rate.interfaces",
+  );
+  expect(definition?.help).toContain("Blank or unset follows traffic.selectors");
+  expect(definition?.help).toContain("[] explicitly selects none");
 });
 
 test("live-rate reference object, rather than display syntax, controls inheritance", () => {

@@ -1,7 +1,9 @@
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use sqlx::{types::Json as SqlJson, Row};
 use std::collections::BTreeMap;
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 use vpsman_common::{
     job_command_display_group, job_command_requires_confirmation, job_command_type_label,
@@ -14,9 +16,12 @@ use crate::{
         CommandTemplateView, JobOutputComparisonGroupView, JobOutputComparisonRowView,
         JobOutputComparisonView, UpsertCommandTemplateRequest,
     },
+    object_store::BackupObjectStore,
     repository::Repository,
     unix_now,
 };
+
+const OUTPUT_COMPARISON_PREVIEW_BYTES: usize = 2048;
 
 impl Repository {
     pub(crate) async fn list_command_templates(
@@ -272,6 +277,8 @@ impl Repository {
         &self,
         job_id: Uuid,
         mode: &str,
+        object_store: Option<&BackupObjectStore>,
+        artifact_max_bytes: usize,
     ) -> Result<JobOutputComparisonView> {
         let mode = normalize_output_compare_mode(mode);
         let targets = self.list_job_targets(job_id).await?;
@@ -292,7 +299,10 @@ impl Repository {
                     .remove(&target.client_id)
                     .unwrap_or_default(),
                 &mode,
-            );
+                object_store,
+                artifact_max_bytes,
+            )
+            .await?;
             let key = OutputComparisonKey {
                 status: target.status.clone(),
                 exit_code: target.exit_code,
@@ -314,7 +324,8 @@ impl Repository {
                 });
         }
         for (client_id, client_outputs) in outputs_by_client {
-            let signature = output_signature(client_outputs, &mode);
+            let signature =
+                output_signature(client_outputs, &mode, object_store, artifact_max_bytes).await?;
             let key = OutputComparisonKey {
                 status: "unknown".to_string(),
                 exit_code: None,
@@ -551,6 +562,7 @@ struct OutputComparisonRowBuild {
     preview: String,
 }
 
+#[derive(Debug)]
 struct OutputSignature {
     output_digest_hex: String,
     output_compare_basis: String,
@@ -566,23 +578,34 @@ fn normalize_output_compare_mode(mode: &str) -> String {
     }
 }
 
-fn output_signature(mut outputs: Vec<JobOutputView>, mode: &str) -> OutputSignature {
+async fn output_signature(
+    mut outputs: Vec<JobOutputView>,
+    mode: &str,
+    object_store: Option<&BackupObjectStore>,
+    artifact_max_bytes: usize,
+) -> Result<OutputSignature> {
     outputs.sort_by_key(|output| output.seq);
     if outputs.is_empty() {
-        return OutputSignature {
+        return Ok(OutputSignature {
             output_digest_hex: vpsman_common::payload_hash(&[]),
             output_compare_basis: mode.to_string(),
             stream_count: 0,
             byte_count: 0,
             preview: "No retained output".to_string(),
-        };
+        });
     }
     if mode == "text" {
         if let Some(signature) = text_output_signature(&outputs) {
-            return signature;
+            return Ok(signature);
+        }
+        // Text comparison has always fallen back to retained chunk metadata
+        // when an artifact prevents inline UTF-8 decoding. Keep that separate
+        // behavior unchanged; only Binary exact owns object materialization.
+        if outputs.iter().any(|output| output.storage != "inline") {
+            return Ok(binary_metadata_output_signature(&outputs));
         }
     }
-    binary_output_signature(&outputs)
+    binary_output_signature(&outputs, object_store, artifact_max_bytes).await
 }
 
 fn text_output_signature(outputs: &[JobOutputView]) -> Option<OutputSignature> {
@@ -621,34 +644,181 @@ fn text_output_signature(outputs: &[JobOutputView]) -> Option<OutputSignature> {
     })
 }
 
-fn binary_output_signature(outputs: &[JobOutputView]) -> OutputSignature {
-    if outputs.iter().any(|output| output.storage != "inline") {
-        return binary_metadata_output_signature(outputs);
-    }
-
-    let mut byte_count = 0_i64;
-    let mut canonical = Vec::new();
+async fn binary_output_signature(
+    outputs: &[JobOutputView],
+    object_store: Option<&BackupObjectStore>,
+    artifact_max_bytes: usize,
+) -> Result<OutputSignature> {
+    let mut byte_count = 0_u64;
+    let mut canonical = Sha256::new();
     let mut preview_bytes = Vec::new();
     for (stream, stream_outputs) in logical_output_streams(outputs) {
-        let mut stream_bytes = Vec::new();
+        append_canonical_hash_field(&mut canonical, stream.as_bytes());
+        let stream_byte_count = logical_stream_byte_count(&stream_outputs)?;
+        canonical.update(stream_byte_count.to_be_bytes());
+        byte_count = byte_count
+            .checked_add(stream_byte_count)
+            .context("job-output comparison byte count overflow")?;
         for output in stream_outputs {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&output.data_base64)
-                .unwrap_or_default();
-            byte_count += decoded.len() as i64;
-            stream_bytes.extend_from_slice(&decoded);
+            match output.storage.as_str() {
+                "inline" => {
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(&output.data_base64)
+                        .context("invalid inline job-output payload")?;
+                    append_binary_signature_bytes(&mut canonical, &mut preview_bytes, &decoded);
+                }
+                "object_store" => {
+                    let store = object_store.context(
+                        "job-output object store is unavailable for Binary exact comparison",
+                    )?;
+                    append_verified_artifact_bytes(
+                        &mut canonical,
+                        &mut preview_bytes,
+                        store,
+                        output,
+                        artifact_max_bytes,
+                    )
+                    .await?;
+                }
+                storage => {
+                    bail!("job-output bytes are unavailable for Binary exact comparison: {storage}")
+                }
+            }
         }
-        append_canonical_field(&mut canonical, stream.as_bytes());
-        append_canonical_field(&mut canonical, &stream_bytes);
-        preview_bytes.extend_from_slice(&stream_bytes);
     }
-    OutputSignature {
-        output_digest_hex: vpsman_common::payload_hash(&canonical),
+    let byte_count = i64::try_from(byte_count).context("job-output comparison is too large")?;
+    Ok(OutputSignature {
+        output_digest_hex: hex::encode(canonical.finalize()),
         output_compare_basis: "binary".to_string(),
         stream_count: outputs.len() as i32,
         byte_count,
         preview: sanitized_preview(&preview_bytes),
+    })
+}
+
+fn logical_stream_byte_count(outputs: &[&JobOutputView]) -> Result<u64> {
+    outputs.iter().try_fold(0_u64, |total, output| {
+        let size = match output.storage.as_str() {
+            "inline" => standard_base64_decoded_len(&output.data_base64)?,
+            "object_store" => {
+                let size = output
+                    .artifact_size_bytes
+                    .context("job-output artifact size is missing")?;
+                u64::try_from(size).context("job-output artifact size is invalid")?
+            }
+            storage => {
+                bail!("job-output bytes are unavailable for Binary exact comparison: {storage}")
+            }
+        };
+        total
+            .checked_add(size)
+            .context("job-output stream byte count overflow")
+    })
+}
+
+fn standard_base64_decoded_len(value: &str) -> Result<u64> {
+    let bytes = value.as_bytes();
+    ensure!(
+        bytes.len().is_multiple_of(4),
+        "invalid inline job-output payload length"
+    );
+    if bytes.is_empty() {
+        return Ok(0);
     }
+    let padding = if bytes.ends_with(b"==") {
+        2_usize
+    } else if bytes.ends_with(b"=") {
+        1_usize
+    } else {
+        0_usize
+    };
+    ensure!(
+        !bytes[..bytes.len() - padding].contains(&b'='),
+        "invalid inline job-output payload padding"
+    );
+    let decoded = (bytes.len() / 4)
+        .checked_mul(3)
+        .and_then(|length| length.checked_sub(padding))
+        .context("inline job-output payload length overflow")?;
+    Ok(decoded as u64)
+}
+
+fn append_canonical_hash_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn append_binary_signature_bytes(hasher: &mut Sha256, preview: &mut Vec<u8>, bytes: &[u8]) {
+    hasher.update(bytes);
+    let remaining = OUTPUT_COMPARISON_PREVIEW_BYTES.saturating_sub(preview.len());
+    preview.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+}
+
+async fn append_verified_artifact_bytes(
+    canonical: &mut Sha256,
+    preview: &mut Vec<u8>,
+    store: &BackupObjectStore,
+    output: &JobOutputView,
+    artifact_max_bytes: usize,
+) -> Result<()> {
+    let object_key = output
+        .artifact_object_key
+        .as_deref()
+        .context("job-output artifact key is missing")?;
+    let expected_hash = output
+        .artifact_sha256_hex
+        .as_deref()
+        .context("job-output artifact hash is missing")?;
+    let expected_size = output
+        .artifact_size_bytes
+        .context("job-output artifact size is missing")?;
+    let expected_size =
+        u64::try_from(expected_size).context("job-output artifact size is invalid")?;
+    let verified = store
+        .verified_object_file(object_key, expected_hash, expected_size, artifact_max_bytes)
+        .await
+        .with_context(|| format!("failed to verify job-output artifact {object_key}"))?;
+
+    let read_result = async {
+        let mut file = tokio::fs::File::open(&verified.path)
+            .await
+            .with_context(|| format!("failed to open job-output artifact {object_key}"))?;
+        let mut artifact_hash = Sha256::new();
+        let mut actual_size = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .await
+                .with_context(|| format!("failed to read job-output artifact {object_key}"))?;
+            if read == 0 {
+                break;
+            }
+            actual_size = actual_size
+                .checked_add(read as u64)
+                .context("job-output artifact size overflow")?;
+            ensure!(
+                actual_size <= expected_size,
+                "job-output artifact size changed during comparison"
+            );
+            artifact_hash.update(&buffer[..read]);
+            append_binary_signature_bytes(canonical, preview, &buffer[..read]);
+        }
+        ensure!(
+            actual_size == expected_size,
+            "job-output artifact size changed during comparison"
+        );
+        ensure!(
+            hex::encode(artifact_hash.finalize()) == expected_hash,
+            "job-output artifact hash changed during comparison"
+        );
+        Ok(())
+    }
+    .await;
+
+    // `verified` owns an S3 spool until this function returns. Its Drop guard
+    // also runs if this comparison future is cancelled during open or read.
+    read_result
 }
 
 fn binary_metadata_output_signature(outputs: &[JobOutputView]) -> OutputSignature {
@@ -885,7 +1055,7 @@ fn validate_template_token(value: &str, max_len: usize, label: &str) -> Result<(
 }
 
 fn sanitized_preview(bytes: &[u8]) -> String {
-    let limit = bytes.len().min(2048);
+    let limit = bytes.len().min(OUTPUT_COMPARISON_PREVIEW_BYTES);
     String::from_utf8_lossy(&bytes[..limit])
         .chars()
         .map(|ch| {

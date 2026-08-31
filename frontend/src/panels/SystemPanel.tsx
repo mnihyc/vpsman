@@ -118,6 +118,7 @@ type SystemPanelProps = {
     privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onLoadSuiteConfig: () => void;
+  onRefreshPreferencesSources: () => void;
   onOpenPrivilegeUnlock: () => void;
   onResetOperatorPassword: (
     operatorId: string,
@@ -159,6 +160,8 @@ type SystemPanelProps = {
   suiteConfigError: string | null;
   suiteConfigLoading: boolean;
   tags: TagView[];
+  tagsError: string | null;
+  tagsLoading: boolean;
 };
 
 const pointDensityOptions: Array<{
@@ -618,6 +621,7 @@ export function SystemPanel({
   onClearOperatorTotps,
   onCreateOperator,
   onLoadSuiteConfig,
+  onRefreshPreferencesSources,
   onOpenPrivilegeUnlock,
   onResetOperatorPassword,
   onRevokeOperatorSessions,
@@ -637,6 +641,8 @@ export function SystemPanel({
   suiteConfigError,
   suiteConfigLoading,
   tags,
+  tagsError,
+  tagsLoading,
 }: SystemPanelProps) {
   if (
     operator?.role !== "admin" &&
@@ -713,6 +719,9 @@ export function SystemPanel({
   if (activeSubpage === "operator") {
     return (
       <PreferencesPanel
+        error={[accessError, tagsError].filter(Boolean).join("; ") || null}
+        loading={accessLoading || tagsLoading}
+        onRefreshSources={onRefreshPreferencesSources}
         onSelectView={onSelectView}
         operator={operator}
         tags={tags}

@@ -290,7 +290,13 @@ fn parse_network_rate_interfaces(raw: &str) -> Result<ParsedVpsRuleValue, String
             display: "All eligible interfaces".to_string(),
         });
     }
-    ensure(raw != "[]", "network_rate_selector_obsolete_all_invalid")?;
+    if raw == "[]" {
+        return Ok(ParsedVpsRuleValue {
+            raw: "[]".to_string(),
+            json: json!({"mode": "exact", "selectors": []}),
+            display: "No live-rate interfaces".to_string(),
+        });
+    }
     let selectors = parse_traffic_selector_list(raw)?;
     ensure(
         selectors.iter().all(|selector| selector.source == "host"),
@@ -1072,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn selector_all_is_explicit_and_exact_selectors_cannot_contain_wildcards() {
+    fn selector_all_and_rate_none_are_explicit_and_exact_cannot_use_wildcards() {
         let traffic_all = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, "*").unwrap();
         assert_eq!(traffic_all.raw, "*");
         assert_eq!(traffic_all.json, json!({"mode": "all"}));
@@ -1084,7 +1090,10 @@ mod tests {
         let rate_all = parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "*").unwrap();
         assert_eq!(rate_all.raw, "*");
         assert_eq!(rate_all.json, json!({"mode": "all"}));
-        for invalid in ["", "[]", "eth*", "*,eth0"] {
+        let rate_none = parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "[]").unwrap();
+        assert_eq!(rate_none.raw, "[]");
+        assert_eq!(rate_none.json, json!({"mode": "exact", "selectors": []}));
+        for invalid in ["", "eth*", "*,eth0"] {
             assert!(
                 parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, invalid).is_err(),
                 "input={invalid:?}"

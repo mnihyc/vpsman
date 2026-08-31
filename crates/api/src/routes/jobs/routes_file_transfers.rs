@@ -458,12 +458,7 @@ async fn verified_object_artifact_response(
         .await
         .map_err(|error| map_verified_object_error(error, codes.not_found, codes.integrity))?;
     let delivery = verified_object_delivery(&object_file);
-    let body = streaming_artifact_file_body(
-        object_file.path,
-        codes.not_found,
-        object_file.cleanup_after_stream,
-    )
-    .await?;
+    let body = streaming_artifact_file_body(object_file, codes.not_found).await?;
     artifact_response(
         body,
         filename_source,
@@ -475,24 +470,21 @@ async fn verified_object_artifact_response(
 }
 
 pub(crate) async fn streaming_artifact_file_body(
-    path: PathBuf,
+    mut object_file: VerifiedObjectFile,
     not_found_code: &'static str,
-    cleanup_after_stream: bool,
 ) -> Result<Body, ApiError> {
-    let file = match tokio::fs::File::open(&path).await {
+    let file = match tokio::fs::File::open(&object_file.path).await {
         Ok(file) => file,
-        Err(_) => {
-            if cleanup_after_stream {
-                let _ = tokio::fs::remove_file(&path).await;
-            }
-            return Err(ApiError::not_found(not_found_code));
-        }
+        Err(_) => return Err(ApiError::not_found(not_found_code)),
     };
+    // No await separates relinquishing the verified-file guard from creating
+    // the response-stream guard, so cancellation always has one cleanup owner.
+    let cleanup_path = object_file.take_streaming_cleanup_path();
     let stream = stream::try_unfold(
         StreamingArtifactFile {
             file,
             buffer: vec![0_u8; ARTIFACT_STREAM_CHUNK_BYTES],
-            cleanup_path: cleanup_after_stream.then_some(path),
+            cleanup_path,
         },
         |mut state| async move {
             let read = state.file.read(&mut state.buffer).await?;

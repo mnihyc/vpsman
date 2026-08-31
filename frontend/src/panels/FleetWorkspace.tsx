@@ -377,6 +377,7 @@ export function FleetWorkspace({
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
+  onRefreshTagOrder,
   onProcessFleetAlertNotifications,
   onProcessWebhookRuleDeliveries,
   onRotateWebhookDeliveryHistory,
@@ -389,6 +390,8 @@ export function FleetWorkspace({
   selectedAgent,
   summary,
   tags,
+  tagOrderError,
+  tagOrderLoading,
   targetAgents,
   telemetryNetworkRates,
   telemetryRollups,
@@ -468,6 +471,7 @@ export function FleetWorkspace({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
+  onRefreshTagOrder: () => Promise<void>;
   onProcessFleetAlertNotifications: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -496,6 +500,8 @@ export function FleetWorkspace({
   selectedAgent: AgentView | null;
   summary: FleetSummary;
   tags: TagView[];
+  tagOrderError: string | null;
+  tagOrderLoading: boolean;
   targetAgents: AgentView[];
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
@@ -1804,6 +1810,8 @@ export function FleetWorkspace({
           deletePending={deletePending}
           deleteSnapshot={deleteSnapshot}
           fleetCoreEvidenceAvailable={fleetCoreEvidenceAvailable}
+          tagOrderError={tagOrderError}
+          tagOrderLoading={tagOrderLoading}
           pageResetKey={fleetPageResetKey}
           lifecycleError={lifecycleError}
           lifecyclePending={lifecyclePending}
@@ -1841,6 +1849,7 @@ export function FleetWorkspace({
               ? () => onNavigatePanel("Fleet", "monitor")
               : undefined
           }
+          onRefreshTagOrder={onRefreshTagOrder}
           onRegisterVps={onRegisterVps}
           onSelectionChange={handleFleetSelectionChange}
           onSuspensionReasonChange={setSuspensionReason}
@@ -2108,6 +2117,8 @@ function FleetInstancesPanel({
   deletePending,
   deleteSnapshot,
   fleetCoreEvidenceAvailable,
+  tagOrderError,
+  tagOrderLoading,
   lifecycleError,
   lifecyclePending,
   lifecycleProgress,
@@ -2127,6 +2138,7 @@ function FleetInstancesPanel({
   onConfirmSuspension,
   onOpenJobDetails,
   onOpenMonitor,
+  onRefreshTagOrder,
   onRegisterVps,
   pageResetKey,
   onSelectionChange,
@@ -2147,6 +2159,8 @@ function FleetInstancesPanel({
   deletePending: boolean;
   deleteSnapshot: DeleteAgentConfirmationSnapshot | null;
   fleetCoreEvidenceAvailable: boolean;
+  tagOrderError: string | null;
+  tagOrderLoading: boolean;
   lifecycleError: string | null;
   lifecyclePending: boolean;
   lifecycleProgress: BulkJobProgress | null;
@@ -2166,6 +2180,7 @@ function FleetInstancesPanel({
   onConfirmSuspension: () => void;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenMonitor?: () => void;
+  onRefreshTagOrder: () => Promise<void>;
   onRegisterVps?: () => void;
   pageResetKey: string;
   onSelectionChange: (rows: AgentView[]) => void;
@@ -2200,6 +2215,10 @@ function FleetInstancesPanel({
       ),
     [agents, vpsNameDisplayMode],
   );
+  const readError =
+    apiError && tagOrderError
+      ? `${apiError}; ${tagOrderError}`
+      : (apiError ?? tagOrderError);
 
   useEffect(() => {
     if (!mutationOutcomeMessage) {
@@ -2227,14 +2246,31 @@ function FleetInstancesPanel({
           <h2>VPS instances</h2>
           <span>Live control-plane inventory</span>
         </div>
-        <span className="sectionContext">
-          {fleetCoreEvidenceAvailable
-            ? `${summary.online} live / ${summary.suspended} suspended / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`
-            : "Fleet inventory unavailable"}{" "}
-          · {formatConsoleStreamState(wsState)}
-        </span>
+        <div className="headerActionStack">
+          <span className="sectionContext">
+            {fleetCoreEvidenceAvailable
+              ? `${summary.online} live / ${summary.suspended} suspended / ${summary.revoked} access revoked / ${summary.never + summary.unknown} no contact / ${summary.total} total`
+              : "Fleet inventory unavailable"}{" "}
+            · {formatConsoleStreamState(wsState)}
+          </span>
+          {tagOrderError ? (
+            <button
+              className="secondaryAction compactAction"
+              disabled={tagOrderLoading}
+              onClick={() => void onRefreshTagOrder()}
+              type="button"
+            >
+              Retry group ordering
+            </button>
+          ) : null}
+          <ActionFeedback
+            className="localActionFeedback"
+            message={tagOrderLoading ? "Refreshing group display order" : null}
+            tone="progress"
+          />
+        </div>
       </div>
-      <ConsoleFreshnessBanner error={apiError} />
+      <ConsoleFreshnessBanner error={readError} />
       <ActionFeedback
         className="localActionFeedback"
         message={mutationOutcomeMessage}

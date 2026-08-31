@@ -3369,7 +3369,7 @@ test("Ping targets stays idle and keeps rows interactive during manual refresh",
     listGets: initialListGets + 1,
   });
 });
-test("job detail invalidations keep visible data and coalesce an in-flight wave", async ({
+test("job detail invalidations stay lightweight and terminal comparison refreshes once", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -3493,7 +3493,7 @@ test("job detail invalidations keep visible data and coalesce an in-flight wave"
       };
     });
   await expect.poll(detailRequestCounts).toEqual({
-    comparison: 1,
+    comparison: 0,
     maxActiveTargets: 1,
     outputs: 1,
     targets: 1,
@@ -3522,7 +3522,7 @@ test("job detail invalidations keep visible data and coalesce an in-flight wave"
     }
   }, selectedJobId);
   expect(await detailRequestCounts()).toEqual({
-    comparison: 1,
+    comparison: 0,
     maxActiveTargets: 1,
     outputs: 1,
     targets: 1,
@@ -3536,7 +3536,7 @@ test("job detail invalidations keep visible data and coalesce an in-flight wave"
     ).__vpsmanJobDetailStress?.release();
   });
   await expect.poll(detailRequestCounts).toEqual({
-    comparison: 2,
+    comparison: 0,
     maxActiveTargets: 1,
     outputs: 2,
     targets: 2,
@@ -3544,6 +3544,45 @@ test("job detail invalidations keep visible data and coalesce an in-flight wave"
   await expect(
     detail.getByText("edge-sfo-01 (fo01)", { exact: true }).first(),
   ).toBeVisible();
+
+  const jobListRefreshesBeforeTerminal = await page.evaluate(() => {
+    const requests = (
+      window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      }
+    ).__vpsmanFetchRequests;
+    return (requests ?? []).filter(
+      (request) =>
+        request.method === "GET" &&
+        new URL(request.url, window.location.href).pathname === "/api/v1/jobs",
+    ).length;
+  });
+  expect(jobListRefreshesBeforeTerminal).toBe(0);
+
+  await page.evaluate((jobId) => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    for (let duplicate = 0; duplicate < 2; duplicate += 1) {
+      socket?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "job_finished",
+            job_id: jobId,
+            status: "completed",
+          }),
+        }),
+      );
+    }
+  }, selectedJobId);
+  await expect.poll(detailRequestCounts).toEqual({
+    comparison: 1,
+    maxActiveTargets: 1,
+    outputs: 2,
+    targets: 2,
+  });
 
   await page.evaluate(() => {
     const socket = (
@@ -3562,24 +3601,11 @@ test("job detail invalidations keep visible data and coalesce an in-flight wave"
   });
   await page.waitForTimeout(50);
   expect(await detailRequestCounts()).toEqual({
-    comparison: 2,
+    comparison: 1,
     maxActiveTargets: 1,
     outputs: 2,
     targets: 2,
   });
-  const jobListRefreshes = await page.evaluate(() => {
-    const requests = (
-      window as typeof window & {
-        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
-      }
-    ).__vpsmanFetchRequests;
-    return (requests ?? []).filter(
-      (request) =>
-        request.method === "GET" &&
-        new URL(request.url, window.location.href).pathname === "/api/v1/jobs",
-    ).length;
-  });
-  expect(jobListRefreshes).toBe(0);
 });
 
 test("job terminal events update loaded history rows without replacing the page", async ({

@@ -35,14 +35,14 @@ async fn preserves_gateway_control_error_status() {
 }
 
 #[tokio::test]
-async fn suspension_fence_batches_use_one_ordered_request_per_phase() {
+async fn dispatch_fence_batches_use_one_ordered_request_per_phase() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let expected_paths = [
-            "/internal/v1/gateway/client/suspension-fence/batch/prepare",
-            "/internal/v1/gateway/client/suspension-fence/batch/promote",
-            "/internal/v1/gateway/client/suspension-fence/batch/clear",
+            "/internal/v1/gateway/client/dispatch-fence/batch/prepare",
+            "/internal/v1/gateway/client/dispatch-fence/batch/promote",
+            "/internal/v1/gateway/client/dispatch-fence/batch/clear",
         ];
         for expected_path in expected_paths {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -57,12 +57,16 @@ async fn suspension_fence_batches_use_one_ordered_request_per_phase() {
                         "client_id": "client-b",
                         "accepted": true,
                         "fenced": fenced,
+                        "ownership_continuous": true,
+                        "enqueued_job_ids": [],
                         "message": "accepted"
                     },
                     {
                         "client_id": "client-a",
                         "accepted": true,
                         "fenced": fenced,
+                        "ownership_continuous": true,
+                        "enqueued_job_ids": [],
                         "message": "accepted"
                     }
                 ]
@@ -89,17 +93,26 @@ async fn suspension_fence_batches_use_one_ordered_request_per_phase() {
     );
     let client_b_token = uuid::Uuid::new_v4();
     let client_a_token = uuid::Uuid::new_v4();
+    let gateway_epoch = uuid::Uuid::new_v4();
     let prepared = client
-        .prepare_client_suspension_fences(vec![
-            GatewayClientSuspensionFencePrepare {
+        .prepare_client_dispatch_fences(vec![
+            GatewayClientDispatchFencePrepare {
                 client_id: "client-b".to_string(),
                 token: client_b_token,
+                gateway_epoch,
+                generation: 1,
+                renewal: false,
                 lease_secs: 60,
+                purpose: GatewayClientDispatchFencePurpose::Suspension,
             },
-            GatewayClientSuspensionFencePrepare {
+            GatewayClientDispatchFencePrepare {
                 client_id: "client-a".to_string(),
                 token: client_a_token,
+                gateway_epoch,
+                generation: 2,
+                renewal: false,
                 lease_secs: 60,
+                purpose: GatewayClientDispatchFencePurpose::Deletion,
             },
         ])
         .await
@@ -108,14 +121,20 @@ async fn suspension_fence_batches_use_one_ordered_request_per_phase() {
     assert_eq!(prepared.results[1].client_id, "client-a");
 
     let promoted = client
-        .promote_client_suspension_fences(vec![
-            GatewayClientSuspensionFencePromote {
+        .promote_client_dispatch_fences(vec![
+            GatewayClientDispatchFencePromote {
                 client_id: "client-b".to_string(),
                 token: client_b_token,
+                gateway_epoch,
+                generation: 1,
+                purpose: GatewayClientDispatchFencePurpose::Suspension,
             },
-            GatewayClientSuspensionFencePromote {
+            GatewayClientDispatchFencePromote {
                 client_id: "client-a".to_string(),
                 token: client_a_token,
+                gateway_epoch,
+                generation: 2,
+                purpose: GatewayClientDispatchFencePurpose::Deletion,
             },
         ])
         .await
@@ -124,15 +143,21 @@ async fn suspension_fence_batches_use_one_ordered_request_per_phase() {
     assert_eq!(promoted.results[1].client_id, "client-a");
 
     let cleared = client
-        .clear_client_suspension_fences(vec![
-            GatewayClientSuspensionFenceClear {
+        .clear_client_dispatch_fences(vec![
+            GatewayClientDispatchFenceClear {
                 client_id: "client-b".to_string(),
-                expected_token: None,
+                expected_token: client_b_token,
+                gateway_epoch,
+                expected_generation: 1,
+                restore_fallback: false,
                 reason: "committed_unsuspend".to_string(),
             },
-            GatewayClientSuspensionFenceClear {
+            GatewayClientDispatchFenceClear {
                 client_id: "client-a".to_string(),
-                expected_token: None,
+                expected_token: client_a_token,
+                gateway_epoch,
+                expected_generation: 2,
+                restore_fallback: false,
                 reason: "committed_unsuspend".to_string(),
             },
         ])
@@ -260,10 +285,12 @@ async fn lifecycle_batches_use_one_ordered_request_per_operation() {
             GatewaySessionDisconnect {
                 client_id: "client-b".to_string(),
                 reason: "vps_deleted".to_string(),
+                required_dispatch_fence_owner: None,
             },
             GatewaySessionDisconnect {
                 client_id: "client-a".to_string(),
                 reason: "vps_deleted".to_string(),
+                required_dispatch_fence_owner: None,
             },
         ])
         .await

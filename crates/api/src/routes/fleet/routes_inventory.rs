@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     time::Duration,
 };
 
@@ -39,16 +39,19 @@ use crate::{
 };
 
 use vpsman_common::{
-    GatewayClientSuspensionFenceClear, GatewayClientSuspensionFencePrepare,
-    GatewayClientSuspensionFencePromote, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationBatchItem, GatewaySessionDisconnect,
-    GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS, GATEWAY_CONTROL_BATCH_MAX_ITEMS,
-    MAX_RUNTIME_CONFIG_FIELD_BYTES,
+    GatewayClientDispatchFenceAcquire, GatewayClientDispatchFenceClear,
+    GatewayClientDispatchFencePrepare, GatewayClientDispatchFencePromote,
+    GatewayClientDispatchFencePurpose, GatewayPrivilegeVerification,
+    GatewayPrivilegeVerificationBatchItem, GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS,
+    GATEWAY_CONTROL_BATCH_MAX_ITEMS, MAX_RUNTIME_CONFIG_FIELD_BYTES,
 };
 
 const BULK_RESOLVE_MANY_ITEM_LIMIT: usize = 500;
-const AGENT_SUSPENSION_FENCE_LEASE_SECS: u64 = 60;
-const AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS: u64 = 5;
+const CLIENT_LIFECYCLE_FENCE_LEASE_SECS: u64 = 60;
+const CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS: u64 = 5;
+// Renewal is derived from the lease, leaving two complete intervals for a
+// delayed attempt; it is lifecycle correctness, not a throughput throttle.
+const CLIENT_LIFECYCLE_FENCE_RENEWAL_SECS: u64 = CLIENT_LIFECYCLE_FENCE_LEASE_SECS / 3;
 
 const MAX_PATCH_GENERATOR_BODY_BYTES: usize = 16 * 1024;
 const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
@@ -144,12 +147,467 @@ pub(crate) async fn bulk_delete_agents(
     ))
 }
 
+struct ClientDispatchFenceLease {
+    state: AppState,
+    client_id: String,
+    token: uuid::Uuid,
+    gateway_epoch: uuid::Uuid,
+    generation: u64,
+    purpose: GatewayClientDispatchFencePurpose,
+    initially_protected: HashSet<uuid::Uuid>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    renewer: Option<tokio::task::JoinHandle<()>>,
+    ownership_healthy: tokio::sync::watch::Receiver<bool>,
+}
+
+async fn retire_unconfirmed_dispatch_fence(
+    state: &AppState,
+    prepare: &GatewayClientDispatchFencePrepare,
+) {
+    let request = GatewayClientDispatchFenceClear {
+        client_id: prepare.client_id.clone(),
+        expected_token: prepare.token,
+        gateway_epoch: prepare.gateway_epoch,
+        expected_generation: prepare.generation,
+        restore_fallback: true,
+        reason: "dispatch_fence_prepare_unconfirmed".to_string(),
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+        state.gateway.clear_client_dispatch_fences(vec![request]),
+    )
+    .await;
+    if !matches!(
+        &result,
+        Ok(Ok(batch))
+            if matches!(batch.results.as_slice(), [result]
+                if result.client_id == prepare.client_id
+                    && (result.accepted
+                        || result.message == "dispatch_fence_gateway_epoch_stale"))
+    ) {
+        tracing::warn!(
+            client_id = %prepare.client_id,
+            token = %prepare.token,
+            ?result,
+            "unconfirmed dispatch-fence owner retirement was not acknowledged"
+        );
+    }
+}
+
+impl ClientDispatchFenceLease {
+    fn owner(&self) -> vpsman_common::GatewayClientDispatchFenceOwner {
+        vpsman_common::GatewayClientDispatchFenceOwner {
+            token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            generation: self.generation,
+        }
+    }
+
+    async fn prepare(
+        state: &AppState,
+        client_id: &str,
+        purpose: GatewayClientDispatchFencePurpose,
+    ) -> anyhow::Result<(Self, Vec<uuid::Uuid>)> {
+        let token = uuid::Uuid::new_v4();
+        state.refresh_gateway_dispatch_timeouts();
+        let acquired = tokio::time::timeout(
+            Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+            state
+                .gateway
+                .acquire_client_dispatch_fence(GatewayClientDispatchFenceAcquire {
+                    client_id: client_id.to_string(),
+                    token,
+                    purpose,
+                }),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("gateway dispatch-fence acquire timed out: {error}"))??;
+        anyhow::ensure!(
+            acquired.client_id == client_id && acquired.owner.token == token,
+            "gateway dispatch-fence acquire result invalid"
+        );
+        let mut prepare = GatewayClientDispatchFencePrepare {
+            client_id: client_id.to_string(),
+            token,
+            gateway_epoch: acquired.owner.gateway_epoch,
+            generation: acquired.owner.generation,
+            renewal: false,
+            lease_secs: CLIENT_LIFECYCLE_FENCE_LEASE_SECS,
+            purpose,
+        };
+        let prepared = tokio::time::timeout(
+            Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+            state
+                .gateway
+                .prepare_client_dispatch_fences(vec![prepare.clone()]),
+        )
+        .await;
+        let result = match &prepared {
+            Ok(Ok(batch)) => match batch.results.as_slice() {
+                [result] if result.client_id == client_id && result.accepted && result.fenced => {
+                    result.clone()
+                }
+                _ => {
+                    retire_unconfirmed_dispatch_fence(state, &prepare).await;
+                    anyhow::bail!("gateway dispatch-fence conflict");
+                }
+            },
+            Ok(Err(error)) => {
+                let message = error.to_string();
+                retire_unconfirmed_dispatch_fence(state, &prepare).await;
+                anyhow::bail!("gateway dispatch-fence prepare failed: {message}");
+            }
+            Err(error) => {
+                let message = error.to_string();
+                retire_unconfirmed_dispatch_fence(state, &prepare).await;
+                anyhow::bail!("gateway dispatch-fence prepare timed out: {message}");
+            }
+        };
+
+        let protected_job_ids = result.enqueued_job_ids.clone();
+        let initially_protected = protected_job_ids.iter().copied().collect::<HashSet<_>>();
+        let renewal_protected = initially_protected.clone();
+        let renewal_state = state.clone();
+        prepare.renewal = true;
+        let renewal_prepare = prepare;
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let (ownership_health, ownership_healthy) = tokio::sync::watch::channel(true);
+        let renewer = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => return,
+                    _ = tokio::time::sleep(Duration::from_secs(
+                        CLIENT_LIFECYCLE_FENCE_RENEWAL_SECS,
+                    )) => {}
+                }
+                let renewal = tokio::time::timeout(
+                    Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+                    renewal_state
+                        .gateway
+                        .prepare_client_dispatch_fences(vec![renewal_prepare.clone()]),
+                )
+                .await;
+                let renewed = matches!(
+                    &renewal,
+                    Ok(Ok(batch))
+                        if matches!(batch.results.as_slice(), [result]
+                            if result.client_id == renewal_prepare.client_id
+                                && result.accepted
+                                && result.fenced
+                                && result.ownership_continuous
+                                && result.enqueued_job_ids.iter().all(|job_id|
+                                    renewal_protected.contains(job_id)))
+                );
+                if !renewed {
+                    let _ = ownership_health.send(false);
+                    tracing::warn!(
+                        client_id = %renewal_prepare.client_id,
+                        ?purpose,
+                        "exact-client dispatch fence renewal was not acknowledged"
+                    );
+                }
+            }
+        });
+        Ok((
+            Self {
+                state: state.clone(),
+                client_id: client_id.to_string(),
+                token,
+                gateway_epoch: acquired.owner.gateway_epoch,
+                generation: acquired.owner.generation,
+                purpose,
+                initially_protected,
+                stop: Some(stop),
+                renewer: Some(renewer),
+                ownership_healthy,
+            },
+            protected_job_ids,
+        ))
+    }
+
+    fn commit_proof(&self) -> ClientDispatchFenceCommitProof {
+        ClientDispatchFenceCommitProof {
+            state: self.state.clone(),
+            client_id: self.client_id.clone(),
+            token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            generation: self.generation,
+            purpose: self.purpose,
+            initially_protected: self.initially_protected.clone(),
+            ownership_healthy: self.ownership_healthy.clone(),
+        }
+    }
+
+    async fn promote_once(&self) -> Option<bool> {
+        let request = GatewayClientDispatchFencePromote {
+            client_id: self.client_id.clone(),
+            token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            generation: self.generation,
+            purpose: self.purpose,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+            self.state
+                .gateway
+                .promote_client_dispatch_fences(vec![request]),
+        )
+        .await;
+        match result {
+            Ok(Ok(batch)) => match batch.results.as_slice() {
+                [result]
+                    if result.client_id == self.client_id
+                        && result.accepted
+                        && result.fenced
+                        && result
+                            .enqueued_job_ids
+                            .iter()
+                            .all(|job_id| self.initially_protected.contains(job_id)) =>
+                {
+                    Some(result.ownership_continuous)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    async fn promote_committed(&mut self) -> bool {
+        self.stop_renewal().await;
+        match self.promote_once().await {
+            Some(promotion_continuous) => promotion_continuous && *self.ownership_healthy.borrow(),
+            None => {
+                tracing::warn!(
+                    client_id = %self.client_id,
+                    purpose = ?self.purpose,
+                    "committed exact-client dispatch fence remains in safe recovery state"
+                );
+                false
+            }
+        }
+    }
+
+    async fn compensate(&self, reason: &str) {
+        let request = GatewayClientDispatchFenceClear {
+            client_id: self.client_id.clone(),
+            expected_token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            expected_generation: self.generation,
+            restore_fallback: true,
+            reason: reason.to_string(),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+            self.state
+                .gateway
+                .clear_client_dispatch_fences(vec![request]),
+        )
+        .await;
+        if !matches!(
+            &result,
+            Ok(Ok(batch))
+                if matches!(batch.results.as_slice(), [result]
+                    if result.client_id == self.client_id
+                        && result.accepted)
+        ) {
+            tracing::warn!(
+                client_id = %self.client_id,
+                ?result,
+                "temporary exact-client dispatch fence compensation was not acknowledged"
+            );
+        }
+    }
+
+    async fn stop_renewal(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(renewer) = self.renewer.take() {
+            let _ = renewer.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ClientDispatchFenceCommitProof {
+    state: AppState,
+    client_id: String,
+    token: uuid::Uuid,
+    gateway_epoch: uuid::Uuid,
+    generation: u64,
+    purpose: GatewayClientDispatchFencePurpose,
+    initially_protected: HashSet<uuid::Uuid>,
+    ownership_healthy: tokio::sync::watch::Receiver<bool>,
+}
+
+impl ClientDispatchFenceCommitProof {
+    async fn verify(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            *self.ownership_healthy.borrow(),
+            "gateway dispatch-fence ownership was previously lost"
+        );
+        let request = GatewayClientDispatchFencePrepare {
+            client_id: self.client_id.clone(),
+            token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            generation: self.generation,
+            renewal: true,
+            lease_secs: CLIENT_LIFECYCLE_FENCE_LEASE_SECS,
+            purpose: self.purpose,
+        };
+        let batch = tokio::time::timeout(
+            Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+            self.state
+                .gateway
+                .prepare_client_dispatch_fences(vec![request]),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("gateway dispatch-fence commit proof timed out: {error}")
+        })??;
+        let [result] = batch.results.as_slice() else {
+            anyhow::bail!("gateway dispatch-fence commit proof invalid");
+        };
+        anyhow::ensure!(
+            result.client_id == self.client_id
+                && result.accepted
+                && result.fenced
+                && result.ownership_continuous
+                && *self.ownership_healthy.borrow()
+                && result
+                    .enqueued_job_ids
+                    .iter()
+                    .all(|job_id| self.initially_protected.contains(job_id)),
+            "gateway dispatch-fence ownership changed before commit"
+        );
+        Ok(())
+    }
+}
+
+enum OwnedDeleteTargetOutcome {
+    Applied {
+        result: crate::model::DeleteAgentResult,
+        gateway_outcome: crate::model::LifecycleOutcomeView,
+    },
+    Rejected {
+        client_id: String,
+        code: &'static str,
+    },
+}
+
+async fn mutate_delete_agent_target_owned(
+    state: AppState,
+    operator: crate::model::AuthContext,
+    client_id: String,
+    reason: Option<String>,
+) -> OwnedDeleteTargetOutcome {
+    let (mut fence, _) = match ClientDispatchFenceLease::prepare(
+        &state,
+        &client_id,
+        GatewayClientDispatchFencePurpose::Deletion,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(%client_id, %error, "VPS deletion dispatch fence rejected");
+            return OwnedDeleteTargetOutcome::Rejected {
+                client_id,
+                code: "agent_delete_gateway_fence_conflict",
+            };
+        }
+    };
+
+    let commit_proof = fence.commit_proof();
+    let outcome = state
+        .repo
+        .delete_agent_target(
+            &client_id,
+            reason.as_deref(),
+            &operator,
+            move || async move { commit_proof.verify().await },
+        )
+        .await;
+    match outcome {
+        Ok(crate::repository_inventory::DeleteAgentRepositoryOutcome::Applied(result)) => {
+            let fence_owner = fence.owner();
+            let continuity_preserved = fence.promote_committed().await;
+            if !continuity_preserved {
+                tracing::error!(
+                    %client_id,
+                    "committed VPS deletion fence recovered after lease continuity loss; expired dispatch attempts were returned to durable eligibility checks"
+                );
+            }
+
+            // Promotion makes deletion authoritative before disconnect. The
+            // persistent deletion fence also rejects a hello that the API
+            // accepted before the deletion transaction committed.
+            state.refresh_gateway_dispatch_timeouts();
+            let disconnect = tokio::time::timeout(
+                Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+                state.gateway.disconnect_session_if_fence_owned(
+                    &client_id,
+                    "vps_deleted",
+                    fence_owner,
+                ),
+            )
+            .await;
+            let gateway_outcome = match disconnect {
+                Ok(Ok(disconnect)) if disconnect.client_id == client_id && disconnect.accepted => {
+                    gateway_disconnect_outcome(Ok(()), &client_id, "VPS deletion")
+                }
+                Ok(Ok(_)) => gateway_disconnect_outcome(
+                    Err(ApiError::conflict(
+                        "gateway_session_disconnect_result_invalid",
+                    )),
+                    &client_id,
+                    "VPS deletion",
+                ),
+                Ok(Err(error)) => {
+                    tracing::warn!(%client_id, %error, "VPS deletion gateway disconnect failed");
+                    gateway_disconnect_outcome(
+                        Err(ApiError::conflict("gateway_session_disconnect_failed")),
+                        &client_id,
+                        "VPS deletion",
+                    )
+                }
+                Err(error) => gateway_disconnect_outcome(
+                    Err(ApiError::conflict("gateway_session_disconnect_timed_out")),
+                    &client_id,
+                    &format!("VPS deletion ({error})"),
+                ),
+            };
+            OwnedDeleteTargetOutcome::Applied {
+                result,
+                gateway_outcome,
+            }
+        }
+        Ok(crate::repository_inventory::DeleteAgentRepositoryOutcome::Rejected {
+            client_id,
+            code,
+        }) => {
+            fence.stop_renewal().await;
+            fence.compensate("deletion_not_committed").await;
+            OwnedDeleteTargetOutcome::Rejected { client_id, code }
+        }
+        Err(error) => {
+            fence.stop_renewal().await;
+            tracing::error!(%client_id, %error, "exact-client VPS deletion transaction failed");
+            OwnedDeleteTargetOutcome::Rejected {
+                client_id,
+                code: "agent_delete_target_failed",
+            }
+        }
+    }
+}
+
 async fn mutate_delete_agents(
     state: &AppState,
     operator: &crate::model::AuthContext,
     request: BulkDeleteAgentsRequest,
 ) -> Result<BulkDeleteAgentsResponse, ApiError> {
     validate_bulk_delete_agents_request(&request)?;
+    let reason = canonical_lifecycle_reason(request.reason.as_deref());
     if !state.gateway.privilege_configured() {
         return Err(ApiError::conflict("gateway_control_url_missing"));
     }
@@ -215,28 +673,39 @@ async fn mutate_delete_agents(
         }
     }
 
-    let repository_outcomes = if approved_client_ids.is_empty() {
-        Vec::new()
-    } else {
-        state
-            .repo
-            .delete_agents(&approved_client_ids, request.reason.as_deref(), operator)
-            .await
-            .map_err(agent_mutation_error)?
-    };
-
     let mut deleted_by_client = HashMap::new();
     let mut affected_client_ids = Vec::new();
-    for outcome in repository_outcomes {
-        match outcome {
-            crate::repository_inventory::DeleteAgentRepositoryOutcome::Applied(result) => {
-                affected_client_ids.push(result.client_id.clone());
-                deleted_by_client.insert(result.client_id.clone(), result);
-            }
-            crate::repository_inventory::DeleteAgentRepositoryOutcome::Rejected {
-                client_id,
-                code,
+    let mut gateway_outcomes = HashMap::new();
+    for client_id in approved_client_ids {
+        // Each target owns its prepare -> database transaction -> durable
+        // promotion -> disconnect sequence. No later target can consume an
+        // earlier target's finite prepare lease or postpone its finalization.
+        // Dropping the HTTP future detaches only this already-started target;
+        // unstarted targets retain the usual request-cancellation semantics.
+        let target = tokio::spawn(mutate_delete_agent_target_owned(
+            state.clone(),
+            operator.clone(),
+            client_id.clone(),
+            reason.clone(),
+        ))
+        .await
+        .map_err(|error| {
+            ApiError::internal(
+                "agent_delete_lifecycle_owner_failed",
+                "The exact VPS deletion lifecycle owner stopped unexpectedly.",
+                error.into(),
+            )
+        })?;
+        match target {
+            OwnedDeleteTargetOutcome::Applied {
+                result,
+                gateway_outcome,
             } => {
+                gateway_outcomes.insert(client_id.clone(), gateway_outcome);
+                affected_client_ids.push(client_id.clone());
+                deleted_by_client.insert(client_id, result);
+            }
+            OwnedDeleteTargetOutcome::Rejected { client_id, code } => {
                 public_by_client
                     .insert(client_id.clone(), rejected_delete_outcome(client_id, code));
             }
@@ -244,66 +713,6 @@ async fn mutate_delete_agents(
     }
 
     if !affected_client_ids.is_empty() {
-        let disconnect_items = affected_client_ids
-            .iter()
-            .map(|client_id| GatewaySessionDisconnect {
-                client_id: client_id.clone(),
-                reason: "vps_deleted".to_string(),
-            })
-            .collect::<Vec<_>>();
-        state.refresh_gateway_dispatch_timeouts();
-        let mut gateway_outcomes = HashMap::new();
-        match state.gateway.disconnect_sessions(disconnect_items).await {
-            Ok(batch)
-                if batch.results.len() == affected_client_ids.len()
-                    && batch
-                        .results
-                        .iter()
-                        .zip(&affected_client_ids)
-                        .all(|(result, client_id)| &result.client_id == client_id) =>
-            {
-                for result in batch.results {
-                    let outcome = if result.accepted {
-                        gateway_disconnect_outcome(Ok(()), &result.client_id, "VPS deletion")
-                    } else {
-                        gateway_disconnect_outcome(
-                            Err(ApiError::conflict("gateway_session_disconnect_failed")),
-                            &result.client_id,
-                            "VPS deletion",
-                        )
-                    };
-                    gateway_outcomes.insert(result.client_id, outcome);
-                }
-            }
-            Ok(_) => {
-                for client_id in &affected_client_ids {
-                    gateway_outcomes.insert(
-                        client_id.clone(),
-                        gateway_disconnect_outcome(
-                            Err(ApiError::conflict(
-                                "gateway_session_disconnect_result_invalid",
-                            )),
-                            client_id,
-                            "VPS deletion",
-                        ),
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "bulk VPS deletion gateway disconnect failed");
-                for client_id in &affected_client_ids {
-                    gateway_outcomes.insert(
-                        client_id.clone(),
-                        gateway_disconnect_outcome(
-                            Err(ApiError::conflict("gateway_session_disconnect_failed")),
-                            client_id,
-                            "VPS deletion",
-                        ),
-                    );
-                }
-            }
-        }
-
         let deleted_set = affected_client_ids.iter().cloned().collect::<HashSet<_>>();
         let mut peers_by_deleted_client = HashMap::new();
         let mut surviving_peers = BTreeSet::new();
@@ -418,6 +827,9 @@ fn delete_agent_rejection_message(code: &str) -> &'static str {
         }
         "privilege_assertion_required" => "A privilege assertion is required for this VPS.",
         "privilege_verification_failed" => "The privilege assertion for this VPS was rejected.",
+        "agent_delete_gateway_fence_conflict" => {
+            "The gateway could not establish exclusive dispatch ownership for this VPS."
+        }
         "agent_delete_target_failed" => {
             "This VPS deletion transaction failed. Review its current state and retry this VPS; other reviewed targets were processed independently."
         }
@@ -433,6 +845,9 @@ fn delete_agent_rejection_error(code: &str) -> ApiError {
         }
         "privilege_assertion_required" => ApiError::forbidden("privilege_assertion_required"),
         "privilege_verification_failed" => ApiError::forbidden("privilege_verification_failed"),
+        "agent_delete_gateway_fence_conflict" => {
+            ApiError::conflict("agent_delete_gateway_fence_conflict")
+        }
         "agent_delete_target_failed" => ApiError::internal(
             "agent_delete_target_failed",
             "The VPS deletion transaction failed. Review its current state and retry this VPS.",
@@ -526,99 +941,235 @@ pub(crate) async fn bulk_agent_suspensions(
     ))
 }
 
+async fn reconcile_unsuspended_gateway_route(state: &AppState, client_id: &str) {
+    if !state.gateway.configured() {
+        return;
+    }
+    state.refresh_gateway_dispatch_timeouts();
+    let token = uuid::Uuid::new_v4();
+    let acquired = match tokio::time::timeout(
+        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+        state
+            .gateway
+            .acquire_client_dispatch_fence(GatewayClientDispatchFenceAcquire {
+                client_id: client_id.to_string(),
+                token,
+                purpose: GatewayClientDispatchFencePurpose::Suspension,
+            }),
+    )
+    .await
+    {
+        Ok(Ok(acquired)) if acquired.client_id == client_id && acquired.owner.token == token => {
+            acquired
+        }
+        result => {
+            tracing::warn!(
+                %client_id,
+                ?result,
+                "DB-authoritative unsuspend skipped optional gateway route reservation"
+            );
+            return;
+        }
+    };
+    let still_unsuspended = match state.repo.agent_by_id(client_id).await {
+        Ok(agent) => agent.status != "suspended",
+        Err(error) => {
+            tracing::warn!(
+                %client_id,
+                %error,
+                "DB-authoritative unsuspend skipped gateway route cleanup after status reread"
+            );
+            false
+        }
+    };
+    if !still_unsuspended {
+        return;
+    }
+    let prepare = GatewayClientDispatchFencePrepare {
+        client_id: client_id.to_string(),
+        token,
+        gateway_epoch: acquired.owner.gateway_epoch,
+        generation: acquired.owner.generation,
+        renewal: false,
+        lease_secs: CLIENT_LIFECYCLE_FENCE_LEASE_SECS,
+        purpose: GatewayClientDispatchFencePurpose::Suspension,
+    };
+    let prepared = tokio::time::timeout(
+        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+        state
+            .gateway
+            .prepare_client_dispatch_fences(vec![prepare.clone()]),
+    )
+    .await;
+    let prepared_exact = matches!(
+        &prepared,
+        Ok(Ok(batch))
+            if matches!(batch.results.as_slice(), [result]
+                if result.client_id == client_id && result.accepted && result.fenced)
+    );
+    let clear = GatewayClientDispatchFenceClear {
+        client_id: client_id.to_string(),
+        expected_token: token,
+        gateway_epoch: acquired.owner.gateway_epoch,
+        expected_generation: acquired.owner.generation,
+        restore_fallback: false,
+        reason: "db_authoritative_unsuspend".to_string(),
+    };
+    let cleared = tokio::time::timeout(
+        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+        state.gateway.clear_client_dispatch_fences(vec![clear]),
+    )
+    .await;
+    if !prepared_exact
+        || !matches!(
+            &cleared,
+            Ok(Ok(batch))
+                if matches!(batch.results.as_slice(), [result]
+                    if result.client_id == client_id
+                        && (result.accepted
+                            || result.message == "dispatch_fence_generation_retired"
+                            || result.message == "dispatch_fence_gateway_epoch_stale"))
+        )
+    {
+        tracing::warn!(
+            %client_id,
+            ?prepared,
+            ?cleared,
+            "DB-authoritative unsuspend left final gateway route cleanup to hello/telemetry"
+        );
+    }
+}
+
+async fn mutate_agent_suspension_target_owned(
+    state: AppState,
+    operator: crate::model::AuthContext,
+    action: AgentSuspensionAction,
+    client_id: String,
+    reason: Option<String>,
+) -> crate::repository_inventory::AgentSuspensionRepositoryOutcome {
+    let mut fence = None;
+    let mut protected_job_ids = Vec::new();
+    if action == AgentSuspensionAction::Suspend && state.gateway.configured() {
+        match ClientDispatchFenceLease::prepare(
+            &state,
+            &client_id,
+            GatewayClientDispatchFencePurpose::Suspension,
+        )
+        .await
+        {
+            Ok((prepared, protected)) => {
+                fence = Some(prepared);
+                protected_job_ids = protected;
+            }
+            Err(error) => {
+                tracing::warn!(%client_id, %error, "VPS suspension dispatch fence rejected");
+                return crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+                    client_id,
+                    code: "agent_suspend_gateway_fence_conflict",
+                };
+            }
+        }
+    }
+
+    let commit_proof = fence.as_ref().map(ClientDispatchFenceLease::commit_proof);
+    let repository_outcome = state
+        .repo
+        .mutate_agent_suspension_target(
+            action,
+            &client_id,
+            reason.as_deref(),
+            &operator,
+            &protected_job_ids,
+            move || async move {
+                if let Some(commit_proof) = commit_proof {
+                    commit_proof.verify().await?;
+                }
+                Ok(())
+            },
+        )
+        .await;
+    let outcome = match repository_outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(mut fence) = fence {
+                fence.stop_renewal().await;
+            }
+            tracing::error!(%client_id, %error, "exact-client VPS suspension transaction failed");
+            return crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+                client_id,
+                code: "agent_suspension_target_failed",
+            };
+        }
+    };
+
+    match &outcome {
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied {
+            client_id,
+            ..
+        } => {
+            if action == AgentSuspensionAction::Suspend {
+                if let Some(mut fence) = fence {
+                    let continuity_preserved = fence.promote_committed().await;
+                    if !continuity_preserved {
+                        tracing::error!(
+                            %client_id,
+                            "committed VPS suspension fence recovered after lease continuity loss; expired dispatch attempts were returned to durable eligibility checks"
+                        );
+                    }
+                }
+            } else {
+                reconcile_unsuspended_gateway_route(&state, client_id).await;
+            }
+        }
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+            code, ..
+        } if action == AgentSuspensionAction::Unsuspend && *code == "agent_not_suspended" => {
+            // A no-op unsuspend is still authoritative evidence that no prior
+            // suspension fallback may remain at the gateway.
+            debug_assert!(fence.is_none());
+            reconcile_unsuspended_gateway_route(&state, &client_id).await;
+        }
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected { .. } => {
+            if let Some(mut fence) = fence {
+                fence.stop_renewal().await;
+                fence.compensate("suspension_not_committed").await;
+            }
+        }
+    }
+    outcome
+}
+
 async fn mutate_agent_suspensions(
     state: &AppState,
     operator: &crate::model::AuthContext,
     request: BulkAgentSuspensionRequest,
 ) -> Result<BulkAgentSuspensionResponse, ApiError> {
     validate_bulk_agent_suspension_request(&request)?;
-
-    let mut gateway_rejections = HashMap::new();
-    let mut prepared_tokens = BTreeMap::new();
-    let mut protected_job_ids = HashMap::new();
-    let mut database_client_ids = request.client_ids.clone();
-    if request.action == AgentSuspensionAction::Suspend && state.gateway.configured() {
-        let prepare_items = request
-            .client_ids
-            .iter()
-            .map(|client_id| {
-                let token = uuid::Uuid::new_v4();
-                prepared_tokens.insert(client_id.clone(), token);
-                GatewayClientSuspensionFencePrepare {
-                    client_id: client_id.clone(),
-                    token,
-                    lease_secs: AGENT_SUSPENSION_FENCE_LEASE_SECS,
-                }
-            })
-            .collect::<Vec<_>>();
-        let results = tokio::time::timeout(
-            Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
-            state
-                .gateway
-                .prepare_client_suspension_fences(prepare_items),
-        )
+    let reason = canonical_lifecycle_reason(request.reason.as_deref());
+    let mut public_by_client = HashMap::new();
+    let mut affected_client_ids = Vec::new();
+    for client_id in &request.client_ids {
+        let outcome = tokio::spawn(mutate_agent_suspension_target_owned(
+            state.clone(),
+            operator.clone(),
+            request.action,
+            client_id.clone(),
+            reason.clone(),
+        ))
         .await
         .map_err(|error| {
             ApiError::internal(
-                "agent_suspend_gateway_fence_timeout",
-                "The gateway dispatch fences could not be prepared within their lease budget.",
+                "agent_suspension_lifecycle_owner_failed",
+                "The exact VPS suspension lifecycle owner stopped unexpectedly.",
                 error.into(),
             )
-        })?
-        .map_err(ApiError::internal_mapper(
-            "agent_suspend_gateway_fence_unavailable",
-            "The gateway dispatch fences could not be prepared.",
-        ))?
-        .results;
-        validate_gateway_fence_results(&request.client_ids, &results)?;
-        database_client_ids.clear();
-        for result in results {
-            if result.accepted && result.fenced {
-                protected_job_ids.insert(result.client_id.clone(), result.enqueued_job_ids);
-                database_client_ids.push(result.client_id);
-            } else {
-                prepared_tokens.remove(&result.client_id);
-                gateway_rejections.insert(result.client_id, "agent_suspend_gateway_fence_conflict");
-            }
-        }
-    }
-
-    let repository_outcomes = if database_client_ids.is_empty() {
-        Vec::new()
-    } else {
-        match state
-            .repo
-            .mutate_agent_suspensions(
-                request.action,
-                &database_client_ids,
-                request.reason.as_deref(),
-                operator,
-                &protected_job_ids,
-            )
-            .await
-        {
-            Ok(outcomes) => outcomes,
-            Err(error) => {
-                compensate_agent_suspension_fences(state, &prepared_tokens).await;
-                return Err(agent_mutation_error(error));
-            }
-        }
-    };
-
-    let mut public_by_client = HashMap::new();
-    let mut affected_client_ids = Vec::new();
-    let mut committed_tokens = BTreeMap::new();
-    let mut rejected_tokens = BTreeMap::new();
-    for outcome in repository_outcomes {
+        })?;
         match outcome {
             crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied {
                 client_id,
                 agent,
                 mutation,
             } => {
-                if let Some(token) = prepared_tokens.remove(&client_id) {
-                    committed_tokens.insert(client_id.clone(), token);
-                }
                 affected_client_ids.push(client_id.clone());
                 public_by_client.insert(
                     client_id.clone(),
@@ -635,9 +1186,6 @@ async fn mutate_agent_suspensions(
                 client_id,
                 code,
             } => {
-                if let Some(token) = prepared_tokens.remove(&client_id) {
-                    rejected_tokens.insert(client_id.clone(), token);
-                }
                 public_by_client.insert(
                     client_id.clone(),
                     rejected_suspension_outcome(client_id, code),
@@ -646,18 +1194,8 @@ async fn mutate_agent_suspensions(
         }
     }
 
-    compensate_agent_suspension_fences(state, &rejected_tokens).await;
-    if request.action == AgentSuspensionAction::Suspend {
-        promote_agent_suspension_fences(state, &committed_tokens).await;
-    } else if state.gateway.configured() && !affected_client_ids.is_empty() {
-        clear_agent_suspension_fences(state, &affected_client_ids, "operator_unsuspended").await;
-    }
-
-    for (client_id, code) in gateway_rejections {
-        public_by_client.insert(
-            client_id.clone(),
-            rejected_suspension_outcome(client_id, code),
-        );
+    if !affected_client_ids.is_empty() {
+        state.repo.wake_agent_suspension_consumers().await;
     }
     let mut outcomes = Vec::with_capacity(request.client_ids.len());
     for client_id in &request.client_ids {
@@ -773,113 +1311,6 @@ fn agent_suspension_rejection_error(code: &str) -> ApiError {
             anyhow::anyhow!("exact-client VPS suspension transaction failed"),
         ),
         _ => ApiError::conflict("agent_suspension_rejected"),
-    }
-}
-
-fn validate_gateway_fence_results(
-    client_ids: &[String],
-    results: &[vpsman_common::GatewayClientSuspensionFenceResult],
-) -> Result<(), ApiError> {
-    if client_ids.len() != results.len()
-        || client_ids
-            .iter()
-            .zip(results)
-            .any(|(client_id, result)| client_id != &result.client_id)
-    {
-        return Err(ApiError::internal(
-            "agent_suspend_gateway_fence_result_invalid",
-            "The gateway returned an invalid dispatch-fence result set.",
-            anyhow::anyhow!("gateway suspension fence results did not preserve request order"),
-        ));
-    }
-    Ok(())
-}
-
-async fn compensate_agent_suspension_fences(
-    state: &AppState,
-    fences: &BTreeMap<String, uuid::Uuid>,
-) {
-    if fences.is_empty() || !state.gateway.configured() {
-        return;
-    }
-    let items = fences
-        .iter()
-        .map(|(client_id, token)| GatewayClientSuspensionFenceClear {
-            client_id: client_id.clone(),
-            expected_token: Some(*token),
-            reason: "suspension_not_committed".to_string(),
-        })
-        .collect();
-    match tokio::time::timeout(
-        Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
-        state.gateway.clear_client_suspension_fences(items),
-    )
-    .await
-    {
-        Ok(Ok(results))
-            if results
-                .results
-                .iter()
-                .all(|result| result.accepted && !result.fenced) => {}
-        Ok(Ok(_)) => tracing::warn!(
-            "some temporary suspension fence compensations were rejected; recovery is deferred to lease expiry"
-        ),
-        Ok(Err(error)) => tracing::warn!(
-            %error,
-            "temporary suspension fence compensation is deferred to lease expiry"
-        ),
-        Err(error) => tracing::warn!(
-            %error,
-            "temporary suspension fence compensation timed out and is deferred to lease expiry"
-        ),
-    }
-}
-
-async fn promote_agent_suspension_fences(state: &AppState, fences: &BTreeMap<String, uuid::Uuid>) {
-    if fences.is_empty() || !state.gateway.configured() {
-        return;
-    }
-    let items = fences
-        .iter()
-        .map(|(client_id, token)| GatewayClientSuspensionFencePromote {
-            client_id: client_id.clone(),
-            token: *token,
-        })
-        .collect::<Vec<_>>();
-    let result = tokio::time::timeout(
-        Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
-        state.gateway.promote_client_suspension_fences(items),
-    )
-    .await;
-    if !matches!(&result, Ok(Ok(batch)) if batch.results.iter().all(|item| item.accepted && item.fenced))
-    {
-        tracing::error!(
-            ?result,
-            "committed suspension fences were not all promoted; durable dispatch rechecks remain active"
-        );
-    }
-}
-
-async fn clear_agent_suspension_fences(state: &AppState, client_ids: &[String], reason: &str) {
-    let items = client_ids
-        .iter()
-        .map(|client_id| GatewayClientSuspensionFenceClear {
-            client_id: client_id.clone(),
-            expected_token: None,
-            reason: reason.to_string(),
-        })
-        .collect::<Vec<_>>();
-    let result = tokio::time::timeout(
-        Duration::from_secs(AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS),
-        state.gateway.clear_client_suspension_fences(items),
-    )
-    .await;
-    if !matches!(&result, Ok(Ok(batch)) if batch.results.iter().all(|item| item.accepted && !item.fenced))
-    {
-        tracing::warn!(
-            ?result,
-            "committed unsuspensions could not all clear gateway fences; an accepted reconnect will reconcile the local route"
-        );
     }
 }
 
@@ -1673,6 +2104,13 @@ fn validate_bulk_delete_agents_request(request: &BulkDeleteAgentsRequest) -> Res
     Ok(())
 }
 
+fn canonical_lifecycle_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+}
+
 fn validate_bulk_agent_suspension_request(
     request: &BulkAgentSuspensionRequest,
 ) -> Result<(), ApiError> {
@@ -1683,7 +2121,7 @@ fn validate_bulk_agent_suspension_request(
         }));
     }
     if request.client_ids.is_empty()
-        || request.client_ids.len() > GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS
+        || request.client_ids.len() > GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS
     {
         return Err(ApiError::bad_request("agent_suspension_targets_invalid"));
     }

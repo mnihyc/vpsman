@@ -14,6 +14,7 @@ import {
   ListChecks,
   MapPin,
   RotateCcw,
+  RefreshCw,
   Route,
   Ruler,
   Save,
@@ -32,6 +33,9 @@ import { defaultFleetTagVisible, fleetTagVisible } from "../tagDisplay";
 import type { OperatorPreferences, OperatorView, TagView } from "../types";
 
 type PreferencesPanelProps = {
+  error: string | null;
+  loading: boolean;
+  onRefreshSources: () => void;
   onSelectView: (view: "Access" | "System", subpage?: string) => void;
   operator: OperatorView | null;
   tags: TagView[];
@@ -53,6 +57,9 @@ const DRAFT_VALIDATION_ERROR_ID = "preferences-draft-validation-error";
 type PreferenceScopeTab = "browser" | "personal" | "system";
 
 export function PreferencesPanel({
+  error,
+  loading,
+  onRefreshSources,
   onSelectView,
   operator,
   tags,
@@ -63,7 +70,12 @@ export function PreferencesPanel({
     preferencesSaving,
     updatePreferences,
   } = usePanelDisplaySettings();
+  const operatorId = operator?.id ?? null;
   const [draft, setDraft] = useState<OperatorPreferences>(preferences);
+  const synchronizedPreferenceSourceRef = useRef({
+    operatorId,
+    preferences,
+  });
   const [localSelectionMessage, setLocalSelectionMessage] = useState<
     string | null
   >(null);
@@ -94,7 +106,7 @@ export function PreferencesPanel({
       ).length,
     [draft.fleet_tag_visibility_overrides, tags],
   );
-  const dirty = JSON.stringify(draft) !== JSON.stringify(preferences);
+  const dirty = !operatorPreferencesEqual(draft, preferences);
   const saveInFlight = preferencesSaving || localSavePending;
   const timezoneValidationError = validateTimezone(
     draft.timezone?.trim() || null,
@@ -113,8 +125,15 @@ export function PreferencesPanel({
   const saveDisabled = !dirty || saveInFlight;
 
   useEffect(() => {
-    setDraft(preferences);
-  }, [preferences]);
+    const previousSource = synchronizedPreferenceSourceRef.current;
+    synchronizedPreferenceSourceRef.current = { operatorId, preferences };
+    setDraft((current) =>
+      previousSource.operatorId !== operatorId ||
+      operatorPreferencesEqual(current, previousSource.preferences)
+        ? preferences
+        : current,
+    );
+  }, [operatorId, preferences]);
 
   async function savePreferences(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -207,14 +226,40 @@ export function PreferencesPanel({
                 : "Current authenticated operator"}
             </span>
           </div>
-          <span
-            className={
-              dirty ? "consoleStatusBadge warning" : "consoleStatusBadge ok"
-            }
-          >
-            {dirty ? "Unsaved changes" : "Saved"}
-          </span>
+          <div className="headerActionStack">
+            <button
+              className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading
+                  ? "Preference sources are already loading"
+                  : dirty
+                    ? "Save or reset unsaved preference changes before refreshing"
+                    : undefined
+              }
+              disabled={loading || dirty}
+              onClick={onRefreshSources}
+              title="Refresh the current operator profile and tag registry"
+              type="button"
+            >
+              <RefreshCw size={14} />
+              <span>{loading ? "Loading" : "Refresh"}</span>
+            </button>
+            <span
+              className={
+                dirty ? "consoleStatusBadge warning" : "consoleStatusBadge ok"
+              }
+            >
+              {dirty ? "Unsaved changes" : "Saved"}
+            </span>
+          </div>
         </div>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={
+            error ?? (loading ? "Refreshing operator and tag registry" : null)
+          }
+          tone={error ? "danger" : "progress"}
+        />
 
         <form className="preferencesForm" onSubmit={savePreferences}>
           <section
@@ -1161,6 +1206,13 @@ function preferenceChangedCount(
     >
   ).filter((key) => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
     .length;
+}
+
+function operatorPreferencesEqual(
+  left: OperatorPreferences,
+  right: OperatorPreferences,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function scopeClass(scope: "Browser" | "Fleet/system" | "Personal"): string {

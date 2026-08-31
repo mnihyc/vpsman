@@ -8,6 +8,7 @@ import {
   Search,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { formatLowerBoundCount } from "../../constants";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
 import {
@@ -44,6 +45,7 @@ type RunbooksPanelProps = {
   agents: AgentView[];
   commandTemplates: CommandTemplateRecord[];
   commandTemplatesTruncated: boolean;
+  error: string | null;
   jobs: JobHistoryRecord[];
   loading: boolean;
   onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
@@ -57,6 +59,7 @@ export function RunbooksPanel({
   agents,
   commandTemplates,
   commandTemplatesTruncated,
+  error,
   jobs,
   loading,
   onOpenDispatchPreset,
@@ -198,6 +201,11 @@ export function RunbooksPanel({
             </button>
           </div>
         </div>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={error}
+          tone="danger"
+        />
 
         <div className="runbookSummary" aria-label="Runbook catalog summary">
           <RunbookMetric

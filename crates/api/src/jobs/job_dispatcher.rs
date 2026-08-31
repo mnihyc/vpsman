@@ -11,7 +11,9 @@ use futures_util::{stream, StreamExt};
 use tokio::sync::{oneshot, Notify};
 use tracing::{debug, warn};
 use uuid::Uuid;
-use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
+use vpsman_common::{
+    CommandOutput, GatewayClientDispatchFenceOwner, JobCommand, JobRequest, OutputStream,
+};
 use vpsman_server_core::{
     operator_is_active_authorized, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
     TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
@@ -491,6 +493,10 @@ async fn dispatch_claimed_target(
         let outcome = dispatch_rejected_outcome(claimed.job_id, "actor_authority_revoked");
         return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
+    // Bind the durable DB proof to the gateway process observed before that
+    // read. A restart or expired lifecycle lease challenges this exact
+    // request and permits one fresh proof/retry, never a global cached proof.
+    let mut expected_gateway_epoch = state.gateway.command_gateway_epoch();
     if !state.repo.claimed_job_target_dispatchable(&claimed).await? {
         wake_job_terminal_event_consumer();
         return Ok(());
@@ -508,17 +514,51 @@ async fn dispatch_claimed_target(
         command: claimed.operation.clone(),
         max_timeout_secs: claimed.max_timeout_secs.max(1),
     };
-    let outcome = match state
+    let first_dispatch = state
         .gateway
         .dispatch(
             &claimed.client_id,
-            request,
+            request.clone(),
             claimed.process_incarnation_id,
+            expected_gateway_epoch,
+            None,
             claimed.payload_hash.clone(),
             gateway_timeouts,
         )
-        .await
-    {
+        .await;
+    let dispatch = match first_dispatch {
+        Err(error) => {
+            let message = error.to_string();
+            let lifecycle_recheck = parse_lifecycle_recheck_owner(&message);
+            let gateway_epoch_recheck = parse_gateway_epoch_recheck(&message);
+            if lifecycle_recheck.is_none() && gateway_epoch_recheck.is_none() {
+                Err(error)
+            } else {
+                if let Some(gateway_epoch) = gateway_epoch_recheck {
+                    state.gateway.observe_command_gateway_epoch(gateway_epoch);
+                    expected_gateway_epoch = Some(gateway_epoch);
+                }
+                if !state.repo.claimed_job_target_dispatchable(&claimed).await? {
+                    wake_job_terminal_event_consumer();
+                    return Ok(());
+                }
+                state
+                    .gateway
+                    .dispatch(
+                        &claimed.client_id,
+                        request,
+                        claimed.process_incarnation_id,
+                        expected_gateway_epoch,
+                        lifecycle_recheck,
+                        claimed.payload_hash.clone(),
+                        gateway_timeouts,
+                    )
+                    .await
+            }
+        }
+        result => result,
+    };
+    let outcome = match dispatch {
         Ok(result) => crate::routes_jobs::target_outcome_from_gateway(result),
         Err(error) => {
             dispatcher_wake_state()
@@ -578,6 +618,35 @@ async fn dispatch_claimed_target(
 fn parse_agent_incarnation_mismatch_actual(message: &str) -> Option<Uuid> {
     let actual = message.split("actual=").nth(1)?;
     let token = actual
+        .split(|ch: char| !(ch.is_ascii_hexdigit() || ch == '-'))
+        .next()
+        .filter(|value| !value.is_empty())?;
+    Uuid::parse_str(token).ok()
+}
+
+fn parse_gateway_epoch_recheck(message: &str) -> Option<Uuid> {
+    parse_uuid_after_marker(message, "agent_gateway_epoch_recheck_required:")
+}
+
+fn parse_lifecycle_recheck_owner(message: &str) -> Option<GatewayClientDispatchFenceOwner> {
+    let suffix = message.split("agent_lifecycle_recheck_required:").nth(1)?;
+    let mut fields = suffix.split(':');
+    let gateway_epoch = parse_uuid_prefix(fields.next()?)?;
+    let generation = fields.next()?.parse().ok()?;
+    let token = parse_uuid_prefix(fields.next()?)?;
+    Some(GatewayClientDispatchFenceOwner {
+        token,
+        gateway_epoch,
+        generation,
+    })
+}
+
+fn parse_uuid_after_marker(message: &str, marker: &str) -> Option<Uuid> {
+    parse_uuid_prefix(message.split(marker).nth(1)?)
+}
+
+fn parse_uuid_prefix(value: &str) -> Option<Uuid> {
+    let token = value
         .split(|ch: char| !(ch.is_ascii_hexdigit() || ch == '-'))
         .next()
         .filter(|value| !value.is_empty())?;
