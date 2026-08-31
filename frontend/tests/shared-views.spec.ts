@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CreateMonitoringShareRequest,
@@ -25,6 +25,53 @@ const publicClientKey = "shared-edge-key";
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
   await installSharedViewApiMock(page);
+});
+
+test("Ping and shared-view mutations retain current-token projection ownership", () => {
+  const panelSource = (name: string) =>
+    readFileSync(
+      join(process.cwd(), "src", "panels", "observability", name),
+      "utf8",
+    );
+  const ping = panelSource("PingTargetsPanel.tsx");
+  const shares = panelSource("SharedViewsPanel.tsx");
+  const has = (source: string, pattern: RegExp) => pattern.test(source);
+  const tokenOwned = [ping, shares].every(
+    (source) =>
+      source.includes("const currentApiTokenRef = useRef(apiToken);") &&
+      has(source, /const requestApiToken = apiToken;[\s\S]*currentApiTokenRef\.current !== requestApiToken/),
+  );
+  const latestReconcile =
+    has(ping, /refreshTargetsRef\.current = refreshTargets;[\s\S]*function reconcileTargetListAfterTokenRotation\(\)[\s\S]*refreshTargetsRef\.current\(\{/) &&
+    !has(ping, /function reconcileTargetListAfterTokenRotation\(\)[\s\S]{0,250}reportError: false/) &&
+    has(shares, /loadSharesRef\.current = loadShares;[\s\S]*function reconcileShareListAfterTokenRotation\(\)[\s\S]*loadSharesRef\.current\(\)/);
+  const committedMutations =
+    has(ping, /async function awaitTokenOwnedResponse[\s\S]*currentApiTokenRef\.current !== apiToken[\s\S]*onStaleSuccess\?\.\(\)/) &&
+    ping.match(/reconcileTargetListAfterTokenRotation/g)?.length === 5 &&
+    shares.match(/reconcileShareListAfterTokenRotation/g)?.length === 5 &&
+    has(shares, /for \(let offset[\s\S]*currentApiTokenRef\.current !== requestApiToken[\s\S]*const page = await apiGet/);
+  const staleReconciles = [
+    ...shares.matchAll(/reconcileShareListAfterTokenRotation\(\);[\s\S]{0,180}/g),
+  ].map(([block]) => block);
+  const workflowsClose =
+    [
+      "setEditReview(null)",
+      'setStatusFilter("active")',
+      "setReview(null)",
+      "setPendingAction(null)",
+      "setTargetUpdateReview(null)",
+    ].every((close) => staleReconciles.some((block) => block.includes(close))) &&
+    has(shares, /if \(response\.applied\) \{[\s\S]{0,180}reconcileShareListAfterTokenRotation\(\)/);
+  const postAwaitFenced =
+    has(ping, /await refreshTargets\([\s\S]*currentApiTokenRef\.current !== apiToken/) &&
+    has(shares, /await loadShares\(\);[\s\S]*currentApiTokenRef\.current !== apiToken/);
+  expect({ committedMutations, latestReconcile, postAwaitFenced, tokenOwned, workflowsClose }).toEqual({
+    committedMutations: true,
+    latestReconcile: true,
+    postAwaitFenced: true,
+    tokenOwned: true,
+    workflowsClose: true,
+  });
 });
 
 test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", async ({
@@ -295,6 +342,117 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   ).toBeVisible();
   await expect(
     revokedGrid.getByText("Regional customer view", { exact: true }),
+  ).toBeVisible();
+});
+
+test("a committed shared-view mutation fences a held list read and coalesces one trailing refresh", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "list ownership is viewport independent",
+  );
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Observability", "Shared views");
+
+  const grid = page.getByLabel("Active shared views data grid");
+  await expect(
+    grid.getByText("Customer status", { exact: true }),
+  ).toBeVisible();
+  const now = Date.now();
+  const staleRecords = [
+    shareFixture({
+      createdAt: new Date(now - 2 * 60 * 60 * 1_000).toISOString(),
+      expiresAt: new Date(now + 24 * 60 * 60 * 1_000).toISOString(),
+      id: activeShareId,
+      name: "Customer status",
+      status: "active",
+      targetClientIds: ["agent-sfo-01"],
+      targetUpdateAvailable: true,
+      visitorCount: 2,
+    }),
+  ];
+  let listGets = 0;
+  let releaseHeldRead: (() => void) | undefined;
+  let releaseTrailingRead: (() => void) | undefined;
+  let markHeldReadStarted: (() => void) | undefined;
+  let markTrailingReadStarted: (() => void) | undefined;
+  const heldRead = new Promise<void>((resolve) => {
+    releaseHeldRead = resolve;
+  });
+  const trailingRead = new Promise<void>((resolve) => {
+    releaseTrailingRead = resolve;
+  });
+  const heldReadStarted = new Promise<void>((resolve) => {
+    markHeldReadStarted = resolve;
+  });
+  const trailingReadStarted = new Promise<void>((resolve) => {
+    markTrailingReadStarted = resolve;
+  });
+  await page.route(
+    /\/api\/v1\/monitoring-shares(?:\/[^?]*)?(?:\?.*)?$/,
+    async (route) => {
+      const request = route.request();
+      if (
+        request.method() === "GET" &&
+        new URL(request.url()).pathname === "/api/v1/monitoring-shares"
+      ) {
+        listGets += 1;
+        if (listGets === 1) {
+          markHeldReadStarted?.();
+          await heldRead;
+          await json(route, staleRecords);
+          return;
+        }
+        if (listGets === 2) {
+          markTrailingReadStarted?.();
+          await trailingRead;
+        }
+      }
+      await route.fallback();
+    },
+  );
+
+  const refresh = grid.getByRole("button", { name: "Refresh", exact: true });
+  await refresh.click();
+  await heldReadStarted;
+  await grid.getByRole("button", { name: "Create shared view" }).click();
+  const drawer = page.getByRole("complementary", {
+    name: "Create shared view",
+  });
+  await drawer
+    .getByLabel("Shared view display name")
+    .fill("Concurrent customer view");
+  await drawer.getByRole("button", { name: "Review creation" }).click();
+  await drawer
+    .locator(".confirmationPrompt")
+    .filter({ hasText: "Confirm public monitoring view" })
+    .getByRole("button", { name: "Create shared view", exact: true })
+    .click();
+  await expect(
+    grid.getByText("Concurrent customer view", { exact: true }),
+  ).toBeVisible();
+  expect(listGets).toBe(1);
+
+  releaseHeldRead?.();
+  await trailingReadStarted;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(
+    grid.getByText("Concurrent customer view", { exact: true }),
+  ).toBeVisible();
+  expect(listGets).toBe(2);
+
+  releaseTrailingRead?.();
+  await expect(refresh).toBeEnabled();
+  expect(listGets).toBe(2);
+  await expect(
+    grid.getByText("Concurrent customer view", { exact: true }),
   ).toBeVisible();
 });
 

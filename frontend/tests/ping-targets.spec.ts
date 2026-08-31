@@ -168,6 +168,132 @@ test("new Ping targets keep their authoritative save resolution when mutation ev
   await expect(createdRow).not.toContainText("Target refresh unavailable");
 });
 
+test("a committed Ping target mutation fences a held list read and coalesces one trailing refresh", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "list ownership is viewport independent",
+  );
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Observability", "Ping targets");
+
+  const grid = page.getByLabel("Ping targets data grid");
+  await expect(
+    grid.getByText("Frankfurt gateway", { exact: true }),
+  ).toBeVisible();
+  const staleRecords = pingTargetFixtures(false);
+  let createdPostcommitTarget: PingTargetView | null = null;
+  let listGets = 0;
+  let releaseHeldRead: (() => void) | undefined;
+  let releaseTrailingRead: (() => void) | undefined;
+  let markHeldReadStarted: (() => void) | undefined;
+  let markTrailingReadStarted: (() => void) | undefined;
+  const heldRead = new Promise<void>((resolve) => {
+    releaseHeldRead = resolve;
+  });
+  const trailingRead = new Promise<void>((resolve) => {
+    releaseTrailingRead = resolve;
+  });
+  const heldReadStarted = new Promise<void>((resolve) => {
+    markHeldReadStarted = resolve;
+  });
+  const trailingReadStarted = new Promise<void>((resolve) => {
+    markTrailingReadStarted = resolve;
+  });
+  await page.route(/\/api\/v1\/ping-targets(?:\/.*)?$/, async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === "/api/v1/ping-targets" && request.method() === "GET") {
+      listGets += 1;
+      if (listGets === 1) {
+        markHeldReadStarted?.();
+        await heldRead;
+        await json(route, staleRecords);
+        return;
+      }
+      if (listGets === 2) {
+        markTrailingReadStarted?.();
+        await trailingRead;
+      }
+      await json(
+        route,
+        createdPostcommitTarget
+          ? [createdPostcommitTarget, ...staleRecords]
+          : staleRecords,
+      );
+      return;
+    }
+    if (pathname === "/api/v1/ping-targets" && request.method() === "POST") {
+      const body = request.postDataJSON() as PingTargetMutationRequest;
+      const targetClientIds = body.target_client_ids ?? [];
+      createdPostcommitTarget = {
+        ...targetFixture({
+          assignedCount: targetClientIds.length,
+          generation: 1,
+          id: createdTargetId,
+          name: body.name,
+          primaryCount: 0,
+          runtimeReason: "No runtime application evidence is available yet.",
+          runtimeState: "unknown",
+          selector: body.selector_expression ?? "*",
+          targetUpdateAvailable: false,
+        }),
+        enabled: body.enabled ?? true,
+        host: body.host,
+        port: body.port ?? null,
+        probe_kind: body.probe_kind,
+        target_client_ids: targetClientIds,
+      };
+      await route.fallback();
+      return;
+    }
+    await route.fallback();
+  });
+
+  const refresh = grid.getByRole("button", { name: "Refresh", exact: true });
+  await refresh.click();
+  await heldReadStarted;
+  await grid.getByRole("button", { name: "Create Ping target" }).click();
+  const drawer = page.getByRole("complementary", {
+    name: "Create Ping target",
+  });
+  await drawer.getByLabel("Ping target name").fill("Concurrent status check");
+  await drawer
+    .getByLabel("Ping target host or IP")
+    .fill("concurrent.example.net");
+  await drawer.getByRole("button", { name: "Review create" }).click();
+  await drawer
+    .getByRole("region", { name: "Confirm Ping target change" })
+    .getByRole("button", { name: "Create Ping target" })
+    .click();
+  await expect(
+    grid.getByText("Concurrent status check", { exact: true }),
+  ).toBeVisible();
+  expect(listGets).toBe(1);
+
+  releaseHeldRead?.();
+  await trailingReadStarted;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(
+    grid.getByText("Concurrent status check", { exact: true }),
+  ).toBeVisible();
+  expect(listGets).toBe(2);
+
+  releaseTrailingRead?.();
+  await expect(refresh).toBeEnabled();
+  expect(listGets).toBe(2);
+  await expect(
+    grid.getByText("Concurrent status check", { exact: true }),
+  ).toBeVisible();
+});
+
 test(maintenanceEvidenceTestTitle, async ({ page }) => {
   const unavailablePing = targetFixture({
     assignedCount: 1,
@@ -285,31 +411,7 @@ async function installPingTargetApiMock(page: Page) {
     assignmentFixture("agent-sfo-01", "edge-sfo-01", true),
     assignmentFixture("agent-fra-02", "core-fra-02", primaryApplied),
   ];
-  const targets = (): PingTargetView[] => [
-    targetFixture({
-      assignedCount: 2,
-      generation: 3,
-      id: driftedTargetId,
-      name: "Frankfurt gateway",
-      primaryCount: primaryApplied ? 2 : 1,
-      runtimeReason: "Every assigned VPS has confirmed Ping generation 3.",
-      runtimeState: "applied",
-      selector: "provider:alpha || country:DE",
-      targetUpdateAvailable: true,
-    }),
-    targetFixture({
-      assignedCount: 1,
-      generation: 2,
-      id: stableTargetId,
-      name: "Status endpoint",
-      primaryCount: 0,
-      runtimeReason: "One assigned VPS has not confirmed Ping generation 2.",
-      runtimeState: "stale",
-      selector: "vps.rules:network.port_speed",
-      targetUpdateAvailable: false,
-      targetUpdateEvidenceAvailable: false,
-    }),
-  ];
+  const targets = (): PingTargetView[] => pingTargetFixtures(primaryApplied);
 
   await page.route(/\/api\/v1\/monitoring\/cards(?:\?.*)?$/, async (route) => {
     await json(route, {
@@ -377,6 +479,34 @@ async function installPingTargetApiMock(page: Page) {
     }
     await route.fallback();
   });
+}
+
+function pingTargetFixtures(primaryApplied: boolean): PingTargetView[] {
+  return [
+    targetFixture({
+      assignedCount: 2,
+      generation: 3,
+      id: driftedTargetId,
+      name: "Frankfurt gateway",
+      primaryCount: primaryApplied ? 2 : 1,
+      runtimeReason: "Every assigned VPS has confirmed Ping generation 3.",
+      runtimeState: "applied",
+      selector: "provider:alpha || country:DE",
+      targetUpdateAvailable: true,
+    }),
+    targetFixture({
+      assignedCount: 1,
+      generation: 2,
+      id: stableTargetId,
+      name: "Status endpoint",
+      primaryCount: 0,
+      runtimeReason: "One assigned VPS has not confirmed Ping generation 2.",
+      runtimeState: "stale",
+      selector: "vps.rules:network.port_speed",
+      targetUpdateAvailable: false,
+      targetUpdateEvidenceAvailable: false,
+    }),
+  ];
 }
 
 function targetFixture({

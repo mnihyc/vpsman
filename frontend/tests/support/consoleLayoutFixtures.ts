@@ -4105,6 +4105,7 @@ export async function installConsoleApiMock(
     fleetAlertEventReviewFailure?: boolean;
     fleetAlertEventReviewRefreshAddsNew?: boolean;
     fleetAlertEventReviewSaturated?: boolean;
+    fleetAlertEventReviewSaturatedCount?: number;
     fleetAlertEmptyTruncated?: boolean;
     fleetAlertSourceFailure?: "current" | "history" | "both";
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
@@ -4178,32 +4179,35 @@ export async function installConsoleApiMock(
     vpsRuleValuesAdditional?: VpsRuleValueRecord[];
   } = {},
 ) {
-  const saturatedFleetAlertEvents = Array.from({ length: 201 }, (_, index) => {
-    const triggeredAt = new Date(
-      Date.parse("2026-06-02T10:00:00Z") - index * 1_000,
-    ).toISOString();
-    return {
-      ...fleetAlerts[8],
-      id: `fleet-alert-event-review-${String(index).padStart(3, "0")}`,
-      lifecycle: {
-        ...fleetAlerts[8].lifecycle,
-        last_confirmed_at: triggeredAt,
-        triggered_at: triggeredAt,
-      },
-      observed_at: triggeredAt,
-      operator_state: index === 0 ? "acknowledged" : "open",
-      state_actor_id:
-        index === 0 ? "99999999-aaaa-4bbb-8ccc-000000000001" : null,
-      state_reason: index === 0 ? "fresh snapshot triage" : null,
-      state_revision: index === 0 ? 1 : 0,
-      state_updated_at: index === 0 ? "2026-06-02T10:00:01Z" : null,
-      target_id: `fixture-terminal-job-${String(index).padStart(3, "0")}`,
-      title:
-        index === 200
-          ? "Older incident beyond snapshot cap"
-          : `Paged terminal incident ${String(index).padStart(3, "0")}`,
-    };
-  });
+  const saturatedFleetAlertEvents = Array.from(
+    { length: options.fleetAlertEventReviewSaturatedCount ?? 201 },
+    (_, index) => {
+      const triggeredAt = new Date(
+        Date.parse("2026-06-02T10:00:00Z") - index * 1_000,
+      ).toISOString();
+      return {
+        ...fleetAlerts[8],
+        id: `fleet-alert-event-review-${String(index).padStart(3, "0")}`,
+        lifecycle: {
+          ...fleetAlerts[8].lifecycle,
+          last_confirmed_at: triggeredAt,
+          triggered_at: triggeredAt,
+        },
+        observed_at: triggeredAt,
+        operator_state: index === 0 ? "acknowledged" : "open",
+        state_actor_id:
+          index === 0 ? "99999999-aaaa-4bbb-8ccc-000000000001" : null,
+        state_reason: index === 0 ? "fresh snapshot triage" : null,
+        state_revision: index === 0 ? 1 : 0,
+        state_updated_at: index === 0 ? "2026-06-02T10:00:01Z" : null,
+        target_id: `fixture-terminal-job-${String(index).padStart(3, "0")}`,
+        title:
+          index === 200
+            ? "Older incident beyond snapshot cap"
+            : `Paged terminal incident ${String(index).padStart(3, "0")}`,
+      };
+    },
+  );
   const scopedGlobalFleetAlert = {
     ...fleetAlerts[8],
     client_id: null,

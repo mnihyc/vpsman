@@ -181,6 +181,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   >(null);
   const fleetAlertEventReviewActive = useRef(false);
   const fleetAlertEventSyncPending = useRef(false);
+  const fleetAlertEventProjectionGeneration = useRef(0);
   const syncFleetAlertEventsRef = useRef<
     (queueTrailing?: boolean) => Promise<void>
   >(() => Promise.resolve());
@@ -1518,6 +1519,16 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     [apiToken],
   );
 
+  const invalidateFleetAlertEventReads = useCallback(() => {
+    ++fleetAlertEventProjectionGeneration.current;
+    if (fleetAlertEventReviewInFlight.current) {
+      // The successful mutation below owns the affected rows. Discard the
+      // older read, then run one authoritative sync to recover unrelated
+      // occurrence changes that may have shared that discarded response.
+      fleetAlertEventSyncPending.current = true;
+    }
+  }, []);
+
   const bulkUpdateFleetAlertStates = useCallback(
     async (request: FleetAlertStateBulkRequest) => {
       try {
@@ -1530,6 +1541,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           return response;
         }
         ++fleetAlertProjectionGeneration.current;
+        invalidateFleetAlertEventReads();
         setFleetAlerts((current) =>
           applyFleetAlertStates(current, response.states),
         );
@@ -1558,7 +1570,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         throw error;
       }
     },
-    [apiToken, loadFleet],
+    [apiToken, invalidateFleetAlertEventReads, loadFleet],
   );
 
   const resolveFleetAlert = useCallback(
@@ -1573,6 +1585,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
       ++fleetAlertProjectionGeneration.current;
       ++policyAlertEpisodeGeneration.current;
+      invalidateFleetAlertEventReads();
       const resolvedIds = new Set(response.alerts.map((alert) => alert.id));
       setFleetAlerts((current) =>
         current.filter((stored) => !resolvedIds.has(stored.id)),
@@ -1599,7 +1612,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       );
       return response;
     },
-    [apiToken],
+    [apiToken, invalidateFleetAlertEventReads],
   );
 
   const finishFleetAlertEventReviewRequest = useCallback(
@@ -1654,6 +1667,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setFleetAlertEventReviewLoading(true);
       setFleetAlertEventReviewError(null);
       setFleetAlertEventReviewLimitNotice(null);
+      const projectionGeneration =
+        fleetAlertEventProjectionGeneration.current;
       const request = (async () => {
         try {
           const response = await apiPost<FleetAlertEventSyncResponse>(
@@ -1662,7 +1677,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             { known_alert_ids: knownAlertIds },
           );
           assertFleetAlertEventSyncResponse(response, knownAlertIds);
-          if (apiTokenRef.current !== apiToken) {
+          if (
+            apiTokenRef.current !== apiToken ||
+            projectionGeneration !==
+              fleetAlertEventProjectionGeneration.current
+          ) {
             return;
           }
           const reconciled = reconcileFleetAlertEventReviewItems(
@@ -1701,7 +1720,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           fleetAlertEventReviewStartedRef.current = true;
           setFleetAlertEventReviewVerified(true);
         } catch (error) {
-          if (apiTokenRef.current === apiToken) {
+          if (
+            apiTokenRef.current === apiToken &&
+            projectionGeneration ===
+              fleetAlertEventProjectionGeneration.current
+          ) {
             setFleetAlertEventReviewVerified(false);
             setFleetAlertEventReviewError(
               error instanceof Error
@@ -1745,6 +1768,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setFleetAlertEventReviewLoading(true);
     setFleetAlertEventReviewError(null);
     setFleetAlertEventReviewLimitNotice(null);
+    const projectionGeneration = fleetAlertEventProjectionGeneration.current;
     const pageLimit = Math.min(
       FLEET_ALERT_EVENT_PAGE_LIMIT,
       FLEET_ALERT_EVENT_SYNC_ID_LIMIT -
@@ -1762,7 +1786,10 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           apiToken,
         );
         assertFleetAlertEventPage(page, cursor);
-        if (apiTokenRef.current !== apiToken) {
+        if (
+          apiTokenRef.current !== apiToken ||
+          projectionGeneration !== fleetAlertEventProjectionGeneration.current
+        ) {
           return;
         }
         const nextItems = dedupeFleetAlertsById([
@@ -1785,7 +1812,10 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         }
         setFleetAlertEventReviewVerified(true);
       } catch (error) {
-        if (apiTokenRef.current === apiToken) {
+        if (
+          apiTokenRef.current === apiToken &&
+          projectionGeneration === fleetAlertEventProjectionGeneration.current
+        ) {
           setFleetAlertEventReviewVerified(false);
           setFleetAlertEventReviewError(
             error instanceof Error
@@ -1837,6 +1867,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
       setFleetAlertEventReviewLoading(true);
       setFleetAlertEventReviewError(null);
+      const projectionGeneration =
+        fleetAlertEventProjectionGeneration.current;
       const request = (async () => {
         try {
           const requestQuery = new URLSearchParams({
@@ -1851,6 +1883,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           assertFleetAlertEventPage(page, cursor);
           if (
             apiTokenRef.current !== apiToken ||
+            projectionGeneration !==
+              fleetAlertEventProjectionGeneration.current ||
             fleetAlertEventSearchQueryRef.current !== normalizedQuery
           ) {
             return;
@@ -1885,7 +1919,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           );
           setFleetAlertEventReviewVerified(true);
         } catch (error) {
-          if (apiTokenRef.current === apiToken) {
+          if (
+            apiTokenRef.current === apiToken &&
+            projectionGeneration ===
+              fleetAlertEventProjectionGeneration.current
+          ) {
             setFleetAlertEventReviewVerified(false);
             setFleetAlertEventReviewError(
               error instanceof Error
@@ -1905,14 +1943,20 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     // React StrictMode remounts panel effects in development. The remount
     // shares an already-running head sync, while entry during an older/search
     // request queues one authoritative head sync after that request completes.
+    const inFlight = fleetAlertEventReviewInFlight.current;
+    if (!inFlight) {
+      // A mutation may have invalidated a request after this panel unmounted.
+      // This activation sync itself satisfies that pending freshness signal.
+      fleetAlertEventSyncPending.current = false;
+    }
     return syncFleetAlertEventsRef.current(
-      fleetAlertEventReviewInFlightKind.current !== "sync",
+      fleetAlertEventReviewInFlightKind.current !== "sync" ||
+        fleetAlertEventSyncPending.current,
     );
   }, []);
 
   const deactivateFleetAlertEventReview = useCallback(() => {
     fleetAlertEventReviewActive.current = false;
-    fleetAlertEventSyncPending.current = false;
   }, []);
 
   const upsertFleetAlertNotificationChannel = useCallback(
@@ -2157,6 +2201,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetAlertEventReviewInFlightKind.current = null;
     fleetAlertEventReviewActive.current = false;
     fleetAlertEventSyncPending.current = false;
+    fleetAlertEventProjectionGeneration.current += 1;
     fleetAlertEventReviewItemsRef.current = [];
     fleetAlertEventReviewCursorRef.current = null;
     fleetAlertEventReviewHasMoreRef.current = false;

@@ -16,7 +16,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { apiGet, apiPost, apiPut } from "../../api";
+import { apiGet, apiPost, apiPut, LatestReadConsumer } from "../../api";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -91,6 +91,12 @@ type LifecycleReview = {
   targets: PingTargetView[];
 };
 
+type RefreshTargetsOptions = {
+  refreshExpandedDetail?: boolean;
+  reportError?: boolean;
+  resetAuxiliaryState?: boolean;
+};
+
 type UpdateTargetsReview = {
   preview: BulkUpdatePingTargetsResponse;
   targetIds: string[];
@@ -153,8 +159,20 @@ export function PingTargetsPanel({
   const [selectorExpression, setSelectorExpression] = useState("*");
   const pageFeedbackRef = useRef<HTMLDivElement | null>(null);
   const editorFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const currentApiTokenRef = useRef(apiToken);
+  currentApiTokenRef.current = apiToken;
   const loadedApiTokenRef = useRef<string | null>(null);
   const loadGenerationRef = useRef(0);
+  // Full-list GETs have one browser-local consumer. Mutation responses own
+  // their committed rows immediately; generations prevent an older GET from
+  // publishing over them while the consumer retains one latest reconciliation.
+  const targetListReadCountRef = useRef(0);
+  const targetListReadConsumerRef = useRef(
+    new LatestReadConsumer<PingTargetView[]>(),
+  );
+  const refreshTargetsRef = useRef<
+    (options?: RefreshTargetsOptions) => Promise<string | null>
+  >(() => Promise.resolve(null));
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -192,13 +210,14 @@ export function PingTargetsPanel({
     if (!requestsEnabled) return;
     if (loadedApiTokenRef.current === apiToken) return;
     loadedApiTokenRef.current = apiToken;
-    const generation = ++loadGenerationRef.current;
+    loadGenerationRef.current += 1;
+    targetListReadConsumerRef.current.discardPending([]);
     invalidateReviewGeneration();
     setReviewPending(false);
-    setLoading(true);
     setError(null);
     setTargets([]);
     setDetails({});
+    setDetailLoading({});
     setDetailErrors({});
     setRuntimeEvidence({});
     setExpandedTargetId(null);
@@ -206,18 +225,10 @@ export function PingTargetsPanel({
     setSaveReview(null);
     setUpdateTargetsReview(null);
     setLifecycleReview(null);
-    void apiGet<PingTargetView[]>("/api/v1/ping-targets", apiToken)
-      .then((records) => {
-        if (loadGenerationRef.current !== generation) return;
-        setTargets(records);
-      })
-      .catch((cause) => {
-        if (loadGenerationRef.current !== generation) return;
-        setError(errorMessage(cause));
-      })
-      .finally(() => {
-        if (loadGenerationRef.current === generation) setLoading(false);
-      });
+    void refreshTargets({
+      refreshExpandedDetail: false,
+      resetAuxiliaryState: false,
+    });
   }, [apiToken, invalidateReviewGeneration, requestsEnabled]);
 
   const parsedSelector = useMemo(
@@ -286,48 +297,124 @@ export function PingTargetsPanel({
     setFeedback(null);
   }
 
-  async function refreshTargets() {
+  async function refreshTargets({
+    refreshExpandedDetail = true,
+    reportError = true,
+    resetAuxiliaryState = true,
+  }: RefreshTargetsOptions = {}): Promise<string | null> {
+    const requestApiToken = apiToken;
+    if (currentApiTokenRef.current !== requestApiToken) return null;
+    const generation = ++loadGenerationRef.current;
+    targetListReadCountRef.current += 1;
     setLoading(true);
-    setError(null);
+    if (reportError) setError(null);
     try {
-      const records = await apiGet<PingTargetView[]>(
-        "/api/v1/ping-targets",
-        apiToken,
+      const records = await targetListReadConsumerRef.current.enqueue(() =>
+        apiGet<PingTargetView[]>("/api/v1/ping-targets", requestApiToken),
       );
-      setTargets(records);
-      setRuntimeEvidence({});
-      setDetails({});
-      setDetailErrors({});
       if (
+        currentApiTokenRef.current !== requestApiToken ||
+        loadGenerationRef.current !== generation
+      ) {
+        return null;
+      }
+      setTargets(records);
+      if (resetAuxiliaryState) {
+        setRuntimeEvidence({});
+        setDetails({});
+        setDetailErrors({});
+      }
+      if (
+        refreshExpandedDetail &&
         expandedTargetId &&
         records.some((target) => target.id === expandedTargetId)
       ) {
         await fetchDetail(expandedTargetId);
       }
+      return null;
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (
+        currentApiTokenRef.current !== requestApiToken ||
+        loadGenerationRef.current !== generation
+      ) {
+        return null;
+      }
+      const message = errorMessage(cause);
+      if (reportError) setError(message);
+      return message;
     } finally {
-      setLoading(false);
+      targetListReadCountRef.current -= 1;
+      if (
+        currentApiTokenRef.current === requestApiToken &&
+        loadGenerationRef.current === generation
+      ) {
+        setLoading(false);
+      }
+    }
+  }
+  refreshTargetsRef.current = refreshTargets;
+
+  function reconcileTargetListAfterTokenRotation() {
+    if (!currentApiTokenRef.current) return;
+    void refreshTargetsRef.current({
+      refreshExpandedDetail: false,
+      resetAuxiliaryState: false,
+    });
+  }
+
+  async function awaitTokenOwnedResponse<T>(
+    request: Promise<T>,
+    onStaleSuccess?: () => void,
+  ): Promise<T | null> {
+    try {
+      const response = await request;
+      if (currentApiTokenRef.current !== apiToken) {
+        onStaleSuccess?.();
+        return null;
+      }
+      return response;
+    } catch (cause) {
+      if (currentApiTokenRef.current !== apiToken) return null;
+      throw cause;
     }
   }
 
-  async function fetchDetail(targetId: string): Promise<PingTargetDetailView> {
+  async function fetchDetail(
+    targetId: string,
+  ): Promise<PingTargetDetailView | null> {
+    const requestApiToken = apiToken;
+    if (currentApiTokenRef.current !== requestApiToken) return null;
+    const listGeneration = loadGenerationRef.current;
     setDetailLoading((current) => ({ ...current, [targetId]: true }));
     setDetailErrors((current) => omitKey(current, targetId));
     try {
       const detail = await apiGet<PingTargetDetailView>(
         `/api/v1/ping-targets/${encodeURIComponent(targetId)}`,
-        apiToken,
+        requestApiToken,
       );
+      if (
+        currentApiTokenRef.current !== requestApiToken ||
+        loadGenerationRef.current !== listGeneration
+      ) {
+        return null;
+      }
       setDetails((current) => ({ ...current, [targetId]: detail }));
       setTargets((current) => replaceTarget(current, detail.target));
       return detail;
     } catch (cause) {
+      if (
+        currentApiTokenRef.current !== requestApiToken ||
+        loadGenerationRef.current !== listGeneration
+      ) {
+        return null;
+      }
       const message = errorMessage(cause);
       setDetailErrors((current) => ({ ...current, [targetId]: message }));
       throw cause;
     } finally {
-      setDetailLoading((current) => ({ ...current, [targetId]: false }));
+      if (currentApiTokenRef.current === requestApiToken) {
+        setDetailLoading((current) => ({ ...current, [targetId]: false }));
+      }
     }
   }
 
@@ -346,6 +433,7 @@ export function PingTargetsPanel({
     enterReviewWorkflow("editor");
     await runPanelAction(setPending, setError, async () => {
       const detail = details[target.id] ?? (await fetchDetail(target.id));
+      if (!detail) return;
       setEditor({
         assignments: detail.assignments,
         mode: "edit",
@@ -385,6 +473,7 @@ export function PingTargetsPanel({
                 selector_expression: frozenSelectorExpression.trim(),
               })
             ).targets;
+      if (currentApiTokenRef.current !== apiToken) return;
       if (!isReviewGenerationCurrent(reviewGeneration)) return;
       const targetClientIds = uniqueSorted(resolved.map((agent) => agent.id));
       const request = editorRequest({
@@ -414,7 +503,10 @@ export function PingTargetsPanel({
         targetName: request.name,
       });
     } catch (cause) {
-      if (isReviewGenerationCurrent(reviewGeneration)) {
+      if (
+        currentApiTokenRef.current === apiToken &&
+        isReviewGenerationCurrent(reviewGeneration)
+      ) {
         setError(errorMessage(cause));
       }
     } finally {
@@ -427,17 +519,21 @@ export function PingTargetsPanel({
   async function confirmSave() {
     if (!saveReview) return;
     await runPanelAction(setPending, setError, async () => {
-      const response = saveReview.targetId
-        ? await apiPut<PingTargetMutationResponse>(
-            `/api/v1/ping-targets/${encodeURIComponent(saveReview.targetId)}`,
-            apiToken,
-            saveReview.request,
-          )
-        : await apiPost<PingTargetMutationResponse>(
-            "/api/v1/ping-targets",
-            apiToken,
-            saveReview.request,
-          );
+      const response = await awaitTokenOwnedResponse(
+        saveReview.targetId
+          ? apiPut<PingTargetMutationResponse>(
+              `/api/v1/ping-targets/${encodeURIComponent(saveReview.targetId)}`,
+              apiToken,
+              saveReview.request,
+            )
+          : apiPost<PingTargetMutationResponse>(
+              "/api/v1/ping-targets",
+              apiToken,
+              saveReview.request,
+            ),
+        reconcileTargetListAfterTokenRotation,
+      );
+      if (!response) return;
       const returnedTarget = response.target.target;
       const priorTarget =
         saveReview.kind === "update" && editor?.mode === "edit"
@@ -459,6 +555,7 @@ export function PingTargetsPanel({
               }
             : returnedTarget;
       const savedDetail = { ...response.target, target: saved };
+      const reconcileList = invalidateTargetListAfterMutation();
       setTargets((current) => replaceTarget(current, saved));
       setDetails((current) => ({ ...current, [saved.id]: savedDetail }));
       setRuntimeEvidence((current) => ({
@@ -475,6 +572,13 @@ export function PingTargetsPanel({
       );
       setSaveReview(null);
       setEditor(null);
+      if (reconcileList) {
+        void refreshTargets({
+          refreshExpandedDetail: false,
+          reportError: false,
+          resetAuxiliaryState: false,
+        });
+      }
     });
   }
 
@@ -491,11 +595,14 @@ export function PingTargetsPanel({
     enterReviewWorkflow("targets");
     await runPanelAction(setPending, setError, async () => {
       const targetIds = uniqueSorted(rows.map((row) => row.id));
-      const preview = await apiPost<BulkUpdatePingTargetsResponse>(
-        "/api/v1/ping-targets/update-targets",
-        apiToken,
-        { target_ids: targetIds, confirmed: false },
+      const preview = await awaitTokenOwnedResponse(
+        apiPost<BulkUpdatePingTargetsResponse>(
+          "/api/v1/ping-targets/update-targets",
+          apiToken,
+          { target_ids: targetIds, confirmed: false },
+        ),
       );
+      if (!preview) return;
       if (!pingTargetChangesPresent(preview.changes)) {
         setFeedback({
           message:
@@ -511,15 +618,20 @@ export function PingTargetsPanel({
   async function confirmTargetUpdates() {
     if (!updateTargetsReview) return;
     await runPanelAction(setPending, setError, async () => {
-      const response = await apiPost<BulkUpdatePingTargetsResponse>(
-        "/api/v1/ping-targets/update-targets",
-        apiToken,
-        {
-          target_ids: updateTargetsReview.targetIds,
-          preview_hash: updateTargetsReview.preview.preview_hash,
-          confirmed: true,
-        },
+      const response = await awaitTokenOwnedResponse(
+        apiPost<BulkUpdatePingTargetsResponse>(
+          "/api/v1/ping-targets/update-targets",
+          apiToken,
+          {
+            target_ids: updateTargetsReview.targetIds,
+            preview_hash: updateTargetsReview.preview.preview_hash,
+            confirmed: true,
+          },
+        ),
+        reconcileTargetListAfterTokenRotation,
       );
+      if (!response) return;
+      invalidateTargetListAfterMutation();
       const evidence = runtimeEvidenceFor(response.runtime_sync);
       setRuntimeEvidence((current) => ({
         ...current,
@@ -555,11 +667,16 @@ export function PingTargetsPanel({
           lifecycleReview.targets.map((target) => target.id),
         ),
       };
-      const response = await apiPost<BulkPingTargetLifecycleResponse>(
-        "/api/v1/ping-targets/lifecycle",
-        apiToken,
-        request,
+      const response = await awaitTokenOwnedResponse(
+        apiPost<BulkPingTargetLifecycleResponse>(
+          "/api/v1/ping-targets/lifecycle",
+          apiToken,
+          request,
+        ),
+        reconcileTargetListAfterTokenRotation,
       );
+      if (!response) return;
+      invalidateTargetListAfterMutation();
       const count = response.affected_target_ids.length;
       const evidence = runtimeEvidenceFor(response.runtime_sync);
       setRuntimeEvidence((current) => ({
@@ -597,31 +714,32 @@ export function PingTargetsPanel({
           assignments.map((assignment) => assignment.client.id),
         ),
       };
-      const response = await apiPost<PingTargetMutationResponse>(
-        `/api/v1/ping-targets/${encodeURIComponent(target.id)}/primary`,
-        apiToken,
-        request,
+      const response = await awaitTokenOwnedResponse(
+        apiPost<PingTargetMutationResponse>(
+          `/api/v1/ping-targets/${encodeURIComponent(target.id)}/primary`,
+          apiToken,
+          request,
+        ),
+        reconcileTargetListAfterTokenRotation,
       );
+      if (!response) return;
       const preservedTarget = {
         ...response.target.target,
         target_update_available: target.target_update_available,
         target_update_evidence_available:
           target.target_update_evidence_available,
       };
+      invalidateTargetListAfterMutation();
       setTargets((current) => replaceTarget(current, preservedTarget));
       setDetails({
         [target.id]: { ...response.target, target: preservedTarget },
       });
-      let refreshFailure: string | null = null;
-      try {
-        const records = await apiGet<PingTargetView[]>(
-          "/api/v1/ping-targets",
-          apiToken,
-        );
-        setTargets(records);
-      } catch (cause) {
-        refreshFailure = errorMessage(cause);
-      }
+      const refreshFailure = await refreshTargets({
+        refreshExpandedDetail: false,
+        reportError: false,
+        resetAuxiliaryState: false,
+      });
+      if (currentApiTokenRef.current !== apiToken) return;
       setFeedback(
         refreshFailure
           ? {
@@ -634,6 +752,11 @@ export function PingTargetsPanel({
             },
       );
     });
+  }
+
+  function invalidateTargetListAfterMutation(): boolean {
+    loadGenerationRef.current += 1;
+    return targetListReadCountRef.current > 0;
   }
 
   const columns = useMemo<ConsoleDataGridColumn<PingTargetView>[]>(

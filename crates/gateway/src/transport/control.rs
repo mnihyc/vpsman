@@ -922,6 +922,11 @@ async fn acquire_gateway_client_dispatch_fence(
     state: &GatewayState,
     acquire: GatewayClientDispatchFenceAcquire,
 ) -> Result<GatewayClientDispatchFenceAcquireResult> {
+    anyhow::ensure!(
+        !acquire.supersede_prepared_suspension
+            || acquire.purpose == GatewayClientDispatchFencePurpose::Suspension,
+        "dispatch_fence_prepared_suspension_supersession_purpose_invalid"
+    );
     let lifecycle_owner = state.client_lifecycle_owner(&acquire.client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
     {
@@ -945,7 +950,14 @@ async fn acquire_gateway_client_dispatch_fence(
                 owner: existing.owner(),
             });
         }
-        let replaceable = existing.requires_durable_recheck()
+        let supersedes_prepared_suspension = acquire.supersede_prepared_suspension
+            && existing.purpose == GatewayClientDispatchFencePurpose::Suspension
+            && matches!(
+                existing.state,
+                GatewayClientDispatchFenceState::Prepared { .. }
+            );
+        let replaceable = supersedes_prepared_suspension
+            || existing.requires_durable_recheck()
             || (matches!(existing.state, GatewayClientDispatchFenceState::Persistent)
                 && (existing.purpose == GatewayClientDispatchFencePurpose::Suspension
                     || (existing.purpose == GatewayClientDispatchFencePurpose::Deletion
@@ -959,6 +971,11 @@ async fn acquire_gateway_client_dispatch_fence(
             generation.latest_purpose == Some(acquire.purpose),
             "dispatch_fence_token_purpose_conflict"
         );
+        anyhow::ensure!(
+            generation.latest_supersedes_prepared_suspension
+                == acquire.supersede_prepared_suspension,
+            "dispatch_fence_token_transition_conflict"
+        );
     } else {
         generation.latest_generation = generation
             .latest_generation
@@ -966,6 +983,7 @@ async fn acquire_gateway_client_dispatch_fence(
             .context("client dispatch-fence generation exhausted")?;
         generation.latest_token = Some(acquire.token);
         generation.latest_purpose = Some(acquire.purpose);
+        generation.latest_supersedes_prepared_suspension = acquire.supersede_prepared_suspension;
     }
     Ok(GatewayClientDispatchFenceAcquireResult {
         client_id: acquire.client_id,
@@ -1033,6 +1051,23 @@ async fn prepare_gateway_client_dispatch_fence(
             && existing.gateway_epoch == prepare.gateway_epoch
             && existing.generation == prepare.generation
             && existing.purpose == prepare.purpose;
+        let authorized_unsuspend_transition = generation.latest_generation == prepare.generation
+            && generation.latest_token == Some(prepare.token)
+            && generation.latest_purpose == Some(prepare.purpose)
+            && generation.latest_supersedes_prepared_suspension;
+        // The exact unsuspend owner is installed before its database
+        // transaction. It may retire only an older suspension prepare; this
+        // prevents the old finalizer from inverting the newer commit while
+        // leaving prepared deletion strictly non-replaceable.
+        let replaces_prepared_suspension = !same_owner
+            && authorized_unsuspend_transition
+            && existing.purpose == GatewayClientDispatchFencePurpose::Suspension
+            && prepare.purpose == GatewayClientDispatchFencePurpose::Suspension
+            && matches!(
+                existing.state,
+                GatewayClientDispatchFenceState::Prepared { .. }
+            )
+            && prepare.generation > existing.generation;
         let replaces_recoverable_fence = !same_owner
             && (existing.requires_durable_recheck()
                 || (matches!(existing.state, GatewayClientDispatchFenceState::Persistent)
@@ -1107,7 +1142,7 @@ async fn prepare_gateway_client_dispatch_fence(
                 enqueued_job_ids: Vec::new(),
             };
         }
-        if replaces_recoverable_fence {
+        if replaces_prepared_suspension || replaces_recoverable_fence {
             let replaced_generation = existing.generation;
             fences.insert(
                 prepare.client_id.clone(),
@@ -1123,7 +1158,12 @@ async fn prepare_gateway_client_dispatch_fence(
                             gateway_epoch: existing.gateway_epoch,
                             generation: existing.generation,
                             purpose: existing.purpose,
-                            requires_durable_recheck: existing.requires_durable_recheck(),
+                            // An exact unsuspend may replace a suspension
+                            // prepare whose database outcome is not yet known.
+                            // If restored, that older owner must require a DB
+                            // recheck; ordinary replacements preserve state.
+                            requires_durable_recheck: authorized_unsuspend_transition
+                                || existing.requires_durable_recheck(),
                         }),
                     },
                 },
@@ -1142,7 +1182,11 @@ async fn prepare_gateway_client_dispatch_fence(
                 accepted: true,
                 fenced: true,
                 ownership_continuous: false,
-                message: "dispatch_fence_replaced_recoverable_owner".to_string(),
+                message: if replaces_prepared_suspension {
+                    "dispatch_fence_superseded_prepared_suspension".to_string()
+                } else {
+                    "dispatch_fence_replaced_recoverable_owner".to_string()
+                },
                 enqueued_job_ids,
             };
         }

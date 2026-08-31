@@ -207,6 +207,7 @@ impl ClientDispatchFenceLease {
         state: &AppState,
         client_id: &str,
         purpose: GatewayClientDispatchFencePurpose,
+        supersede_prepared_suspension: bool,
     ) -> anyhow::Result<(Self, Vec<uuid::Uuid>)> {
         let token = uuid::Uuid::new_v4();
         state.refresh_gateway_dispatch_timeouts();
@@ -218,6 +219,7 @@ impl ClientDispatchFenceLease {
                     client_id: client_id.to_string(),
                     token,
                     purpose,
+                    supersede_prepared_suspension,
                 }),
         )
         .await
@@ -418,6 +420,42 @@ impl ClientDispatchFenceLease {
         }
     }
 
+    async fn clear_committed(&mut self, reason: &str) -> bool {
+        self.stop_renewal().await;
+        let request = GatewayClientDispatchFenceClear {
+            client_id: self.client_id.clone(),
+            expected_token: self.token,
+            gateway_epoch: self.gateway_epoch,
+            expected_generation: self.generation,
+            restore_fallback: false,
+            reason: reason.to_string(),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
+            self.state
+                .gateway
+                .clear_client_dispatch_fences(vec![request]),
+        )
+        .await;
+        let cleared = matches!(
+            &result,
+            Ok(Ok(batch))
+                if matches!(batch.results.as_slice(), [result]
+                    if result.client_id == self.client_id
+                        && (result.accepted
+                            || result.message == "dispatch_fence_generation_retired"
+                            || result.message == "dispatch_fence_gateway_epoch_stale"))
+        );
+        if !cleared {
+            tracing::warn!(
+                client_id = %self.client_id,
+                ?result,
+                "committed exact-client dispatch fence clear was not acknowledged"
+            );
+        }
+        cleared
+    }
+
     async fn stop_renewal(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -505,6 +543,7 @@ async fn mutate_delete_agent_target_owned(
         &state,
         &client_id,
         GatewayClientDispatchFencePurpose::Deletion,
+        false,
     )
     .await
     {
@@ -941,105 +980,6 @@ pub(crate) async fn bulk_agent_suspensions(
     ))
 }
 
-async fn reconcile_unsuspended_gateway_route(state: &AppState, client_id: &str) {
-    if !state.gateway.configured() {
-        return;
-    }
-    state.refresh_gateway_dispatch_timeouts();
-    let token = uuid::Uuid::new_v4();
-    let acquired = match tokio::time::timeout(
-        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
-        state
-            .gateway
-            .acquire_client_dispatch_fence(GatewayClientDispatchFenceAcquire {
-                client_id: client_id.to_string(),
-                token,
-                purpose: GatewayClientDispatchFencePurpose::Suspension,
-            }),
-    )
-    .await
-    {
-        Ok(Ok(acquired)) if acquired.client_id == client_id && acquired.owner.token == token => {
-            acquired
-        }
-        result => {
-            tracing::warn!(
-                %client_id,
-                ?result,
-                "DB-authoritative unsuspend skipped optional gateway route reservation"
-            );
-            return;
-        }
-    };
-    let still_unsuspended = match state.repo.agent_by_id(client_id).await {
-        Ok(agent) => agent.status != "suspended",
-        Err(error) => {
-            tracing::warn!(
-                %client_id,
-                %error,
-                "DB-authoritative unsuspend skipped gateway route cleanup after status reread"
-            );
-            false
-        }
-    };
-    if !still_unsuspended {
-        return;
-    }
-    let prepare = GatewayClientDispatchFencePrepare {
-        client_id: client_id.to_string(),
-        token,
-        gateway_epoch: acquired.owner.gateway_epoch,
-        generation: acquired.owner.generation,
-        renewal: false,
-        lease_secs: CLIENT_LIFECYCLE_FENCE_LEASE_SECS,
-        purpose: GatewayClientDispatchFencePurpose::Suspension,
-    };
-    let prepared = tokio::time::timeout(
-        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
-        state
-            .gateway
-            .prepare_client_dispatch_fences(vec![prepare.clone()]),
-    )
-    .await;
-    let prepared_exact = matches!(
-        &prepared,
-        Ok(Ok(batch))
-            if matches!(batch.results.as_slice(), [result]
-                if result.client_id == client_id && result.accepted && result.fenced)
-    );
-    let clear = GatewayClientDispatchFenceClear {
-        client_id: client_id.to_string(),
-        expected_token: token,
-        gateway_epoch: acquired.owner.gateway_epoch,
-        expected_generation: acquired.owner.generation,
-        restore_fallback: false,
-        reason: "db_authoritative_unsuspend".to_string(),
-    };
-    let cleared = tokio::time::timeout(
-        Duration::from_secs(CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS),
-        state.gateway.clear_client_dispatch_fences(vec![clear]),
-    )
-    .await;
-    if !prepared_exact
-        || !matches!(
-            &cleared,
-            Ok(Ok(batch))
-                if matches!(batch.results.as_slice(), [result]
-                    if result.client_id == client_id
-                        && (result.accepted
-                            || result.message == "dispatch_fence_generation_retired"
-                            || result.message == "dispatch_fence_gateway_epoch_stale"))
-        )
-    {
-        tracing::warn!(
-            %client_id,
-            ?prepared,
-            ?cleared,
-            "DB-authoritative unsuspend left final gateway route cleanup to hello/telemetry"
-        );
-    }
-}
-
 async fn mutate_agent_suspension_target_owned(
     state: AppState,
     operator: crate::model::AuthContext,
@@ -1049,11 +989,12 @@ async fn mutate_agent_suspension_target_owned(
 ) -> crate::repository_inventory::AgentSuspensionRepositoryOutcome {
     let mut fence = None;
     let mut protected_job_ids = Vec::new();
-    if action == AgentSuspensionAction::Suspend && state.gateway.configured() {
+    if state.gateway.configured() {
         match ClientDispatchFenceLease::prepare(
             &state,
             &client_id,
             GatewayClientDispatchFencePurpose::Suspension,
+            action == AgentSuspensionAction::Unsuspend,
         )
         .await
         {
@@ -1062,7 +1003,7 @@ async fn mutate_agent_suspension_target_owned(
                 protected_job_ids = protected;
             }
             Err(error) => {
-                tracing::warn!(%client_id, %error, "VPS suspension dispatch fence rejected");
+                tracing::warn!(%client_id, %error, "VPS suspension transition fence rejected");
                 return crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
                     client_id,
                     code: "agent_suspend_gateway_fence_conflict",
@@ -1092,6 +1033,10 @@ async fn mutate_agent_suspension_target_owned(
         Ok(outcome) => outcome,
         Err(error) => {
             if let Some(mut fence) = fence {
+                // A repository error may follow either a confirmed rollback
+                // or an uncertain commit. Keep the exact owner installed; its
+                // finite lease becomes the existing per-request durable DB
+                // recheck barrier without guessing either database outcome.
                 fence.stop_renewal().await;
             }
             tracing::error!(%client_id, %error, "exact-client VPS suspension transaction failed");
@@ -1117,22 +1062,28 @@ async fn mutate_agent_suspension_target_owned(
                         );
                     }
                 }
-            } else {
-                reconcile_unsuspended_gateway_route(&state, client_id).await;
+            } else if let Some(mut fence) = fence {
+                fence.clear_committed("db_authoritative_unsuspend").await;
             }
         }
         crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
             code, ..
         } if action == AgentSuspensionAction::Unsuspend && *code == "agent_not_suspended" => {
-            // A no-op unsuspend is still authoritative evidence that no prior
-            // suspension fallback may remain at the gateway.
-            debug_assert!(fence.is_none());
-            reconcile_unsuspended_gateway_route(&state, &client_id).await;
+            // The exact transition owner prevented a newer suspension from
+            // entering its database transaction. A no-op unsuspend is thus
+            // authoritative evidence that its replaced fallback is obsolete.
+            if let Some(mut fence) = fence {
+                fence
+                    .clear_committed("db_authoritative_unsuspend_noop")
+                    .await;
+            }
         }
         crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected { .. } => {
             if let Some(mut fence) = fence {
                 fence.stop_renewal().await;
-                fence.compensate("suspension_not_committed").await;
+                fence
+                    .compensate("suspension_transition_not_committed")
+                    .await;
             }
         }
     }

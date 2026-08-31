@@ -12,7 +12,9 @@ type PanelDisplaySettings = {
   preferencesError: string | null;
   preferencesSaving: boolean;
   vpsNameDisplayMode: VpsNameDisplayMode;
-  updatePreferences: (preferences: OperatorPreferences) => Promise<void>;
+  updatePreferences: (
+    preferences: OperatorPreferences,
+  ) => Promise<OperatorPreferences | null>;
   setVpsNameDisplayMode: (mode: VpsNameDisplayMode) => void;
 };
 
@@ -24,7 +26,7 @@ const fallbackSettings: PanelDisplaySettings = {
   preferencesError: null,
   preferencesSaving: false,
   vpsNameDisplayMode: DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode,
-  updatePreferences: async () => undefined,
+  updatePreferences: async (preferences) => preferences,
   setVpsNameDisplayMode: () => undefined,
 };
 

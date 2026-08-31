@@ -12,6 +12,30 @@ import {
 } from "./support/consoleNavigation";
 
 type TrackedRequest = { method: string; url: string };
+type AlertResponseKind = "page" | "sync";
+type AlertResponseGate = {
+  hold: (kind: AlertResponseKind, skip: number) => void;
+  release: () => void;
+  state: () => {
+    held: AlertResponseKind | null;
+    pageStarts: number;
+    syncStarts: number;
+  };
+};
+type AlertResponseGateWindow = typeof window & {
+  __vpsmanAlertResponseGate: AlertResponseGate;
+};
+
+async function waitForTwoAnimationFrames(page: Page) {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => resolve()),
+        ),
+      ),
+  );
+}
 
 async function installVisibilityControl(page: Page, initiallyHidden: boolean) {
   await page.addInitScript((hiddenAtStartup) => {
@@ -1380,6 +1404,329 @@ test("resolved occurrences commit their returned projections without a full flee
       );
     }),
   ).toHaveLength(1);
+});
+
+test("alert mutations fence an older occurrence response and coalesce one trailing sync", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "occurrence projection ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Fleet", "Alerts");
+
+  const grid = page.getByLabel("Current alert episodes data grid");
+  const review = page.getByLabel("Older current incident review");
+  const incident = () =>
+    grid
+      .getByRole("row")
+      .filter({ hasText: "Backup request failed" })
+      .first();
+  await expect(review).toContainText("occurrence feed is complete");
+  await expect(incident()).toBeVisible();
+
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let holdNextSync = false;
+    let releaseSync: (() => void) | null = null;
+    let syncStarts = 0;
+    let syncHeld = false;
+    const control = {
+      holdNext() {
+        holdNextSync = true;
+      },
+      release() {
+        releaseSync?.();
+      },
+      state() {
+        return { held: syncHeld, starts: syncStarts };
+      },
+    };
+    Object.defineProperty(window, "__vpsmanAlertSyncRace", {
+      configurable: true,
+      value: control,
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      const response = await originalFetch(input, init);
+      if (
+        method === "POST" &&
+        url.pathname === "/api/v1/fleet-alert-events/sync"
+      ) {
+        syncStarts += 1;
+        if (holdNextSync) {
+          holdNextSync = false;
+          syncHeld = true;
+          await new Promise<void>((resolve) => {
+            releaseSync = resolve;
+          });
+          releaseSync = null;
+          syncHeld = false;
+        }
+      }
+      return response;
+    };
+  });
+
+  const control = {
+    holdNext: () =>
+      page.evaluate(() => {
+        (
+          window as typeof window & {
+            __vpsmanAlertSyncRace: { holdNext: () => void };
+          }
+        ).__vpsmanAlertSyncRace.holdNext();
+      }),
+    release: () =>
+      page.evaluate(() => {
+        (
+          window as typeof window & {
+            __vpsmanAlertSyncRace: { release: () => void };
+          }
+        ).__vpsmanAlertSyncRace.release();
+      }),
+    state: () =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanAlertSyncRace: {
+                state: () => { held: boolean; starts: number };
+              };
+            }
+          ).__vpsmanAlertSyncRace.state(),
+      ),
+  };
+  const beginHeldPanelSync = async (expectedStarts: number) => {
+    await control.holdNext();
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    await expect.poll(control.state).toEqual({
+      held: true,
+      starts: expectedStarts,
+    });
+  };
+
+  await beginHeldPanelSync(1);
+  await incident().getByRole("checkbox").check();
+  await grid.getByRole("button", { name: "Actions", exact: true }).click();
+  await activate(
+    page.getByRole("menuitem", {
+      name: "Reset triage to Open",
+      exact: true,
+    }),
+  );
+  await activate(
+    page
+      .getByLabel("Confirm fleet alert triage")
+      .getByRole("button", { name: "Reset triage to Open" }),
+  );
+  await expect(incident()).toContainText("Operator triage: Open");
+  await control.holdNext();
+  await control.release();
+  await expect.poll(control.state).toEqual({ held: true, starts: 2 });
+  await waitForTwoAnimationFrames(page);
+  await expect(incident()).toContainText("Operator triage: Open");
+  await control.release();
+  await expect.poll(control.state).toEqual({ held: false, starts: 2 });
+
+  await beginHeldPanelSync(3);
+  const incidentCheckbox = incident().getByRole("checkbox");
+  if (!(await incidentCheckbox.isChecked())) {
+    await incidentCheckbox.check();
+  }
+  await grid.getByRole("button", { name: "Actions", exact: true }).click();
+  await activate(page.getByRole("menuitem", { name: "Resolve incident" }));
+  const resolution = page.getByLabel("Confirm incident resolution");
+  await resolution
+    .getByLabel("Incident resolution reason")
+    .fill("Replacement backup verified after reconciliation.");
+  await activate(resolution.getByRole("button", { name: "Resolve incident" }));
+  await expect(incident()).toHaveCount(0);
+  await control.holdNext();
+  await control.release();
+  await expect.poll(control.state).toEqual({ held: true, starts: 4 });
+  await waitForTwoAnimationFrames(page);
+  await expect(grid).not.toContainText("Backup request failed");
+  await control.release();
+  await expect.poll(control.state).toEqual({ held: false, starts: 4 });
+});
+
+test("older and search pages cannot publish after an overlapping alert mutation", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "occurrence projection ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, {
+    fleetAlertEventReviewSaturated: true,
+    fleetAlertEventReviewSaturatedCount: 401,
+    storedAuthSession: true,
+  });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Fleet", "Alerts");
+
+  const grid = page.getByLabel("Current alert episodes data grid");
+  const review = page.getByLabel("Older current incident review");
+  await activate(
+    review.getByRole("button", { name: "Load older current incidents" }),
+  );
+  await grid
+    .getByLabel("Current alert episodes page size")
+    .selectOption("250");
+  const older = () =>
+    grid
+      .getByRole("row")
+      .filter({ hasText: "Older incident beyond snapshot cap" })
+      .first();
+  await expect(older()).toBeVisible();
+
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let nextGate: { kind: AlertResponseKind; skip: number } | null = null;
+    let releaseResponse: (() => void) | null = null;
+    let held: AlertResponseKind | null = null;
+    let pageStarts = 0;
+    let syncStarts = 0;
+    const control: AlertResponseGate = {
+      hold(kind, skip) {
+        nextGate = { kind, skip };
+      },
+      release() {
+        releaseResponse?.();
+      },
+      state() {
+        return { held, pageStarts, syncStarts };
+      },
+    };
+    Object.defineProperty(window, "__vpsmanAlertResponseGate", {
+      configurable: true,
+      value: control,
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      const response = await originalFetch(input, init);
+      const kind =
+        method === "POST" &&
+        url.pathname === "/api/v1/fleet-alert-events/sync"
+          ? "sync"
+          : method === "GET" &&
+              url.pathname === "/api/v1/fleet-alert-events"
+            ? "page"
+            : null;
+      if (kind) {
+        if (kind === "sync") syncStarts += 1;
+        else pageStarts += 1;
+      }
+      if (kind && nextGate?.kind === kind) {
+        if (nextGate.skip > 0) {
+          nextGate.skip -= 1;
+        } else {
+          nextGate = null;
+          held = kind;
+          await new Promise<void>((resolve) => {
+            releaseResponse = resolve;
+          });
+          releaseResponse = null;
+          held = null;
+        }
+      }
+      return response;
+    };
+  });
+  const gate = {
+    hold: (kind: AlertResponseKind, skip = 0) =>
+      page.evaluate(
+        ({ responseKind, responsesToSkip }) =>
+          (
+            window as AlertResponseGateWindow
+          ).__vpsmanAlertResponseGate.hold(
+            responseKind,
+            responsesToSkip,
+          ),
+        { responseKind: kind, responsesToSkip: skip },
+      ),
+    release: () =>
+      page.evaluate(() =>
+        (
+          window as AlertResponseGateWindow
+        ).__vpsmanAlertResponseGate.release(),
+      ),
+    state: () =>
+      page.evaluate(
+        () =>
+          (
+            window as AlertResponseGateWindow
+          ).__vpsmanAlertResponseGate.state(),
+      ),
+  };
+  const updateOlderTriage = async (
+    action: "Acknowledge Open triage" | "Reset triage to Open",
+    confirmation: "Acknowledge" | "Reset triage to Open",
+  ) => {
+    const checkbox = older().getByRole("checkbox");
+    if (!(await checkbox.isChecked())) await checkbox.check();
+    await grid.getByRole("button", { name: "Actions", exact: true }).click();
+    await activate(page.getByRole("menuitem", { exact: true, name: action }));
+    await activate(
+      page
+        .getByLabel("Confirm fleet alert triage")
+        .getByRole("button", { name: confirmation }),
+    );
+  };
+
+  await gate.hold("page");
+  await activate(
+    review.getByRole("button", { name: "Load older current incidents" }),
+  );
+  await expect.poll(gate.state).toMatchObject({ held: "page", pageStarts: 1 });
+  await updateOlderTriage("Acknowledge Open triage", "Acknowledge");
+  await gate.hold("sync");
+  await gate.release();
+  await expect.poll(gate.state).toMatchObject({ held: "sync", syncStarts: 1 });
+  await waitForTwoAnimationFrames(page);
+  await expect(older()).toContainText("Operator triage: Acknowledged");
+  await expect(grid).not.toContainText("Paged terminal incident 400");
+  await gate.release();
+  await expect.poll(gate.state).toMatchObject({ held: null });
+
+  const search = grid.getByLabel("Current alert episodes search");
+  await gate.hold("page", 1);
+  await search.fill("Older incident beyond snapshot cap");
+  await expect.poll(gate.state).toMatchObject({ held: "page", pageStarts: 3 });
+  await updateOlderTriage("Reset triage to Open", "Reset triage to Open");
+  await gate.hold("sync");
+  await gate.release();
+  await expect.poll(gate.state).toMatchObject({ held: "sync", syncStarts: 2 });
+  await waitForTwoAnimationFrames(page);
+  await expect(older()).toContainText("Operator triage: Open");
+  await expect(review).toContainText("200 older rows scanned");
+  await search.fill("");
+  await gate.release();
+  await expect.poll(gate.state).toMatchObject({ held: null });
 });
 
 test("committed notification dispatch keeps its exact delivery projection bounded without a refresh", async ({

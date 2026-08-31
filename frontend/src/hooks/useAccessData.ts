@@ -27,6 +27,7 @@ import type {
   UpsertAgentIdentityRequest,
 } from "../typesAccess";
 import type { PrivilegeAssertion } from "../privilege";
+import { sanitizeOperatorPreferences } from "../utils";
 
 const ACCESS_BULK_LIMIT = 500;
 
@@ -1545,9 +1546,10 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           currentApiToken.current !== apiToken ||
           preferencesMutationGeneration.current !== operationGeneration
         ) {
-          return;
+          return null;
         }
         storeOperators([nextOperator]);
+        return sanitizeOperatorPreferences(nextOperator.preferences);
       } catch (error) {
         if (
           currentApiToken.current !== apiToken ||

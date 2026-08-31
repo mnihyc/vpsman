@@ -71,6 +71,8 @@ export function PreferencesPanel({
     updatePreferences,
   } = usePanelDisplaySettings();
   const operatorId = operator?.id ?? null;
+  const operatorIdRef = useRef(operatorId);
+  operatorIdRef.current = operatorId;
   const [draft, setDraft] = useState<OperatorPreferences>(preferences);
   const synchronizedPreferenceSourceRef = useRef({
     operatorId,
@@ -140,25 +142,38 @@ export function PreferencesPanel({
     if (!dirty || saveInFlight || savePendingRef.current) {
       return;
     }
-    const timezone = draft.timezone?.trim() || null;
+    const submittedDraft = draft;
+    const submittedOperatorId = operatorId;
+    const timezone = submittedDraft.timezone?.trim() || null;
     const dashboardCurveExclusions = normalizeCurveExclusions(
-      draft.dashboard_curve_exclusions,
+      submittedDraft.dashboard_curve_exclusions,
     );
     const fleetTagVisibilityOverrides = normalizeFleetTagVisibilityOverrides(
-      draft.fleet_tag_visibility_overrides,
+      submittedDraft.fleet_tag_visibility_overrides,
     );
     if (draftValidationError) {
       return;
     }
+    const submittedPreferences: OperatorPreferences = {
+      ...submittedDraft,
+      dashboard_curve_exclusions: dashboardCurveExclusions,
+      fleet_tag_visibility_overrides: fleetTagVisibilityOverrides,
+      timezone,
+    };
     savePendingRef.current = true;
     setLocalSavePending(true);
     try {
-      await updatePreferences({
-        ...draft,
-        dashboard_curve_exclusions: dashboardCurveExclusions,
-        fleet_tag_visibility_overrides: fleetTagVisibilityOverrides,
-        timezone,
-      });
+      const savedPreferences = await updatePreferences(submittedPreferences);
+      if (
+        savedPreferences !== null &&
+        operatorIdRef.current === submittedOperatorId
+      ) {
+        setDraft((current) =>
+          operatorPreferencesEqual(current, submittedDraft)
+            ? savedPreferences
+            : current,
+        );
+      }
     } catch {
       // The shared preference context exposes the API error for rendering.
     } finally {

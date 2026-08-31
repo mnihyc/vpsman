@@ -241,7 +241,7 @@ type AccessPanelProps = {
   ) => Promise<void>;
   onUpdateOperatorPreferences: (
     preferences: OperatorPreferences,
-  ) => Promise<void>;
+  ) => Promise<OperatorPreferences | null>;
   onUpsertAgentIdentity: (
     request: UpsertAgentIdentityRequest,
   ) => Promise<AgentIdentityMutationResponse>;
@@ -3167,7 +3167,7 @@ function InstallCommand({
   clientId?: string;
   onUpdateOperatorPreferences: (
     preferences: OperatorPreferences,
-  ) => Promise<void>;
+  ) => Promise<OperatorPreferences | null>;
   operatorPreferences: OperatorPreferences | null;
   privateKeyHex?: string;
 }) {

@@ -99,6 +99,7 @@ pub(crate) struct GatewayClientDispatchFenceGeneration {
     pub(crate) latest_generation: u64,
     pub(crate) latest_token: Option<uuid::Uuid>,
     pub(crate) latest_purpose: Option<GatewayClientDispatchFencePurpose>,
+    pub(crate) latest_supersedes_prepared_suspension: bool,
     pub(crate) retired_generation: u64,
 }
 

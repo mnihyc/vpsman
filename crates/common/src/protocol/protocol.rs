@@ -1212,6 +1212,13 @@ pub struct GatewayClientDispatchFenceAcquire {
     pub client_id: String,
     pub token: Uuid,
     pub purpose: GatewayClientDispatchFencePurpose,
+    /// An exact unsuspend transition may allocate its suspension-purpose
+    /// owner before entering the database transaction even when an older
+    /// suspension prepare is still finalizing. The gateway accepts this only
+    /// for Suspension -> Suspension; prepared deletion ownership is never
+    /// replaceable through this path.
+    #[serde(default)]
+    pub supersede_prepared_suspension: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

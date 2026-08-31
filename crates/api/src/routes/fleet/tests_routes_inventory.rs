@@ -422,31 +422,33 @@ fn exact_suspension_owner_preserves_suspend_and_unsuspend_business_ownership() {
         .expect("exact suspension owner boundary");
     assert!(owner.contains("GatewayClientDispatchFencePurpose::Suspension"));
     assert!(owner.contains("action == AgentSuspensionAction::Suspend"));
+    assert!(owner.contains("action == AgentSuspensionAction::Unsuspend"));
     assert!(owner.contains(".mutate_agent_suspension_target("));
     assert!(owner.contains("commit_proof.verify().await?"));
     assert!(owner.contains("fence.promote_committed().await"));
+    assert!(owner.contains("fence.clear_committed(\"db_authoritative_unsuspend\")"));
     assert!(owner.contains("fence.stop_renewal().await"));
-    assert!(owner.contains("fence.compensate(\"suspension_not_committed\")"));
-    assert!(owner.contains("reconcile_unsuspended_gateway_route(&state, client_id).await"));
+    assert!(owner.contains(".compensate("));
+    assert!(owner.contains("\"suspension_transition_not_committed\""));
+    let prepare = owner
+        .find("ClientDispatchFenceLease::prepare(")
+        .expect("pretransaction exact owner");
+    let mutation = owner
+        .find(".mutate_agent_suspension_target(")
+        .expect("database lifecycle mutation");
+    assert!(prepare < mutation);
+    let (_, repository_result) = owner
+        .split_once("let outcome = match repository_outcome {")
+        .expect("repository result owner");
+    let (_, repository_error) = repository_result
+        .split_once("Err(error) => {")
+        .expect("repository error owner");
+    let (repository_error, _) = repository_error
+        .split_once("match &outcome {")
+        .expect("repository error owner boundary");
+    assert!(repository_error.contains("fence.stop_renewal().await"));
+    assert!(!repository_error.contains("fence.compensate("));
     assert!(!owner.contains(".disconnect_session("));
     assert!(!owner.contains("tokio::select!"));
-
-    let (_, cleanup) = source
-        .split_once("async fn reconcile_unsuspended_gateway_route(")
-        .expect("optional unsuspend cleanup");
-    let (cleanup, _) = cleanup
-        .split_once("async fn mutate_agent_suspension_target_owned(")
-        .expect("optional cleanup boundary");
-    let acquire = cleanup
-        .find(".acquire_client_dispatch_fence(")
-        .expect("postcommit reservation");
-    let reread = cleanup.find("state.repo.agent_by_id(").expect("DB reread");
-    let prepare = cleanup
-        .find(".prepare_client_dispatch_fences(")
-        .expect("one-shot prepare");
-    let clear = cleanup
-        .find(".clear_client_dispatch_fences(")
-        .expect("one-shot exact clear");
-    assert!(acquire < reread && reread < prepare && prepare < clear);
-    assert!(!cleanup.contains("loop {"));
+    assert!(!source.contains("reconcile_unsuspended_gateway_route"));
 }

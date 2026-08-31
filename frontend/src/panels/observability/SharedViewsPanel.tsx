@@ -31,7 +31,7 @@ import {
   ConsoleStatusBadge,
 } from "../../components/ConsoleLayout";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
-import { apiGet, apiPost, apiPut } from "../../api";
+import { apiGet, apiPost, apiPut, LatestReadConsumer } from "../../api";
 import { useHistoryEntryState } from "../../historyEntryState";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
@@ -203,7 +203,18 @@ export function SharedViewsPanel({
   const [targetUpdateRefreshRequired, setTargetUpdateRefreshRequired] =
     useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const currentApiTokenRef = useRef(apiToken);
+  currentApiTokenRef.current = apiToken;
   const loadGeneration = useRef(0);
+  // A committed mutation response owns its rows immediately. Full-list reads
+  // share one latest consumer, and generations fence any pre-commit snapshot.
+  const shareListReadCountRef = useRef(0);
+  const shareListReadConsumerRef = useRef(
+    new LatestReadConsumer<MonitoringShareView[]>(),
+  );
+  const loadSharesRef = useRef<() => Promise<boolean>>(() =>
+    Promise.resolve(false),
+  );
   const loadedApiTokenRef = useRef<string | null>(null);
   const authoritativeTargetRevisions = useRef(
     new Map<string, MonitoringShareRevisionView>(),
@@ -220,8 +231,11 @@ export function SharedViewsPanel({
   }, []);
 
   const loadShares = useCallback(async (): Promise<boolean> => {
+    const requestApiToken = apiToken;
+    if (currentApiTokenRef.current !== requestApiToken) return false;
     const generation = ++loadGeneration.current;
-    if (!apiToken) {
+    if (!requestApiToken) {
+      shareListReadConsumerRef.current.discardPending([]);
       setShares([]);
       setLoading(false);
       setLoadError(null);
@@ -229,19 +243,27 @@ export function SharedViewsPanel({
     }
     setLoading(true);
     setLoadError(null);
+    shareListReadCountRef.current += 1;
     try {
-      const loaded: MonitoringShareView[] = [];
-      for (let offset = 0; ; offset += SHARE_PAGE_SIZE) {
-        const page = await apiGet<MonitoringShareView[]>(
-          `/api/v1/monitoring-shares?limit=${SHARE_PAGE_SIZE}&offset=${offset}`,
-          apiToken,
-        );
-        loaded.push(...page);
-        if (page.length < SHARE_PAGE_SIZE) {
-          break;
+      const loaded = await shareListReadConsumerRef.current.enqueue(async () => {
+        const records: MonitoringShareView[] = [];
+        for (let offset = 0; ; offset += SHARE_PAGE_SIZE) {
+          if (currentApiTokenRef.current !== requestApiToken) return records;
+          const page = await apiGet<MonitoringShareView[]>(
+            `/api/v1/monitoring-shares?limit=${SHARE_PAGE_SIZE}&offset=${offset}`,
+            requestApiToken,
+          );
+          records.push(...page);
+          if (page.length < SHARE_PAGE_SIZE) {
+            break;
+          }
         }
-      }
-      if (loadGeneration.current !== generation) {
+        return records;
+      });
+      if (
+        currentApiTokenRef.current !== requestApiToken ||
+        loadGeneration.current !== generation
+      ) {
         return false;
       }
       const loadedShares = deduplicateShares(loaded);
@@ -267,17 +289,30 @@ export function SharedViewsPanel({
       );
       return true;
     } catch (error) {
-      if (loadGeneration.current !== generation) {
+      if (
+        currentApiTokenRef.current !== requestApiToken ||
+        loadGeneration.current !== generation
+      ) {
         return false;
       }
       setLoadError(actionErrorMessage(error));
       return false;
     } finally {
-      if (loadGeneration.current === generation) {
+      shareListReadCountRef.current -= 1;
+      if (
+        currentApiTokenRef.current === requestApiToken &&
+        loadGeneration.current === generation
+      ) {
         setLoading(false);
       }
     }
   }, [apiToken]);
+  loadSharesRef.current = loadShares;
+
+  function reconcileShareListAfterTokenRotation() {
+    if (!currentApiTokenRef.current) return;
+    void loadSharesRef.current();
+  }
 
   const refreshShares = useCallback(async (): Promise<boolean> => {
     const loaded = await loadShares();
@@ -583,6 +618,7 @@ export function SharedViewsPanel({
     try {
       const selectorExpression = editDraft.selectorExpression.trim();
       const resolved = await onResolveTargets(selectorExpression);
+      if (currentApiTokenRef.current !== apiToken) return;
       const request: UpdateMonitoringShareRequest = {
         confirmed: false,
         expected_updated_at: editingShare.updated_at,
@@ -596,8 +632,10 @@ export function SharedViewsPanel({
         apiToken,
         request,
       );
+      if (currentApiTokenRef.current !== apiToken) return;
       setEditReview({ request, response, targets: resolved.targets });
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -620,12 +658,22 @@ export function SharedViewsPanel({
           preview_hash: editReview.response.preview_hash,
         } satisfies UpdateMonitoringShareRequest,
       );
+      if (currentApiTokenRef.current !== apiToken) {
+        if (response.applied) {
+          reconcileShareListAfterTokenRotation();
+          setEditReview(null);
+          setEditDraft(null);
+          setEditingShare(null);
+        }
+        return;
+      }
       if (!response.applied || !response.share) {
         throw new Error(
           "The server did not attest the shared-view edit. Refresh current state before retrying.",
         );
       }
       const updatedShare = response.share;
+      const reconcileList = invalidateShareListAfterMutation();
       setShares((current) => mergeShares(current, [updatedShare]));
       setSharedViewUrl((current) =>
         current?.shareId === updatedShare.id
@@ -639,7 +687,9 @@ export function SharedViewsPanel({
       setEditReview(null);
       setEditDraft(null);
       setEditingShare(null);
+      if (reconcileList) void loadShares();
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -658,6 +708,7 @@ export function SharedViewsPanel({
     try {
       const selectorExpression = draft.selectorExpression.trim();
       const resolved = await onResolveTargets(selectorExpression);
+      if (currentApiTokenRef.current !== apiToken) return;
       if (resolved.target_count === 0 || resolved.targets.length === 0) {
         setActionError(
           "The selector currently resolves to no VPSs. Adjust it before creating a public view.",
@@ -676,6 +727,7 @@ export function SharedViewsPanel({
         targets: resolved.targets,
       });
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -694,11 +746,19 @@ export function SharedViewsPanel({
         apiToken,
         review.request,
       );
+      if (currentApiTokenRef.current !== apiToken) {
+        reconcileShareListAfterTokenRotation();
+        setStatusFilter("active");
+        setReview(null);
+        setDrawerOpen(false);
+        return;
+      }
       const createdShare = {
         ...response.share,
         target_update_available: false,
         target_update_evidence_available: true,
       };
+      const reconcileList = invalidateShareListAfterMutation();
       setShares((current) => mergeShares(current, [createdShare]));
       createdUrlFocusShareIdRef.current = response.share.id;
       setSharedViewUrl({
@@ -714,7 +774,9 @@ export function SharedViewsPanel({
       setStatusFilter("active");
       setReview(null);
       setDrawerOpen(false);
+      if (reconcileList) void loadShares();
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -753,6 +815,12 @@ export function SharedViewsPanel({
           { share_ids: ids } satisfies RevokeMonitoringSharesRequest,
         );
       }
+      if (currentApiTokenRef.current !== apiToken) {
+        reconcileShareListAfterTokenRotation();
+        setPendingAction(null);
+        return;
+      }
+      const reconcileList = invalidateShareListAfterMutation();
       setShares((current) => {
         const existingById = new Map(current.map((share) => [share.id, share]));
         const updated = response.shares.map((share) =>
@@ -777,7 +845,9 @@ export function SharedViewsPanel({
         tone: "success",
       });
       setPendingAction(null);
+      if (reconcileList) void loadShares();
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -807,6 +877,7 @@ export function SharedViewsPanel({
           share_ids: selectedShares.map((share) => share.id),
         } satisfies BulkUpdateMonitoringShareTargetsRequest,
       );
+      if (currentApiTokenRef.current !== apiToken) return;
       if (!targetChangesPresent(response)) {
         setFeedback({
           message: `The frozen targets already match the saved ${selectedShares.length === 1 ? "selector" : "selectors"}.`,
@@ -816,6 +887,7 @@ export function SharedViewsPanel({
       }
       setTargetUpdateReview({ response, shares: selectedShares });
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -838,6 +910,13 @@ export function SharedViewsPanel({
           share_ids: targetUpdateReview.shares.map((share) => share.id),
         } satisfies BulkUpdateMonitoringShareTargetsRequest,
       );
+      if (currentApiTokenRef.current !== apiToken) {
+        if (response.applied) {
+          reconcileShareListAfterTokenRotation();
+          setTargetUpdateReview(null);
+        }
+        return;
+      }
       const selectedShareIds = new Set(
         targetUpdateReview.shares.map((share) => share.id),
       );
@@ -854,6 +933,7 @@ export function SharedViewsPanel({
           "The server did not return authoritative shared-view revisions. Refresh current state before retrying.",
         );
       }
+      invalidateShareListAfterMutation();
       const revisions = response.revisions;
       for (const revision of revisions) {
         authoritativeTargetRevisions.current.set(revision.share_id, revision);
@@ -866,6 +946,7 @@ export function SharedViewsPanel({
       // lifecycle refresh for visitor/evidence fields, then re-apply them so
       // a delayed or stale GET can never roll updated_at backwards.
       const refreshed = await loadShares();
+      if (currentApiTokenRef.current !== apiToken) return;
       setShares((current) => mergeTargetRevisions(current, revisions));
       if (!refreshed) {
         // Keep the actionable reconciliation state visible instead of hiding
@@ -884,6 +965,7 @@ export function SharedViewsPanel({
         });
       }
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });
@@ -891,6 +973,11 @@ export function SharedViewsPanel({
       setTargetUpdateReconciliationPending(false);
       setPending(false);
     }
+  }
+
+  function invalidateShareListAfterMutation(): boolean {
+    loadGeneration.current += 1;
+    return shareListReadCountRef.current > 0;
   }
 
   async function copyShareUrl(share: MonitoringShareView) {
@@ -901,6 +988,7 @@ export function SharedViewsPanel({
         `/api/v1/monitoring-shares/${encodeURIComponent(share.id)}/url`,
         apiToken,
       );
+      if (currentApiTokenRef.current !== apiToken) return;
       const recoveredUrl: SharedViewUrl = {
         createdAt: share.created_at,
         name: share.name,
@@ -910,6 +998,7 @@ export function SharedViewsPanel({
       setSharedViewUrl(recoveredUrl);
       await copyShareUrlText(recoveredUrl);
     } catch (error) {
+      if (currentApiTokenRef.current !== apiToken) return;
       const message = actionErrorMessage(error);
       setActionError(message);
       setFeedback({ message, tone: "danger" });

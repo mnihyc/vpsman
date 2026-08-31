@@ -2064,6 +2064,56 @@ test(
   },
 );
 
+test(
+  "adopts a normalized preference save without overwriting a later edit",
+  { tag: "@preferences-normalized-save-owner" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "preference draft ownership is shared and covered in the desktop form",
+    );
+
+    await page.goto("/");
+    await waitForConsoleShell(page);
+    await openConsoleSubpage(page, "System", "Preferences");
+
+    const exclusions = page.getByLabel("Home telemetry curve exclusions");
+    const save = page.getByRole("button", { name: "Save preferences" });
+    const status = page.locator(".consoleStatusBadge").filter({
+      hasText: /^(Saved|Unsaved changes)$/,
+    });
+
+    await exclusions.fill("CPU usage\nCPU usage\nNetwork traffic");
+    await save.click();
+    await expect(exclusions).toHaveValue("CPU usage\nNetwork traffic");
+    await expect(status).toHaveText("Saved");
+
+    await page.evaluate(() => {
+      const originalFetch = window.fetch;
+      window.fetch = async (input, init) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        const response = await originalFetch(input, init);
+        if (
+          new URL(request.url, window.location.href).pathname ===
+            "/api/v1/auth/preferences" &&
+          request.method === "PUT"
+        ) {
+          await new Promise((resolve) => window.setTimeout(resolve, 300));
+        }
+        return response;
+      };
+    });
+
+    await exclusions.fill("CPU usage\nDisk usage\nDisk usage");
+    await save.click();
+    await exclusions.fill("CPU usage\nMemory usage");
+    await expect(save).toBeEnabled();
+    await expect(exclusions).toHaveValue("CPU usage\nMemory usage");
+    await expect(status).toHaveText("Unsaved changes");
+  },
+);
+
 test("clears browser-local console selections without deleting session or privilege records", async ({
   page,
 }, testInfo) => {

@@ -225,6 +225,7 @@ async fn acquire_test_fence(
             client_id: client_id.to_string(),
             token,
             purpose,
+            supersede_prepared_suspension: false,
         },
     )
     .await
@@ -403,6 +404,7 @@ async fn active_owner_rejects_dispatch_and_conflicting_acquire_without_preemptin
             client_id: "client-a".to_string(),
             token: uuid::Uuid::new_v4(),
             purpose: GatewayClientDispatchFencePurpose::Deletion,
+            supersede_prepared_suspension: false,
         },
     )
     .await
@@ -443,6 +445,352 @@ async fn active_owner_rejects_dispatch_and_conflicting_acquire_without_preemptin
 }
 
 #[tokio::test]
+async fn exact_unsuspend_transition_supersedes_only_an_older_prepared_suspension() {
+    let state = GatewayState::default();
+    let suspension = acquire_test_fence(
+        &state,
+        "client-a",
+        uuid::Uuid::new_v4(),
+        GatewayClientDispatchFencePurpose::Suspension,
+    )
+    .await;
+    assert!(
+        prepare_gateway_client_dispatch_fence(
+            &state,
+            test_fence_prepare(
+                "client-a",
+                suspension,
+                GatewayClientDispatchFencePurpose::Suspension,
+                false,
+            ),
+        )
+        .await
+        .accepted
+    );
+
+    let ordinary_conflict = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-a".to_string(),
+            token: uuid::Uuid::new_v4(),
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: false,
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert_eq!(ordinary_conflict, "dispatch_fence_conflict");
+
+    let unsuspend_token = uuid::Uuid::new_v4();
+    let unsuspend = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-a".to_string(),
+            token: unsuspend_token,
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: true,
+        },
+    )
+    .await
+    .expect("exact unsuspend transition acquire")
+    .owner;
+    assert!(unsuspend.generation > suspension.generation);
+    let prepared_unsuspend = prepare_gateway_client_dispatch_fence(
+        &state,
+        test_fence_prepare(
+            "client-a",
+            unsuspend,
+            GatewayClientDispatchFencePurpose::Suspension,
+            false,
+        ),
+    )
+    .await;
+    assert!(prepared_unsuspend.accepted && prepared_unsuspend.fenced);
+    assert_eq!(
+        prepared_unsuspend.message,
+        "dispatch_fence_superseded_prepared_suspension"
+    );
+    let fallback = state.client_dispatch_fences.read().await["client-a"]
+        .fallback()
+        .expect("superseded suspension recovery owner");
+    assert_eq!(fallback.token, suspension.token);
+    assert!(fallback.requires_durable_recheck);
+
+    let cleared =
+        clear_gateway_client_dispatch_fence(&state, test_fence_clear("client-a", unsuspend, false))
+            .await;
+    assert!(cleared.accepted && !cleared.fenced);
+    assert!(!state
+        .client_dispatch_fences
+        .read()
+        .await
+        .contains_key("client-a"));
+
+    let delayed_promotion = promote_gateway_client_dispatch_fence(
+        &state,
+        test_fence_promote(
+            "client-a",
+            suspension,
+            GatewayClientDispatchFencePurpose::Suspension,
+        ),
+    )
+    .await;
+    assert!(!delayed_promotion.accepted && !delayed_promotion.fenced);
+    assert_eq!(
+        delayed_promotion.message,
+        "dispatch_fence_generation_retired"
+    );
+    let dispatch = dispatch_gateway_command(
+        &state,
+        GatewayCommandDispatch {
+            client_id: "client-a".to_string(),
+            request: test_job_request(),
+            expected_process_incarnation_id: uuid::Uuid::new_v4(),
+            expected_gateway_epoch: Some(state.client_dispatch_fence_epoch),
+            payload_hash: "test-payload-hash".to_string(),
+            lifecycle_recheck: None,
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert_eq!(dispatch, "agent_not_online:client-a");
+
+    let deletion = acquire_test_fence(
+        &state,
+        "client-b",
+        uuid::Uuid::new_v4(),
+        GatewayClientDispatchFencePurpose::Deletion,
+    )
+    .await;
+    assert!(
+        prepare_gateway_client_dispatch_fence(
+            &state,
+            test_fence_prepare(
+                "client-b",
+                deletion,
+                GatewayClientDispatchFencePurpose::Deletion,
+                false,
+            ),
+        )
+        .await
+        .accepted
+    );
+    let deletion_conflict = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-b".to_string(),
+            token: uuid::Uuid::new_v4(),
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: true,
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert_eq!(deletion_conflict, "dispatch_fence_conflict");
+    assert_eq!(
+        state.client_dispatch_fences.read().await["client-b"].owner(),
+        deletion
+    );
+
+    let rejected_transition_suspension = acquire_test_fence(
+        &state,
+        "client-c",
+        uuid::Uuid::new_v4(),
+        GatewayClientDispatchFencePurpose::Suspension,
+    )
+    .await;
+    prepare_gateway_client_dispatch_fence(
+        &state,
+        test_fence_prepare(
+            "client-c",
+            rejected_transition_suspension,
+            GatewayClientDispatchFencePurpose::Suspension,
+            false,
+        ),
+    )
+    .await;
+    let rejected_unsuspend = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-c".to_string(),
+            token: uuid::Uuid::new_v4(),
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: true,
+        },
+    )
+    .await
+    .expect("rejected unsuspend owner acquire")
+    .owner;
+    prepare_gateway_client_dispatch_fence(
+        &state,
+        test_fence_prepare(
+            "client-c",
+            rejected_unsuspend,
+            GatewayClientDispatchFencePurpose::Suspension,
+            false,
+        ),
+    )
+    .await;
+    let rejected = clear_gateway_client_dispatch_fence(
+        &state,
+        test_fence_clear("client-c", rejected_unsuspend, true),
+    )
+    .await;
+    assert!(rejected.accepted && rejected.fenced);
+    let restored = state.client_dispatch_fences.read().await["client-c"];
+    assert_eq!(restored.owner(), rejected_transition_suspension);
+    assert!(restored.requires_durable_recheck());
+}
+
+#[tokio::test]
+async fn newer_suspension_starts_only_after_exact_unsuspend_cleanup_finishes() {
+    let state = GatewayState::default();
+    let unsuspend = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-a".to_string(),
+            token: uuid::Uuid::new_v4(),
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: true,
+        },
+    )
+    .await
+    .expect("exact unsuspend transition acquire")
+    .owner;
+    assert!(
+        prepare_gateway_client_dispatch_fence(
+            &state,
+            test_fence_prepare(
+                "client-a",
+                unsuspend,
+                GatewayClientDispatchFencePurpose::Suspension,
+                false,
+            ),
+        )
+        .await
+        .accepted
+    );
+
+    let blocked_suspend = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-a".to_string(),
+            token: uuid::Uuid::new_v4(),
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: false,
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert_eq!(blocked_suspend, "dispatch_fence_conflict");
+
+    let cleared =
+        clear_gateway_client_dispatch_fence(&state, test_fence_clear("client-a", unsuspend, false))
+            .await;
+    assert!(cleared.accepted && !cleared.fenced);
+
+    let suspension = acquire_test_fence(
+        &state,
+        "client-a",
+        uuid::Uuid::new_v4(),
+        GatewayClientDispatchFencePurpose::Suspension,
+    )
+    .await;
+    assert!(
+        prepare_gateway_client_dispatch_fence(
+            &state,
+            test_fence_prepare(
+                "client-a",
+                suspension,
+                GatewayClientDispatchFencePurpose::Suspension,
+                false,
+            ),
+        )
+        .await
+        .accepted
+    );
+    assert!(
+        promote_gateway_client_dispatch_fence(
+            &state,
+            test_fence_promote(
+                "client-a",
+                suspension,
+                GatewayClientDispatchFencePurpose::Suspension,
+            ),
+        )
+        .await
+        .accepted
+    );
+
+    let delayed_unsuspend_cleanup =
+        clear_gateway_client_dispatch_fence(&state, test_fence_clear("client-a", unsuspend, false))
+            .await;
+    assert!(!delayed_unsuspend_cleanup.accepted && delayed_unsuspend_cleanup.fenced);
+    assert_eq!(
+        state.client_dispatch_fences.read().await["client-a"].owner(),
+        suspension
+    );
+}
+
+#[tokio::test]
+async fn failed_unsuspend_without_fallback_expires_to_durable_recheck() {
+    let state = GatewayState::default();
+    let unsuspend = acquire_gateway_client_dispatch_fence(
+        &state,
+        GatewayClientDispatchFenceAcquire {
+            client_id: "client-a".to_string(),
+            token: uuid::Uuid::new_v4(),
+            purpose: GatewayClientDispatchFencePurpose::Suspension,
+            supersede_prepared_suspension: true,
+        },
+    )
+    .await
+    .expect("exact unsuspend transition acquire")
+    .owner;
+    assert!(
+        prepare_gateway_client_dispatch_fence(
+            &state,
+            test_fence_prepare(
+                "client-a",
+                unsuspend,
+                GatewayClientDispatchFencePurpose::Suspension,
+                false,
+            ),
+        )
+        .await
+        .accepted
+    );
+    assert!(state.client_dispatch_fences.read().await["client-a"]
+        .fallback()
+        .is_none());
+
+    expire_test_fence(&state, "client-a").await;
+    let error = dispatch_gateway_command(
+        &state,
+        GatewayCommandDispatch {
+            client_id: "client-a".to_string(),
+            request: test_job_request(),
+            expected_process_incarnation_id: uuid::Uuid::new_v4(),
+            expected_gateway_epoch: Some(state.client_dispatch_fence_epoch),
+            payload_hash: "test-payload-hash".to_string(),
+            lifecycle_recheck: None,
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("agent_lifecycle_recheck_required:"));
+    assert!(matches!(
+        state.client_dispatch_fences.read().await["client-a"].state,
+        GatewayClientDispatchFenceState::DurableRecheck { fallback: None }
+    ));
+}
+
+#[tokio::test]
 async fn same_token_acquire_requires_the_same_purpose_before_or_after_prepare() {
     let state = GatewayState::default();
     let token = uuid::Uuid::new_v4();
@@ -459,6 +807,7 @@ async fn same_token_acquire_requires_the_same_purpose_before_or_after_prepare() 
             client_id: "client-a".to_string(),
             token,
             purpose: GatewayClientDispatchFencePurpose::Deletion,
+            supersede_prepared_suspension: false,
         },
     )
     .await
@@ -485,6 +834,7 @@ async fn same_token_acquire_requires_the_same_purpose_before_or_after_prepare() 
             client_id: "client-a".to_string(),
             token,
             purpose: GatewayClientDispatchFencePurpose::Deletion,
+            supersede_prepared_suspension: false,
         },
     )
     .await
