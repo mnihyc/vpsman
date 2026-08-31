@@ -2853,6 +2853,7 @@ export function App() {
           onLoadNetworkAdapterDefinitions={
             dashboard.loadNetworkAdapterDefinitions
           }
+          onLoadJobHistory={dashboard.loadJobHistory}
           onLoadTopologyGraph={dashboard.loadTopologyGraph}
           onLoadOutputs={dashboard.loadJobOutputs}
           onLoadTargets={dashboard.loadJobTargets}
@@ -2929,6 +2930,8 @@ export function App() {
   }
 
   function renderBackupsPanel(panelSubpage: string) {
+    const ownsFileTransfers =
+      panelSubpage === "restore" || panelSubpage === "migration";
     return (
       <BackupsPanel
         activeSubpage={panelSubpage}
@@ -2941,13 +2944,19 @@ export function App() {
         jobs={dashboard.jobs}
         migrationLinks={dashboard.migrationLinks}
         restorePlans={dashboard.restorePlans}
-        error={dashboard.backupsError}
+        error={combineErrors(
+          dashboard.backupsError,
+          ownsFileTransfers ? dashboard.jobsError : null,
+        )}
         initialTargetIntent={
           workflowTargetIntent?.destination === "backup_requests"
             ? workflowTargetIntent
             : null
         }
-        loading={dashboard.backupsLoading}
+        loading={
+          dashboard.backupsLoading ||
+          (ownsFileTransfers && dashboard.jobsLoading)
+        }
         onCreateBackupPolicy={dashboard.createBackupPolicy}
         onUpdateBackupPolicy={dashboard.updateBackupPolicy}
         onCreateJob={dashboard.createJob}

@@ -193,6 +193,7 @@ export function TopologyPanel({
   onLoadOspfRecommendations,
   onLoadOspfUpdatePlans,
   onLoadNetworkAdapterDefinitions,
+  onLoadJobHistory,
   onLoadOutputs,
   onLoadTargets,
   onLoadTopologyGraph,
@@ -423,6 +424,7 @@ export function TopologyPanel({
         onLoadObservations={onLoadNetworkObservations}
         onLoadOspfRecommendations={onLoadOspfRecommendations}
         onLoadOspfUpdatePlans={onLoadOspfUpdatePlans}
+        onLoadJobHistory={onLoadJobHistory}
         onLoadOutputs={onLoadOutputs}
         onLoadTrends={onLoadNetworkTrends}
         onOpenGraph={() => onSelectSubpage("graph")}
@@ -483,7 +485,12 @@ export function TopologyPanel({
       onOpenConfigurationSources={onOpenConfigurationSources}
       onQueryNetworkObservations={onQueryNetworkObservations}
       onRefresh={async () => {
-        await Promise.all([onRefresh(), onLoadTopologyGraph()]);
+        await Promise.all([
+          onRefresh(),
+          onLoadTopologyGraph(),
+          onLoadNetworkAdapterDefinitions(),
+          onLoadConfigurationSources().catch(() => undefined),
+        ]);
       }}
       onRotateTunnelPlanCredentials={onRotateTunnelPlanCredentials}
       onSetTunnelPlanEnabled={onSetTunnelPlanEnabled}
@@ -6354,6 +6361,7 @@ type TopologyPanelProps = {
   onLoadOspfRecommendations: () => Promise<void>;
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadNetworkAdapterDefinitions: () => Promise<void>;
+  onLoadJobHistory: () => Promise<JobHistoryRecord[]>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onLoadTopologyGraph: (query?: NetworkEvidenceQuery) => Promise<void>;

@@ -932,7 +932,13 @@ export function BackupsPanel({
             <div className="sectionActions headerActionStack">
               <button
                 className="secondaryAction"
+                disabled={loading}
                 onClick={() => void onRefresh()}
+                title={
+                  loading
+                    ? `${backupSubpageMeta.title} refresh is already in progress`
+                    : `Refresh ${backupSubpageMeta.title.toLowerCase()}`
+                }
                 type="button"
               >
                 <RefreshCw size={17} />
@@ -2665,7 +2671,13 @@ export function BackupsPanel({
             <div className="sectionActions">
               <button
                 className="secondaryAction"
+                disabled={loading}
                 onClick={() => void onRefresh()}
+                title={
+                  loading
+                    ? `${backupSubpageMeta.title} refresh is already in progress`
+                    : `Refresh ${backupSubpageMeta.title.toLowerCase()}`
+                }
                 type="button"
               >
                 <RefreshCw size={17} />

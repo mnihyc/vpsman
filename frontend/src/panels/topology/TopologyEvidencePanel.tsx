@@ -73,6 +73,7 @@ export function TopologyEvidencePanel({
   loading,
   observations,
   onLoadObservations,
+  onLoadJobHistory,
   onLoadOspfRecommendations,
   onLoadOspfUpdatePlans,
   onLoadOutputs,
@@ -94,6 +95,7 @@ export function TopologyEvidencePanel({
   loading: boolean;
   observations: NetworkObservationRecord[];
   onLoadObservations: (query?: NetworkEvidenceQuery) => Promise<void>;
+  onLoadJobHistory: () => Promise<JobHistoryRecord[]>;
   onLoadOspfRecommendations: () => Promise<void>;
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
@@ -276,19 +278,26 @@ export function TopologyEvidencePanel({
     };
   }
 
-  async function refreshEvidence(windowOverride = evidenceWindow) {
+  async function refreshEvidence(
+    windowOverride = evidenceWindow,
+    includeCommandJobs = false,
+  ) {
     const generation = refreshGenerationRef.current + 1;
     refreshGenerationRef.current = generation;
     setRefreshing(true);
     setRefreshError(null);
     try {
       const query = currentEvidenceQuery(windowOverride);
-      await Promise.all([
+      const requests: Promise<unknown>[] = [
         onLoadObservations(query),
         onLoadTrends({ ...query, limit: 10_000 }),
         onLoadOspfRecommendations(),
         onLoadOspfUpdatePlans(),
-      ]);
+      ];
+      if (includeCommandJobs) {
+        requests.push(onLoadJobHistory().catch(() => undefined));
+      }
+      await Promise.all(requests);
       if (generation !== refreshGenerationRef.current) return;
       setAppliedPlanId(planId);
     } catch (loadError) {
@@ -398,7 +407,7 @@ export function TopologyEvidencePanel({
           <button
             className="secondaryAction"
             disabled={refreshing || loading}
-            onClick={() => void refreshEvidence()}
+            onClick={() => void refreshEvidence(evidenceWindow, true)}
             title={
               refreshing || loading
                 ? "Network evidence is already refreshing"

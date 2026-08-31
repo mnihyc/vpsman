@@ -190,6 +190,116 @@ test("hidden Network route visits hydrate the final exact owner once", async ({
   expect(pathCount(requests, "/api/v1/runtime-config/apply-state")).toBe(0);
 });
 
+test("Network manual refresh retries each exact button-owned source", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "request ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+
+  await openConsoleSubpage(page, "Network", "Evidence");
+  const evidence = page.locator(".topologyEvidence");
+  await evidence.getByText("Advanced filters", { exact: true }).click();
+  const applyFilters = evidence.getByRole("button", {
+    name: "Apply filters",
+    exact: true,
+  });
+  await expect(applyFilters).toBeEnabled();
+  await clearTrackedRequests(page);
+  await applyFilters.click();
+  await expect
+    .poll(async () => {
+      const requests = await trackedRequests(page);
+      return [
+        "/api/v1/network/observations",
+        "/api/v1/network/observation-trends",
+        "/api/v1/network/ospf-recommendations",
+        "/api/v1/network/ospf-update-plans",
+      ].map((path) => pathCount(requests, path));
+    })
+    .toEqual([1, 1, 1, 1]);
+  let requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/jobs",
+    "/api/v1/tunnel-plans",
+    "/api/v1/network/topology-graph",
+    "/api/v1/network-adapter-definitions",
+    "/api/v1/configuration-sources",
+    "/api/v1/port-forward-rules",
+    "/api/v1/runtime-config/apply-state",
+  ]) {
+    expect(pathCount(requests, path), `${path} is outside filter apply`).toBe(0);
+  }
+
+  const refreshEvidence = evidence
+    .getByRole("button", { name: "Refresh evidence", exact: true });
+  await expect(refreshEvidence).toBeEnabled();
+  await clearTrackedRequests(page);
+  await refreshEvidence.click();
+  await expect
+    .poll(async () => {
+      const requests = await trackedRequests(page);
+      return [
+        "/api/v1/network/observations",
+        "/api/v1/network/observation-trends",
+        "/api/v1/network/ospf-recommendations",
+        "/api/v1/network/ospf-update-plans",
+        "/api/v1/jobs",
+      ].map((path) => pathCount(requests, path));
+    })
+    .toEqual([1, 1, 1, 1, 1]);
+  requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/tunnel-plans",
+    "/api/v1/network/topology-graph",
+    "/api/v1/network-adapter-definitions",
+    "/api/v1/configuration-sources",
+    "/api/v1/port-forward-rules",
+    "/api/v1/runtime-config/apply-state",
+  ]) {
+    expect(pathCount(requests, path), `${path} is outside evidence refresh`).toBe(
+      0,
+    );
+  }
+
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+  const refreshTunnelPlans = page
+    .locator(".tunnelPlanRegistry")
+    .getByRole("button", { name: "Refresh", exact: true });
+  await expect(refreshTunnelPlans).toBeEnabled();
+  await clearTrackedRequests(page);
+  await refreshTunnelPlans.click();
+  await expect
+    .poll(async () => {
+      const requests = await trackedRequests(page);
+      return [
+        "/api/v1/tunnel-plans",
+        "/api/v1/network/topology-graph",
+        "/api/v1/network-adapter-definitions",
+        "/api/v1/configuration-sources",
+      ].map((path) => pathCount(requests, path));
+    })
+    .toEqual([1, 1, 1, 1]);
+  requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/jobs",
+    "/api/v1/network/observations",
+    "/api/v1/network/observation-trends",
+    "/api/v1/network/ospf-recommendations",
+    "/api/v1/network/ospf-update-plans",
+    "/api/v1/port-forward-rules",
+    "/api/v1/runtime-config/apply-state",
+  ]) {
+    expect(pathCount(requests, path), `${path} is outside tunnel refresh`).toBe(
+      0,
+    );
+  }
+});
+
 test("topology source failures stay with their exact route consumers", async ({
   page,
 }, testInfo) => {
@@ -607,6 +717,115 @@ test("Access manual refresh follows the canonical visible projection", async ({
       0,
     );
   }
+});
+
+test("Backups restore and migration surface their file-transfer owner status", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "source ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    const state: {
+      failNext: boolean;
+      held: boolean;
+      release: (() => void) | null;
+    } = { failNext: false, held: false, release: null };
+    Object.defineProperty(window, "__vpsmanBackupTransferStatus", {
+      configurable: true,
+      value: state,
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      if (method !== "GET" || url.pathname !== "/api/v1/file-transfers") {
+        return originalFetch(input, init);
+      }
+      if (state.failNext) {
+        state.failNext = false;
+        return new Response(
+          JSON.stringify({
+            error: "file_transfer_probe",
+            message: "Transfer source failed",
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 503 },
+        );
+      }
+      if (!state.held) {
+        state.held = true;
+        await new Promise<void>((resolve) => {
+          state.release = resolve;
+        });
+      }
+      return originalFetch(input, init);
+    };
+  });
+
+  const openingRestore = openConsoleSubpage(page, "Backups", "Restore");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanBackupTransferStatus: { held: boolean };
+            }
+          ).__vpsmanBackupTransferStatus.held,
+      ),
+    )
+    .toBe(true);
+  await openingRestore;
+  const backupWorkspace = page.locator(".backupWorkspace");
+  const refresh = backupWorkspace.getByRole("button", {
+    name: "Refresh",
+    exact: true,
+  });
+  await expect(refresh).toBeDisabled();
+  await expect(refresh).toHaveAttribute(
+    "title",
+    "Restore operations refresh is already in progress",
+  );
+  await expect(backupWorkspace.getByText("Loading restore sources")).toBeVisible();
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __vpsmanBackupTransferStatus: { release: (() => void) | null };
+      }
+    ).__vpsmanBackupTransferStatus;
+    state.release?.();
+    state.release = null;
+  });
+  await expect(refresh).toBeEnabled();
+
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanBackupTransferStatus: { failNext: boolean };
+      }
+    ).__vpsmanBackupTransferStatus.failNext = true;
+  });
+  await openConsoleSubpage(page, "Backups", "Migration");
+  await expect(
+    page.getByText(/File transfer sessions: .*Transfer source failed/i),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator(".backupWorkspace")
+      .getByRole("button", { name: "Refresh", exact: true }),
+  ).toBeEnabled();
 });
 
 test("committed backup prune reconciles request linkage and artifacts once", async ({
