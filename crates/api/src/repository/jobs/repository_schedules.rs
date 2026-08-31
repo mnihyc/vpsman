@@ -4,7 +4,7 @@ use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use croner::Cron;
 use serde_json::Value;
-use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
+use sqlx::{types::Json as SqlJson, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{alert_event_argv_template_hash, payload_hash, JobCommand};
 
@@ -266,6 +266,29 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn schedules_by_ids(
+        &self,
+        schedule_ids: &[Uuid],
+    ) -> Result<Vec<ScheduleView>> {
+        if schedule_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                let sql = schedule_select_sql(
+                    "WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL ORDER BY id",
+                );
+                sqlx::query(&sql)
+                    .bind(schedule_ids)
+                    .fetch_all(pool)
+                    .await?
+                    .into_iter()
+                    .map(schedule_from_postgres_row)
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn update_schedule_record(
         &self,
         schedule_id: Uuid,
@@ -353,6 +376,199 @@ impl Repository {
                 .await?;
                 tx.commit().await?;
                 Ok(schedule)
+            }
+        }
+    }
+
+    pub(crate) async fn update_schedule_targets_bulk(
+        &self,
+        updates: &[ScheduleTargetBatchUpdate],
+        operator: &AuthContext,
+    ) -> Result<Vec<ScheduleTargetBatchUpdateResult>> {
+        ensure!(!updates.is_empty(), "schedule_target_selection_required");
+        ensure!(updates.len() <= 500, "schedule_target_selection_too_large");
+        let unique_schedule_ids = updates
+            .iter()
+            .map(|update| update.schedule_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure!(
+            unique_schedule_ids.len() == updates.len(),
+            "schedule_target_selection_duplicate"
+        );
+
+        match self {
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let definition_identities = unique_schedule_ids
+                    .iter()
+                    .map(|schedule_id| format!("schedule:{schedule_id}"))
+                    .collect::<Vec<_>>();
+                let target_client_ids = updates
+                    .iter()
+                    .flat_map(|update| update.target_client_ids.iter().cloned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                crate::repository_key_lifecycle::lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &definition_identities,
+                    &target_client_ids,
+                )
+                .await?;
+
+                let visible_client_ids = if target_client_ids.is_empty() {
+                    std::collections::BTreeSet::new()
+                } else {
+                    sqlx::query_scalar::<_, String>(
+                        r#"
+                        SELECT id
+                        FROM visible_clients
+                        WHERE id = ANY($1::text[])
+                        ORDER BY id
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&target_client_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .collect()
+                };
+                let schedule_ids = unique_schedule_ids.iter().copied().collect::<Vec<_>>();
+                let sql = schedule_select_sql(
+                    "WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL ORDER BY id FOR UPDATE",
+                );
+                let schedules = sqlx::query(&sql)
+                    .bind(&schedule_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .map(schedule_from_postgres_row)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|schedule| (schedule.id, schedule))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+
+                let mut rejected = std::collections::HashMap::<Uuid, &'static str>::new();
+                let mut accepted = Vec::new();
+                for update in updates {
+                    let Some(schedule) = schedules.get(&update.schedule_id) else {
+                        rejected.insert(update.schedule_id, "schedule_not_found");
+                        continue;
+                    };
+                    if update
+                        .target_client_ids
+                        .iter()
+                        .any(|client_id| !visible_client_ids.contains(client_id))
+                    {
+                        rejected.insert(update.schedule_id, "schedule_fixed_targets_not_found");
+                        continue;
+                    }
+                    if ensure_schedule_operation_valid(schedule).is_err() {
+                        rejected.insert(update.schedule_id, "schedule_operation_invalid");
+                        continue;
+                    }
+                    if ensure_schedule_snapshot(schedule, Some(&update.expectation)).is_err() {
+                        rejected.insert(update.schedule_id, "schedule_snapshot_stale");
+                        continue;
+                    }
+                    accepted.push(update);
+                }
+
+                if !accepted.is_empty() {
+                    let mut query = QueryBuilder::<Postgres>::new(
+                        r#"
+                        UPDATE schedules AS schedule
+                        SET
+                            actor_id = "#,
+                    );
+                    query.push_bind(operator.operator.id).push(
+                        r#",
+                            target_client_ids = update_input.target_client_ids,
+                            definition_revision = schedule.definition_revision + 1,
+                            event_armed_at = CASE
+                                WHEN schedule.trigger_kind = 'event' THEN clock_timestamp()
+                                ELSE NULL
+                            END,
+                            updated_at = now()
+                        FROM ("#,
+                    );
+                    query.push_values(&accepted, |mut values, update| {
+                        values
+                            .push_bind(update.schedule_id)
+                            .push_bind(&update.target_client_ids)
+                            .push_bind(update.expectation.definition_revision);
+                    });
+                    query.push(
+                        r#") AS update_input(id, target_client_ids, definition_revision)
+                        WHERE schedule.id = update_input.id
+                          AND schedule.deleted_at IS NULL
+                          AND schedule.definition_revision = update_input.definition_revision
+                        RETURNING schedule.id
+                        "#,
+                    );
+                    let updated_ids = query
+                        .build_query_scalar::<Uuid>()
+                        .fetch_all(&mut *tx)
+                        .await?
+                        .into_iter()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    ensure!(
+                        updated_ids.len() == accepted.len(),
+                        "schedule_target_batch_update_invariant_failed"
+                    );
+                }
+
+                let updated_ids = accepted
+                    .iter()
+                    .map(|update| update.schedule_id)
+                    .collect::<Vec<_>>();
+                let updated = if updated_ids.is_empty() {
+                    std::collections::BTreeMap::new()
+                } else {
+                    let sql = schedule_select_sql(
+                        "WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL ORDER BY id",
+                    );
+                    sqlx::query(&sql)
+                        .bind(&updated_ids)
+                        .fetch_all(&mut *tx)
+                        .await?
+                        .into_iter()
+                        .map(schedule_from_postgres_row)
+                        .collect::<Result<Vec<_>>>()?
+                        .into_iter()
+                        .map(|schedule| (schedule.id, schedule))
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                };
+                for schedule in updated.values() {
+                    record_postgres_schedule_audit(
+                        &mut tx,
+                        schedule,
+                        operator,
+                        "schedule.targets_updated",
+                    )
+                    .await?;
+                }
+                let outcomes = updates
+                    .iter()
+                    .map(|update| {
+                        if let Some(error_code) = rejected.get(&update.schedule_id) {
+                            ScheduleTargetBatchUpdateResult::Rejected {
+                                schedule_id: update.schedule_id,
+                                error_code,
+                            }
+                        } else {
+                            ScheduleTargetBatchUpdateResult::Updated(Box::new(
+                                updated
+                                    .get(&update.schedule_id)
+                                    .cloned()
+                                    .expect("accepted schedule must have an updated row"),
+                            ))
+                        }
+                    })
+                    .collect();
+                tx.commit().await?;
+                Ok(outcomes)
             }
         }
     }
@@ -553,6 +769,22 @@ pub(crate) struct ScheduleSnapshotExpectation {
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) definition_revision: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ScheduleTargetBatchUpdate {
+    pub(crate) schedule_id: Uuid,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) expectation: ScheduleSnapshotExpectation,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ScheduleTargetBatchUpdateResult {
+    Updated(Box<ScheduleView>),
+    Rejected {
+        schedule_id: Uuid,
+        error_code: &'static str,
+    },
 }
 
 struct ScheduleRowParts {

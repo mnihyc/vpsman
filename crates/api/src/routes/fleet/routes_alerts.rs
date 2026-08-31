@@ -18,21 +18,23 @@ use crate::{
     error::ApiError,
     fleet_alerts::apply_alert_states,
     model::{
-        FleetAlertEventPage, FleetAlertEventQuery, FleetAlertHistoryQuery, FleetAlertQuery,
-        FleetAlertView, ResolveFleetAlertRequest,
+        BulkResolveFleetAlertsRequest, BulkResolveFleetAlertsResponse, FleetAlertEventPage,
+        FleetAlertEventQuery, FleetAlertEventSyncRequest, FleetAlertEventSyncResponse,
+        FleetAlertHistoryQuery, FleetAlertQuery, FleetAlertView, ResolveFleetAlertRequest,
     },
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, DeleteFleetAlertNotificationChannelRequest,
+        FleetAlertNotificationChannelBulkRequest, FleetAlertNotificationChannelBulkResponse,
         FleetAlertNotificationChannelQuery, FleetAlertNotificationChannelView,
         FleetAlertNotificationDeliveryQuery, FleetAlertNotificationDeliveryView,
         FleetAlertNotificationDispatchRequest, FleetAlertNotificationProcessRequest,
     },
     model_alert_policies::{
-        CreateFleetAlertPolicyRequest, DeleteFleetAlertPolicyRequest, FleetAlertPolicyQuery,
-        PolicyAlertQuery, PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse,
-        PolicyGroupRecord, TrafficAccountingQuery, TrafficAccountingRecord, VpsRuleQuery,
-        VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
-        VpsRulesDryRunRequest, VpsRulesDryRunResponse,
+        CreateFleetAlertPolicyRequest, DeleteFleetAlertPolicyRequest, FleetAlertPolicyBulkRequest,
+        FleetAlertPolicyBulkResponse, FleetAlertPolicyQuery, PolicyAlertQuery, PolicyAlertRecord,
+        PolicyDryRunRequest, PolicyDryRunResponse, PolicyGroupRecord, TrafficAccountingQuery,
+        TrafficAccountingRecord, VpsRuleQuery, VpsRuleValueRecord, VpsRulesBulkUnsetRequest,
+        VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest, VpsRulesDryRunResponse,
     },
     model_alert_states::{
         BulkUpdateFleetAlertStatesRequest, BulkUpdateFleetAlertStatesResponse,
@@ -50,6 +52,10 @@ use crate::{
     unix_now,
     util::{limit_or_default, parse_timestamp_utc},
 };
+
+const FLEET_ALERT_EVENT_PAGE_LIMIT: usize = 200;
+const FLEET_ALERT_EVENT_SYNC_ID_LIMIT: usize = 5_000;
+const ALERT_CONFIGURATION_BULK_ITEM_LIMIT: usize = 500;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct FleetAlertEventCursor {
@@ -186,6 +192,86 @@ pub(crate) async fn list_fleet_alert_events(
     }))
 }
 
+pub(crate) async fn sync_fleet_alert_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<FleetAlertEventSyncRequest>,
+) -> Result<Json<FleetAlertEventSyncResponse>, ApiError> {
+    let operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    let known_alert_ids = normalize_fleet_alert_event_sync_ids(request.known_alert_ids)?;
+    let mut sync = state
+        .repo
+        .sync_unresolved_operational_alert_events(
+            &known_alert_ids,
+            FLEET_ALERT_EVENT_PAGE_LIMIT.saturating_add(1),
+        )
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fleet_alert_event_sync_unavailable",
+            "Current Fleet alert occurrences could not be synchronized.",
+        ))?;
+    let has_more = sync.head.len() > FLEET_ALERT_EVENT_PAGE_LIMIT;
+    if has_more {
+        sync.head.truncate(FLEET_ALERT_EVENT_PAGE_LIMIT);
+    }
+    let next_cursor = if has_more {
+        sync.head
+            .last()
+            .map(encode_fleet_alert_event_cursor)
+            .transpose()?
+    } else {
+        None
+    };
+    let mut head = sync
+        .head
+        .iter()
+        .map(operational_episode_to_fleet_alert)
+        .collect::<Vec<_>>();
+    let mut current_items = sync
+        .current
+        .iter()
+        .map(operational_episode_to_fleet_alert)
+        .collect::<Vec<_>>();
+    apply_alert_states(&mut head, &sync.states);
+    apply_alert_states(&mut current_items, &sync.states);
+    Ok(Json(FleetAlertEventSyncResponse {
+        head: FleetAlertEventPage {
+            items: head,
+            next_cursor,
+            has_more,
+        },
+        current_items,
+    }))
+}
+
+fn normalize_fleet_alert_event_sync_ids(
+    requested_ids: Vec<String>,
+) -> Result<Vec<String>, ApiError> {
+    if requested_ids.len() > FLEET_ALERT_EVENT_SYNC_ID_LIMIT {
+        return Err(ApiError::bad_request(
+            "fleet_alert_event_sync_items_invalid",
+        ));
+    }
+    let mut unique = HashSet::with_capacity(requested_ids.len());
+    let mut known_alert_ids = Vec::with_capacity(requested_ids.len());
+    for alert_id in requested_ids {
+        validate_alert_id(&alert_id)?;
+        let alert_id = alert_id.trim().to_string();
+        if !unique.insert(alert_id.clone()) {
+            return Err(ApiError::bad_request(
+                "fleet_alert_event_sync_duplicate_item",
+            ));
+        }
+        known_alert_ids.push(alert_id);
+    }
+    Ok(known_alert_ids)
+}
+
 fn decode_fleet_alert_event_cursor(
     cursor: Option<&str>,
 ) -> Result<Option<(DateTime<Utc>, Uuid)>, ApiError> {
@@ -271,6 +357,55 @@ pub(crate) async fn resolve_fleet_alert(
     Ok(Json(alert))
 }
 
+pub(crate) async fn bulk_resolve_fleet_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkResolveFleetAlertsRequest>,
+) -> Result<Json<BulkResolveFleetAlertsResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_FLEET_READ)
+        || !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ)
+    {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    validate_bulk_fleet_alert_resolution(&request)?;
+    let items = request
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.alert_id.clone(),
+                Some(item.expected_trigger_generation),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (_, episodes) = state
+        .repo
+        .resolve_operational_alert_events(&items, request.reason.trim(), &operator)
+        .await
+        .map_err(fleet_alert_resolution_error)?;
+    let mut alerts = episodes
+        .iter()
+        .map(operational_episode_to_fleet_alert)
+        .collect::<Vec<_>>();
+    let alert_ids = alerts
+        .iter()
+        .map(|alert| alert.id.clone())
+        .collect::<Vec<_>>();
+    let states = state
+        .repo
+        .list_fleet_alert_states_for_alert_ids(&alert_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fleet_alert_state_unavailable",
+            "Fleet alert triage state could not be loaded.",
+        ))?;
+    apply_alert_states(&mut alerts, &states);
+    Ok(Json(BulkResolveFleetAlertsResponse { alerts }))
+}
+
 fn fleet_alert_resolution_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("fleet_alert_not_found") {
@@ -282,6 +417,19 @@ fn fleet_alert_resolution_error(error: anyhow::Error) -> ApiError {
     if message.contains("fleet_alert_already_resolved") {
         return ApiError::conflict("fleet_alert_already_resolved");
     }
+    if message.contains("fleet_alert_resolution_snapshot_stale") {
+        return ApiError::conflict("fleet_alert_resolution_snapshot_stale");
+    }
+    for code in [
+        "fleet_alert_resolution_items_invalid",
+        "fleet_alert_resolution_duplicate_item",
+        "fleet_alert_resolution_generation_invalid",
+        "fleet_alert_id_required",
+    ] {
+        if message.contains(code) {
+            return ApiError::bad_request(code);
+        }
+    }
     if message.contains("fleet_alert_resolution_reason_invalid") {
         return ApiError::bad_request("fleet_alert_resolution_reason_invalid");
     }
@@ -290,6 +438,42 @@ fn fleet_alert_resolution_error(error: anyhow::Error) -> ApiError {
         "The Fleet alert could not be resolved.",
         error,
     )
+}
+
+fn validate_bulk_fleet_alert_resolution(
+    request: &BulkResolveFleetAlertsRequest,
+) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "fleet_alert_resolution_confirmation_required",
+        ));
+    }
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.len() > 1024 {
+        return Err(ApiError::bad_request(
+            "fleet_alert_resolution_reason_invalid",
+        ));
+    }
+    if request.items.is_empty() || request.items.len() > 1_000 {
+        return Err(ApiError::bad_request(
+            "fleet_alert_resolution_items_invalid",
+        ));
+    }
+    let mut alert_ids = HashSet::with_capacity(request.items.len());
+    for item in &request.items {
+        validate_alert_id(&item.alert_id)?;
+        if item.expected_trigger_generation < 1 {
+            return Err(ApiError::bad_request(
+                "fleet_alert_resolution_generation_invalid",
+            ));
+        }
+        if !alert_ids.insert(item.alert_id.trim()) {
+            return Err(ApiError::bad_request(
+                "fleet_alert_resolution_duplicate_item",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn export_fleet_alerts(
@@ -509,6 +693,29 @@ pub(crate) async fn upsert_fleet_alert_policy(
     ))
 }
 
+pub(crate) async fn bulk_mutate_fleet_alert_policies(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<FleetAlertPolicyBulkRequest>,
+) -> Result<Json<FleetAlertPolicyBulkResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
+        .await?;
+    require_alert_policy_source_scopes(&operator.operator.scopes)?;
+    validate_fleet_alert_policy_bulk_request(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .bulk_mutate_fleet_alert_policies(
+                &request,
+                &operator,
+                operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+            )
+            .await
+            .map_err(fleet_alert_policy_error)?,
+    ))
+}
+
 pub(crate) async fn delete_fleet_alert_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -553,6 +760,27 @@ fn require_alert_policy_source_scopes(scopes: &[String]) -> Result<(), ApiError>
     } else {
         Err(ApiError::forbidden("operator_scope_insufficient"))
     }
+}
+
+fn validate_fleet_alert_policy_bulk_request(
+    request: &FleetAlertPolicyBulkRequest,
+) -> Result<(), ApiError> {
+    validate_alert_configuration_bulk_items(
+        request.confirmed,
+        request.items.len(),
+        request.items.iter().map(|item| {
+            (
+                item.id,
+                item.reviewed_name.as_str(),
+                item.expected_updated_at.as_str(),
+            )
+        }),
+        "fleet_alert_policy_bulk_confirmation_required",
+        "fleet_alert_policy_bulk_items_invalid",
+        "fleet_alert_policy_bulk_duplicate_item",
+        "fleet_alert_policy_bulk_review_invalid",
+        "fleet_alert_policy_bulk_expected_updated_at_invalid",
+    )
 }
 
 pub(crate) async fn list_vps_rules(
@@ -755,6 +983,24 @@ pub(crate) async fn upsert_fleet_alert_notification_channel(
         state
             .repo
             .upsert_fleet_alert_notification_channel(&request, &operator)
+            .await
+            .map_err(fleet_alert_notification_channel_error)?,
+    ))
+}
+
+pub(crate) async fn bulk_mutate_fleet_alert_notification_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<FleetAlertNotificationChannelBulkRequest>,
+) -> Result<Json<FleetAlertNotificationChannelBulkResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
+        .await?;
+    validate_fleet_alert_notification_channel_bulk_request(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .bulk_mutate_fleet_alert_notification_channels(&request, &operator)
             .await
             .map_err(fleet_alert_notification_channel_error)?,
     ))
@@ -1006,6 +1252,60 @@ fn validate_alert_notification_channel_query(
     }
     if let Some(delivery_kind) = query.delivery_kind.as_deref() {
         validate_alert_notification_delivery_kind(delivery_kind)?;
+    }
+    Ok(())
+}
+
+fn validate_fleet_alert_notification_channel_bulk_request(
+    request: &FleetAlertNotificationChannelBulkRequest,
+) -> Result<(), ApiError> {
+    validate_alert_configuration_bulk_items(
+        request.confirmed,
+        request.items.len(),
+        request.items.iter().map(|item| {
+            (
+                item.id,
+                item.reviewed_name.as_str(),
+                item.expected_updated_at.as_str(),
+            )
+        }),
+        "fleet_alert_notification_channel_bulk_confirmation_required",
+        "fleet_alert_notification_channel_bulk_items_invalid",
+        "fleet_alert_notification_channel_bulk_duplicate_item",
+        "fleet_alert_notification_channel_bulk_review_invalid",
+        "fleet_alert_notification_channel_bulk_expected_updated_at_invalid",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_alert_configuration_bulk_items<'a, I>(
+    confirmed: bool,
+    item_count: usize,
+    items: I,
+    confirmation_error: &'static str,
+    items_error: &'static str,
+    duplicate_error: &'static str,
+    reviewed_name_error: &'static str,
+    timestamp_error: &'static str,
+) -> Result<(), ApiError>
+where
+    I: IntoIterator<Item = (Uuid, &'a str, &'a str)>,
+{
+    if !confirmed {
+        return Err(ApiError::bad_request(confirmation_error));
+    }
+    if !(1..=ALERT_CONFIGURATION_BULK_ITEM_LIMIT).contains(&item_count) {
+        return Err(ApiError::bad_request(items_error));
+    }
+    let mut ids = HashSet::with_capacity(item_count);
+    for (id, reviewed_name, expected_updated_at) in items {
+        if !ids.insert(id) {
+            return Err(ApiError::bad_request(duplicate_error));
+        }
+        validate_short_required_value(reviewed_name, reviewed_name_error)?;
+        if parse_timestamp_utc(expected_updated_at).is_none() {
+            return Err(ApiError::bad_request(timestamp_error));
+        }
     }
     Ok(())
 }
@@ -1291,6 +1591,16 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
     if message.contains("fleet_alert_policy_delete_review_stale") {
         return ApiError::conflict("fleet_alert_policy_delete_review_stale");
     }
+    for code in [
+        "fleet_alert_policy_bulk_review_stale",
+        "fleet_alert_policy_bulk_state_stale",
+        "fleet_alert_policy_bulk_snapshot_stale",
+        "fleet_alert_policy_rule_version_overflow",
+    ] {
+        if message.contains(code) {
+            return ApiError::conflict(code);
+        }
+    }
     if message.contains("fleet_alert_policy_rule_id_conflict") {
         return ApiError::conflict("fleet_alert_policy_rule_id_conflict");
     }
@@ -1364,6 +1674,15 @@ fn fleet_alert_notification_channel_error(error: anyhow::Error) -> ApiError {
     }
     if message.contains("fleet_alert_notification_channel_delete_review_stale") {
         return ApiError::conflict("fleet_alert_notification_channel_delete_review_stale");
+    }
+    for code in [
+        "fleet_alert_notification_channel_bulk_review_stale",
+        "fleet_alert_notification_channel_bulk_state_stale",
+        "fleet_alert_notification_channel_bulk_snapshot_stale",
+    ] {
+        if message.contains(code) {
+            return ApiError::conflict(code);
+        }
     }
     ApiError::internal(
         "fleet_alert_notification_channel_mutation_failed",

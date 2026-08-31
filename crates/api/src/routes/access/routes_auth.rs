@@ -1,4 +1,7 @@
-use std::net::{Ipv6Addr, SocketAddr};
+use std::{
+    collections::{HashMap, HashSet},
+    net::{Ipv6Addr, SocketAddr},
+};
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
@@ -9,17 +12,22 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    gateway_client::GatewayControlResponseError,
     model::{
         is_valid_operator_timezone, AuthContext, AuthResponse, BootstrapOperatorRequest,
-        BootstrapStatusResponse, CreateOperatorRequest, HistoryQuery, LoginRequest,
-        OperatorAuthEventQuery, OperatorAuthEventView, OperatorLifecycleRequest,
+        BootstrapStatusResponse, BulkOperatorMutationItem, BulkOperatorMutationOutcome,
+        BulkOperatorMutationResponse, BulkOperatorSessionRevokeItem,
+        BulkOperatorSessionRevokeOutcome, BulkOperatorSessionRevokeRequest,
+        BulkOperatorSessionRevokeResponse, BulkOperatorStatusRequest, BulkOperatorTotpClearRequest,
+        CreateOperatorRequest, HistoryQuery, LoginRequest, OperatorAuthEventQuery,
+        OperatorAuthEventView, OperatorLifecycleRequest, OperatorLifecycleStatus,
         OperatorPasswordResetRequest, OperatorPreferences, OperatorSessionRevokeRequest,
         OperatorSessionView, OperatorView, RefreshRequest, TotpConfirmRequest, TotpDisableRequest,
         TotpSetupOutcome, TotpSetupRequest, TotpSetupResponse, TotpUpdateOutcome,
         UpdateOperatorRequest,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
-    repository_auth::OperatorLoginAttempt,
+    repository_auth::{AccessBatchMutationOutcome, OperatorLoginAttempt},
     security::{
         bearer_token, normalize_operator_scopes, validate_operator_credentials,
         validate_operator_role, DEFAULT_REFRESH_TOKEN_TTL_SECS, MAX_REFRESH_TOKEN_TTL_SECS,
@@ -27,7 +35,10 @@ use crate::{
     },
     state::AppState,
 };
-use vpsman_common::{operator_db_payload_hash, OperatorDbPayloadInput, PrivilegeAssertion};
+use vpsman_common::{
+    operator_db_payload_hash, GatewayPrivilegeVerification, GatewayPrivilegeVerificationBatchItem,
+    OperatorDbPayloadInput, PrivilegeAssertion, GATEWAY_CONTROL_BATCH_MAX_ITEMS,
+};
 
 pub(crate) async fn bootstrap_status(
     State(state): State<AppState>,
@@ -764,6 +775,17 @@ pub(crate) async fn disable_operator(
     set_operator_lifecycle_status(state, headers, operator_id, "disabled", request).await
 }
 
+pub(crate) async fn bulk_set_operator_statuses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkOperatorStatusRequest>,
+) -> Result<Json<BulkOperatorMutationResponse>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    Ok(Json(
+        mutate_operator_statuses(&state, &actor, request).await?,
+    ))
+}
+
 pub(crate) async fn enable_operator(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -790,45 +812,469 @@ async fn set_operator_lifecycle_status(
     request: OperatorLifecycleRequest,
 ) -> Result<Json<OperatorView>, ApiError> {
     let actor = state.require_operator_role(&headers, "admin").await?;
-    require_confirmed(request.confirmed)?;
-    let target = state
+    let status = match status {
+        "active" => OperatorLifecycleStatus::Active,
+        "disabled" => OperatorLifecycleStatus::Disabled,
+        "deleted" => OperatorLifecycleStatus::Deleted,
+        _ => return Err(ApiError::bad_request("invalid_operator_status")),
+    };
+    let response = mutate_operator_statuses(
+        &state,
+        &actor,
+        BulkOperatorStatusRequest {
+            status,
+            items: vec![BulkOperatorMutationItem {
+                operator_id,
+                privilege_assertion: request.privilege_assertion,
+            }],
+            confirmed: request.confirmed,
+            admin_risk_acknowledged: request.admin_risk_acknowledged,
+        },
+    )
+    .await?;
+    singleton_operator_mutation(response)
+}
+
+async fn mutate_operator_statuses(
+    state: &AppState,
+    actor: &AuthContext,
+    request: BulkOperatorStatusRequest,
+) -> Result<BulkOperatorMutationResponse, ApiError> {
+    validate_operator_batch(request.confirmed, &request.items)?;
+    let operator_ids = request
+        .items
+        .iter()
+        .map(|item| item.operator_id)
+        .collect::<Vec<_>>();
+    let snapshots = state
         .repo
-        .operator_by_id(operator_id)
+        .operator_batch_authority_snapshots(&operator_ids)
         .await
         .map_err(ApiError::internal_mapper(
             "operator_unavailable",
-            "The operator account could not be loaded.",
-        ))?
-        .filter(|operator| operator.status != "deleted")
-        .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
-    require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
-    let action = match status {
-        "active" => "operator.enable",
-        "disabled" => "operator.disable",
-        "deleted" => "operator.delete",
-        _ => return Err(ApiError::bad_request("invalid_operator_status")),
+            "The operator accounts could not be loaded.",
+        ))?;
+    let snapshots = snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.operator_id, snapshot))
+        .collect::<HashMap<_, _>>();
+    let mut outcomes = HashMap::new();
+    let mut prepared = Vec::new();
+    for item in &request.items {
+        let Some(snapshot) = snapshots.get(&item.operator_id) else {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, "operator_not_found"),
+            );
+            continue;
+        };
+        if snapshot.status == "deleted"
+            || (request.status == OperatorLifecycleStatus::Active && snapshot.status != "disabled")
+        {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, "operator_not_found"),
+            );
+            continue;
+        }
+        if let Err(error) =
+            require_admin_risk_if_needed(&snapshot.role, None, request.admin_risk_acknowledged)
+        {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, error.code),
+            );
+            continue;
+        }
+        let Some(assertion) = item.privilege_assertion.clone() else {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, "privilege_assertion_required"),
+            );
+            continue;
+        };
+        prepared.push(prepare_operator_privilege_verification(
+            item.operator_id,
+            request.status.privilege_action(),
+            Some(request.status.as_str()),
+            request.admin_risk_acknowledged,
+            assertion,
+        )?);
+    }
+    let approved = verify_operator_privilege_batch(state, prepared, &mut outcomes).await?;
+    let repository_outcomes = if approved.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .repo
+            .set_operator_statuses(&approved, request.status.as_str(), actor)
+            .await
+            .map_err(operator_management_error)?
     };
-    let target = operator_id.to_string();
-    verify_operator_management_privilege(
-        &state,
+    merge_operator_repository_outcomes(&approved, repository_outcomes, &mut outcomes)?;
+    ordered_operator_response(&operator_ids, outcomes)
+}
+
+fn singleton_operator_mutation(
+    mut response: BulkOperatorMutationResponse,
+) -> Result<Json<OperatorView>, ApiError> {
+    let outcome = response.outcomes.pop().ok_or_else(|| {
+        ApiError::internal(
+            "operator_mutation_result_invalid",
+            "The operator account change returned no outcome.",
+            anyhow::anyhow!("singleton operator mutation outcome missing"),
+        )
+    })?;
+    if let Some(result) = outcome.result {
+        Ok(Json(result))
+    } else {
+        Err(operator_outcome_error(
+            outcome
+                .error_code
+                .as_deref()
+                .unwrap_or("operator_management_failed"),
+        ))
+    }
+}
+
+fn operator_outcome_error(code: &str) -> ApiError {
+    match code {
+        "operator_not_found" => ApiError::not_found("operator_not_found"),
+        "last_active_admin_required" => ApiError::conflict("last_active_admin_required"),
+        "admin_risk_acknowledgement_required" => {
+            ApiError::bad_request("admin_risk_acknowledgement_required")
+        }
+        "privilege_assertion_required" => ApiError::forbidden("privilege_assertion_required"),
+        "privilege_verification_failed" => ApiError::forbidden("privilege_verification_failed"),
+        _ => ApiError::internal(
+            "operator_management_failed",
+            "The operator account change could not be completed.",
+            anyhow::anyhow!("unexpected operator mutation outcome: {code}"),
+        ),
+    }
+}
+
+fn validate_operator_batch(
+    confirmed: bool,
+    items: &[BulkOperatorMutationItem],
+) -> Result<(), ApiError> {
+    require_confirmed(confirmed)?;
+    if items.is_empty() || items.len() > GATEWAY_CONTROL_BATCH_MAX_ITEMS {
+        return Err(ApiError::bad_request("operator_batch_targets_invalid"));
+    }
+    let mut unique = HashSet::with_capacity(items.len());
+    if items.iter().any(|item| !unique.insert(item.operator_id)) {
+        return Err(ApiError::bad_request("operator_batch_targets_duplicate"));
+    }
+    Ok(())
+}
+
+fn prepare_operator_privilege_verification(
+    target_id: Uuid,
+    action: &str,
+    status: Option<&str>,
+    admin_risk_acknowledged: bool,
+    assertion: PrivilegeAssertion,
+) -> Result<(Uuid, GatewayPrivilegeVerificationBatchItem), ApiError> {
+    let target = target_id.to_string();
+    let payload_hash = operator_db_payload_hash(OperatorDbPayloadInput {
         action,
-        &target,
-        None,
-        None,
-        &[],
-        None,
-        Some(status),
-        request.admin_risk_acknowledged,
-        request.privilege_assertion.clone(),
-    )
-    .await?;
-    state
-        .repo
-        .set_operator_status(operator_id, status, &actor)
+        target: &target,
+        username: None,
+        role: None,
+        scopes: &[],
+        session_refresh_ttl_secs: None,
+        status,
+        admin_risk_acknowledged,
+    })
+    .map_err(|error| {
+        ApiError::internal(
+            "operator_privilege_intent_failed",
+            "The operator privilege request could not be prepared.",
+            anyhow::Error::from(error),
+        )
+    })?;
+    let targets = vec![target.clone()];
+    let intent = DbPrivilegeIntent::new(action, &target, None, &targets, true, Some(&payload_hash));
+    let intent = serde_json::to_string(&intent).map_err(|error| {
+        ApiError::internal(
+            "operator_privilege_intent_failed",
+            "The operator privilege request could not be prepared.",
+            error.into(),
+        )
+    })?;
+    Ok((
+        target_id,
+        GatewayPrivilegeVerificationBatchItem {
+            request_id: target,
+            verification: GatewayPrivilegeVerification { intent, assertion },
+        },
+    ))
+}
+
+async fn verify_prepared_operator_privileges(
+    state: &AppState,
+    prepared: Vec<(Uuid, GatewayPrivilegeVerificationBatchItem)>,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), ApiError> {
+    if prepared.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if !state.gateway.privilege_configured() {
+        return Err(ApiError::conflict("gateway_control_url_missing"));
+    }
+    let expected = prepared
+        .iter()
+        .map(|(target_id, item)| (*target_id, item.request_id.clone()))
+        .collect::<Vec<_>>();
+    state.refresh_gateway_dispatch_timeouts();
+    let result = state
+        .gateway
+        .verify_privileges(prepared.into_iter().map(|(_, item)| item).collect())
         .await
-        .map_err(operator_management_error)?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("operator_not_found"))
+        .map_err(operator_privilege_batch_error)?;
+    if result.results.len() != expected.len()
+        || result
+            .results
+            .iter()
+            .zip(&expected)
+            .any(|(result, (_, request_id))| &result.request_id != request_id)
+    {
+        return Err(ApiError::internal(
+            "privilege_verification_result_invalid",
+            "The gateway returned an invalid operator privilege result set.",
+            anyhow::anyhow!("bulk operator privilege results did not preserve request order"),
+        ));
+    }
+    let mut approved = Vec::with_capacity(expected.len());
+    let mut rejected = Vec::new();
+    for (result, (target_id, _)) in result.results.into_iter().zip(expected) {
+        if result.approved {
+            approved.push(target_id);
+        } else {
+            rejected.push(target_id);
+        }
+    }
+    Ok((approved, rejected))
+}
+
+fn operator_privilege_batch_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("ReplayProtectionSaturated") {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "privilege_replay_protection_saturated",
+            error,
+            public_message: Some(
+                "Privilege verification is temporarily saturated; wait for an assertion to expire and review request volume before retrying."
+                    .to_string(),
+            ),
+        }
+    } else if error
+        .downcast_ref::<GatewayControlResponseError>()
+        .is_some_and(|response| matches!(response.status_code, 403 | 409))
+    {
+        ApiError::forbidden("privilege_verification_failed")
+    } else {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "privilege_verification_unavailable",
+            error,
+            public_message: Some(
+                "The gateway could not verify privilege material; the action remains locked."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+async fn verify_operator_privilege_batch(
+    state: &AppState,
+    prepared: Vec<(Uuid, GatewayPrivilegeVerificationBatchItem)>,
+    outcomes: &mut HashMap<Uuid, BulkOperatorMutationOutcome>,
+) -> Result<Vec<Uuid>, ApiError> {
+    let (approved, rejected) = verify_prepared_operator_privileges(state, prepared).await?;
+    for operator_id in rejected {
+        outcomes.insert(
+            operator_id,
+            rejected_operator_outcome(operator_id, "privilege_verification_failed"),
+        );
+    }
+    Ok(approved)
+}
+
+async fn verify_operator_session_privilege_batch(
+    state: &AppState,
+    prepared: Vec<(Uuid, GatewayPrivilegeVerificationBatchItem)>,
+    outcomes: &mut HashMap<Uuid, BulkOperatorSessionRevokeOutcome>,
+) -> Result<Vec<Uuid>, ApiError> {
+    let (approved, rejected) = verify_prepared_operator_privileges(state, prepared).await?;
+    for session_id in rejected {
+        outcomes.insert(
+            session_id,
+            rejected_operator_session_outcome(session_id, "privilege_verification_failed"),
+        );
+    }
+    Ok(approved)
+}
+
+fn merge_operator_repository_outcomes(
+    approved: &[Uuid],
+    repository_outcomes: Vec<AccessBatchMutationOutcome<OperatorView>>,
+    outcomes: &mut HashMap<Uuid, BulkOperatorMutationOutcome>,
+) -> Result<(), ApiError> {
+    if repository_outcomes.len() != approved.len()
+        || repository_outcomes
+            .iter()
+            .zip(approved)
+            .any(|(outcome, expected)| access_outcome_target(outcome) != *expected)
+    {
+        return Err(ApiError::internal(
+            "operator_mutation_result_invalid",
+            "The operator account change returned an invalid result set.",
+            anyhow::anyhow!("operator repository outcomes did not preserve approved order"),
+        ));
+    }
+    for outcome in repository_outcomes {
+        match outcome {
+            AccessBatchMutationOutcome::Applied { target_id, result } => {
+                outcomes.insert(
+                    target_id,
+                    BulkOperatorMutationOutcome {
+                        operator_id: target_id,
+                        status: "succeeded".to_string(),
+                        result: Some(result),
+                        error_code: None,
+                        error_message: None,
+                    },
+                );
+            }
+            AccessBatchMutationOutcome::Rejected { target_id, code } => {
+                outcomes.insert(target_id, rejected_operator_outcome(target_id, code));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_operator_session_repository_outcomes(
+    approved: &[Uuid],
+    repository_outcomes: Vec<AccessBatchMutationOutcome<OperatorSessionView>>,
+    outcomes: &mut HashMap<Uuid, BulkOperatorSessionRevokeOutcome>,
+) -> Result<(), ApiError> {
+    if repository_outcomes.len() != approved.len()
+        || repository_outcomes
+            .iter()
+            .zip(approved)
+            .any(|(outcome, expected)| access_outcome_target(outcome) != *expected)
+    {
+        return Err(ApiError::internal(
+            "operator_session_mutation_result_invalid",
+            "The operator session change returned an invalid result set.",
+            anyhow::anyhow!("operator session repository outcomes did not preserve approved order"),
+        ));
+    }
+    for outcome in repository_outcomes {
+        match outcome {
+            AccessBatchMutationOutcome::Applied { target_id, result } => {
+                outcomes.insert(
+                    target_id,
+                    BulkOperatorSessionRevokeOutcome {
+                        session_id: target_id,
+                        status: "succeeded".to_string(),
+                        result: Some(result),
+                        error_code: None,
+                        error_message: None,
+                    },
+                );
+            }
+            AccessBatchMutationOutcome::Rejected { target_id, code } => {
+                outcomes.insert(
+                    target_id,
+                    rejected_operator_session_outcome(target_id, code),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn access_outcome_target<T>(outcome: &AccessBatchMutationOutcome<T>) -> Uuid {
+    match outcome {
+        AccessBatchMutationOutcome::Applied { target_id, .. }
+        | AccessBatchMutationOutcome::Rejected { target_id, .. } => *target_id,
+    }
+}
+
+fn ordered_operator_response(
+    operator_ids: &[Uuid],
+    mut outcomes: HashMap<Uuid, BulkOperatorMutationOutcome>,
+) -> Result<BulkOperatorMutationResponse, ApiError> {
+    let ordered = operator_ids
+        .iter()
+        .map(|operator_id| {
+            outcomes.remove(operator_id).ok_or_else(|| {
+                ApiError::internal(
+                    "operator_mutation_result_invalid",
+                    "The operator account change returned an incomplete result set.",
+                    anyhow::anyhow!("operator outcome missing for {operator_id}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BulkOperatorMutationResponse { outcomes: ordered })
+}
+
+fn ordered_operator_session_response(
+    session_ids: &[Uuid],
+    mut outcomes: HashMap<Uuid, BulkOperatorSessionRevokeOutcome>,
+) -> Result<BulkOperatorSessionRevokeResponse, ApiError> {
+    let ordered = session_ids
+        .iter()
+        .map(|session_id| {
+            outcomes.remove(session_id).ok_or_else(|| {
+                ApiError::internal(
+                    "operator_session_mutation_result_invalid",
+                    "The operator session change returned an incomplete result set.",
+                    anyhow::anyhow!("operator session outcome missing for {session_id}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BulkOperatorSessionRevokeResponse { outcomes: ordered })
+}
+
+fn rejected_operator_outcome(operator_id: Uuid, code: &str) -> BulkOperatorMutationOutcome {
+    BulkOperatorMutationOutcome {
+        operator_id,
+        status: "rejected".to_string(),
+        result: None,
+        error_code: Some(code.to_string()),
+        error_message: Some(operator_mutation_error_message(code).to_string()),
+    }
+}
+
+fn rejected_operator_session_outcome(
+    session_id: Uuid,
+    code: &str,
+) -> BulkOperatorSessionRevokeOutcome {
+    BulkOperatorSessionRevokeOutcome {
+        session_id,
+        status: "rejected".to_string(),
+        result: None,
+        error_code: Some(code.to_string()),
+        error_message: Some(operator_mutation_error_message(code).to_string()),
+    }
+}
+
+fn operator_mutation_error_message(code: &str) -> &'static str {
+    match code {
+        "operator_not_found" => "The operator account is unavailable for this action.",
+        "operator_session_not_found" => "The operator session was not found.",
+        "last_active_admin_required" => "At least one active administrator must remain.",
+        "admin_risk_acknowledgement_required" => "Administrator risk acknowledgement is required.",
+        "privilege_assertion_required" => "A privilege assertion is required.",
+        "privilege_verification_failed" => "The privilege assertion was rejected.",
+        _ => "The requested access change could not be completed.",
+    }
 }
 
 pub(crate) async fn reset_operator_password(
@@ -884,42 +1330,108 @@ pub(crate) async fn clear_operator_totp(
     Json(request): Json<OperatorLifecycleRequest>,
 ) -> Result<Json<OperatorView>, ApiError> {
     let actor = state.require_operator_role(&headers, "admin").await?;
-    require_confirmed(request.confirmed)?;
-    let target = state
+    let response = mutate_operator_totp_clears(
+        &state,
+        &actor,
+        BulkOperatorTotpClearRequest {
+            items: vec![BulkOperatorMutationItem {
+                operator_id,
+                privilege_assertion: request.privilege_assertion,
+            }],
+            confirmed: request.confirmed,
+            admin_risk_acknowledged: request.admin_risk_acknowledged,
+        },
+    )
+    .await?;
+    singleton_operator_mutation(response)
+}
+
+pub(crate) async fn bulk_clear_operator_totps(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkOperatorTotpClearRequest>,
+) -> Result<Json<BulkOperatorMutationResponse>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    Ok(Json(
+        mutate_operator_totp_clears(&state, &actor, request).await?,
+    ))
+}
+
+async fn mutate_operator_totp_clears(
+    state: &AppState,
+    actor: &AuthContext,
+    request: BulkOperatorTotpClearRequest,
+) -> Result<BulkOperatorMutationResponse, ApiError> {
+    validate_operator_batch(request.confirmed, &request.items)?;
+    let operator_ids = request
+        .items
+        .iter()
+        .map(|item| item.operator_id)
+        .collect::<Vec<_>>();
+    let snapshots = state
         .repo
-        .operator_by_id(operator_id)
+        .operator_batch_authority_snapshots(&operator_ids)
         .await
         .map_err(ApiError::internal_mapper(
             "operator_unavailable",
-            "The operator account could not be loaded.",
-        ))?
-        .filter(|operator| operator.status != "deleted")
-        .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
-    require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
-    let target = operator_id.to_string();
-    verify_operator_management_privilege(
-        &state,
-        "operator.totp_clear",
-        &target,
-        None,
-        None,
-        &[],
-        None,
-        None,
-        request.admin_risk_acknowledged,
-        request.privilege_assertion.clone(),
-    )
-    .await?;
-    state
-        .repo
-        .clear_operator_totp(operator_id, &actor)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "operator_totp_clear_failed",
-            "The operator authenticator could not be cleared.",
-        ))?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("operator_not_found"))
+            "The operator accounts could not be loaded.",
+        ))?;
+    let snapshots = snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.operator_id, snapshot))
+        .collect::<HashMap<_, _>>();
+    let mut outcomes = HashMap::new();
+    let mut prepared = Vec::new();
+    for item in &request.items {
+        let Some(snapshot) = snapshots
+            .get(&item.operator_id)
+            .filter(|snapshot| snapshot.status != "deleted")
+        else {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, "operator_not_found"),
+            );
+            continue;
+        };
+        if let Err(error) =
+            require_admin_risk_if_needed(&snapshot.role, None, request.admin_risk_acknowledged)
+        {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, error.code),
+            );
+            continue;
+        }
+        let Some(assertion) = item.privilege_assertion.clone() else {
+            outcomes.insert(
+                item.operator_id,
+                rejected_operator_outcome(item.operator_id, "privilege_assertion_required"),
+            );
+            continue;
+        };
+        prepared.push(prepare_operator_privilege_verification(
+            item.operator_id,
+            "operator.totp_clear",
+            None,
+            request.admin_risk_acknowledged,
+            assertion,
+        )?);
+    }
+    let approved = verify_operator_privilege_batch(state, prepared, &mut outcomes).await?;
+    let repository_outcomes = if approved.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .repo
+            .clear_operator_totps(&approved, actor)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "operator_totp_clear_failed",
+                "The operator authenticators could not be cleared.",
+            ))?
+    };
+    merge_operator_repository_outcomes(&approved, repository_outcomes, &mut outcomes)?;
+    ordered_operator_response(&operator_ids, outcomes)
 }
 
 pub(crate) async fn list_operator_auth_events(
@@ -973,48 +1485,167 @@ pub(crate) async fn revoke_operator_session(
     Json(request): Json<OperatorSessionRevokeRequest>,
 ) -> Result<Json<OperatorSessionView>, ApiError> {
     let operator = state.require_operator_role(&headers, "admin").await?;
-    let current_session_id = operator
+    let response = mutate_operator_session_revocations(
+        &state,
+        &operator,
+        BulkOperatorSessionRevokeRequest {
+            items: vec![BulkOperatorSessionRevokeItem {
+                session_id,
+                privilege_assertion: request.privilege_assertion,
+            }],
+            confirmed: request.confirmed,
+            admin_risk_acknowledged: request.admin_risk_acknowledged,
+        },
+    )
+    .await?;
+    singleton_operator_session_mutation(response)
+}
+
+pub(crate) async fn bulk_revoke_operator_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkOperatorSessionRevokeRequest>,
+) -> Result<Json<BulkOperatorSessionRevokeResponse>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    Ok(Json(
+        mutate_operator_session_revocations(&state, &actor, request).await?,
+    ))
+}
+
+async fn mutate_operator_session_revocations(
+    state: &AppState,
+    actor: &AuthContext,
+    request: BulkOperatorSessionRevokeRequest,
+) -> Result<BulkOperatorSessionRevokeResponse, ApiError> {
+    validate_operator_session_batch(request.confirmed, &request.items)?;
+    actor
         .audit_session_id()
         .ok_or_else(|| ApiError::unauthorized("invalid_operator_session"))?;
-    require_confirmed(request.confirmed)?;
-    let target_session = state
+    let session_ids = request
+        .items
+        .iter()
+        .map(|item| item.session_id)
+        .collect::<Vec<_>>();
+    let snapshots = state
         .repo
-        .operator_session_by_id(session_id, current_session_id)
+        .operator_session_batch_authority_snapshots(&session_ids)
         .await
         .map_err(ApiError::internal_mapper(
             "operator_session_unavailable",
-            "The operator session could not be loaded.",
-        ))?
-        .ok_or_else(|| ApiError::not_found("operator_session_not_found"))?;
-    require_admin_risk_if_needed(
-        &target_session.operator_role,
-        None,
-        request.admin_risk_acknowledged,
-    )?;
-    let target = session_id.to_string();
-    verify_operator_management_privilege(
-        &state,
-        "operator_session.revoke",
-        &target,
-        None,
-        None,
-        &[],
-        None,
-        None,
-        request.admin_risk_acknowledged,
-        request.privilege_assertion.clone(),
-    )
-    .await?;
-    state
-        .repo
-        .revoke_operator_session(session_id, &operator)
-        .await
-        .map_err(ApiError::internal_mapper(
+            "The operator sessions could not be loaded.",
+        ))?;
+    let snapshots = snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.session_id, snapshot))
+        .collect::<HashMap<_, _>>();
+    let mut outcomes = HashMap::new();
+    let mut prepared = Vec::new();
+    for item in &request.items {
+        let Some(snapshot) = snapshots.get(&item.session_id) else {
+            outcomes.insert(
+                item.session_id,
+                rejected_operator_session_outcome(item.session_id, "operator_session_not_found"),
+            );
+            continue;
+        };
+        if let Err(error) = require_admin_risk_if_needed(
+            &snapshot.operator_role,
+            None,
+            request.admin_risk_acknowledged,
+        ) {
+            outcomes.insert(
+                item.session_id,
+                rejected_operator_session_outcome(item.session_id, error.code),
+            );
+            continue;
+        }
+        let Some(assertion) = item.privilege_assertion.clone() else {
+            outcomes.insert(
+                item.session_id,
+                rejected_operator_session_outcome(item.session_id, "privilege_assertion_required"),
+            );
+            continue;
+        };
+        prepared.push(prepare_operator_privilege_verification(
+            item.session_id,
+            "operator_session.revoke",
+            None,
+            request.admin_risk_acknowledged,
+            assertion,
+        )?);
+    }
+    let approved = verify_operator_session_privilege_batch(state, prepared, &mut outcomes).await?;
+    let repository_outcomes = if approved.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .repo
+            .revoke_operator_sessions(&approved, actor)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "operator_session_revoke_failed",
+                "The operator sessions could not be revoked.",
+            ))?
+    };
+    merge_operator_session_repository_outcomes(&approved, repository_outcomes, &mut outcomes)?;
+    ordered_operator_session_response(&session_ids, outcomes)
+}
+
+fn singleton_operator_session_mutation(
+    mut response: BulkOperatorSessionRevokeResponse,
+) -> Result<Json<OperatorSessionView>, ApiError> {
+    let outcome = response.outcomes.pop().ok_or_else(|| {
+        ApiError::internal(
+            "operator_session_mutation_result_invalid",
+            "The operator session change returned no outcome.",
+            anyhow::anyhow!("singleton operator session outcome missing"),
+        )
+    })?;
+    if let Some(result) = outcome.result {
+        Ok(Json(result))
+    } else {
+        Err(operator_session_outcome_error(
+            outcome
+                .error_code
+                .as_deref()
+                .unwrap_or("operator_session_revoke_failed"),
+        ))
+    }
+}
+
+fn operator_session_outcome_error(code: &str) -> ApiError {
+    match code {
+        "operator_session_not_found" => ApiError::not_found("operator_session_not_found"),
+        "admin_risk_acknowledgement_required" => {
+            ApiError::bad_request("admin_risk_acknowledgement_required")
+        }
+        "privilege_assertion_required" => ApiError::forbidden("privilege_assertion_required"),
+        "privilege_verification_failed" => ApiError::forbidden("privilege_verification_failed"),
+        _ => ApiError::internal(
             "operator_session_revoke_failed",
             "The operator session could not be revoked.",
-        ))?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("operator_session_not_found"))
+            anyhow::anyhow!("unexpected operator session mutation outcome: {code}"),
+        ),
+    }
+}
+
+fn validate_operator_session_batch(
+    confirmed: bool,
+    items: &[BulkOperatorSessionRevokeItem],
+) -> Result<(), ApiError> {
+    require_confirmed(confirmed)?;
+    if items.is_empty() || items.len() > GATEWAY_CONTROL_BATCH_MAX_ITEMS {
+        return Err(ApiError::bad_request(
+            "operator_session_batch_targets_invalid",
+        ));
+    }
+    let mut unique = HashSet::with_capacity(items.len());
+    if items.iter().any(|item| !unique.insert(item.session_id)) {
+        return Err(ApiError::bad_request(
+            "operator_session_batch_targets_duplicate",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_session_refresh_ttl(value: u64) -> Result<(), ApiError> {
@@ -1103,5 +1734,81 @@ fn require_admin_risk_if_needed(
         Err(ApiError::bad_request("admin_risk_acknowledgement_required"))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_batch_validators_enforce_the_shared_bound_and_unique_targets() {
+        let one = BulkOperatorMutationItem {
+            operator_id: Uuid::new_v4(),
+            privilege_assertion: None,
+        };
+        assert!(validate_operator_batch(
+            true,
+            &[BulkOperatorMutationItem {
+                operator_id: one.operator_id,
+                privilege_assertion: None,
+            }]
+        )
+        .is_ok());
+        assert_eq!(
+            validate_operator_batch(false, &[one])
+                .expect_err("confirmation must be required")
+                .code,
+            "confirmation_required"
+        );
+
+        let duplicate_id = Uuid::new_v4();
+        assert_eq!(
+            validate_operator_batch(
+                true,
+                &[
+                    BulkOperatorMutationItem {
+                        operator_id: duplicate_id,
+                        privilege_assertion: None,
+                    },
+                    BulkOperatorMutationItem {
+                        operator_id: duplicate_id,
+                        privilege_assertion: None,
+                    },
+                ],
+            )
+            .expect_err("duplicate operators must be rejected")
+            .code,
+            "operator_batch_targets_duplicate"
+        );
+
+        let oversized = (0..=GATEWAY_CONTROL_BATCH_MAX_ITEMS)
+            .map(|_| BulkOperatorSessionRevokeItem {
+                session_id: Uuid::new_v4(),
+                privilege_assertion: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_operator_session_batch(true, &oversized)
+                .expect_err("oversized session batches must be rejected")
+                .code,
+            "operator_session_batch_targets_invalid"
+        );
+    }
+
+    #[test]
+    fn access_batch_owner_has_one_gateway_verification_call_and_singletons_delegate() {
+        let source = include_str!("routes_auth.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production route source");
+        assert_eq!(production.matches(".verify_privileges(").count(), 1);
+        assert!(production.contains("mutate_operator_statuses(\n        &state,"));
+        assert!(production.contains("mutate_operator_totp_clears(\n        &state,"));
+        assert!(production.contains("mutate_operator_session_revocations(\n        &state,"));
+        assert!(
+            !production.contains("for item in &request.items {\n        verify_privilege_intent")
+        );
     }
 }

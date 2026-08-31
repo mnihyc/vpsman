@@ -148,6 +148,7 @@ test.beforeEach(async ({ page }, testInfo) => {
           : undefined;
   await installConsoleApiMock(page, {
     ...options,
+    accessBulkCoverage: testInfo.tags.includes("@access-bulk"),
     alertDomainDuplicateCoverage: testInfo.tags.includes(
       "@alert-domain-deduplication",
     ),
@@ -185,6 +186,9 @@ test.beforeEach(async ({ page }, testInfo) => {
     fleetAlertEventReviewSaturated: testInfo.tags.includes(
       "@fleet-alert-event-review-saturated",
     ),
+    fleetAlertEmptyTruncated: testInfo.tags.includes(
+      "@fleet-alert-empty-truncated",
+    ),
     fleetAlertSourceFailure: testInfo.tags.includes(
       "@fleet-alert-current-unavailable",
     )
@@ -220,6 +224,11 @@ test.beforeEach(async ({ page }, testInfo) => {
       : undefined,
     jobTargetDelayMs: testInfo.tags.includes("@job-target-delay")
       ? 1_000
+      : undefined,
+    runtimeConfigBulkAgentCount: testInfo.tags.includes(
+      "@runtime-config-bulk-status-read",
+    )
+      ? 118
       : undefined,
     schedulesOverride: testInfo.tags.includes("@bulk-schedule-targets")
       ? bulkTargetUpdateSchedules
@@ -1378,6 +1387,31 @@ test("reviews suspend and unsuspend as expected offline lifecycle actions", asyn
 
   await page.goto("/");
   await openConsoleSubpage(page, "Fleet", "Instances");
+  const mutationReadBaseline = await page.evaluate(() => {
+    const requests = (
+      window as typeof window & {
+        __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+      }
+    ).__vpsmanFetchRequests;
+    const count = (path: string) =>
+      requests.filter(
+        (request) =>
+          new URL(request.url, window.location.href).pathname === path,
+      ).length;
+    return {
+      applyState: count("/api/v1/runtime-config/apply-state"),
+      dashboardOverview: count("/api/v1/dashboard/overview"),
+      fullSnapshot: requests.filter((request) => {
+        const url = new URL(request.url, window.location.href);
+        return (
+          url.pathname === "/api/v1/fleet/snapshot" &&
+          url.searchParams.get("mode") === "full"
+        );
+      }).length,
+      patchGenerators: count("/api/v1/runtime-config/patch-generators"),
+      tagOrder: count("/api/v1/tags/order"),
+    };
+  });
   const fleetGrid = page.getByLabel("VPS instance records data grid");
   await fleetGrid
     .getByLabel("Select VPS instance records row agent-nyc-03")
@@ -1411,6 +1445,63 @@ test("reviews suspend and unsuspend as expected offline lifecycle actions", asyn
   await expect(page.locator(".fleetInstancesHeader")).toContainText(
     "1 suspended",
   );
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+            }
+          ).__vpsmanFetchRequests.filter((request) => {
+            const url = new URL(request.url, window.location.href);
+            return (
+              url.pathname === "/api/v1/fleet/snapshot" &&
+              url.searchParams.get("mode") === "full"
+            );
+          }).length,
+      ),
+    )
+    .toBe(mutationReadBaseline.fullSnapshot + 1);
+  const mutationReadAfter = await page.evaluate(() => {
+    const requests = (
+      window as typeof window & {
+        __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+      }
+    ).__vpsmanFetchRequests;
+    const count = (path: string) =>
+      requests.filter(
+        (request) =>
+          new URL(request.url, window.location.href).pathname === path,
+      ).length;
+    return {
+      applyState: count("/api/v1/runtime-config/apply-state"),
+      dashboardOverview: count("/api/v1/dashboard/overview"),
+      patchGenerators: count("/api/v1/runtime-config/patch-generators"),
+      tagOrder: count("/api/v1/tags/order"),
+    };
+  });
+  expect(mutationReadAfter).toEqual({
+    applyState: mutationReadBaseline.applyState,
+    dashboardOverview: mutationReadBaseline.dashboardOverview,
+    patchGenerators: mutationReadBaseline.patchGenerators,
+    tagOrder: mutationReadBaseline.tagOrder,
+  });
+  const initialBulkSuspensionRequests = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __vpsmanTestRequests: { agentSuspensions: Array<{ bulk?: boolean }> };
+      }
+    ).__vpsmanTestRequests.agentSuspensions.filter((request) => request.bulk),
+  );
+  expect(initialBulkSuspensionRequests).toHaveLength(1);
+  expect(initialBulkSuspensionRequests[0]).toMatchObject({
+    action: "suspend",
+    client_ids: ["agent-nyc-03"],
+    confirmed: true,
+    reason: "Planned cold storage until the next project phase",
+  });
 
   await openConsoleSubpage(page, "Fleet", "Monitor");
   await expect(page.getByLabel(/backup-nyc-03 .* monitor card/)).toHaveCount(0);
@@ -1480,23 +1571,6 @@ test("reviews suspend and unsuspend as expected offline lifecycle actions", asyn
     .getByLabel("Select VPS instance records row agent-nyc-03")
     .check();
 
-  let suspensionRequests = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: { agentSuspensions: unknown[] };
-      }
-    ).__vpsmanTestRequests;
-    return requests.agentSuspensions;
-  });
-  expect(suspensionRequests).toContainEqual(
-    expect.objectContaining({
-      action: "suspend",
-      client_id: "agent-nyc-03",
-      confirmed: true,
-      reason: "Planned cold storage until the next project phase",
-    }),
-  );
-
   await fleetGrid
     .locator(".gridToolbarActions")
     .getByRole("button", { name: "Actions", exact: true })
@@ -1516,17 +1590,20 @@ test("reviews suspend and unsuspend as expected offline lifecycle actions", asyn
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
   ).toContainText("Stale");
 
-  suspensionRequests = await page.evaluate(() => {
+  const suspensionRequests = await page.evaluate(() => {
     const requests = (
       window as unknown as {
-        __vpsmanTestRequests: { agentSuspensions: unknown[] };
+        __vpsmanTestRequests: {
+          agentSuspensions: Array<{ bulk?: boolean }>;
+        };
       }
     ).__vpsmanTestRequests;
-    return requests.agentSuspensions;
+    return requests.agentSuspensions.filter((request) => request.bulk);
   });
+  expect(suspensionRequests).toHaveLength(2);
   expect(suspensionRequests.at(-1)).toMatchObject({
     action: "unsuspend",
-    client_id: "agent-nyc-03",
+    client_ids: ["agent-nyc-03"],
     confirmed: true,
   });
 });
@@ -1578,20 +1655,24 @@ test(
     const deleteRequests = await page.evaluate(() => {
       const requests = (
         window as unknown as {
-          __vpsmanTestRequests: { agentDeletes: unknown[] };
+          __vpsmanTestRequests: {
+            agentDeletes: Array<{ bulk?: boolean }>;
+          };
         }
       ).__vpsmanTestRequests;
-      return requests.agentDeletes.slice(-2);
+      return requests.agentDeletes.filter((request) => request.bulk);
     });
-    expect(deleteRequests).toHaveLength(2);
-    expect(deleteRequests).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ client_id: "agent-fra-02", confirmed: true }),
-        expect.objectContaining({ client_id: "agent-sfo-01", confirmed: true }),
+    expect(deleteRequests).toHaveLength(1);
+    expect(deleteRequests[0]).toMatchObject({
+      confirmed: true,
+      items: expect.arrayContaining([
+        expect.objectContaining({ client_id: "agent-fra-02" }),
+        expect.objectContaining({ client_id: "agent-sfo-01" }),
       ]),
-    );
-    for (const request of deleteRequests) {
-      expectPrivilegeAssertion(request);
+      reason: "Deleted from fleet inventory selection action",
+    });
+    for (const item of (deleteRequests[0] as { items: unknown[] }).items) {
+      expectPrivilegeAssertion(item);
     }
   },
 );
@@ -2692,6 +2773,40 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
   await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("3TB");
 });
 
+test("keeps the complete VPS selector across repeated edit and blur cycles", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "selector chip interaction is viewport-independent",
+  );
+
+  await page.goto("/#/config/rules/agent-sfo-01");
+  await waitForConsoleShell(page);
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  const selector = editor.getByLabel("VPS rules selector expression");
+  const expression = "country:US && country:DE";
+  await selector.fill(expression);
+  await selector.press("Tab");
+  await expect(selector).toHaveValue(expression);
+  await expect(editor.locator(".searchExpressionPreview button")).toHaveCount(
+    0,
+  );
+  const requestsAfterEdit = await effectiveVpsRuleRequests(page);
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    await selector.click();
+    await expect(selector).toBeFocused();
+    await selector.press("Tab");
+    await expect(selector).toHaveValue(expression);
+  }
+  await expect
+    .poll(() => effectiveVpsRuleRequests(page))
+    .toHaveLength(requestsAfterEdit.length);
+});
+
 test("canonicalizes the monthly traffic reset hour without constraining typing", async ({
   page,
 }, testInfo) => {
@@ -3302,6 +3417,33 @@ test(
         }),
       ]),
     );
+    await expect(grid.getByText("4 of 4 rules")).toBeVisible();
+    await expect(grid).toContainText("product.name");
+    await expect(grid).toContainText("traffic.reset_day");
+    await expect(grid).toContainText("traffic.selectors");
+    const requestEvidence = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+          }
+        ).__vpsmanFetchRequests ?? [],
+    );
+    expect(
+      requestEvidence.filter((request) => {
+        const url = new URL(request.url, "http://localhost");
+        return request.method === "GET" && url.pathname === "/api/v1/vps-rules";
+      }),
+    ).toHaveLength(0);
+    expect(
+      requestEvidence.filter((request) => {
+        const url = new URL(request.url, "http://localhost");
+        return (
+          request.method === "POST" &&
+          url.pathname === "/api/v1/vps-rules/bulk-upsert"
+        );
+      }),
+    ).toHaveLength(1);
 
     await editor.getByRole("button", { name: "Unset values" }).click();
     await checkControl(editor.getByLabel("Unset traffic.quota.total"));
@@ -3617,6 +3759,122 @@ test("keeps fleet alert policy actions selection-scoped", async ({
 });
 
 test(
+  "uses one authoritative request for each displayed alert configuration bulk action",
+  { tag: "@alert-configuration-bulk" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "multi-row request ownership is covered through the desktop grid toolbar",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    for (const policyId of [
+      "fbfbfbfb-1111-4111-8111-111111111111",
+      "abababab-1111-4111-8111-111111111111",
+    ]) {
+      await selectGridRow(page, "Policy groups", policyId);
+    }
+    await runGridAction(page, "Policy groups", "Disable");
+    await expect(page.getByText("Disabled 2 alert policies")).toBeVisible();
+
+    await page.getByRole("tab", { name: /Destinations/ }).click();
+    await selectGridRow(
+      page,
+      "Alert notification channels",
+      "fcfcfcfc-1111-4111-8111-111111111111",
+    );
+    await runGridAction(page, "Alert notification channels", "Disable");
+    await expect(
+      page.getByText("Disabled 1 notification channel"),
+    ).toBeVisible();
+
+    await openConsoleSubpage(page, "Observability", "Event webhooks");
+    await selectGridRow(
+      page,
+      "Webhook rules",
+      "fefefefe-1111-4111-8111-111111111111",
+    );
+    await runGridAction(page, "Webhook rules", "Disable");
+    await expect(page.getByText("Disabled 1 webhook rule")).toBeVisible();
+    const unrelatedWebhook = page
+      .getByLabel("Webhook rules data grid")
+      .locator(".gridBody [role=row]", { hasText: "alert-lifecycle-webhook" })
+      .first();
+    await expect(
+      unrelatedWebhook.getByText("enabled", { exact: true }),
+    ).toBeVisible();
+
+    const evidence = await page.evaluate(() => {
+      const trackedWindow = window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+        __vpsmanTestRequests: {
+          fleetAlertNotificationChannels: Array<{
+            action?: string;
+            items?: unknown[];
+          }>;
+          fleetAlertPolicies: Array<{ action?: string; items?: unknown[] }>;
+          webhookRules: Array<{ action?: string; items?: unknown[] }>;
+        };
+      };
+      const postPaths = (trackedWindow.__vpsmanFetchRequests ?? [])
+        .filter((request) => request.method === "POST")
+        .map((request) => new URL(request.url, window.location.href).pathname);
+      const getPaths = (trackedWindow.__vpsmanFetchRequests ?? [])
+        .filter((request) => request.method === "GET")
+        .map((request) => new URL(request.url, window.location.href).pathname);
+      return {
+        channelMutations:
+          trackedWindow.__vpsmanTestRequests.fleetAlertNotificationChannels,
+        getPaths,
+        policyMutations: trackedWindow.__vpsmanTestRequests.fleetAlertPolicies,
+        postPaths,
+        webhookMutations: trackedWindow.__vpsmanTestRequests.webhookRules,
+      };
+    });
+    expect(evidence.policyMutations).toEqual([
+      expect.objectContaining({ action: "disable", items: expect.any(Array) }),
+    ]);
+    expect(evidence.policyMutations[0]?.items).toHaveLength(2);
+    expect(evidence.channelMutations).toEqual([
+      expect.objectContaining({ action: "disable", items: expect.any(Array) }),
+    ]);
+    expect(evidence.channelMutations[0]?.items).toHaveLength(1);
+    expect(evidence.webhookMutations).toEqual([
+      expect.objectContaining({ action: "disable", items: expect.any(Array) }),
+    ]);
+    expect(evidence.webhookMutations[0]?.items).toHaveLength(1);
+    for (const path of [
+      "/api/v1/fleet-alert-policies/bulk-mutate",
+      "/api/v1/fleet-alert-notification-channels/bulk-mutate",
+      "/api/v1/webhook-rules/bulk-mutate",
+    ]) {
+      expect(
+        evidence.postPaths.filter((candidate) => candidate === path),
+      ).toHaveLength(1);
+    }
+    expect(
+      evidence.postPaths.filter(
+        (path) =>
+          path === "/api/v1/fleet-alert-policies/dry-run" ||
+          path === "/api/v1/fleet-alert-policies" ||
+          path === "/api/v1/fleet-alert-notification-channels" ||
+          path === "/api/v1/webhook-rules",
+      ),
+    ).toHaveLength(0);
+    for (const path of [
+      "/api/v1/fleet-alert-policies",
+      "/api/v1/fleet-alert-notification-channels",
+      "/api/v1/webhook-rules",
+    ]) {
+      expect(
+        evidence.getPaths.filter((candidate) => candidate === path),
+      ).toHaveLength(0);
+    }
+  },
+);
+
+test(
   "authors policy Trigger and Resolve meta conditions with typed starters",
   { tag: "@policy-meta-editor" },
   async ({ page }) => {
@@ -3871,7 +4129,9 @@ test(
 
 test(
   "reviews exact System Maintenance target deltas without horizontal clipping",
-  { tag: "@system-maintenance-target-review" },
+  {
+    tag: ["@system-maintenance-target-review", "@bulk-schedule-targets"],
+  },
   async ({ page }) => {
     await page.route(/\/api\/v1\/ping-targets(?:\?.*)?$/, (route) =>
       route.fulfill({ json: [], status: 200 }),
@@ -3906,8 +4166,37 @@ test(
         (element) => element.scrollWidth - element.clientWidth,
       ),
     ).toBeLessThanOrEqual(1);
-    await activate(prompt.getByRole("button", { name: "Cancel" }));
+    await activate(prompt.getByRole("button", { name: "Update targets" }));
     await expect(prompt).toBeHidden();
+    const bulkRequests = await page.evaluate(() =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            scheduleActions: Array<{
+              body: { items?: unknown[] };
+              path: string;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.scheduleActions.filter(
+        (request) => request.path === "/api/v1/schedules/update-targets",
+      ),
+    );
+    expect(bulkRequests).toHaveLength(1);
+    expect(bulkRequests[0]?.body.items).toHaveLength(2);
+    const resolveManyRequests = await page.evaluate(() =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            bulkResolve: Array<{ items?: unknown[] }>;
+          };
+        }
+      ).__vpsmanTestRequests.bulkResolve.filter((request) =>
+        Array.isArray(request.items),
+      ),
+    );
+    expect(resolveManyRequests).toHaveLength(1);
+    expect(resolveManyRequests[0]?.items).toHaveLength(2);
   },
 );
 
@@ -4235,6 +4524,9 @@ test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", asy
   await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
     "3 actionable · 2 Unknown · 5+ current triaged",
   );
+  await expect(
+    page.getByLabel("Current alert episodes data grid"),
+  ).toContainText("authoritative current evidence complete");
 
   await openConsoleSubpage(page, "Observability", "Event webhooks");
   await expect(
@@ -4368,10 +4660,15 @@ test("presents unified alert lifecycle and resolves only occurrences", async ({
   await unknownRow.getByRole("checkbox").uncheck();
 
   const incidentRow = alertRecord(current, "Backup request failed");
+  const secondIncidentRow = alertRecord(current, "Agent update timed out");
   await incidentRow.getByRole("checkbox").check();
+  await secondIncidentRow.getByRole("checkbox").check();
+  await expect(current).toContainText("2 resolvable occurrences");
   await current.getByRole("button", { name: "Actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Resolve incident" }).click();
   const prompt = page.getByLabel("Confirm incident resolution");
+  await expect(prompt).toContainText("2 occurrences");
+  await expect(prompt).toContainText("Atomic · all or none");
   const confirm = prompt.getByRole("button", { name: "Resolve incident" });
   await expect(confirm).toBeDisabled();
   await prompt
@@ -4381,6 +4678,7 @@ test("presents unified alert lifecycle and resolves only occurrences", async ({
   await confirm.click();
 
   await expect(current).not.toContainText("Backup request failed");
+  await expect(current).not.toContainText("Agent update timed out");
   await expect(history).toContainText("Resolved");
   await expect(history).toContainText("Operator Resolved");
   await expect(history).toContainText(
@@ -4388,7 +4686,7 @@ test("presents unified alert lifecycle and resolves only occurrences", async ({
   );
   await expect(
     page.getByText(
-      "Resolved occurrence Backup request failed, generation 1. Operator triage was not changed.",
+      "Resolved 2 occurrences atomically. Operator triage was not changed.",
       { exact: true },
     ),
   ).toBeVisible();
@@ -4427,6 +4725,20 @@ test("presents unified alert lifecycle and resolves only occurrences", async ({
         }
       ).__vpsmanTestRequests.fleetAlertResolutions,
   );
+  expect(resolutionRequests[0]).toMatchObject({
+    confirmed: true,
+    reason: "Reviewed and replaced by a successful backup.",
+    items: expect.arrayContaining([
+      expect.objectContaining({
+        alert_id: "fleet-alert-backup-agent-sfo-01",
+        expected_trigger_generation: 1,
+      }),
+      expect.objectContaining({
+        alert_id: "fleet-alert-agent-update-timeout",
+        expected_trigger_generation: 1,
+      }),
+    ]),
+  });
   expect(resolutionRequests.at(-1)).toMatchObject({
     alert_id: "fleet-alert-backup-agent-sfo-01",
     confirmed: true,
@@ -4435,7 +4747,7 @@ test("presents unified alert lifecycle and resolves only occurrences", async ({
 });
 
 test(
-  "manually reaches incidents beyond the current cap and refreshes after terminal cursor",
+  "auto-synchronizes current occurrences, searches the indexed tail, and prunes externally resolved rows",
   { tag: "@fleet-alert-event-review-saturated" },
   async ({ page }, testInfo) => {
     test.skip(
@@ -4447,109 +4759,110 @@ test(
 
     const grid = page.getByLabel("Current alert episodes data grid");
     const review = page.getByLabel("Older current incident review");
+    await expect(review).toContainText("Load older extends only");
     await expect(grid).not.toContainText("Older incident beyond snapshot cap");
-    await review
-      .getByRole("button", { name: "Load older current incidents" })
-      .click();
-    await expect(review).toContainText(
-      "occurrence feed has reached its explicit end",
-    );
 
     const search = grid.getByLabel("Current alert episodes search");
     await search.fill("Older incident beyond snapshot cap");
     await expect(grid).toContainText("Older incident beyond snapshot cap");
+    await expect(grid).toContainText(
+      "occurrence feed complete; condition evidence capped",
+    );
+
+    await search.fill("");
+    await review
+      .getByRole("button", { name: "Load older current incidents" })
+      .click();
+    await expect(review).toContainText("occurrence feed is complete");
     await search.fill("Paged terminal incident 000");
     await expect(
       grid.getByRole("row").filter({ hasText: "Paged terminal incident 000" }),
     ).toContainText("Operator triage: Acknowledged");
-
-    await search.fill("Older incident beyond snapshot cap");
-    const olderRow = () =>
-      grid
-        .getByRole("row")
-        .filter({ hasText: "Older incident beyond snapshot cap" })
-        .first();
-    const applyTriage = async (
-      action: string,
-      confirmLabel: string,
-      expectedState: string,
-    ) => {
-      const checkbox = olderRow().getByRole("checkbox");
-      if (!(await checkbox.isChecked())) await checkbox.check();
-      await grid.getByRole("button", { name: "Actions", exact: true }).click();
-      await page.getByRole("menuitem", { name: action }).click();
-      await page
-        .getByLabel("Confirm fleet alert triage")
-        .getByRole("button", { name: confirmLabel, exact: true })
-        .click();
-      await expect(olderRow()).toContainText(
-        `Operator triage: ${expectedState}`,
-      );
-    };
-    await applyTriage("Mute Open triage 4h", "Mute", "Muted");
-    await applyTriage("Reset triage to Open", "Reset triage to Open", "Open");
-    await applyTriage("Escalate Open triage", "Escalate", "Escalated");
-    await applyTriage("Reset triage to Open", "Reset triage to Open", "Open");
-    await applyTriage("Acknowledge Open triage", "Acknowledge", "Acknowledged");
-
-    await review
-      .getByRole("button", { name: "Refresh unresolved occurrences" })
-      .click();
-    await search.fill("New incident after review reached end");
+    await search.fill("");
+    await page.evaluate(() =>
+      (
+        window as unknown as {
+          __vpsmanTriggerFleetAlertExternalChange: () => void;
+        }
+      ).__vpsmanTriggerFleetAlertExternalChange(),
+    );
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
     await expect(grid).toContainText("New incident after review reached end");
-    await search.fill("Older incident beyond snapshot cap");
-    await expect(
-      grid
-        .getByRole("row")
-        .filter({ hasText: "Older incident beyond snapshot cap" }),
-    ).toHaveCount(0);
-    await review
-      .getByRole("button", { name: "Load older current incidents" })
-      .click();
-    await expect(
-      grid
-        .getByRole("row")
-        .filter({ hasText: "Older incident beyond snapshot cap" }),
-    ).toHaveCount(0);
+    await expect(grid).not.toContainText("Older incident beyond snapshot cap");
 
     const reviewRequests = await page.evaluate(
       () =>
         (
           window as unknown as {
             __vpsmanTestRequests: {
-              fleetAlertEventReviews: Array<{ cursor: string | null }>;
+              fleetAlertEventReviews: Array<{
+                cursor?: string | null;
+                kind: "older" | "sync";
+                known_alert_ids?: string[];
+              }>;
             };
           }
         ).__vpsmanTestRequests.fleetAlertEventReviews,
     );
-    expect(reviewRequests.map((request) => request.cursor)).toEqual([
-      null,
-      "fixture-event-cursor:200",
-      null,
-      "fixture-event-cursor:200",
+    expect(reviewRequests[0]).toEqual({ kind: "sync", known_alert_ids: [] });
+    const olderRequests = reviewRequests.filter(
+      (request) => request.kind === "older",
+    );
+    const syncRequests = reviewRequests.filter(
+      (request) => request.kind === "sync",
+    );
+    // Each panel entry performs one authoritative sync. React StrictMode's
+    // effect remount shares that request and does not manufacture a trailing
+    // request for the same freshness signal.
+    expect(syncRequests).toHaveLength(2);
+    expect(olderRequests).toEqual([
+      { cursor: "fixture-event-cursor:200", kind: "older" },
+      { cursor: "fixture-event-cursor:200", kind: "older" },
     ]);
+    expect(
+      syncRequests.some((request) =>
+        request.known_alert_ids?.includes("fleet-alert-event-review-200"),
+      ),
+    ).toBe(true);
+    expect(
+      reviewRequests.some(
+        (request) => request.kind === "older" && request.cursor == null,
+      ),
+    ).toBe(false);
   },
 );
 
 test(
-  "shows explicit incident-review source failure without changing current rows",
+  "marks retained occurrence evidence unverified when authoritative synchronization fails",
   { tag: "@fleet-alert-event-review-failure" },
   async ({ page }) => {
     await page.goto("/");
     await openConsoleSubpage(page, "Fleet", "Alerts");
     const grid = page.getByLabel("Current alert episodes data grid");
     const review = page.getByLabel("Older current incident review");
-    await expect(grid).toContainText("Backup request failed");
-    await review
-      .getByRole("button", { name: "Load older current incidents" })
-      .click();
     await expect(review).toContainText(
-      "Simulated unresolved occurrence review failure.",
+      "Simulated current occurrence synchronization failure.",
     );
     await expect(
-      review.getByRole("button", { name: "Retry older current incidents" }),
+      review.getByRole("button", { name: "Retry current occurrence sync" }),
     ).toBeVisible();
-    await expect(grid).toContainText("Backup request failed");
+    await expect(grid).not.toContainText("Backup request failed");
+    await expect(review).toContainText("retained rows are hidden");
+  },
+);
+
+test(
+  "gives an operator recovery path for an empty capped alert projection",
+  { tag: "@fleet-alert-empty-truncated" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    const grid = page.getByLabel("Current alert episodes data grid");
+    await expect(grid).toContainText(
+      "Current condition evidence is capped and this loaded page is empty; narrow the fleet scope, severity, or category.",
+    );
+    await expect(grid).not.toContainText("more may exist");
   },
 );
 
@@ -5453,6 +5766,148 @@ test("marks saturated operator auth history without changing normal counts", asy
   await expect(selectedOperatorEvidence).toContainText("≥200 loaded");
 });
 
+test(
+  "uses one ordered request for displayed operator bulk actions and retains rejected rows",
+  { tag: "@access-bulk" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop operator multi-selection covers the request owner",
+    );
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Access", "Operators");
+
+    const operatorIds = [
+      "99999999-aaaa-4bbb-8ccc-000000000001",
+      "99999999-aaaa-4bbb-8ccc-000000000002",
+    ];
+    for (const operatorId of operatorIds) {
+      await selectGridRow(page, "Operator accounts", operatorId);
+    }
+    await runGridAction(page, "Operator accounts", "Disable");
+    await activate(
+      page
+        .getByLabel("Confirm admin user action")
+        .getByRole("button", { name: "Disable users" }),
+    );
+    await expect(page.getByText(/Disabled 1 of 2 operators/)).toBeVisible();
+    await expect(
+      page.getByText(/console-admin: At least one active/),
+    ).toBeVisible();
+    await expect(page.getByText(/Rejected rows remain selected/)).toBeVisible();
+    await expect(
+      page.getByLabel("Operator accounts data grid").getByText("2 selected"),
+    ).toBeVisible();
+
+    await runGridAction(page, "Operator accounts", "Clear TOTP");
+    await activate(
+      page
+        .getByLabel("Confirm admin user action")
+        .getByRole("button", { name: "Clear TOTP secrets" }),
+    );
+
+    const actions = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: { operatorActions: unknown[] };
+          }
+        ).__vpsmanTestRequests.operatorActions,
+    );
+    const statusRequests = actions.filter(
+      (request) => (request as { action?: string }).action === "status-bulk",
+    );
+    const totpRequests = actions.filter(
+      (request) =>
+        (request as { action?: string }).action === "totp-clear-bulk",
+    );
+    expect(statusRequests).toHaveLength(1);
+    expect(totpRequests).toHaveLength(1);
+    const statusBody = (
+      statusRequests[0] as {
+        body: { items: Array<{ operator_id: string }> };
+      }
+    ).body;
+    expect(statusBody.items.map((item) => item.operator_id)).toEqual(
+      operatorIds,
+    );
+    statusBody.items.forEach((item) => expectPrivilegeAssertion(item));
+    const totpBody = (
+      totpRequests[0] as {
+        body: { items: Array<{ operator_id: string }> };
+      }
+    ).body;
+    expect(totpBody.items.map((item) => item.operator_id)).toEqual(operatorIds);
+    totpBody.items.forEach((item) => expectPrivilegeAssertion(item));
+    expect(
+      actions.filter((request) =>
+        ["disable", "totp-clear"].includes(
+          String((request as { action?: string }).action),
+        ),
+      ),
+    ).toHaveLength(0);
+  },
+);
+
+test(
+  "revokes displayed bearer sessions with one ordered bulk request",
+  { tag: "@access-bulk" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop session multi-selection covers the request owner",
+    );
+    await page.addInitScript(() => {
+      const frozenNow = Date.parse("2026-01-03T00:00:00Z");
+      Date.now = () => frozenNow;
+    });
+    await page.goto("/");
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Audit", "Sessions");
+    const sessionIds = [
+      "88888888-aaaa-4bbb-8ccc-000000000002",
+      "88888888-aaaa-4bbb-8ccc-000000000003",
+    ];
+    for (const sessionId of sessionIds) {
+      await selectGridRow(page, "Operator bearer sessions", sessionId);
+    }
+    await runGridAction(page, "Operator bearer sessions", "Revoke");
+    await activate(
+      page
+        .getByLabel("Confirm admin session revoke")
+        .getByRole("button", { name: "Revoke sessions" }),
+    );
+    await expect(page.getByText("Revoked 2 bearer sessions")).toBeVisible();
+
+    const requests = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: { operatorActions: unknown[] };
+          }
+        ).__vpsmanTestRequests.operatorActions,
+    );
+    const bulkRequests = requests.filter(
+      (request) =>
+        (request as { action?: string }).action === "session-revoke-bulk",
+    );
+    expect(bulkRequests).toHaveLength(1);
+    const body = (
+      bulkRequests[0] as {
+        body: { items: Array<{ session_id: string }> };
+      }
+    ).body;
+    expect(body.items.map((item) => item.session_id)).toEqual(sessionIds);
+    body.items.forEach((item) => expectPrivilegeAssertion(item));
+    expect(
+      requests.filter(
+        (request) =>
+          (request as { action?: string }).action === "session-revoke",
+      ),
+    ).toHaveLength(0);
+  },
+);
+
 test("revokes selected non-current bearer sessions from Audit", async ({
   page,
 }) => {
@@ -5501,14 +5956,20 @@ test("revokes selected non-current bearer sessions from Audit", async ({
       }
     ).__vpsmanTestRequests;
     return requests.operatorActions.find(
-      (request) => (request as { action?: string }).action === "session-revoke",
+      (request) =>
+        (request as { action?: string }).action === "session-revoke-bulk",
     );
   });
   expect(revokeRequest).toMatchObject({
-    action: "session-revoke",
-    session_id: sessionId,
+    action: "session-revoke-bulk",
+    body: { items: [{ session_id: sessionId }] },
   });
-  expectPrivilegeAssertion((revokeRequest as { body?: unknown }).body);
+  const revokeBody = (
+    revokeRequest as {
+      body: { items: unknown[] };
+    }
+  ).body;
+  expectPrivilegeAssertion(revokeBody.items[0]);
 });
 
 test("keeps malformed persisted schedule cadences visible and blocks only automatic runs", async ({
@@ -5821,176 +6282,225 @@ test("keeps malformed schedule operations visible with only repair and removal a
   ).toBeEnabled();
 });
 
-test(
-  "updates only a schedule's frozen targets through the table action",
-  async ({ page }, testInfo) => {
-    test.skip(
-      testInfo.project.name.includes("mobile"),
-      "the shared mobile card action path is covered by the responsive audit",
-    );
+test("updates only a schedule's frozen targets through the table action", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the shared mobile card action path is covered by the responsive audit",
+  );
 
-    await page.goto("/");
-    await unlockPrivilegeFor(page, "Automation", "Schedules");
-    const grid = page.getByLabel("Schedule records data grid");
-    await expect(
-      grid.getByRole("columnheader", { name: /^Actions?$/ }),
-    ).toHaveCount(0);
-    const pageSize = grid.getByLabel("Schedule records page size");
-    await expect(pageSize.locator('option[value="1000"]')).toHaveCount(1);
-    await pageSize.selectOption("1000");
-    await expect(pageSize).toHaveValue("1000");
-    const scheduleRow = grid
-      .getByRole("row")
-      .filter({ hasText: "edge-health-hourly" })
-      .first();
-    const expand = scheduleRow.getByRole("button", {
-      name: /Expand Schedule records row/,
-    });
-    await expect(expand).toHaveAttribute("aria-expanded", "false");
-    await scheduleRow.click();
-    await expect(
-      grid.getByLabel(
-        "Collapse Schedule records row 51515151-6161-4717-8abc-defdefdefdef",
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Automation", "Schedules");
+  const grid = page.getByLabel("Schedule records data grid");
+  await expect(
+    grid.getByRole("columnheader", { name: /^Actions?$/ }),
+  ).toHaveCount(0);
+  const pageSize = grid.getByLabel("Schedule records page size");
+  await expect(pageSize.locator('option[value="1000"]')).toHaveCount(1);
+  await pageSize.selectOption("1000");
+  await expect(pageSize).toHaveValue("1000");
+  const scheduleRow = grid
+    .getByRole("row")
+    .filter({ hasText: "edge-health-hourly" })
+    .first();
+  const expand = scheduleRow.getByRole("button", {
+    name: /Expand Schedule records row/,
+  });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await scheduleRow.click();
+  await expect(
+    grid.getByLabel(
+      "Collapse Schedule records row 51515151-6161-4717-8abc-defdefdefdef",
+    ),
+  ).toHaveAttribute("aria-expanded", "true");
+  const expandedDetail = grid.locator(".gridExpandedRow");
+  await expect(expandedDetail).toBeVisible();
+  await expect(expandedDetail).toContainText("Run only one missed run");
+  await expect(expandedDetail).toContainText("edge-sfo-01 (agent-sfo-01)");
+  await expect(expandedDetail).toContainText("core-fra-02 (agent-fra-02)");
+  await expect
+    .poll(() =>
+      expandedDetail.evaluate(
+        (element) => window.getComputedStyle(element).animationName,
       ),
-    ).toHaveAttribute("aria-expanded", "true");
-    const expandedDetail = grid.locator(".gridExpandedRow");
-    await expect(expandedDetail).toBeVisible();
-    await expect(expandedDetail).toContainText("Run only one missed run");
-    await expect(expandedDetail).toContainText("edge-sfo-01 (agent-sfo-01)");
-    await expect(expandedDetail).toContainText("core-fra-02 (agent-fra-02)");
-    await expect
-      .poll(() =>
-        expandedDetail.evaluate(
-          (element) => window.getComputedStyle(element).animationName,
-        ),
-      )
-      .toBe("grid-detail-reveal");
-    await expect(
-      page.getByRole("heading", { level: 1, name: "Schedules" }),
-    ).toBeVisible();
-    await selectGridRow(
-      page,
-      "Schedule records",
-      "51515151-6161-4717-8abc-defdefdefdef",
-    );
-    await grid
-      .locator(".gridToolbarActions")
-      .getByRole("button", { name: "Actions", exact: true })
-      .click();
-    const updateTargets = page.getByRole("menuitem", {
-      name: "Update targets",
-      exact: true,
-    });
-    await expect(updateTargets).toBeEnabled();
-    await expect(updateTargets).toHaveAttribute(
-      "title",
-      /only fixed target IDs change/i,
-    );
-    await page.evaluate(() => {
+    )
+    .toBe("grid-detail-reveal");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Schedules" }),
+  ).toBeVisible();
+  await selectGridRow(
+    page,
+    "Schedule records",
+    "51515151-6161-4717-8abc-defdefdefdef",
+  );
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  const updateTargets = page.getByRole("menuitem", {
+    name: "Update targets",
+    exact: true,
+  });
+  await expect(updateTargets).toBeEnabled();
+  await expect(updateTargets).toHaveAttribute(
+    "title",
+    /only fixed target IDs change/i,
+  );
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanGateNextBulkResolve: () => void;
+      }
+    ).__vpsmanGateNextBulkResolve();
+  });
+  await updateTargets.click();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Review deletion" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets", exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanReleaseNextBulkResolve: () => void;
+      }
+    ).__vpsmanReleaseNextBulkResolve();
+  });
+
+  const prompt = page.getByRole("region", {
+    name: "Update schedule targets",
+  });
+  await expect(prompt).toContainText("2 VPSs");
+  await expect(prompt).toContainText("1 VPS");
+  await expect(prompt).toContainText("No other schedule setting changes");
+  const scheduleReadsBefore = await page.evaluate(
+    () =>
       (
         window as typeof window & {
-          __vpsmanGateNextBulkResolve: () => void;
+          __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
         }
-      ).__vpsmanGateNextBulkResolve();
-    });
-    await updateTargets.click();
-    await grid
-      .locator(".gridToolbarActions")
-      .getByRole("button", { name: "Actions", exact: true })
-      .click();
-    await expect(page.getByRole("menuitem", { name: "Edit" })).toBeDisabled();
-    await expect(
-      page.getByRole("menuitem", { name: "Review deletion" }),
-    ).toBeDisabled();
-    await expect(
-      page.getByRole("menuitem", { name: "Update targets", exact: true }),
-    ).toBeDisabled();
-    await page.keyboard.press("Escape");
-    await page.evaluate(() => {
-      (
-        window as typeof window & {
-          __vpsmanReleaseNextBulkResolve: () => void;
-        }
-      ).__vpsmanReleaseNextBulkResolve();
-    });
+      ).__vpsmanFetchRequests?.filter((request) => {
+        const url = new URL(request.url, window.location.href);
+        return request.method === "GET" && url.pathname === "/api/v1/schedules";
+      }).length ?? 0,
+  );
+  await activate(prompt.getByRole("button", { name: "Update targets" }));
 
-    const prompt = page.getByRole("region", {
-      name: "Update schedule targets",
-    });
-    await expect(prompt).toContainText("2 VPSs");
-    await expect(prompt).toContainText("1 VPS");
-    await expect(prompt).toContainText("No other schedule setting changes");
-    await activate(prompt.getByRole("button", { name: "Update targets" }));
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const actions = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              scheduleActions: Array<{
+                body: Record<string, unknown>;
+                method: string;
+                path: string;
+              }>;
+            };
+          }
+        ).__vpsmanTestRequests.scheduleActions;
+        return (
+          actions.find(
+            (action) => action.path === "/api/v1/schedules/update-targets",
+          ) ?? null
+        );
+      }),
+    )
+    .not.toBeNull();
+  const targetUpdate = await page.evaluate(() => {
+    const actions = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          scheduleActions: Array<{
+            body: Record<string, unknown>;
+            method: string;
+            path: string;
+          }>;
+        };
+      }
+    ).__vpsmanTestRequests.scheduleActions;
+    return actions.find(
+      (action) => action.path === "/api/v1/schedules/update-targets",
+    );
+  });
+  expect(targetUpdate).toMatchObject({
+    method: "POST",
+    path: "/api/v1/schedules/update-targets",
+    body: {
+      confirmed: true,
+      items: [
+        expect.objectContaining({
+          schedule_id: "51515151-6161-4717-8abc-defdefdefdef",
+          privilege_assertion: expect.objectContaining({
+            assertion_hex: expect.any(String),
+          }),
+        }),
+      ],
+    },
+  });
+  expect(targetUpdate?.body).not.toHaveProperty("selector_expression");
+  expect(targetUpdate?.body).not.toHaveProperty("target_client_ids");
+  expect(targetUpdate?.body).not.toHaveProperty("cron_expr");
+  expect(targetUpdate?.body).not.toHaveProperty("name");
+  expect(targetUpdate?.body).not.toHaveProperty("operation");
+  const resolveManyRequests = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          bulkResolve: Array<{ items?: unknown[] }>;
+        };
+      }
+    ).__vpsmanTestRequests.bulkResolve.filter((request) =>
+      Array.isArray(request.items),
+    ),
+  );
+  expect(resolveManyRequests).toHaveLength(1);
+  expect(resolveManyRequests[0]?.items).toHaveLength(1);
 
-    await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const actions = (
-            window as unknown as {
-              __vpsmanTestRequests: {
-                scheduleActions: Array<{
-                  body: Record<string, unknown>;
-                  method: string;
-                  path: string;
-                }>;
-              };
+  await expect(grid).toContainText("1 fixed VPS");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
             }
-          ).__vpsmanTestRequests.scheduleActions;
-          return (
-            actions.find((action) => action.path.endsWith("/targets")) ?? null
-          );
-        }),
-      )
-      .not.toBeNull();
-    const targetUpdate = await page.evaluate(() => {
-      const actions = (
-        window as unknown as {
-          __vpsmanTestRequests: {
-            scheduleActions: Array<{
-              body: Record<string, unknown>;
-              method: string;
-              path: string;
-            }>;
-          };
-        }
-      ).__vpsmanTestRequests.scheduleActions;
-      return actions.find((action) => action.path.endsWith("/targets"));
-    });
-    expect(targetUpdate).toMatchObject({
-      method: "POST",
-      path: "/api/v1/schedules/51515151-6161-4717-8abc-defdefdefdef/targets",
-      body: {
-        confirmed: true,
-        privilege_assertion: expect.objectContaining({
-          assertion_hex: expect.any(String),
-        }),
-      },
-    });
-    expect(targetUpdate?.body).not.toHaveProperty("selector_expression");
-    expect(targetUpdate?.body).not.toHaveProperty("target_client_ids");
-    expect(targetUpdate?.body).not.toHaveProperty("cron_expr");
-    expect(targetUpdate?.body).not.toHaveProperty("name");
-    expect(targetUpdate?.body).not.toHaveProperty("operation");
-
-    await expect(grid).toContainText("1 fixed VPS");
-    await grid
-      .locator(".gridToolbarActions")
-      .getByRole("button", { name: "Actions", exact: true })
-      .click();
-    await expect(
-      page.getByRole("menuitem", { name: "Update targets", exact: true }),
-    ).toBeDisabled();
-    await page.keyboard.press("Escape");
-    await grid
-      .getByRole("row")
-      .filter({ hasText: "edge-health-hourly" })
-      .first()
-      .click({ button: "right" });
-    await expect(
-      page.getByRole("menuitem", { name: "Update targets", exact: true }),
-    ).toBeDisabled();
-  },
-);
+          ).__vpsmanFetchRequests?.filter((request) => {
+            const url = new URL(request.url, window.location.href);
+            return (
+              request.method === "GET" && url.pathname === "/api/v1/schedules"
+            );
+          }).length ?? 0,
+      ),
+    )
+    .toBe(scheduleReadsBefore);
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets", exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await grid
+    .getByRole("row")
+    .filter({ hasText: "edge-health-hourly" })
+    .first()
+    .click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Update targets", exact: true }),
+  ).toBeDisabled();
+});
 
 test(
   "bulk-updates each selected schedule from its own saved selector",
@@ -6052,11 +6562,12 @@ test(
               };
             }
           ).__vpsmanTestRequests.scheduleActions;
-          return actions.filter((action) => action.path.endsWith("/targets"))
-            .length;
+          return actions.filter(
+            (action) => action.path === "/api/v1/schedules/update-targets",
+          ).length;
         }),
       )
-      .toBe(2);
+      .toBe(1);
     const updates = await page.evaluate(() => {
       const actions = (
         window as unknown as {
@@ -6068,30 +6579,31 @@ test(
           };
         }
       ).__vpsmanTestRequests.scheduleActions;
-      return actions.filter((action) => action.path.endsWith("/targets"));
+      return actions.filter(
+        (action) => action.path === "/api/v1/schedules/update-targets",
+      );
     });
-    expect(updates).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: "/api/v1/schedules/51515151-6161-4717-8abc-defdefdefdef/targets",
-          body: expect.objectContaining({
-            confirmed: true,
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      path: "/api/v1/schedules/update-targets",
+      body: {
+        confirmed: true,
+        items: [
+          expect.objectContaining({
+            schedule_id: "51515151-6161-4717-8abc-defdefdefdef",
             privilege_assertion: expect.objectContaining({
               assertion_hex: expect.any(String),
             }),
           }),
-        }),
-        expect.objectContaining({
-          path: "/api/v1/schedules/52525252-6161-4717-8abc-defdefdefdef/targets",
-          body: expect.objectContaining({
-            confirmed: true,
+          expect.objectContaining({
+            schedule_id: "52525252-6161-4717-8abc-defdefdefdef",
             privilege_assertion: expect.objectContaining({
               assertion_hex: expect.any(String),
             }),
           }),
-        }),
-      ]),
-    );
+        ],
+      },
+    });
     for (const update of updates) {
       expect(update.body).not.toHaveProperty("cron_expr");
       expect(update.body).not.toHaveProperty("name");
@@ -6099,6 +6611,21 @@ test(
       expect(update.body).not.toHaveProperty("selector_expression");
       expect(update.body).not.toHaveProperty("target_client_ids");
     }
+    const resolveManyRequests = await page.evaluate(() =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            bulkResolve: Array<{
+              items?: Array<{ selector_expression: string }>;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.bulkResolve.filter((request) =>
+        Array.isArray(request.items),
+      ),
+    );
+    expect(resolveManyRequests).toHaveLength(1);
+    expect(resolveManyRequests[0]?.items).toHaveLength(2);
   },
 );
 
@@ -7258,6 +7785,117 @@ test("renders patch generators and submits explicit runtime config patch modes",
   );
   expect(JSON.stringify(request)).not.toContain("local-super-password");
 });
+
+test(
+  "polls 118 runtime sync jobs through one exact-pair status request",
+  { tag: "@runtime-config-bulk-status-read" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "large bulk patch review is covered through the desktop workflow",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Config", "VPS override patch");
+    await unlockPrivilegeFor(page, "Config", "VPS override patch");
+    const bulk = page.locator(".configApplyGrid");
+    await bulk
+      .getByLabel("Patch generator", { exact: true })
+      .selectOption({ label: "Autonomous updater disabled" });
+    await bulk
+      .getByRole("combobox", { name: "Bulk patch target expression" })
+      .fill("status:online");
+    await activate(bulk.getByRole("button", { name: "Preview changes" }));
+    await expect(bulk.getByText("118 VPSs verified")).toBeVisible();
+    await activate(bulk.getByRole("button", { name: "Apply override patch" }));
+    await expect(page.getByText("Confirm VPS override patch")).toBeVisible();
+
+    const baseline = await page.evaluate(() => {
+      const requests = (
+        window as typeof window & {
+          __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+        }
+      ).__vpsmanFetchRequests;
+      const paths = requests.map((request) => ({
+        method: request.method,
+        path: new URL(request.url, window.location.href).pathname,
+      }));
+      return {
+        exact: paths.filter(
+          ({ method, path }) =>
+            method === "POST" && path === "/api/v1/job-targets/statuses",
+        ).length,
+        outputs: paths.filter(
+          ({ method, path }) =>
+            method === "GET" && /^\/api\/v1\/jobs\/[^/]+\/outputs$/u.test(path),
+        ).length,
+        targets: paths.filter(
+          ({ method, path }) =>
+            method === "GET" && /^\/api\/v1\/jobs\/[^/]+\/targets$/u.test(path),
+        ).length,
+      };
+    });
+
+    await confirmVisiblePrompt(page, "Apply VPS override patch");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as typeof window & {
+                __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+              }
+            ).__vpsmanFetchRequests.filter((request) => {
+              const url = new URL(request.url, window.location.href);
+              return (
+                request.method === "POST" &&
+                url.pathname === "/api/v1/job-targets/statuses"
+              );
+            }).length,
+        ),
+      )
+      .toBe(baseline.exact + 1);
+
+    const evidence = await page.evaluate(() => {
+      const testRequests = (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            jobTargetStatusReads: Array<{
+              items: Array<{ client_id: string; job_id: string }>;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests;
+      const fetchRequests = (
+        window as typeof window & {
+          __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+        }
+      ).__vpsmanFetchRequests;
+      const paths = fetchRequests.map((request) => ({
+        method: request.method,
+        path: new URL(request.url, window.location.href).pathname,
+      }));
+      return {
+        items: testRequests.jobTargetStatusReads.at(-1)?.items ?? [],
+        outputs: paths.filter(
+          ({ method, path }) =>
+            method === "GET" && /^\/api\/v1\/jobs\/[^/]+\/outputs$/u.test(path),
+        ).length,
+        targets: paths.filter(
+          ({ method, path }) =>
+            method === "GET" && /^\/api\/v1\/jobs\/[^/]+\/targets$/u.test(path),
+        ).length,
+      };
+    });
+    expect(evidence.items).toHaveLength(118);
+    expect(new Set(evidence.items.map((item) => item.client_id)).size).toBe(
+      118,
+    );
+    expect(new Set(evidence.items.map((item) => item.job_id)).size).toBe(118);
+    expect(evidence.targets).toBe(baseline.targets);
+    expect(evidence.outputs).toBe(baseline.outputs);
+  },
+);
 
 test("uses an exact VPS combobox for the desired-config workspace", async ({
   page,
@@ -8908,6 +9546,49 @@ test("clears selected tunnel evidence against frozen plan revisions", async ({
   });
 });
 
+test("submits selected tunnel lifecycle changes as one ordered request", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "bulk row actions are covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+  await selectGridRow(page, "Tunnel plans", tunnelPlans[0].id);
+  await selectGridRow(page, "Tunnel plans", tunnelPlans[1].id);
+  await runGridAction(page, "Tunnel plans", "Disable");
+  await confirmVisiblePrompt(page, "Disable plans");
+  await expect(page.locator(".topologyPlanActionFeedback")).toContainText(
+    "2 tunnel plans disabled",
+  );
+
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: { tunnelPlanEnabledMutations: unknown[] };
+        }
+      ).__vpsmanTestRequests.tunnelPlanEnabledMutations,
+  );
+  expect(requests).toEqual([
+    {
+      enabled: false,
+      items: [
+        {
+          expected_revision: tunnelPlans[0].revision,
+          plan_id: tunnelPlans[0].id,
+        },
+        {
+          expected_revision: tunnelPlans[1].revision,
+          plan_id: tunnelPlans[1].id,
+        },
+      ],
+    },
+  ]);
+});
+
 test(
   "authors explicit tunnel plans with endpoint-scoped adapters",
   {
@@ -9516,9 +10197,9 @@ test(
       .locator(".gridExpandedRow", { hasText: "core-fra-02" })
       .first();
     await activate(coreDetail.getByRole("tab", { name: "System" }));
-    await expect(
-      coreDetail.getByLabel("VPS system information"),
-    ).toContainText("System information unavailable");
+    await expect(coreDetail.getByLabel("VPS system information")).toContainText(
+      "System information unavailable",
+    );
     await activate(edgeDetail.getByRole("tab", { name: "Telemetry" }));
     await activate(coreDetail.getByRole("tab", { name: "Telemetry" }));
     const edgeRate = edgeDetail
@@ -9687,6 +10368,30 @@ test(
 
     await page.goto("/");
     await unlockPrivilegeFor(page, "Jobs", "Dispatch");
+    const sourceReadBaseline = await page.evaluate(() => {
+      const requests = (
+        window as typeof window & {
+          __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+        }
+      ).__vpsmanFetchRequests;
+      const paths = requests
+        .filter((request) => request.method === "GET")
+        .map((request) => new URL(request.url, window.location.href).pathname);
+      return Object.fromEntries(
+        [
+          "/api/v1/jobs",
+          "/api/v1/job-approvals",
+          "/api/v1/job-rollouts",
+          "/api/v1/agent-update-releases",
+          "/api/v1/process-supervisor/inventory",
+          "/api/v1/file-transfers",
+          "/api/v1/file-transfer-sources",
+          "/api/v1/terminal-sessions",
+          "/api/v1/server-jobs",
+          "/api/v1/command-templates",
+        ].map((path) => [path, paths.filter((value) => value === path).length]),
+      );
+    });
     const composer = page.locator(".commandComposer");
     await composer.getByLabel("Command argv").fill("/usr/bin/uptime");
     await composer
@@ -9702,6 +10407,41 @@ test(
       result.getByRole("button", { name: "Open job details" }),
     ).toBeVisible();
     await expect(result).toContainText("completed on 1 VPS");
+    const sourceReadEvidence = await page.evaluate(() => {
+      const requests = (
+        window as typeof window & {
+          __vpsmanFetchRequests: Array<{ method: string; url: string }>;
+        }
+      ).__vpsmanFetchRequests;
+      const paths = requests
+        .filter((request) => request.method === "GET")
+        .map((request) => new URL(request.url, window.location.href).pathname);
+      return {
+        exactJob: paths.filter(
+          (path) =>
+            path === "/api/v1/jobs/11111111-2222-4333-8444-555555555555",
+        ).length,
+        sources: Object.fromEntries(
+          [
+            "/api/v1/jobs",
+            "/api/v1/job-approvals",
+            "/api/v1/job-rollouts",
+            "/api/v1/agent-update-releases",
+            "/api/v1/process-supervisor/inventory",
+            "/api/v1/file-transfers",
+            "/api/v1/file-transfer-sources",
+            "/api/v1/terminal-sessions",
+            "/api/v1/server-jobs",
+            "/api/v1/command-templates",
+          ].map((path) => [
+            path,
+            paths.filter((value) => value === path).length,
+          ]),
+        ),
+      };
+    });
+    expect(sourceReadEvidence.exactJob).toBe(1);
+    expect(sourceReadEvidence.sources).toEqual(sourceReadBaseline);
   },
 );
 

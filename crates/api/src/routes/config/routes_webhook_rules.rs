@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -8,18 +10,22 @@ use crate::{
     error::ApiError,
     model_webhook_rules::{
         CreateWebhookRuleRequest, DeleteWebhookRuleRequest, WebhookDeliveryRotationRequest,
-        WebhookDeliveryRotationResponse, WebhookRuleDeliveryQuery, WebhookRuleDeliveryView,
-        WebhookRuleDispatchRequest, WebhookRuleDryRunRequest, WebhookRuleDryRunView,
-        WebhookRuleProcessRequest, WebhookRuleQuery, WebhookRuleView,
+        WebhookDeliveryRotationResponse, WebhookRuleBulkRequest, WebhookRuleBulkResponse,
+        WebhookRuleDeliveryQuery, WebhookRuleDeliveryView, WebhookRuleDispatchRequest,
+        WebhookRuleDryRunRequest, WebhookRuleDryRunView, WebhookRuleProcessRequest,
+        WebhookRuleQuery, WebhookRuleView,
     },
     repository_webhook_rules::validate_webhook_rule_target,
     security::{
-        require_vps_rule_selector_scope, SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
+        operator_has_scope, require_vps_rule_selector_scope, SCOPE_CONFIG_READ,
+        SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
     },
     selector_expression::parse_selector_expression,
     state::AppState,
-    util::limit_or_default,
+    util::{limit_or_default, parse_timestamp_utc},
 };
+
+const WEBHOOK_RULE_BULK_ITEM_LIMIT: usize = 500;
 use vpsman_common::{
     is_webhook_rule_delivery_history_status, is_webhook_rule_delivery_process_status,
     validate_template,
@@ -65,6 +71,28 @@ pub(crate) async fn upsert_webhook_rule(
             .upsert_webhook_rule(&request, &operator)
             .await
             .map_err(webhook_rule_upsert_error)?,
+    ))
+}
+
+pub(crate) async fn bulk_mutate_webhook_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<WebhookRuleBulkRequest>,
+) -> Result<Json<WebhookRuleBulkResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
+        .await?;
+    validate_webhook_rule_bulk_request(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .bulk_mutate_webhook_rules(
+                &request,
+                &operator,
+                operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+            )
+            .await
+            .map_err(webhook_rule_bulk_error)?,
     ))
 }
 
@@ -117,6 +145,30 @@ fn webhook_rule_delete_error(error: anyhow::Error) -> ApiError {
     ApiError::internal(
         "webhook_rule_delete_failed",
         "The webhook rule could not be deleted.",
+        error,
+    )
+}
+
+fn webhook_rule_bulk_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("webhook_rule_not_found") {
+        return ApiError::not_found("webhook_rule_not_found");
+    }
+    if message.contains("vps_rule_selector_scope_required") {
+        return ApiError::forbidden("operator_scope_insufficient");
+    }
+    for code in [
+        "webhook_rule_bulk_review_stale",
+        "webhook_rule_bulk_state_stale",
+        "webhook_rule_bulk_snapshot_stale",
+    ] {
+        if message.contains(code) {
+            return ApiError::conflict(code);
+        }
+    }
+    ApiError::internal(
+        "webhook_rule_bulk_mutation_failed",
+        "The webhook rule changes could not be completed.",
         error,
     )
 }
@@ -294,6 +346,30 @@ fn validate_webhook_rule_request(request: &CreateWebhookRuleRequest) -> Result<(
     if let Some(notes) = request.notes.as_deref() {
         if notes.len() > 1024 {
             return Err(ApiError::bad_request("webhook_rule_notes_too_long"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_webhook_rule_bulk_request(request: &WebhookRuleBulkRequest) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "webhook_rule_bulk_confirmation_required",
+        ));
+    }
+    if !(1..=WEBHOOK_RULE_BULK_ITEM_LIMIT).contains(&request.items.len()) {
+        return Err(ApiError::bad_request("webhook_rule_bulk_items_invalid"));
+    }
+    let mut ids = HashSet::with_capacity(request.items.len());
+    for item in &request.items {
+        if !ids.insert(item.id) {
+            return Err(ApiError::bad_request("webhook_rule_bulk_duplicate_item"));
+        }
+        validate_required_text(&item.reviewed_name, 128, "webhook_rule_bulk_review_invalid")?;
+        if parse_timestamp_utc(&item.expected_updated_at).is_none() {
+            return Err(ApiError::bad_request(
+                "webhook_rule_bulk_expected_updated_at_invalid",
+            ));
         }
     }
     Ok(())

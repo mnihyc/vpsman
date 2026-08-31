@@ -3266,15 +3266,19 @@ mod telemetry_projector_scheduler_tests {
 
         let port_forwarding = include_str!("../network/repository_port_forwarding.rs");
         let (_, lifecycle_owner) = port_forwarding
-            .split_once("pub(crate) async fn lock_postgres_port_forward_client")
+            .split_once("pub(crate) async fn lock_postgres_port_forward_clients")
             .expect("port-forward client owner");
         let (lifecycle_owner, _) = lifecycle_owner
-            .split_once("pub(crate) async fn postgres_port_forwarding_blocks_agent_delete")
+            .split_once(
+                "pub(crate) async fn postgres_port_forwarding_blocked_clients_for_agent_delete",
+            )
             .expect("port-forward client owner boundary");
-        assert!(lifecycle_owner.contains("pg_advisory_xact_lock(hashtextextended($1, 0))"));
+        assert!(lifecycle_owner.contains("pg_advisory_xact_lock(hashtextextended(lock_key, 0))"));
+        assert!(lifecycle_owner.contains("FROM unnest($1::text[])"));
+        assert!(lifecycle_owner.contains("ORDER BY lock_key COLLATE \"C\""));
 
         let inventory = include_str!("repository_inventory.rs");
-        assert!(inventory.contains("lock_postgres_port_forward_client(&mut tx, client_id)"));
+        assert!(inventory.contains("lock_postgres_port_forward_clients(&mut tx, client_ids)"));
     }
 }
 

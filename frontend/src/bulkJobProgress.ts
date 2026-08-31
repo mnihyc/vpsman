@@ -4,7 +4,12 @@ import {
   JOB_TARGET_TERMINAL_STATUSES,
 } from "./generated/protocolContracts";
 import { agentDisplayState } from "./agentDisplayState";
-import type { AgentView, JobOutputRecord, JobTargetRecord } from "./types";
+import type {
+  AgentView,
+  JobOutputRecord,
+  JobTargetRecord,
+  JobTargetStatusRequestItem,
+} from "./types";
 import type {
   GeneratedJobTargetStatus,
   GeneratedJobTargetStatusClass,
@@ -358,6 +363,10 @@ export async function waitForBulkJobSet(
     targets: AgentView[];
     maxTimeoutSecs?: number;
     onLoadOutputs?: (jobId: string) => Promise<JobOutputRecord[]>;
+    exactTargetStatusItems?: JobTargetStatusRequestItem[];
+    onLoadExactTargetStatuses?: (
+      items: JobTargetStatusRequestItem[],
+    ) => Promise<JobTargetRecord[]>;
   },
 ): Promise<{
   outputs: JobOutputRecord[];
@@ -370,6 +379,17 @@ export async function waitForBulkJobSet(
   const targetsByJob = new Map<string, JobTargetRecord[]>();
   const intervalMs =
     options.intervalMs ?? DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS;
+  const useExactTargetStatuses = Boolean(
+    options.exactTargetStatusItems && options.onLoadExactTargetStatuses,
+  );
+  if (
+    Boolean(options.exactTargetStatusItems) !==
+    Boolean(options.onLoadExactTargetStatuses)
+  ) {
+    throw new Error(
+      "Exact job-target status items and loader must be provided together",
+    );
+  }
 
   let targetRecords: JobTargetRecord[] = [];
   let outputs: JobOutputRecord[] = [];
@@ -383,18 +403,28 @@ export async function waitForBulkJobSet(
   });
 
   for (;;) {
-    await Promise.all(
-      normalizedJobIds.map(async (jobId) => {
-        try {
-          targetsByJob.set(jobId, await onLoadTargets(jobId));
-        } catch {
-          // Preserve the last result for this job across transient fetch failures.
-        }
-      }),
-    );
-    targetRecords = normalizedJobIds.flatMap(
-      (jobId) => targetsByJob.get(jobId) ?? [],
-    );
+    if (useExactTargetStatuses) {
+      try {
+        targetRecords = await options.onLoadExactTargetStatuses!(
+          options.exactTargetStatusItems!,
+        );
+      } catch {
+        // Preserve the last exact set across transient fetch failures.
+      }
+    } else {
+      await Promise.all(
+        normalizedJobIds.map(async (jobId) => {
+          try {
+            targetsByJob.set(jobId, await onLoadTargets(jobId));
+          } catch {
+            // Preserve the last result for this job across transient fetch failures.
+          }
+        }),
+      );
+      targetRecords = normalizedJobIds.flatMap(
+        (jobId) => targetsByJob.get(jobId) ?? [],
+      );
+    }
     progress = buildBulkJobProgress({
       jobId: options.operationId,
       jobIds: normalizedJobIds,

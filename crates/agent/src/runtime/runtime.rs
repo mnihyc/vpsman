@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
+    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -279,8 +280,12 @@ async fn run_agent_with_ledger(
             }
         }
 
-        time::sleep(Duration::from_secs(config.auth.gateway_retry_secs.max(1))).await;
+        time::sleep(gateway_retry_delay(config.auth.gateway_retry_secs)).await;
     }
+}
+
+fn gateway_retry_delay(configured_secs: u64) -> Duration {
+    Duration::from_secs(configured_secs.max(1))
 }
 
 fn endpoint_candidates(config: &AgentConfig) -> Vec<ServerEndpoint> {
@@ -695,8 +700,16 @@ async fn connect_and_stream(
     let host_facts = collect_connection_host_facts(config);
     info!(%endpoint, "connecting to gateway");
     let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
-    let mut stream = connect_noise_stream(tcp, config).await?;
+    configure_gateway_tcp_liveness(&tcp);
+    let mut stream = run_gateway_network_phase(
+        config.auth.gateway_connect_timeout_secs,
+        connect_noise_stream(tcp, config),
+    )
+    .await?;
 
+    // Capability discovery is local work with its own command deadlines. It is
+    // deliberately outside the gateway network deadline: a slow-but-bounded nft
+    // or driver probe must not make a healthy transport look unreachable.
     let port_forwarding_capability = port_forwarding.probe().await?;
     let hello = AgentHello {
         client_id: config.client_id.clone(),
@@ -714,9 +727,12 @@ async fn connect_and_stream(
         }),
         capabilities: agent_capabilities(config, port_forwarding_capability).await,
     };
-    send_json_frame(&mut stream, MessageKind::ClientHello, 0, 1, &hello).await?;
-
-    let server_hello: ServerHello = read_json_frame(&mut stream).await?;
+    let server_hello: ServerHello =
+        run_gateway_network_phase(config.auth.gateway_connect_timeout_secs, async {
+            send_json_frame(&mut stream, MessageKind::ClientHello, 0, 1, &hello).await?;
+            read_json_frame(&mut stream).await
+        })
+        .await?;
     if !server_hello.accepted {
         anyhow::bail!("server rejected agent: {}", server_hello.message);
     }
@@ -1029,6 +1045,76 @@ async fn connect_and_stream(
     }
 }
 
+async fn run_gateway_network_phase<T>(
+    max_timeout_secs: u64,
+    attempt: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    time::timeout(Duration::from_secs(max_timeout_secs.clamp(1, 300)), attempt)
+        .await
+        .context("gateway network phase timed out")?
+}
+
+#[cfg(target_os = "linux")]
+fn configure_gateway_tcp_liveness(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+
+    for (name, error) in gateway_tcp_liveness_option_errors(stream.as_raw_fd()) {
+        warn!(option = name, %error, "gateway TCP liveness option is unavailable");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn gateway_tcp_liveness_option_errors(
+    fd: std::os::fd::RawFd,
+) -> Vec<(&'static str, anyhow::Error)> {
+    let mut errors = Vec::new();
+    for (name, level, option, value) in [
+        ("SO_KEEPALIVE", libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1),
+        ("TCP_KEEPIDLE", libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 30),
+        ("TCP_KEEPINTVL", libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10),
+        ("TCP_KEEPCNT", libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3),
+        (
+            "TCP_USER_TIMEOUT",
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            60_000,
+        ),
+    ] {
+        if let Err(error) = set_tcp_socket_option(fd, level, option, value) {
+            errors.push((name, error));
+        }
+    }
+    errors
+}
+
+#[cfg(target_os = "linux")]
+fn set_tcp_socket_option(
+    fd: std::os::fd::RawFd,
+    level: libc::c_int,
+    option: libc::c_int,
+    value: libc::c_int,
+) -> Result<()> {
+    // SAFETY: fd belongs to the live TcpStream, and value points to a valid c_int
+    // for the duration and size supplied to setsockopt.
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            option,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("failed to configure gateway TCP liveness")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_gateway_tcp_liveness(_stream: &TcpStream) {}
+
 fn configured_os_release(path: Option<&str>) -> Result<String> {
     let Some(path) = path else {
         return Ok(String::new());
@@ -1132,8 +1218,10 @@ async fn configured_runtime_tunnels_require_reconnect_sync(config: &AgentConfig)
 }
 
 async fn connect_tcp_endpoint(endpoint: &str, max_timeout_secs: u64) -> Result<TcpStream> {
-    let mut addrs = tokio::net::lookup_host(endpoint)
+    let timeout = Duration::from_secs(max_timeout_secs.clamp(1, 300));
+    let mut addrs = time::timeout(timeout, tokio::net::lookup_host(endpoint))
         .await
+        .with_context(|| format!("gateway endpoint {endpoint} DNS lookup timed out"))?
         .with_context(|| format!("failed to resolve gateway endpoint {endpoint}"))?
         .collect::<Vec<_>>();
     if addrs.is_empty() {
@@ -1141,10 +1229,22 @@ async fn connect_tcp_endpoint(endpoint: &str, max_timeout_secs: u64) -> Result<T
     }
     addrs.sort_by_key(address_family_order);
 
-    let timeout = Duration::from_secs(max_timeout_secs.clamp(1, 300));
+    connect_gateway_address_candidates(endpoint, addrs, timeout, TcpStream::connect).await
+}
+
+async fn connect_gateway_address_candidates<T, F, Fut>(
+    endpoint: &str,
+    addrs: Vec<SocketAddr>,
+    timeout: Duration,
+    mut connect: F,
+) -> Result<T>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
     let mut last_error = None;
     for addr in addrs {
-        match time::timeout(timeout, TcpStream::connect(addr)).await {
+        match time::timeout(timeout, connect(addr)).await {
             Ok(Ok(stream)) => return Ok(stream),
             Ok(Err(error)) => {
                 debug!(%endpoint, %addr, %error, "gateway address connect failed");

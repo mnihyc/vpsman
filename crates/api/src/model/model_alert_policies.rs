@@ -113,6 +113,7 @@ pub(crate) struct VpsRulesDryRunResponse {
     pub(crate) invalid_row_count: usize,
     pub(crate) preview_hash: String,
     pub(crate) changes: Vec<VpsRuleChangePreview>,
+    pub(crate) committed_records: Vec<VpsRuleValueRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,6 +472,45 @@ pub(crate) struct DeleteFleetAlertPolicyRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) reviewed_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FleetAlertPolicyBulkAction {
+    Enable,
+    Disable,
+    Delete,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FleetAlertPolicyBulkItem {
+    pub(crate) id: Uuid,
+    pub(crate) reviewed_name: String,
+    pub(crate) expected_updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FleetAlertPolicyBulkRequest {
+    pub(crate) action: FleetAlertPolicyBulkAction,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) items: Vec<FleetAlertPolicyBulkItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertPolicyBulkOutcome {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) result: String,
+    pub(crate) record: Option<PolicyGroupRecord>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertPolicyBulkResponse {
+    pub(crate) action: FleetAlertPolicyBulkAction,
+    pub(crate) outcomes: Vec<FleetAlertPolicyBulkOutcome>,
 }
 
 fn default_true() -> bool {

@@ -23,16 +23,18 @@ use crate::{
     model_alert_notifications::FleetAlertNotificationMatchRule,
     model_alert_policies::{
         AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
-        CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
-        PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse, PolicyDryRunRulePreview,
-        PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest, PolicyRuleStateRecord,
-        TrafficAccountingQuery, TrafficAccountingRecord, TrafficAccountingSelectorBreakdown,
-        VpsRuleChangePreview, VpsRuleQuery, VpsRuleValueRecord, VpsRulesBulkUnsetRequest,
-        VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest, VpsRulesDryRunResponse,
-        VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_INTERFACES,
-        VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
-        VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        CreateFleetAlertPolicyRequest, FleetAlertPolicyBulkAction, FleetAlertPolicyBulkOutcome,
+        FleetAlertPolicyBulkRequest, FleetAlertPolicyBulkResponse, NetworkRateInterfaceSelection,
+        PolicyAlertQuery, PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse,
+        PolicyDryRunRulePreview, PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest,
+        PolicyRuleStateRecord, TrafficAccountingQuery, TrafficAccountingRecord,
+        TrafficAccountingSelectorBreakdown, VpsRuleChangePreview, VpsRuleQuery, VpsRuleValueRecord,
+        VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest,
+        VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE,
+        VPS_RULE_KEY_NETWORK_INTERFACES, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
     model_monitoring::TrafficHistoryPointView,
     repository::Repository,
@@ -1349,7 +1351,7 @@ impl Repository {
                 // mutation that won the race therefore produces the existing
                 // preview-stale response instead of changing the committed set.
                 let (agents, stored) = postgres_vps_rule_snapshot_in_tx(&mut tx).await?;
-                let preview = build_vps_rule_preview(
+                let mut preview = build_vps_rule_preview(
                     operation,
                     selector_expression,
                     values,
@@ -1362,6 +1364,8 @@ impl Repository {
                     lock_postgres_traffic_reset_rule_targets(&mut tx, &preview).await?;
                     apply_vps_rule_changes_postgres_in_tx(&mut tx, &preview, operator).await?;
                 }
+                preview.committed_records =
+                    load_committed_vps_rule_changes_in_tx(&mut tx, &preview).await?;
                 tx.commit().await?;
                 Ok(preview)
             }
@@ -3060,6 +3064,429 @@ impl Repository {
         Ok(())
     }
 
+    pub(crate) async fn bulk_mutate_fleet_alert_policies(
+        &self,
+        request: &FleetAlertPolicyBulkRequest,
+        operator: &AuthContext,
+        allow_vps_rule_selectors: bool,
+    ) -> Result<FleetAlertPolicyBulkResponse> {
+        anyhow::ensure!(
+            request.confirmed,
+            "fleet_alert_policy_bulk_confirmation_required"
+        );
+        anyhow::ensure!(
+            (1..=500).contains(&request.items.len()),
+            "fleet_alert_policy_bulk_items_invalid"
+        );
+        let requested_ids = request.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let unique_ids = requested_ids.iter().copied().collect::<HashSet<_>>();
+        anyhow::ensure!(
+            unique_ids.len() == requested_ids.len(),
+            "fleet_alert_policy_bulk_duplicate_item"
+        );
+
+        let (mut outcomes, telemetry_activation_changed) = match self {
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let definition_identities = requested_ids
+                    .iter()
+                    .map(|id| format!("alert-policy:{id}"))
+                    .collect::<Vec<_>>();
+                lock_postgres_definition_lifecycles_in_tx(&mut tx, &definition_identities).await?;
+
+                let group_rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, name, enabled, selector_expression, notes,
+                        created_by, updated_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM policy_groups
+                    WHERE id=ANY($1::uuid[])
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&requested_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut policies = group_rows
+                    .into_iter()
+                    .map(|row| policy_group_from_row(row, Vec::new()))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|policy| (policy.id, policy))
+                    .collect::<HashMap<_, _>>();
+                anyhow::ensure!(
+                    policies.len() == request.items.len(),
+                    "fleet_alert_policy_not_found"
+                );
+                let desired_enabled = match request.action {
+                    FleetAlertPolicyBulkAction::Enable => Some(true),
+                    FleetAlertPolicyBulkAction::Disable => Some(false),
+                    FleetAlertPolicyBulkAction::Delete => None,
+                };
+                for item in &request.items {
+                    let policy = policies
+                        .get(&item.id)
+                        .context("fleet_alert_policy_not_found")?;
+                    anyhow::ensure!(
+                        policy.name == item.reviewed_name.trim()
+                            && policy.updated_at == item.expected_updated_at.trim(),
+                        "fleet_alert_policy_bulk_review_stale"
+                    );
+                    if let Some(enabled) = desired_enabled {
+                        anyhow::ensure!(
+                            policy.enabled != enabled,
+                            "fleet_alert_policy_bulk_state_stale"
+                        );
+                    }
+                    let selector = parse_selector_expression(&policy.selector_expression)
+                        .map_err(|error| anyhow::anyhow!("invalid selector expression: {error}"))?
+                        .context("selector expression is empty")?;
+                    anyhow::ensure!(
+                        allow_vps_rule_selectors || !expression_references_vps_rules(&selector),
+                        "vps_rule_selector_scope_required"
+                    );
+                }
+
+                let touches_telemetry_activation: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM policy_rules
+                        WHERE group_id=ANY($1::uuid[])
+                          AND evidence_source='telemetry.combined'
+                    )
+                    "#,
+                )
+                .bind(&requested_ids)
+                .fetch_one(&mut *tx)
+                .await?;
+                if touches_telemetry_activation {
+                    lock_postgres_definition_lifecycles_in_tx(
+                        &mut tx,
+                        &["alert-policy-telemetry-consumer".to_string()],
+                    )
+                    .await?;
+                }
+
+                // Rule rows are locked in a canonical order only after every
+                // policy row passed its reviewed snapshot check. No requested
+                // definition changes until the complete batch is current.
+                let rule_rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, group_id, rule_version, sort_order, name, enabled,
+                        rule_kind, evidence_source, correlation_mode,
+                        traffic_selector, trigger_condition_expression,
+                        trigger_meta_condition, resolve_condition_expression,
+                        resolve_meta_condition, severity, category,
+                        title_template, detail_template, system_seed_key,
+                        armed_after_evidence_seq,
+                        armed_at::text AS armed_at,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM policy_rules
+                    WHERE group_id=ANY($1::uuid[])
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&requested_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut rules_by_group = HashMap::<Uuid, Vec<PolicyRuleRecord>>::new();
+                for row in rule_rows {
+                    let rule = policy_rule_from_row(row)?;
+                    rules_by_group.entry(rule.group_id).or_default().push(rule);
+                }
+                for policy in policies.values_mut() {
+                    let mut rules = rules_by_group.remove(&policy.id).unwrap_or_default();
+                    rules.sort_by(|left, right| {
+                        left.sort_order
+                            .cmp(&right.sort_order)
+                            .then_with(|| left.created_at.cmp(&right.created_at))
+                            .then_with(|| left.id.cmp(&right.id))
+                    });
+                    policy.rule_count = rules.len() as i64;
+                    policy.enabled_rule_count =
+                        rules.iter().filter(|rule| rule.enabled).count() as i64;
+                    policy.rules = rules;
+                }
+                let mut rule_ids = policies
+                    .values()
+                    .flat_map(|policy| policy.rules.iter().map(|rule| rule.id))
+                    .collect::<Vec<_>>();
+                rule_ids.sort_unstable();
+
+                let drained_evidence_ids =
+                    crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
+                        &mut tx, &rule_ids,
+                    )
+                    .await?;
+
+                if let Some(enabled) = desired_enabled {
+                    anyhow::ensure!(
+                        policies
+                            .values()
+                            .flat_map(|policy| &policy.rules)
+                            .all(|rule| { rule.rule_version < i32::MAX }),
+                        "fleet_alert_policy_rule_version_overflow"
+                    );
+                    let telemetry_policy_was_enabled: bool = sqlx::query_scalar(
+                        r#"
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM policy_rules rule
+                            JOIN policy_groups policy ON policy.id=rule.group_id
+                            WHERE policy.enabled
+                              AND rule.enabled
+                              AND rule.evidence_source='telemetry.combined'
+                        )
+                        "#,
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let armed_after_evidence_seq: i64 = sqlx::query_scalar(
+                        "SELECT COALESCE(max(evidence_seq), 0) FROM alert_policy_evidence",
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let armed_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                        .fetch_one(&mut *tx)
+                        .await?;
+
+                    let group_updates = sqlx::query(
+                        r#"
+                        UPDATE policy_groups
+                        SET enabled=$2, updated_by=$3, updated_at=now()
+                        WHERE id=ANY($1::uuid[])
+                        RETURNING id, updated_at::text AS updated_at
+                        "#,
+                    )
+                    .bind(&requested_ids)
+                    .bind(enabled)
+                    .bind(operator.operator.id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    let group_updated_at = group_updates
+                        .into_iter()
+                        .map(|row| {
+                            Ok((
+                                row.try_get::<Uuid, _>("id")?,
+                                row.try_get::<String, _>("updated_at")?,
+                            ))
+                        })
+                        .collect::<Result<HashMap<_, _>>>()?;
+                    anyhow::ensure!(
+                        group_updated_at.len() == request.items.len(),
+                        "fleet_alert_policy_bulk_snapshot_stale"
+                    );
+
+                    let rule_updates = if rule_ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        sqlx::query(
+                            r#"
+                            UPDATE policy_rules
+                            SET rule_version=rule_version+1,
+                                armed_after_evidence_seq=$2,
+                                armed_at=$3,
+                                updated_at=now()
+                            WHERE id=ANY($1::uuid[])
+                            RETURNING id, rule_version,
+                                      armed_at::text AS armed_at,
+                                      updated_at::text AS updated_at
+                            "#,
+                        )
+                        .bind(&rule_ids)
+                        .bind(armed_after_evidence_seq)
+                        .bind(armed_at)
+                        .fetch_all(&mut *tx)
+                        .await?
+                    };
+                    let rule_updates = rule_updates
+                        .into_iter()
+                        .map(|row| {
+                            Ok((
+                                row.try_get::<Uuid, _>("id")?,
+                                (
+                                    row.try_get::<i32, _>("rule_version")?,
+                                    row.try_get::<String, _>("armed_at")?,
+                                    row.try_get::<String, _>("updated_at")?,
+                                ),
+                            ))
+                        })
+                        .collect::<Result<HashMap<_, _>>>()?;
+                    anyhow::ensure!(
+                        rule_updates.len() == rule_ids.len(),
+                        "fleet_alert_policy_bulk_snapshot_stale"
+                    );
+
+                    resolve_policy_alerts_for_rules_in_tx(
+                        &mut tx,
+                        &rule_ids,
+                        if enabled {
+                            "policy_changed"
+                        } else {
+                            "policy_disabled"
+                        },
+                    )
+                    .await?;
+                    if !rule_ids.is_empty() {
+                        sqlx::query(
+                            "DELETE FROM alert_policy_evaluation_states WHERE policy_rule_id=ANY($1::uuid[])",
+                        )
+                        .bind(&rule_ids)
+                        .execute(&mut *tx)
+                        .await?;
+                        sqlx::query(
+                            "DELETE FROM alert_policy_confirmations WHERE policy_rule_id=ANY($1::uuid[])",
+                        )
+                        .bind(&rule_ids)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    let baseline_rule_ids = if telemetry_policy_was_enabled {
+                        rule_ids.clone()
+                    } else {
+                        policies
+                            .values()
+                            .flat_map(|policy| &policy.rules)
+                            .filter(|rule| rule.evidence_source != "telemetry.combined")
+                            .map(|rule| rule.id)
+                            .collect::<Vec<_>>()
+                    };
+                    crate::repository_policy_lifecycle::evaluate_policy_rule_baselines_in_tx(
+                        &mut tx,
+                        &baseline_rule_ids,
+                    )
+                    .await?;
+
+                    for policy in policies.values_mut() {
+                        policy.enabled = enabled;
+                        policy.updated_by = Some(operator.operator.id);
+                        policy.updated_at = group_updated_at
+                            .get(&policy.id)
+                            .context("fleet_alert_policy_bulk_snapshot_stale")?
+                            .clone();
+                        for rule in &mut policy.rules {
+                            let (version, armed_at, updated_at) = rule_updates
+                                .get(&rule.id)
+                                .context("fleet_alert_policy_bulk_snapshot_stale")?;
+                            rule.rule_version = *version;
+                            rule.armed_after_evidence_seq = armed_after_evidence_seq;
+                            rule.armed_at = armed_at.clone();
+                            rule.updated_at = updated_at.clone();
+                        }
+                    }
+                } else {
+                    resolve_policy_alerts_for_rules_in_tx(&mut tx, &rule_ids, "policy_deleted")
+                        .await?;
+                    let deleted = sqlx::query("DELETE FROM policy_groups WHERE id=ANY($1::uuid[])")
+                        .bind(&requested_ids)
+                        .execute(&mut *tx)
+                        .await?;
+                    anyhow::ensure!(
+                        deleted.rows_affected() == request.items.len() as u64,
+                        "fleet_alert_policy_bulk_snapshot_stale"
+                    );
+                }
+
+                for evidence_id in drained_evidence_ids {
+                    crate::repository_policy_lifecycle::recompute_policy_evidence_pending_in_tx(
+                        &mut tx,
+                        evidence_id,
+                    )
+                    .await?;
+                }
+
+                let (audit_action, result) = match request.action {
+                    FleetAlertPolicyBulkAction::Enable => {
+                        ("fleet.alert_policy_upserted", "enabled")
+                    }
+                    FleetAlertPolicyBulkAction::Disable => {
+                        ("fleet.alert_policy_upserted", "disabled")
+                    }
+                    FleetAlertPolicyBulkAction::Delete => ("fleet.alert_policy_deleted", "deleted"),
+                };
+                let mut outcomes = Vec::with_capacity(request.items.len());
+                for item in &request.items {
+                    let policy = policies
+                        .get(&item.id)
+                        .context("fleet_alert_policy_bulk_snapshot_stale")?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, $2, $3, $4, NULL, $5)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(operator.operator.id)
+                    .bind(audit_action)
+                    .bind(format!("fleet_alert_policy:{}", policy.id))
+                    .bind(policy_group_metadata(policy, operator))
+                    .execute(&mut *tx)
+                    .await?;
+                    outcomes.push(FleetAlertPolicyBulkOutcome {
+                        id: policy.id,
+                        name: policy.name.clone(),
+                        result: result.to_string(),
+                        record: (request.action != FleetAlertPolicyBulkAction::Delete)
+                            .then(|| policy.clone()),
+                    });
+                }
+
+                let telemetry_activation_changed = if touches_telemetry_activation {
+                    reconcile_telemetry_policy_activation_request_in_tx(&mut tx).await?
+                } else {
+                    false
+                };
+                if telemetry_activation_changed {
+                    mark_telemetry_policy_activation_may_be_pending();
+                }
+                tx.commit().await?;
+                (outcomes, telemetry_activation_changed)
+            }
+        };
+        if telemetry_activation_changed {
+            wake_telemetry_policy_activation();
+        }
+        wake_policy_evaluator();
+        if request.action != FleetAlertPolicyBulkAction::Delete {
+            let mut committed = outcomes
+                .iter()
+                .filter_map(|outcome| outcome.record.clone())
+                .collect::<Vec<_>>();
+            if let Err(error) = self.enrich_policy_group_summaries(&mut committed).await {
+                tracing::warn!(
+                    %error,
+                    policy_count = committed.len(),
+                    "policy summary enrichment after bulk policy update"
+                );
+            } else {
+                let mut committed = committed
+                    .into_iter()
+                    .map(|policy| (policy.id, policy))
+                    .collect::<HashMap<_, _>>();
+                for outcome in &mut outcomes {
+                    outcome.record = Some(
+                        committed
+                            .remove(&outcome.id)
+                            .context("fleet_alert_policy_bulk_snapshot_stale")?,
+                    );
+                }
+            }
+        }
+        Ok(FleetAlertPolicyBulkResponse {
+            action: request.action,
+            outcomes,
+        })
+    }
+
     pub(crate) async fn list_policy_alerts(
         &self,
         query: &PolicyAlertQuery,
@@ -3789,7 +4216,48 @@ fn build_vps_rule_preview(
         invalid_row_count,
         preview_hash: preview_hash(&hash_payload),
         changes,
+        committed_records: Vec::new(),
     })
+}
+
+async fn load_committed_vps_rule_changes_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    preview: &VpsRulesDryRunResponse,
+) -> Result<Vec<VpsRuleValueRecord>> {
+    if preview.changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client_ids = preview
+        .changes
+        .iter()
+        .map(|change| change.client_id.clone())
+        .collect::<Vec<_>>();
+    let keys = preview
+        .changes
+        .iter()
+        .map(|change| change.key.clone())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        WITH requested(client_id, key) AS (
+            SELECT * FROM unnest($1::text[], $2::text[])
+        )
+        SELECT
+            rule.client_id, rule.key, rule.value_raw, rule.value_json,
+            rule.source_kind, rule.source_id, rule.updated_by,
+            rule.updated_at::text AS updated_at
+        FROM requested
+        JOIN vps_rule_values rule
+          ON rule.client_id = requested.client_id
+         AND rule.key = requested.key
+        ORDER BY rule.client_id, rule.key
+        "#,
+    )
+    .bind(&client_ids)
+    .bind(&keys)
+    .fetch_all(&mut **tx)
+    .await?;
+    rows.into_iter().map(vps_rule_from_row).collect()
 }
 
 async fn apply_vps_rule_changes_postgres_in_tx(

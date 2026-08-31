@@ -92,6 +92,7 @@ import type {
   JobOperation,
   JobOutputRecord,
   JobTargetRecord,
+  JobTargetStatusRequestItem,
   JsonValue,
   PrivilegeAssertion,
   PreviewRuntimeConfigBulkOverrideRequest,
@@ -194,6 +195,7 @@ export function ConfigPanel({
   onApplyRuntimeConfigBulkOverride,
   onApplyRuntimeConfigOverride,
   onCreateJob,
+  onLoadExactJobTargetStatuses,
   onLoadJobOutputs,
   onLoadJobTargets,
   onLoadConfigurationInventory,
@@ -245,6 +247,9 @@ export function ConfigPanel({
     request: ApplyRuntimeConfigOverrideRequest,
   ) => Promise<ApplyRuntimeConfigOverrideResponse>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onLoadExactJobTargetStatuses: (
+    items: JobTargetStatusRequestItem[],
+  ) => Promise<JobTargetRecord[]>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onLoadConfigurationInventory: () => Promise<void>;
@@ -404,7 +409,7 @@ export function ConfigPanel({
               onDeleteRuntimeConfigPatchGenerator
             }
             onCreateJob={onCreateJob}
-            onLoadJobOutputs={onLoadJobOutputs}
+            onLoadExactJobTargetStatuses={onLoadExactJobTargetStatuses}
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
             onOpenJobHistory={onOpenJobHistory}
@@ -1524,7 +1529,7 @@ function BulkConfigApply({
   onApplyRuntimeConfigBulkOverride,
   onDeleteRuntimeConfigPatchGenerator,
   onCreateJob,
-  onLoadJobOutputs,
+  onLoadExactJobTargetStatuses,
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenJobHistory,
@@ -1547,7 +1552,9 @@ function BulkConfigApply({
     request: DeleteRuntimeConfigPatchGeneratorRequest,
   ) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadExactJobTargetStatuses: (
+    items: JobTargetStatusRequestItem[],
+  ) => Promise<JobTargetRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenJobHistory: () => void;
@@ -2167,6 +2174,14 @@ function BulkConfigApply({
       const queuedClientIds = new Set(
         response.sync.map((outcome) => outcome.client_id),
       );
+      const targetStatusItems = response.sync.map((outcome) => {
+        if (!outcome.job_id) {
+          throw new Error(
+            `Runtime apply job for ${outcome.client_id} omitted its job ID`,
+          );
+        }
+        return { client_id: outcome.client_id, job_id: outcome.job_id };
+      });
       const queuedTargets = snapshot.targets.filter((target) =>
         queuedClientIds.has(target.id),
       );
@@ -2186,7 +2201,8 @@ function BulkConfigApply({
         onProgress: setProgress,
         targets: queuedTargets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
-        onLoadOutputs: onLoadJobOutputs,
+        exactTargetStatusItems: targetStatusItems,
+        onLoadExactTargetStatuses: onLoadExactJobTargetStatuses,
       });
       setProgress(waited.progress);
       setApplySnapshot(null);

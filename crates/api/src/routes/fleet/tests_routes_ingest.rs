@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn accepted_hello_has_no_reverse_gateway_control_dependency() {
+    let source = include_str!("routes_ingest.rs");
+    let (_, route) = source
+        .split_once("pub(crate) async fn ingest_agent_hello(")
+        .expect("agent hello ingest owner");
+    let (route, _) = route
+        .split_once("pub(crate) async fn request_runtime_config_reload(")
+        .expect("agent hello ingest boundary");
+
+    let commit = route
+        .find("upsert_agent_hello")
+        .expect("durable hello commit");
+    let publish = route.find("state.publish").expect("accepted hello event");
+    assert!(commit < publish);
+    assert!(!route.contains("state.gateway"));
+    assert!(!route.contains("suspension_fence"));
+    assert!(!route.contains("tokio::time::sleep"));
+}
+
+#[test]
 fn duplicate_vnstat_output_does_not_clear_retry_cooldown_or_wake_finalization() {
     assert!(network_traffic_import_output_advances_finalization(
         JobOutputWriteResult::Inserted

@@ -74,6 +74,7 @@ import type {
   AgentView,
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
+  BulkTunnelPlanLifecycleResponse,
   ClearTunnelPlanEvidenceOutcome,
   ConfigurationSourceView,
   CreateJobRequest,
@@ -704,7 +705,7 @@ function TunnelPlansWorkspace({
   onSetTunnelPlanEnabled: (
     targets: TunnelPlanRevisionTarget[],
     enabled: boolean,
-  ) => Promise<TunnelPlanMutationResponse[]>;
+  ) => Promise<BulkTunnelPlanLifecycleResponse>;
   onUpdateTunnelConnectionAssessment: (
     planId: string,
     request: UpdateTunnelConnectionAssessmentRequest,
@@ -826,21 +827,45 @@ function TunnelPlansWorkspace({
     setPending(true);
     setFeedback(null);
     try {
-      const responses = await onSetTunnelPlanEnabled(
+      const response = await onSetTunnelPlanEnabled(
         snapshot.targets,
         snapshot.enabled,
       );
       setLifecycleSnapshot(null);
-      setFeedback(
-        tunnelDispatchFeedback(
-          responses.flatMap((response) => response.sync),
-          snapshot.retryCleanup
-            ? `Cleanup requested for ${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"}`
-            : snapshot.retryApply
-              ? `Runtime reapply requested for ${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"}`
-              : `${snapshot.targets.length} tunnel plan${snapshot.targets.length === 1 ? "" : "s"} ${snapshot.enabled ? "enabled" : "disabled"}`,
-        ),
+      const acceptedCount = response.outcomes.filter(
+        (outcome) => outcome.status !== "rejected",
+      ).length;
+      const rejected = response.outcomes.filter(
+        (outcome) => outcome.status === "rejected",
       );
+      const acceptedLabel =
+        acceptedCount === snapshot.targets.length
+          ? snapshot.retryCleanup
+            ? `Cleanup requested for ${acceptedCount} tunnel plan${acceptedCount === 1 ? "" : "s"}`
+            : snapshot.retryApply
+              ? `Runtime reapply requested for ${acceptedCount} tunnel plan${acceptedCount === 1 ? "" : "s"}`
+              : `${acceptedCount} tunnel plan${acceptedCount === 1 ? "" : "s"} ${snapshot.enabled ? "enabled" : "disabled"}`
+          : `${acceptedCount} of ${snapshot.targets.length} tunnel plans accepted for ${snapshot.retryCleanup ? "cleanup" : snapshot.retryApply ? "runtime reapply" : snapshot.enabled ? "enable" : "disable"}`;
+      const dispatchFeedback = tunnelDispatchFeedback(
+        response.sync,
+        acceptedLabel,
+      );
+      if (rejected.length === 0) {
+        setFeedback(dispatchFeedback);
+      } else {
+        const targetNames = new Map(
+          snapshot.targets.map((target) => [target.plan_id, target.name]),
+        );
+        setFeedback({
+          message: `${dispatchFeedback.message} Rejected ${rejected.length}: ${rejected
+            .map(
+              (outcome) =>
+                `${targetNames.get(outcome.plan_id) ?? outcome.plan_id} (${outcome.error_code ?? "lifecycle request rejected"})`,
+            )
+            .join("; ")}`,
+          tone: "warning",
+        });
+      }
     } catch (actionError) {
       setFeedback({
         message:
@@ -6339,7 +6364,7 @@ type TopologyPanelProps = {
   onSetTunnelPlanEnabled: (
     targets: TunnelPlanRevisionTarget[],
     enabled: boolean,
-  ) => Promise<TunnelPlanMutationResponse[]>;
+  ) => Promise<BulkTunnelPlanLifecycleResponse>;
   onUpdateTunnelConnectionAssessment: (
     planId: string,
     request: UpdateTunnelConnectionAssessmentRequest,

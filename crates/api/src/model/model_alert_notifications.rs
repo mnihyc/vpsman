@@ -69,6 +69,45 @@ pub(crate) struct DeleteFleetAlertNotificationChannelRequest {
     pub(crate) reviewed_name: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FleetAlertNotificationChannelBulkAction {
+    Enable,
+    Disable,
+    Delete,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FleetAlertNotificationChannelBulkItem {
+    pub(crate) id: Uuid,
+    pub(crate) reviewed_name: String,
+    pub(crate) expected_updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FleetAlertNotificationChannelBulkRequest {
+    pub(crate) action: FleetAlertNotificationChannelBulkAction,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) items: Vec<FleetAlertNotificationChannelBulkItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertNotificationChannelBulkOutcome {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) result: String,
+    pub(crate) record: Option<FleetAlertNotificationChannelView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertNotificationChannelBulkResponse {
+    pub(crate) action: FleetAlertNotificationChannelBulkAction,
+    pub(crate) outcomes: Vec<FleetAlertNotificationChannelBulkOutcome>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetAlertNotificationDeliveryView {
     pub(crate) id: Uuid,

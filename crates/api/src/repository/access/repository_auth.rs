@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use sqlx::Row;
 use uuid::Uuid;
@@ -40,6 +42,25 @@ struct SuccessfulOperatorAuthContext<'a> {
     remote_ip: &'a str,
     user_agent: Option<&'a str>,
     cleared_previous_failures: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OperatorBatchAuthoritySnapshot {
+    pub(crate) operator_id: Uuid,
+    pub(crate) status: String,
+    pub(crate) role: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OperatorSessionBatchAuthoritySnapshot {
+    pub(crate) session_id: Uuid,
+    pub(crate) operator_role: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum AccessBatchMutationOutcome<T> {
+    Applied { target_id: Uuid, result: T },
+    Rejected { target_id: Uuid, code: &'static str },
 }
 
 impl OperatorLoginFailureReason {
@@ -771,6 +792,62 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn operator_batch_authority_snapshots(
+        &self,
+        operator_ids: &[Uuid],
+    ) -> Result<Vec<OperatorBatchAuthoritySnapshot>> {
+        match self {
+            Self::Postgres(pool) => sqlx::query(
+                r#"
+                SELECT id, status, role
+                FROM operators
+                WHERE id = ANY($1)
+                ORDER BY id
+                "#,
+            )
+            .bind(operator_ids)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(OperatorBatchAuthoritySnapshot {
+                    operator_id: row.try_get("id")?,
+                    status: row.try_get("status")?,
+                    role: row.try_get("role")?,
+                })
+            })
+            .collect(),
+        }
+    }
+
+    pub(crate) async fn operator_session_batch_authority_snapshots(
+        &self,
+        session_ids: &[Uuid],
+    ) -> Result<Vec<OperatorSessionBatchAuthoritySnapshot>> {
+        match self {
+            Self::Postgres(pool) => sqlx::query(
+                r#"
+                SELECT session.id, operator.role AS operator_role
+                FROM operator_sessions AS session
+                JOIN operators AS operator ON operator.id = session.operator_id
+                WHERE session.id = ANY($1)
+                ORDER BY session.id
+                "#,
+            )
+            .bind(session_ids)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(OperatorSessionBatchAuthoritySnapshot {
+                    session_id: row.try_get("id")?,
+                    operator_role: row.try_get("operator_role")?,
+                })
+            })
+            .collect(),
+        }
+    }
+
     pub(crate) async fn operator_by_id(&self, id: Uuid) -> Result<Option<OperatorRecord>> {
         match self {
             Self::Postgres(pool) => {
@@ -1113,12 +1190,12 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn set_operator_status(
+    pub(crate) async fn set_operator_statuses(
         &self,
-        operator_id: Uuid,
+        operator_ids: &[Uuid],
         status: &str,
         actor: &AuthContext,
-    ) -> Result<Option<OperatorView>> {
+    ) -> Result<Vec<AccessBatchMutationOutcome<OperatorView>>> {
         let status = status.trim();
         if !matches!(status, "active" | "disabled" | "deleted") {
             anyhow::bail!("invalid_operator_status");
@@ -1129,48 +1206,73 @@ impl Repository {
             "deleted" => "operator.deleted",
             _ => unreachable!(),
         };
-        let metadata = serde_json::json!({
-            "target_operator_id": operator_id,
-            "target_operator_status": status,
-            "operator_id": actor.operator.id,
-            "operator_username": actor.operator.username,
-            "operator_role": actor.operator.role,
-            "operator_session_id": actor.audit_session_id(),
-            "result": "succeeded",
-            "origin_kind": "operator_request",
-            "component": "operator-admin-controller",
-        });
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_active_admin_invariant(&mut tx).await?;
-                let target = sqlx::query(
+                let locked_rows = sqlx::query(
                     r#"
-                    SELECT status, role
+                    SELECT
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
                     FROM operators
-                    WHERE id = $1
-                      AND status <> 'deleted'
-                      AND ($2 <> 'active' OR status = 'disabled')
+                    WHERE id = ANY($1)
+                    ORDER BY id
                     FOR UPDATE
                     "#,
                 )
-                .bind(operator_id)
-                .bind(status)
-                .fetch_optional(&mut *tx)
+                .bind(operator_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                let Some(target) = target else {
-                    return Ok(None);
-                };
-                ensure_postgres_active_admin_remains(
-                    &mut tx,
-                    operator_id,
-                    target.try_get("status")?,
-                    target.try_get("role")?,
-                    None,
-                    Some(status),
+                let locked = locked_rows
+                    .iter()
+                    .map(|row| Ok((row.try_get::<Uuid, _>("id")?, operator_view_from_row(row)?)))
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let mut active_admin_count = sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM operators WHERE status = 'active' AND role = 'admin'",
                 )
+                .fetch_one(&mut *tx)
                 .await?;
-                let row = sqlx::query(
+                let mut applied_ids = Vec::with_capacity(operator_ids.len());
+                let mut rejection_codes = HashMap::new();
+                for operator_id in operator_ids {
+                    let Some(operator) = locked.get(operator_id) else {
+                        rejection_codes.insert(*operator_id, "operator_not_found");
+                        continue;
+                    };
+                    if operator.status == "deleted"
+                        || (status == "active" && operator.status != "disabled")
+                    {
+                        rejection_codes.insert(*operator_id, "operator_not_found");
+                        continue;
+                    }
+                    if status != "active" && operator.status == "active" && operator.role == "admin"
+                    {
+                        if active_admin_count <= 1 {
+                            rejection_codes.insert(*operator_id, "last_active_admin_required");
+                            continue;
+                        }
+                        active_admin_count -= 1;
+                    }
+                    applied_ids.push(*operator_id);
+                }
+                if applied_ids.is_empty() {
+                    tx.rollback().await?;
+                    return Ok(operator_ids
+                        .iter()
+                        .map(|operator_id| AccessBatchMutationOutcome::Rejected {
+                            target_id: *operator_id,
+                            code: rejection_codes
+                                .get(operator_id)
+                                .copied()
+                                .unwrap_or("operator_not_found"),
+                        })
+                        .collect());
+                }
+                let updated_rows = sqlx::query(
                     r#"
                     UPDATE operators
                     SET status = $2,
@@ -1183,9 +1285,7 @@ impl Repository {
                             WHEN $2 = 'deleted' AND deleted_at IS NULL THEN now()
                             ELSE deleted_at
                         END
-                    WHERE id = $1
-                      AND status <> 'deleted'
-                      AND ($2 <> 'active' OR status = 'disabled')
+                    WHERE id = ANY($1)
                     RETURNING
                         id, username, status, role, scopes, preferences,
                         totp_enabled, session_refresh_ttl_secs,
@@ -1194,32 +1294,85 @@ impl Repository {
                         deleted_at::text AS deleted_at
                     "#,
                 )
-                .bind(operator_id)
+                .bind(&applied_ids)
                 .bind(status)
-                .fetch_optional(&mut *tx)
+                .fetch_all(&mut *tx)
                 .await?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
                 if status != "active" {
                     sqlx::query(
-                        "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = $1",
+                        "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = ANY($1)",
                     )
-                    .bind(operator_id)
+                    .bind(&applied_ids)
                     .execute(&mut *tx)
                     .await?;
                 }
-                sqlx::query(audit_insert_sql())
-                    .bind(Uuid::new_v4())
-                    .bind(actor.operator.id)
-                    .bind(action)
-                    .bind(format!("operator:{operator_id}"))
-                    .bind(metadata)
-                    .execute(&mut *tx)
-                    .await?;
-                let operator = operator_view_from_row(&row)?;
+                let audit_ids = applied_ids
+                    .iter()
+                    .map(|_| Uuid::new_v4())
+                    .collect::<Vec<_>>();
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    SELECT
+                        mutation.audit_id,
+                        $3,
+                        $4,
+                        'operator:' || mutation.operator_id::text,
+                        NULL,
+                        jsonb_build_object(
+                            'target_operator_id', mutation.operator_id,
+                            'target_operator_status', $5::text,
+                            'operator_id', $3::uuid,
+                            'operator_username', $6::text,
+                            'operator_role', $7::text,
+                            'operator_session_id', $8::uuid,
+                            'result', 'succeeded',
+                            'origin_kind', 'operator_request',
+                            'component', 'operator-admin-controller'
+                        )
+                    FROM unnest($1::uuid[], $2::uuid[])
+                        AS mutation(audit_id, operator_id)
+                    "#,
+                )
+                .bind(&audit_ids)
+                .bind(&applied_ids)
+                .bind(actor.operator.id)
+                .bind(action)
+                .bind(status)
+                .bind(&actor.operator.username)
+                .bind(&actor.operator.role)
+                .bind(actor.audit_session_id())
+                .execute(&mut *tx)
+                .await?;
+                let updated = updated_rows
+                    .iter()
+                    .map(|row| Ok((row.try_get::<Uuid, _>("id")?, operator_view_from_row(row)?)))
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let outcomes = operator_ids
+                    .iter()
+                    .map(|operator_id| {
+                        if let Some(code) = rejection_codes.get(operator_id) {
+                            Ok(AccessBatchMutationOutcome::Rejected {
+                                target_id: *operator_id,
+                                code,
+                            })
+                        } else {
+                            Ok(AccessBatchMutationOutcome::Applied {
+                                target_id: *operator_id,
+                                result: updated
+                                    .get(operator_id)
+                                    .cloned()
+                                    .with_context(|| {
+                                        format!(
+                                            "operator status update omitted approved target {operator_id}"
+                                        )
+                                    })?,
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 tx.commit().await?;
-                Ok(Some(operator))
+                Ok(outcomes)
             }
         }
     }
@@ -1292,26 +1445,58 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn clear_operator_totp(
+    pub(crate) async fn clear_operator_totps(
         &self,
-        operator_id: Uuid,
+        operator_ids: &[Uuid],
         actor: &AuthContext,
-    ) -> Result<Option<OperatorView>> {
-        let metadata = serde_json::json!({
-            "target_operator_id": operator_id,
-            "operator_id": actor.operator.id,
-            "operator_username": actor.operator.username,
-            "operator_role": actor.operator.role,
-            "operator_session_id": actor.audit_session_id(),
-            "sessions_revoked": true,
-            "result": "succeeded",
-            "origin_kind": "operator_request",
-            "component": "operator-admin-controller",
-        });
+    ) -> Result<Vec<AccessBatchMutationOutcome<OperatorView>>> {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let row = sqlx::query(
+                let locked_rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
+                    FROM operators
+                    WHERE id = ANY($1)
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(operator_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let locked = locked_rows
+                    .iter()
+                    .map(|row| Ok((row.try_get::<Uuid, _>("id")?, operator_view_from_row(row)?)))
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let mut applied_ids = Vec::with_capacity(operator_ids.len());
+                let mut rejection_codes = HashMap::new();
+                for operator_id in operator_ids {
+                    match locked.get(operator_id) {
+                        Some(operator) if operator.status != "deleted" => {
+                            applied_ids.push(*operator_id)
+                        }
+                        _ => {
+                            rejection_codes.insert(*operator_id, "operator_not_found");
+                        }
+                    }
+                }
+                if applied_ids.is_empty() {
+                    tx.rollback().await?;
+                    return Ok(operator_ids
+                        .iter()
+                        .map(|operator_id| AccessBatchMutationOutcome::Rejected {
+                            target_id: *operator_id,
+                            code: "operator_not_found",
+                        })
+                        .collect());
+                }
+                let updated_rows = sqlx::query(
                     r#"
                     UPDATE operators
                     SET totp_enabled = false,
@@ -1319,7 +1504,7 @@ impl Repository {
                         totp_secret_nonce_hex = NULL,
                         totp_secret_salt_hex = NULL,
                         totp_last_accepted_step = NULL
-                    WHERE id = $1 AND status <> 'deleted'
+                    WHERE id = ANY($1)
                     RETURNING
                         id, username, status, role, scopes, preferences,
                         totp_enabled, session_refresh_ttl_secs,
@@ -1328,29 +1513,77 @@ impl Repository {
                         deleted_at::text AS deleted_at
                     "#,
                 )
-                .bind(operator_id)
-                .fetch_optional(&mut *tx)
+                .bind(&applied_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
                 sqlx::query(
-                    "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = $1",
+                    "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = ANY($1)",
                 )
-                .bind(operator_id)
+                .bind(&applied_ids)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query(audit_insert_sql())
-                    .bind(Uuid::new_v4())
-                    .bind(actor.operator.id)
-                    .bind("operator.totp_cleared")
-                    .bind(format!("operator:{operator_id}"))
-                    .bind(metadata)
-                    .execute(&mut *tx)
-                    .await?;
-                let operator = operator_view_from_row(&row)?;
+                let audit_ids = applied_ids
+                    .iter()
+                    .map(|_| Uuid::new_v4())
+                    .collect::<Vec<_>>();
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    SELECT
+                        mutation.audit_id,
+                        $3,
+                        'operator.totp_cleared',
+                        'operator:' || mutation.operator_id::text,
+                        NULL,
+                        jsonb_build_object(
+                            'target_operator_id', mutation.operator_id,
+                            'operator_id', $3::uuid,
+                            'operator_username', $4::text,
+                            'operator_role', $5::text,
+                            'operator_session_id', $6::uuid,
+                            'sessions_revoked', true,
+                            'result', 'succeeded',
+                            'origin_kind', 'operator_request',
+                            'component', 'operator-admin-controller'
+                        )
+                    FROM unnest($1::uuid[], $2::uuid[])
+                        AS mutation(audit_id, operator_id)
+                    "#,
+                )
+                .bind(&audit_ids)
+                .bind(&applied_ids)
+                .bind(actor.operator.id)
+                .bind(&actor.operator.username)
+                .bind(&actor.operator.role)
+                .bind(actor.audit_session_id())
+                .execute(&mut *tx)
+                .await?;
+                let updated = updated_rows
+                    .iter()
+                    .map(|row| Ok((row.try_get::<Uuid, _>("id")?, operator_view_from_row(row)?)))
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let outcomes = operator_ids
+                    .iter()
+                    .map(|operator_id| {
+                        if let Some(code) = rejection_codes.get(operator_id) {
+                            Ok(AccessBatchMutationOutcome::Rejected {
+                                target_id: *operator_id,
+                                code,
+                            })
+                        } else {
+                            Ok(AccessBatchMutationOutcome::Applied {
+                                target_id: *operator_id,
+                                result: updated.get(operator_id).cloned().with_context(|| {
+                                    format!(
+                                        "operator TOTP clear omitted approved target {operator_id}"
+                                    )
+                                })?,
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 tx.commit().await?;
-                Ok(Some(operator))
+                Ok(outcomes)
             }
         }
     }
@@ -1521,69 +1754,53 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn operator_session_by_id(
+    pub(crate) async fn revoke_operator_sessions(
         &self,
-        session_id: Uuid,
-        current_session_id: Uuid,
-    ) -> Result<Option<OperatorSessionView>> {
-        match self {
-            Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        s.id,
-                        s.operator_id,
-                        o.username AS operator_username,
-                        o.role AS operator_role,
-                        s.created_at::text AS created_at,
-                        s.expires_at::text AS expires_at,
-                        s.refresh_expires_at::text AS refresh_expires_at,
-                        s.revoked_at::text AS revoked_at
-                    FROM operator_sessions s
-                    JOIN operators o ON o.id = s.operator_id
-                    WHERE s.id = $1
-                    "#,
-                )
-                .bind(session_id)
-                .fetch_optional(pool)
-                .await?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
-                let revoked_at: Option<String> = row.try_get("revoked_at")?;
-                Ok(Some(OperatorSessionView {
-                    id: row.try_get("id")?,
-                    operator_id: row.try_get("operator_id")?,
-                    operator_username: row.try_get("operator_username")?,
-                    operator_role: row.try_get("operator_role")?,
-                    current: session_id == current_session_id,
-                    created_at: row.try_get("created_at")?,
-                    expires_at: row.try_get("expires_at")?,
-                    refresh_expires_at: row.try_get("refresh_expires_at")?,
-                    revoked: revoked_at.is_some(),
-                    revoked_at,
-                }))
-            }
-        }
-    }
-
-    pub(crate) async fn revoke_operator_session(
-        &self,
-        session_id: Uuid,
+        session_ids: &[Uuid],
         actor: &AuthContext,
-    ) -> Result<Option<OperatorSessionView>> {
+    ) -> Result<Vec<AccessBatchMutationOutcome<OperatorSessionView>>> {
         let current_session_id = actor
             .audit_session_id()
             .context("operator session revoke requires an authenticated session")?;
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let row = sqlx::query(
+                let locked_rows = sqlx::query(
+                    r#"
+                    SELECT session.id
+                    FROM operator_sessions AS session
+                    WHERE session.id = ANY($1)
+                    ORDER BY session.id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(session_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let locked_ids = locked_rows
+                    .iter()
+                    .map(|row| row.try_get::<Uuid, _>("id"))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let locked_id_set = locked_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>();
+                if locked_ids.is_empty() {
+                    tx.rollback().await?;
+                    return Ok(session_ids
+                        .iter()
+                        .map(|session_id| AccessBatchMutationOutcome::Rejected {
+                            target_id: *session_id,
+                            code: "operator_session_not_found",
+                        })
+                        .collect());
+                }
+                let rows = sqlx::query(
                     r#"
                     WITH revoked AS (
                         UPDATE operator_sessions
                         SET revoked_at = COALESCE(revoked_at, now())
-                        WHERE id = $1
+                        WHERE id = ANY($1)
                         RETURNING
                             id,
                             operator_id,
@@ -1605,52 +1822,88 @@ impl Repository {
                     JOIN operators o ON o.id = revoked.operator_id
                     "#,
                 )
-                .bind(session_id)
-                .fetch_optional(&mut *tx)
+                .bind(&locked_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                let Some(row) = row else {
-                    tx.rollback().await?;
-                    return Ok(None);
-                };
-                let revoked_at: Option<String> = row.try_get("revoked_at")?;
-                let view = OperatorSessionView {
-                    id: row.try_get("id")?,
-                    operator_id: row.try_get("operator_id")?,
-                    operator_username: row.try_get("operator_username")?,
-                    operator_role: row.try_get("operator_role")?,
-                    current: session_id == current_session_id,
-                    created_at: row.try_get("created_at")?,
-                    expires_at: row.try_get("expires_at")?,
-                    refresh_expires_at: row.try_get("refresh_expires_at")?,
-                    revoked: revoked_at.is_some(),
-                    revoked_at,
-                };
+                let views = rows
+                    .iter()
+                    .map(|row| {
+                        let session_id: Uuid = row.try_get("id")?;
+                        let revoked_at: Option<String> = row.try_get("revoked_at")?;
+                        Ok((
+                            session_id,
+                            OperatorSessionView {
+                                id: session_id,
+                                operator_id: row.try_get("operator_id")?,
+                                operator_username: row.try_get("operator_username")?,
+                                operator_role: row.try_get("operator_role")?,
+                                current: session_id == current_session_id,
+                                created_at: row.try_get("created_at")?,
+                                expires_at: row.try_get("expires_at")?,
+                                refresh_expires_at: row.try_get("refresh_expires_at")?,
+                                revoked: revoked_at.is_some(),
+                                revoked_at,
+                            },
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let audit_ids = locked_ids
+                    .iter()
+                    .map(|_| Uuid::new_v4())
+                    .collect::<Vec<_>>();
                 sqlx::query(
                     r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
-                    )
-                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    SELECT
+                        mutation.audit_id,
+                        $3,
+                        'operator_session.revoked',
+                        'operator-session:' || mutation.session_id::text,
+                        NULL,
+                        jsonb_build_object(
+                            'revoked_operator_session_id', mutation.session_id,
+                            'operator_id', $3::uuid,
+                            'operator_username', $4::text,
+                            'operator_role', $5::text,
+                            'operator_session_id', $6::uuid,
+                            'result', 'succeeded',
+                            'origin_kind', 'operator_request',
+                            'component', 'operator-session-controller'
+                        )
+                    FROM unnest($1::uuid[], $2::uuid[])
+                        AS mutation(audit_id, session_id)
                     "#,
                 )
-                .bind(Uuid::new_v4())
+                .bind(&audit_ids)
+                .bind(&locked_ids)
                 .bind(actor.operator.id)
-                .bind("operator_session.revoked")
-                .bind(format!("operator-session:{session_id}"))
-                .bind(serde_json::json!({
-                    "revoked_operator_session_id": session_id,
-                    "operator_id": actor.operator.id,
-                    "operator_username": actor.operator.username,
-                    "operator_role": actor.operator.role,
-                    "operator_session_id": actor.audit_session_id(),
-                    "result": "succeeded",
-                    "origin_kind": "operator_request",
-                    "component": "operator-session-controller",
-                }))
+                .bind(&actor.operator.username)
+                .bind(&actor.operator.role)
+                .bind(actor.audit_session_id())
                 .execute(&mut *tx)
                 .await?;
+                let outcomes = session_ids
+                    .iter()
+                    .map(|session_id| {
+                        if !locked_id_set.contains(session_id) {
+                            Ok(AccessBatchMutationOutcome::Rejected {
+                                target_id: *session_id,
+                                code: "operator_session_not_found",
+                            })
+                        } else {
+                            Ok(AccessBatchMutationOutcome::Applied {
+                                target_id: *session_id,
+                                result: views.get(session_id).cloned().with_context(|| {
+                                    format!(
+                                        "operator session revoke omitted approved target {session_id}"
+                                    )
+                                })?,
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 tx.commit().await?;
-                Ok(Some(view))
+                Ok(outcomes)
             }
         }
     }

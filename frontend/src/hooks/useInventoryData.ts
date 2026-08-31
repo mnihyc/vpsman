@@ -15,6 +15,8 @@ import type {
   ApplyRuntimeConfigBulkOverrideResponse,
   ApplyRuntimeConfigOverrideRequest,
   ApplyRuntimeConfigOverrideResponse,
+  BulkResolveManyRequest,
+  BulkResolveManyResponse,
   BulkTagMutationRequest,
   BulkResolveResponse,
   CloneConfigurationPresetRequest,
@@ -51,7 +53,7 @@ import { retainMutationSuccessAfterRefresh } from "../utils";
 export function useInventoryData(
   apiToken: string,
   onUnauthorized: () => void,
-  onFleetChanged: () => Promise<void>,
+  onAgentTagsChanged: (response: TagMutationResponse) => void,
 ) {
   const [tags, setTags] = useState<TagView[]>([]);
   const [namespaceNaturalSortEnabled, setNamespaceNaturalSortEnabled] =
@@ -99,6 +101,8 @@ export function useInventoryData(
     setConfigurationSourcesEvidenceAvailable,
   ] = useState(false);
   const tagInventoryLoadConsumer = useRef(new LatestReadConsumer());
+  const tagOrderLoadConsumer = useRef(new LatestReadConsumer());
+  const patchGeneratorLoadConsumer = useRef(new LatestReadConsumer());
   const loadConfigurationPresetsInFlight = useRef<{
     request: Promise<void>;
     token: string;
@@ -108,13 +112,43 @@ export function useInventoryData(
     token: string;
   } | null>(null);
   const tagInventoryLoadGeneration = useRef(0);
+  const tagOrderLoadGeneration = useRef(0);
+  const patchGeneratorLoadGeneration = useRef(0);
+  const tagOrderSourceAvailable = useRef(false);
+  const patchGeneratorSourceAvailable = useRef(false);
+  const tagOrderSourceError = useRef<string | null>(null);
+  const patchGeneratorSourceError = useRef<string | null>(null);
+  const tagLoadSequence = useRef(0);
+  const tagLoadsPending = useRef(new Set<number>());
   const configurationPresetsLoadGeneration = useRef(0);
   const configurationSourcesLoadGeneration = useRef(0);
   const runtimeConfigApplyLoadGeneration = useRef(0);
   const tagOrderMutationGeneration = useRef(0);
-  const tagInventoryError = useRef<string | null>(null);
   const currentApiToken = useRef(apiToken);
   currentApiToken.current = apiToken;
+
+  const publishTagInventoryState = useCallback(() => {
+    setTagInventoryEvidenceAvailable(
+      tagOrderSourceAvailable.current && patchGeneratorSourceAvailable.current,
+    );
+    const errors = [
+      tagOrderSourceError.current,
+      patchGeneratorSourceError.current,
+    ].filter((message): message is string => message !== null);
+    setTagsError(errors.length > 0 ? errors.join("; ") : null);
+  }, []);
+
+  const beginTagLoad = useCallback(() => {
+    const operation = ++tagLoadSequence.current;
+    tagLoadsPending.current.add(operation);
+    setTagsLoading(true);
+    return operation;
+  }, []);
+
+  const finishTagLoad = useCallback((operation: number) => {
+    tagLoadsPending.current.delete(operation);
+    setTagsLoading(tagLoadsPending.current.size > 0);
+  }, []);
 
   const loadTagInventory = useCallback(
     (_forceFresh = false): Promise<void> => {
@@ -123,132 +157,270 @@ export function useInventoryData(
       }
       const generation = tagInventoryLoadGeneration.current + 1;
       tagInventoryLoadGeneration.current = generation;
-      const tagOrderGenerationAtLoad = tagOrderMutationGeneration.current;
+      const tagOrderLoad = tagOrderLoadGeneration.current + 1;
+      tagOrderLoadGeneration.current = tagOrderLoad;
+      const tagOrderMutation = tagOrderMutationGeneration.current;
+      const patchGeneratorLoad = patchGeneratorLoadGeneration.current + 1;
+      patchGeneratorLoadGeneration.current = patchGeneratorLoad;
       const runtimeApplyGeneration =
         runtimeConfigApplyLoadGeneration.current + 1;
       runtimeConfigApplyLoadGeneration.current = runtimeApplyGeneration;
-      return tagInventoryLoadConsumer.current.enqueue(async () => {
-        setTagsLoading(true);
-        tagInventoryError.current = null;
-        setTagsError(null);
-        setRuntimeConfigApplyError(null);
-        setRuntimeConfigApplyLoading(true);
-        setTagInventoryEvidenceAvailable(false);
-        try {
-          const [
-            tagsResult,
-            runtimeConfigApplyStatesResult,
-            patchGeneratorsResult,
-          ] = await Promise.allSettled([
-            apiGet<TagOrderState>("/api/v1/tags/order", apiToken),
-            apiGet<RuntimeConfigApplyStateRecord[]>(
-              "/api/v1/runtime-config/apply-state",
-              apiToken,
-            ),
-            apiGet<RuntimeConfigPatchGeneratorRecord[]>(
-              "/api/v1/runtime-config/patch-generators",
-              apiToken,
-            ),
-          ]);
-          if (
-            tagInventoryLoadGeneration.current !== generation ||
-            currentApiToken.current !== apiToken
-          ) {
-            return;
-          }
-          const results = [
-            tagsResult,
-            runtimeConfigApplyStatesResult,
-            patchGeneratorsResult,
-          ];
-          if (
-            results.some(
-              (result) =>
-                result.status === "rejected" &&
-                isApiUnauthorized(result.reason),
-            )
-          ) {
-            onUnauthorized();
-            setTags([]);
-            setNamespaceNaturalSortEnabled(false);
-            setRuntimeConfigApplyStates([]);
-            setRuntimeConfigPatchGenerators([]);
-            setTagInventoryEvidenceAvailable(false);
-            setRuntimeConfigApplyEvidenceAvailable(false);
-            tagInventoryError.current = "Operator login required";
-            setTagsError("Operator login required");
-            setRuntimeConfigApplyError("Operator login required");
-            return;
-          }
-          if (
-            tagsResult.status === "fulfilled" &&
-            tagOrderMutationGeneration.current === tagOrderGenerationAtLoad
-          ) {
-            setTags(tagsResult.value.tags);
-            setNamespaceNaturalSortEnabled(
-              tagsResult.value.namespace_natural_sort_enabled,
-            );
-          }
-          if (runtimeConfigApplyStatesResult.status === "fulfilled") {
+      const tagLoadOperation = beginTagLoad();
+      tagOrderSourceError.current = null;
+      patchGeneratorSourceError.current = null;
+      publishTagInventoryState();
+      return tagInventoryLoadConsumer.current
+        .enqueue(async () => {
+          setRuntimeConfigApplyError(null);
+          setRuntimeConfigApplyLoading(true);
+          try {
+            const [
+              tagsResult,
+              runtimeConfigApplyStatesResult,
+              patchGeneratorsResult,
+            ] = await Promise.allSettled([
+              apiGet<TagOrderState>("/api/v1/tags/order", apiToken),
+              apiGet<RuntimeConfigApplyStateRecord[]>(
+                "/api/v1/runtime-config/apply-state",
+                apiToken,
+              ),
+              apiGet<RuntimeConfigPatchGeneratorRecord[]>(
+                "/api/v1/runtime-config/patch-generators",
+                apiToken,
+              ),
+            ]);
+            if (
+              tagInventoryLoadGeneration.current !== generation ||
+              currentApiToken.current !== apiToken
+            ) {
+              return;
+            }
+            const results = [
+              tagsResult,
+              runtimeConfigApplyStatesResult,
+              patchGeneratorsResult,
+            ];
+            if (
+              results.some(
+                (result) =>
+                  result.status === "rejected" &&
+                  isApiUnauthorized(result.reason),
+              )
+            ) {
+              onUnauthorized();
+              setTags([]);
+              setNamespaceNaturalSortEnabled(false);
+              setRuntimeConfigApplyStates([]);
+              setRuntimeConfigPatchGenerators([]);
+              tagOrderSourceAvailable.current = false;
+              patchGeneratorSourceAvailable.current = false;
+              tagOrderSourceError.current = "Operator login required";
+              patchGeneratorSourceError.current = "Operator login required";
+              publishTagInventoryState();
+              setRuntimeConfigApplyEvidenceAvailable(false);
+              setRuntimeConfigApplyError("Operator login required");
+              return;
+            }
+            if (
+              tagOrderLoadGeneration.current === tagOrderLoad &&
+              tagOrderMutationGeneration.current === tagOrderMutation
+            ) {
+              if (tagsResult.status === "fulfilled") {
+                setTags(tagsResult.value.tags);
+                setNamespaceNaturalSortEnabled(
+                  tagsResult.value.namespace_natural_sort_enabled,
+                );
+                tagOrderSourceAvailable.current = true;
+                tagOrderSourceError.current = null;
+              } else {
+                tagOrderSourceAvailable.current = false;
+                tagOrderSourceError.current = inventorySourceFailure(
+                  "Tags",
+                  tagsResult.reason,
+                );
+              }
+            }
+            if (runtimeConfigApplyStatesResult.status === "fulfilled") {
+              if (
+                runtimeConfigApplyLoadGeneration.current ===
+                runtimeApplyGeneration
+              ) {
+                setRuntimeConfigApplyStates(
+                  runtimeConfigApplyStatesResult.value,
+                );
+                setRuntimeConfigApplyEvidenceAvailable(true);
+              }
+            }
+            if (patchGeneratorLoadGeneration.current === patchGeneratorLoad) {
+              if (patchGeneratorsResult.status === "fulfilled") {
+                setRuntimeConfigPatchGenerators(patchGeneratorsResult.value);
+                patchGeneratorSourceAvailable.current = true;
+                patchGeneratorSourceError.current = null;
+              } else {
+                patchGeneratorSourceAvailable.current = false;
+                patchGeneratorSourceError.current = inventorySourceFailure(
+                  "Runtime configuration patch generators",
+                  patchGeneratorsResult.reason,
+                );
+              }
+            }
+            publishTagInventoryState();
             if (
               runtimeConfigApplyLoadGeneration.current ===
               runtimeApplyGeneration
             ) {
-              setRuntimeConfigApplyStates(runtimeConfigApplyStatesResult.value);
-              setRuntimeConfigApplyEvidenceAvailable(true);
+              if (runtimeConfigApplyStatesResult.status === "rejected") {
+                setRuntimeConfigApplyEvidenceAvailable(false);
+              }
+              setRuntimeConfigApplyError(
+                unavailableSourceSummary(
+                  "Runtime configuration source unavailable",
+                  [runtimeConfigApplyStatesResult],
+                  ["apply state"],
+                ),
+              );
+            }
+          } finally {
+            if (
+              runtimeConfigApplyLoadGeneration.current ===
+                runtimeApplyGeneration &&
+              currentApiToken.current === apiToken
+            ) {
+              setRuntimeConfigApplyLoading(false);
             }
           }
-          if (patchGeneratorsResult.status === "fulfilled") {
-            setRuntimeConfigPatchGenerators(patchGeneratorsResult.value);
-          }
-          setTagInventoryEvidenceAvailable(
-            [tagsResult, patchGeneratorsResult].every(
-              (result) => result.status === "fulfilled",
-            ),
-          );
-          tagInventoryError.current = unavailableSourceSummary(
-            "Some inventory sources are unavailable",
-            [tagsResult, patchGeneratorsResult],
-            ["tags", "runtime configuration patch generators"],
-          );
-          setTagsError(tagInventoryError.current);
-          if (
-            runtimeConfigApplyLoadGeneration.current === runtimeApplyGeneration
-          ) {
-            if (runtimeConfigApplyStatesResult.status === "rejected") {
-              setRuntimeConfigApplyEvidenceAvailable(false);
-            }
-            setRuntimeConfigApplyError(
-              unavailableSourceSummary(
-                "Runtime configuration source unavailable",
-                [runtimeConfigApplyStatesResult],
-                ["apply state"],
-              ),
-            );
-          }
-        } finally {
-          if (
-            tagInventoryLoadGeneration.current === generation &&
-            currentApiToken.current === apiToken
-          ) {
-            setTagsLoading(false);
-          }
-          if (
-            runtimeConfigApplyLoadGeneration.current ===
-              runtimeApplyGeneration &&
-            currentApiToken.current === apiToken
-          ) {
-            setRuntimeConfigApplyLoading(false);
-          }
-        }
-      });
+        })
+        .finally(() => finishTagLoad(tagLoadOperation));
     },
-    [apiToken, onUnauthorized],
+    [
+      apiToken,
+      beginTagLoad,
+      finishTagLoad,
+      onUnauthorized,
+      publishTagInventoryState,
+    ],
   );
 
-  const refreshTagInventoryAfterMutation = useCallback(
-    () => loadTagInventory(true),
-    [loadTagInventory],
+  const loadTagOrder = useCallback((): Promise<void> => {
+    if (currentApiToken.current !== apiToken) {
+      return Promise.resolve();
+    }
+    const generation = tagOrderLoadGeneration.current + 1;
+    tagOrderLoadGeneration.current = generation;
+    const mutationGeneration = tagOrderMutationGeneration.current;
+    const tagLoadOperation = beginTagLoad();
+    tagOrderSourceError.current = null;
+    publishTagInventoryState();
+    return tagOrderLoadConsumer.current
+      .enqueue(async () => {
+        try {
+          const state = await apiGet<TagOrderState>(
+            "/api/v1/tags/order",
+            apiToken,
+          );
+          if (
+            currentApiToken.current !== apiToken ||
+            tagOrderLoadGeneration.current !== generation ||
+            tagOrderMutationGeneration.current !== mutationGeneration
+          ) {
+            return;
+          }
+          setTags(state.tags);
+          setNamespaceNaturalSortEnabled(state.namespace_natural_sort_enabled);
+          tagOrderSourceAvailable.current = true;
+          tagOrderSourceError.current = null;
+          publishTagInventoryState();
+        } catch (error) {
+          if (
+            currentApiToken.current !== apiToken ||
+            tagOrderLoadGeneration.current !== generation
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setTags([]);
+            setNamespaceNaturalSortEnabled(false);
+            tagOrderSourceAvailable.current = false;
+            tagOrderSourceError.current = "Operator login required";
+            publishTagInventoryState();
+            return;
+          }
+          tagOrderSourceAvailable.current = false;
+          tagOrderSourceError.current = inventorySourceFailure("Tags", error);
+          publishTagInventoryState();
+        }
+      })
+      .finally(() => finishTagLoad(tagLoadOperation));
+  }, [
+    apiToken,
+    beginTagLoad,
+    finishTagLoad,
+    onUnauthorized,
+    publishTagInventoryState,
+  ]);
+
+  const loadRuntimeConfigPatchGenerators = useCallback((): Promise<void> => {
+    if (currentApiToken.current !== apiToken) {
+      return Promise.resolve();
+    }
+    const generation = patchGeneratorLoadGeneration.current + 1;
+    patchGeneratorLoadGeneration.current = generation;
+    const tagLoadOperation = beginTagLoad();
+    patchGeneratorSourceError.current = null;
+    publishTagInventoryState();
+    return patchGeneratorLoadConsumer.current
+      .enqueue(async () => {
+        try {
+          const records = await apiGet<RuntimeConfigPatchGeneratorRecord[]>(
+            "/api/v1/runtime-config/patch-generators",
+            apiToken,
+          );
+          if (
+            currentApiToken.current !== apiToken ||
+            patchGeneratorLoadGeneration.current !== generation
+          ) {
+            return;
+          }
+          setRuntimeConfigPatchGenerators(records);
+          patchGeneratorSourceAvailable.current = true;
+          patchGeneratorSourceError.current = null;
+          publishTagInventoryState();
+        } catch (error) {
+          if (
+            currentApiToken.current !== apiToken ||
+            patchGeneratorLoadGeneration.current !== generation
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setRuntimeConfigPatchGenerators([]);
+            patchGeneratorSourceAvailable.current = false;
+            patchGeneratorSourceError.current = "Operator login required";
+            publishTagInventoryState();
+            return;
+          }
+          patchGeneratorSourceAvailable.current = false;
+          patchGeneratorSourceError.current = inventorySourceFailure(
+            "Runtime configuration patch generators",
+            error,
+          );
+          publishTagInventoryState();
+        }
+      })
+      .finally(() => finishTagLoad(tagLoadOperation));
+  }, [
+    apiToken,
+    beginTagLoad,
+    finishTagLoad,
+    onUnauthorized,
+    publishTagInventoryState,
+  ]);
+
+  const refreshTagOrderAfterMutation = useCallback(
+    () => loadTagOrder(),
+    [loadTagOrder],
   );
 
   const loadConfigurationPresets = useCallback(
@@ -478,9 +650,9 @@ export function useInventoryData(
       if (currentApiToken.current !== apiToken) {
         return;
       }
-      await refreshTagInventoryAfterMutation();
+      await refreshTagOrderAfterMutation();
     },
-    [apiToken, refreshTagInventoryAfterMutation],
+    [apiToken, refreshTagOrderAfterMutation],
   );
 
   const updateTagOrder = useCallback(
@@ -501,9 +673,12 @@ export function useInventoryData(
       tagOrderMutationGeneration.current = operationGeneration + 1;
       setTags(response.tags);
       setNamespaceNaturalSortEnabled(response.namespace_natural_sort_enabled);
+      tagOrderSourceAvailable.current = true;
+      tagOrderSourceError.current = null;
+      publishTagInventoryState();
       return response;
     },
-    [apiToken],
+    [apiToken, publishTagInventoryState],
   );
 
   const assignTag = useCallback(
@@ -524,10 +699,13 @@ export function useInventoryData(
       if (currentApiToken.current !== apiToken) {
         return response;
       }
-      await Promise.all([onFleetChanged(), refreshTagInventoryAfterMutation()]);
+      if (!response.confirmation_required) {
+        onAgentTagsChanged(response);
+        await refreshTagOrderAfterMutation();
+      }
       return response;
     },
-    [apiToken, onFleetChanged, refreshTagInventoryAfterMutation],
+    [apiToken, onAgentTagsChanged, refreshTagOrderAfterMutation],
   );
 
   const bulkMutateTags = useCallback(
@@ -539,14 +717,12 @@ export function useInventoryData(
         return response;
       }
       if (!response.confirmation_required) {
-        await Promise.all([
-          onFleetChanged(),
-          refreshTagInventoryAfterMutation(),
-        ]);
+        onAgentTagsChanged(response);
+        await refreshTagOrderAfterMutation();
       }
       return response;
     },
-    [apiToken, onFleetChanged, refreshTagInventoryAfterMutation],
+    [apiToken, onAgentTagsChanged, refreshTagOrderAfterMutation],
   );
 
   const deleteTag = useCallback(
@@ -569,14 +745,12 @@ export function useInventoryData(
         return response;
       }
       if (!response.confirmation_required) {
-        await Promise.all([
-          onFleetChanged(),
-          refreshTagInventoryAfterMutation(),
-        ]);
+        onAgentTagsChanged(response);
+        await refreshTagOrderAfterMutation();
       }
       return response;
     },
-    [apiToken, onFleetChanged, refreshTagInventoryAfterMutation],
+    [apiToken, onAgentTagsChanged, refreshTagOrderAfterMutation],
   );
 
   const createConfigurationPreset = useCallback(
@@ -765,10 +939,10 @@ export function useInventoryData(
       if (currentApiToken.current !== apiToken) {
         return response;
       }
-      await refreshTagInventoryAfterMutation();
+      await loadRuntimeConfigPatchGenerators();
       return response;
     },
-    [apiToken, refreshTagInventoryAfterMutation],
+    [apiToken, loadRuntimeConfigPatchGenerators],
   );
 
   const renderRuntimeConfigPatchGenerator = useCallback(
@@ -797,9 +971,9 @@ export function useInventoryData(
       if (currentApiToken.current !== apiToken) {
         return;
       }
-      await refreshTagInventoryAfterMutation();
+      await loadRuntimeConfigPatchGenerators();
     },
-    [apiToken, refreshTagInventoryAfterMutation],
+    [apiToken, loadRuntimeConfigPatchGenerators],
   );
 
   const resolveBulkPreview = useCallback(
@@ -820,8 +994,22 @@ export function useInventoryData(
     [apiToken],
   );
 
+  const resolveManyJobTargets = useCallback(
+    async (request: BulkResolveManyRequest) =>
+      apiPostPreview<BulkResolveManyResponse>(
+        "/api/v1/bulk/resolve-many",
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
   const clearInventory = useCallback(() => {
     tagInventoryLoadGeneration.current += 1;
+    tagOrderLoadGeneration.current += 1;
+    patchGeneratorLoadGeneration.current += 1;
+    tagOrderLoadConsumer.current.discardPending();
+    patchGeneratorLoadConsumer.current.discardPending();
     configurationPresetsLoadGeneration.current += 1;
     configurationSourcesLoadGeneration.current += 1;
     runtimeConfigApplyLoadGeneration.current += 1;
@@ -830,7 +1018,11 @@ export function useInventoryData(
     loadConfigurationPresetsInFlight.current = null;
     loadConfigurationSourcesInFlight.current = null;
     currentApiToken.current = "";
-    tagInventoryError.current = null;
+    tagOrderSourceAvailable.current = false;
+    patchGeneratorSourceAvailable.current = false;
+    tagOrderSourceError.current = null;
+    patchGeneratorSourceError.current = null;
+    tagLoadsPending.current.clear();
     setTags([]);
     setNamespaceNaturalSortEnabled(false);
     setConfigurationPresets([]);
@@ -875,9 +1067,11 @@ export function useInventoryData(
     loadEffectiveAgentConfig,
     loadRuntimeConfigClientWorkspace,
     loadTagInventory,
+    loadTagOrder,
     loadConfigurationInventory,
     loadConfigurationSources,
     loadRuntimeConfigApplyStates,
+    loadRuntimeConfigPatchGenerators,
     namespaceNaturalSortEnabled,
     runtimeConfigApplyEvidenceAvailable,
     runtimeConfigApplyError,
@@ -890,6 +1084,7 @@ export function useInventoryData(
     previewRuntimeConfigOverride,
     renderRuntimeConfigPatchGenerator,
     resolveBulkPreview,
+    resolveManyJobTargets,
     resolveJobTargets,
     tagInventoryEvidenceAvailable,
     tags,
@@ -912,4 +1107,10 @@ function unavailableSourceSummary(
   return failedLabels.length > 0
     ? `${prefix}: ${failedLabels.join(", ")}`
     : null;
+}
+
+function inventorySourceFailure(label: string, error: unknown): string {
+  return `${label}: ${
+    error instanceof Error ? error.message : "source unavailable"
+  }`;
 }

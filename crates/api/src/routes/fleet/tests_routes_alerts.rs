@@ -2,6 +2,70 @@ use super::*;
 use crate::model_alert_states::BulkFleetAlertStateItem;
 
 #[test]
+fn alert_configuration_bulk_reviews_are_confirmed_unique_and_current_shaped() {
+    let policy_id = Uuid::new_v4();
+    let valid_policy: FleetAlertPolicyBulkRequest = serde_json::from_value(serde_json::json!({
+        "action": "disable",
+        "confirmed": true,
+        "items": [{
+            "id": policy_id,
+            "reviewed_name": "CPU sustained",
+            "expected_updated_at": "2026-08-31 00:00:00+00"
+        }]
+    }))
+    .unwrap();
+    validate_fleet_alert_policy_bulk_request(&valid_policy).unwrap();
+
+    let duplicate_policy: FleetAlertPolicyBulkRequest =
+        serde_json::from_value(serde_json::json!({
+            "action": "delete",
+            "confirmed": true,
+            "items": [
+                {"id": policy_id, "reviewed_name": "CPU sustained", "expected_updated_at": "2026-08-31T00:00:00Z"},
+                {"id": policy_id, "reviewed_name": "CPU sustained", "expected_updated_at": "2026-08-31T00:00:00Z"}
+            ]
+        }))
+        .unwrap();
+    let error = validate_fleet_alert_policy_bulk_request(&duplicate_policy).unwrap_err();
+    assert_eq!(error.code, "fleet_alert_policy_bulk_duplicate_item");
+
+    let invalid_channel: FleetAlertNotificationChannelBulkRequest =
+        serde_json::from_value(serde_json::json!({
+            "action": "enable",
+            "confirmed": true,
+            "items": [{
+                "id": Uuid::new_v4(),
+                "reviewed_name": "Operations",
+                "expected_updated_at": "not-a-timestamp"
+            }]
+        }))
+        .unwrap();
+    let error =
+        validate_fleet_alert_notification_channel_bulk_request(&invalid_channel).unwrap_err();
+    assert_eq!(
+        error.code,
+        "fleet_alert_notification_channel_bulk_expected_updated_at_invalid"
+    );
+
+    let unconfirmed_channel: FleetAlertNotificationChannelBulkRequest =
+        serde_json::from_value(serde_json::json!({
+            "action": "delete",
+            "items": [{
+                "id": Uuid::new_v4(),
+                "reviewed_name": "Operations",
+                "expected_updated_at": "2026-08-31T00:00:00Z"
+            }]
+        }))
+        .unwrap();
+    let error =
+        validate_fleet_alert_notification_channel_bulk_request(&unconfirmed_channel).unwrap_err();
+    assert_eq!(
+        error.code,
+        "fleet_alert_notification_channel_bulk_confirmation_required"
+    );
+}
+
+#[test]
 fn condition_parse_errors_include_operator_actionable_detail() {
     let error = fleet_alert_policy_error(anyhow::anyhow!(
         "fleet_alert_policy_condition_invalid: unknown metric cpu.load1"
@@ -213,4 +277,76 @@ fn fleet_alert_bulk_validation_rejects_duplicates_and_overflow() {
     let error = validate_bulk_alert_state_request(&overflow).unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "fleet_alert_state_items_invalid");
+}
+
+#[test]
+fn fleet_alert_bulk_resolution_freezes_unique_bounded_generations() {
+    let duplicate: BulkResolveFleetAlertsRequest = serde_json::from_value(serde_json::json!({
+        "confirmed": true,
+        "reason": "Reviewed duplicate incident selection",
+        "items": [
+            {"alert_id":"alert:duplicate","expected_trigger_generation":1},
+            {"alert_id":"alert:duplicate","expected_trigger_generation":1}
+        ]
+    }))
+    .unwrap();
+    let error = validate_bulk_fleet_alert_resolution(&duplicate).unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "fleet_alert_resolution_duplicate_item");
+
+    let invalid_generation: BulkResolveFleetAlertsRequest =
+        serde_json::from_value(serde_json::json!({
+            "confirmed": true,
+            "reason": "Reviewed stale incident selection",
+            "items": [
+                {"alert_id":"alert:stale","expected_trigger_generation":0}
+            ]
+        }))
+        .unwrap();
+    let error = validate_bulk_fleet_alert_resolution(&invalid_generation).unwrap_err();
+    assert_eq!(error.code, "fleet_alert_resolution_generation_invalid");
+
+    let overflow: BulkResolveFleetAlertsRequest = serde_json::from_value(serde_json::json!({
+        "confirmed": true,
+        "reason": "Reviewed bounded incident selection",
+        "items": (0..=1_000).map(|index| serde_json::json!({
+            "alert_id": format!("alert:overflow:{index}"),
+            "expected_trigger_generation": 1
+        })).collect::<Vec<_>>()
+    }))
+    .unwrap();
+    let error = validate_bulk_fleet_alert_resolution(&overflow).unwrap_err();
+    assert_eq!(error.code, "fleet_alert_resolution_items_invalid");
+
+    let stale =
+        fleet_alert_resolution_error(anyhow::anyhow!("fleet_alert_resolution_snapshot_stale"));
+    assert_eq!(stale.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(stale.code, "fleet_alert_resolution_snapshot_stale");
+}
+
+#[test]
+fn fleet_alert_event_sync_ids_are_unique_normalized_and_request_bounded() {
+    let normalized = normalize_fleet_alert_event_sync_ids(vec![
+        "  alert:event:one  ".to_string(),
+        "alert:event:two".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(normalized, ["alert:event:one", "alert:event:two"]);
+
+    let duplicate = normalize_fleet_alert_event_sync_ids(vec![
+        "alert:event:one".to_string(),
+        " alert:event:one ".to_string(),
+    ])
+    .unwrap_err();
+    assert_eq!(duplicate.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(duplicate.code, "fleet_alert_event_sync_duplicate_item");
+
+    let overflow = normalize_fleet_alert_event_sync_ids(
+        (0..=FLEET_ALERT_EVENT_SYNC_ID_LIMIT)
+            .map(|index| format!("alert:event:{index}"))
+            .collect(),
+    )
+    .unwrap_err();
+    assert_eq!(overflow.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(overflow.code, "fleet_alert_event_sync_items_invalid");
 }

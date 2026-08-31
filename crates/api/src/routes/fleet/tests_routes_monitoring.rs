@@ -5,8 +5,10 @@ use super::{
     public_monitoring_detail_singleflight_key, public_network_metric, public_network_points,
     public_traffic_metric, public_visibility_uses_projected_telemetry, retained_resolution_for_age,
     retained_traffic_resolution_for_age, tier_aligned_step_secs, traffic_uses_exact_source,
-    validate_monitoring_share_targets, ClientMonitoringQuery, MonitoringCardsHistoryMode,
+    validate_bulk_ping_target_selection, validate_monitoring_share_targets, ClientMonitoringQuery,
+    MonitoringCardsHistoryMode,
 };
+use uuid::Uuid;
 
 use crate::{
     model::{
@@ -35,6 +37,43 @@ fn monitoring_card_history_compaction_is_additive_and_opt_in() {
         MonitoringCardsHistoryMode::SelectedAggregate.as_str(),
         "selected_aggregate"
     );
+}
+
+#[test]
+fn bulk_ping_target_selection_has_an_explicit_input_bound() {
+    let bounded = (1..=500).map(Uuid::from_u128).collect::<Vec<_>>();
+    validate_bulk_ping_target_selection(&bounded).expect("500 Ping targets are valid");
+    let oversized = (1..=501).map(Uuid::from_u128).collect::<Vec<_>>();
+    assert_eq!(
+        validate_bulk_ping_target_selection(&oversized)
+            .unwrap_err()
+            .code,
+        "ping_target_selection_too_large"
+    );
+    assert_eq!(
+        validate_bulk_ping_target_selection(&[]).unwrap_err().code,
+        "ping_target_selection_required"
+    );
+}
+
+#[test]
+fn bulk_ping_target_preview_uses_one_set_based_target_and_selector_read() {
+    let source = include_str!("routes_monitoring.rs");
+    let (_, bulk) = source
+        .split_once("pub(crate) async fn bulk_update_ping_targets")
+        .expect("Ping bulk-update route");
+    let (bulk, _) = bulk
+        .split_once("pub(crate) fn validate_bulk_ping_target_selection")
+        .expect("Ping bulk-update route end");
+    assert_eq!(bulk.matches("ping_target_records_by_ids").count(), 1);
+    assert_eq!(
+        bulk.matches("list_ping_target_assignment_records_for_targets")
+            .count(),
+        1
+    );
+    assert_eq!(bulk.matches("resolve_saved_selectors_batch").count(), 1);
+    assert!(!bulk.contains("ping_target_record(*target_id)"));
+    assert!(!bulk.contains("resolve_selector("));
 }
 
 #[test]

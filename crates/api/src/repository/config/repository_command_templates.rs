@@ -587,23 +587,24 @@ fn output_signature(mut outputs: Vec<JobOutputView>, mode: &str) -> OutputSignat
 
 fn text_output_signature(outputs: &[JobOutputView]) -> Option<OutputSignature> {
     let mut total_bytes = 0_i64;
-    let mut canonical = String::new();
+    let mut canonical = Vec::new();
     let mut preview_text = String::new();
-    for output in outputs {
-        if output.storage != "inline" {
-            return None;
+    for (stream, stream_outputs) in logical_output_streams(outputs) {
+        let mut stream_bytes = Vec::new();
+        for output in stream_outputs {
+            if output.storage != "inline" {
+                return None;
+            }
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&output.data_base64)
+                .ok()?;
+            total_bytes += decoded.len() as i64;
+            stream_bytes.extend_from_slice(&decoded);
         }
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&output.data_base64)
-            .ok()?;
-        let byte_len = decoded.len();
-        let text = String::from_utf8(decoded).ok()?;
-        total_bytes += byte_len as i64;
+        let text = String::from_utf8(stream_bytes).ok()?;
         let normalized = normalize_text_for_comparison(&text);
-        canonical.push_str(&output.stream);
-        canonical.push('\0');
-        canonical.push_str(&normalized);
-        canonical.push('\0');
+        append_canonical_field(&mut canonical, stream.as_bytes());
+        append_canonical_field(&mut canonical, normalized.as_bytes());
         if !normalized.is_empty() {
             if !preview_text.is_empty() {
                 preview_text.push('\n');
@@ -612,7 +613,7 @@ fn text_output_signature(outputs: &[JobOutputView]) -> Option<OutputSignature> {
         }
     }
     Some(OutputSignature {
-        output_digest_hex: vpsman_common::payload_hash(canonical.as_bytes()),
+        output_digest_hex: vpsman_common::payload_hash(&canonical),
         output_compare_basis: "text".to_string(),
         stream_count: outputs.len() as i32,
         byte_count: total_bytes,
@@ -621,60 +622,103 @@ fn text_output_signature(outputs: &[JobOutputView]) -> Option<OutputSignature> {
 }
 
 fn binary_output_signature(outputs: &[JobOutputView]) -> OutputSignature {
+    if outputs.iter().any(|output| output.storage != "inline") {
+        return binary_metadata_output_signature(outputs);
+    }
+
     let mut byte_count = 0_i64;
     let mut canonical = Vec::new();
     let mut preview_bytes = Vec::new();
-    let mut has_artifact_backed_output = false;
-    for output in outputs {
-        canonical.extend_from_slice(output.stream.as_bytes());
-        canonical.push(0);
-        canonical.extend_from_slice(output.storage.as_bytes());
-        canonical.push(0);
-        if output.storage == "inline" {
+    for (stream, stream_outputs) in logical_output_streams(outputs) {
+        let mut stream_bytes = Vec::new();
+        for output in stream_outputs {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(&output.data_base64)
                 .unwrap_or_default();
             byte_count += decoded.len() as i64;
-            canonical.extend_from_slice(decoded.len().to_string().as_bytes());
-            canonical.push(0);
-            canonical.extend_from_slice(vpsman_common::payload_hash(&decoded).as_bytes());
-            preview_bytes.extend_from_slice(&decoded);
-        } else {
-            has_artifact_backed_output = true;
-            let size = output.artifact_size_bytes.unwrap_or_default().max(0);
-            byte_count += size;
-            canonical.extend_from_slice(size.to_string().as_bytes());
-            canonical.push(0);
-            canonical.extend_from_slice(
-                output
-                    .artifact_sha256_hex
-                    .as_deref()
-                    .unwrap_or("missing-artifact-hash")
-                    .as_bytes(),
-            );
+            stream_bytes.extend_from_slice(&decoded);
         }
-        canonical.push(0);
+        append_canonical_field(&mut canonical, stream.as_bytes());
+        append_canonical_field(&mut canonical, &stream_bytes);
+        preview_bytes.extend_from_slice(&stream_bytes);
     }
-    let preview = if has_artifact_backed_output {
-        format!(
+    OutputSignature {
+        output_digest_hex: vpsman_common::payload_hash(&canonical),
+        output_compare_basis: "binary".to_string(),
+        stream_count: outputs.len() as i32,
+        byte_count,
+        preview: sanitized_preview(&preview_bytes),
+    }
+}
+
+fn binary_metadata_output_signature(outputs: &[JobOutputView]) -> OutputSignature {
+    let mut byte_count = 0_i64;
+    let mut canonical = Vec::new();
+    for (stream, stream_outputs) in logical_output_streams(outputs) {
+        append_canonical_field(&mut canonical, stream.as_bytes());
+        for output in stream_outputs {
+            append_canonical_field(&mut canonical, output.storage.as_bytes());
+            if output.storage == "inline" {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&output.data_base64)
+                    .unwrap_or_default();
+                byte_count += decoded.len() as i64;
+                append_canonical_field(&mut canonical, &decoded);
+            } else {
+                let size = output.artifact_size_bytes.unwrap_or_default().max(0);
+                byte_count += size;
+                append_canonical_field(&mut canonical, &size.to_be_bytes());
+                append_canonical_field(
+                    &mut canonical,
+                    output
+                        .artifact_sha256_hex
+                        .as_deref()
+                        .unwrap_or("missing-artifact-hash")
+                        .as_bytes(),
+                );
+            }
+        }
+    }
+    OutputSignature {
+        output_digest_hex: vpsman_common::payload_hash(&canonical),
+        output_compare_basis: "binary_metadata".to_string(),
+        stream_count: outputs.len() as i32,
+        byte_count,
+        preview: format!(
             "Artifact-backed retained output; {} chunks, {} bytes. Download chunks for full content.",
             outputs.len(),
             byte_count
-        )
-    } else {
-        sanitized_preview(&preview_bytes)
-    };
-    OutputSignature {
-        output_digest_hex: vpsman_common::payload_hash(&canonical),
-        output_compare_basis: if has_artifact_backed_output {
-            "binary_metadata".to_string()
-        } else {
-            "binary".to_string()
-        },
-        stream_count: outputs.len() as i32,
-        byte_count,
-        preview,
+        ),
     }
+}
+
+fn logical_output_streams(outputs: &[JobOutputView]) -> Vec<(&str, Vec<&JobOutputView>)> {
+    let mut streams = BTreeMap::<&str, Vec<&JobOutputView>>::new();
+    for output in outputs {
+        streams.entry(&output.stream).or_default().push(output);
+    }
+    let mut streams = streams.into_iter().collect::<Vec<_>>();
+    streams.sort_by(|(left, _), (right, _)| {
+        logical_stream_rank(left)
+            .cmp(&logical_stream_rank(right))
+            .then_with(|| left.cmp(right))
+    });
+    streams
+}
+
+fn logical_stream_rank(stream: &str) -> u8 {
+    match stream {
+        "stdout" => 0,
+        "stderr" => 1,
+        "pty" => 2,
+        "status" => 3,
+        _ => 4,
+    }
+}
+
+fn append_canonical_field(canonical: &mut Vec<u8>, value: &[u8]) {
+    canonical.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(value);
 }
 
 fn normalize_text_for_comparison(text: &str) -> String {

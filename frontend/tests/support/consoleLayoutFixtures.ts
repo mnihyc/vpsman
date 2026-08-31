@@ -4072,6 +4072,7 @@ export const ospfUpdatePlans = [
 export async function installConsoleApiMock(
   page: Page,
   options: {
+    accessBulkCoverage?: boolean;
     agentListOverride?: typeof agents;
     alertEvidenceSaturated?: boolean;
     alertDomainDuplicateCoverage?: boolean;
@@ -4104,6 +4105,7 @@ export async function installConsoleApiMock(
     fleetAlertEventReviewFailure?: boolean;
     fleetAlertEventReviewRefreshAddsNew?: boolean;
     fleetAlertEventReviewSaturated?: boolean;
+    fleetAlertEmptyTruncated?: boolean;
     fleetAlertSourceFailure?: "current" | "history" | "both";
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
     fleetSnapshotAfterDeleteDelayMs?: number;
@@ -4112,6 +4114,7 @@ export async function installConsoleApiMock(
     homeSnapshotSourceFailure?: "monitoring_cards" | "system_dashboard";
     recordPagesSaturated?: boolean;
     runtimeConfigApplyFailure?: boolean;
+    runtimeConfigBulkAgentCount?: number;
     runtimeConfigBulkPreviewStateDrift?: boolean;
     runtimeConfigBulkNoOpClientIds?: string[];
     runtimeConfigBulkStorageOnlyClientIds?: string[];
@@ -4212,6 +4215,7 @@ export async function installConsoleApiMock(
   };
   await page.addInitScript(
     ({
+      accessBulkCoverageFixture,
       agentListOverrideFixture,
       agentDeleteDelayMsFixture,
       agentDeleteFailedClientIdsFixture,
@@ -4483,7 +4487,15 @@ export async function installConsoleApiMock(
       }));
       let telemetryNetworkRateRequestCount = 0;
       let monitoringCardsRequestCount = 0;
-      let fleetAlertEventReviewRequestCount = 0;
+      let alertConfigurationMutationRevision = 0;
+      let fleetAlertExternalChangePending = false;
+      (
+        window as unknown as {
+          __vpsmanTriggerFleetAlertExternalChange: () => void;
+        }
+      ).__vpsmanTriggerFleetAlertExternalChange = () => {
+        fleetAlertExternalChangePending = true;
+      };
       const mutableHostPackageUpdatePlans = hostPackageUpdatePlansFixture.map(
         (plan) => ({
           ...plan,
@@ -4685,6 +4697,7 @@ export async function installConsoleApiMock(
         historyRetentionPolicies: [] as unknown[],
         historyRetentionPrunes: [] as unknown[],
         jobs: [] as unknown[],
+        jobTargetStatusReads: [] as unknown[],
         jobApprovals: [] as unknown[],
         jobApprovalDecisions: [] as unknown[],
         jobRolloutActions: [] as unknown[],
@@ -5179,6 +5192,11 @@ export async function installConsoleApiMock(
           username: "noc-operator",
         },
       ];
+      if (accessBulkCoverageFixture) {
+        operatorRecords.forEach((record) => {
+          record.totp_enabled = true;
+        });
+      }
       const operatorSessions = [
         {
           id: "88888888-aaaa-4bbb-8ccc-000000000001",
@@ -5205,6 +5223,20 @@ export async function installConsoleApiMock(
           revoked_at: null as string | null,
         },
       ];
+      if (accessBulkCoverageFixture) {
+        operatorSessions.push({
+          id: "88888888-aaaa-4bbb-8ccc-000000000003",
+          operator_id: "99999999-aaaa-4bbb-8ccc-000000000002",
+          operator_role: "operator",
+          operator_username: "noc-operator",
+          current: false,
+          created_at: "2026-01-01T02:00:00Z",
+          expires_at: "2026-01-01T02:15:00Z",
+          refresh_expires_at: "2026-01-15T02:00:00Z",
+          revoked: false,
+          revoked_at: null,
+        });
+      }
       const operatorView = (record: (typeof operatorRecords)[number]) => ({
         ...record,
         preferences: currentOperatorPreferences,
@@ -5743,9 +5775,87 @@ export async function installConsoleApiMock(
         if (!expression) {
           return [];
         }
-        return backendAgents()
+        return visibleAgents()
           .filter((agent) => expressionMatchesAgent(agent, expression))
           .sort((left, right) => left.id.localeCompare(right.id));
+      };
+      const mutateAlertConfigurationFixture = (
+        records: Array<Record<string, unknown>>,
+        body: unknown,
+      ) => {
+        const request = body as {
+          action?: "enable" | "disable" | "delete";
+          confirmed?: boolean;
+          items?: Array<{
+            expected_updated_at?: string;
+            id?: string;
+            reviewed_name?: string;
+          }>;
+        } | null;
+        const action = request?.action;
+        const items = request?.items ?? [];
+        const selected = items.map((item) =>
+          records.find((record) => record.id === item.id),
+        );
+        const validAction =
+          action === "enable" || action === "disable" || action === "delete";
+        const valid =
+          request?.confirmed === true &&
+          validAction &&
+          items.length > 0 &&
+          selected.every(
+            (record, index) =>
+              record &&
+              record.name === items[index]?.reviewed_name &&
+              record.updated_at === items[index]?.expected_updated_at &&
+              (action === "delete" ||
+                (action === "enable" && record.enabled === false) ||
+                (action === "disable" && record.enabled === true)),
+          );
+        if (!valid || !action) {
+          return {
+            body: {
+              error: "alert_configuration_snapshot_stale",
+              message: "Alert configuration changed before confirmation",
+              status: 409,
+            },
+            status: 409,
+          };
+        }
+        alertConfigurationMutationRevision += 1;
+        const committedUpdatedAt = `2026-06-02T10:07:00.${String(
+          alertConfigurationMutationRevision,
+        ).padStart(6, "0")}Z`;
+        if (action === "delete") {
+          const deletedIds = new Set(items.map((item) => item.id));
+          for (let index = records.length - 1; index >= 0; index -= 1) {
+            if (deletedIds.has(String(records[index]?.id))) {
+              records.splice(index, 1);
+            }
+          }
+        } else {
+          for (const record of selected) {
+            if (!record) continue;
+            record.enabled = action === "enable";
+            record.updated_at = committedUpdatedAt;
+          }
+        }
+        const outcomes = items.map((item, index) => {
+          const record = selected[index];
+          const { signing_secret: _secret, ...safeRecord } = record ?? {};
+          return {
+            id: item.id,
+            name: String(record?.name ?? ""),
+            record: action === "delete" ? null : safeRecord,
+            result:
+              action === "enable"
+                ? "enabled"
+                : action === "disable"
+                  ? "disabled"
+                  : "deleted",
+          };
+        });
+        return { body: { action, outcomes }, status: 200 };
       };
       const jobTargetsFor = (jobId: string) => {
         const createdTargets = createdJobTargets.get(jobId);
@@ -5992,6 +6102,7 @@ export async function installConsoleApiMock(
           matched_vps_count: targets.length,
           preview_hash:
             "3333333333333333333333333333333333333333333333333333333333333333",
+          committed_records: [],
         };
       };
       const monitoringCardItemsPayload = (fixedClientId: string | null) => {
@@ -6090,8 +6201,7 @@ export async function installConsoleApiMock(
                   generation: 1,
                   latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
                   loss_ratio: clientIndex === 0 ? 0 : 0.2,
-                  reason:
-                    clientIndex === 0 ? null : "Intermittent packet loss",
+                  reason: clientIndex === 0 ? null : "Intermittent packet loss",
                   state: clientIndex === 0 ? "ok" : "degraded",
                   status: clientIndex === 0 ? "ok" : "degraded",
                   target_id:
@@ -6700,9 +6810,7 @@ export async function installConsoleApiMock(
                 peak: transform(series.peak),
                 points,
                 threshold_direction:
-                  requestedResourceMetric === "memory_used"
-                    ? "above"
-                    : "below",
+                  requestedResourceMetric === "memory_used" ? "above" : "below",
                 warning_threshold: null,
               };
             });
@@ -6780,6 +6888,88 @@ export async function installConsoleApiMock(
         };
       };
 
+      const applySuspensionFixture = (
+        clientId: string,
+        action: "suspend" | "unsuspend",
+        reason: unknown,
+      ) => {
+        const agent = agentsFixture.find(
+          (candidate) => candidate.id === clientId,
+        );
+        if (!agent) return null;
+        const fromStatus = agent.status;
+        agent.status = action === "suspend" ? "suspended" : "stale";
+        return {
+          agent,
+          resolved_alert_count: action === "suspend" ? 1 : 0,
+          skipped_unstarted_job_ids:
+            action === "suspend"
+              ? ["91919191-9191-4191-8191-919191919191"]
+              : [],
+          suspended_at: action === "suspend" ? "2026-06-05T20:45:00Z" : null,
+          suspended_by:
+            action === "suspend"
+              ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+              : null,
+          suspended_from_status: action === "suspend" ? fromStatus : null,
+          suspended_reason: action === "suspend" ? (reason ?? null) : null,
+        };
+      };
+
+      const successfulDeleteFixture = (clientId: string) => {
+        deletedAgentIds.add(clientId);
+        return {
+          client_id: clientId,
+          deleted: true,
+          deleted_at: "2026-06-02T10:07:00Z",
+          post_commit: [
+            {
+              error: null,
+              operation: "gateway_session_disconnect",
+              status: "completed",
+            },
+            {
+              error: null,
+              operation: "job_terminal_reconciliation",
+              status: "completed",
+            },
+          ],
+          runtime_sync: [
+            ...agentDeleteSyncJobIdsFixture.map((jobId, index) => ({
+              client_id: index === 0 ? "agent-fra-02" : `peer-${index + 1}`,
+              error: null,
+              job_id: jobId,
+              status: "queued",
+            })),
+            ...agentDeleteFailedClientIdsFixture.map((failedClientId) => ({
+              client_id: failedClientId,
+              error:
+                "Runtime apply job could not be queued because the server failed while creating it. Desired state remains saved; inspect API logs and retry",
+              job_id: null,
+              status: "queue_failed",
+            })),
+          ],
+        };
+      };
+
+      const publishFleetStateInvalidationFixture = (changedCount: number) => {
+        if (changedCount === 0) return;
+        window.setTimeout(() => {
+          const socket = (
+            window as typeof window & {
+              __vpsmanTestWebSockets: Array<EventTarget>;
+            }
+          ).__vpsmanTestWebSockets.at(-1);
+          socket?.dispatchEvent(
+            new MessageEvent("message", {
+              data: JSON.stringify({
+                type: "fleet_state_invalidated",
+              }),
+            }),
+          );
+        }, 0);
+      };
+
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
         const pathname = new URL(url, window.location.href).pathname;
@@ -6805,9 +6995,7 @@ export async function installConsoleApiMock(
               : availableSnapshotSource([]);
           const telemetryNetworkRates =
             telemetryFailurePathFixture === "network-rates"
-              ? unavailableSnapshotSource(
-                  "telemetry_network_rates_unavailable",
-                )
+              ? unavailableSnapshotSource("telemetry_network_rates_unavailable")
               : availableSnapshotSource(telemetryNetworkRatesPayload());
           const fleetAlerts = ["current", "both"].includes(
             fleetAlertSourceFailureFixture ?? "",
@@ -6849,8 +7037,7 @@ export async function installConsoleApiMock(
             monitoring_cards: homeMonitoringCards,
             jobs: availableSnapshotSource(jobsFixture),
             file_transfers: availableSnapshotSource(fileTransfersFixture),
-            terminal_sessions:
-              availableSnapshotSource(terminalSessionsFixture),
+            terminal_sessions: availableSnapshotSource(terminalSessionsFixture),
             backups: availableSnapshotSource(backupsFixture),
             backup_artifacts: availableSnapshotSource(artifactsFixture),
             audit: availableSnapshotSource(auditLogsFixture),
@@ -6985,9 +7172,7 @@ export async function installConsoleApiMock(
               : availableSnapshotSource([]);
           const telemetryNetworkRates =
             telemetryFailurePathFixture === "network-rates"
-              ? unavailableSnapshotSource(
-                  "telemetry_network_rates_unavailable",
-                )
+              ? unavailableSnapshotSource("telemetry_network_rates_unavailable")
               : availableSnapshotSource(telemetryNetworkRatesPayload());
           const telemetryTunnels =
             telemetryFailurePathFixture === "tunnels"
@@ -7042,8 +7227,9 @@ export async function installConsoleApiMock(
               fleet_alerts_truncated: fleetAlertsTruncatedFixture,
               policy_alerts: availableSnapshotSource(policyAlertsFixture),
               policy_alerts_truncated: policyAlertsTruncatedFixture,
-              traffic_accounting:
-                availableSnapshotSource(trafficAccountingFixture),
+              traffic_accounting: availableSnapshotSource(
+                trafficAccountingFixture,
+              ),
               vps_rule_values: availableSnapshotSource(vpsRuleValuesFixture),
               webhook_rule_deliveries: availableSnapshotSource(
                 webhookDeliveriesFixture,
@@ -7056,6 +7242,95 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/fleet/summary") {
           return jsonResponse(fleetSummaryPayload());
+        }
+        if (pathname === "/api/v1/fleet-alerts/resolve" && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            confirmed?: boolean;
+            reason?: string;
+            items?: Array<{
+              alert_id?: string;
+              expected_trigger_generation?: number;
+            }>;
+          };
+          requests.fleetAlertResolutions.push(body);
+          const reason = body.reason?.trim() ?? "";
+          const items = body.items ?? [];
+          if (
+            !body.confirmed ||
+            !reason ||
+            reason.length > 1024 ||
+            items.length < 1 ||
+            items.length > 1_000
+          ) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_resolution_invalid",
+                message:
+                  "Resolution requires a bounded reviewed batch, explicit confirmation, and a reason of at most 1024 characters.",
+              },
+              400,
+            );
+          }
+          const reviewed = items.map((item) => {
+            const alert = fleetAlertsFixture.find(
+              (stored) => stored.id === item.alert_id,
+            );
+            return { alert, item };
+          });
+          if (
+            reviewed.some(
+              ({ alert, item }) =>
+                !alert ||
+                alert.record_kind !== "event" ||
+                !["triggered", "persisting"].includes(alert.lifecycle.state) ||
+                alert.lifecycle.trigger_generation !==
+                  item.expected_trigger_generation,
+            )
+          ) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_resolution_snapshot_stale",
+                message: "The reviewed incident batch is no longer current.",
+              },
+              409,
+            );
+          }
+          const resolvedAlerts = reviewed.map(({ alert }) => {
+            const current = alert!;
+            const resolvedAlert = {
+              ...current,
+              lifecycle: {
+                ...current.lifecycle,
+                resolution_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+                resolution_note: reason,
+                resolution_reason: "operator_resolved",
+                resolved_at: "2026-07-01T12:00:00Z",
+                state: "resolved",
+              },
+            };
+            const alertIndex = fleetAlertsFixture.findIndex(
+              (stored) => stored.id === current.id,
+            );
+            fleetAlertsFixture.splice(alertIndex, 1);
+            const eventReviewIndex = fleetAlertEventsFixture.findIndex(
+              (stored) => stored.id === current.id,
+            );
+            if (eventReviewIndex >= 0) {
+              fleetAlertEventsFixture.splice(eventReviewIndex, 1);
+            }
+            const historyIndex = fleetAlertHistoryFixture.findIndex(
+              (stored) => stored.id === current.id,
+            );
+            if (historyIndex >= 0) {
+              fleetAlertHistoryFixture.splice(historyIndex, 1, resolvedAlert);
+            } else {
+              fleetAlertHistoryFixture.unshift(resolvedAlert);
+            }
+            return resolvedAlert;
+          });
+          return jsonResponse({
+            alerts: resolvedAlerts,
+          });
         }
         if (
           pathname.startsWith("/api/v1/fleet-alerts/") &&
@@ -7138,27 +7413,40 @@ export async function installConsoleApiMock(
           }
           return jsonResponse(resolvedAlert);
         }
-        if (pathname === "/api/v1/fleet-alert-events" && method === "GET") {
-          const requestUrl = new URL(url, window.location.href);
-          const cursor = requestUrl.searchParams.get("cursor");
-          requests.fleetAlertEventReviews.push({ cursor });
+        if (
+          pathname === "/api/v1/fleet-alert-events/sync" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            known_alert_ids?: unknown;
+          };
+          const knownAlertIds = Array.isArray(body.known_alert_ids)
+            ? body.known_alert_ids.filter(
+                (alertId): alertId is string => typeof alertId === "string",
+              )
+            : [];
+          requests.fleetAlertEventReviews.push({
+            kind: "sync",
+            known_alert_ids: knownAlertIds,
+          });
           if (fleetAlertEventReviewFailureFixture) {
             return jsonResponse(
               {
-                error: "fleet_alert_events_unavailable",
-                message: "Simulated unresolved occurrence review failure.",
+                error: "fleet_alert_event_sync_unavailable",
+                message:
+                  "Simulated current occurrence synchronization failure.",
               },
               503,
             );
           }
           if (
             fleetAlertEventReviewRefreshAddsNewFixture &&
-            fleetAlertEventReviewRequestCount >= 2 &&
-            cursor === null &&
+            fleetAlertExternalChangePending &&
             !fleetAlertEventsFixture.some(
               (alert) => alert.id === "fleet-alert-new-after-review-end",
             )
           ) {
+            fleetAlertExternalChangePending = false;
             const externallyResolvedIndex = fleetAlertEventsFixture.findIndex(
               (alert) => alert.title === "Older incident beyond snapshot cap",
             );
@@ -7184,7 +7472,40 @@ export async function installConsoleApiMock(
               title: "New incident after review reached end",
             });
           }
-          fleetAlertEventReviewRequestCount += 1;
+          const authoritativeEvents = fleetAlertEventsFixture.map(
+            (alert) =>
+              fleetAlertsFixture.find((current) => current.id === alert.id) ??
+              alert,
+          );
+          const headItems = authoritativeEvents.slice(0, 200);
+          const hasMore = fleetAlertEventsFixture.length > headItems.length;
+          const knownIds = new Set(knownAlertIds);
+          return jsonResponse({
+            current_items: authoritativeEvents.filter((alert) =>
+              knownIds.has(alert.id),
+            ),
+            head: {
+              has_more: hasMore,
+              items: headItems,
+              next_cursor: hasMore
+                ? `fixture-event-cursor:${headItems.length}`
+                : null,
+            },
+          });
+        }
+        if (pathname === "/api/v1/fleet-alert-events" && method === "GET") {
+          const requestUrl = new URL(url, window.location.href);
+          const cursor = requestUrl.searchParams.get("cursor");
+          requests.fleetAlertEventReviews.push({ kind: "older", cursor });
+          if (fleetAlertEventReviewFailureFixture) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_events_unavailable",
+                message: "Simulated unresolved occurrence review failure.",
+              },
+              503,
+            );
+          }
           const offset = cursor
             ? Number(cursor.replace("fixture-event-cursor:", ""))
             : 0;
@@ -7201,7 +7522,13 @@ export async function installConsoleApiMock(
             200,
             Math.max(1, Number(requestUrl.searchParams.get("limit") ?? 50)),
           );
-          const items = fleetAlertEventsFixture.slice(offset, offset + limit);
+          const items = fleetAlertEventsFixture
+            .slice(offset, offset + limit)
+            .map(
+              (alert) =>
+                fleetAlertsFixture.find((current) => current.id === alert.id) ??
+                alert,
+            );
           const nextOffset = offset + items.length;
           const hasMore = nextOffset < fleetAlertEventsFixture.length;
           return jsonResponse({
@@ -7550,6 +7877,22 @@ export async function installConsoleApiMock(
               }
             }
           }
+          if (body.confirmed === true) {
+            response.committed_records = response.changes
+              .flatMap((change) => {
+                const record = vpsRuleValuesFixture.find(
+                  (row) =>
+                    row.client_id === change.client_id &&
+                    row.key === change.key,
+                );
+                return record ? [{ ...record }] : [];
+              })
+              .sort(
+                (left, right) =>
+                  left.client_id.localeCompare(right.client_id) ||
+                  left.key.localeCompare(right.key),
+              );
+          }
           return jsonResponse(response);
         }
         if (pathname === "/api/v1/traffic-accounting" && method === "GET") {
@@ -7611,6 +7954,18 @@ export async function installConsoleApiMock(
         ) {
           return jsonResponse(policyDryRunFixture);
         }
+        if (
+          pathname === "/api/v1/fleet-alert-policies/bulk-mutate" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.fleetAlertPolicies.push(body);
+          const result = mutateAlertConfigurationFixture(
+            fleetAlertPoliciesFixture as Array<Record<string, unknown>>,
+            body,
+          );
+          return jsonResponse(result.body, result.status);
+        }
         if (pathname === "/api/v1/fleet-alert-policies" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.fleetAlertPolicies.push(body);
@@ -7663,6 +8018,21 @@ export async function installConsoleApiMock(
             id: "efefefef-1111-4111-8111-111111111111",
             updated_at: "2026-06-02T10:02:00Z",
           });
+        }
+        if (
+          pathname ===
+            "/api/v1/fleet-alert-notification-channels/bulk-mutate" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.fleetAlertNotificationChannels.push(body);
+          const result = mutateAlertConfigurationFixture(
+            fleetAlertNotificationChannelsFixture as Array<
+              Record<string, unknown>
+            >,
+            body,
+          );
+          return jsonResponse(result.body, result.status);
         }
         const notificationChannelMatch = pathname.match(
           /^\/api\/v1\/fleet-alert-notification-channels\/([^/]+)$/,
@@ -7784,6 +8154,18 @@ export async function installConsoleApiMock(
             webhookRulesFixture.push(storedRule);
           }
           return jsonResponse(storedRule);
+        }
+        if (
+          pathname === "/api/v1/webhook-rules/bulk-mutate" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.webhookRules.push(body);
+          const result = mutateAlertConfigurationFixture(
+            webhookRulesFixture as Array<Record<string, unknown>>,
+            body,
+          );
+          return jsonResponse(result.body, result.status);
         }
         if (pathname === "/api/v1/webhook-rules/dry-run" && method === "POST") {
           const body = (await readJsonBody(input, init)) as Record<
@@ -7910,6 +8292,39 @@ export async function installConsoleApiMock(
             status: body?.status ?? null,
           });
         }
+        if (pathname === "/api/v1/agents/suspensions" && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            action: "suspend" | "unsuspend";
+            client_ids: string[];
+            confirmed: boolean;
+            reason?: string | null;
+          };
+          requests.agentSuspensions.push({ bulk: true, ...body });
+          const outcomes = body.client_ids.map((clientId) => {
+            const result = applySuspensionFixture(
+              clientId,
+              body.action,
+              body.reason,
+            );
+            return result
+              ? {
+                  client_id: clientId,
+                  result,
+                  status: "succeeded",
+                }
+              : {
+                  client_id: clientId,
+                  error_code: "agent_not_found",
+                  error_message:
+                    "The VPS does not exist or is no longer visible.",
+                  status: "rejected",
+                };
+          });
+          publishFleetStateInvalidationFixture(
+            outcomes.filter((outcome) => outcome.status === "succeeded").length,
+          );
+          return jsonResponse({ outcomes });
+        }
         const deleteAgentMatch = pathname.match(
           /^\/api\/v1\/agents\/([^/]+)\/delete$/,
         );
@@ -7925,33 +8340,60 @@ export async function installConsoleApiMock(
           > | null;
           requests.agentSuspensions.push({
             action,
+            bulk: false,
             client_id: clientId,
             ...(body ?? {}),
           });
-          const agent = agentsFixture.find(
-            (candidate) => candidate.id === clientId,
-          );
-          if (!agent) {
+          const result = applySuspensionFixture(clientId, action, body?.reason);
+          if (!result) {
             return jsonResponse({ error: "agent_not_found" }, 404);
           }
-          const fromStatus = agent.status;
-          agent.status = action === "suspend" ? "suspended" : "stale";
-          return jsonResponse({
-            agent,
-            resolved_alert_count: action === "suspend" ? 1 : 0,
-            skipped_unstarted_job_ids:
-              action === "suspend"
-                ? ["91919191-9191-4191-8191-919191919191"]
-                : [],
-            suspended_at: action === "suspend" ? "2026-06-05T20:45:00Z" : null,
-            suspended_by:
-              action === "suspend"
-                ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-                : null,
-            suspended_from_status: action === "suspend" ? fromStatus : null,
-            suspended_reason:
-              action === "suspend" ? (body?.reason ?? null) : null,
-          });
+          return jsonResponse(result);
+        }
+        if (pathname === "/api/v1/agents/deletions" && method === "POST") {
+          if (agentDeleteDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, agentDeleteDelayMsFixture),
+            );
+          }
+          const body = (await readJsonBody(input, init)) as {
+            confirmed: boolean;
+            items: Array<{
+              client_id: string;
+              privilege_assertion?: unknown;
+            }>;
+            reason?: string | null;
+          };
+          requests.agentDeletes.push({ bulk: true, ...body });
+          if (agentDeleteRequestFailureFixture) {
+            return jsonResponse(
+              {
+                error: "fixture_delete_refused",
+                message:
+                  "Fixture refused the VPS deletion before changing inventory.",
+              },
+              503,
+            );
+          }
+          const outcomes = body.items.map((item) =>
+            agentDeleteRequestFailureClientIdsFixture.includes(item.client_id)
+              ? {
+                  client_id: item.client_id,
+                  error_code: "fixture_delete_refused",
+                  error_message:
+                    "Fixture refused the VPS deletion before changing inventory.",
+                  status: "rejected",
+                }
+              : {
+                  client_id: item.client_id,
+                  result: successfulDeleteFixture(item.client_id),
+                  status: "succeeded",
+                },
+          );
+          publishFleetStateInvalidationFixture(
+            outcomes.filter((outcome) => outcome.status === "succeeded").length,
+          );
+          return jsonResponse({ outcomes });
         }
         if (deleteAgentMatch && method === "POST") {
           if (agentDeleteDelayMsFixture > 0) {
@@ -7965,6 +8407,7 @@ export async function installConsoleApiMock(
             unknown
           > | null;
           requests.agentDeletes.push({
+            bulk: false,
             client_id: clientId,
             ...(body ?? {}),
           });
@@ -7981,39 +8424,7 @@ export async function installConsoleApiMock(
               503,
             );
           }
-          deletedAgentIds.add(clientId);
-          return jsonResponse({
-            client_id: clientId,
-            deleted: true,
-            deleted_at: "2026-06-02T10:07:00Z",
-            post_commit: [
-              {
-                error: null,
-                operation: "gateway_session_disconnect",
-                status: "completed",
-              },
-              {
-                error: null,
-                operation: "job_terminal_reconciliation",
-                status: "completed",
-              },
-            ],
-            runtime_sync: [
-              ...agentDeleteSyncJobIdsFixture.map((jobId, index) => ({
-                client_id: index === 0 ? "agent-fra-02" : `peer-${index + 1}`,
-                error: null,
-                job_id: jobId,
-                status: "queued",
-              })),
-              ...agentDeleteFailedClientIdsFixture.map((failedClientId) => ({
-                client_id: failedClientId,
-                error:
-                  "Runtime apply job could not be queued because the server failed while creating it. Desired state remains saved; inspect API logs and retry",
-                job_id: null,
-                status: "queue_failed",
-              })),
-            ],
-          });
+          return jsonResponse(successfulDeleteFixture(clientId));
         }
         if (pathname === "/api/v1/agents") {
           return jsonResponse(dashboardAgents());
@@ -8173,6 +8584,119 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/operators" && method === "GET") {
           return jsonResponse(operatorRecords.map(operatorView));
         }
+        if (pathname === "/api/v1/operators/statuses" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.operatorActions.push({ action: "status-bulk", body });
+          const status = String(body.status ?? "");
+          const items = Array.isArray(body.items)
+            ? body.items
+                .map(asFixtureRecord)
+                .filter(
+                  (item): item is Record<string, unknown> => item !== null,
+                )
+            : [];
+          let activeAdminCount = operatorRecords.filter(
+            (record) => record.status === "active" && record.role === "admin",
+          ).length;
+          const outcomes = items.map((item) => {
+            const operatorId = String(item.operator_id ?? "");
+            const record = operatorRecords.find(
+              (operator) => operator.id === operatorId,
+            );
+            const rejected = (code: string, message: string) => ({
+              error_code: code,
+              error_message: message,
+              operator_id: operatorId,
+              status: "rejected",
+            });
+            if (
+              !record ||
+              record.status === "deleted" ||
+              (status === "active" && record.status !== "disabled")
+            ) {
+              return rejected(
+                "operator_not_found",
+                "The operator account is unavailable for this action.",
+              );
+            }
+            if (
+              status !== "active" &&
+              record.status === "active" &&
+              record.role === "admin" &&
+              activeAdminCount <= 1
+            ) {
+              return rejected(
+                "last_active_admin_required",
+                "At least one active administrator must remain.",
+              );
+            }
+            if (
+              status !== "active" &&
+              record.status === "active" &&
+              record.role === "admin"
+            ) {
+              activeAdminCount -= 1;
+            }
+            record.status = status;
+            record.disabled_at =
+              status === "disabled" ? "2026-01-03T00:10:00Z" : null;
+            record.deleted_at =
+              status === "deleted" ? "2026-01-03T00:10:00Z" : null;
+            if (status !== "active") {
+              operatorSessions
+                .filter((session) => session.operator_id === operatorId)
+                .forEach((session) => {
+                  session.revoked = true;
+                  session.revoked_at = "2026-01-03T00:15:00Z";
+                });
+            }
+            return {
+              operator_id: operatorId,
+              result: operatorView(record),
+              status: "succeeded",
+            };
+          });
+          return jsonResponse({ outcomes });
+        }
+        if (pathname === "/api/v1/operators/totp-clears" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.operatorActions.push({ action: "totp-clear-bulk", body });
+          const items = Array.isArray(body.items)
+            ? body.items
+                .map(asFixtureRecord)
+                .filter(
+                  (item): item is Record<string, unknown> => item !== null,
+                )
+            : [];
+          const outcomes = items.map((item) => {
+            const operatorId = String(item.operator_id ?? "");
+            const record = operatorRecords.find(
+              (operator) => operator.id === operatorId,
+            );
+            if (!record || record.status === "deleted") {
+              return {
+                error_code: "operator_not_found",
+                error_message:
+                  "The operator account is unavailable for this action.",
+                operator_id: operatorId,
+                status: "rejected",
+              };
+            }
+            record.totp_enabled = false;
+            operatorSessions
+              .filter((session) => session.operator_id === operatorId)
+              .forEach((session) => {
+                session.revoked = true;
+                session.revoked_at = "2026-01-03T00:15:00Z";
+              });
+            return {
+              operator_id: operatorId,
+              result: operatorView(record),
+              status: "succeeded",
+            };
+          });
+          return jsonResponse({ outcomes });
+        }
         const operatorMutationMatch = pathname.match(
           /^\/api\/v1\/operators\/([^/]+)(?:\/([^/]+))?$/,
         );
@@ -8211,6 +8735,45 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/operator-sessions" && method === "GET")
           return jsonResponse(operatorSessions);
+        if (
+          pathname === "/api/v1/operator-sessions/revocations" &&
+          method === "POST"
+        ) {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.operatorActions.push({
+            action: "session-revoke-bulk",
+            body,
+          });
+          const items = Array.isArray(body.items)
+            ? body.items
+                .map(asFixtureRecord)
+                .filter(
+                  (item): item is Record<string, unknown> => item !== null,
+                )
+            : [];
+          const outcomes = items.map((item) => {
+            const sessionId = String(item.session_id ?? "");
+            const session = operatorSessions.find(
+              (record) => record.id === sessionId,
+            );
+            if (!session) {
+              return {
+                error_code: "operator_session_not_found",
+                error_message: "The operator session was not found.",
+                session_id: sessionId,
+                status: "rejected",
+              };
+            }
+            session.revoked = true;
+            session.revoked_at = "2026-01-03T00:15:00Z";
+            return {
+              result: { ...session },
+              session_id: sessionId,
+              status: "succeeded",
+            };
+          });
+          return jsonResponse({ outcomes });
+        }
         const operatorSessionRevokeMatch = pathname.match(
           /^\/api\/v1\/operator-sessions\/([^/]+)\/revoke$/,
         );
@@ -9475,7 +10038,7 @@ export async function installConsoleApiMock(
           const artifactSha256Hex = await sha256HexForText(artifactBody);
           const sizeBytes = new TextEncoder().encode(artifactBody).byteLength;
           const chunkSize = transfer.chunk_size_bytes ?? 65536;
-          return jsonResponse({
+          const handoff = {
             client_id: clientId,
             session_id: sessionId,
             object_key: `file-transfers/${Array.from(
@@ -9489,7 +10052,14 @@ export async function installConsoleApiMock(
             download_path: `/api/v1/file-transfers/${encodeURIComponent(clientId)}/${encodeURIComponent(
               sessionId,
             )}/handoff/artifact`,
+          };
+          Object.assign(transfer, {
+            handoff_evidence_status: "artifact_available",
+            handoff_object_key: handoff.object_key,
+            handoff_download_path: handoff.download_path,
+            handoff_unavailable_reason: null,
           });
+          return jsonResponse(handoff);
         }
         const handoffArtifactMatch = pathname.match(
           /^\/api\/v1\/file-transfers\/([^/]+)\/([^/]+)\/handoff\/artifact$/,
@@ -9600,6 +10170,21 @@ export async function installConsoleApiMock(
         const targetMatch = pathname.match(
           /^\/api\/v1\/jobs\/([^/]+)\/targets$/,
         );
+        if (pathname === "/api/v1/job-targets/statuses" && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            items?: Array<{ client_id?: string; job_id?: string }>;
+          };
+          requests.jobTargetStatusReads.push(body);
+          const exactTargets = (body.items ?? []).map((item) =>
+            jobTargetsFor(String(item.job_id ?? "")).find(
+              (target) => target.client_id === item.client_id,
+            ),
+          );
+          if (exactTargets.some((target) => !target)) {
+            return jsonResponse({ error: "job_target_not_found" }, 404);
+          }
+          return jsonResponse(exactTargets);
+        }
         if (targetMatch && method === "GET") {
           if (jobTargetDelayMsFixture > 0) {
             await new Promise((resolve) =>
@@ -9694,6 +10279,13 @@ export async function installConsoleApiMock(
           rollout.pause_reason = "operator_aborted_rollout";
           rollout.completed_at = "2026-06-02T10:03:00Z";
           rollout.updated_at = "2026-06-02T10:03:00Z";
+          const canceledJob = (
+            jobsFixture as Array<Record<string, unknown>>
+          ).find((job) => job.id === jobId);
+          if (canceledJob) {
+            canceledJob.status = "canceled";
+            canceledJob.completed_at = "2026-06-02T10:03:00Z";
+          }
           persistJobRollouts();
           requests.jobRolloutActions.push({
             action: "abort",
@@ -10012,6 +10604,57 @@ export async function installConsoleApiMock(
           });
           currentSchedules.push(schedule);
           return jsonResponse(schedule);
+        }
+        if (
+          pathname === "/api/v1/schedules/update-targets" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.scheduleActions.push({ body, method, path: pathname });
+          const items =
+            (
+              body as {
+                items?: Array<{
+                  expected_definition_revision: number;
+                  schedule_id: string;
+                }>;
+              }
+            ).items ?? [];
+          const outcomes = items.map((item) => {
+            const schedule = findSchedule(item.schedule_id);
+            if (!schedule) {
+              return {
+                error_code: "schedule_not_found",
+                schedule_id: item.schedule_id,
+                status: "rejected",
+              };
+            }
+            if (
+              Number(schedule.definition_revision) !==
+              item.expected_definition_revision
+            ) {
+              return {
+                error_code: "schedule_snapshot_stale",
+                schedule_id: item.schedule_id,
+                status: "rejected",
+              };
+            }
+            schedule.target_client_ids = scheduleTargetIdsFromSelector(
+              schedule.selector_expression,
+            );
+            schedule.definition_revision =
+              Number(schedule.definition_revision) + 1;
+            if (schedule.trigger_kind === "event") {
+              schedule.event_armed_at = "2026-06-02T10:06:30Z";
+            }
+            schedule.updated_at = "2026-06-02T10:06:30Z";
+            return {
+              schedule,
+              schedule_id: item.schedule_id,
+              status: "updated",
+            };
+          });
+          return jsonResponse({ outcomes });
         }
         const scheduleMatch = pathname.match(/^\/api\/v1\/schedules\/([^/]+)$/);
         if (scheduleMatch && method === "PUT") {
@@ -10678,6 +11321,77 @@ export async function installConsoleApiMock(
           );
           return jsonResponse({ plan: mutablePlan, sync });
         }
+        if (
+          pathname === "/api/v1/tunnel-plans/lifecycle" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            enabled?: boolean;
+            items?: Array<{
+              expected_revision?: number;
+              plan_id?: string;
+            }>;
+          };
+          const enabled = body.enabled === true;
+          const items = body.items ?? [];
+          requests.tunnelPlanEnabledMutations.push({ enabled, items });
+          const syncByClient = new Map<string, unknown>();
+          const outcomes = items.map((item) => {
+            const plan = tunnelPlansFixture.find(
+              (record) => record.id === item.plan_id,
+            );
+            if (!plan) {
+              return {
+                error_code: "tunnel_plan_not_found",
+                plan_id: item.plan_id,
+                status: "rejected",
+              };
+            }
+            if (item.expected_revision !== plan.revision) {
+              return {
+                error_code: "tunnel_plan_snapshot_stale",
+                plan_id: item.plan_id,
+                revision: plan.revision,
+                status: "rejected",
+              };
+            }
+            if (plan.enabled === enabled) {
+              for (const dispatch of setRuntimeTunnelConfig(
+                plan as unknown as Record<string, unknown>,
+                enabled,
+              )) {
+                syncByClient.set(dispatch.client_id, dispatch);
+              }
+              return {
+                plan_id: plan.id,
+                revision: plan.revision,
+                status: "unchanged",
+              };
+            }
+            plan.enabled = enabled;
+            plan.revision += 1;
+            plan.connection_assessment = "automatic";
+            plan.connection_assessment_note = null;
+            plan.connection_assessed_at = null;
+            plan.connection_assessed_by = null;
+            plan.updated_at = "2026-06-02T10:08:00Z";
+            for (const dispatch of setRuntimeTunnelConfig(
+              plan as unknown as Record<string, unknown>,
+              enabled,
+            )) {
+              syncByClient.set(dispatch.client_id, dispatch);
+            }
+            return {
+              plan_id: plan.id,
+              revision: plan.revision,
+              status: "updated",
+            };
+          });
+          return jsonResponse({
+            outcomes,
+            sync: [...syncByClient.values()],
+          });
+        }
         const tunnelPlanEnabledMatch = pathname.match(
           /^\/api\/v1\/tunnel-plans\/([^/]+)\/(enable|disable)$/,
         );
@@ -11151,6 +11865,45 @@ export async function installConsoleApiMock(
             targets,
           });
         }
+        if (pathname === "/api/v1/bulk/resolve-many" && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            items?: Array<{ selector_expression?: string }>;
+          } | null;
+          requests.bulkResolve.push(body);
+          const gate = nextBulkResolveGate;
+          nextBulkResolveGate = null;
+          if (gate) {
+            await gate;
+          }
+          if (bulkResolveDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, bulkResolveDelayMsFixture),
+            );
+          }
+          if (bulkResolveFailureFixture) {
+            return jsonResponse(
+              {
+                error: "target_resolver_unavailable",
+                message: "Target inventory could not be read",
+                status: 503,
+              },
+              503,
+            );
+          }
+          return jsonResponse({
+            outcomes: (body?.items ?? []).map((item) => {
+              const selectorExpression = item.selector_expression?.trim() ?? "";
+              const targets = resolveBulkTargets({
+                selector_expression: selectorExpression,
+              });
+              return {
+                selector_expression: selectorExpression,
+                target_client_ids: targets.map((target) => target.id),
+                target_count: targets.length,
+              };
+            }),
+          });
+        }
         if (
           (pathname === "/api/v1/runtime-config/overrides/bulk/preview" ||
             pathname === "/api/v1/runtime-config/overrides/bulk/apply") &&
@@ -11166,7 +11919,7 @@ export async function installConsoleApiMock(
           const targetIds = body.target_client_ids?.length
             ? body.target_client_ids
             : resolveBulkTargets(body).map((agent) => agent.id);
-          const targets = agentsFixture.filter((agent) =>
+          const targets = visibleAgents().filter((agent) =>
             targetIds.includes(agent.id),
           );
           const noOpClientIds = new Set(runtimeConfigBulkNoOpClientIdsFixture);
@@ -11224,6 +11977,24 @@ export async function installConsoleApiMock(
             })),
           };
           if (pathname.endsWith("/preview")) return jsonResponse(preview);
+          const sync = syncedTargets.map((agent, index) => ({
+            client_id: agent.id,
+            error: null,
+            job_id: `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
+            status: "queued",
+          }));
+          for (const outcome of sync) {
+            createdJobTargets.set(outcome.job_id, [
+              {
+                client_id: outcome.client_id,
+                completed_at: "2026-06-02T10:09:00Z",
+                exit_code: 0,
+                message: "Runtime config synchronized",
+                started_at: "2026-06-02T10:08:59Z",
+                status: "completed",
+              },
+            ]);
+          }
           return jsonResponse({
             overrides: changedTargets.map((agent) => ({
               client_id: agent.id,
@@ -11233,16 +12004,8 @@ export async function installConsoleApiMock(
               updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
             })),
             preview,
-            sync_job_ids: syncedTargets.map(
-              (_, index) =>
-                `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
-            ),
-            sync: syncedTargets.map((agent, index) => ({
-              client_id: agent.id,
-              error: null,
-              job_id: `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
-              status: "queued",
-            })),
+            sync_job_ids: sync.map((outcome) => outcome.job_id),
+            sync,
           });
         }
         if (pathname === "/api/v1/jobs" && method === "POST") {
@@ -11418,6 +12181,29 @@ export async function installConsoleApiMock(
               createdRolloutJobStorageKey,
               JSON.stringify(createdJob),
             );
+          }
+          if (
+            !(jobsFixture as Array<{ id: string }>).some(
+              (job) => job.id === jobId,
+            )
+          ) {
+            jobsFixture.unshift({
+              actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              command_type: commandType,
+              completed_at: null,
+              created_at: "2026-05-31T10:08:55Z",
+              id: jobId,
+              max_timeout_secs:
+                (body as { max_timeout_secs?: number } | null)
+                  ?.max_timeout_secs ?? 30,
+              payload_hash: "1".repeat(64),
+              privileged: Boolean(
+                (body as { privileged?: boolean } | null)?.privileged,
+              ),
+              source_schedule_id: null,
+              status: "running",
+              target_count: targets.length,
+            });
           }
           createdJobTargets.set(jobId, targetRecords);
           if (commandType === "package_update_plan") {
@@ -11843,7 +12629,17 @@ export async function installConsoleApiMock(
       });
     },
     {
-      agentListOverrideFixture: options.agentListOverride ?? null,
+      agentListOverrideFixture:
+        options.runtimeConfigBulkAgentCount === undefined
+          ? (options.agentListOverride ?? null)
+          : Array.from(
+              { length: options.runtimeConfigBulkAgentCount },
+              (_, index) => ({
+                ...agents[0],
+                display_name: `runtime-scale-${String(index + 1).padStart(3, "0")}`,
+                id: `runtime-scale-${String(index + 1).padStart(3, "0")}`,
+              }),
+            ),
       agentDeleteDelayMsFixture: options.agentDeleteDelayMs ?? 0,
       agentDeleteFailedClientIdsFixture:
         options.agentDeleteFailedClientIds ?? [],
@@ -11964,120 +12760,125 @@ export async function installConsoleApiMock(
         options.fleetAlertEventReviewFailure ?? false,
       fleetAlertEventReviewRefreshAddsNewFixture:
         options.fleetAlertEventReviewRefreshAddsNew ?? false,
-      fleetAlertEventsFixture: options.fleetAlertEventReviewSaturated
-        ? saturatedFleetAlertEvents.map((alert, index) =>
-            index === 0
-              ? {
-                  ...alert,
-                  operator_state: "open",
-                  state_actor_id: null,
-                  state_reason: "stale review-feed triage",
-                  state_revision: 1,
-                  state_updated_at: "2026-06-02T09:59:00Z",
-                }
-              : alert,
-          )
-        : [
-            ...fleetAlerts.filter((alert) => alert.record_kind === "event"),
-            ...(options.alertScopedGlobalCoverage
-              ? [scopedGlobalFleetAlert]
-              : []),
-          ],
+      fleetAlertEventsFixture: options.fleetAlertEmptyTruncated
+        ? []
+        : options.fleetAlertEventReviewSaturated
+          ? saturatedFleetAlertEvents.map((alert, index) =>
+              index === 0
+                ? {
+                    ...alert,
+                    operator_state: "open",
+                    state_actor_id: null,
+                    state_reason: "stale review-feed triage",
+                    state_revision: 1,
+                    state_updated_at: "2026-06-02T09:59:00Z",
+                  }
+                : alert,
+            )
+          : [
+              ...fleetAlerts.filter((alert) => alert.record_kind === "event"),
+              ...(options.alertScopedGlobalCoverage
+                ? [scopedGlobalFleetAlert]
+                : []),
+            ],
       fleetAlertsTruncatedFixture:
         options.fleetAlertEventReviewFailure ||
         options.fleetAlertEventReviewSaturated ||
+        options.fleetAlertEmptyTruncated ||
         options.recordPagesSaturated,
       fleetAlertSourceFailureFixture: options.fleetAlertSourceFailure ?? null,
       fleetAlertStateFailureFixture: options.fleetAlertStateFailure ?? false,
       fleetAlertStatesFixture: fleetAlertStates,
-      fleetAlertsFixture: options.fleetAlertEventReviewSaturated
-        ? saturatedFleetAlertEvents.slice(0, 200)
-        : options.alertScopedGlobalCoverage
-          ? [...fleetAlerts, scopedGlobalFleetAlert]
-          : options.alertDomainDuplicateCoverage
-            ? fleetAlerts.filter(
-                (alert) =>
-                  alert.target_id !== "fixture-backup-01" &&
-                  alert.target_id !== "fixture-update-job-01",
-              )
-            : options.alertLifecycleMalformed
-              ? [
-                  {
-                    ...fleetAlerts[7],
-                    id: "fleet-alert-malformed-event-unknown",
-                    lifecycle: {
-                      ...fleetAlerts[7].lifecycle,
-                      state: "unknown",
-                    },
-                    operator_state: "open",
-                    title: "Malformed event lifecycle fixture",
-                  },
-                  {
-                    ...fleetAlerts[5],
-                    id: "fleet-alert-malformed-policy-condition",
-                    lifecycle: {
-                      ...fleetAlerts[5].lifecycle,
-                      last_confirmed_at: "2026-06-01T09:59:00Z",
-                    },
-                    operator_state: "open",
-                    title: "Malformed policy lifecycle fixture",
-                  },
-                ]
-              : options.alertStateCoverage
+      fleetAlertsFixture: options.fleetAlertEmptyTruncated
+        ? []
+        : options.fleetAlertEventReviewSaturated
+          ? saturatedFleetAlertEvents.slice(0, 200)
+          : options.alertScopedGlobalCoverage
+            ? [...fleetAlerts, scopedGlobalFleetAlert]
+            : options.alertDomainDuplicateCoverage
+              ? fleetAlerts.filter(
+                  (alert) =>
+                    alert.target_id !== "fixture-backup-01" &&
+                    alert.target_id !== "fixture-update-job-01",
+                )
+              : options.alertLifecycleMalformed
                 ? [
                     {
-                      ...fleetAlerts[5],
-                      id: "fleet-alert-state-open",
+                      ...fleetAlerts[7],
+                      id: "fleet-alert-malformed-event-unknown",
+                      lifecycle: {
+                        ...fleetAlerts[7].lifecycle,
+                        state: "unknown",
+                      },
                       operator_state: "open",
-                      severity: "warning",
-                      title: "Open daily alert",
+                      title: "Malformed event lifecycle fixture",
                     },
                     {
                       ...fleetAlerts[5],
-                      escalation_level: 1,
-                      id: "fleet-alert-state-escalated",
-                      operator_state: "escalated",
-                      severity: "critical",
-                      title: "Escalated daily alert",
-                    },
-                    {
-                      ...fleetAlerts[5],
-                      id: "fleet-alert-state-muted",
-                      muted_until_unix: 1_900_000_000,
-                      operator_state: "muted",
-                      severity: "critical",
-                      title: "Muted daily alert",
-                    },
-                    {
-                      ...fleetAlerts[4],
-                      id: "fleet-alert-state-acknowledged",
-                      title: "Acknowledged daily alert",
+                      id: "fleet-alert-malformed-policy-condition",
+                      lifecycle: {
+                        ...fleetAlerts[5].lifecycle,
+                        last_confirmed_at: "2026-06-01T09:59:00Z",
+                      },
+                      operator_state: "open",
+                      title: "Malformed policy lifecycle fixture",
                     },
                   ]
-                : options.fleetAlertBulkScale
-                  ? Array.from({ length: 125 }, (_, index) => ({
-                      ...fleetAlerts[0],
-                      id: `fleet-alert-bulk-${String(index).padStart(3, "0")}`,
-                      state_actor_id: null,
-                      state_reason: null,
-                      state_revision: 0,
-                      state_updated_at: null,
-                      target_id: `agent-fra-02:bulk-${index}`,
-                      title: `Bulk alert ${String(index).padStart(3, "0")}`,
-                    }))
-                  : options.recordPagesSaturated
-                    ? [
-                        ...fleetAlerts,
-                        ...Array.from(
-                          { length: 200 - fleetAlerts.length },
-                          (_, index) => ({
-                            ...fleetAlerts[0],
-                            id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
-                            target_id: `agent-fra-02:filler-${index}`,
-                          }),
-                        ),
-                      ]
-                    : fleetAlerts,
+                : options.alertStateCoverage
+                  ? [
+                      {
+                        ...fleetAlerts[5],
+                        id: "fleet-alert-state-open",
+                        operator_state: "open",
+                        severity: "warning",
+                        title: "Open daily alert",
+                      },
+                      {
+                        ...fleetAlerts[5],
+                        escalation_level: 1,
+                        id: "fleet-alert-state-escalated",
+                        operator_state: "escalated",
+                        severity: "critical",
+                        title: "Escalated daily alert",
+                      },
+                      {
+                        ...fleetAlerts[5],
+                        id: "fleet-alert-state-muted",
+                        muted_until_unix: 1_900_000_000,
+                        operator_state: "muted",
+                        severity: "critical",
+                        title: "Muted daily alert",
+                      },
+                      {
+                        ...fleetAlerts[4],
+                        id: "fleet-alert-state-acknowledged",
+                        title: "Acknowledged daily alert",
+                      },
+                    ]
+                  : options.fleetAlertBulkScale
+                    ? Array.from({ length: 125 }, (_, index) => ({
+                        ...fleetAlerts[0],
+                        id: `fleet-alert-bulk-${String(index).padStart(3, "0")}`,
+                        state_actor_id: null,
+                        state_reason: null,
+                        state_revision: 0,
+                        state_updated_at: null,
+                        target_id: `agent-fra-02:bulk-${index}`,
+                        title: `Bulk alert ${String(index).padStart(3, "0")}`,
+                      }))
+                    : options.recordPagesSaturated
+                      ? [
+                          ...fleetAlerts,
+                          ...Array.from(
+                            { length: 200 - fleetAlerts.length },
+                            (_, index) => ({
+                              ...fleetAlerts[0],
+                              id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
+                              target_id: `agent-fra-02:filler-${index}`,
+                            }),
+                          ),
+                        ]
+                      : fleetAlerts,
       policyAlertsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...policyAlerts[0],
@@ -12206,6 +13007,7 @@ export async function installConsoleApiMock(
       ospfUpdatePlansFixture:
         options.ospfUpdatePlansOverride ?? ospfUpdatePlans,
       networkTrendsFixture: networkTrends,
+      accessBulkCoverageFixture: options.accessBulkCoverage ?? false,
       operatorPreferencesFixture: operatorPreferences,
       operatorAuthEventsFixture: options.operatorAuthEventsOverride ?? null,
       operatorRoleOverrideFixture: options.operatorRoleOverride ?? "admin",

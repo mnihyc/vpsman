@@ -138,10 +138,44 @@ pub(crate) struct FleetAlertEventPage {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct FleetAlertEventSyncRequest {
+    #[serde(default)]
+    pub(crate) known_alert_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertEventSyncResponse {
+    pub(crate) head: FleetAlertEventPage,
+    pub(crate) current_items: Vec<FleetAlertView>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ResolveFleetAlertRequest {
     pub(crate) reason: String,
     #[serde(default)]
     pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkResolveFleetAlertItem {
+    pub(crate) alert_id: String,
+    pub(crate) expected_trigger_generation: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkResolveFleetAlertsRequest {
+    pub(crate) items: Vec<BulkResolveFleetAlertItem>,
+    pub(crate) reason: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BulkResolveFleetAlertsResponse {
+    pub(crate) alerts: Vec<FleetAlertView>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -191,6 +225,23 @@ pub(crate) struct UnsuspendAgentRequest {
     pub(crate) confirmed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentSuspensionAction {
+    Suspend,
+    Unsuspend,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkAgentSuspensionRequest {
+    pub(crate) action: AgentSuspensionAction,
+    pub(crate) client_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct AgentSuspensionMutationResponse {
     pub(crate) agent: AgentView,
@@ -200,6 +251,23 @@ pub(crate) struct AgentSuspensionMutationResponse {
     pub(crate) suspended_from_status: Option<String>,
     pub(crate) skipped_unstarted_job_ids: Vec<Uuid>,
     pub(crate) resolved_alert_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkAgentSuspensionOutcome {
+    pub(crate) client_id: String,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<AgentSuspensionMutationResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkAgentSuspensionResponse {
+    pub(crate) outcomes: Vec<BulkAgentSuspensionOutcome>,
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +285,22 @@ pub(crate) struct DeleteAgentRequest {
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkDeleteAgentItem {
+    pub(crate) client_id: String,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkDeleteAgentsRequest {
+    pub(crate) items: Vec<BulkDeleteAgentItem>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DeleteAgentResponse {
     pub(crate) client_id: String,
@@ -224,6 +308,23 @@ pub(crate) struct DeleteAgentResponse {
     pub(crate) deleted_at: String,
     pub(crate) post_commit: Vec<LifecycleOutcomeView>,
     pub(crate) runtime_sync: Vec<RuntimeConfigDispatchView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkDeleteAgentOutcome {
+    pub(crate) client_id: String,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<DeleteAgentResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkDeleteAgentsResponse {
+    pub(crate) outcomes: Vec<BulkDeleteAgentOutcome>,
 }
 
 #[derive(Clone, Debug)]
@@ -443,6 +544,19 @@ pub(crate) struct JobTargetView {
     pub(crate) deadline_at: Option<String>,
     pub(crate) completed_at: Option<String>,
     pub(crate) process_incarnation_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JobTargetStatusBatchItem {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JobTargetStatusBatchRequest {
+    pub(crate) items: Vec<JobTargetStatusBatchItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -812,6 +926,38 @@ pub(crate) struct TunnelPlanMutationResponse {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct BulkTunnelPlanLifecycleItemRequest {
+    pub(crate) plan_id: Uuid,
+    pub(crate) expected_revision: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkTunnelPlanLifecycleRequest {
+    pub(crate) items: Vec<BulkTunnelPlanLifecycleItemRequest>,
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkTunnelPlanLifecycleOutcome {
+    pub(crate) plan_id: Uuid,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkTunnelPlanLifecycleResponse {
+    pub(crate) outcomes: Vec<BulkTunnelPlanLifecycleOutcome>,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TunnelPlanEvidenceClearTargetRequest {
     pub(crate) plan_id: String,
     pub(crate) expected_revision: i64,
@@ -1149,6 +1295,38 @@ pub(crate) struct UpdateScheduleTargetsRequest {
     pub(crate) confirmed: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkUpdateScheduleTargetsItemRequest {
+    pub(crate) schedule_id: Uuid,
+    pub(crate) expected_definition_revision: i64,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkUpdateScheduleTargetsRequest {
+    pub(crate) items: Vec<BulkUpdateScheduleTargetsItemRequest>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkUpdateScheduleTargetsOutcome {
+    pub(crate) schedule_id: Uuid,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) schedule: Option<ScheduleView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkUpdateScheduleTargetsResponse {
+    pub(crate) outcomes: Vec<BulkUpdateScheduleTargetsOutcome>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ScheduleView {
     pub(crate) id: Uuid,
@@ -1355,6 +1533,31 @@ pub(crate) struct BulkResolveResponse {
     pub(crate) target_count: usize,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkResolveManyItem {
+    #[serde(default)]
+    pub(crate) selector_expression: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkResolveManyRequest {
+    pub(crate) items: Vec<BulkResolveManyItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkResolveManyOutcome {
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) target_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkResolveManyResponse {
+    pub(crate) outcomes: Vec<BulkResolveManyOutcome>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WsEvent {
@@ -1370,6 +1573,7 @@ pub(crate) enum WsEvent {
         client_id: String,
         gateway_id: String,
     },
+    FleetStateInvalidated,
     FleetTelemetryInvalidated,
     JobRejected {
         job_id: Uuid,

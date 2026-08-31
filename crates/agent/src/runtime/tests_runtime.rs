@@ -2,6 +2,116 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
+fn gateway_retry_cadence_remains_configured_and_never_counts_down() {
+    for _ in 0..10_000 {
+        assert_eq!(gateway_retry_delay(60), Duration::from_secs(60));
+    }
+    assert_eq!(gateway_retry_delay(0), Duration::from_secs(1));
+    assert_eq!(gateway_retry_delay(3_600), Duration::from_secs(3_600));
+}
+
+#[tokio::test(start_paused = true)]
+async fn gateway_connection_attempt_deadline_covers_a_stalled_handshake() {
+    let attempt = run_gateway_network_phase(10, std::future::pending::<Result<()>>());
+    tokio::pin!(attempt);
+
+    assert!(time::timeout(Duration::ZERO, &mut attempt).await.is_err());
+    time::advance(Duration::from_secs(10)).await;
+    let error = attempt.await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("gateway network phase timed out"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn gateway_address_timeout_preserves_the_next_candidate() {
+    let stalled: SocketAddr = "192.0.2.1:443".parse().unwrap();
+    let working: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+    let attempt = connect_gateway_address_candidates(
+        "gateway.example:443",
+        vec![stalled, working],
+        Duration::from_secs(10),
+        move |addr| async move {
+            if addr == stalled {
+                std::future::pending::<std::io::Result<SocketAddr>>().await
+            } else {
+                Ok(addr)
+            }
+        },
+    );
+    tokio::pin!(attempt);
+
+    assert!(time::timeout(Duration::ZERO, &mut attempt).await.is_err());
+    time::advance(Duration::from_secs(10)).await;
+    assert_eq!(attempt.await.unwrap(), working);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gateway_socket_liveness_configuration_is_supported() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let _accepted = accept.await.unwrap();
+
+    configure_gateway_tcp_liveness(&stream);
+    use std::os::fd::AsRawFd;
+    assert!(gateway_tcp_liveness_option_errors(stream.as_raw_fd()).is_empty());
+    assert_eq!(
+        gateway_tcp_socket_option(&stream, libc::SOL_SOCKET, libc::SO_KEEPALIVE),
+        1
+    );
+    assert_eq!(
+        gateway_tcp_socket_option(&stream, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE),
+        30
+    );
+    assert_eq!(
+        gateway_tcp_socket_option(&stream, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL),
+        10
+    );
+    assert_eq!(
+        gateway_tcp_socket_option(&stream, libc::IPPROTO_TCP, libc::TCP_KEEPCNT),
+        3
+    );
+    assert_eq!(
+        gateway_tcp_socket_option(&stream, libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT),
+        60_000
+    );
+    assert_eq!(gateway_tcp_liveness_option_errors(-1).len(), 5);
+}
+
+#[cfg(target_os = "linux")]
+fn gateway_tcp_socket_option(
+    stream: &TcpStream,
+    level: libc::c_int,
+    option: libc::c_int,
+) -> libc::c_int {
+    use std::os::fd::AsRawFd;
+
+    let mut value = 0;
+    let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+    // SAFETY: value and length are valid writable storage for an integer
+    // socket option and the stream owns a live descriptor for this call.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            level,
+            option,
+            (&mut value as *mut libc::c_int).cast(),
+            &mut length,
+        )
+    };
+    assert_eq!(
+        result,
+        0,
+        "getsockopt failed: {}",
+        std::io::Error::last_os_error()
+    );
+    value
+}
+
+#[test]
 fn ping_targets_bound_telemetry_publish_cadence_to_one_minute() {
     let mut network = vpsman_common::AgentNetworkConfig::default();
     network.ping_targets.push(vpsman_common::AgentPingTarget {

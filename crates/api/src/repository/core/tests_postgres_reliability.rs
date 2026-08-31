@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     str::FromStr,
     sync::Arc,
@@ -329,6 +329,102 @@ async fn postgres_file_transfer_handoff_job_discovery_is_index_bounded() {
     assert_eq!(status_outputs.len(), 1);
     assert_eq!(stdout_sizes, vec![65_536; 128]);
     assert_eq!(stdout_available, vec![true; 128]);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_exact_job_target_status_batch_route_is_pairwise_ordered_and_fail_closed() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let (_operator, headers) = postgres_operator_session(&db.repo, "job-target-batch-admin").await;
+    let first_job = Uuid::new_v4();
+    let second_job = Uuid::new_v4();
+    let first_incarnation = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, status, target_count, payload_hash, request_fingerprint
+        ) VALUES
+            ($1, 'shell_argv', 'running', 2, 'pairwise-payload-1', $3),
+            ($2, 'shell_argv', 'running', 1, 'pairwise-payload-2', $4)
+        "#,
+    )
+    .bind(first_job)
+    .bind(second_job)
+    .bind(format!("pairwise-request-{first_job}"))
+    .bind(format!("pairwise-request-{second_job}"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO job_targets (
+            job_id, client_id, status, message, exit_code,
+            started_at, completed_at, process_incarnation_id
+        ) VALUES
+            ($1, 'pair-a', 'running', 'first running', NULL, now(), NULL, $3),
+            ($1, 'pair-b', 'completed', 'first complete', 0, now(), now(), NULL),
+            ($2, 'pair-a', 'failed', 'second failed', 17, now(), now(), NULL)
+        "#,
+    )
+    .bind(first_job)
+    .bind(second_job)
+    .bind(first_incarnation)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let router = crate::routes::build_router(postgres_app_state(&db));
+    let authorization = headers.get(AUTHORIZATION).unwrap().clone();
+    let request = |items: Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/job-targets/statuses")
+            .header(AUTHORIZATION, authorization.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"items": items}).to_string()))
+            .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(request(json!([
+            {"job_id": second_job, "client_id": "pair-a"},
+            {"job_id": first_job, "client_id": "pair-b"},
+            {"job_id": first_job, "client_id": "pair-a"}
+        ])))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let targets = response.as_array().unwrap();
+    assert_eq!(targets.len(), 3);
+    assert_eq!(targets[0]["job_id"], second_job.to_string());
+    assert_eq!(targets[0]["client_id"], "pair-a");
+    assert_eq!(targets[0]["status"], "failed");
+    assert_eq!(targets[0]["exit_code"], 17);
+    assert_eq!(targets[1]["job_id"], first_job.to_string());
+    assert_eq!(targets[1]["client_id"], "pair-b");
+    assert_eq!(targets[1]["status"], "completed");
+    assert_eq!(targets[2]["job_id"], first_job.to_string());
+    assert_eq!(targets[2]["client_id"], "pair-a");
+    assert_eq!(
+        targets[2]["process_incarnation_id"],
+        first_incarnation.to_string()
+    );
+
+    let missing = router
+        .oneshot(request(json!([
+            {"job_id": first_job, "client_id": "pair-a"},
+            {"job_id": second_job, "client_id": "pair-b"}
+        ])))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing: Value =
+        serde_json::from_slice(&to_bytes(missing.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(missing["error"], "job_target_not_found");
 
     db.cleanup().await;
 }
@@ -2707,6 +2803,297 @@ async fn wait_for_telemetry_policy_activation_work(
 }
 
 #[tokio::test]
+async fn postgres_current_occurrence_sync_reconciles_known_ids_and_newest_head_together() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "current-occurrence-sync";
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    let rule_id = insert_typed_policy_rule_fixture(
+        &db.pool,
+        client_id,
+        "occurrence",
+        "backup.failure",
+        "natural_key",
+        "evidence.status = execution_failed",
+        None,
+        None,
+        Some(json!({"kind":"elapsed_since_trigger","seconds":3600})),
+        "backup",
+    )
+    .await;
+    for suffix in ["a", "b", "c"] {
+        record_test_policy_fact(
+            &db.pool,
+            crate::repository_policy_lifecycle::PolicyEvidenceFact {
+                source_kind: "backup.failure".to_string(),
+                source_event_id: format!("current-occurrence-sync-{suffix}"),
+                fact_kind: AlertPolicyRuleKind::Occurrence,
+                natural_key: format!("backup-{suffix}"),
+                confirmation_bucket_key: format!("backup-{suffix}"),
+                subject_client_id: Some(client_id.to_string()),
+                target_kind: "backup_request".to_string(),
+                target_id: format!("backup-{suffix}"),
+                source_status: "execution_failed".to_string(),
+                complete: true,
+                subject_snapshot: json!({}),
+                payload: json!({
+                    "status":"execution_failed",
+                    "backup_request_id":format!("backup-{suffix}"),
+                    "client_id":client_id,
+                }),
+                observed_at: Utc::now(),
+                state_started_at: None,
+                causation_id: None,
+                schedule_lineage: Vec::new(),
+            },
+        )
+        .await;
+    }
+    let episodes = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT public_id, trigger_generation
+        FROM alert_episodes
+        WHERE policy_rule_id=$1 AND resolved_at IS NULL
+        ORDER BY triggered_at DESC, id DESC
+        "#,
+    )
+    .bind(rule_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(episodes.len(), 3);
+    let known_ids = episodes
+        .iter()
+        .map(|(public_id, _)| public_id.clone())
+        .collect::<Vec<_>>();
+
+    let first = db
+        .repo
+        .sync_unresolved_operational_alert_events(&known_ids, 2)
+        .await
+        .unwrap();
+    assert_eq!(first.head.len(), 2);
+    assert_eq!(first.current.len(), 3);
+    assert_eq!(
+        first
+            .current
+            .iter()
+            .map(|episode| episode.public_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        known_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+    );
+
+    let resolved_id = episodes[1].0.clone();
+    let operator = postgres_network_operator(&db.repo).await;
+    db.repo
+        .resolve_operational_alert_events(
+            &[(resolved_id.clone(), Some(episodes[1].1))],
+            "Reviewed external resolution",
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let second = db
+        .repo
+        .sync_unresolved_operational_alert_events(&known_ids, 2)
+        .await
+        .unwrap();
+    assert_eq!(second.head.len(), 2);
+    assert_eq!(second.current.len(), 2);
+    assert!(second
+        .current
+        .iter()
+        .all(|episode| episode.public_id != resolved_id));
+    assert!(second
+        .head
+        .iter()
+        .all(|episode| episode.public_id != resolved_id));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_operator_occurrence_resolution_is_atomic_audited_and_idempotent() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "operator-resolution-batch";
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    let rule_id = insert_typed_policy_rule_fixture(
+        &db.pool,
+        client_id,
+        "occurrence",
+        "backup.failure",
+        "natural_key",
+        "evidence.status = execution_failed",
+        None,
+        None,
+        Some(json!({"kind":"elapsed_since_trigger","seconds":3600})),
+        "backup",
+    )
+    .await;
+    for suffix in ["a", "b"] {
+        record_test_policy_fact(
+            &db.pool,
+            crate::repository_policy_lifecycle::PolicyEvidenceFact {
+                source_kind: "backup.failure".to_string(),
+                source_event_id: format!("operator-resolution-{suffix}"),
+                fact_kind: AlertPolicyRuleKind::Occurrence,
+                natural_key: format!("backup-{suffix}"),
+                confirmation_bucket_key: format!("backup-{suffix}"),
+                subject_client_id: Some(client_id.to_string()),
+                target_kind: "backup_request".to_string(),
+                target_id: format!("backup-{suffix}"),
+                source_status: "execution_failed".to_string(),
+                complete: true,
+                subject_snapshot: json!({}),
+                payload: json!({
+                    "status":"execution_failed",
+                    "backup_request_id":format!("backup-{suffix}"),
+                    "client_id":client_id,
+                }),
+                observed_at: Utc::now(),
+                state_started_at: None,
+                causation_id: None,
+                schedule_lineage: Vec::new(),
+            },
+        )
+        .await;
+    }
+    let episodes = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT public_id, trigger_generation
+        FROM alert_episodes
+        WHERE policy_rule_id=$1 AND resolved_at IS NULL
+        ORDER BY public_id COLLATE "C"
+        "#,
+    )
+    .bind(rule_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(episodes.len(), 2);
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut stale_items = episodes
+        .iter()
+        .map(|(public_id, generation)| (public_id.clone(), Some(*generation)))
+        .collect::<Vec<_>>();
+    stale_items[1].1 = Some(stale_items[1].1.unwrap() + 1);
+    let stale = db
+        .repo
+        .resolve_operational_alert_events(&stale_items, "Reviewed incident batch", &operator)
+        .await
+        .unwrap_err();
+    assert!(
+        stale
+            .to_string()
+            .contains("fleet_alert_resolution_snapshot_stale"),
+        "{stale:#}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM alert_episodes WHERE policy_rule_id=$1 AND resolved_at IS NOT NULL",
+        )
+        .bind(rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "a stale member must roll the whole reviewed batch back"
+    );
+
+    let items = episodes
+        .iter()
+        .map(|(public_id, generation)| (public_id.clone(), Some(*generation)))
+        .collect::<Vec<_>>();
+    let (batch_id, resolved) = db
+        .repo
+        .resolve_operational_alert_events(&items, "Reviewed incident batch", &operator)
+        .await
+        .unwrap();
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved.iter().all(|episode| {
+        episode.lifecycle_state == "resolved"
+            && episode.resolution_reason.as_deref() == Some("operator_resolved")
+            && episode.resolution_note.as_deref() == Some("Reviewed incident batch")
+            && episode.resolution_actor_id == Some(operator.operator.id)
+    }));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM alert_policy_evaluation_states
+            WHERE policy_rule_id=$1 AND active_episode_id IS NULL
+              AND truth_state='not_matched'
+            "#,
+        )
+        .bind(rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM alert_lifecycle_events event
+            JOIN alert_episodes episode ON episode.id=event.episode_id
+            WHERE episode.policy_rule_id=$1 AND event.edge_kind='alert.resolved'
+            "#,
+        )
+        .bind(rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    let audits = sqlx::query_as::<_, (String, i64, String)>(
+        r#"
+        SELECT metadata->>'batch_id', (metadata->>'batch_size')::bigint,
+               metadata->>'result'
+        FROM audit_logs
+        WHERE action='fleet_alert.lifecycle_resolved'
+        ORDER BY target
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audits,
+        vec![
+            (batch_id.to_string(), 2, "succeeded".to_string()),
+            (batch_id.to_string(), 2, "succeeded".to_string()),
+        ]
+    );
+
+    let (_, retried) = db
+        .repo
+        .resolve_operational_alert_events(&items, "Reviewed incident batch", &operator)
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action='fleet_alert.lifecycle_resolved'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2,
+        "an exact committed retry must not duplicate lifecycle evidence"
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_occurrence_count_windows_use_db_acceptance_not_source_clock() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -4288,10 +4675,13 @@ use crate::{
     model_agent_updates::CreateAgentUpdateReleaseRequest,
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
+        FleetAlertNotificationChannelBulkAction, FleetAlertNotificationChannelBulkItem,
+        FleetAlertNotificationChannelBulkRequest,
     },
     model_alert_policies::{
         AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
-        CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyDryRunRequest,
+        CreateFleetAlertPolicyRequest, FleetAlertPolicyBulkAction, FleetAlertPolicyBulkItem,
+        FleetAlertPolicyBulkRequest, NetworkRateInterfaceSelection, PolicyDryRunRequest,
         PolicyRuleRequest, VpsRuleQuery, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
         VpsRulesDryRunRequest, VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_PRODUCT_NAME,
         VPS_RULE_KEY_TRAFFIC_RESET_DAY,
@@ -4308,7 +4698,8 @@ use crate::{
     },
     model_terminal::TerminalSessionView,
     model_webhook_rules::{
-        CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate, WebhookRuleDispatchRequest,
+        CreateWebhookRuleRequest, WebhookRuleBulkAction, WebhookRuleBulkItem,
+        WebhookRuleBulkRequest, WebhookRuleDeliveryCandidate, WebhookRuleDispatchRequest,
     },
     repository::Repository,
     repository_alert_policies::{
@@ -4321,6 +4712,7 @@ use crate::{
         enqueue_target_terminal_event_in_tx,
         finish_job_in_tx_if_all_targets_terminal_and_enqueue_event,
     },
+    repository_network::{TunnelPlanLifecycleUpdate, TunnelPlanLifecycleUpdateResult},
     repository_network_observations::NetworkObservationFilter,
     repository_network_traffic_import::{
         ensure_postgres_vnstat_interfaces_admitted, load_postgres_import_boundary_samples,
@@ -4662,6 +5054,501 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
         .await
         .unwrap();
     assert!(webhook_deliveries.is_empty());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_alert_configuration_bulk_mutations_are_ordered_and_atomic() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let mut channels = Vec::new();
+    for suffix in ["one", "two"] {
+        channels.push(
+            db.repo
+                .upsert_fleet_alert_notification_channel(
+                    &CreateFleetAlertNotificationChannelRequest {
+                        id: Some(Uuid::new_v4()),
+                        name: format!("bulk-channel-{suffix}"),
+                        scope_kind: "global".to_string(),
+                        scope_value: None,
+                        min_severity: Some("warning".to_string()),
+                        categories: Some(vec!["agent_status".to_string()]),
+                        operator_states: Some(vec!["open".to_string()]),
+                        delivery_kind: "webhook".to_string(),
+                        target: format!("https://www.cloudflare.com/bulk-channel-{suffix}"),
+                        cooldown_secs: Some(60),
+                        enabled: Some(true),
+                        notes: None,
+                        confirmed: true,
+                    },
+                    &operator,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let channel_disable = FleetAlertNotificationChannelBulkRequest {
+        action: FleetAlertNotificationChannelBulkAction::Disable,
+        confirmed: true,
+        items: channels
+            .iter()
+            .rev()
+            .map(|channel| FleetAlertNotificationChannelBulkItem {
+                id: channel.id,
+                reviewed_name: channel.name.clone(),
+                expected_updated_at: channel.updated_at.clone(),
+            })
+            .collect(),
+    };
+    let channel_outcome = db
+        .repo
+        .bulk_mutate_fleet_alert_notification_channels(&channel_disable, &operator)
+        .await
+        .unwrap();
+    assert_eq!(
+        channel_outcome
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.id)
+            .collect::<Vec<_>>(),
+        channel_disable
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>()
+    );
+    for (outcome, reviewed) in channel_outcome.outcomes.iter().zip(&channel_disable.items) {
+        let record = outcome
+            .record
+            .as_ref()
+            .expect("a committed channel state change must return its exact record");
+        assert_eq!(record.id, reviewed.id);
+        assert_eq!(record.name, reviewed.reviewed_name);
+        assert!(!record.enabled);
+        assert_ne!(record.updated_at, reviewed.expected_updated_at);
+    }
+    let current_channels = db
+        .repo
+        .list_fleet_alert_notification_channels(100, None, None, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|channel| channels.iter().any(|created| created.id == channel.id))
+        .map(|channel| (channel.id, channel))
+        .collect::<HashMap<_, _>>();
+    assert!(current_channels.values().all(|channel| !channel.enabled));
+    let stale_channel_enable = FleetAlertNotificationChannelBulkRequest {
+        action: FleetAlertNotificationChannelBulkAction::Enable,
+        confirmed: true,
+        items: channel_disable
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| FleetAlertNotificationChannelBulkItem {
+                id: item.id,
+                reviewed_name: item.reviewed_name.clone(),
+                expected_updated_at: if index == 0 {
+                    current_channels[&item.id].updated_at.clone()
+                } else {
+                    item.expected_updated_at.clone()
+                },
+            })
+            .collect(),
+    };
+    assert!(db
+        .repo
+        .bulk_mutate_fleet_alert_notification_channels(&stale_channel_enable, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("fleet_alert_notification_channel_bulk_review_stale"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fleet_alert_notification_channels WHERE id=ANY($1::uuid[]) AND enabled",
+        )
+        .bind(channels.iter().map(|channel| channel.id).collect::<Vec<_>>())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "one stale channel must roll back the complete reviewed batch"
+    );
+
+    let mut webhook_rules = Vec::new();
+    for suffix in ["one", "two"] {
+        webhook_rules.push(
+            db.repo
+                .upsert_webhook_rule(
+                    &CreateWebhookRuleRequest {
+                        id: Some(Uuid::new_v4()),
+                        name: format!("bulk-webhook-{suffix}"),
+                        enabled: true,
+                        expression: if suffix == "two" {
+                            "interval.1min && vps.rules:traffic.reset_day >= 1".to_string()
+                        } else {
+                            "interval.1min".to_string()
+                        },
+                        target: format!("https://www.cloudflare.com/bulk-webhook-{suffix}"),
+                        body_template: "{event.kind}".to_string(),
+                        signing_secret: Some(format!("secret-{suffix}")),
+                        clear_signing_secret: false,
+                        cooldown_secs: Some(60),
+                        notes: None,
+                        confirmed: true,
+                    },
+                    &operator,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let webhook_disable = WebhookRuleBulkRequest {
+        action: WebhookRuleBulkAction::Disable,
+        confirmed: true,
+        items: webhook_rules
+            .iter()
+            .rev()
+            .map(|rule| WebhookRuleBulkItem {
+                id: rule.id,
+                reviewed_name: rule.name.clone(),
+                expected_updated_at: rule.updated_at.clone(),
+            })
+            .collect(),
+    };
+    let scope_error = db
+        .repo
+        .bulk_mutate_webhook_rules(&webhook_disable, &operator, false)
+        .await
+        .unwrap_err();
+    assert!(scope_error
+        .to_string()
+        .contains("vps_rule_selector_scope_required"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_rules WHERE id=ANY($1::uuid[]) AND enabled",
+        )
+        .bind(webhook_rules.iter().map(|rule| rule.id).collect::<Vec<_>>())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2,
+        "a missing VPS-rule read scope must reject the complete reviewed batch"
+    );
+    let webhook_outcome = db
+        .repo
+        .bulk_mutate_webhook_rules(&webhook_disable, &operator, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        webhook_outcome
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.id)
+            .collect::<Vec<_>>(),
+        webhook_disable
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>()
+    );
+    for (outcome, reviewed) in webhook_outcome.outcomes.iter().zip(&webhook_disable.items) {
+        let record = outcome
+            .record
+            .as_ref()
+            .expect("a committed webhook state change must return its exact record");
+        assert_eq!(record.id, reviewed.id);
+        assert_eq!(record.name, reviewed.reviewed_name);
+        assert!(!record.enabled);
+        assert!(record.signing_secret_set);
+        assert_ne!(record.updated_at, reviewed.expected_updated_at);
+    }
+    let serialized_webhooks = serde_json::to_value(&webhook_outcome).unwrap();
+    for outcome in serialized_webhooks["outcomes"].as_array().unwrap() {
+        let record = outcome["record"].as_object().unwrap();
+        assert!(
+            !record.contains_key("signing_secret"),
+            "exact mutation responses must never serialize webhook secrets"
+        );
+        assert_eq!(record.get("signing_secret_set"), Some(&json!(true)));
+    }
+    let current_webhooks = db
+        .repo
+        .list_webhook_rules(100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|rule| webhook_rules.iter().any(|created| created.id == rule.id))
+        .map(|rule| (rule.id, rule))
+        .collect::<HashMap<_, _>>();
+    assert!(current_webhooks.values().all(|rule| !rule.enabled));
+    assert!(current_webhooks
+        .values()
+        .all(|rule| rule.signing_secret_set));
+    let stale_webhook_enable = WebhookRuleBulkRequest {
+        action: WebhookRuleBulkAction::Enable,
+        confirmed: true,
+        items: webhook_disable
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| WebhookRuleBulkItem {
+                id: item.id,
+                reviewed_name: item.reviewed_name.clone(),
+                expected_updated_at: if index == 0 {
+                    current_webhooks[&item.id].updated_at.clone()
+                } else {
+                    item.expected_updated_at.clone()
+                },
+            })
+            .collect(),
+    };
+    assert!(db
+        .repo
+        .bulk_mutate_webhook_rules(&stale_webhook_enable, &operator, true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("webhook_rule_bulk_review_stale"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_rules WHERE id=ANY($1::uuid[]) AND enabled",
+        )
+        .bind(webhook_rules.iter().map(|rule| rule.id).collect::<Vec<_>>())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "one stale webhook must roll back the complete reviewed batch"
+    );
+
+    let channel_delete = FleetAlertNotificationChannelBulkRequest {
+        action: FleetAlertNotificationChannelBulkAction::Delete,
+        confirmed: true,
+        items: channel_disable
+            .items
+            .iter()
+            .map(|item| FleetAlertNotificationChannelBulkItem {
+                id: item.id,
+                reviewed_name: item.reviewed_name.clone(),
+                expected_updated_at: current_channels[&item.id].updated_at.clone(),
+            })
+            .collect(),
+    };
+    assert!(db
+        .repo
+        .bulk_mutate_fleet_alert_notification_channels(&channel_delete, &operator)
+        .await
+        .unwrap()
+        .outcomes
+        .iter()
+        .all(|outcome| outcome.result == "deleted"));
+    let webhook_delete = WebhookRuleBulkRequest {
+        action: WebhookRuleBulkAction::Delete,
+        confirmed: true,
+        items: webhook_disable
+            .items
+            .iter()
+            .map(|item| WebhookRuleBulkItem {
+                id: item.id,
+                reviewed_name: item.reviewed_name.clone(),
+                expected_updated_at: current_webhooks[&item.id].updated_at.clone(),
+            })
+            .collect(),
+    };
+    assert!(db
+        .repo
+        .bulk_mutate_webhook_rules(&webhook_delete, &operator, true)
+        .await
+        .unwrap()
+        .outcomes
+        .iter()
+        .all(|outcome| outcome.result == "deleted"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT count(*) FROM fleet_alert_notification_channels WHERE id=ANY($1::uuid[])) + (SELECT count(*) FROM webhook_rules WHERE id=ANY($2::uuid[]))",
+        )
+        .bind(channels.iter().map(|channel| channel.id).collect::<Vec<_>>())
+        .bind(webhook_rules.iter().map(|rule| rule.id).collect::<Vec<_>>())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    insert_client(&db.pool, "bulk-policy-summary-client", None).await;
+    let mut policies = Vec::new();
+    for suffix in ["one", "two"] {
+        policies.push(
+            db.repo
+                .upsert_fleet_alert_policy(
+                    &CreateFleetAlertPolicyRequest {
+                        id: None,
+                        name: format!("bulk-policy-{suffix}"),
+                        enabled: false,
+                        selector_expression: "*".to_string(),
+                        rules: vec![postgres_backup_failure_rule_request(None, "warning")],
+                        notes: None,
+                        confirmed: true,
+                        preview_hash: None,
+                    },
+                    &operator,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let policy_enable = FleetAlertPolicyBulkRequest {
+        action: FleetAlertPolicyBulkAction::Enable,
+        confirmed: true,
+        items: policies
+            .iter()
+            .rev()
+            .map(|policy| FleetAlertPolicyBulkItem {
+                id: policy.id,
+                reviewed_name: policy.name.clone(),
+                expected_updated_at: policy.updated_at.clone(),
+            })
+            .collect(),
+    };
+    let policy_outcome = db
+        .repo
+        .bulk_mutate_fleet_alert_policies(&policy_enable, &operator, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        policy_outcome
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.id)
+            .collect::<Vec<_>>(),
+        policy_enable
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>()
+    );
+    for (outcome, reviewed) in policy_outcome.outcomes.iter().zip(&policy_enable.items) {
+        let record = outcome
+            .record
+            .as_ref()
+            .expect("a committed policy state change must return its exact policy and rules");
+        assert_eq!(record.id, reviewed.id);
+        assert_eq!(record.name, reviewed.reviewed_name);
+        assert!(record.enabled);
+        assert_ne!(record.updated_at, reviewed.expected_updated_at);
+        assert_eq!(record.rules.len(), 1);
+        let previous = policies
+            .iter()
+            .find(|policy| policy.id == record.id)
+            .unwrap();
+        assert_eq!(
+            record.rules[0].rule_version,
+            previous.rules[0].rule_version + 1
+        );
+    }
+    let mut current_policies = HashMap::new();
+    for policy in &policies {
+        let current = db
+            .repo
+            .get_fleet_alert_policy(policy.id, true)
+            .await
+            .unwrap();
+        assert!(current.enabled);
+        assert_eq!(
+            current.rules[0].rule_version,
+            policy.rules[0].rule_version + 1
+        );
+        let returned = policy_outcome
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.id == current.id)
+            .and_then(|outcome| outcome.record.as_ref())
+            .unwrap();
+        assert_eq!(returned.matched_vps_count, current.matched_vps_count);
+        assert_eq!(returned.matched_vps_count, 1);
+        assert_eq!(returned.active_info_count, current.active_info_count);
+        assert_eq!(returned.active_warning_count, current.active_warning_count);
+        assert_eq!(
+            returned.active_critical_count,
+            current.active_critical_count
+        );
+        assert_eq!(returned.incomplete_vps_count, current.incomplete_vps_count);
+        assert_eq!(returned.last_evaluated_at, current.last_evaluated_at);
+        current_policies.insert(current.id, current);
+    }
+    let stale_policy_disable = FleetAlertPolicyBulkRequest {
+        action: FleetAlertPolicyBulkAction::Disable,
+        confirmed: true,
+        items: policy_enable
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| FleetAlertPolicyBulkItem {
+                id: item.id,
+                reviewed_name: item.reviewed_name.clone(),
+                expected_updated_at: if index == 0 {
+                    current_policies[&item.id].updated_at.clone()
+                } else {
+                    item.expected_updated_at.clone()
+                },
+            })
+            .collect(),
+    };
+    assert!(db
+        .repo
+        .bulk_mutate_fleet_alert_policies(&stale_policy_disable, &operator, true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("fleet_alert_policy_bulk_review_stale"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_groups WHERE id=ANY($1::uuid[]) AND enabled",
+        )
+        .bind(policies.iter().map(|policy| policy.id).collect::<Vec<_>>())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2,
+        "one stale policy must roll back the complete reviewed lifecycle batch"
+    );
+
+    let policy_delete = FleetAlertPolicyBulkRequest {
+        action: FleetAlertPolicyBulkAction::Delete,
+        confirmed: true,
+        items: policy_enable
+            .items
+            .iter()
+            .map(|item| FleetAlertPolicyBulkItem {
+                id: item.id,
+                reviewed_name: item.reviewed_name.clone(),
+                expected_updated_at: current_policies[&item.id].updated_at.clone(),
+            })
+            .collect(),
+    };
+    let deleted = db
+        .repo
+        .bulk_mutate_fleet_alert_policies(&policy_delete, &operator, true)
+        .await
+        .unwrap();
+    assert!(deleted
+        .outcomes
+        .iter()
+        .all(|outcome| outcome.result == "deleted"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_groups WHERE id=ANY($1::uuid[])",
+        )
+        .bind(policies.iter().map(|policy| policy.id).collect::<Vec<_>>())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
 
     db.cleanup().await;
 }
@@ -7270,6 +8157,88 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
         .await
         .unwrap();
     assert!(edited_empty.target_client_ids.is_empty());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_bulk_schedule_target_updates_preserve_order_and_isolate_stale_items() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    insert_client(&db.pool, "schedule-bulk-a", None).await;
+    insert_client(&db.pool, "schedule-bulk-b", None).await;
+    let first = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("schedule-bulk-first", "schedule-bulk-a"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let second = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("schedule-bulk-second", "schedule-bulk-a"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let updates = vec![
+        crate::repository_schedules::ScheduleTargetBatchUpdate {
+            schedule_id: first.id,
+            target_client_ids: vec!["schedule-bulk-b".to_string()],
+            expectation: crate::repository_schedules::ScheduleSnapshotExpectation {
+                selector_expression: first.selector_expression.clone(),
+                target_client_ids: first.target_client_ids.clone(),
+                definition_revision: first.definition_revision,
+            },
+        },
+        crate::repository_schedules::ScheduleTargetBatchUpdate {
+            schedule_id: second.id,
+            target_client_ids: vec!["schedule-bulk-b".to_string()],
+            expectation: crate::repository_schedules::ScheduleSnapshotExpectation {
+                selector_expression: second.selector_expression.clone(),
+                target_client_ids: second.target_client_ids.clone(),
+                definition_revision: second.definition_revision + 1,
+            },
+        },
+    ];
+
+    let outcomes = db
+        .repo
+        .update_schedule_targets_bulk(&updates, &operator)
+        .await
+        .unwrap();
+    match &outcomes[0] {
+        crate::repository_schedules::ScheduleTargetBatchUpdateResult::Updated(schedule) => {
+            assert_eq!(schedule.id, first.id);
+            assert_eq!(schedule.target_client_ids, vec!["schedule-bulk-b"]);
+        }
+        outcome => panic!("unexpected first outcome: {outcome:?}"),
+    }
+    match &outcomes[1] {
+        crate::repository_schedules::ScheduleTargetBatchUpdateResult::Rejected {
+            schedule_id,
+            error_code,
+        } => {
+            assert_eq!(*schedule_id, second.id);
+            assert_eq!(*error_code, "schedule_snapshot_stale");
+        }
+        outcome => panic!("unexpected second outcome: {outcome:?}"),
+    }
+    let unchanged = db.repo.schedule_by_id(second.id).await.unwrap();
+    assert_eq!(unchanged.target_client_ids, vec!["schedule-bulk-a"]);
+    assert_eq!(unchanged.definition_revision, second.definition_revision);
+    let audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_logs WHERE action = 'schedule.targets_updated' AND target = $1",
+    )
+    .bind(format!("schedule:{}", first.id))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1);
 
     db.cleanup().await;
 }
@@ -10026,6 +10995,266 @@ async fn postgres_telemetry_client_owner_orders_liveness_before_suspension() {
 
     record_pool.close().await;
     suspension_pool.close().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_batch_suspension_preserves_order_and_commits_valid_peers() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["batch-suspend-a", "batch-suspend-b", "batch-suspend-online"] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+    let mut trigger = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM clients WHERE id='batch-suspend-a' FOR UPDATE")
+        .fetch_one(&mut *trigger)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE clients SET status='revoked' WHERE id='batch-suspend-a'")
+        .execute(&mut *trigger)
+        .await
+        .unwrap();
+    crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
+        &mut trigger,
+        "batch-suspend-a",
+        "revoked",
+    )
+    .await
+    .unwrap();
+    trigger.commit().await.unwrap();
+    let unresolved_before = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM alert_episodes WHERE client_id='batch-suspend-a' AND resolved_at IS NULL",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(unresolved_before > 0);
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET status=CASE id
+                WHEN 'batch-suspend-a' THEN 'offline'
+                WHEN 'batch-suspend-b' THEN 'suspended'
+                ELSE status
+            END,
+            suspended_at=CASE WHEN id='batch-suspend-b' THEN now() ELSE NULL END,
+            suspended_from_status=CASE WHEN id='batch-suspend-b' THEN 'offline' ELSE NULL END
+        WHERE id=ANY($1)
+        "#,
+    )
+    .bind(vec!["batch-suspend-a", "batch-suspend-b"])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let operator = postgres_network_operator(&db.repo).await;
+    let requested = vec![
+        "batch-suspend-missing".to_string(),
+        "batch-suspend-a".to_string(),
+        "batch-suspend-online".to_string(),
+        "batch-suspend-b".to_string(),
+    ];
+    let outcomes = db
+        .repo
+        .mutate_agent_suspensions(
+            crate::model::AgentSuspensionAction::Suspend,
+            &requested,
+            Some("batch maintenance"),
+            &operator,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), requested.len());
+    for (outcome, expected_client_id) in outcomes.iter().zip(&requested) {
+        let client_id = match outcome {
+            crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied {
+                client_id,
+                ..
+            }
+            | crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+                client_id,
+                ..
+            } => client_id,
+        };
+        assert_eq!(client_id, expected_client_id);
+    }
+    assert!(matches!(
+        &outcomes[0],
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+            code: "agent_not_found",
+            ..
+        }
+    ));
+    let crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied { mutation, .. } =
+        &outcomes[1]
+    else {
+        panic!("eligible client was not suspended")
+    };
+    assert_eq!(
+        mutation.resolved_alert_count, unresolved_before as usize,
+        "set-based suppression must return the exact per-client edge count"
+    );
+    assert!(matches!(
+        &outcomes[2],
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+            code: "agent_suspend_online",
+            ..
+        }
+    ));
+    assert!(matches!(
+        &outcomes[3],
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+            code: "agent_already_suspended",
+            ..
+        }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM clients WHERE id='batch-suspend-a'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "suspended"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM audit_logs WHERE action='agent.suspended' AND target='client:batch-suspend-a'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM client_status_history WHERE client_id='batch-suspend-a' AND reason='operator_suspended'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM alert_episodes WHERE client_id='batch-suspend-a' AND resolved_at IS NULL",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM alert_episodes WHERE client_id='batch-suspend-a' AND evidence ? '_vpsman_client_suspension'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        unresolved_before
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_batch_delete_preserves_order_and_commits_valid_peers() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "batch-delete-valid", Some(Uuid::new_v4())).await;
+    insert_client(&db.pool, "batch-delete-blocked", Some(Uuid::new_v4())).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    sqlx::query(
+        r#"
+        INSERT INTO port_forward_runtime_state (client_id, snapshot, observed_at)
+        VALUES ($1, $2, now())
+        "#,
+    )
+    .bind("batch-delete-blocked")
+    .bind(SqlJson(PortForwardRuntimeSnapshot {
+        status: PortForwardRuntimeStatus::Applied,
+        owned_table_present: Some(true),
+        observed_unix: crate::unix_now(),
+        ..PortForwardRuntimeSnapshot::default()
+    }))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let requested = vec![
+        "batch-delete-missing".to_string(),
+        "batch-delete-blocked".to_string(),
+        "batch-delete-valid".to_string(),
+    ];
+    let outcomes = db
+        .repo
+        .delete_agents(&requested, Some("batch retirement"), &operator)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), requested.len());
+    for (outcome, expected_client_id) in outcomes.iter().zip(&requested) {
+        let client_id = match outcome {
+            crate::repository_inventory::DeleteAgentRepositoryOutcome::Applied(result) => {
+                &result.client_id
+            }
+            crate::repository_inventory::DeleteAgentRepositoryOutcome::Rejected {
+                client_id,
+                ..
+            } => client_id,
+        };
+        assert_eq!(client_id, expected_client_id);
+    }
+    assert!(matches!(
+        &outcomes[0],
+        crate::repository_inventory::DeleteAgentRepositoryOutcome::Rejected {
+            code: "agent_not_found",
+            ..
+        }
+    ));
+    assert!(matches!(
+        &outcomes[1],
+        crate::repository_inventory::DeleteAgentRepositoryOutcome::Rejected {
+            code: "agent_port_forwarding_cleanup_required",
+            ..
+        }
+    ));
+    assert!(matches!(
+        &outcomes[2],
+        crate::repository_inventory::DeleteAgentRepositoryOutcome::Applied(_)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM clients WHERE id='batch-delete-valid'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        "deleted"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM clients WHERE id='batch-delete-blocked'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "online"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM audit_logs WHERE action='agent.deleted' AND target='client:batch-delete-valid'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM client_key_revocations WHERE client_id='batch-delete-valid'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
     db.cleanup().await;
 }
 
@@ -13905,7 +15134,8 @@ async fn postgres_product_name_uses_the_fresh_canonical_rule_schema() {
         .unwrap();
     assert_eq!(preview.changed_row_count, 1);
     assert_eq!(preview.changes[0].after.as_deref(), Some("Storage-Box 4"));
-    db.repo
+    let committed = db
+        .repo
         .bulk_upsert_vps_rules(
             &VpsRulesBulkUpsertRequest {
                 selector_expression: format!("id:{client_id}"),
@@ -13917,6 +15147,13 @@ async fn postgres_product_name_uses_the_fresh_canonical_rule_schema() {
         )
         .await
         .unwrap();
+    assert_eq!(committed.committed_records.len(), committed.changes.len());
+    assert_eq!(committed.committed_records[0].client_id, client_id);
+    assert_eq!(
+        committed.committed_records[0].key,
+        VPS_RULE_KEY_PRODUCT_NAME
+    );
+    assert_eq!(committed.committed_records[0].value_raw, "Storage-Box 4");
 
     let stored = sqlx::query_as::<_, (String, Value, chrono::DateTime<chrono::Utc>)>(
         "SELECT value_raw, value_json, updated_at FROM vps_rule_values WHERE client_id = $1 AND key = $2",
@@ -13952,7 +15189,8 @@ async fn postgres_product_name_uses_the_fresh_canonical_rule_schema() {
         .unwrap();
     assert_eq!(equivalent_preview.changed_row_count, 0);
     assert_eq!(equivalent_preview.changes[0].action, "unchanged");
-    db.repo
+    let unchanged = db
+        .repo
         .bulk_upsert_vps_rules(
             &VpsRulesBulkUpsertRequest {
                 selector_expression: format!("id:{client_id}"),
@@ -13964,6 +15202,17 @@ async fn postgres_product_name_uses_the_fresh_canonical_rule_schema() {
         )
         .await
         .unwrap();
+    assert_eq!(unchanged.changes[0].action, "unchanged");
+    assert_eq!(unchanged.committed_records.len(), 1);
+    assert_eq!(unchanged.committed_records[0].client_id, client_id);
+    assert_eq!(
+        unchanged.committed_records[0].key,
+        VPS_RULE_KEY_PRODUCT_NAME
+    );
+    assert_eq!(
+        unchanged.committed_records[0].updated_at, committed.committed_records[0].updated_at,
+        "an unchanged reviewed identity must return the existing committed row"
+    );
 
     let after = sqlx::query_as::<_, (String, Value, chrono::DateTime<chrono::Utc>)>(
         "SELECT value_raw, value_json, updated_at FROM vps_rule_values WHERE client_id = $1 AND key = $2",
@@ -17704,6 +18953,38 @@ async fn postgres_monthly_traffic_fast_path_bounds_raw_work_for_128_clients() {
     )
     .bind(client_count)
     .bind((cycle_start - 60) as f64)
+    .bind(minute_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    // Exercise the negotiated fleet shape instead of accidentally proving a
+    // one-interface toy relation. Seven unrelated interfaces per VPS make the
+    // hourly table representative of 128 VPSes with eight interfaces, while
+    // the requested eth0 tail must still use its exact primary-key path. This
+    // leaves PostgreSQL free to choose the cheapest real plan; the test does
+    // not disable sequential scans or force an index.
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_hourly_usage (
+            client_id, source_kind, interface, bucket_start,
+            rx_bytes, tx_bytes, rx_reset_count, tx_reset_count,
+            sample_count, first_observed_at, latest_observed_at
+        )
+        SELECT
+            format('traffic-fast-%s', client_number),
+            'host',
+            format('aux%s', interface_number),
+            to_timestamp($2 + hour_number * 3600),
+            0, 0, 0, 0, 1,
+            to_timestamp($2 + hour_number * 3600),
+            to_timestamp($2 + hour_number * 3600)
+        FROM generate_series(1, $1::bigint) client_number
+        CROSS JOIN generate_series(1, 7) interface_number
+        CROSS JOIN generate_series(0, $3::bigint / 60) hour_number
+        "#,
+    )
+    .bind(client_count)
+    .bind(cycle_start as f64)
     .bind(minute_count)
     .execute(&db.pool)
     .await
@@ -32744,6 +34025,153 @@ async fn postgres_terminal_merge_preserves_terminal_state_nulls_and_true_open_ti
 }
 
 #[tokio::test]
+async fn postgres_tunnel_plan_bulk_lifecycle_is_ordered_partial_and_set_owned() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let mut first_input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    first_input.name = "bulk-lifecycle-first".to_string();
+    first_input.interface_name = "bulk-tun-a".to_string();
+    first_input.address_pool_cidr = "10.98.0.0/29".to_string();
+    first_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.98.0.0".to_string(),
+        right: "10.98.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let mut second_input = first_input.clone();
+    second_input.name = "bulk-lifecycle-second".to_string();
+    second_input.interface_name = "bulk-tun-b".to_string();
+    second_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.98.0.2".to_string(),
+        right: "10.98.0.3".to_string(),
+        prefix_len: 31,
+    });
+    let first = db
+        .repo
+        .record_tunnel_plan(
+            &first_input,
+            &plan_tunnel(&first_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let second = db
+        .repo
+        .record_tunnel_plan(
+            &second_input,
+            &plan_tunnel(&second_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let results = db
+        .repo
+        .set_tunnel_plans_enabled_bulk(
+            &[
+                TunnelPlanLifecycleUpdate {
+                    plan_id: first.id,
+                    expected_revision: first.revision,
+                    enabled: false,
+                },
+                TunnelPlanLifecycleUpdate {
+                    plan_id: second.id,
+                    expected_revision: second.revision + 1,
+                    enabled: false,
+                },
+            ],
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        &results[0],
+        TunnelPlanLifecycleUpdateResult::Updated(plan)
+            if plan.id == first.id && !plan.enabled && plan.revision == first.revision + 1
+    ));
+    assert!(matches!(
+        &results[1],
+        TunnelPlanLifecycleUpdateResult::Rejected { plan_id, error_code }
+            if *plan_id == second.id && *error_code == "tunnel_plan_snapshot_stale"
+    ));
+    let states = sqlx::query_as::<_, (Uuid, bool, i64)>(
+        "SELECT id, enabled, revision FROM tunnel_plans WHERE id = ANY($1::uuid[]) ORDER BY id",
+    )
+    .bind(vec![first.id, second.id])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|state| (state.0, (state.1, state.2)))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(states[&first.id], (false, first.revision + 1));
+    assert_eq!(states[&second.id], (true, second.revision));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'network.tunnel_plan_disabled' AND target = $1",
+        )
+        .bind(format!("tunnel_plan:{}", first.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'network.tunnel_plan_disabled' AND target = $1",
+        )
+        .bind(format!("tunnel_plan:{}", second.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    let duplicate = db
+        .repo
+        .set_tunnel_plans_enabled_bulk(
+            &[
+                TunnelPlanLifecycleUpdate {
+                    plan_id: first.id,
+                    expected_revision: first.revision + 1,
+                    enabled: true,
+                },
+                TunnelPlanLifecycleUpdate {
+                    plan_id: first.id,
+                    expected_revision: first.revision + 1,
+                    enabled: true,
+                },
+            ],
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        duplicate.to_string(),
+        "tunnel_plan_lifecycle_items_duplicate"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, i64)>(
+            "SELECT enabled, revision FROM tunnel_plans WHERE id = $1",
+        )
+        .bind(first.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (false, first.revision + 1)
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_tunnel_plan_conflict_checks_are_concurrency_safe() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -34960,15 +36388,25 @@ async fn postgres_refresh_rotation_precedes_operator_session_revocation_mutation
             }),
             RevokingMutation::TotpClear => tokio::spawn(async move {
                 mutation_repo
-                    .clear_operator_totp(target_id, &mutation_actor)
+                    .clear_operator_totps(&[target_id], &mutation_actor)
                     .await
-                    .map(|operator| operator.is_some())
+                    .map(|outcomes| {
+                        matches!(
+                            outcomes.as_slice(),
+                            [crate::repository_auth::AccessBatchMutationOutcome::Applied { .. }]
+                        )
+                    })
             }),
             RevokingMutation::Disable => tokio::spawn(async move {
                 mutation_repo
-                    .set_operator_status(target_id, "disabled", &mutation_actor)
+                    .set_operator_statuses(&[target_id], "disabled", &mutation_actor)
                     .await
-                    .map(|operator| operator.is_some())
+                    .map(|outcomes| {
+                        matches!(
+                            outcomes.as_slice(),
+                            [crate::repository_auth::AccessBatchMutationOutcome::Applied { .. }]
+                        )
+                    })
             }),
         };
         wait_for_ungranted_lock(&db.pool, "transactionid").await;
@@ -35037,12 +36475,17 @@ async fn postgres_session_revoke_response_is_the_persisted_transaction_snapshot(
         session_id: Some(auth.session_id),
     };
 
-    let revoked = db
+    let mut outcomes = db
         .repo
-        .revoke_operator_session(target.session_id, &actor)
+        .revoke_operator_sessions(&[target.session_id], &actor)
         .await
-        .unwrap()
-        .expect("target session should exist");
+        .unwrap();
+    let crate::repository_auth::AccessBatchMutationOutcome::Applied {
+        result: revoked, ..
+    } = outcomes.pop().expect("target session outcome should exist")
+    else {
+        panic!("target session should exist")
+    };
     let persisted =
         sqlx::query_as::<_, (Uuid, String, String, String, String, String, Option<String>)>(
             r#"
@@ -35073,6 +36516,416 @@ async fn postgres_session_revoke_response_is_the_persisted_transaction_snapshot(
     assert_eq!(revoked.refresh_expires_at, persisted.5);
     assert!(revoked.revoked);
     assert_eq!(revoked.revoked_at, persisted.6);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_access_batch_owners_preserve_order_partial_invariants_and_audits() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "access-batch-admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator.clone(),
+        session_id: Some(auth.session_id),
+    };
+    let second_admin = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "access-batch-second-admin".to_string(),
+                password: "second-admin-password-123".to_string(),
+                role: "admin".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: true,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    let viewer = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "access-batch-viewer".to_string(),
+                password: "viewer-password-123".to_string(),
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    let second_admin_session = db.repo.issue_session(second_admin.clone()).await.unwrap();
+    let viewer_session = db.repo.issue_session(viewer.clone()).await.unwrap();
+    let missing_operator = Uuid::new_v4();
+    let requested_statuses = vec![
+        missing_operator,
+        viewer.id,
+        second_admin.id,
+        actor.operator.id,
+    ];
+    let status_outcomes = db
+        .repo
+        .set_operator_statuses(&requested_statuses, "disabled", &actor)
+        .await
+        .unwrap();
+    assert_eq!(status_outcomes.len(), requested_statuses.len());
+    for (outcome, expected) in status_outcomes.iter().zip(&requested_statuses) {
+        let target_id = match outcome {
+            crate::repository_auth::AccessBatchMutationOutcome::Applied { target_id, .. }
+            | crate::repository_auth::AccessBatchMutationOutcome::Rejected { target_id, .. } => {
+                target_id
+            }
+        };
+        assert_eq!(*target_id, *expected);
+    }
+    assert!(matches!(
+        status_outcomes[0],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            code: "operator_not_found",
+            ..
+        }
+    ));
+    assert!(matches!(
+        status_outcomes[1],
+        crate::repository_auth::AccessBatchMutationOutcome::Applied { .. }
+    ));
+    assert!(matches!(
+        status_outcomes[2],
+        crate::repository_auth::AccessBatchMutationOutcome::Applied { .. }
+    ));
+    assert!(matches!(
+        status_outcomes[3],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            code: "last_active_admin_required",
+            ..
+        }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operators WHERE status='active' AND role='admin'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    for session_id in [second_admin_session.session_id, viewer_session.session_id] {
+        assert!(sqlx::query_scalar::<_, bool>(
+            "SELECT revoked_at IS NOT NULL FROM operator_sessions WHERE id=$1",
+        )
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap());
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action='operator.disabled'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+
+    let totp_target = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "access-batch-totp".to_string(),
+                password: "totp-target-password-123".to_string(),
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE operators
+        SET totp_enabled=true,
+            totp_secret_ciphertext_hex='00',
+            totp_secret_nonce_hex='000000000000000000000000',
+            totp_secret_salt_hex='00000000000000000000000000000000',
+            totp_last_accepted_step=1
+        WHERE id=$1
+        "#,
+    )
+    .bind(totp_target.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let totp_session = db.repo.issue_session(totp_target.clone()).await.unwrap();
+    let missing_totp = Uuid::new_v4();
+    let totp_outcomes = db
+        .repo
+        .clear_operator_totps(&[missing_totp, totp_target.id], &actor)
+        .await
+        .unwrap();
+    assert!(matches!(
+        totp_outcomes[0],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "operator_not_found"
+        } if target_id == missing_totp
+    ));
+    assert!(matches!(
+        totp_outcomes[1],
+        crate::repository_auth::AccessBatchMutationOutcome::Applied {
+            target_id,
+            ..
+        } if target_id == totp_target.id
+    ));
+    let totp_state = sqlx::query_as::<_, (bool, bool, bool)>(
+        r#"
+        SELECT
+            totp_enabled,
+            totp_secret_ciphertext_hex IS NULL,
+            totp_last_accepted_step IS NULL
+        FROM operators
+        WHERE id=$1
+        "#,
+    )
+    .bind(totp_target.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(totp_state, (false, true, true));
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT revoked_at IS NOT NULL FROM operator_sessions WHERE id=$1",
+    )
+    .bind(totp_session.session_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action='operator.totp_cleared' AND target=$1",
+        )
+        .bind(format!("operator:{}", totp_target.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    let other_session = db.repo.issue_session(actor.operator.clone()).await.unwrap();
+    let missing_session = Uuid::new_v4();
+    let session_ids = vec![missing_session, auth.session_id, other_session.session_id];
+    let session_outcomes = db
+        .repo
+        .revoke_operator_sessions(&session_ids, &actor)
+        .await
+        .unwrap();
+    assert!(matches!(
+        session_outcomes[0],
+        crate::repository_auth::AccessBatchMutationOutcome::Rejected {
+            target_id,
+            code: "operator_session_not_found"
+        } if target_id == missing_session
+    ));
+    let crate::repository_auth::AccessBatchMutationOutcome::Applied {
+        result: current_result,
+        ..
+    } = &session_outcomes[1]
+    else {
+        panic!("current session should retain the existing API revocation semantic")
+    };
+    assert!(current_result.current);
+    let crate::repository_auth::AccessBatchMutationOutcome::Applied {
+        result: other_result,
+        ..
+    } = &session_outcomes[2]
+    else {
+        panic!("non-current session should be revoked")
+    };
+    assert!(!other_result.current);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action='operator_session.revoked' AND target=ANY($1)",
+        )
+        .bind(vec![
+            format!("operator-session:{}", auth.session_id),
+            format!("operator-session:{}", other_session.session_id),
+        ])
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_access_batch_routes_expose_ordered_contract_and_singleton_delegation() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "access-route-admin".to_string(),
+            password: "access-route-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator.clone(),
+        session_id: Some(auth.session_id),
+    };
+    let target = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "access-route-target".to_string(),
+                password: "access-route-target-password-123".to_string(),
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+    let missing = Uuid::new_v4();
+    let mut state = postgres_app_state(&db);
+    state.gateway = GatewayDispatchClient::default().with_test_privilege_auto_approve();
+    let router = crate::routes::build_router(state);
+    let assertion = || {
+        json!({
+            "nonce_hex": "00",
+            "issued_unix": 0,
+            "expires_unix": 0,
+            "assertion_hex": "00"
+        })
+    };
+    let request = |uri: &str, body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let status_response = router
+        .clone()
+        .oneshot(request(
+            "/api/v1/operators/statuses",
+            json!({
+                "status": "disabled",
+                "items": [
+                    {"operator_id": missing, "privilege_assertion": assertion()},
+                    {"operator_id": target.id, "privilege_assertion": assertion()}
+                ],
+                "confirmed": true,
+                "admin_risk_acknowledged": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body: Value = serde_json::from_slice(
+        &to_bytes(status_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let outcomes = status_body["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0]["operator_id"], missing.to_string());
+    assert_eq!(outcomes[0]["error_code"], "operator_not_found");
+    assert_eq!(outcomes[1]["operator_id"], target.id.to_string());
+    assert_eq!(outcomes[1]["status"], "succeeded");
+
+    let singleton = router
+        .clone()
+        .oneshot(request(
+            &format!("/api/v1/operators/{}/enable", target.id),
+            json!({
+                "confirmed": true,
+                "admin_risk_acknowledged": false,
+                "privilege_assertion": assertion()
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(singleton.status(), StatusCode::OK);
+    let singleton: Value =
+        serde_json::from_slice(&to_bytes(singleton.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(singleton["id"], target.id.to_string());
+    assert_eq!(singleton["status"], "active");
+
+    let totp_response = router
+        .clone()
+        .oneshot(request(
+            "/api/v1/operators/totp-clears",
+            json!({
+                "items": [
+                    {"operator_id": target.id, "privilege_assertion": assertion()}
+                ],
+                "confirmed": true,
+                "admin_risk_acknowledged": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(totp_response.status(), StatusCode::OK);
+
+    let target_session = db.repo.issue_session(target).await.unwrap();
+    let session_response = router
+        .oneshot(request(
+            "/api/v1/operator-sessions/revocations",
+            json!({
+                "items": [
+                    {"session_id": target_session.session_id, "privilege_assertion": assertion()}
+                ],
+                "confirmed": true,
+                "admin_risk_acknowledged": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_body: Value = serde_json::from_slice(
+        &to_bytes(session_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        session_body["outcomes"][0]["session_id"],
+        target_session.session_id.to_string()
+    );
+    assert_eq!(session_body["outcomes"][0]["status"], "succeeded");
 
     db.cleanup().await;
 }

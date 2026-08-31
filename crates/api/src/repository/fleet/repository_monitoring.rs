@@ -201,10 +201,39 @@ impl Repository {
         target_id: Uuid,
     ) -> Result<Option<PingTargetRecord>> {
         Ok(self
-            .list_ping_target_records()
+            .ping_target_records_by_ids(&[target_id])
             .await?
             .into_iter()
-            .find(|record| record.id == target_id))
+            .next())
+    }
+
+    pub(crate) async fn ping_target_records_by_ids(
+        &self,
+        target_ids: &[Uuid],
+    ) -> Result<Vec<PingTargetRecord>> {
+        if target_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, name, host, probe_kind, port, enabled,
+                        selector_expression, generation, created_by, updated_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM ping_targets
+                    WHERE id = ANY($1::uuid[])
+                    ORDER BY lower(name), id
+                    "#,
+                )
+                .bind(target_ids)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(ping_target_record_from_row).collect()
+            }
+        }
     }
 
     async fn list_ping_target_records(&self) -> Result<Vec<PingTargetRecord>> {
@@ -247,6 +276,43 @@ impl Repository {
                     "#,
                 )
                 .bind(target_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(PingTargetAssignmentRecord {
+                            target_id: row.try_get("target_id")?,
+                            client_id: row.try_get("client_id")?,
+                            is_primary: row.try_get("is_primary")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn list_ping_target_assignment_records_for_targets(
+        &self,
+        target_ids: &[Uuid],
+    ) -> Result<Vec<PingTargetAssignmentRecord>> {
+        if target_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        assignment.target_id,
+                        assignment.client_id,
+                        assignment.is_primary
+                    FROM ping_target_assignments assignment
+                    JOIN visible_clients client ON client.id = assignment.client_id
+                    WHERE assignment.target_id = ANY($1::uuid[])
+                    ORDER BY assignment.target_id, assignment.client_id
+                    "#,
+                )
+                .bind(target_ids)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()

@@ -8,24 +8,26 @@ use crate::{
     backup_upload_sessions::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES,
     privilege::verify_privilege_unlock,
     routes_alerts::{
-        bulk_unset_vps_rules, bulk_update_fleet_alert_states, bulk_upsert_vps_rules,
-        delete_fleet_alert_notification_channel, delete_fleet_alert_policy,
+        bulk_mutate_fleet_alert_notification_channels, bulk_mutate_fleet_alert_policies,
+        bulk_resolve_fleet_alerts, bulk_unset_vps_rules, bulk_update_fleet_alert_states,
+        bulk_upsert_vps_rules, delete_fleet_alert_notification_channel, delete_fleet_alert_policy,
         dispatch_fleet_alert_notifications, dry_run_fleet_alert_policy, dry_run_vps_rules,
         export_fleet_alerts, get_effective_vps_rules, get_fleet_alert_policy,
         get_traffic_accounting, list_fleet_alert_events, list_fleet_alert_history,
         list_fleet_alert_notification_channels, list_fleet_alert_notifications,
         list_fleet_alert_policies, list_fleet_alert_states, list_fleet_alerts, list_policy_alerts,
         list_traffic_accounting, list_vps_rules, process_fleet_alert_notifications,
-        resolve_fleet_alert, update_fleet_alert_state, upsert_fleet_alert_notification_channel,
-        upsert_fleet_alert_policy,
+        resolve_fleet_alert, sync_fleet_alert_events, update_fleet_alert_state,
+        upsert_fleet_alert_notification_channel, upsert_fleet_alert_policy,
     },
     routes_auth::{
-        bootstrap_operator, bootstrap_status, clear_operator_totp, confirm_operator_totp,
-        create_operator, current_operator, delete_operator, disable_operator,
-        disable_operator_totp, enable_operator, list_operator_auth_events, list_operator_sessions,
-        list_operators, login_operator, logout_operator_session, refresh_operator_session,
-        reset_operator_password, revoke_operator_session, setup_operator_totp, update_operator,
-        update_operator_preferences,
+        bootstrap_operator, bootstrap_status, bulk_clear_operator_totps,
+        bulk_revoke_operator_sessions, bulk_set_operator_statuses, clear_operator_totp,
+        confirm_operator_totp, create_operator, current_operator, delete_operator,
+        disable_operator, disable_operator_totp, enable_operator, list_operator_auth_events,
+        list_operator_sessions, list_operators, login_operator, logout_operator_session,
+        refresh_operator_session, reset_operator_password, revoke_operator_session,
+        setup_operator_totp, update_operator, update_operator_preferences,
     },
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
@@ -69,20 +71,21 @@ use crate::{
         verify_agent_update_artifact,
     },
     routes_inventory::{
-        assign_agent_tag, bulk_mutate_tags, create_tag, delete_agent,
-        delete_runtime_config_patch_generator, delete_tag, fleet_summary, get_tag_order,
-        list_agents, list_gateway_sessions, list_runtime_config_apply_states,
+        assign_agent_tag, bulk_agent_suspensions, bulk_delete_agents, bulk_mutate_tags, create_tag,
+        delete_agent, delete_runtime_config_patch_generator, delete_tag, fleet_summary,
+        get_tag_order, list_agents, list_gateway_sessions, list_runtime_config_apply_states,
         list_runtime_config_patch_generators, list_tags, list_telemetry_network_rates,
         list_telemetry_rollups, list_telemetry_samples, list_telemetry_tunnels,
-        render_runtime_config_patch_generator, resolve_bulk_targets, suspend_agent,
-        unsuspend_agent, update_agent_alias, update_tag_order,
+        render_runtime_config_patch_generator, resolve_bulk_targets, resolve_many_bulk_targets,
+        suspend_agent, unsuspend_agent, update_agent_alias, update_tag_order,
         upsert_runtime_config_patch_generator,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
         download_job_output_archive, download_job_output_chunk, download_job_output_stream,
-        download_job_target_statuses, get_audit_log, get_job, list_audit_logs, list_job_outputs,
-        list_job_targets, list_jobs, list_network_observation_trends, list_network_observations,
+        download_job_target_statuses, get_audit_log, get_job, list_audit_logs,
+        list_exact_job_target_statuses, list_job_outputs, list_job_targets, list_jobs,
+        list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
     routes_job_rollouts::{
@@ -106,11 +109,12 @@ use crate::{
         update_monitoring_share, update_ping_target,
     },
     routes_network::{
-        allocate_tunnel_endpoints, clear_tunnel_plan_evidence, create_tunnel_plan,
-        delete_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan, export_tunnel_plan,
-        get_topology_graph, list_network_ospf_recommendations, list_network_ospf_update_plans,
-        list_tunnel_plans, refresh_tunnel_plan_ospf_status, rotate_tunnel_plan_credentials,
-        update_tunnel_connection_assessment, update_tunnel_plan, update_tunnel_plan_ospf_cost,
+        allocate_tunnel_endpoints, bulk_tunnel_plan_lifecycle, clear_tunnel_plan_evidence,
+        create_tunnel_plan, delete_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
+        export_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
+        list_network_ospf_update_plans, list_tunnel_plans, refresh_tunnel_plan_ospf_status,
+        rotate_tunnel_plan_credentials, update_tunnel_connection_assessment, update_tunnel_plan,
+        update_tunnel_plan_ospf_cost,
     },
     routes_port_forwarding::{
         bulk_mutate_port_forward_rules, create_port_forward_rule, delete_port_forward_rule,
@@ -125,9 +129,9 @@ use crate::{
         preview_single_runtime_config_override,
     },
     routes_schedules::{
-        apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
-        enable_schedule, get_schedule, list_schedules, preview_event_schedule_template,
-        update_schedule, update_schedule_targets,
+        apply_schedule_now, bulk_update_schedule_targets, create_schedule, defer_schedule,
+        delete_schedule, disable_schedule, enable_schedule, get_schedule, list_schedules,
+        preview_event_schedule_template, update_schedule, update_schedule_targets,
     },
     routes_server_jobs::{
         cancel_server_job, create_artifact_cleanup_job, list_server_jobs, preview_artifact_cleanup,
@@ -142,9 +146,9 @@ use crate::{
         create_agent_update_release, latest_agent_update_release, list_agent_update_releases,
     },
     routes_webhook_rules::{
-        delete_webhook_rule, dispatch_webhook_rules, dry_run_webhook_rule,
-        list_webhook_rule_deliveries, list_webhook_rules, process_webhook_rule_deliveries,
-        rotate_webhook_delivery_history, upsert_webhook_rule,
+        bulk_mutate_webhook_rules, delete_webhook_rule, dispatch_webhook_rules,
+        dry_run_webhook_rule, list_webhook_rule_deliveries, list_webhook_rules,
+        process_webhook_rule_deliveries, rotate_webhook_delivery_history, upsert_webhook_rule,
     },
     routes_ws::ws_handler,
     state::AppState,
@@ -187,6 +191,14 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/operators",
             get(list_operators).post(create_operator),
         )
+        .route(
+            "/api/v1/operators/statuses",
+            post(bulk_set_operator_statuses),
+        )
+        .route(
+            "/api/v1/operators/totp-clears",
+            post(bulk_clear_operator_totps),
+        )
         .route("/api/v1/operators/{operator_id}", put(update_operator))
         .route(
             "/api/v1/operators/{operator_id}/disable",
@@ -213,6 +225,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(list_operator_auth_events),
         )
         .route("/api/v1/operator-sessions", get(list_operator_sessions))
+        .route(
+            "/api/v1/operator-sessions/revocations",
+            post(bulk_revoke_operator_sessions),
+        )
         .route(
             "/api/v1/operator-sessions/{session_id}/revoke",
             post(revoke_operator_session),
@@ -241,7 +257,15 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/fleet/summary", get(fleet_summary))
         .route("/api/v1/fleet/snapshot", get(fleet_snapshot))
         .route("/api/v1/fleet-alerts", get(list_fleet_alerts))
+        .route(
+            "/api/v1/fleet-alerts/resolve",
+            post(bulk_resolve_fleet_alerts),
+        )
         .route("/api/v1/fleet-alert-events", get(list_fleet_alert_events))
+        .route(
+            "/api/v1/fleet-alert-events/sync",
+            post(sync_fleet_alert_events),
+        )
         .route("/api/v1/fleet-alert-history", get(list_fleet_alert_history))
         .route(
             "/api/v1/fleet-alerts/{alert_id}/resolve",
@@ -263,6 +287,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/fleet-alert-policies/dry-run",
             post(dry_run_fleet_alert_policy),
+        )
+        .route(
+            "/api/v1/fleet-alert-policies/bulk-mutate",
+            post(bulk_mutate_fleet_alert_policies),
         )
         .route(
             "/api/v1/fleet-alert-policies/{policy_id}",
@@ -298,6 +326,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             delete(delete_fleet_alert_notification_channel),
         )
         .route(
+            "/api/v1/fleet-alert-notification-channels/bulk-mutate",
+            post(bulk_mutate_fleet_alert_notification_channels),
+        )
+        .route(
             "/api/v1/fleet-alert-notifications",
             get(list_fleet_alert_notifications),
         )
@@ -317,6 +349,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/webhook-rules/{rule_id}",
             delete(delete_webhook_rule),
         )
+        .route(
+            "/api/v1/webhook-rules/bulk-mutate",
+            post(bulk_mutate_webhook_rules),
+        )
         .route("/api/v1/webhook-rules/dry-run", post(dry_run_webhook_rule))
         .route(
             "/api/v1/webhook-rules/dispatch",
@@ -335,6 +371,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(rotate_webhook_delivery_history),
         )
         .route("/api/v1/agents", get(list_agents))
+        .route("/api/v1/agents/suspensions", post(bulk_agent_suspensions))
+        .route("/api/v1/agents/deletions", post(bulk_delete_agents))
         .route("/api/v1/agents/{client_id}/suspend", post(suspend_agent))
         .route(
             "/api/v1/agents/{client_id}/unsuspend",
@@ -509,6 +547,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents/{client_id}/tags", post(assign_agent_tag))
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
         .route("/api/v1/bulk/resolve", post(resolve_bulk_targets))
+        .route("/api/v1/bulk/resolve-many", post(resolve_many_bulk_targets))
         .route(
             "/api/v1/jobs",
             get(list_jobs)
@@ -570,6 +609,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(resume_job_rollout),
         )
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
+        .route(
+            "/api/v1/job-targets/statuses",
+            post(list_exact_job_target_statuses),
+        )
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
         .route(
             "/api/v1/jobs/{job_id}/targets/download",
@@ -681,6 +724,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(preview_event_schedule_template),
         )
         .route(
+            "/api/v1/schedules/update-targets",
+            post(bulk_update_schedule_targets),
+        )
+        .route(
             "/api/v1/schedules/{schedule_id}",
             get(get_schedule)
                 .put(update_schedule)
@@ -717,6 +764,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/tunnel-plans/evidence/clear",
             post(clear_tunnel_plan_evidence),
+        )
+        .route(
+            "/api/v1/tunnel-plans/lifecycle",
+            post(bulk_tunnel_plan_lifecycle),
         )
         .route(
             "/api/v1/tunnel-plans/{plan_id}/plan",

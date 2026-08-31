@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   AlertTriangle,
   ArrowUpCircle,
@@ -15,9 +21,12 @@ import { formatBoundedCount } from "../constants";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
+  type ConsoleDataGridSearchState,
 } from "../components/ConsoleDataGrid";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { searchFieldsForSearchValues } from "../components/searchSuggestions";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { filterBySearchExpression } from "../searchExpression";
 import {
   alertCategoryLabel,
   presentFleetAlert,
@@ -25,8 +34,9 @@ import {
 } from "../alertPresentation";
 import type {
   AgentView,
+  FleetAlertBulkResolveRequest,
+  FleetAlertBulkResolveResponse,
   FleetAlertRecord,
-  FleetAlertResolveRequest,
   FleetAlertStateBulkRequest,
   FleetAlertStateBulkResponse,
   FleetAlertStateRequest,
@@ -46,18 +56,30 @@ type FleetAlertsPanelProps = {
   eventReviewHasMore: boolean;
   eventReviewItems: FleetAlertRecord[];
   eventReviewLoading: boolean;
+  eventReviewLimitNotice: string | null;
   eventReviewStarted: boolean;
+  eventReviewVerified: boolean;
+  eventSearchHasMore: boolean;
+  eventSearchItems: FleetAlertRecord[];
+  eventSearchQuery: string;
+  eventSearchScannedCount: number;
   history: FleetAlertRecord[];
   historyEvidenceAvailable: boolean;
   historyTruncated: boolean;
   onOpenAlertPolicies: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
+  onActivateEvents: () => Promise<void>;
+  onDeactivateEvents: () => void;
   onLoadOlderEvents: () => Promise<void>;
-  onRefreshEvents: () => Promise<void>;
+  onSearchOlderEvents: (
+    query: string,
+    matchingItems: (items: FleetAlertRecord[]) => FleetAlertRecord[],
+    scan: boolean,
+  ) => Promise<void>;
+  onSyncEvents: () => Promise<void>;
   onResolve: (
-    alertId: string,
-    request: FleetAlertResolveRequest,
-  ) => Promise<FleetAlertRecord>;
+    request: FleetAlertBulkResolveRequest,
+  ) => Promise<FleetAlertBulkResolveResponse>;
   onUpdateBulk: (
     request: FleetAlertStateBulkRequest,
   ) => Promise<FleetAlertStateBulkResponse>;
@@ -74,22 +96,49 @@ export function FleetAlertsPanel({
   eventReviewHasMore,
   eventReviewItems,
   eventReviewLoading,
+  eventReviewLimitNotice,
   eventReviewStarted,
+  eventReviewVerified,
+  eventSearchHasMore,
+  eventSearchItems,
+  eventSearchQuery,
+  eventSearchScannedCount,
   history,
   historyEvidenceAvailable,
   historyTruncated,
   onOpenAlertPolicies,
   onOpenVpsDetail,
+  onActivateEvents,
+  onDeactivateEvents,
   onLoadOlderEvents,
-  onRefreshEvents,
+  onSearchOlderEvents,
+  onSyncEvents,
   onResolve,
   onUpdateBulk,
 }: FleetAlertsPanelProps) {
+  useEffect(() => {
+    void onActivateEvents();
+    return onDeactivateEvents;
+  }, [onActivateEvents, onDeactivateEvents]);
+  const currentConditions = useMemo(
+    () => alerts.filter((alert) => alert.record_kind !== "event"),
+    [alerts],
+  );
   const currentAlerts = useMemo(
-    // Manual review rows can outlive a snapshot refresh. Put authoritative
-    // snapshot rows last so fresh lifecycle/triage state wins duplicate IDs.
-    () => dedupeFleetAlertsById([...eventReviewItems, ...alerts]),
-    [alerts, eventReviewItems],
+    // Conditions remain owned by the full Fleet snapshot. Occurrences have one
+    // separate current-feed owner and participate only after it verifies them.
+    () =>
+      dedupeFleetAlertsById([
+        ...(eventReviewVerified ? eventReviewItems : []),
+        ...(eventReviewVerified ? eventSearchItems : []),
+        ...currentConditions,
+      ]),
+    [
+      currentConditions,
+      eventReviewItems,
+      eventReviewVerified,
+      eventSearchItems,
+    ],
   );
   const currentTriagedCount = currentAlerts.filter((alert) => {
     const presentation = presentFleetAlert(alert);
@@ -107,7 +156,7 @@ export function FleetAlertsPanel({
             <h2>Fleet alerts</h2>
             <span>
               {!alertsEvidenceAvailable
-                ? eventReviewStarted
+                ? eventReviewStarted && eventReviewVerified
                   ? `Current alert snapshot is unavailable; ${currentAlerts.length} incident review row${currentAlerts.length === 1 ? " is" : "s are"} loaded separately.`
                   : "Current alert evidence is unavailable."
                 : `${formatBoundedCount(currentAlerts.length, alertsTruncated)} current alert episode${currentAlerts.length === 1 ? "" : "s"}${alertsTruncated ? " in the loaded evidence" : ""}`}
@@ -151,19 +200,29 @@ export function FleetAlertsPanel({
           canManageAlertLifecycle={canManageAlertLifecycle}
           eventReviewAdditionalCount={Math.max(
             0,
-            currentAlerts.length - alerts.length,
+            eventReviewVerified
+              ? currentAlerts.filter((alert) => alert.record_kind === "event")
+                  .length
+              : 0,
           )}
           eventReviewError={eventReviewError}
           eventReviewHasMore={eventReviewHasMore}
           eventReviewLoading={eventReviewLoading}
+          eventReviewLimitNotice={eventReviewLimitNotice}
+          eventReviewRetainedCount={eventReviewItems.length}
           eventReviewStarted={eventReviewStarted}
+          eventReviewVerified={eventReviewVerified}
+          eventSearchHasMore={eventSearchHasMore}
+          eventSearchQuery={eventSearchQuery}
+          eventSearchScannedCount={eventSearchScannedCount}
           history={history}
           historyEvidenceAvailable={historyEvidenceAvailable}
           historyTruncated={historyTruncated}
           onOpenAlertPolicies={onOpenAlertPolicies}
           onOpenVpsDetail={onOpenVpsDetail}
           onLoadOlderEvents={onLoadOlderEvents}
-          onRefreshEvents={onRefreshEvents}
+          onSearchOlderEvents={onSearchOlderEvents}
+          onSyncEvents={onSyncEvents}
           onResolve={onResolve}
           onUpdateBulk={onUpdateBulk}
         />
@@ -209,14 +268,21 @@ function FleetAlertList({
   eventReviewError,
   eventReviewHasMore,
   eventReviewLoading,
+  eventReviewLimitNotice,
+  eventReviewRetainedCount,
   eventReviewStarted,
+  eventReviewVerified,
+  eventSearchHasMore,
+  eventSearchQuery,
+  eventSearchScannedCount,
   history,
   historyEvidenceAvailable,
   historyTruncated,
   onOpenAlertPolicies,
   onOpenVpsDetail,
   onLoadOlderEvents,
-  onRefreshEvents,
+  onSearchOlderEvents,
+  onSyncEvents,
   onResolve,
   onUpdateBulk,
 }: {
@@ -229,18 +295,28 @@ function FleetAlertList({
   eventReviewError: string | null;
   eventReviewHasMore: boolean;
   eventReviewLoading: boolean;
+  eventReviewLimitNotice: string | null;
+  eventReviewRetainedCount: number;
   eventReviewStarted: boolean;
+  eventReviewVerified: boolean;
+  eventSearchHasMore: boolean;
+  eventSearchQuery: string;
+  eventSearchScannedCount: number;
   history: FleetAlertRecord[];
   historyEvidenceAvailable: boolean;
   historyTruncated: boolean;
   onOpenAlertPolicies: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
   onLoadOlderEvents: () => Promise<void>;
-  onRefreshEvents: () => Promise<void>;
+  onSearchOlderEvents: (
+    query: string,
+    matchingItems: (items: FleetAlertRecord[]) => FleetAlertRecord[],
+    scan: boolean,
+  ) => Promise<void>;
+  onSyncEvents: () => Promise<void>;
   onResolve: (
-    alertId: string,
-    request: FleetAlertResolveRequest,
-  ) => Promise<FleetAlertRecord>;
+    request: FleetAlertBulkResolveRequest,
+  ) => Promise<FleetAlertBulkResolveResponse>;
   onUpdateBulk: (
     request: FleetAlertStateBulkRequest,
   ) => Promise<FleetAlertStateBulkResponse>;
@@ -253,12 +329,27 @@ function FleetAlertList({
     request: FleetAlertStateBulkRequest;
     rows: FleetAlertRecord[];
   } | null>(null);
-  const [resolveSnapshot, setResolveSnapshot] =
-    useState<FleetAlertRecord | null>(null);
+  const [resolveSnapshot, setResolveSnapshot] = useState<
+    FleetAlertRecord[] | null
+  >(null);
   const [resolveReason, setResolveReason] = useState("");
   const [resolvePending, setResolvePending] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [resolveSuccess, setResolveSuccess] = useState<string | null>(null);
+  const [alertSearchState, setAlertSearchState] =
+    useState<ConsoleDataGridSearchState>({
+      error: null,
+      matchingCount: 0,
+      pageSize: 10,
+      query: "",
+    });
+  const [historySearchState, setHistorySearchState] =
+    useState<ConsoleDataGridSearchState>({
+      error: null,
+      matchingCount: 0,
+      pageSize: 10,
+      query: "",
+    });
   const agentById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
     [agents],
@@ -460,13 +551,17 @@ function FleetAlertList({
     if (!resolveSnapshot) {
       return;
     }
-    const latest = alerts.find((alert) => alert.id === resolveSnapshot.id);
-    if (
-      !latest ||
-      !presentFleetAlert(latest).resolvableIncident ||
-      latest.lifecycle.trigger_generation !==
-        resolveSnapshot.lifecycle.trigger_generation
-    ) {
+    const latestById = new Map(alerts.map((alert) => [alert.id, alert]));
+    const reviewIsCurrent = resolveSnapshot.every((reviewed) => {
+      const latest = latestById.get(reviewed.id);
+      return (
+        latest != null &&
+        presentFleetAlert(latest).resolvableIncident &&
+        latest.lifecycle.trigger_generation ===
+          reviewed.lifecycle.trigger_generation
+      );
+    });
+    if (!reviewIsCurrent) {
       setResolveSnapshot(null);
       setResolveReason("");
       setResolveError(null);
@@ -538,18 +633,17 @@ function FleetAlertList({
   }
 
   function reviewIncidentResolution(rows: FleetAlertRecord[]) {
-    const [alert] = rows;
     if (
-      rows.length !== 1 ||
-      !alert ||
-      !presentFleetAlert(alert).resolvableIncident ||
+      rows.length === 0 ||
+      rows.length > MAX_ALERT_STATE_BULK_ITEMS ||
+      rows.some((alert) => !presentFleetAlert(alert).resolvableIncident) ||
       !canManageAlertLifecycle ||
       pending ||
       resolvePending
     ) {
       return;
     }
-    setResolveSnapshot(alert);
+    setResolveSnapshot(rows);
     setResolveReason("");
     setResolveError(null);
     setResolveSuccess(null);
@@ -570,9 +664,18 @@ function FleetAlertList({
     setResolvePending(true);
     setResolveError(null);
     try {
-      await onResolve(snapshot.id, { confirmed: true, reason });
+      await onResolve({
+        confirmed: true,
+        items: snapshot.map((alert) => ({
+          alert_id: alert.id,
+          expected_trigger_generation: alert.lifecycle.trigger_generation,
+        })),
+        reason,
+      });
       setResolveSuccess(
-        `Resolved occurrence ${snapshot.title}, generation ${snapshot.lifecycle.trigger_generation}. Operator triage was not changed.`,
+        snapshot.length === 1
+          ? `Resolved occurrence ${snapshot[0].title}, generation ${snapshot[0].lifecycle.trigger_generation}. Operator triage was not changed.`
+          : `Resolved ${snapshot.length.toLocaleString()} occurrences atomically. Operator triage was not changed.`,
       );
       setResolveSnapshot(null);
       setResolveReason("");
@@ -603,6 +706,83 @@ function FleetAlertList({
     });
   const resolvableRows = (rows: FleetAlertRecord[]) =>
     rows.filter((alert) => presentFleetAlert(alert).resolvableIncident);
+  const handleAlertSearchState = useCallback(
+    (next: ConsoleDataGridSearchState) => {
+      setAlertSearchState((current) =>
+        current.error === next.error &&
+        current.matchingCount === next.matchingCount &&
+        current.pageSize === next.pageSize &&
+        current.query === next.query
+          ? current
+          : next,
+      );
+    },
+    [],
+  );
+  const handleHistorySearchState = useCallback(
+    (next: ConsoleDataGridSearchState) => {
+      setHistorySearchState((current) =>
+        current.error === next.error &&
+        current.matchingCount === next.matchingCount &&
+        current.pageSize === next.pageSize &&
+        current.query === next.query
+          ? current
+          : next,
+      );
+    },
+    [],
+  );
+  const normalizedAlertSearch = alertSearchState.query.trim();
+  const validAlertSearchNeedsMore =
+    normalizedAlertSearch.length > 0 &&
+    alertSearchState.error === null &&
+    alertSearchState.matchingCount < alertSearchState.pageSize;
+  const searchSequenceIsCurrent = eventSearchQuery === normalizedAlertSearch;
+  const searchingOlderOccurrences =
+    validAlertSearchNeedsMore &&
+    (!searchSequenceIsCurrent || eventSearchHasMore);
+  const matchingOlderOccurrenceItems = useCallback(
+    (items: FleetAlertRecord[]) => {
+      const result = filterBySearchExpression(
+        items,
+        normalizedAlertSearch,
+        (alert) =>
+          searchFieldsForSearchValues(
+            alertColumns.map(
+              (column) =>
+                column.searchValue?.(alert) ?? column.sortValue?.(alert),
+            ),
+          ),
+      );
+      return result.error ? [] : result.items;
+    },
+    [alertColumns, normalizedAlertSearch],
+  );
+  useEffect(() => {
+    if (
+      !eventReviewVerified ||
+      eventReviewLoading ||
+      eventReviewError ||
+      (searchSequenceIsCurrent && !searchingOlderOccurrences)
+    ) {
+      return;
+    }
+    void onSearchOlderEvents(
+      normalizedAlertSearch,
+      matchingOlderOccurrenceItems,
+      validAlertSearchNeedsMore,
+    );
+  }, [
+    eventReviewError,
+    eventReviewLoading,
+    eventReviewVerified,
+    matchingOlderOccurrenceItems,
+    normalizedAlertSearch,
+    onSearchOlderEvents,
+    searchSequenceIsCurrent,
+    searchingOlderOccurrences,
+    validAlertSearchNeedsMore,
+  ]);
 
   return (
     <div className="fleetAlertList" aria-label="Fleet alerts">
@@ -613,12 +793,12 @@ function FleetAlertList({
         </span>
         <small>
           {!alertsEvidenceAvailable
-            ? eventReviewStarted
-              ? `Unified current evidence unavailable · ${alerts.length} manually reviewed occurrence${alerts.length === 1 ? "" : "s"}`
+            ? eventReviewStarted && eventReviewVerified
+              ? `Current condition evidence unavailable · ${alerts.length} verified occurrence${alerts.length === 1 ? "" : "s"}`
               : "Current alert evidence unavailable"
             : alerts.length === 0 && !alertsTruncated
               ? "No current alert episodes"
-              : `${alertsTruncated ? "Loaded page: " : ""}${criticalCount} critical / ${warningCount} warning / ${infoCount} info active · ${actionableCount} actionable${unknownCount ? ` · ${unknownCount} Unknown` : ""}${malformedCount ? ` · ${malformedCount} malformed` : ""} · ${formatBoundedCount(triagedRows(alerts).length, alertsTruncated)} current triaged`}
+              : `${alertsTruncated ? "Capped condition evidence: " : ""}${criticalCount} critical / ${warningCount} warning / ${infoCount} info active · ${actionableCount} actionable${unknownCount ? ` · ${unknownCount} Unknown` : ""}${malformedCount ? ` · ${malformedCount} malformed` : ""} · ${formatBoundedCount(triagedRows(alerts).length, alertsTruncated)} current triaged`}
         </small>
       </div>
       {!canManageAlertLifecycle ? (
@@ -637,8 +817,10 @@ function FleetAlertList({
       ) : null}
       {alertsTruncated ||
       !alertsEvidenceAvailable ||
+      !eventReviewVerified ||
       eventReviewStarted ||
-      eventReviewError ? (
+      eventReviewError ||
+      eventReviewLimitNotice ? (
         <div
           aria-label="Older current incident review"
           className="consoleInlineNotice"
@@ -647,41 +829,47 @@ function FleetAlertList({
             <strong>Unresolved occurrence review</strong>
             <small>
               {eventReviewLoading
-                ? "Loading the next bounded incident-review page."
+                ? searchingOlderOccurrences
+                  ? `Searching the next indexed 200-row occurrence page; ${eventSearchScannedCount.toLocaleString()} older rows scanned for this expression.`
+                  : "Synchronizing the newest occurrences and revalidating every retained occurrence."
                 : eventReviewError
-                  ? `Older incident review is unavailable: ${eventReviewError} Loaded current rows are unchanged.`
-                  : !eventReviewStarted
-                    ? alertsEvidenceAvailable
-                      ? "The unified current snapshot is capped. Load the dedicated occurrence feed to reach older unresolved incidents."
-                      : "The unified current snapshot is unavailable. The dedicated occurrence feed can still be reviewed explicitly."
-                    : eventReviewHasMore
-                      ? `${eventReviewAdditionalCount} additional current occurrence${eventReviewAdditionalCount === 1 ? "" : "s"} loaded; older incidents remain.`
-                      : `${eventReviewAdditionalCount} additional current occurrence${eventReviewAdditionalCount === 1 ? "" : "s"} loaded. The occurrence feed has reached its explicit end${alertsTruncated ? "; the condition snapshot may still be capped" : ""}.`}
+                  ? `Current occurrence evidence is unverified: ${eventReviewError} ${eventReviewRetainedCount.toLocaleString()} retained row${eventReviewRetainedCount === 1 ? " is" : "s are"} hidden until synchronization succeeds.`
+                  : eventReviewLimitNotice
+                    ? eventReviewLimitNotice
+                    : !eventReviewVerified
+                      ? "Current occurrence evidence has not been verified yet. Retained occurrence rows are not presented as current."
+                      : !eventReviewStarted
+                        ? "Synchronizing the authoritative current occurrence head."
+                        : eventReviewHasMore
+                          ? `${eventReviewAdditionalCount} additional verified current occurrence${eventReviewAdditionalCount === 1 ? "" : "s"} loaded. Load older extends only from the current tail cursor.`
+                          : `${eventReviewAdditionalCount} additional verified current occurrence${eventReviewAdditionalCount === 1 ? "" : "s"} loaded. The occurrence feed is complete${alertsTruncated ? "; current condition evidence remains capped" : ""}.`}
             </small>
           </span>
-          <button
-            className="secondaryAction compactAction"
-            disabled={eventReviewLoading}
-            onClick={() =>
-              void (eventReviewStarted && !eventReviewHasMore
-                ? onRefreshEvents()
-                : onLoadOlderEvents())
-            }
-            type="button"
-          >
-            <History size={14} />
-            <span>
-              {eventReviewLoading
-                ? "Loading incidents"
-                : eventReviewStarted && !eventReviewHasMore
-                  ? eventReviewError
-                    ? "Retry incident refresh"
-                    : "Refresh unresolved occurrences"
-                  : eventReviewError
-                    ? "Retry older current incidents"
+          {eventReviewError ||
+          !eventReviewVerified ||
+          (eventReviewHasMore &&
+            !eventReviewLimitNotice &&
+            !searchingOlderOccurrences) ? (
+            <button
+              className="secondaryAction compactAction"
+              disabled={eventReviewLoading}
+              onClick={() =>
+                void (eventReviewError || !eventReviewVerified
+                  ? onSyncEvents()
+                  : onLoadOlderEvents())
+              }
+              type="button"
+            >
+              <History size={14} />
+              <span>
+                {eventReviewLoading
+                  ? "Synchronizing occurrences"
+                  : eventReviewError || !eventReviewVerified
+                    ? "Retry current occurrence sync"
                     : "Load older current incidents"}
-            </span>
-          </button>
+              </span>
+            </button>
+          ) : null}
         </div>
       ) : null}
       <ActionFeedback
@@ -756,17 +944,18 @@ function FleetAlertList({
           {
             label: "Resolve incident",
             description: (rows) =>
-              rows.length === 1 && resolvableRows(rows).length === 1
-                ? "Resolve this occurrence lifecycle with a required operator reason."
-                : "Select exactly one unresolved occurrence to resolve.",
+              bulkActionDescription(
+                "Resolve",
+                resolvableRows(rows),
+                "whose occurrence lifecycles are current, using one required operator reason",
+              ),
             disabled: (rows) =>
               pending != null ||
               resolvePending ||
-              rows.length !== 1 ||
-              resolvableRows(rows).length !== 1,
+              !validAlertStateBulk(resolvableRows(rows)),
             hidden: () => !canManageAlertLifecycle,
             icon: <AlertTriangle size={14} />,
-            onSelect: reviewIncidentResolution,
+            onSelect: (rows) => reviewIncidentResolution(resolvableRows(rows)),
           },
         ]}
         columns={alertColumns}
@@ -775,7 +964,7 @@ function FleetAlertList({
           !alertsEvidenceAvailable
             ? "Current alert evidence is unavailable."
             : alertsTruncated
-              ? "No current episodes appear in the loaded page; more may exist."
+              ? "Current condition evidence is capped and this loaded page is empty; narrow the fleet scope, severity, or category."
               : "No current alert episodes."
         }
         expandOnRowClick
@@ -972,24 +1161,81 @@ function FleetAlertList({
           const selectedResolvable = resolvableRows(rows).length;
           const exceedsBulkLimit =
             selectedOpen > MAX_ALERT_STATE_BULK_ITEMS ||
-            selectedTriaged > MAX_ALERT_STATE_BULK_ITEMS;
+            selectedTriaged > MAX_ALERT_STATE_BULK_ITEMS ||
+            selectedResolvable > MAX_ALERT_STATE_BULK_ITEMS;
           return (
             <span>
               {rows.length} selected · {selectedOpen} current with Open triage ·{" "}
               {selectedTriaged} current triaged · {selectedResolvable}{" "}
               resolvable occurrence{selectedResolvable === 1 ? "" : "s"}
               {exceedsBulkLimit
-                ? ` · Atomic triage limit is ${MAX_ALERT_STATE_BULK_ITEMS.toLocaleString()}; narrow the selection.`
+                ? ` · Atomic action limit is ${MAX_ALERT_STATE_BULK_ITEMS.toLocaleString()}; narrow the selection.`
                 : ""}
             </span>
           );
         }}
         rows={alerts}
         rowsTruncated={alertsTruncated || eventReviewHasMore}
+        onSearchStateChange={handleAlertSearchState}
         searchPlaceholder="Search alerts"
         selectable={canManageAlertLifecycle}
         storageKey="vpsman.grid.fleet.alerts.v1"
         title="Current alert episodes"
+        truncatedEmpty={
+          eventReviewError
+            ? "Current occurrence synchronization failed. Retry the sync above before trusting this view."
+            : !eventReviewVerified || eventReviewLoading
+              ? "Synchronizing the authoritative current occurrence head."
+              : eventReviewHasMore
+                ? "No verified current occurrence is loaded yet. Load older current incidents above, or narrow the fleet scope, severity, or category."
+                : alertsTruncated
+                  ? "Current condition evidence is capped and this loaded page is empty; narrow the fleet scope, severity, or category."
+                  : undefined
+        }
+        truncatedSearchEmpty={
+          eventReviewError
+            ? "Search is paused because current occurrence synchronization failed. Retry the current occurrence sync above."
+            : eventReviewLimitNotice && !normalizedAlertSearch
+              ? eventReviewLimitNotice
+              : searchingOlderOccurrences || eventReviewLoading
+                ? `Searching older current occurrences; ${eventSearchScannedCount.toLocaleString()} indexed rows scanned for this expression.`
+                : validAlertSearchNeedsMore &&
+                    searchSequenceIsCurrent &&
+                    !eventSearchHasMore
+                  ? alertsTruncated
+                    ? "No verified occurrence matches after reaching the current occurrence-feed end. Current condition evidence is capped; narrow by VPS, severity, or category."
+                    : "No current alert matches after reaching the authoritative occurrence-feed end."
+                  : alertsTruncated
+                    ? "No loaded alert matches. Current condition evidence is capped; narrow by VPS, severity, or category, or review the alert policies."
+                    : "No current alert matches this search."
+        }
+        truncatedStatus={
+          alertSearchState.query.trim()
+            ? eventReviewError
+              ? `${alertSearchState.matchingCount} matching · occurrence search paused; retry above`
+              : eventReviewLimitNotice && !normalizedAlertSearch
+                ? `${alertSearchState.matchingCount} matching · retained-review limit reached; narrow or export`
+                : searchingOlderOccurrences || eventReviewLoading
+                  ? `${alertSearchState.matchingCount} matching · ${eventSearchScannedCount.toLocaleString()} older occurrence rows scanned`
+                  : eventSearchHasMore &&
+                      alertSearchState.matchingCount >=
+                        alertSearchState.pageSize
+                    ? `${alertSearchState.matchingCount} matching · visible page filled; narrow the expression to inspect later occurrence matches`
+                    : validAlertSearchNeedsMore &&
+                        searchSequenceIsCurrent &&
+                        !eventSearchHasMore
+                      ? alertsTruncated
+                        ? `${alertSearchState.matchingCount} matching · occurrence feed complete; condition evidence capped`
+                        : `${alertSearchState.matchingCount} matching · authoritative occurrence feed complete`
+                      : alertsTruncated
+                        ? `${alertSearchState.matchingCount} matching · current condition evidence is capped`
+                        : `${alertSearchState.matchingCount} matching current alerts`
+            : eventReviewHasMore
+              ? `${alerts.length} verified current rows loaded · Load older extends the occurrence tail`
+              : alertsTruncated
+                ? `${alerts.length} current rows loaded · current condition evidence is capped`
+                : `${alerts.length} current rows loaded · authoritative current evidence complete`
+        }
       />
       <ConsoleDataGrid
         columns={alertColumns}
@@ -998,17 +1244,25 @@ function FleetAlertList({
           !historyEvidenceAvailable
             ? "Alert episode history is unavailable."
             : historyTruncated
-              ? "No alert episodes appear in the loaded history; more may exist."
+              ? "The newest retained-history page is empty; use alert export with an explicit time window for authoritative older evidence."
               : "No retained alert episode history."
         }
         getRowId={(alert) => alert.id}
         itemLabel="episodes"
+        onSearchStateChange={handleHistorySearchState}
         rows={history}
         rowsTruncated={historyTruncated}
         searchPlaceholder="Search alert episode history"
         selectable={false}
         storageKey="vpsman.grid.fleet.alert-history.v1"
         title="Alert episode history"
+        truncatedEmpty="The newest retained-history page is empty. Use alert export with an explicit time window for authoritative older evidence."
+        truncatedSearchEmpty="No newest retained episode matches. Use the alert export with an explicit time window for complete retained-history evidence."
+        truncatedStatus={
+          historySearchState.query.trim()
+            ? `${historySearchState.matchingCount} matching in the newest ${history.length} retained episodes · use alert export for the complete time window`
+            : `Newest ${history.length} retained episodes loaded · use alert export for older retained evidence`
+        }
       />
       <ConfirmationPrompt
         confirmLabel={fleetAlertActionLabel(reviewSnapshot?.action)}
@@ -1051,19 +1305,26 @@ function FleetAlertList({
       <ConfirmationPrompt
         confirmDisabled={!resolveReason.trim()}
         confirmLabel="Resolve incident"
-        detail="Closes this occurrence lifecycle and emits its resolved edge. Operator triage remains separate and unchanged."
+        detail="Closes the reviewed occurrence lifecycles atomically and emits one resolved edge per occurrence. Operator triage remains separate and unchanged."
         error={resolveError ?? undefined}
         items={[
           {
-            label: "Occurrence",
-            value: resolveSnapshot?.title ?? "No occurrence selected",
-            title: resolveSnapshot?.id,
+            label: "Batch",
+            value: `${(resolveSnapshot?.length ?? 0).toLocaleString()} occurrence${resolveSnapshot?.length === 1 ? "" : "s"}`,
           },
           {
-            label: "Generation",
-            value:
-              resolveSnapshot?.lifecycle.trigger_generation ??
-              "Lifecycle unavailable",
+            label: "Commit",
+            value: "Atomic · all or none",
+          },
+          {
+            label: "Occurrences",
+            value: selectedRecordSummary(
+              resolveSnapshot,
+              "occurrence",
+              "occurrences",
+              (row) => row.title,
+              (row) => row.id,
+            ),
           },
         ]}
         onCancel={() => {

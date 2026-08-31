@@ -3,7 +3,7 @@ use uuid::Uuid;
 use vpsman_common::{payload_hash, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand};
 
 use crate::{
-    repository::Repository,
+    model::NetworkAdapterDefinitionView, repository::Repository,
     repository_configuration_presets::validate_network_adapter_definition_view,
 };
 
@@ -18,47 +18,52 @@ impl Repository {
             .network_adapter_definition_by_id(definition_id, Some("runtime_tunnel"))
             .await?
             .context("runtime_tunnel_adapter_definition_not_found")?;
-        validate_network_adapter_definition_view(&definition)
-            .context("runtime_tunnel_adapter_definition_invalid")?;
-        if definition
-            .definition
-            .get("manager")
-            .and_then(serde_json::Value::as_str)
-            != Some("custom_adapter")
-            || definition
-                .definition
-                .get("contract_version")
-                .and_then(serde_json::Value::as_u64)
-                != Some(1)
-        {
-            anyhow::bail!("runtime_tunnel_adapter_contract_invalid");
-        }
-        let status = required_command(&definition.definition, "status_command")?;
-        let startup = optional_command(&definition.definition, "startup_command")?;
-        let stop = optional_command(&definition.definition, "stop_command")?;
-        let cleanup = optional_command(&definition.definition, "cleanup_command")?;
-        let restart = optional_command(&definition.definition, "restart_command")?;
-        let traffic_limit_apply =
-            optional_command(&definition.definition, "traffic_limit_command")?;
-        if startup.is_none() && restart.is_none() {
-            anyhow::bail!("runtime_tunnel_adapter_start_command_required");
-        }
-        if stop.is_none() && cleanup.is_none() {
-            anyhow::bail!("runtime_tunnel_adapter_remove_command_required");
-        }
-        let definition_json = serde_json::to_vec(&definition.definition)?;
-        Ok(RuntimeTunnelAdapterCommands {
-            definition_id: definition.id.to_string(),
-            definition_name: definition.name,
-            definition_hash: payload_hash(&definition_json),
-            startup,
-            stop,
-            cleanup,
-            restart,
-            status,
-            traffic_limit_apply,
-        })
+        runtime_tunnel_adapter_from_definition(&definition)
     }
+}
+
+pub(crate) fn runtime_tunnel_adapter_from_definition(
+    definition: &NetworkAdapterDefinitionView,
+) -> Result<RuntimeTunnelAdapterCommands> {
+    validate_network_adapter_definition_view(definition)
+        .context("runtime_tunnel_adapter_definition_invalid")?;
+    if definition
+        .definition
+        .get("manager")
+        .and_then(serde_json::Value::as_str)
+        != Some("custom_adapter")
+        || definition
+            .definition
+            .get("contract_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+    {
+        anyhow::bail!("runtime_tunnel_adapter_contract_invalid");
+    }
+    let status = required_command(&definition.definition, "status_command")?;
+    let startup = optional_command(&definition.definition, "startup_command")?;
+    let stop = optional_command(&definition.definition, "stop_command")?;
+    let cleanup = optional_command(&definition.definition, "cleanup_command")?;
+    let restart = optional_command(&definition.definition, "restart_command")?;
+    let traffic_limit_apply = optional_command(&definition.definition, "traffic_limit_command")?;
+    if startup.is_none() && restart.is_none() {
+        anyhow::bail!("runtime_tunnel_adapter_start_command_required");
+    }
+    if stop.is_none() && cleanup.is_none() {
+        anyhow::bail!("runtime_tunnel_adapter_remove_command_required");
+    }
+    let definition_json = serde_json::to_vec(&definition.definition)?;
+    Ok(RuntimeTunnelAdapterCommands {
+        definition_id: definition.id.to_string(),
+        definition_name: definition.name.clone(),
+        definition_hash: payload_hash(&definition_json),
+        startup,
+        stop,
+        cleanup,
+        restart,
+        status,
+        traffic_limit_apply,
+    })
 }
 
 fn required_command(definition: &serde_json::Value, field: &str) -> Result<RuntimeTunnelCommand> {

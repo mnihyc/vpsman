@@ -812,10 +812,6 @@ nav {
   display: none;
 }
 
-.searchExpressionPreview button {
-  pointer-events: auto;
-}
-
 .searchExpressionEditor::placeholder {
   color: var(--placeholder);
 }
@@ -835,7 +831,7 @@ nav {
   border-radius: 999px;
   background: var(--primary-soft);
   color: var(--primary-text);
-  padding: 0 4px 0 8px;
+  padding: 0 8px;
   font-size: 12px;
   font-weight: 700;
 }
@@ -872,22 +868,6 @@ nav {
 .compactForm .searchExpressionInput span,
 .sideForm .searchExpressionInput span {
   text-transform: none;
-}
-
-.searchExpressionChip button {
-  display: grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-
-.searchExpressionChip button:hover {
-  background: rgba(26, 115, 232, 0.12);
 }
 
 .searchExpressionMeta {

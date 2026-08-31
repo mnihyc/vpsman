@@ -27,6 +27,25 @@ const MAX_JOB_OPERATION_DECODE_ERROR_CHARS: usize = 1024;
 const INVALID_JOB_OPERATION_RETRY_DEFER_SECS: i32 = 30;
 const INVALID_JOB_OPERATION_RETRY_MARKER: &str = "invalid_job_operation:";
 
+pub(crate) const JOB_TARGET_STATUS_BATCH_SQL: &str = r#"
+    SELECT
+        exact.job_id,
+        exact.client_id,
+        exact.status,
+        exact.message,
+        exact.exit_code,
+        exact.started_at::text AS started_at,
+        exact.deadline_at::text AS deadline_at,
+        exact.completed_at::text AS completed_at,
+        exact.process_incarnation_id
+    FROM unnest($1::uuid[], $2::text[]) WITH ORDINALITY
+        AS requested(job_id, client_id, input_ordinal)
+    JOIN job_targets AS exact
+      ON exact.job_id = requested.job_id
+     AND exact.client_id = requested.client_id
+    ORDER BY requested.input_ordinal
+"#;
+
 pub(crate) fn canonical_target_write_order(targets: &[String]) -> Vec<&str> {
     let mut ordered = targets.iter().map(String::as_str).collect::<Vec<_>>();
     ordered.sort_unstable();
@@ -2285,6 +2304,39 @@ impl Repository {
                     })
                     .collect()
             }
+        }
+    }
+
+    pub(crate) async fn list_exact_job_target_statuses(
+        &self,
+        pairs: &[(Uuid, String)],
+    ) -> Result<Vec<JobTargetView>> {
+        let job_ids = pairs.iter().map(|(job_id, _)| *job_id).collect::<Vec<_>>();
+        let client_ids = pairs
+            .iter()
+            .map(|(_, client_id)| client_id.clone())
+            .collect::<Vec<_>>();
+        match self {
+            Self::Postgres(pool) => sqlx::query(JOB_TARGET_STATUS_BATCH_SQL)
+                .bind(job_ids)
+                .bind(client_ids)
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .map(|row| {
+                    Ok(JobTargetView {
+                        job_id: row.try_get("job_id")?,
+                        client_id: row.try_get("client_id")?,
+                        status: row.try_get("status")?,
+                        message: row.try_get("message")?,
+                        exit_code: row.try_get("exit_code")?,
+                        started_at: row.try_get("started_at")?,
+                        deadline_at: row.try_get("deadline_at")?,
+                        completed_at: row.try_get("completed_at")?,
+                        process_incarnation_id: row.try_get("process_incarnation_id")?,
+                    })
+                })
+                .collect(),
         }
     }
 

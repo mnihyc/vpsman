@@ -22,6 +22,8 @@ import { formatLowerBoundCount } from "../../constants";
 import type {
   AgentView,
   AuditLogRecord,
+  BulkOperatorSessionRevokeItem,
+  BulkOperatorSessionRevokeResponse,
   JobHistoryRecord,
   JsonValue,
   OperatorAuthEventRecord,
@@ -71,6 +73,7 @@ type OperatorSessionEvidenceState = {
 };
 
 const TERMINAL_STALE_FLOOR_MS = 60 * 60 * 1000;
+const accessBulkActionLimit = 500;
 
 export function SessionEvidencePanel({
   agents,
@@ -82,7 +85,7 @@ export function SessionEvidencePanel({
   onClearSession,
   onOpenPrivilegeUnlock,
   onRefresh,
-  onRevokeOperatorSession,
+  onRevokeOperatorSessions,
   operator,
   operatorAuthEvents,
   operatorAuthEventsTruncated,
@@ -101,11 +104,10 @@ export function SessionEvidencePanel({
   onClearSession: () => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
-  onRevokeOperatorSession: (
-    sessionId: string,
+  onRevokeOperatorSessions: (
+    items: BulkOperatorSessionRevokeItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorSessionRevokeResponse>;
   operator: OperatorView | null;
   operatorAuthEvents: OperatorAuthEventRecord[];
   operatorAuthEventsTruncated: boolean;
@@ -558,7 +560,7 @@ export function SessionEvidencePanel({
         authEventBySessionId={authEventBySessionId}
         canInspectOperatorAuthority={canInspectOperatorAuthority}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-        onRevokeOperatorSession={onRevokeOperatorSession}
+        onRevokeOperatorSessions={onRevokeOperatorSessions}
         operatorSessions={operatorSessions}
         operatorSessionsTruncated={operatorSessionsTruncated}
         privilegeMaterial={privilegeMaterial}
@@ -819,7 +821,7 @@ function OperatorSessionEvidence({
   authEventBySessionId,
   canInspectOperatorAuthority,
   onOpenPrivilegeUnlock,
-  onRevokeOperatorSession,
+  onRevokeOperatorSessions,
   operatorSessions,
   operatorSessionsTruncated,
   privilegeMaterial,
@@ -828,11 +830,10 @@ function OperatorSessionEvidence({
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
   canInspectOperatorAuthority: boolean;
   onOpenPrivilegeUnlock: () => void;
-  onRevokeOperatorSession: (
-    sessionId: string,
+  onRevokeOperatorSessions: (
+    items: BulkOperatorSessionRevokeItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorSessionRevokeResponse>;
   operatorSessions: OperatorSessionRecord[];
   operatorSessionsTruncated: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -986,6 +987,13 @@ function OperatorSessionEvidence({
       });
       return;
     }
+    if (sessions.length > accessBulkActionLimit) {
+      setFeedback({
+        message: `Select at most ${accessBulkActionLimit} sessions; narrow the selection before review.`,
+        tone: "danger",
+      });
+      return;
+    }
     if (!privilegeMaterial) {
       setFeedback({
         message: "Unlock privilege to review session revocation.",
@@ -1056,19 +1064,34 @@ function OperatorSessionEvidence({
     setRevokePending(true);
     setFeedback({ message: "Revoking sessions", tone: "progress" });
     try {
-      for (const session of pendingRevoke.sessions) {
-        await onRevokeOperatorSession(
-          session.id,
-          pendingRevoke.adminRisk,
-          pendingRevoke.privileges[session.id].privilegeAssertion,
-        );
-      }
+      const response = await onRevokeOperatorSessions(
+        pendingRevoke.sessions.map((session) => ({
+          session_id: session.id,
+          privilege_assertion:
+            pendingRevoke.privileges[session.id].privilegeAssertion,
+        })),
+        pendingRevoke.adminRisk,
+      );
       const count = pendingRevoke.sessions.length;
       setPendingRevoke(null);
-      setFeedback({
-        message: `Revoked ${count} bearer session${count === 1 ? "" : "s"}.`,
-        tone: "success",
-      });
+      const rejected = response.outcomes.flatMap((outcome, index) =>
+        outcome.status === "succeeded" && outcome.result
+          ? []
+          : [
+              `${pendingRevoke.sessions[index]?.operator_username ?? shortId(outcome.session_id)} (${shortId(outcome.session_id)}): ${outcome.error_message || outcome.error_code || "no updated session record returned"}`,
+            ],
+      );
+      setFeedback(
+        rejected.length > 0
+          ? {
+              message: `Revoked ${count - rejected.length} of ${count} bearer sessions. Rejected in request order: ${rejected.join("; ")}. Rejected rows remain selected; review them and retry.`,
+              tone: "danger",
+            }
+          : {
+              message: `Revoked ${count} bearer session${count === 1 ? "" : "s"}.`,
+              tone: "success",
+            },
+      );
     } catch (error) {
       setFeedback({
         message:
@@ -1114,13 +1137,16 @@ function OperatorSessionEvidence({
               {
                 label: "Revoke",
                 description: (rows) =>
-                  rows.length === 1
-                    ? `Revoke the bearer session for ${rows[0].operator_username}.`
-                    : `Revoke ${rows.length} selected bearer sessions.`,
+                  rows.length > accessBulkActionLimit
+                    ? `Select at most ${accessBulkActionLimit} sessions; narrow the selection before review.`
+                    : rows.length === 1
+                      ? `Revoke the bearer session for ${rows[0].operator_username}.`
+                      : `Revoke ${rows.length} selected bearer sessions.`,
                 disabled: (rows) =>
                   reviewPending ||
                   revokePending ||
                   rows.length === 0 ||
+                  rows.length > accessBulkActionLimit ||
                   rows.some(
                     (session) =>
                       session.current || !isOperatorSessionRevokable(session),

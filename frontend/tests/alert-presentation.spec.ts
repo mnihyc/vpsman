@@ -1,7 +1,17 @@
 import { expect, test } from "@playwright/test";
 import { presentFleetAlert } from "../src/alertPresentation";
-import { applyFleetAlertStates } from "../src/hooks/useFleetData";
-import type { FleetAlertRecord, FleetAlertStateRecord } from "../src/types";
+import {
+  applyResolvedPolicyAlertHistory,
+  applyFleetAlertStates,
+  policyAlertEpisodeId,
+  reconcileFleetAlertEventReviewItems,
+  withoutResolvedPolicyAlertEpisodes,
+} from "../src/hooks/useFleetData";
+import type {
+  FleetAlertRecord,
+  FleetAlertStateRecord,
+  PolicyAlertRecord,
+} from "../src/types";
 
 const baseAlert: FleetAlertRecord = {
   category: "resource",
@@ -79,12 +89,86 @@ test("delayed bulk state responses cannot downgrade embedded alert revisions", (
   };
   const newerAlert = alertWithState(newer);
 
-  expect(applyFleetAlertStates([newerAlert], [delayed])).toEqual([
-    newerAlert,
-  ]);
+  expect(applyFleetAlertStates([newerAlert], [delayed])).toEqual([newerAlert]);
 
   expect(applyFleetAlertStates([alertWithState(delayed)], [newer])).toEqual([
     newerAlert,
+  ]);
+});
+
+test("current occurrence sync resets an over-bound retained tail to a contiguous head", () => {
+  const retained = Array.from({ length: 5_000 }, (_, index) => ({
+    ...baseAlert,
+    id: `occurrence:${index}`,
+    record_kind: "event" as const,
+  }));
+  const head = [
+    { ...retained[0], id: "occurrence:newest" },
+    ...retained.slice(0, 199),
+  ];
+
+  const overflow = reconcileFleetAlertEventReviewItems(head, retained);
+  expect(overflow.resetTail).toBe(true);
+  expect(overflow.items).toHaveLength(200);
+  expect(overflow.items.map((alert) => alert.id)).toEqual(
+    head.map((alert) => alert.id),
+  );
+
+  const repeated = reconcileFleetAlertEventReviewItems(head, overflow.items);
+  expect(repeated.resetTail).toBe(false);
+  expect(repeated.items).toHaveLength(200);
+});
+
+test("maps only canonical policy alert public identities to episode rows", () => {
+  expect(policyAlertEpisodeId("policy-alert:episode-01")).toBe("episode-01");
+  expect(policyAlertEpisodeId("policy-alert:")).toBeNull();
+  expect(policyAlertEpisodeId("operational-alert:episode-01")).toBeNull();
+
+  const policyAlert: PolicyAlertRecord = {
+    actual_value: 0.91,
+    category: "resource",
+    client_id: "fixture-client-01",
+    created_at: "2026-08-18T10:00:00Z",
+    detail: "Fixture occurrence evidence",
+    id: "episode-01",
+    last_confirmed_at: "2026-08-18T10:01:00Z",
+    lifecycle_state: "persisting",
+    observed_at: "2026-08-18T10:01:00Z",
+    payload: {},
+    policy_group_id: "group-01",
+    policy_rule_id: "rule-01",
+    resolution_reason: null,
+    resolved_at: null,
+    severity: "warning",
+    threshold_value: 0.9,
+    title: "Fixture occurrence",
+    trigger_generation: 1,
+  };
+  const resolved: FleetAlertRecord = {
+    ...baseAlert,
+    id: "policy-alert:episode-01",
+    lifecycle: {
+      ...baseAlert.lifecycle,
+      last_confirmed_at: "2026-08-18T10:02:00Z",
+      resolution_reason: "operator_resolved",
+      resolved_at: "2026-08-18T10:03:00Z",
+      state: "resolved",
+    },
+    observed_at: "2026-08-18T10:02:00Z",
+    record_kind: "event",
+  };
+  expect(withoutResolvedPolicyAlertEpisodes([policyAlert], [resolved])).toEqual(
+    [],
+  );
+  expect(applyResolvedPolicyAlertHistory([policyAlert], [resolved])).toEqual([
+    expect.objectContaining({
+      id: "episode-01",
+      last_confirmed_at: "2026-08-18T10:02:00Z",
+      lifecycle_state: "resolved",
+      observed_at: "2026-08-18T10:02:00Z",
+      resolution_reason: "operator_resolved",
+      resolved_at: "2026-08-18T10:03:00Z",
+    }),
   ]);
 });
 

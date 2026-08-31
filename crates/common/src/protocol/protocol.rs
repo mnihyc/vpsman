@@ -1168,6 +1168,18 @@ pub struct GatewaySessionDisconnectResult {
     pub message: String,
 }
 
+pub const GATEWAY_CONTROL_BATCH_MAX_ITEMS: usize = 500;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewaySessionDisconnectBatchRequest {
+    pub items: Vec<GatewaySessionDisconnect>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewaySessionDisconnectBatchResult {
+    pub results: Vec<GatewaySessionDisconnectResult>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayClientSuspensionFencePrepare {
     pub client_id: String,
@@ -1191,6 +1203,23 @@ pub struct GatewayClientSuspensionFenceClear {
     pub reason: String,
 }
 
+pub const GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS: usize = 500;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFencePrepareBatchRequest {
+    pub items: Vec<GatewayClientSuspensionFencePrepare>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFencePromoteBatchRequest {
+    pub items: Vec<GatewayClientSuspensionFencePromote>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFenceClearBatchRequest {
+    pub items: Vec<GatewayClientSuspensionFenceClear>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayClientSuspensionFenceResult {
     pub client_id: String,
@@ -1201,6 +1230,11 @@ pub struct GatewayClientSuspensionFenceResult {
     /// API must not relabel these as never dispatched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enqueued_job_ids: Vec<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayClientSuspensionFenceBatchResult {
+    pub results: Vec<GatewayClientSuspensionFenceResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1227,6 +1261,33 @@ pub struct GatewayPrivilegeVerificationResult {
     pub approved: bool,
     pub intent_hash_hex: String,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayPrivilegeVerificationBatchItem {
+    /// Opaque correlation key supplied by the caller. It has no client or
+    /// workflow semantics.
+    pub request_id: String,
+    pub verification: GatewayPrivilegeVerification,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayPrivilegeVerificationBatchRequest {
+    pub items: Vec<GatewayPrivilegeVerificationBatchItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayPrivilegeVerificationBatchItemResult {
+    pub request_id: String,
+    pub approved: bool,
+    pub intent_hash_hex: Option<String>,
+    pub message: String,
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayPrivilegeVerificationBatchResult {
+    pub results: Vec<GatewayPrivilegeVerificationBatchItemResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

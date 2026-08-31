@@ -98,6 +98,13 @@ export type ConsoleDataGridAction<T> = {
   tone?: "danger" | "normal";
 };
 
+export type ConsoleDataGridSearchState = {
+  error: string | null;
+  matchingCount: number;
+  pageSize: number;
+  query: string;
+};
+
 type ConsoleDataGridPreferences = {
   columnOrder?: string[];
   columnSizing?: ColumnSizingState;
@@ -131,6 +138,7 @@ export function ConsoleDataGrid<T>({
   showMobileOpenRowAction = false,
   showMobileRowActions = false,
   onSelectionChange,
+  onSearchStateChange,
   renderExpandedRow,
   renderSelectionPanel,
   rowActions = [],
@@ -142,6 +150,9 @@ export function ConsoleDataGrid<T>({
   storageKey,
   title,
   toolbarActions,
+  truncatedEmpty,
+  truncatedSearchEmpty,
+  truncatedStatus,
 }: {
   actions?: ConsoleDataGridAction<T>[];
   columns: ConsoleDataGridColumn<T>[];
@@ -163,6 +174,7 @@ export function ConsoleDataGrid<T>({
   showMobileOpenRowAction?: boolean;
   showMobileRowActions?: boolean;
   onSelectionChange?: (rows: T[]) => void;
+  onSearchStateChange?: (state: ConsoleDataGridSearchState) => void;
   renderExpandedRow?: (row: T) => ReactNode;
   renderSelectionPanel?: (rows: T[]) => ReactNode;
   rowActions?: ConsoleDataGridAction<T>[];
@@ -174,6 +186,9 @@ export function ConsoleDataGrid<T>({
   storageKey: string;
   title: string;
   toolbarActions?: ReactNode;
+  truncatedEmpty?: ReactNode;
+  truncatedSearchEmpty?: ReactNode;
+  truncatedStatus?: ReactNode;
 }) {
   const singularItemLabel = singularizeItemLabel(itemLabel);
   const controlIdPrefix = gridControlId(storageKey);
@@ -203,10 +218,12 @@ export function ConsoleDataGrid<T>({
   const showMobileCards = isMobileGrid && mobileLayout === "cards";
   const expandedRowsRef = useRef(expandedRows);
   const onExpandedRowChangeRef = useRef(onExpandedRowChange);
+  const onSearchStateChangeRef = useRef(onSearchStateChange);
   const renderExpandedRowRef = useRef(renderExpandedRow);
   const singleExpandedRowRef = useRef(singleExpandedRow);
   expandedRowsRef.current = expandedRows;
   onExpandedRowChangeRef.current = onExpandedRowChange;
+  onSearchStateChangeRef.current = onSearchStateChange;
   renderExpandedRowRef.current = renderExpandedRow;
   singleExpandedRowRef.current = singleExpandedRow;
   const hasExpandedRows = Boolean(renderExpandedRow);
@@ -222,6 +239,14 @@ export function ConsoleDataGrid<T>({
   }, [columns, globalFilter, rows]);
   const filteredRows = searchResult.items;
   const searchError = searchResult.error;
+  useEffect(() => {
+    onSearchStateChangeRef.current?.({
+      error: searchError,
+      matchingCount: filteredRows.length,
+      pageSize,
+      query: globalFilter,
+    });
+  }, [filteredRows.length, globalFilter, pageSize, searchError]);
   const gridSearchSuggestions = useMemo(
     () =>
       buildParseableSearchValueSuggestions(
@@ -827,6 +852,11 @@ export function ConsoleDataGrid<T>({
       );
     }
     if (rows.length > 0 && globalFilter.trim()) {
+      if (rowsTruncated && truncatedSearchEmpty !== undefined) {
+        return (
+          <div className="emptyState compactEmpty">{truncatedSearchEmpty}</div>
+        );
+      }
       return (
         <div className="emptyState compactEmpty">
           <strong>
@@ -851,10 +881,17 @@ export function ConsoleDataGrid<T>({
       );
     }
     if (rowsTruncated && rows.length === 0) {
+      const truncatedEmptyContent = truncatedEmpty ?? empty ?? (
+        <>
+          <strong>No loaded {itemLabel} are available</strong>
+          <span>
+            Refresh this view, load older records where offered, or narrow its
+            filters.
+          </span>
+        </>
+      );
       return (
-        <div className="emptyState compactEmpty">
-          No {itemLabel} appear in the loaded page; more may exist.
-        </div>
+        <div className="emptyState compactEmpty">{truncatedEmptyContent}</div>
       );
     }
     const emptyContent = empty ?? `No ${itemLabel} match the current view.`;
@@ -871,9 +908,11 @@ export function ConsoleDataGrid<T>({
           <strong>{title}</strong>
           <span>
             {rowsTruncated
-              ? globalFilter.trim().length > 0
-                ? `${filteredRows.length} matching in ${rows.length} loaded; more may exist`
-                : `${rows.length} loaded; more may exist`
+              ? truncatedStatus !== undefined
+                ? truncatedStatus
+                : globalFilter.trim().length > 0
+                  ? `${filteredRows.length} matching in ${rows.length} loaded; more may exist`
+                  : `${rows.length} loaded; more may exist`
               : `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? singularItemLabel : itemLabel}`}
           </span>
           {selectable && <span>{selectedRows.length} selected</span>}

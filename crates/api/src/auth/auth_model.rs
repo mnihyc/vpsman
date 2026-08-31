@@ -391,6 +391,77 @@ pub(crate) struct OperatorLifecycleRequest {
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OperatorLifecycleStatus {
+    Active,
+    Disabled,
+    Deleted,
+}
+
+impl OperatorLifecycleStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+            Self::Deleted => "deleted",
+        }
+    }
+
+    pub(crate) fn privilege_action(self) -> &'static str {
+        match self {
+            Self::Active => "operator.enable",
+            Self::Disabled => "operator.disable",
+            Self::Deleted => "operator.delete",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkOperatorMutationItem {
+    pub(crate) operator_id: Uuid,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkOperatorStatusRequest {
+    pub(crate) status: OperatorLifecycleStatus,
+    pub(crate) items: Vec<BulkOperatorMutationItem>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkOperatorMutationOutcome {
+    pub(crate) operator_id: Uuid,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<OperatorView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkOperatorMutationResponse {
+    pub(crate) outcomes: Vec<BulkOperatorMutationOutcome>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkOperatorTotpClearRequest {
+    pub(crate) items: Vec<BulkOperatorMutationItem>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct OperatorPasswordResetRequest {
     pub(crate) password: String,
@@ -408,6 +479,40 @@ pub(crate) struct OperatorSessionRevokeRequest {
     #[serde(default)]
     pub(crate) admin_risk_acknowledged: bool,
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkOperatorSessionRevokeItem {
+    pub(crate) session_id: Uuid,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkOperatorSessionRevokeRequest {
+    pub(crate) items: Vec<BulkOperatorSessionRevokeItem>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkOperatorSessionRevokeOutcome {
+    pub(crate) session_id: Uuid,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<OperatorSessionView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkOperatorSessionRevokeResponse {
+    pub(crate) outcomes: Vec<BulkOperatorSessionRevokeOutcome>,
 }
 
 #[derive(Debug, Deserialize)]

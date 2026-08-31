@@ -22,8 +22,8 @@ use crate::repository_key_lifecycle::{
     public_key_sha256_hex, require_visible_postgres_clients_in_tx,
 };
 use crate::repository_port_forwarding::{
-    archive_postgres_port_forwarding_for_agent_delete, lock_postgres_port_forward_client,
-    postgres_port_forwarding_blocks_agent_delete,
+    archive_postgres_port_forwarding_for_agent_deletes, lock_postgres_port_forward_clients,
+    postgres_port_forwarding_blocked_clients_for_agent_delete,
 };
 use crate::selector_expression::{
     agent_matches_selector_expression, agent_matches_selector_expression_with_rules,
@@ -33,6 +33,43 @@ use crate::unix_now;
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
 const TAG_NATURAL_SORT_SETTING_KEY: &str = "order.namespace_natural_sort_enabled";
+
+#[derive(Clone, Debug)]
+pub(crate) enum AgentSuspensionRepositoryOutcome {
+    Applied {
+        client_id: String,
+        agent: Box<AgentView>,
+        mutation: AgentSuspensionMutationResult,
+    },
+    Rejected {
+        client_id: String,
+        code: &'static str,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DeleteAgentRepositoryOutcome {
+    Applied(DeleteAgentResult),
+    Rejected {
+        client_id: String,
+        code: &'static str,
+    },
+}
+
+struct DeleteAgentState {
+    process_incarnation_id: Option<Uuid>,
+    public_key: Vec<u8>,
+    status: String,
+}
+
+fn suspension_status_rejection(status: &str) -> Option<&'static str> {
+    match status {
+        "never" | "disconnected" | "offline" | "stale" => None,
+        "suspended" => Some("agent_already_suspended"),
+        "online" => Some("agent_suspend_online"),
+        _ => Some("agent_suspend_ineligible"),
+    }
+}
 
 impl Repository {
     pub(crate) async fn ensure_visible_display_name_available(
@@ -961,6 +998,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn suspend_agent_with_protected_dispatches(
         &self,
         client_id: &str,
@@ -968,6 +1006,52 @@ impl Repository {
         operator: &AuthContext,
         protected_enqueued_job_ids: &[Uuid],
     ) -> Result<AgentSuspensionMutationResult> {
+        let protected =
+            HashMap::from([(client_id.to_string(), protected_enqueued_job_ids.to_vec())]);
+        let mut outcomes = self
+            .mutate_agent_suspensions(
+                AgentSuspensionAction::Suspend,
+                &[client_id.to_string()],
+                reason,
+                operator,
+                &protected,
+            )
+            .await?;
+        match outcomes.pop().context("agent_not_found")? {
+            AgentSuspensionRepositoryOutcome::Applied { mutation, .. } => Ok(mutation),
+            AgentSuspensionRepositoryOutcome::Rejected { code, .. } => anyhow::bail!(code),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn unsuspend_agent(
+        &self,
+        client_id: &str,
+        operator: &AuthContext,
+    ) -> Result<AgentSuspensionMutationResult> {
+        let mut outcomes = self
+            .mutate_agent_suspensions(
+                AgentSuspensionAction::Unsuspend,
+                &[client_id.to_string()],
+                None,
+                operator,
+                &HashMap::new(),
+            )
+            .await?;
+        match outcomes.pop().context("agent_not_found")? {
+            AgentSuspensionRepositoryOutcome::Applied { mutation, .. } => Ok(mutation),
+            AgentSuspensionRepositoryOutcome::Rejected { code, .. } => anyhow::bail!(code),
+        }
+    }
+
+    pub(crate) async fn mutate_agent_suspensions(
+        &self,
+        action: AgentSuspensionAction,
+        client_ids: &[String],
+        reason: Option<&str>,
+        operator: &AuthContext,
+        protected_enqueued_job_ids: &HashMap<String, Vec<Uuid>>,
+    ) -> Result<Vec<AgentSuspensionRepositoryOutcome>> {
         let reason = reason
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -981,263 +1065,342 @@ impl Repository {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                // The API installs a 60-second gateway lease before entering
-                // this transaction. Server-side budgets ensure a canceled API
-                // future cannot leave PostgreSQL waiting past that lease.
+                // A prepared gateway fence has a 60-second lease. These are
+                // failure budgets, not throughput throttles, and keep a
+                // canceled request from retaining database locks past it.
                 sqlx::query("SELECT set_config('lock_timeout', '10s', true)")
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query("SELECT set_config('statement_timeout', '25s', true)")
                     .execute(&mut *tx)
                     .await?;
-                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
-                crate::repository_policy_lifecycle::lock_client_policy_suppression_in_tx(
-                    &mut tx, client_id,
+                lock_postgres_client_lifecycles_in_tx(&mut tx, client_ids).await?;
+                crate::repository_policy_lifecycle::lock_client_policy_suppressions_in_tx(
+                    &mut tx, client_ids,
                 )
                 .await?;
-                let row = sqlx::query(
+
+                let rows = sqlx::query(
                     r#"
-                    SELECT status
+                    SELECT id, status, suspended_from_status
                     FROM clients
-                    WHERE id=$1 AND hidden_at IS NULL
+                    WHERE id = ANY($1) AND hidden_at IS NULL
+                    ORDER BY id COLLATE "C"
                     FOR UPDATE
                     "#,
                 )
-                .bind(client_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .context("agent_not_found")?;
-                let prior_status: String = row.try_get("status")?;
-                match prior_status.as_str() {
-                    "never" | "disconnected" | "offline" | "stale" => {}
-                    "suspended" => anyhow::bail!("agent_already_suspended"),
-                    "online" => anyhow::bail!("agent_suspend_online"),
-                    _ => anyhow::bail!("agent_suspend_ineligible"),
+                .bind(client_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut states = HashMap::with_capacity(rows.len());
+                for row in rows {
+                    states.insert(
+                        row.try_get::<String, _>("id")?,
+                        (
+                            row.try_get::<String, _>("status")?,
+                            row.try_get::<Option<String>, _>("suspended_from_status")?,
+                        ),
+                    );
                 }
-                let row = sqlx::query(
-                    r#"
-                    UPDATE clients
-                    SET status='suspended',
-                        suspended_at=clock_timestamp(), suspended_by=$2,
-                        suspended_reason=$3, suspended_from_status=$4
-                    WHERE id=$1 AND hidden_at IS NULL
-                    RETURNING suspended_at::text AS suspended_at, suspended_by,
-                              suspended_reason, suspended_from_status
-                    "#,
-                )
-                .bind(client_id)
-                .bind(operator.operator.id)
-                .bind(&reason)
-                .bind(&prior_status)
-                .fetch_one(&mut *tx)
-                .await?;
-                let record = AgentSuspensionRecord {
-                    suspended_at: row.try_get("suspended_at")?,
-                    suspended_by: row.try_get("suspended_by")?,
-                    suspended_reason: row.try_get("suspended_reason")?,
-                    suspended_from_status: row.try_get("suspended_from_status")?,
-                };
-                let skipped_job_ids = skip_suspended_undelivered_targets_for_client_except_in_tx(
-                    &mut tx,
-                    client_id,
-                    "target_suspended",
-                    "target_suspended: target skipped because VPS is suspended",
-                    protected_enqueued_job_ids,
-                )
-                .await?;
-                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &skipped_job_ids).await?;
-                let resolved_alert_count =
-                    crate::repository_policy_lifecycle::suppress_client_policy_alerts_in_tx(
-                        &mut tx, client_id,
+
+                let mut applied = HashMap::new();
+                let mut rejected = HashMap::new();
+                let mut all_skipped_job_ids = Vec::new();
+                let mut resolved_alert_counts = if action == AgentSuspensionAction::Suspend {
+                    let eligible_client_ids = client_ids
+                        .iter()
+                        .filter(|client_id| {
+                            states.get(*client_id).is_some_and(|(status, _)| {
+                                suspension_status_rejection(status).is_none()
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    crate::repository_policy_lifecycle::suppress_client_policy_alerts_for_clients_in_tx(
+                        &mut tx,
+                        &eligible_client_ids,
                     )
+                    .await?
+                } else {
+                    HashMap::new()
+                };
+                for client_id in client_ids {
+                    let Some((status, suspended_from_status)) = states.get(client_id) else {
+                        rejected.insert(client_id.clone(), "agent_not_found");
+                        continue;
+                    };
+                    match action {
+                        AgentSuspensionAction::Suspend => {
+                            if let Some(code) = suspension_status_rejection(status) {
+                                rejected.insert(client_id.clone(), code);
+                                continue;
+                            }
+                            let row = sqlx::query(
+                                r#"
+                                UPDATE clients
+                                SET status='suspended',
+                                    suspended_at=clock_timestamp(), suspended_by=$2,
+                                    suspended_reason=$3, suspended_from_status=$4
+                                WHERE id=$1 AND hidden_at IS NULL
+                                RETURNING suspended_at::text AS suspended_at, suspended_by,
+                                          suspended_reason, suspended_from_status
+                                "#,
+                            )
+                            .bind(client_id)
+                            .bind(operator.operator.id)
+                            .bind(&reason)
+                            .bind(status)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                            let record = AgentSuspensionRecord {
+                                suspended_at: row.try_get("suspended_at")?,
+                                suspended_by: row.try_get("suspended_by")?,
+                                suspended_reason: row.try_get("suspended_reason")?,
+                                suspended_from_status: row.try_get("suspended_from_status")?,
+                            };
+                            let skipped_job_ids =
+                                skip_suspended_undelivered_targets_for_client_except_in_tx(
+                                    &mut tx,
+                                    client_id,
+                                    "target_suspended",
+                                    "target_suspended: target skipped because VPS is suspended",
+                                    protected_enqueued_job_ids
+                                        .get(client_id)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
+                                )
+                                .await?;
+                            all_skipped_job_ids.extend(skipped_job_ids.iter().copied());
+                            let resolved_alert_count =
+                                resolved_alert_counts.remove(client_id).unwrap_or_default();
+                            let transition_metadata = json!({
+                                "reason": &reason,
+                                "operator_id": operator.operator.id,
+                                "result": "suspended",
+                                "origin_kind": "operator_request",
+                                "component": "inventory-controller",
+                            });
+                            sqlx::query(
+                                r#"
+                                INSERT INTO client_status_history (
+                                    id, client_id, from_status, to_status, reason, metadata
+                                ) VALUES ($1,$2,$3,'suspended','operator_suspended',$4)
+                                "#,
+                            )
+                            .bind(Uuid::new_v4())
+                            .bind(client_id)
+                            .bind(status)
+                            .bind(&transition_metadata)
+                            .execute(&mut *tx)
+                            .await?;
+                            crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                                &mut tx,
+                                client_id,
+                                Some(status),
+                                "suspended",
+                                "operator_suspended",
+                                transition_metadata,
+                            )
+                            .await?;
+                            sqlx::query(
+                                r#"
+                                INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                                VALUES ($1,$2,'agent.suspended',$3,NULL,$4)
+                                "#,
+                            )
+                            .bind(Uuid::new_v4())
+                            .bind(operator.operator.id)
+                            .bind(format!("client:{client_id}"))
+                            .bind(sqlx::types::Json(json!({
+                                "client_id": client_id,
+                                "from_status": status,
+                                "to_status": "suspended",
+                                "reason": &reason,
+                                "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                                "resolved_alert_count": resolved_alert_count,
+                                "result": "succeeded",
+                                "operator_id": operator.operator.id,
+                                "operator_username": &operator.operator.username,
+                                "operator_role": &operator.operator.role,
+                                "operator_session_id": operator.audit_session_id(),
+                                "origin_kind": "operator_request",
+                                "component": "inventory-controller",
+                            })))
+                            .execute(&mut *tx)
+                            .await?;
+                            applied.insert(
+                                client_id.clone(),
+                                AgentSuspensionMutationResult {
+                                    record: Some(record),
+                                    skipped_unstarted_job_ids: skipped_job_ids,
+                                    resolved_alert_count,
+                                },
+                            );
+                        }
+                        AgentSuspensionAction::Unsuspend => {
+                            if status != "suspended" {
+                                rejected.insert(client_id.clone(), "agent_not_suspended");
+                                continue;
+                            }
+                            let restored_status = suspended_from_status
+                                .as_deref()
+                                .context("agent_suspension_metadata_invalid")?;
+                            sqlx::query(
+                                r#"
+                                UPDATE clients
+                                SET status=$2, suspended_at=NULL, suspended_by=NULL,
+                                    suspended_reason=NULL, suspended_from_status=NULL
+                                WHERE id=$1 AND status='suspended' AND hidden_at IS NULL
+                                "#,
+                            )
+                            .bind(client_id)
+                            .bind(restored_status)
+                            .execute(&mut *tx)
+                            .await?;
+                            let transition_metadata = json!({
+                                "operator_id": operator.operator.id,
+                                "result": restored_status,
+                                "origin_kind": "operator_request",
+                                "component": "inventory-controller",
+                            });
+                            sqlx::query(
+                                r#"
+                                INSERT INTO client_status_history (
+                                    id, client_id, from_status, to_status, reason, metadata
+                                ) VALUES ($1,$2,'suspended',$3,'operator_unsuspended',$4)
+                                "#,
+                            )
+                            .bind(Uuid::new_v4())
+                            .bind(client_id)
+                            .bind(restored_status)
+                            .bind(&transition_metadata)
+                            .execute(&mut *tx)
+                            .await?;
+                            crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
+                                &mut tx,
+                                client_id,
+                                restored_status,
+                            )
+                            .await?;
+                            crate::repository_operational_alerts::mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
+                                &mut tx,
+                                std::slice::from_ref(client_id),
+                            )
+                            .await?;
+                            crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                                &mut tx,
+                                client_id,
+                                Some("suspended"),
+                                restored_status,
+                                "operator_unsuspended",
+                                transition_metadata,
+                            )
+                            .await?;
+                            sqlx::query(
+                                r#"
+                                INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                                VALUES ($1,$2,'agent.unsuspended',$3,NULL,$4)
+                                "#,
+                            )
+                            .bind(Uuid::new_v4())
+                            .bind(operator.operator.id)
+                            .bind(format!("client:{client_id}"))
+                            .bind(sqlx::types::Json(json!({
+                                "client_id": client_id,
+                                "from_status": "suspended",
+                                "to_status": restored_status,
+                                "result": "succeeded",
+                                "operator_id": operator.operator.id,
+                                "operator_username": &operator.operator.username,
+                                "operator_role": &operator.operator.role,
+                                "operator_session_id": operator.audit_session_id(),
+                                "origin_kind": "operator_request",
+                                "component": "inventory-controller",
+                            })))
+                            .execute(&mut *tx)
+                            .await?;
+                            applied.insert(
+                                client_id.clone(),
+                                AgentSuspensionMutationResult {
+                                    record: None,
+                                    skipped_unstarted_job_ids: Vec::new(),
+                                    resolved_alert_count: 0,
+                                },
+                            );
+                        }
+                    }
+                }
+
+                all_skipped_job_ids.sort_unstable();
+                all_skipped_job_ids.dedup();
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &all_skipped_job_ids)
                     .await?;
-                let transition_metadata = json!({
-                    "reason": &reason,
-                    "operator_id": operator.operator.id,
-                    "result": "suspended",
-                    "origin_kind": "operator_request",
-                    "component": "inventory-controller",
-                });
-                sqlx::query(
-                    r#"
-                    INSERT INTO client_status_history (
-                        id, client_id, from_status, to_status, reason, metadata
-                    ) VALUES ($1,$2,$3,'suspended','operator_suspended',$4)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(client_id)
-                .bind(&prior_status)
-                .bind(&transition_metadata)
-                .execute(&mut *tx)
-                .await?;
-                crate::repository_ingest::insert_client_status_webhook_event_in_tx(
-                    &mut tx,
-                    client_id,
-                    Some(&prior_status),
-                    "suspended",
-                    "operator_suspended",
-                    transition_metadata.clone(),
-                )
-                .await?;
-                // Suspension and resolved lifecycle rows are the durable
-                // authority. Wake the sole delivery owners; they revalidate
-                // the exact client/episode immediately before external I/O.
-                sqlx::query("SELECT pg_notify('webhook_events', 'alert_notification')")
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1,$2,'agent.suspended',$3,NULL,$4)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind(format!("client:{client_id}"))
-                .bind(sqlx::types::Json(json!({
-                    "client_id": client_id,
-                    "from_status": prior_status,
-                    "to_status": "suspended",
-                    "reason": &reason,
-                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
-                    "resolved_alert_count": resolved_alert_count,
-                    "result": "succeeded",
-                    "operator_id": operator.operator.id,
-                    "operator_username": &operator.operator.username,
-                    "operator_role": &operator.operator.role,
-                    "operator_session_id": operator.audit_session_id(),
-                    "origin_kind": "operator_request",
-                    "component": "inventory-controller",
-                })))
-                .execute(&mut *tx)
-                .await?;
+                if !applied.is_empty() {
+                    // One wakeup covers all durable per-client webhook rows.
+                    sqlx::query("SELECT pg_notify('webhook_events', 'alert_notification')")
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                let applied_client_ids = client_ids
+                    .iter()
+                    .filter(|client_id| applied.contains_key(*client_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let agents = postgres_agents_by_ids_in_tx(&mut tx, &applied_client_ids).await?;
                 tx.commit().await?;
-                Ok(AgentSuspensionMutationResult {
-                    record: Some(record),
-                    skipped_unstarted_job_ids: skipped_job_ids,
-                    resolved_alert_count,
-                })
+
+                let mut agents = agents
+                    .into_iter()
+                    .map(|agent| (agent.id.clone(), agent))
+                    .collect::<HashMap<_, _>>();
+                let mut outcomes = Vec::with_capacity(client_ids.len());
+                for client_id in client_ids {
+                    if let Some(code) = rejected.remove(client_id) {
+                        outcomes.push(AgentSuspensionRepositoryOutcome::Rejected {
+                            client_id: client_id.clone(),
+                            code,
+                        });
+                    } else {
+                        outcomes.push(AgentSuspensionRepositoryOutcome::Applied {
+                            client_id: client_id.clone(),
+                            agent: Box::new(
+                                agents
+                                    .remove(client_id)
+                                    .context("agent_suspension_result_missing")?,
+                            ),
+                            mutation: applied
+                                .remove(client_id)
+                                .context("agent_suspension_result_missing")?,
+                        });
+                    }
+                }
+                Ok(outcomes)
             }
         }
     }
 
-    pub(crate) async fn unsuspend_agent(
-        &self,
-        client_id: &str,
-        operator: &AuthContext,
-    ) -> Result<AgentSuspensionMutationResult> {
-        match self {
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
-                let row = sqlx::query(
-                    r#"
-                    SELECT status, suspended_from_status
-                    FROM clients
-                    WHERE id=$1 AND hidden_at IS NULL
-                    FOR UPDATE
-                    "#,
-                )
-                .bind(client_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .context("agent_not_found")?;
-                let status: String = row.try_get("status")?;
-                anyhow::ensure!(status == "suspended", "agent_not_suspended");
-                let restored_status: String = row
-                    .try_get::<Option<String>, _>("suspended_from_status")?
-                    .context("agent_suspension_metadata_invalid")?;
-                sqlx::query(
-                    r#"
-                    UPDATE clients
-                    SET status=$2, suspended_at=NULL, suspended_by=NULL,
-                        suspended_reason=NULL, suspended_from_status=NULL
-                    WHERE id=$1 AND status='suspended' AND hidden_at IS NULL
-                    "#,
-                )
-                .bind(client_id)
-                .bind(&restored_status)
-                .execute(&mut *tx)
-                .await?;
-                let transition_metadata = json!({
-                    "operator_id": operator.operator.id,
-                    "result": &restored_status,
-                    "origin_kind": "operator_request",
-                    "component": "inventory-controller",
-                });
-                sqlx::query(
-                    r#"
-                    INSERT INTO client_status_history (
-                        id, client_id, from_status, to_status, reason, metadata
-                    ) VALUES ($1,$2,'suspended',$3,'operator_unsuspended',$4)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(client_id)
-                .bind(&restored_status)
-                .bind(&transition_metadata)
-                .execute(&mut *tx)
-                .await?;
-                crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
-                    &mut tx,
-                    client_id,
-                    &restored_status,
-                )
-                .await?;
-                crate::repository_operational_alerts::mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
-                    &mut tx,
-                    &[client_id.to_string()],
-                )
-                .await?;
-                crate::repository_ingest::insert_client_status_webhook_event_in_tx(
-                    &mut tx,
-                    client_id,
-                    Some("suspended"),
-                    &restored_status,
-                    "operator_unsuspended",
-                    transition_metadata,
-                )
-                .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1,$2,'agent.unsuspended',$3,NULL,$4)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind(format!("client:{client_id}"))
-                .bind(sqlx::types::Json(json!({
-                    "client_id": client_id,
-                    "from_status": "suspended",
-                    "to_status": &restored_status,
-                    "result": "succeeded",
-                    "operator_id": operator.operator.id,
-                    "operator_username": &operator.operator.username,
-                    "operator_role": &operator.operator.role,
-                    "operator_session_id": operator.audit_session_id(),
-                    "origin_kind": "operator_request",
-                    "component": "inventory-controller",
-                })))
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                Ok(AgentSuspensionMutationResult {
-                    record: None,
-                    skipped_unstarted_job_ids: Vec::new(),
-                    resolved_alert_count: 0,
-                })
-            }
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) async fn delete_agent(
         &self,
         client_id: &str,
         reason: Option<&str>,
         operator: &AuthContext,
     ) -> Result<DeleteAgentResult> {
+        let mut outcomes = self
+            .delete_agents(&[client_id.to_string()], reason, operator)
+            .await?;
+        match outcomes.pop().context("agent_not_found")? {
+            DeleteAgentRepositoryOutcome::Applied(result) => Ok(result),
+            DeleteAgentRepositoryOutcome::Rejected { code, .. } => anyhow::bail!(code),
+        }
+    }
+
+    pub(crate) async fn delete_agents(
+        &self,
+        client_ids: &[String],
+        reason: Option<&str>,
+        operator: &AuthContext,
+    ) -> Result<Vec<DeleteAgentRepositoryOutcome>> {
         let reason = reason
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -1245,188 +1408,308 @@ impl Repository {
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_postgres_client_lifecycles_in_tx(&mut tx, &[client_id.to_string()]).await?;
-                lock_postgres_port_forward_client(&mut tx, client_id).await?;
-                anyhow::ensure!(
-                    !postgres_port_forwarding_blocks_agent_delete(&mut tx, client_id).await?,
-                    "agent_port_forwarding_cleanup_required"
-                );
-                let client_row = sqlx::query(
+                sqlx::query("SELECT set_config('lock_timeout', '10s', true)")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("SELECT set_config('statement_timeout', '55s', true)")
+                    .execute(&mut *tx)
+                    .await?;
+
+                // Tunnel writers acquire definition identities before exact
+                // endpoint clients. Snapshot those identities first, acquire
+                // the same order, then reject a concurrent new-plan snapshot
+                // instead of taking a definition lock after a client lock.
+                let tunnel_snapshot = sqlx::query(
                     r#"
-                    SELECT process_incarnation_id, public_key, status
+                    SELECT id
+                    FROM tunnel_plans
+                    WHERE deleted_at IS NULL
+                      AND (left_client_id=ANY($1) OR right_client_id=ANY($1))
+                    ORDER BY id
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let tunnel_plan_ids = tunnel_snapshot
+                    .iter()
+                    .map(|row| row.try_get::<Uuid, _>("id").map_err(Into::into))
+                    .collect::<Result<Vec<_>>>()?;
+                let tunnel_definitions = tunnel_plan_ids
+                    .iter()
+                    .map(|plan_id| format!("tunnel-plan:{plan_id}"))
+                    .collect::<Vec<_>>();
+                lock_postgres_definitions_and_clients_in_tx(
+                    &mut tx,
+                    &tunnel_definitions,
+                    client_ids,
+                )
+                .await?;
+                let current_tunnel_plan_ids = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    SELECT id
+                    FROM tunnel_plans
+                    WHERE deleted_at IS NULL
+                      AND (left_client_id=ANY($1) OR right_client_id=ANY($1))
+                    ORDER BY id
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(
+                    current_tunnel_plan_ids
+                        .iter()
+                        .all(|plan_id| tunnel_plan_ids.contains(plan_id)),
+                    "agent_delete_tunnel_snapshot_stale"
+                );
+                lock_postgres_port_forward_clients(&mut tx, client_ids).await?;
+
+                let client_rows = sqlx::query(
+                    r#"
+                    SELECT id, process_incarnation_id, public_key, status
                     FROM clients
-                    WHERE id = $1
+                    WHERE id=ANY($1)
+                    ORDER BY id COLLATE "C"
                     FOR UPDATE
                     "#,
                 )
-                .bind(client_id)
-                .fetch_optional(&mut *tx)
+                .bind(client_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                let Some(client_row) = client_row else {
-                    anyhow::bail!("agent_not_found");
-                };
-                let old_process_incarnation_id: Option<Uuid> =
-                    client_row.try_get("process_incarnation_id")?;
-                let public_key: Vec<u8> = client_row.try_get("public_key")?;
-                let prior_status: String = client_row.try_get("status")?;
-                if !public_key.is_empty() {
-                    let public_key_sha256_hex = public_key_sha256_hex(&public_key);
-                    lock_postgres_key_identities_in_tx(
-                        &mut tx,
-                        std::slice::from_ref(&public_key_sha256_hex),
-                    )
-                    .await?;
-                    sqlx::query(
-                        r#"
-                        INSERT INTO client_key_revocations (
-                            id, client_id, public_key_sha256_hex, reason, revoked_by
-                        )
-                        VALUES ($1, $2, $3, 'vps_deleted', $4)
-                        ON CONFLICT (public_key_sha256_hex) DO NOTHING
-                        "#,
-                    )
-                    .bind(Uuid::new_v4())
-                    .bind(client_id)
-                    .bind(public_key_sha256_hex)
-                    .bind(operator.operator.id)
-                    .execute(&mut *tx)
-                    .await?;
+                let mut states = HashMap::with_capacity(client_rows.len());
+                for row in client_rows {
+                    states.insert(
+                        row.try_get::<String, _>("id")?,
+                        DeleteAgentState {
+                            process_incarnation_id: row.try_get("process_incarnation_id")?,
+                            public_key: row.try_get("public_key")?,
+                            status: row.try_get("status")?,
+                        },
+                    );
                 }
-                let row = sqlx::query(
-                    r#"
-                    UPDATE clients
-                    SET
-                        hidden_at = COALESCE(hidden_at, now()),
-                        hidden_by = COALESCE(hidden_by, $2),
-                        hidden_reason = COALESCE($3, hidden_reason),
-                        public_key = ''::bytea,
-                        status = 'deleted',
-                        process_incarnation_id = NULL,
-                        suspended_at = NULL,
-                        suspended_by = NULL,
-                        suspended_reason = NULL,
-                        suspended_from_status = NULL
-                    WHERE id = $1
-                    RETURNING id, hidden_at::text AS deleted_at
-                    "#,
+                let existing_client_ids = client_ids
+                    .iter()
+                    .filter(|client_id| states.contains_key(*client_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let blocked = postgres_port_forwarding_blocked_clients_for_agent_delete(
+                    &mut tx,
+                    &existing_client_ids,
                 )
-                .bind(client_id)
-                .bind(operator.operator.id)
-                .bind(&reason)
-                .fetch_optional(&mut *tx)
                 .await?;
-                let Some(row) = row else {
-                    anyhow::bail!("agent_not_found");
-                };
-                let deleted_at: String = row.try_get("deleted_at")?;
-                if prior_status != "deleted" {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO client_status_history (
-                            id, client_id, from_status, to_status, reason, metadata
-                        )
-                        VALUES ($1, $2, $3, 'deleted', 'vps_deleted', $4)
-                        "#,
-                    )
-                    .bind(Uuid::new_v4())
-                    .bind(client_id)
-                    .bind(&prior_status)
-                    .bind(json!({
-                        "reason": &reason,
-                        "operator_id": operator.operator.id,
-                        "frontend_visible": false,
-                    }))
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                let archived_port_forward_rule_count =
-                    archive_postgres_port_forwarding_for_agent_delete(
+                let applied_client_ids = existing_client_ids
+                    .iter()
+                    .filter(|client_id| !blocked.contains(*client_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let key_hashes = applied_client_ids
+                    .iter()
+                    .filter_map(|client_id| states.get(client_id))
+                    .filter(|state| !state.public_key.is_empty())
+                    .map(|state| public_key_sha256_hex(&state.public_key))
+                    .collect::<Vec<_>>();
+                lock_postgres_key_identities_in_tx(&mut tx, &key_hashes).await?;
+                let mut archived_port_forward_counts =
+                    archive_postgres_port_forwarding_for_agent_deletes(
                         &mut tx,
-                        client_id,
+                        &applied_client_ids,
                         operator.operator.id,
                         reason.as_deref(),
                     )
                     .await?;
-                let agent_lost_job_ids =
-                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
-                        mark_active_targets_agent_lost_for_client_in_tx(
-                            &mut tx,
-                            client_id,
-                            old_process_incarnation_id,
-                            None,
-                            "vps_deleted",
-                            "client was deleted before final command output",
-                        )
-                        .await?
-                    } else {
-                        Vec::new()
+
+                let mut applied = HashMap::new();
+                let mut rejected = HashMap::new();
+                let mut all_affected_job_ids = Vec::new();
+                let mut affected_tunnel_clients = Vec::new();
+                for client_id in client_ids {
+                    let Some(state) = states.get(client_id) else {
+                        rejected.insert(client_id.clone(), "agent_not_found");
+                        continue;
                     };
-                sqlx::query(
-                    r#"
-                    UPDATE gateway_sessions
-                    SET
-                        status = 'ended',
-                        last_seen_at = now(),
-                        ended_at = COALESCE(ended_at, now()),
-                        end_reason = COALESCE(end_reason, 'vps_deleted')
-                    WHERE client_id = $1 AND status = 'active'
-                    "#,
-                )
-                .bind(client_id)
-                .execute(&mut *tx)
-                .await?;
-                let tunnel_delete_reason =
-                    deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
-                let soft_deleted_tunnel_plan_rows = sqlx::query(
-                    r#"
-                    UPDATE tunnel_plans
-                    SET
-                        deleted_at = now(),
-                        deleted_by = $2,
-                        deleted_reason = $3,
-                        enabled = FALSE,
-                        builtin_credentials = NULL,
-                        updated_at = now()
-                    WHERE deleted_at IS NULL
-                      AND (left_client_id = $1 OR right_client_id = $1)
-                    RETURNING left_client_id, right_client_id
-                    "#,
-                )
-                .bind(client_id)
-                .bind(operator.operator.id)
-                .bind(&tunnel_delete_reason)
-                .fetch_all(&mut *tx)
-                .await?;
-                let soft_deleted_tunnel_plan_count = soft_deleted_tunnel_plan_rows.len();
-                let retired_tunnel_endpoint_pairs = soft_deleted_tunnel_plan_rows
-                    .into_iter()
-                    .map(|row| {
-                        Ok((
-                            row.try_get::<String, _>("left_client_id")?,
-                            row.try_get::<String, _>("right_client_id")?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let mut affected_tunnel_clients = retired_tunnel_endpoint_pairs
-                    .iter()
-                    .flat_map(|(left, right)| [left.clone(), right.clone()])
-                    .collect::<Vec<_>>();
+                    if blocked.contains(client_id) {
+                        rejected
+                            .insert(client_id.clone(), "agent_port_forwarding_cleanup_required");
+                        continue;
+                    }
+                    if !state.public_key.is_empty() {
+                        let public_key_sha256_hex = public_key_sha256_hex(&state.public_key);
+                        sqlx::query(
+                            r#"
+                            INSERT INTO client_key_revocations (
+                                id, client_id, public_key_sha256_hex, reason, revoked_by
+                            )
+                            VALUES ($1, $2, $3, 'vps_deleted', $4)
+                            ON CONFLICT (public_key_sha256_hex) DO NOTHING
+                            "#,
+                        )
+                        .bind(Uuid::new_v4())
+                        .bind(client_id)
+                        .bind(public_key_sha256_hex)
+                        .bind(operator.operator.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    let row = sqlx::query(
+                        r#"
+                        UPDATE clients
+                        SET hidden_at=COALESCE(hidden_at,now()),
+                            hidden_by=COALESCE(hidden_by,$2),
+                            hidden_reason=COALESCE($3,hidden_reason),
+                            public_key=''::bytea, status='deleted',
+                            process_incarnation_id=NULL,
+                            suspended_at=NULL, suspended_by=NULL,
+                            suspended_reason=NULL, suspended_from_status=NULL
+                        WHERE id=$1
+                        RETURNING hidden_at::text AS deleted_at
+                        "#,
+                    )
+                    .bind(client_id)
+                    .bind(operator.operator.id)
+                    .bind(&reason)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let deleted_at: String = row.try_get("deleted_at")?;
+                    if state.status != "deleted" {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO client_status_history (
+                                id, client_id, from_status, to_status, reason, metadata
+                            ) VALUES ($1,$2,$3,'deleted','vps_deleted',$4)
+                            "#,
+                        )
+                        .bind(Uuid::new_v4())
+                        .bind(client_id)
+                        .bind(&state.status)
+                        .bind(json!({
+                            "reason": &reason,
+                            "operator_id": operator.operator.id,
+                            "frontend_visible": false,
+                        }))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    let agent_lost_job_ids =
+                        if let Some(process_incarnation_id) = state.process_incarnation_id {
+                            mark_active_targets_agent_lost_for_client_in_tx(
+                                &mut tx,
+                                client_id,
+                                process_incarnation_id,
+                                None,
+                                "vps_deleted",
+                                "client was deleted before final command output",
+                            )
+                            .await?
+                        } else {
+                            Vec::new()
+                        };
+                    let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                        &mut tx,
+                        client_id,
+                        "vps_deleted",
+                        "vps_deleted: target skipped before dispatch",
+                    )
+                    .await?;
+                    all_affected_job_ids.extend(agent_lost_job_ids.iter().copied());
+                    all_affected_job_ids.extend(skipped_job_ids.iter().copied());
+
+                    let tunnel_delete_reason =
+                        deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
+                    let tunnel_rows = sqlx::query(
+                        r#"
+                        UPDATE tunnel_plans
+                        SET deleted_at=now(), deleted_by=$2, deleted_reason=$3,
+                            enabled=FALSE, builtin_credentials=NULL, updated_at=now()
+                        WHERE deleted_at IS NULL
+                          AND (left_client_id=$1 OR right_client_id=$1)
+                        RETURNING left_client_id, right_client_id
+                        "#,
+                    )
+                    .bind(client_id)
+                    .bind(operator.operator.id)
+                    .bind(&tunnel_delete_reason)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    let retired_tunnel_endpoint_pairs = tunnel_rows
+                        .into_iter()
+                        .map(|row| {
+                            Ok((
+                                row.try_get::<String, _>("left_client_id")?,
+                                row.try_get::<String, _>("right_client_id")?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    affected_tunnel_clients.extend(
+                        retired_tunnel_endpoint_pairs
+                            .iter()
+                            .flat_map(|(left, right)| [left.clone(), right.clone()]),
+                    );
+                    let archived_port_forward_rule_count = archived_port_forward_counts
+                        .remove(client_id)
+                        .unwrap_or_default();
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                        VALUES ($1,$2,'agent.deleted',$3,NULL,$4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(operator.operator.id)
+                    .bind(format!("client:{client_id}"))
+                    .bind(sqlx::types::Json(json!({
+                        "reason": &reason,
+                        "frontend_visible": false,
+                        "access_deactivated": true,
+                        "related_configuration_and_assignments_preserved": true,
+                        "frozen_monitoring_share_targets_preserved": true,
+                        "soft_deleted_tunnel_plan_count": retired_tunnel_endpoint_pairs.len(),
+                        "archived_port_forward_rule_count": archived_port_forward_rule_count,
+                        "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                        "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                        "result": "succeeded",
+                        "operator_id": operator.operator.id,
+                        "operator_username": &operator.operator.username,
+                        "operator_role": &operator.operator.role,
+                        "operator_session_id": operator.audit_session_id(),
+                        "origin_kind": "operator_request",
+                        "component": "inventory-controller",
+                    })))
+                    .execute(&mut *tx)
+                    .await?;
+                    applied.insert(
+                        client_id.clone(),
+                        DeleteAgentResult {
+                            client_id: client_id.clone(),
+                            deleted_at,
+                            retired_tunnel_endpoint_pairs,
+                        },
+                    );
+                }
+
+                all_affected_job_ids.sort_unstable();
+                all_affected_job_ids.dedup();
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &all_affected_job_ids)
+                    .await?;
+                if !applied_client_ids.is_empty() {
+                    sqlx::query(
+                        r#"
+                        UPDATE gateway_sessions
+                        SET status='ended', last_seen_at=now(),
+                            ended_at=COALESCE(ended_at,now()),
+                            end_reason=COALESCE(end_reason,'vps_deleted')
+                        WHERE client_id=ANY($1) AND status='active'
+                        "#,
+                    )
+                    .bind(&applied_client_ids)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 affected_tunnel_clients.sort();
                 affected_tunnel_clients.dedup();
-                let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                crate::repository_operational_alerts::reconcile_postgres_deleted_agent_alert_transitions_in_tx(
                     &mut tx,
-                    client_id,
-                    "vps_deleted",
-                    "vps_deleted: target skipped before dispatch",
-                )
-                .await?;
-                let mut affected_job_ids = agent_lost_job_ids.clone();
-                affected_job_ids.extend(skipped_job_ids.iter().copied());
-                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &affected_job_ids).await?;
-                crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
-                    &mut tx,
-                    client_id,
-                    "deleted",
+                    &applied_client_ids,
                 )
                 .await?;
                 crate::repository_operational_alerts::reconcile_postgres_tunnel_alerts_for_clients_in_tx(
@@ -1434,41 +1717,24 @@ impl Repository {
                     &affected_tunnel_clients,
                 )
                 .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, 'agent.deleted', $3, NULL, $4)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind(format!("client:{client_id}"))
-                .bind(sqlx::types::Json(json!({
-                    "reason": reason,
-                    "frontend_visible": false,
-                    "access_deactivated": true,
-                    "related_configuration_and_assignments_preserved": true,
-                    "frozen_monitoring_share_targets_preserved": true,
-                    "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
-                    "archived_port_forward_rule_count": archived_port_forward_rule_count,
-                    "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
-                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
-                    "result": "succeeded",
-                    "operator_id": operator.operator.id,
-                    "operator_username": &operator.operator.username,
-                    "operator_role": &operator.operator.role,
-                    "operator_session_id": operator.audit_session_id(),
-                    "origin_kind": "operator_request",
-                    "component": "inventory-controller"
-                })))
-                .execute(&mut *tx)
-                .await?;
                 tx.commit().await?;
-                Ok(DeleteAgentResult {
-                    client_id: client_id.to_string(),
-                    deleted_at,
-                    retired_tunnel_endpoint_pairs,
-                })
+
+                let mut outcomes = Vec::with_capacity(client_ids.len());
+                for client_id in client_ids {
+                    if let Some(code) = rejected.remove(client_id) {
+                        outcomes.push(DeleteAgentRepositoryOutcome::Rejected {
+                            client_id: client_id.clone(),
+                            code,
+                        });
+                    } else {
+                        outcomes.push(DeleteAgentRepositoryOutcome::Applied(
+                            applied
+                                .remove(client_id)
+                                .context("agent_delete_result_missing")?,
+                        ));
+                    }
+                }
+                Ok(outcomes)
             }
         }
     }
@@ -1665,66 +1931,21 @@ impl Repository {
                 targets: Vec::new(),
             });
         };
-        let candidates = match self {
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        c.id,
-                        c.display_name,
-                        c.status,
-                        host(c.registration_ip) AS registration_ip,
-                        host(c.last_ip) AS last_ip,
-                        c.last_seen_at::text AS last_seen_at,
-                        c.arch,
-                        c.internal_build_number,
-                        c.process_incarnation_id,
-                        c.stale_since::text AS stale_since,
-                        c.stale_reason,
-                        c.capabilities,
-                        COALESCE(
-                            array_remove(array_agg(all_tags.name ORDER BY all_tags.display_order, all_tags.created_at, all_tags.name), NULL),
-                            ARRAY[]::TEXT[]
-                        ) AS tags
-                    FROM visible_clients c
-                    LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
-                    LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
-                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
-                    ORDER BY c.display_name, c.id
-                    "#,
-                )
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(AgentView {
-                            id: row.try_get("id")?,
-                            display_name: row.try_get("display_name")?,
-                            status: row.try_get("status")?,
-                            tags: row.try_get("tags")?,
-                            registration_ip: row.try_get("registration_ip")?,
-                            last_ip: row.try_get("last_ip")?,
-                            last_seen_at: row.try_get("last_seen_at")?,
-                            arch: row.try_get("arch")?,
-                            internal_build_number: row
-                                .try_get::<i64, _>("internal_build_number")?
-                                .max(1) as u64,
-                            process_incarnation_id: row.try_get("process_incarnation_id")?,
-                            stale_since: row.try_get("stale_since")?,
-                            stale_reason: row.try_get("stale_reason")?,
-                            capabilities: row
-                                .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
-                                    "capabilities",
-                                )?
-                                .0,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            }
+        let needs_rules = expression_references_vps_rules(&expression);
+        let (candidates, rules_by_client) = self.selector_resolution_inputs(needs_rules).await?;
+        let mut targets = if needs_rules {
+            Self::resolve_agents_for_expression_with_rule_contexts(
+                &candidates,
+                &expression,
+                &rules_by_client,
+            )
+        } else {
+            candidates
+                .iter()
+                .filter(|agent| agent_matches_selector_expression(agent, &expression))
+                .cloned()
+                .collect()
         };
-        let mut targets = self
-            .resolve_agents_for_expression(&candidates, &expression)
-            .await?;
         targets.sort_by(|left, right| left.id.cmp(&right.id));
         targets.dedup_by(|left, right| left.id == right.id);
         Ok(BulkResolveResponse {
@@ -1732,6 +1953,58 @@ impl Repository {
             targets,
         })
     }
+
+    pub(crate) async fn resolve_many_bulk_targets(
+        &self,
+        selectors: &[(String, Expression)],
+    ) -> Result<BulkResolveManyResponse> {
+        let needs_rules = selectors
+            .iter()
+            .any(|(_, expression)| expression_references_vps_rules(expression));
+        let (candidates, rules_by_client) = self.selector_resolution_inputs(needs_rules).await?;
+        let outcomes = selectors
+            .iter()
+            .map(|(selector_expression, expression)| {
+                let mut target_client_ids = candidates
+                    .iter()
+                    .filter(|agent| {
+                        if expression_references_vps_rules(expression) {
+                            agent_matches_selector_expression_with_rules(
+                                agent,
+                                expression,
+                                rules_by_client.get(&agent.id),
+                            )
+                        } else {
+                            agent_matches_selector_expression(agent, expression)
+                        }
+                    })
+                    .map(|agent| agent.id.clone())
+                    .collect::<Vec<_>>();
+                target_client_ids.sort();
+                target_client_ids.dedup();
+                BulkResolveManyOutcome {
+                    selector_expression: selector_expression.clone(),
+                    target_count: target_client_ids.len(),
+                    target_client_ids,
+                }
+            })
+            .collect();
+        Ok(BulkResolveManyResponse { outcomes })
+    }
+
+    async fn selector_resolution_inputs(
+        &self,
+        needs_rules: bool,
+    ) -> Result<(Vec<AgentView>, HashMap<String, VpsRuleContext>)> {
+        let candidates = self.list_agents().await?;
+        let rules_by_client = if needs_rules {
+            self.vps_rule_contexts_for_agents(&candidates).await?
+        } else {
+            HashMap::new()
+        };
+        Ok((candidates, rules_by_client))
+    }
+
     pub(crate) async fn clients_for_tag(&self, tag: &str) -> Result<Vec<AgentView>> {
         match self {
             Self::Postgres(pool) => {
@@ -1779,7 +2052,17 @@ async fn postgres_agent_by_id_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     client_id: &str,
 ) -> Result<AgentView> {
-    let row = sqlx::query(
+    postgres_agents_by_ids_in_tx(tx, &[client_id.to_string()])
+        .await?
+        .pop()
+        .context("agent_not_found")
+}
+
+async fn postgres_agents_by_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_ids: &[String],
+) -> Result<Vec<AgentView>> {
+    let rows = sqlx::query(
         r#"
         SELECT
             c.id,
@@ -1801,14 +2084,17 @@ async fn postgres_agent_by_id_in_tx(
         FROM visible_clients c
         LEFT JOIN client_tags ct ON ct.client_id = c.id
         LEFT JOIN tags t ON t.id = ct.tag_id
-        WHERE c.id = $1
+        WHERE c.id = ANY($1)
         GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
+        ORDER BY c.id COLLATE "C"
         "#,
     )
-    .bind(client_id)
-    .fetch_one(&mut **tx)
+    .bind(client_ids)
+    .fetch_all(&mut **tx)
     .await?;
-    agent_view_from_inventory_row(row)
+    rows.into_iter()
+        .map(agent_view_from_inventory_row)
+        .collect()
 }
 
 async fn postgres_tag_view_in_tx(tx: &mut Transaction<'_, Postgres>, tag: &str) -> Result<TagView> {
@@ -2209,18 +2495,29 @@ fn schedule_impact_summary(added: usize, removed: usize) -> String {
 #[cfg(test)]
 mod list_agents_query_tests {
     #[test]
-    fn suspension_changes_source_state_and_signals_delivery_consumers() {
+    fn batch_suspension_changes_source_state_and_signals_delivery_consumers_once() {
         let source = include_str!("repository_inventory.rs");
         let (_, suspend) = source
-            .split_once("pub(crate) async fn suspend_agent_with_protected_dispatches")
+            .split_once("pub(crate) async fn mutate_agent_suspensions")
             .expect("agent suspension producer");
         let (suspend, _) = suspend
-            .split_once("pub(crate) async fn unsuspend_agent")
+            .split_once("pub(crate) async fn delete_agent")
             .expect("agent suspension producer boundary");
 
-        assert!(suspend.contains("suppress_client_policy_alerts_in_tx"));
+        assert!(suspend.contains("suppress_client_policy_alerts_for_clients_in_tx"));
+        assert_eq!(
+            suspend
+                .matches("suppress_client_policy_alerts_for_clients_in_tx")
+                .count(),
+            1
+        );
         assert!(suspend.contains("insert_client_status_webhook_event_in_tx"));
-        assert!(suspend.contains("pg_notify('webhook_events', 'alert_notification')"));
+        assert_eq!(
+            suspend
+                .matches("pg_notify('webhook_events', 'alert_notification')")
+                .count(),
+            1
+        );
         assert!(!suspend.contains("UPDATE fleet_alert_notification_deliveries"));
         assert!(!suspend.contains("UPDATE webhook_rule_deliveries"));
     }

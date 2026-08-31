@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -14,12 +15,18 @@ use tokio::{
 };
 use tracing::{info, warn};
 use vpsman_common::{
-    verify_privilege_assertion, GatewayClientSuspensionFenceClear,
-    GatewayClientSuspensionFencePrepare, GatewayClientSuspensionFencePromote,
+    verify_privilege_assertion, GatewayClientSuspensionFenceBatchResult,
+    GatewayClientSuspensionFenceClear, GatewayClientSuspensionFenceClearBatchRequest,
+    GatewayClientSuspensionFencePrepare, GatewayClientSuspensionFencePrepareBatchRequest,
+    GatewayClientSuspensionFencePromote, GatewayClientSuspensionFencePromoteBatchRequest,
     GatewayClientSuspensionFenceResult, GatewayCommandCancel, GatewayCommandCancelResult,
     GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationResult, GatewaySessionDisconnect, GatewaySessionDisconnectResult,
-    GatewayTerminalControl, GatewayTerminalControlResult, PrivilegeAssertionError,
+    GatewayPrivilegeVerificationBatchItemResult, GatewayPrivilegeVerificationBatchRequest,
+    GatewayPrivilegeVerificationBatchResult, GatewayPrivilegeVerificationResult,
+    GatewaySessionDisconnect, GatewaySessionDisconnectBatchRequest,
+    GatewaySessionDisconnectBatchResult, GatewaySessionDisconnectResult, GatewayTerminalControl,
+    GatewayTerminalControlResult, PrivilegeAssertionError,
+    GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS, GATEWAY_CONTROL_BATCH_MAX_ITEMS,
 };
 
 use crate::{
@@ -213,12 +220,17 @@ where
             "/internal/v1/gateway/command"
                 | "/internal/v1/gateway/command/cancel"
                 | "/internal/v1/gateway/session/disconnect"
+                | "/internal/v1/gateway/session/disconnect/batch"
                 | "/internal/v1/gateway/client/suspension-fence/prepare"
                 | "/internal/v1/gateway/client/suspension-fence/promote"
                 | "/internal/v1/gateway/client/suspension-fence/clear"
+                | "/internal/v1/gateway/client/suspension-fence/batch/prepare"
+                | "/internal/v1/gateway/client/suspension-fence/batch/promote"
+                | "/internal/v1/gateway/client/suspension-fence/batch/clear"
                 | "/internal/v1/gateway/terminal/control"
                 | "/internal/v1/gateway/metrics"
                 | "/internal/v1/gateway/privilege/verify"
+                | "/internal/v1/gateway/privilege/verify/batch"
         )
     {
         write_http_json(
@@ -290,6 +302,32 @@ where
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
+    } else if request.path == "/internal/v1/gateway/session/disconnect/batch" {
+        let batch: GatewaySessionDisconnectBatchRequest = match serde_json::from_slice(
+            &request.body,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                write_http_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error": format!("invalid_session_disconnect_batch:{error}")}),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        match disconnect_gateway_sessions(&state, batch).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": error}),
+                )
+                .await?
+            }
+        }
     } else if request.path == "/internal/v1/gateway/client/suspension-fence/prepare" {
         let prepare: GatewayClientSuspensionFencePrepare = match serde_json::from_slice(
             &request.body,
@@ -339,6 +377,84 @@ where
         };
         let result = clear_gateway_client_suspension_fence(&state, clear).await;
         write_http_json(&mut stream, "200 OK", &result).await?;
+    } else if request.path == "/internal/v1/gateway/client/suspension-fence/batch/prepare" {
+        let batch: GatewayClientSuspensionFencePrepareBatchRequest = match serde_json::from_slice(
+            &request.body,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                write_http_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error": format!("invalid_suspension_fence_prepare_batch:{error}")}),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        match prepare_gateway_client_suspension_fence_batch(&state, batch).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": error}),
+                )
+                .await?
+            }
+        }
+    } else if request.path == "/internal/v1/gateway/client/suspension-fence/batch/promote" {
+        let batch: GatewayClientSuspensionFencePromoteBatchRequest = match serde_json::from_slice(
+            &request.body,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                write_http_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error": format!("invalid_suspension_fence_promote_batch:{error}")}),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        match promote_gateway_client_suspension_fence_batch(&state, batch).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": error}),
+                )
+                .await?
+            }
+        }
+    } else if request.path == "/internal/v1/gateway/client/suspension-fence/batch/clear" {
+        let batch: GatewayClientSuspensionFenceClearBatchRequest = match serde_json::from_slice(
+            &request.body,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                write_http_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error": format!("invalid_suspension_fence_clear_batch:{error}")}),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        match clear_gateway_client_suspension_fence_batch(&state, batch).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": error}),
+                )
+                .await?
+            }
+        }
     } else if request.path == "/internal/v1/gateway/terminal/control" {
         let control: GatewayTerminalControl = match serde_json::from_slice(&request.body) {
             Ok(control) => control,
@@ -358,6 +474,26 @@ where
         }
     } else if request.path == "/internal/v1/gateway/metrics" {
         write_http_json(&mut stream, "200 OK", &state.forward_metrics.snapshot()).await?;
+    } else if request.path == "/internal/v1/gateway/privilege/verify/batch" {
+        let batch: GatewayPrivilegeVerificationBatchRequest = match serde_json::from_slice(
+            &request.body,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                write_http_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error": format!("invalid_privilege_verification_batch:{error}")}),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        match verify_gateway_privileges(&state, privilege_verifier_key_hex.as_deref(), batch).await
+        {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => write_privilege_error(&mut stream, error).await?,
+        }
     } else {
         let verification: GatewayPrivilegeVerification = match serde_json::from_slice(&request.body)
         {
@@ -445,6 +581,56 @@ async fn verify_gateway_privilege(
         intent_hash_hex,
         message: "approved".to_string(),
     })
+}
+
+async fn verify_gateway_privileges(
+    state: &GatewayState,
+    verifier_key_hex: Option<&str>,
+    batch: GatewayPrivilegeVerificationBatchRequest,
+) -> Result<GatewayPrivilegeVerificationBatchResult> {
+    validate_gateway_control_batch(
+        batch.items.len(),
+        batch.items.iter().map(|item| item.request_id.as_str()),
+        "privilege_verification_batch",
+    )
+    .map_err(anyhow::Error::msg)?;
+    let verifier_key = decode_verifier_key(verifier_key_hex)?;
+    let now_unix = unix_now();
+    let mut replay_cache = state.privilege_assertions.lock().await;
+    let mut results = Vec::with_capacity(batch.items.len());
+    for item in batch.items {
+        match verify_privilege_assertion(
+            &verifier_key,
+            &item.verification.intent,
+            &item.verification.assertion,
+            now_unix,
+            &mut replay_cache,
+        ) {
+            Ok(intent_hash_hex) => {
+                results.push(GatewayPrivilegeVerificationBatchItemResult {
+                    request_id: item.request_id,
+                    approved: true,
+                    intent_hash_hex: Some(intent_hash_hex),
+                    message: "approved".to_string(),
+                    error_code: None,
+                });
+            }
+            Err(PrivilegeAssertionError::ReplayProtectionSaturated) => {
+                return Err(anyhow!(
+                    "privilege_assertion_{:?}",
+                    PrivilegeAssertionError::ReplayProtectionSaturated
+                ));
+            }
+            Err(error) => results.push(GatewayPrivilegeVerificationBatchItemResult {
+                request_id: item.request_id,
+                approved: false,
+                intent_hash_hex: None,
+                message: "privilege verification failed".to_string(),
+                error_code: Some(format!("privilege_assertion_{error:?}")),
+            }),
+        }
+    }
+    Ok(GatewayPrivilegeVerificationBatchResult { results })
 }
 
 fn decode_verifier_key(value: Option<&str>) -> Result<[u8; 32]> {
@@ -585,6 +771,95 @@ async fn rollback_failed_command_enqueue(
     } else {
         command_enqueues.remove(&enqueue_key);
     }
+}
+
+fn validate_suspension_fence_batch<'a>(
+    item_count: usize,
+    client_ids: impl IntoIterator<Item = &'a str>,
+) -> std::result::Result<(), String> {
+    if !(1..=GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS).contains(&item_count) {
+        return Err(format!(
+            "suspension_fence_batch_size_out_of_range:expected=1..={}:actual={item_count}",
+            GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS
+        ));
+    }
+    let mut unique_client_ids = HashSet::with_capacity(item_count);
+    for client_id in client_ids {
+        if !unique_client_ids.insert(client_id) {
+            return Err(format!(
+                "suspension_fence_batch_duplicate_client_id:{client_id}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_gateway_control_batch<'a>(
+    item_count: usize,
+    request_ids: impl IntoIterator<Item = &'a str>,
+    error_prefix: &str,
+) -> std::result::Result<(), String> {
+    if !(1..=GATEWAY_CONTROL_BATCH_MAX_ITEMS).contains(&item_count) {
+        return Err(format!(
+            "{error_prefix}_size_out_of_range:expected=1..={}:actual={item_count}",
+            GATEWAY_CONTROL_BATCH_MAX_ITEMS
+        ));
+    }
+    let mut unique_request_ids = HashSet::with_capacity(item_count);
+    for request_id in request_ids {
+        if request_id.is_empty() {
+            return Err(format!("{error_prefix}_empty_request_id"));
+        }
+        if !unique_request_ids.insert(request_id) {
+            return Err(format!("{error_prefix}_duplicate_request_id:{request_id}"));
+        }
+    }
+    Ok(())
+}
+
+async fn prepare_gateway_client_suspension_fence_batch(
+    state: &GatewayState,
+    batch: GatewayClientSuspensionFencePrepareBatchRequest,
+) -> std::result::Result<GatewayClientSuspensionFenceBatchResult, String> {
+    validate_suspension_fence_batch(
+        batch.items.len(),
+        batch.items.iter().map(|item| item.client_id.as_str()),
+    )?;
+    let mut results = Vec::with_capacity(batch.items.len());
+    for prepare in batch.items {
+        results.push(prepare_gateway_client_suspension_fence(state, prepare).await);
+    }
+    Ok(GatewayClientSuspensionFenceBatchResult { results })
+}
+
+async fn promote_gateway_client_suspension_fence_batch(
+    state: &GatewayState,
+    batch: GatewayClientSuspensionFencePromoteBatchRequest,
+) -> std::result::Result<GatewayClientSuspensionFenceBatchResult, String> {
+    validate_suspension_fence_batch(
+        batch.items.len(),
+        batch.items.iter().map(|item| item.client_id.as_str()),
+    )?;
+    let mut results = Vec::with_capacity(batch.items.len());
+    for promote in batch.items {
+        results.push(promote_gateway_client_suspension_fence(state, promote).await);
+    }
+    Ok(GatewayClientSuspensionFenceBatchResult { results })
+}
+
+async fn clear_gateway_client_suspension_fence_batch(
+    state: &GatewayState,
+    batch: GatewayClientSuspensionFenceClearBatchRequest,
+) -> std::result::Result<GatewayClientSuspensionFenceBatchResult, String> {
+    validate_suspension_fence_batch(
+        batch.items.len(),
+        batch.items.iter().map(|item| item.client_id.as_str()),
+    )?;
+    let mut results = Vec::with_capacity(batch.items.len());
+    for clear in batch.items {
+        results.push(clear_gateway_client_suspension_fence(state, clear).await);
+    }
+    Ok(GatewayClientSuspensionFenceBatchResult { results })
 }
 
 async fn prepare_gateway_client_suspension_fence(
@@ -796,6 +1071,26 @@ async fn disconnect_gateway_session(
         disconnected: true,
         message: "disconnect_requested".to_string(),
     })
+}
+
+async fn disconnect_gateway_sessions(
+    state: &GatewayState,
+    batch: GatewaySessionDisconnectBatchRequest,
+) -> std::result::Result<GatewaySessionDisconnectBatchResult, String> {
+    validate_gateway_control_batch(
+        batch.items.len(),
+        batch.items.iter().map(|item| item.client_id.as_str()),
+        "session_disconnect_batch",
+    )?;
+    let mut results = Vec::with_capacity(batch.items.len());
+    for item in batch.items {
+        results.push(
+            disconnect_gateway_session(state, item)
+                .await
+                .map_err(|error| format!("session_disconnect_batch_failed:{error}"))?,
+        );
+    }
+    Ok(GatewaySessionDisconnectBatchResult { results })
 }
 
 async fn write_gateway_error<S>(stream: &mut S, error: anyhow::Error) -> Result<()>

@@ -87,6 +87,113 @@ fn runtime_reload_scope_uses_the_explicit_resource_set() {
 }
 
 #[test]
+fn suspension_fence_batch_protocol_preserves_request_and_result_order() {
+    let first_token = uuid::Uuid::new_v4();
+    let second_token = uuid::Uuid::new_v4();
+    let request = super::GatewayClientSuspensionFencePrepareBatchRequest {
+        items: vec![
+            super::GatewayClientSuspensionFencePrepare {
+                client_id: "client-b".to_string(),
+                token: first_token,
+                lease_secs: 60,
+            },
+            super::GatewayClientSuspensionFencePrepare {
+                client_id: "client-a".to_string(),
+                token: second_token,
+                lease_secs: 60,
+            },
+        ],
+    };
+    let encoded = serde_json::to_value(request).unwrap();
+    assert_eq!(encoded["items"][0]["client_id"], "client-b");
+    assert_eq!(encoded["items"][1]["client_id"], "client-a");
+    assert_eq!(encoded["items"][0]["token"], first_token.to_string());
+    assert_eq!(encoded["items"][1]["token"], second_token.to_string());
+
+    let decoded: super::GatewayClientSuspensionFenceBatchResult =
+        serde_json::from_value(serde_json::json!({
+            "results": [
+                {
+                    "client_id": "client-b",
+                    "accepted": false,
+                    "fenced": true,
+                    "message": "suspension_fence_conflict"
+                },
+                {
+                    "client_id": "client-a",
+                    "accepted": true,
+                    "fenced": true,
+                    "message": "suspension_fence_prepared"
+                }
+            ]
+        }))
+        .unwrap();
+    assert_eq!(decoded.results[0].client_id, "client-b");
+    assert_eq!(decoded.results[1].client_id, "client-a");
+}
+
+#[test]
+fn lifecycle_batch_protocol_preserves_target_order() {
+    let disconnect = super::GatewaySessionDisconnectBatchRequest {
+        items: vec![
+            super::GatewaySessionDisconnect {
+                client_id: "client-b".to_string(),
+                reason: "vps_deleted".to_string(),
+            },
+            super::GatewaySessionDisconnect {
+                client_id: "client-a".to_string(),
+                reason: "vps_deleted".to_string(),
+            },
+        ],
+    };
+    let encoded = serde_json::to_value(disconnect).unwrap();
+    assert_eq!(encoded["items"][0]["client_id"], "client-b");
+    assert_eq!(encoded["items"][1]["client_id"], "client-a");
+
+    let result: super::GatewaySessionDisconnectBatchResult =
+        serde_json::from_value(serde_json::json!({
+            "results": [
+                {
+                    "client_id": "client-b",
+                    "accepted": true,
+                    "disconnected": true,
+                    "message": "disconnect_requested"
+                },
+                {
+                    "client_id": "client-a",
+                    "accepted": true,
+                    "disconnected": false,
+                    "message": "agent_not_online"
+                }
+            ]
+        }))
+        .unwrap();
+    assert_eq!(result.results[0].client_id, "client-b");
+    assert_eq!(result.results[1].client_id, "client-a");
+
+    let privilege = super::GatewayPrivilegeVerificationBatchRequest {
+        items: vec![super::GatewayPrivilegeVerificationBatchItem {
+            request_id: "schedule:00000000-0000-0000-0000-000000000001".to_string(),
+            verification: super::GatewayPrivilegeVerification {
+                intent: "opaque-intent".to_string(),
+                assertion: super::PrivilegeAssertion {
+                    nonce_hex: "00".repeat(16),
+                    issued_unix: 1,
+                    expires_unix: 2,
+                    assertion_hex: "00".repeat(32),
+                },
+            },
+        }],
+    };
+    let encoded = serde_json::to_value(privilege).unwrap();
+    assert_eq!(
+        encoded["items"][0]["request_id"],
+        "schedule:00000000-0000-0000-0000-000000000001"
+    );
+    assert!(encoded["items"][0].get("client_id").is_none());
+}
+
+#[test]
 fn tunnel_deletion_reason_covers_runtime_tunnel_reconciliation() {
     let scope = super::runtime_config_reconcile_scope_from_reason("tunnel_plan_deleted");
 

@@ -11,6 +11,8 @@ import {
 } from "../FleetWorkspace";
 import type {
   AgentView,
+  AlertConfigurationBulkRequest,
+  AlertConfigurationBulkResponse,
   WebhookDeliveryRotationRequest,
   WebhookDeliveryRotationResponse,
   WebhookRuleDeliveryRecord,
@@ -27,7 +29,9 @@ type WebhookConfigTab = "rules" | "deliveries" | "maintenance";
 type WebhooksPanelProps = {
   agents: AgentView[];
   apiError: string | null;
-  onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
+  onBulkMutateWebhookRules: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDispatchWebhookRules: (
     request: WebhookRuleDispatchRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
@@ -51,7 +55,7 @@ type WebhooksPanelProps = {
 export function WebhooksPanel({
   agents,
   apiError,
-  onDeleteWebhookRule,
+  onBulkMutateWebhookRules,
   onDispatchWebhookRules,
   onDryRunWebhookRule,
   onProcessWebhookRuleDeliveries,
@@ -226,7 +230,7 @@ export function WebhooksPanel({
             <WebhookRuleManager
               agents={agents}
               deliveries={webhookRuleDeliveries}
-              onDelete={onDeleteWebhookRule}
+              onBulkMutate={onBulkMutateWebhookRules}
               onDispatch={onDispatchWebhookRules}
               onDryRun={onDryRunWebhookRule}
               onOpenDeliveries={openDeliveryEvidence}

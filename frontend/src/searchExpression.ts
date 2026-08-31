@@ -451,33 +451,6 @@ export function quoteSelectorValue(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-export function removeTokenFromExpression(
-  expression: string,
-  tokenToRemove: SearchToken,
-): string {
-  if (tokenToRemove.kind !== "term") {
-    return expression;
-  }
-  const tokens = tokenizeSearchExpression(expression).tokens;
-  const tokenIndex = tokens.findIndex(
-    (candidate) =>
-      candidate.start === tokenToRemove.start &&
-      candidate.end === tokenToRemove.end,
-  );
-  let removeStart = tokenToRemove.start;
-  let removeEnd = tokenToRemove.end;
-  const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : null;
-  const next = tokenIndex >= 0 ? tokens[tokenIndex + 1] : null;
-  if (next?.kind === "and" || next?.kind === "or") {
-    removeEnd = next.end;
-  } else if (previous?.kind === "and" || previous?.kind === "or") {
-    removeStart = previous.start;
-  }
-  return cleanExpressionSpacing(
-    `${expression.slice(0, removeStart)} ${expression.slice(removeEnd)}`,
-  );
-}
-
 function predicateMatchesFields(
   predicate: SearchPredicate,
   fields: SearchFields,
@@ -1135,17 +1108,6 @@ function globMatches(value: string, pattern: string): boolean {
     patternIndex += 1;
   }
   return patternIndex === pattern.length;
-}
-
-function cleanExpressionSpacing(expression: string): string {
-  return expression
-    .replace(/\s+/g, " ")
-    .replace(/\(\s+/g, "(")
-    .replace(/\s+\)/g, ")")
-    .replace(/\(\s*\)/g, "")
-    .replace(/^\s*(?:&&|\|\|)\s*/g, "")
-    .replace(/\s*(?:&&|\|\|)\s*$/g, "")
-    .trim();
 }
 
 function token(

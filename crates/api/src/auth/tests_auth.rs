@@ -28,14 +28,14 @@ fn generated_operator_tokens_are_hashed_for_storage() {
 }
 
 #[test]
-fn postgres_operator_mutations_decode_returning_rows_before_commit() {
+fn postgres_operator_mutation_owners_decode_returning_rows_before_commit() {
     let source = include_str!("../repository/access/repository_auth.rs");
 
     for function_name in [
         "update_operator",
-        "set_operator_status",
+        "set_operator_statuses",
         "reset_operator_password",
-        "clear_operator_totp",
+        "clear_operator_totps",
         "update_operator_preferences",
     ] {
         let signature = format!("    pub(crate) async fn {function_name}(");
@@ -51,13 +51,12 @@ fn postgres_operator_mutations_decode_returning_rows_before_commit() {
             .split_once("Self::Postgres(pool) => {")
             .map(|(_, postgres_source)| postgres_source)
             .unwrap_or_else(|| panic!("missing {function_name} Postgres branch"));
-        let decode = "operator_view_from_row(&row)?";
+        let decode = "operator_view_from_row(";
         let commit = "tx.commit().await?;";
 
-        assert_eq!(
-            postgres_source.matches(decode).count(),
-            1,
-            "{function_name} must decode its RETURNING row exactly once"
+        assert!(
+            postgres_source.matches(decode).count() >= 1,
+            "{function_name} must decode its RETURNING rows"
         );
         assert_eq!(
             postgres_source.matches(commit).count(),

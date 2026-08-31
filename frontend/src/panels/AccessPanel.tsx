@@ -52,6 +52,10 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import { RELEASE_TAG } from "../buildInfo";
 import { ACCESS_REVOKED_RECOVERY_DETAIL } from "../agentDisplayState";
 import type {
+  BulkOperatorMutationItem,
+  BulkOperatorMutationResponse,
+  BulkOperatorSessionRevokeItem,
+  BulkOperatorSessionRevokeResponse,
   GatewaySessionRecord,
   LifecycleOutcomeRecord,
   OperatorAuthEventRecord,
@@ -184,11 +188,10 @@ type AccessPanelProps = {
   lastLiveEvent: string;
   loading: boolean;
   onClearSession: () => void;
-  onClearOperatorTotp: (
-    operatorId: string,
+  onClearOperatorTotps: (
+    items: BulkOperatorMutationItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorMutationResponse>;
   onConfirmTotp: (password: string, code: string) => Promise<void>;
   onCreateOperator: (
     username: string,
@@ -217,19 +220,17 @@ type AccessPanelProps = {
     confirmed: boolean,
     privilegeAssertion: PrivilegeAssertion | null,
   ) => Promise<ClientKeyRevocationMutationResponse>;
-  onRevokeOperatorSession: (
-    sessionId: string,
+  onRevokeOperatorSessions: (
+    items: BulkOperatorSessionRevokeItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorSessionRevokeResponse>;
   onSetupTotp: (password: string) => Promise<TotpSetupResponse>;
   onSelectSubpage: (subpage: AccessReleaseSubpage) => void;
-  onSetOperatorStatus: (
-    operatorId: string,
+  onSetOperatorStatuses: (
+    items: BulkOperatorMutationItem[],
     status: "active" | "disabled" | "deleted",
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorMutationResponse>;
   onUpdateOperator: (
     operatorId: string,
     role: string,
@@ -336,7 +337,7 @@ export function AccessPanel({
   lastLiveEvent,
   loading,
   onClearSession,
-  onClearOperatorTotp,
+  onClearOperatorTotps,
   onConfirmTotp,
   onCreateOperator,
   onDisableTotp,
@@ -347,10 +348,10 @@ export function AccessPanel({
   onRefresh,
   onResetOperatorPassword,
   onRevokeClientKey,
-  onRevokeOperatorSession,
+  onRevokeOperatorSessions,
   onSetupTotp,
   onSelectSubpage,
-  onSetOperatorStatus,
+  onSetOperatorStatuses,
   onUpdateOperator,
   onUpdateOperatorPreferences,
   onUpsertAgentIdentity,
@@ -1483,12 +1484,12 @@ export function AccessPanel({
               authEvents={operatorAuthEvents}
               authEventsTruncated={operatorAuthEventsTruncated}
               currentOperator={operator}
-              onClearOperatorTotp={onClearOperatorTotp}
+              onClearOperatorTotps={onClearOperatorTotps}
               onCreateOperator={onCreateOperator}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
               onResetOperatorPassword={onResetOperatorPassword}
-              onRevokeOperatorSession={onRevokeOperatorSession}
-              onSetOperatorStatus={onSetOperatorStatus}
+              onRevokeOperatorSessions={onRevokeOperatorSessions}
+              onSetOperatorStatuses={onSetOperatorStatuses}
               onUpdateOperator={onUpdateOperator}
               operators={operators}
               privilegeMaterial={privilegeMaterial}

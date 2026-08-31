@@ -63,6 +63,7 @@ type ConsoleShellProps = {
   alertCounts: {
     critical: number;
     info: number;
+    scopeIncomplete: boolean;
     total: number;
     truncated: boolean;
     warning: number;
@@ -1084,12 +1085,16 @@ export function ConsoleShell({
                 label="Alerts"
                 title={
                   fleetAlertsEvidenceAvailable
-                    ? `${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info${alertCounts.truncated ? " in the loaded alert page; additional matching alerts may exist" : ""}`
+                    ? alertCounts.scopeIncomplete
+                      ? "The global current-alert page was capped before fleet-scope filtering. Open Fleet alerts to review the authoritative current occurrence feed."
+                      : `${alertCounts.critical} critical, ${alertCounts.warning} warning, ${alertCounts.info} info${alertCounts.truncated ? "; lower-bound counts from capped evidence—open Fleet alerts and narrow the scope" : ""}`
                     : "Fleet alert evidence is unavailable."
                 }
                 value={
                   !fleetAlertsEvidenceAvailable
                     ? "Unknown"
+                    : alertCounts.scopeIncomplete && alertCounts.total === 0
+                      ? "Unknown"
                     : alertCounts.truncated && alertCounts.total === 0
                       ? "0 loaded"
                       : formatLowerBoundCount(
@@ -1100,6 +1105,8 @@ export function ConsoleShell({
                 tone={
                   !fleetAlertsEvidenceAvailable
                     ? "neutral"
+                    : alertCounts.scopeIncomplete && alertCounts.total === 0
+                      ? "neutral"
                     : alertCounts.total > 0 || alertCounts.truncated
                       ? "yellow"
                       : "green"
@@ -1140,9 +1147,11 @@ export function ConsoleShell({
                 {!fleetAlertsEvidenceAvailable
                   ? "Alert evidence unavailable"
                   : alertCounts.total > 0
-                    ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} actionable · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
-                    : alertCounts.truncated
-                      ? "No matching alerts in the loaded page · more may exist"
+                    ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} actionable · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.scopeIncomplete ? " in capped scoped evidence · open Fleet alerts" : alertCounts.truncated ? " in capped evidence · open Fleet alerts" : ""}`
+                    : alertCounts.scopeIncomplete
+                      ? "Alert count unavailable for this scope · open Fleet alerts"
+                      : alertCounts.truncated
+                        ? "Current alert count unavailable · open Fleet alerts"
                       : "No actionable alerts"}
               </span>
               <small

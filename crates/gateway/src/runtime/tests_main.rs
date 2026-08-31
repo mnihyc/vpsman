@@ -166,7 +166,7 @@ async fn registering_replacement_session_closes_displaced_session() {
     let (newer_close_tx, _newer_close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
     let newer_session_id = uuid::Uuid::new_v4();
 
-    register_session(
+    register_session_after_accepted_hello(
         &state,
         "client-a",
         GatewaySession {
@@ -177,7 +177,7 @@ async fn registering_replacement_session_closes_displaced_session() {
         },
     )
     .await;
-    register_session(
+    register_session_after_accepted_hello(
         &state,
         "client-a",
         GatewaySession {
@@ -204,6 +204,68 @@ async fn registering_replacement_session_closes_displaced_session() {
             .get("client-a")
             .map(|session| session.session_id),
         Some(newer_session_id)
+    );
+}
+
+#[tokio::test]
+async fn accepted_hello_clears_the_local_fence_and_registers_under_one_client_owner() {
+    let state = std::sync::Arc::new(GatewayState::default());
+    let fence_token = uuid::Uuid::new_v4();
+    state.client_suspension_fences.write().await.insert(
+        "client-a".to_string(),
+        GatewayClientSuspensionFence {
+            token: fence_token,
+            expires_at: None,
+        },
+    );
+    let lifecycle_owner = state.client_lifecycle_owner("client-a").await;
+    let lifecycle_guard = lifecycle_owner.write().await;
+    let session_id = uuid::Uuid::new_v4();
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, _close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+
+    let registration = {
+        let state = std::sync::Arc::clone(&state);
+        tokio::spawn(async move {
+            register_session_after_accepted_hello(
+                &state,
+                "client-a",
+                GatewaySession {
+                    session_id,
+                    process_incarnation_id: uuid::Uuid::new_v4(),
+                    sender,
+                    close_tx,
+                },
+            )
+            .await;
+        })
+    };
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        state.client_suspension_fences.read().await["client-a"].token,
+        fence_token
+    );
+    assert!(!state.sessions.read().await.contains_key("client-a"));
+
+    drop(lifecycle_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(1), registration)
+        .await
+        .expect("accepted registration must not wait on remote control")
+        .expect("accepted registration task");
+    assert!(!state
+        .client_suspension_fences
+        .read()
+        .await
+        .contains_key("client-a"));
+    assert_eq!(
+        state
+            .sessions
+            .read()
+            .await
+            .get("client-a")
+            .map(|session| session.session_id),
+        Some(session_id)
     );
 }
 

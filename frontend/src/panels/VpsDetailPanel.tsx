@@ -547,12 +547,12 @@ export function VpsDetailPanel({
                 !fleetAlertsEvidenceAvailable
                   ? "Unknown"
                   : fleetAlertsTruncated && related.alerts.length === 0
-                    ? "None in loaded page"
+                    ? "Unknown in capped page"
                     : `${formatLowerBoundCount(related.alerts.length, fleetAlertsTruncated)} current`
               }
               detail={
                 fleetAlertsEvidenceAvailable
-                  ? `${activeAlertCount} actionable${fleetAlertsTruncated ? "; the fleet alert page is capped" : ""}`
+                  ? `${activeAlertCount} actionable${fleetAlertsTruncated ? "; this is a lower bound—open Fleet Alerts and narrow the VPS scope" : ""}`
                   : "Current alert evidence is unavailable"
               }
               tone={
@@ -635,6 +635,7 @@ export function VpsDetailPanel({
             <SummaryTab
               agent={agent}
               fleetAlertsEvidenceAvailable={fleetAlertsEvidenceAvailable}
+              fleetAlertsTruncated={fleetAlertsTruncated}
               latestJob={latestJob}
               loading={loading}
               related={related}
@@ -791,6 +792,7 @@ export function VpsDetailPanel({
 function SummaryTab({
   agent,
   fleetAlertsEvidenceAvailable,
+  fleetAlertsTruncated,
   latestJob,
   loading,
   related,
@@ -801,6 +803,7 @@ function SummaryTab({
 }: {
   agent: AgentView;
   fleetAlertsEvidenceAvailable: boolean;
+  fleetAlertsTruncated: boolean;
   latestJob: JobHistoryRecord | null;
   loading: boolean;
   related: VpsDetailContext;
@@ -897,7 +900,11 @@ function SummaryTab({
           <DetailState
             loading={loading}
             title="No current alert episodes"
-            detail="No current condition or occurrence is present for this VPS in the loaded page."
+            detail={
+              fleetAlertsTruncated
+                ? "No current condition or occurrence for this VPS appears in the capped page. Open Fleet Alerts and narrow to this VPS for authoritative current occurrences."
+                : "No current condition or occurrence is present for this VPS."
+            }
           />
         ) : (
           related.alerts.slice(0, 3).map((alert) => {
@@ -1569,8 +1576,8 @@ function NetworkTab({
             <strong>Current traffic policy state is partially loaded</strong>
             <span>
               {currentTrafficPolicyAlerts.length === 0
-                ? "Unknown in loaded current policy-alert page; more may exist"
-                : `At least ${currentTrafficPolicyAlerts.length} current traffic policy alert${currentTrafficPolicyAlerts.length === 1 ? "" : "s"} in the loaded current page; more may exist.`}
+                ? "Unknown in capped current policy evidence; open Alert Policy and narrow to this VPS."
+                : `At least ${currentTrafficPolicyAlerts.length} current traffic policy alert${currentTrafficPolicyAlerts.length === 1 ? "" : "s"} in capped evidence; open Alert Policy and narrow to this VPS.`}
             </span>
           </span>
         ) : null}
@@ -1589,11 +1596,11 @@ function NetworkTab({
                 ? "Current evidence is unavailable or incomplete."
                 : currentPolicyAlertsTruncated &&
                     currentTrafficPolicyAlerts.length === 0
-                  ? "Unknown in loaded current policy-alert page; more may exist"
+                  ? "Unknown in capped current policy evidence; open Alert Policy and narrow to this VPS."
                   : !policyAlertsEvidenceAvailable
                     ? "Policy alert history is unavailable; retained rows may be stale."
                     : policyAlertHistoryTruncated
-                      ? "No traffic policy alert appears in the loaded policy alert history; more may exist."
+                      ? "No traffic policy alert for this VPS appears in the newest history page; use an explicit alert export window for older evidence."
                       : "No traffic policy alert is loaded for this VPS."
             }
           />

@@ -560,10 +560,26 @@ export type FleetAlertResolveRequest = {
   reason: string;
 };
 
+export type FleetAlertBulkResolveRequest = FleetAlertResolveRequest & {
+  items: Array<{
+    alert_id: string;
+    expected_trigger_generation: number;
+  }>;
+};
+
+export type FleetAlertBulkResolveResponse = {
+  alerts: FleetAlertRecord[];
+};
+
 export type FleetAlertEventPage = {
   items: FleetAlertRecord[];
   next_cursor: string | null;
   has_more: boolean;
+};
+
+export type FleetAlertEventSyncResponse = {
+  head: FleetAlertEventPage;
+  current_items: FleetAlertRecord[];
 };
 
 export type VpsRuleValueRecord = GeneratedVpsRuleValueRecord;
@@ -627,6 +643,41 @@ export type FleetAlertNotificationChannelRequest = {
   enabled?: boolean;
   notes?: string | null;
   confirmed: boolean;
+};
+
+export type AlertConfigurationBulkAction = "enable" | "disable" | "delete";
+
+export type AlertConfigurationBulkItem = {
+  id: string;
+  reviewed_name: string;
+  expected_updated_at: string;
+};
+
+export type AlertConfigurationBulkRequest = {
+  action: AlertConfigurationBulkAction;
+  confirmed: boolean;
+  items: AlertConfigurationBulkItem[];
+};
+
+export type AlertConfigurationRecord =
+  | FleetAlertPolicyRecord
+  | FleetAlertNotificationChannelRecord
+  | WebhookRuleRecord;
+
+export type AlertConfigurationBulkOutcome<
+  TRecord extends AlertConfigurationRecord = AlertConfigurationRecord,
+> = {
+  id: string;
+  name: string;
+  result: "enabled" | "disabled" | "deleted";
+  record: TRecord | null;
+};
+
+export type AlertConfigurationBulkResponse<
+  TRecord extends AlertConfigurationRecord = AlertConfigurationRecord,
+> = {
+  action: AlertConfigurationBulkAction;
+  outcomes: AlertConfigurationBulkOutcome<TRecord>[];
 };
 
 export type FleetAlertNotificationDeliveryRecord = {
@@ -831,6 +882,25 @@ export type AgentSuspensionMutationResponse = {
   resolved_alert_count: number;
 };
 
+export type BulkAgentSuspensionRequest = {
+  action: AgentSuspensionAction;
+  client_ids: string[];
+  confirmed: boolean;
+  reason: string | null;
+};
+
+export type BulkAgentSuspensionApiOutcome = {
+  client_id: string;
+  status: "succeeded" | "rejected" | string;
+  result?: AgentSuspensionMutationResponse;
+  error_code?: string;
+  error_message?: string;
+};
+
+export type BulkAgentSuspensionResponse = {
+  outcomes: BulkAgentSuspensionApiOutcome[];
+};
+
 export type AgentSuspensionBatchTarget = {
   action: AgentSuspensionAction;
   client_id: string;
@@ -847,6 +917,27 @@ export type AgentSuspensionBatchOutcome = {
 export type DeleteAgentBatchTarget = {
   client_id: string;
   request: DeleteAgentRequest;
+};
+
+export type BulkDeleteAgentsRequest = {
+  items: Array<{
+    client_id: string;
+    privilege_assertion?: PrivilegeAssertion | null;
+  }>;
+  confirmed: boolean;
+  reason: string | null;
+};
+
+export type BulkDeleteAgentApiOutcome = {
+  client_id: string;
+  status: "succeeded" | "rejected" | string;
+  result?: DeleteAgentResponse;
+  error_code?: string;
+  error_message?: string;
+};
+
+export type BulkDeleteAgentsResponse = {
+  outcomes: BulkDeleteAgentApiOutcome[];
 };
 
 export type DeleteAgentBatchOutcome = {
@@ -1678,6 +1769,7 @@ export type WsEvent =
   | { type: "hello"; service: string; stream: string }
   | { type: "fleet_snapshot"; summary: FleetSummary; agents: AgentView[] }
   | { type: "agent_updated"; client_id: string; gateway_id: string }
+  | { type: "fleet_state_invalidated" }
   | { type: "fleet_telemetry_invalidated" }
   | {
       type: "job_rejected";
@@ -1754,6 +1846,40 @@ export type OperatorSessionRecord = {
   refresh_expires_at: string;
   revoked: boolean;
   revoked_at: string | null;
+};
+
+export type BulkOperatorMutationItem = {
+  operator_id: string;
+  privilege_assertion: PrivilegeAssertion;
+};
+
+export type BulkOperatorMutationOutcome = {
+  operator_id: string;
+  status: string;
+  result?: OperatorView | null;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+export type BulkOperatorMutationResponse = {
+  outcomes: BulkOperatorMutationOutcome[];
+};
+
+export type BulkOperatorSessionRevokeItem = {
+  session_id: string;
+  privilege_assertion: PrivilegeAssertion;
+};
+
+export type BulkOperatorSessionRevokeOutcome = {
+  session_id: string;
+  status: string;
+  result?: OperatorSessionRecord | null;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+export type BulkOperatorSessionRevokeResponse = {
+  outcomes: BulkOperatorSessionRevokeOutcome[];
 };
 
 export type OperatorAuthEventRecord = {
@@ -2290,6 +2416,18 @@ export type TunnelPlanMutationResponse = {
   sync: RuntimeConfigDispatchRecord[];
 };
 
+export type BulkTunnelPlanLifecycleOutcome = {
+  plan_id: string;
+  status: "updated" | "unchanged" | "rejected";
+  revision?: number;
+  error_code?: string;
+};
+
+export type BulkTunnelPlanLifecycleResponse = {
+  outcomes: BulkTunnelPlanLifecycleOutcome[];
+  sync: RuntimeConfigDispatchRecord[];
+};
+
 export type TopologyGraphNode = {
   client_id: string;
   display_name: string;
@@ -2377,6 +2515,11 @@ export type JobTargetRecord = {
   deadline_at?: string | null;
   completed_at: string | null;
   process_incarnation_id?: string | null;
+};
+
+export type JobTargetStatusRequestItem = {
+  job_id: string;
+  client_id: string;
 };
 
 export type JobOutputRecord = {
@@ -3296,10 +3439,24 @@ export type UpdateScheduleRequest = CreateScheduleRequest & {
   expected_target_client_ids: string[];
 };
 
-export type UpdateScheduleTargetsRequest = {
-  expected_definition_revision: number;
+export type BulkUpdateScheduleTargetsRequest = {
   confirmed: boolean;
-  privilege_assertion?: PrivilegeAssertion | null;
+  items: Array<{
+    schedule_id: string;
+    expected_definition_revision: number;
+    privilege_assertion?: PrivilegeAssertion | null;
+  }>;
+};
+
+export type BulkUpdateScheduleTargetsOutcome = {
+  schedule_id: string;
+  status: "updated" | "rejected";
+  schedule?: ScheduleRecord | null;
+  error_code?: string | null;
+};
+
+export type BulkUpdateScheduleTargetsResponse = {
+  outcomes: BulkUpdateScheduleTargetsOutcome[];
 };
 
 export type SchedulePrivilegeMutationRequest = {
@@ -4152,6 +4309,20 @@ export type RuntimeConfigPatchGeneratorRenderResponse = {
 export type BulkResolveResponse = {
   targets: AgentView[];
   target_count: number;
+};
+
+export type BulkResolveManyRequest = {
+  items: Array<{ selector_expression: string }>;
+};
+
+export type BulkResolveManyOutcome = {
+  selector_expression: string;
+  target_client_ids: string[];
+  target_count: number;
+};
+
+export type BulkResolveManyResponse = {
+  outcomes: BulkResolveManyOutcome[];
 };
 
 export type SuiteConfigValidationRecord = {

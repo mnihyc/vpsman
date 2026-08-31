@@ -1343,6 +1343,7 @@ export function App() {
     return {
       critical,
       info,
+      scopeIncomplete: hasFleetScope && dashboard.fleetAlertsTruncated,
       total: activeAlerts.length,
       truncated: dashboard.fleetAlertsTruncated,
       warning,
@@ -2034,11 +2035,11 @@ export function App() {
         onUpdateAgentAlias={dashboard.updateAgentAlias}
         privilegeMaterial={privilegeMaterial}
         scopeActive={hasFleetScope}
-        onDeleteFleetAlertNotificationChannel={
-          dashboard.deleteFleetAlertNotificationChannel
+        onBulkMutateFleetAlertNotificationChannels={
+          dashboard.bulkMutateFleetAlertNotificationChannels
         }
-        onDeleteFleetAlertPolicy={dashboard.deleteFleetAlertPolicy}
-        onDeleteWebhookRule={dashboard.deleteWebhookRule}
+        onBulkMutateFleetAlertPolicies={dashboard.bulkMutateFleetAlertPolicies}
+        onBulkMutateWebhookRules={dashboard.bulkMutateWebhookRules}
         onDispatchFleetAlertNotifications={
           dashboard.dispatchFleetAlertNotifications
         }
@@ -2236,6 +2237,7 @@ export function App() {
         }
         onApplyRuntimeConfigOverride={dashboard.applyRuntimeConfigOverride}
         onCreateJob={dashboard.createJob}
+        onLoadExactJobTargetStatuses={dashboard.loadExactJobTargetStatuses}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
         onLoadConfigurationInventory={dashboard.loadConfigurationInventory}
@@ -2302,10 +2304,10 @@ export function App() {
           dashboard.fleetAlertHistoryEvidenceAvailable
         }
         fleetAlertHistoryTruncated={dashboard.fleetAlertHistoryTruncated}
-        onDeleteFleetAlertNotificationChannel={
-          dashboard.deleteFleetAlertNotificationChannel
+        onBulkMutateFleetAlertNotificationChannels={
+          dashboard.bulkMutateFleetAlertNotificationChannels
         }
-        onDeleteFleetAlertPolicy={dashboard.deleteFleetAlertPolicy}
+        onBulkMutateFleetAlertPolicies={dashboard.bulkMutateFleetAlertPolicies}
         onDispatchFleetAlertNotifications={
           dashboard.dispatchFleetAlertNotifications
         }
@@ -2342,7 +2344,7 @@ export function App() {
       <WebhooksPanel
         agents={dashboard.agents}
         apiError={dashboard.apiError}
-        onDeleteWebhookRule={dashboard.deleteWebhookRule}
+        onBulkMutateWebhookRules={dashboard.bulkMutateWebhookRules}
         onDispatchWebhookRules={dashboard.dispatchWebhookRules}
         onDryRunWebhookRule={dashboard.dryRunWebhookRule}
         onProcessWebhookRuleDeliveries={dashboard.processWebhookRuleDeliveries}
@@ -2690,7 +2692,7 @@ export function App() {
         onPreviewCleanup={dashboard.previewArtifactCleanup}
         onRefreshJobs={dashboard.loadJobs}
         onRefreshSchedules={dashboard.loadSchedules}
-        onResolveTargets={dashboard.resolveJobTargets}
+        onResolveManyTargets={dashboard.resolveManyJobTargets}
         onSelectSubpage={(subpage) => selectView("System", subpage)}
         privilegeMaterial={privilegeMaterial}
       />
@@ -2717,9 +2719,10 @@ export function App() {
         onOpenScheduledRuns={() => selectView("Jobs", "scheduled_runs")}
         onPreviewEventTemplate={dashboard.previewEventScheduleTemplate}
         onRefresh={dashboard.loadSchedules}
+        onResolveManyTargets={dashboard.resolveManyJobTargets}
         onResolveTargets={dashboard.resolveJobTargets}
         onUpdateSchedule={dashboard.updateSchedule}
-        onUpdateScheduleTargets={dashboard.updateScheduleTargets}
+        onBulkUpdateScheduleTargets={dashboard.bulkUpdateScheduleTargets}
         privilegeMaterial={privilegeMaterial}
         schedules={dashboard.schedules}
         schedulesTruncated={dashboard.schedulesTruncated}
@@ -2930,7 +2933,7 @@ export function App() {
         lastLiveEvent={dashboard.lastLiveEvent}
         loading={dashboard.accessLoading}
         onClearSession={clearOperatorSession}
-        onClearOperatorTotp={dashboard.clearOperatorTotp}
+        onClearOperatorTotps={dashboard.clearOperatorTotps}
         onConfirmTotp={dashboard.confirmTotp}
         onCreateOperator={dashboard.createOperator}
         onUpsertAgentIdentity={dashboard.upsertAgentIdentity}
@@ -2946,9 +2949,9 @@ export function App() {
         onRefresh={dashboard.loadCurrentOperator}
         onResetOperatorPassword={dashboard.resetOperatorPassword}
         onRevokeClientKey={dashboard.revokeClientKey}
-        onRevokeOperatorSession={dashboard.revokeOperatorSession}
+        onRevokeOperatorSessions={dashboard.revokeOperatorSessions}
         onSelectSubpage={(subpage) => selectView("Access", subpage)}
-        onSetOperatorStatus={dashboard.setOperatorStatus}
+        onSetOperatorStatuses={dashboard.setOperatorStatuses}
         onSetupTotp={dashboard.setupTotp}
         onUpdateOperator={dashboard.updateOperator}
         onUpdateOperatorPreferences={dashboard.updateOperatorPreferences}
@@ -2980,14 +2983,14 @@ export function App() {
         onDashboardPointDensityChange={dashboard.setSystemDashboardPointDensity}
         onDashboardRefresh={() => void dashboard.loadSystemDashboard()}
         onDashboardWindowChange={dashboard.setSystemDashboardWindow}
-        onClearOperatorTotp={dashboard.clearOperatorTotp}
+        onClearOperatorTotps={dashboard.clearOperatorTotps}
         onCreateOperator={dashboard.createOperator}
         onLoadSuiteConfig={() => void dashboard.loadSuiteConfig()}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onResetOperatorPassword={dashboard.resetOperatorPassword}
-        onRevokeOperatorSession={dashboard.revokeOperatorSession}
+        onRevokeOperatorSessions={dashboard.revokeOperatorSessions}
         onSelectView={selectView}
-        onSetOperatorStatus={dashboard.setOperatorStatus}
+        onSetOperatorStatuses={dashboard.setOperatorStatuses}
         onUpdateOperator={dashboard.updateOperator}
         onUpdateSuiteConfig={dashboard.updateSuiteConfig}
         onValidateSuiteConfig={dashboard.validateSuiteConfig}
@@ -3064,14 +3067,25 @@ export function App() {
             eventReviewHasMore={dashboard.fleetAlertEventReviewHasMore}
             eventReviewItems={dashboard.fleetAlertEventReviewItems}
             eventReviewLoading={dashboard.fleetAlertEventReviewLoading}
+            eventReviewLimitNotice={dashboard.fleetAlertEventReviewLimitNotice}
             eventReviewStarted={dashboard.fleetAlertEventReviewStarted}
+            eventReviewVerified={dashboard.fleetAlertEventReviewVerified}
+            eventSearchHasMore={dashboard.fleetAlertEventSearchHasMore}
+            eventSearchItems={dashboard.fleetAlertEventSearchItems}
+            eventSearchQuery={dashboard.fleetAlertEventSearchQuery}
+            eventSearchScannedCount={
+              dashboard.fleetAlertEventSearchScannedCount
+            }
             history={dashboard.fleetAlertHistory}
             historyEvidenceAvailable={
               dashboard.fleetAlertHistoryEvidenceAvailable
             }
             historyTruncated={dashboard.fleetAlertHistoryTruncated}
+            onActivateEvents={dashboard.activateFleetAlertEventReview}
+            onDeactivateEvents={dashboard.deactivateFleetAlertEventReview}
             onLoadOlderEvents={dashboard.loadOlderFleetAlertEvents}
-            onRefreshEvents={dashboard.refreshFleetAlertEvents}
+            onSearchOlderEvents={dashboard.searchOlderFleetAlertEvents}
+            onSyncEvents={dashboard.syncFleetAlertEvents}
             onOpenAlertPolicies={() => selectView("Observability", "alerts")}
             onOpenVpsDetail={releaseRoutes.openVpsDetail}
             onResolve={dashboard.resolveFleetAlert}
@@ -3193,7 +3207,7 @@ export function App() {
                 void dashboard.loadTerminalSessions();
                 void dashboard.loadCurrentOperator();
               }}
-              onRevokeOperatorSession={dashboard.revokeOperatorSession}
+              onRevokeOperatorSessions={dashboard.revokeOperatorSessions}
               operator={dashboard.operator}
               operatorAuthEvents={dashboard.operatorAuthEvents}
               operatorAuthEventsTruncated={

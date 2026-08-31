@@ -1,6 +1,11 @@
 import { Activity, Gauge, Network, Radio, Server } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { apiErrorFromResponse, apiFetch, apiJsonFromResponse } from "./api";
+import {
+  apiErrorFromResponse,
+  apiFetch,
+  apiJsonFromResponse,
+  LatestReadConsumer,
+} from "./api";
 import { dashboardChartColors, consolePalette } from "./colorPalette";
 import {
   TimeSeriesChart,
@@ -93,6 +98,12 @@ const bootstrapRequests = new Map<
   string,
   Promise<PublicMonitoringShareBootstrapView>
 >();
+
+// Initial pagination and periodic refresh are producers for the same card
+// projection. This owner lives outside the remounted page so only one public
+// card read is active in this browser; newer demand replaces pending demand.
+// It stores no share id or secret after work drains.
+const publicMonitoringCardsReadConsumer = new LatestReadConsumer<void>();
 
 export function PublicMonitoringSharePage({
   initialClientKey = null,
@@ -200,60 +211,62 @@ export function PublicMonitoringSharePage({
       setShare(bootstrap.share);
       setVisitorId(bootstrap.visitor_id);
 
-      let offset = 0;
-      let combined: PublicMonitoringCard[] = [];
-      const loadedKeys = new Set<string>();
-      for (;;) {
-        const params = new URLSearchParams({
-          limit: "1000",
-          offset: String(offset),
-        });
-        const page = await publicShareJson<PublicMonitoringData>(
-          publicDataPath(shareId, params),
-          secret,
-          controller.signal,
-          bootstrap.visitor_id,
-        );
-        if (!active) return;
-        if (page.offset !== offset) {
-          throw new Error(
-            "The shared view returned the wrong pagination offset.",
+      await publicMonitoringCardsReadConsumer.enqueue(async () => {
+        let offset = 0;
+        let combined: PublicMonitoringCard[] = [];
+        const loadedKeys = new Set<string>();
+        for (;;) {
+          const params = new URLSearchParams({
+            limit: "1000",
+            offset: String(offset),
+          });
+          const page = await publicShareJson<PublicMonitoringData>(
+            publicDataPath(shareId, params),
+            secret,
+            controller.signal,
+            bootstrap.visitor_id,
           );
-        }
-        if (page.cards.some((card) => loadedKeys.has(card.client_key))) {
-          throw new Error(
-            "The shared view returned the same VPS more than once.",
-          );
-        }
-        page.cards.forEach((card) => loadedKeys.add(card.client_key));
-        setShare(page.share);
-        setTotal(page.total);
-        combined = [...combined, ...page.cards];
-        setCards(combined);
-        if (combined.length > page.total) {
-          throw new Error(
-            "The shared view returned more cards than its reported total.",
-          );
-        }
-        if (page.next_offset === null) {
-          if (combined.length !== page.total) {
+          if (!active) return;
+          if (page.offset !== offset) {
             throw new Error(
-              "The shared view ended before every shared VPS was returned.",
+              "The shared view returned the wrong pagination offset.",
             );
           }
-          break;
+          if (page.cards.some((card) => loadedKeys.has(card.client_key))) {
+            throw new Error(
+              "The shared view returned the same VPS more than once.",
+            );
+          }
+          page.cards.forEach((card) => loadedKeys.add(card.client_key));
+          setShare(page.share);
+          setTotal(page.total);
+          combined = [...combined, ...page.cards];
+          setCards(combined);
+          if (combined.length > page.total) {
+            throw new Error(
+              "The shared view returned more cards than its reported total.",
+            );
+          }
+          if (page.next_offset === null) {
+            if (combined.length !== page.total) {
+              throw new Error(
+                "The shared view ended before every shared VPS was returned.",
+              );
+            }
+            break;
+          }
+          if (
+            page.next_offset !== offset + page.cards.length ||
+            page.next_offset > page.total ||
+            page.cards.length === 0
+          ) {
+            throw new Error(
+              "The shared view returned an invalid pagination cursor; no cards were inferred beyond the last complete page.",
+            );
+          }
+          offset = page.next_offset;
         }
-        if (
-          page.next_offset !== offset + page.cards.length ||
-          page.next_offset > page.total ||
-          page.cards.length === 0
-        ) {
-          throw new Error(
-            "The shared view returned an invalid pagination cursor; no cards were inferred beyond the last complete page.",
-          );
-        }
-        offset = page.next_offset;
-      }
+      });
     })()
       .catch((reason: unknown) => {
         if (active && !isAbortError(reason)) {
@@ -279,75 +292,72 @@ export function PublicMonitoringSharePage({
   useEffect(() => {
     if (!visitorId || !shareId.trim() || !secret) return;
     let active = true;
-    let inFlight = false;
     const refreshCards = async () => {
-      if (inFlight) return;
-      inFlight = true;
       try {
-        let offset = 0;
-        let combined: PublicMonitoringCard[] = [];
-        const loadedKeys = new Set<string>();
-        let latestShare = share;
-        let latestTotal = total;
-        for (;;) {
-          const params = new URLSearchParams({
-            limit: "1000",
-            offset: String(offset),
-          });
-          const page = await publicShareJson<PublicMonitoringData>(
-            publicDataPath(shareId, params),
-            secret,
-            undefined,
-            visitorId,
-          );
-          if (!active) return;
-          if (page.offset !== offset) {
-            throw new Error(
-              "The shared view returned the wrong pagination offset; the previous complete card set remains visible.",
+        await publicMonitoringCardsReadConsumer.enqueue(async () => {
+          let offset = 0;
+          let combined: PublicMonitoringCard[] = [];
+          const loadedKeys = new Set<string>();
+          let latestShare = share;
+          let latestTotal = total;
+          for (;;) {
+            const params = new URLSearchParams({
+              limit: "1000",
+              offset: String(offset),
+            });
+            const page = await publicShareJson<PublicMonitoringData>(
+              publicDataPath(shareId, params),
+              secret,
+              undefined,
+              visitorId,
             );
-          }
-          if (page.cards.some((card) => loadedKeys.has(card.client_key))) {
-            throw new Error(
-              "The shared view returned the same VPS more than once; the previous complete card set remains visible.",
-            );
-          }
-          page.cards.forEach((card) => loadedKeys.add(card.client_key));
-          latestShare = page.share;
-          latestTotal = page.total;
-          combined = [...combined, ...page.cards];
-          if (combined.length > page.total) {
-            throw new Error(
-              "The shared view exceeded its reported total; the previous complete card set remains visible.",
-            );
-          }
-          if (page.next_offset === null) {
-            if (combined.length !== page.total) {
+            if (!active) return;
+            if (page.offset !== offset) {
               throw new Error(
-                "The shared view ended early; the previous complete card set remains visible.",
+                "The shared view returned the wrong pagination offset; the previous complete card set remains visible.",
               );
             }
-            break;
+            if (page.cards.some((card) => loadedKeys.has(card.client_key))) {
+              throw new Error(
+                "The shared view returned the same VPS more than once; the previous complete card set remains visible.",
+              );
+            }
+            page.cards.forEach((card) => loadedKeys.add(card.client_key));
+            latestShare = page.share;
+            latestTotal = page.total;
+            combined = [...combined, ...page.cards];
+            if (combined.length > page.total) {
+              throw new Error(
+                "The shared view exceeded its reported total; the previous complete card set remains visible.",
+              );
+            }
+            if (page.next_offset === null) {
+              if (combined.length !== page.total) {
+                throw new Error(
+                  "The shared view ended early; the previous complete card set remains visible.",
+                );
+              }
+              break;
+            }
+            if (
+              page.next_offset !== offset + page.cards.length ||
+              page.next_offset > page.total ||
+              page.cards.length === 0
+            ) {
+              throw new Error(
+                "The shared view returned an invalid pagination cursor; the previous complete card set remains visible.",
+              );
+            }
+            offset = page.next_offset;
           }
-          if (
-            page.next_offset !== offset + page.cards.length ||
-            page.next_offset > page.total ||
-            page.cards.length === 0
-          ) {
-            throw new Error(
-              "The shared view returned an invalid pagination cursor; the previous complete card set remains visible.",
-            );
-          }
-          offset = page.next_offset;
-        }
-        if (!active) return;
-        setShare(latestShare);
-        setTotal(latestTotal);
-        setCards(combined);
-        setError(null);
+          if (!active) return;
+          setShare(latestShare);
+          setTotal(latestTotal);
+          setCards(combined);
+          setError(null);
+        });
       } catch (reason) {
         if (active) setError(errorMessage(reason));
-      } finally {
-        inFlight = false;
       }
     };
     const timer = globalThis.setInterval(

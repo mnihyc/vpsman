@@ -25,10 +25,11 @@ import { buildScheduleTargetUpdatePrivilegeAssertion } from "../scheduleTargetMa
 import type {
   AgentView,
   ArtifactCleanupPreviewRecord,
-  BulkResolveResponse,
+  BulkResolveManyRequest,
+  BulkResolveManyResponse,
+  BulkUpdateScheduleTargetsResponse,
   BulkUpdateMonitoringShareTargetsResponse,
   BulkUpdatePingTargetsResponse,
-  JobTargetSelection,
   MonitoringShareTargetChangeView,
   MonitoringShareView,
   PingTargetAssignmentChangeView,
@@ -76,6 +77,10 @@ type Feedback = {
   tone: ActionFeedbackTone;
 };
 
+const SCHEDULE_TARGET_UPDATE_BATCH_LIMIT = 500;
+const PING_TARGET_UPDATE_BATCH_LIMIT = 500;
+const MONITORING_SHARE_UPDATE_BATCH_LIMIT = 1_000;
+
 const maintenanceTabs: Array<{
   id: MaintenanceTab;
   label: string;
@@ -108,7 +113,7 @@ export function SystemMaintenancePanel({
   onPreviewCleanup,
   onRefreshJobs,
   onRefreshSchedules,
-  onResolveTargets,
+  onResolveManyTargets,
   onSelectSubpage,
   privilegeMaterial,
 }: {
@@ -131,9 +136,9 @@ export function SystemMaintenancePanel({
   ) => Promise<ArtifactCleanupPreviewRecord>;
   onRefreshJobs: () => void;
   onRefreshSchedules: () => Promise<void>;
-  onResolveTargets: (
-    selection: JobTargetSelection,
-  ) => Promise<BulkResolveResponse>;
+  onResolveManyTargets: (
+    request: BulkResolveManyRequest,
+  ) => Promise<BulkResolveManyResponse>;
   onSelectSubpage: (subpage: string) => void;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
@@ -174,7 +179,7 @@ export function SystemMaintenancePanel({
           apiToken={apiToken}
           onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           onRefreshSchedules={onRefreshSchedules}
-          onResolveTargets={onResolveTargets}
+          onResolveManyTargets={onResolveManyTargets}
           privilegeMaterial={privilegeMaterial}
         />
       ) : null}
@@ -200,16 +205,16 @@ function StaleSelectorMaintenancePanel({
   apiToken,
   onOpenPrivilegeUnlock,
   onRefreshSchedules,
-  onResolveTargets,
+  onResolveManyTargets,
   privilegeMaterial,
 }: {
   agents: AgentView[];
   apiToken: string;
   onOpenPrivilegeUnlock: () => void;
   onRefreshSchedules: () => Promise<void>;
-  onResolveTargets: (
-    selection: JobTargetSelection,
-  ) => Promise<BulkResolveResponse>;
+  onResolveManyTargets: (
+    request: BulkResolveManyRequest,
+  ) => Promise<BulkResolveManyResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
   const vpsRuleSearch = useVpsRuleSearchContext();
@@ -399,6 +404,11 @@ function StaleSelectorMaintenancePanel({
       );
       return;
     }
+    const limitMessage = selectorUpdateBatchLimitMessage(selected);
+    if (limitMessage) {
+      setError(limitMessage);
+      return;
+    }
     const selectedSchedules = selected.filter(
       (row): row is StaleSelectorRow & { source: ScheduleRecord } =>
         row.kind === "Schedule",
@@ -419,17 +429,27 @@ function StaleSelectorMaintenancePanel({
       tone: "progress",
     });
     try {
-      const resolvedBySelector = new Map<string, string[]>();
+      const selectors = Array.from(
+        new Set(selectedSchedules.map((row) => row.selectorExpression)),
+      );
+      const resolution =
+        selectors.length > 0
+          ? await onResolveManyTargets({
+              items: selectors.map((selector_expression) => ({
+                selector_expression,
+              })),
+            })
+          : { outcomes: [] };
+      assertOrderedSelectorResolution(selectors, resolution);
+      const resolvedBySelector = new Map(
+        resolution.outcomes.map((outcome) => [
+          outcome.selector_expression,
+          uniqueSorted(outcome.target_client_ids),
+        ]),
+      );
       const scheduleUpdates: ScheduleTargetReview[] = [];
       for (const row of selectedSchedules) {
-        let targetIds = resolvedBySelector.get(row.selectorExpression);
-        if (!targetIds) {
-          const resolved = await onResolveTargets({
-            selector_expression: row.selectorExpression,
-          });
-          targetIds = uniqueSorted(resolved.targets.map((target) => target.id));
-          resolvedBySelector.set(row.selectorExpression, targetIds);
-        }
+        const targetIds = resolvedBySelector.get(row.selectorExpression) ?? [];
         if (!sameStringSet(row.frozenTargetIds, targetIds)) {
           scheduleUpdates.push({
             nextTargetIds: targetIds,
@@ -529,31 +549,33 @@ function StaleSelectorMaintenancePanel({
           ),
         })),
       );
-      for (let offset = 0; offset < preparedSchedules.length; offset += 8) {
-        const batch = preparedSchedules.slice(offset, offset + 8);
-        const results = await Promise.allSettled(
-          batch.map((update) =>
-            apiPost<ScheduleRecord>(
-              `/api/v1/schedules/${encodeURIComponent(update.schedule.id)}/targets`,
-              apiToken,
-              {
+      if (preparedSchedules.length > 0) {
+        try {
+          const response = await apiPost<BulkUpdateScheduleTargetsResponse>(
+            "/api/v1/schedules/update-targets",
+            apiToken,
+            {
+              confirmed: true,
+              items: preparedSchedules.map((update) => ({
+                schedule_id: update.schedule.id,
                 expected_definition_revision:
                   update.schedule.definition_revision,
-                confirmed: true,
                 privilege_assertion: update.privilegeAssertion,
-              },
-            ),
-          ),
-        );
-        results.forEach((result, index) => {
-          if (result.status === "fulfilled") {
-            updatedSchedules += 1;
-          } else {
-            failures.push(
-              `${batch[index]?.schedule.name ?? "Schedule"}: ${errorMessage(result.reason)}`,
-            );
-          }
-        });
+              })),
+            },
+          );
+          response.outcomes.forEach((outcome, index) => {
+            if (outcome.status === "updated") {
+              updatedSchedules += 1;
+            } else {
+              failures.push(
+                `${preparedSchedules[index]?.schedule.name ?? outcome.schedule_id}: ${outcome.error_code ?? "schedule target update rejected"}`,
+              );
+            }
+          });
+        } catch (cause) {
+          failures.push(`Schedules: ${errorMessage(cause)}`);
+        }
       }
 
       if (snapshot.pingPreview && snapshot.pingTargetIds.length > 0) {
@@ -628,11 +650,21 @@ function StaleSelectorMaintenancePanel({
 
   const actions: ConsoleDataGridAction<StaleSelectorRow>[] = [
     {
-      description: (selected) =>
-        selected.length > 0
-          ? `Resolve and review ${selected.filter((row) => row.canUpdate).length} updateable saved selector${selected.filter((row) => row.canUpdate).length === 1 ? "" : "s"}.`
-          : "Select one or more stale saved selectors.",
-      disabled: (selected) => pending || !selected.some((row) => row.canUpdate),
+      description: (selected) => {
+        const updateable = selected.filter((row) => row.canUpdate);
+        return (
+          selectorUpdateBatchLimitMessage(updateable) ??
+          (selected.length > 0
+            ? `Resolve and review ${updateable.length} updateable saved selector${updateable.length === 1 ? "" : "s"}.`
+            : "Select one or more stale saved selectors.")
+        );
+      },
+      disabled: (selected) =>
+        pending ||
+        !selected.some((row) => row.canUpdate) ||
+        selectorUpdateBatchLimitMessage(
+          selected.filter((row) => row.canUpdate),
+        ) !== null,
       icon: <Target size={14} />,
       label: "Update targets",
       onSelect: (selected) => void reviewRows(selected),
@@ -743,18 +775,24 @@ function StaleSelectorMaintenancePanel({
               data-tooltip-disabled-reason={
                 pending
                   ? "A stale selector update review is already in progress."
-                  : "No resolvable stale target snapshots are available to update."
+                  : selectorUpdateBatchLimitMessage(updateableRows) ??
+                    "No resolvable stale target snapshots are available to update."
               }
-              disabled={pending || updateableRows.length === 0}
+              disabled={
+                pending ||
+                updateableRows.length === 0 ||
+                selectorUpdateBatchLimitMessage(updateableRows) !== null
+              }
               onClick={() => void reviewRows(updateableRows)}
               title={
                 pending
                   ? "A stale selector update review is already in progress."
                   : updateableRows.length === 0
                     ? "No resolvable stale target snapshots are available to update."
-                    : blockedRows > 0
-                      ? `Update every resolvable stale snapshot; ${blockedRows} invalid definition${blockedRows === 1 ? " remains" : "s remain"} for repair.`
-                      : "Resolve and review every stale mutable target snapshot."
+                    : selectorUpdateBatchLimitMessage(updateableRows) ??
+                      (blockedRows > 0
+                        ? `Update every resolvable stale snapshot; ${blockedRows} invalid definition${blockedRows === 1 ? " remains" : "s remain"} for repair.`
+                        : "Resolve and review every stale mutable target snapshot.")
               }
               type="button"
             >
@@ -777,6 +815,24 @@ function StaleSelectorMaintenancePanel({
       />
     </div>
   );
+}
+
+function selectorUpdateBatchLimitMessage(
+  rows: StaleSelectorRow[],
+): string | null {
+  const scheduleCount = rows.filter((row) => row.kind === "Schedule").length;
+  if (scheduleCount > SCHEDULE_TARGET_UPDATE_BATCH_LIMIT) {
+    return `Schedule target updates accept at most ${SCHEDULE_TARGET_UPDATE_BATCH_LIMIT} records in one reviewed batch; narrow the selection by ${scheduleCount - SCHEDULE_TARGET_UPDATE_BATCH_LIMIT} or more.`;
+  }
+  const pingCount = rows.filter((row) => row.kind === "Ping target").length;
+  if (pingCount > PING_TARGET_UPDATE_BATCH_LIMIT) {
+    return `Ping target updates accept at most ${PING_TARGET_UPDATE_BATCH_LIMIT} records in one reviewed batch; narrow the selection by ${pingCount - PING_TARGET_UPDATE_BATCH_LIMIT} or more.`;
+  }
+  const shareCount = rows.filter((row) => row.kind === "Shared view").length;
+  if (shareCount > MONITORING_SHARE_UPDATE_BATCH_LIMIT) {
+    return `Shared-view target updates accept at most ${MONITORING_SHARE_UPDATE_BATCH_LIMIT} records in one reviewed batch; narrow the selection by ${shareCount - MONITORING_SHARE_UPDATE_BATCH_LIMIT} or more.`;
+  }
+  return null;
 }
 
 function staleSelectorRows(
@@ -1079,6 +1135,22 @@ function targetCountLabel(count: number): string {
 
 function targetIdTitle(ids: string[]): string {
   return ids.length > 0 ? ids.join(", ") : "No frozen target IDs";
+}
+
+function assertOrderedSelectorResolution(
+  selectors: string[],
+  response: BulkResolveManyResponse,
+): void {
+  if (
+    response.outcomes.length !== selectors.length ||
+    response.outcomes.some(
+      (outcome, index) =>
+        outcome.selector_expression !== selectors[index] ||
+        outcome.target_count !== outcome.target_client_ids.length,
+    )
+  ) {
+    throw new Error("Target resolution returned an invalid ordered result set");
+  }
 }
 
 function uniqueSorted(values: string[]): string[] {

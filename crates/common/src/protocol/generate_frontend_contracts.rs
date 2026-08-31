@@ -648,6 +648,7 @@ export type VpsRulesDryRunResponse = {{
   invalid_row_count: number;
   preview_hash: string;
   changes: VpsRuleChangePreview[];
+  committed_records: VpsRuleValueRecord[];
 }};
 
 export type VpsRulesBulkUpsertRequest = {{

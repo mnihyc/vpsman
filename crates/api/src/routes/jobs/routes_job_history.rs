@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path as FsPath, PathBuf},
 };
 
@@ -24,8 +24,9 @@ use crate::{
     error::ApiError,
     model::{
         AuditLogView, HistoryQuery, JobHistoryView, JobOutputListItemView, JobOutputListPageView,
-        JobOutputView, JobTargetView, ListQuery, NetworkEvidenceQuery, NetworkObservationTrendView,
-        NetworkObservationView, ProcessSupervisorInventoryView,
+        JobOutputView, JobTargetStatusBatchItem, JobTargetStatusBatchRequest, JobTargetView,
+        ListQuery, NetworkEvidenceQuery, NetworkObservationTrendView, NetworkObservationView,
+        ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     repository_job_outputs::{
@@ -33,6 +34,7 @@ use crate::{
     },
     repository_network_observations::NetworkObservationFilter,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
+    routes_key_lifecycle::validate_client_id,
     security::{SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ},
     state::AppState,
     util::limit_or_default,
@@ -44,6 +46,7 @@ const MAX_JOB_OUTPUT_ARCHIVE_STREAM_BYTES: u64 = 1024 * 1024 * 1024;
 const JOB_OUTPUT_LIST_DEFAULT_LIMIT: i64 = 200;
 const JOB_OUTPUT_LIST_MAX_LIMIT: i64 = 1000;
 const MAX_JOB_OUTPUT_EXPORT_ROWS: usize = 10_000;
+const JOB_TARGET_STATUS_BATCH_MAX_ITEMS: usize = 500;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FileDownloadBundleQuery {
@@ -136,6 +139,61 @@ pub(crate) async fn list_job_targets(
             "Job targets could not be loaded.",
         ),
     )?))
+}
+
+pub(crate) async fn list_exact_job_target_statuses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<JobTargetStatusBatchRequest>,
+) -> Result<Json<Vec<JobTargetView>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    validate_job_target_status_batch(&request.items)?;
+    let pairs = request
+        .items
+        .iter()
+        .map(|item| (item.job_id, item.client_id.clone()))
+        .collect::<Vec<_>>();
+    let targets = state
+        .repo
+        .list_exact_job_target_statuses(&pairs)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_targets_unavailable",
+            "Job target statuses could not be loaded.",
+        ))?;
+    if targets.len() != request.items.len() {
+        return Err(ApiError::not_found("job_target_not_found"));
+    }
+    if targets
+        .iter()
+        .zip(&request.items)
+        .any(|(target, requested)| {
+            target.job_id != requested.job_id || target.client_id != requested.client_id
+        })
+    {
+        return Err(ApiError::internal(
+            "job_target_status_result_invalid",
+            "Job target statuses were returned in an invalid order.",
+            anyhow::anyhow!("exact job-target pair query did not preserve request order"),
+        ));
+    }
+    Ok(Json(targets))
+}
+
+fn validate_job_target_status_batch(items: &[JobTargetStatusBatchItem]) -> Result<(), ApiError> {
+    if items.is_empty() || items.len() > JOB_TARGET_STATUS_BATCH_MAX_ITEMS {
+        return Err(ApiError::bad_request("job_target_status_pairs_invalid"));
+    }
+    let mut unique = HashSet::with_capacity(items.len());
+    for item in items {
+        validate_client_id(&item.client_id)?;
+        if !unique.insert((item.job_id, item.client_id.as_str())) {
+            return Err(ApiError::bad_request("job_target_status_pairs_duplicate"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn download_job_target_statuses(

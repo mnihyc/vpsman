@@ -11,6 +11,7 @@ import { TOPOLOGY_EVIDENCE_LIMIT } from "../constants";
 import type {
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
+  BulkTunnelPlanLifecycleResponse,
   ClearTunnelPlanEvidenceOutcome,
   ClearTunnelPlanEvidenceRequest,
   ClearTunnelPlanEvidenceResponse,
@@ -73,13 +74,23 @@ export function useTopologyData(
   const [networkAdapterDefinitions, setNetworkAdapterDefinitions] = useState<
     NetworkAdapterDefinitionRecord[]
   >([]);
-  const [tunnelPlanCorruptions, setTunnelPlanCorruptions] =
-    useState<TunnelPlanCorruptRecord[]>([]);
-  const [networkObservations, setNetworkObservations] = useState<NetworkObservationRecord[]>([]);
-  const [networkTrends, setNetworkTrends] = useState<NetworkObservationTrendRecord[]>([]);
-  const [ospfRecommendations, setOspfRecommendations] = useState<NetworkOspfRecommendationRecord[]>([]);
-  const [ospfUpdatePlans, setOspfUpdatePlans] = useState<NetworkOspfUpdatePlanRecord[]>([]);
-  const [topologyGraph, setTopologyGraph] = useState<TopologyGraph>(emptyTopologyGraph());
+  const [tunnelPlanCorruptions, setTunnelPlanCorruptions] = useState<
+    TunnelPlanCorruptRecord[]
+  >([]);
+  const [networkObservations, setNetworkObservations] = useState<
+    NetworkObservationRecord[]
+  >([]);
+  const [networkTrends, setNetworkTrends] = useState<
+    NetworkObservationTrendRecord[]
+  >([]);
+  const [ospfRecommendations, setOspfRecommendations] = useState<
+    NetworkOspfRecommendationRecord[]
+  >([]);
+  const [ospfUpdatePlans, setOspfUpdatePlans] = useState<
+    NetworkOspfUpdatePlanRecord[]
+  >([]);
+  const [topologyGraph, setTopologyGraph] =
+    useState<TopologyGraph>(emptyTopologyGraph());
   const [topologyError, setTopologyError] = useState<string | null>(null);
   const [topologyLoading, setTopologyLoading] = useState(false);
   const topologyErrors = useRef<Partial<Record<TopologySource, string>>>({});
@@ -132,7 +143,7 @@ export function useTopologyData(
   );
 
   const loadTopologySource = useCallback(
-    async <T,>(
+    async <T>(
       source: TopologySource,
       request: () => Promise<T>,
       apply: (value: T) => void,
@@ -359,7 +370,8 @@ export function useTopologyData(
         ...(refreshShortRangeTrends ? [loadNetworkTrends(trendQuery)] : []),
         loadOspfRecommendations(),
         loadOspfUpdatePlans(),
-        ...(includeTopologyGraph && topologyGraphQuery.current.window !== "custom"
+        ...(includeTopologyGraph &&
+        topologyGraphQuery.current.window !== "custom"
           ? [loadTopologyGraph(topologyGraphQuery.current)]
           : []),
       ]);
@@ -373,13 +385,67 @@ export function useTopologyData(
     ],
   );
 
+  const refreshNetworkJobEvidence = useCallback(
+    async (commandType: string, includeTopologyGraph: boolean) => {
+      if (
+        commandType === "network_status" ||
+        commandType === "network_probe" ||
+        commandType === "network_speed_test"
+      ) {
+        const observationQuery = networkObservationQuery.current;
+        const trendQuery = networkTrendQuery.current;
+        await Promise.all([
+          refreshRecentNetworkObservations(observationQuery),
+          ...(matchesLiveEvidenceWindow(trendQuery.window)
+            ? [loadNetworkTrends(trendQuery)]
+            : []),
+          ...(includeTopologyGraph &&
+          topologyGraphQuery.current.window !== "custom"
+            ? [loadTopologyGraph(topologyGraphQuery.current)]
+            : []),
+        ]);
+        return;
+      }
+      if (
+        commandType === "network_routing_status" ||
+        commandType === "network_routing_apply"
+      ) {
+        await Promise.all([loadOspfRecommendations(), loadOspfUpdatePlans()]);
+      }
+    },
+    [
+      loadNetworkTrends,
+      loadOspfRecommendations,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      refreshRecentNetworkObservations,
+    ],
+  );
+
   const createTunnelPlan = useCallback(
     async (request: CreateTunnelPlanRequest) => {
-      const response = await apiPost<TunnelPlanMutationResponse>("/api/v1/tunnel-plans", apiToken, request);
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      const response = await apiPost<TunnelPlanMutationResponse>(
+        "/api/v1/tunnel-plans",
+        apiToken,
+        request,
+      );
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        loadOspfUpdatePlans(),
+        onAuditChanged(),
+        onRuntimeConfigChanged(),
+      ]);
       return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+      onRuntimeConfigChanged,
+    ],
   );
 
   const createNetworkAdapterDefinition = useCallback(
@@ -390,10 +456,9 @@ export function useTopologyData(
         request,
       );
       await retainMutationSuccessAfterRefresh(() =>
-        Promise.all([
-          loadNetworkAdapterDefinitions(),
-          onAuditChanged(),
-        ]).then(() => undefined),
+        Promise.all([loadNetworkAdapterDefinitions(), onAuditChanged()]).then(
+          () => undefined,
+        ),
       );
       return response;
     },
@@ -419,12 +484,7 @@ export function useTopologyData(
       );
       return response;
     },
-    [
-      apiToken,
-      loadNetworkAdapterDefinitions,
-      loadTunnelPlans,
-      onAuditChanged,
-    ],
+    [apiToken, loadNetworkAdapterDefinitions, loadTunnelPlans, onAuditChanged],
   );
 
   const deleteNetworkAdapterDefinition = useCallback(
@@ -434,10 +494,9 @@ export function useTopologyData(
         apiToken,
       );
       await retainMutationSuccessAfterRefresh(() =>
-        Promise.all([
-          loadNetworkAdapterDefinitions(),
-          onAuditChanged(),
-        ]).then(() => undefined),
+        Promise.all([loadNetworkAdapterDefinitions(), onAuditChanged()]).then(
+          () => undefined,
+        ),
       );
     },
     [apiToken, loadNetworkAdapterDefinitions, onAuditChanged],
@@ -450,10 +509,23 @@ export function useTopologyData(
         apiToken,
         request,
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        loadOspfUpdatePlans(),
+        onAuditChanged(),
+        onRuntimeConfigChanged(),
+      ]);
       return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+      onRuntimeConfigChanged,
+    ],
   );
 
   const rotateTunnelPlanCredentials = useCallback(
@@ -484,74 +556,54 @@ export function useTopologyData(
 
   const allocateTunnelEndpoints = useCallback(
     async (request: AllocateTunnelEndpointsRequest) =>
-      apiPost<AllocateTunnelEndpointsResponse>("/api/v1/tunnel-plans/allocate", apiToken, request),
+      apiPost<AllocateTunnelEndpointsResponse>(
+        "/api/v1/tunnel-plans/allocate",
+        apiToken,
+        request,
+      ),
     [apiToken],
   );
 
   const exportTunnelPlan = useCallback(
     async (planId: string) =>
-      apiGet<TunnelPlanExport>(`/api/v1/tunnel-plans/${encodeURIComponent(planId)}/plan`, apiToken),
+      apiGet<TunnelPlanExport>(
+        `/api/v1/tunnel-plans/${encodeURIComponent(planId)}/plan`,
+        apiToken,
+      ),
     [apiToken],
   );
 
   const setTunnelPlanEnabled = useCallback(
     async (targets: TunnelPlanRevisionTarget[], enabled: boolean) => {
-      const mutationResults = await Promise.allSettled(
-        targets.map((target) =>
-          apiPost<TunnelPlanMutationResponse>(
-            `/api/v1/tunnel-plans/${encodeURIComponent(target.plan_id)}/${enabled ? "enable" : "disable"}`,
-            apiToken,
-            { confirmed: true, expected_revision: target.expected_revision },
-          ),
-        ),
+      const response = await apiPost<BulkTunnelPlanLifecycleResponse>(
+        "/api/v1/tunnel-plans/lifecycle",
+        apiToken,
+        {
+          confirmed: true,
+          enabled,
+          items: targets.map(({ plan_id, expected_revision }) => ({
+            plan_id,
+            expected_revision,
+          })),
+        },
       );
-      const refreshResults = await Promise.allSettled([
+      await Promise.allSettled([
         loadTunnelPlans(),
         loadTopologyGraph(),
         loadOspfUpdatePlans(),
         onAuditChanged(),
         onRuntimeConfigChanged(),
       ]);
-      const failures = mutationResults.flatMap((result, index) =>
-        result.status === "rejected"
-          ? [
-              `Tunnel plan ${targets[index].plan_id}: ${
-                result.reason instanceof Error
-                  ? result.reason.message
-                  : "mutation failed"
-              }`,
-            ]
-          : [],
-      );
-      const refreshLabels = [
-        "tunnel plans",
-        "topology graph",
-        "OSPF update plans",
-        "audit log",
-        "runtime configuration",
-      ];
-      failures.push(
-        ...refreshResults.flatMap((result, index) =>
-          result.status === "rejected"
-            ? [
-                `Refresh ${refreshLabels[index]}: ${
-                  result.reason instanceof Error
-                    ? result.reason.message
-                    : "source unavailable"
-                }`,
-              ]
-            : [],
-        ),
-      );
-      if (failures.length > 0) {
-        throw new Error(failures.join("; "));
-      }
-      const responses = mutationResults.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : [],
-      );
-      return responses;
+      return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+      onRuntimeConfigChanged,
+    ],
   );
 
   const deleteTunnelPlan = useCallback(
@@ -561,10 +613,23 @@ export function useTopologyData(
         apiToken,
         { confirmed: true, expected_revision: target.expected_revision },
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged(), onRuntimeConfigChanged()]);
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        loadOspfUpdatePlans(),
+        onAuditChanged(),
+        onRuntimeConfigChanged(),
+      ]);
       return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+      onRuntimeConfigChanged,
+    ],
   );
 
   const clearTunnelPlanEvidence = useCallback(
@@ -623,13 +688,20 @@ export function useTopologyData(
   );
 
   const updateTunnelConnectionAssessment = useCallback(
-    async (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => {
+    async (
+      planId: string,
+      request: UpdateTunnelConnectionAssessmentRequest,
+    ) => {
       await apiPut<TunnelPlanRecord>(
         `/api/v1/tunnel-plans/${encodeURIComponent(planId)}/connection-assessment`,
         apiToken,
         request,
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), onAuditChanged()]);
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        onAuditChanged(),
+      ]);
     },
     [apiToken, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
   );
@@ -641,10 +713,21 @@ export function useTopologyData(
         apiToken,
         request,
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        loadOspfUpdatePlans(),
+        onAuditChanged(),
+      ]);
       return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+    ],
   );
 
   const refreshTunnelPlanOspfStatus = useCallback(
@@ -654,10 +737,21 @@ export function useTopologyData(
         apiToken,
         {},
       );
-      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        loadOspfUpdatePlans(),
+        onAuditChanged(),
+      ]);
       return response;
     },
-    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+    ],
   );
 
   const clearTopology = useCallback(() => {
@@ -701,6 +795,7 @@ export function useTopologyData(
     queryNetworkObservations,
     queryNetworkTrends,
     refreshNetworkEvidence,
+    refreshNetworkJobEvidence,
     networkTrends,
     ospfRecommendations,
     ospfUpdatePlans,
@@ -749,7 +844,9 @@ function mergeRecentNetworkObservations(
   recent: NetworkObservationRecord[],
   query: NetworkEvidenceQuery,
 ): NetworkObservationRecord[] {
-  const byId = new Map(current.map((observation) => [observation.id, observation]));
+  const byId = new Map(
+    current.map((observation) => [observation.id, observation]),
+  );
   for (const observation of recent) {
     byId.set(observation.id, observation);
   }
@@ -760,7 +857,8 @@ function mergeRecentNetworkObservations(
   );
   const windowSecs = evidenceWindowSecs(query.window);
   const newestMillis = merged.reduce(
-    (latest, observation) => Math.max(latest, Date.parse(observation.observed_at)),
+    (latest, observation) =>
+      Math.max(latest, Date.parse(observation.observed_at)),
     Number.NEGATIVE_INFINITY,
   );
   const retained =
@@ -768,7 +866,8 @@ function mergeRecentNetworkObservations(
       ? merged
       : merged.filter(
           (observation) =>
-            Date.parse(observation.observed_at) >= newestMillis - windowSecs * 1_000,
+            Date.parse(observation.observed_at) >=
+            newestMillis - windowSecs * 1_000,
         );
   return retained.slice(0, query.limit ?? 100_000);
 }
@@ -829,8 +928,9 @@ function summarizeTopologyErrors(
     labels.push(entry.label);
     labelsByMessage.set(entry.message, labels);
   }
-  const failures = Array.from(labelsByMessage, ([message, labels]) =>
-    `${labels.join(", ")}: ${message}`,
+  const failures = Array.from(
+    labelsByMessage,
+    ([message, labels]) => `${labels.join(", ")}: ${message}`,
   );
   return failures.length > 0 ? failures.join(" · ") : null;
 }

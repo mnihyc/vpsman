@@ -1,4 +1,4 @@
-import { Search, X } from "lucide-react";
+import { Search } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -23,7 +23,6 @@ import {
   expressionReferencesVpsRules,
   parseSearchExpression,
   quoteSelectorValue,
-  removeTokenFromExpression,
   type SearchToken,
   termMatchTitle,
   tokenizeSearchExpression,
@@ -490,24 +489,11 @@ export function SearchExpressionInput({
           <div
             className="searchExpressionPreview"
             ref={previewRef}
-            onMouseDown={(event) => {
-              if (disabled) {
-                return;
-              }
-              if ((event.target as Element).closest("button")) {
-                return;
-              }
-              event.preventDefault();
-              editorRef.current?.focus();
-            }}
           >
             {displayTokens.map((token, index) => (
               <TokenFragment
                 agents={agents}
-                disabled={disabled}
-                expression={value}
                 key={`${token.start}-${token.end}-${token.raw}`}
-                onChange={onChange}
                 token={token}
                 trailingSpace={index < displayTokens.length - 1}
               />
@@ -635,28 +621,16 @@ export function SearchExpressionInput({
 
 function TokenFragment({
   agents,
-  disabled,
-  expression,
-  onChange,
   token,
   trailingSpace,
 }: {
   agents?: AgentView[];
-  disabled: boolean;
-  expression: string;
-  onChange: (value: string) => void;
   token: DisplayToken;
   trailingSpace: boolean;
 }) {
   return (
     <>
-      <SearchExpressionTokenView
-        agents={agents}
-        disabled={disabled}
-        expression={expression}
-        onChange={onChange}
-        token={token}
-      />
+      <SearchExpressionTokenView agents={agents} token={token} />
       {trailingSpace ? " " : null}
     </>
   );
@@ -664,15 +638,9 @@ function TokenFragment({
 
 function SearchExpressionTokenView({
   agents,
-  disabled,
-  expression,
-  onChange,
   token,
 }: {
   agents?: AgentView[];
-  disabled: boolean;
-  expression: string;
-  onChange: (value: string) => void;
   token: DisplayToken;
 }) {
   const vpsRuleSearch = useVpsRuleSearchContext();
@@ -685,20 +653,6 @@ function SearchExpressionTokenView({
       title={agents ? termMatchTitle(token, agents, vpsRuleSearch) : token.raw}
     >
       <span>{token.raw}</span>
-      <button
-        aria-label={`Remove ${token.raw}`}
-        contentEditable={false}
-        disabled={disabled}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onChange(removeTokenFromExpression(expression, token));
-        }}
-        onMouseDown={(event) => event.preventDefault()}
-        type="button"
-      >
-        <X size={12} />
-      </button>
     </span>
   );
 }

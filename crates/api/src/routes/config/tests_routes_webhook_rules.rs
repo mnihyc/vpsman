@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn webhook_rule_bulk_review_is_confirmed_unique_and_timestamped() {
+    let id = uuid::Uuid::new_v4();
+    let valid: WebhookRuleBulkRequest = serde_json::from_value(serde_json::json!({
+        "action": "disable",
+        "confirmed": true,
+        "items": [{
+            "id": id,
+            "reviewed_name": "Fleet webhook",
+            "expected_updated_at": "2026-08-31T00:00:00Z"
+        }]
+    }))
+    .unwrap();
+    validate_webhook_rule_bulk_request(&valid).unwrap();
+
+    let duplicate: WebhookRuleBulkRequest = serde_json::from_value(serde_json::json!({
+        "action": "delete",
+        "confirmed": true,
+        "items": [
+            {"id": id, "reviewed_name": "Fleet webhook", "expected_updated_at": "2026-08-31T00:00:00Z"},
+            {"id": id, "reviewed_name": "Fleet webhook", "expected_updated_at": "2026-08-31T00:00:00Z"}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        validate_webhook_rule_bulk_request(&duplicate)
+            .unwrap_err()
+            .code,
+        "webhook_rule_bulk_duplicate_item"
+    );
+
+    let unconfirmed: WebhookRuleBulkRequest = serde_json::from_value(serde_json::json!({
+        "action": "enable",
+        "confirmed": false,
+        "items": [{
+            "id": id,
+            "reviewed_name": "Fleet webhook",
+            "expected_updated_at": "2026-08-31T00:00:00Z"
+        }]
+    }))
+    .unwrap();
+    assert_eq!(
+        validate_webhook_rule_bulk_request(&unconfirmed)
+            .unwrap_err()
+            .code,
+        "webhook_rule_bulk_confirmation_required"
+    );
+}
+
+#[test]
 fn webhook_manual_dispatch_binds_commit_to_the_reviewed_event_identity() {
     let request = |dry_run, confirmed, event_id: Option<&str>, preview_hash: Option<&str>| {
         WebhookRuleDispatchRequest {
@@ -58,6 +107,13 @@ fn webhook_rule_upsert_maps_name_conflicts_only() {
         unexpected.public_message.as_deref(),
         Some("The webhook rule could not be saved.")
     );
+}
+
+#[test]
+fn webhook_rule_bulk_preserves_vps_rule_scope_denial() {
+    let error = webhook_rule_bulk_error(anyhow::anyhow!("vps_rule_selector_scope_required"));
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "operator_scope_insufficient");
 }
 
 #[test]

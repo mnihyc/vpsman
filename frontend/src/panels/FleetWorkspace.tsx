@@ -165,6 +165,8 @@ import type {
   AgentSuspensionBatchOutcome,
   AgentSuspensionBatchTarget,
   AgentView,
+  AlertConfigurationBulkRequest,
+  AlertConfigurationBulkResponse,
   AlertPolicyCorrelationMode,
   AlertPolicyMetaCondition,
   AlertPolicyRuleKind,
@@ -362,9 +364,9 @@ export function FleetWorkspace({
   onOpenJobDispatchPreset,
   onLoadEffectiveAgentConfig,
   onLoadConfigurationSources,
-  onDeleteFleetAlertNotificationChannel,
-  onDeleteFleetAlertPolicy,
-  onDeleteWebhookRule,
+  onBulkMutateFleetAlertNotificationChannels,
+  onBulkMutateFleetAlertPolicies,
+  onBulkMutateWebhookRules,
   onDispatchFleetAlertNotifications,
   onDispatchWebhookRules,
   onDryRunFleetAlertPolicy,
@@ -435,15 +437,15 @@ export function FleetWorkspace({
     clientId: string,
   ) => Promise<EffectiveAgentConfigResponse>;
   onLoadConfigurationSources: () => Promise<void>;
-  onDeleteFleetAlertNotificationChannel: (
-    channelId: string,
-    reviewedName: string,
-  ) => Promise<void>;
-  onDeleteFleetAlertPolicy: (
-    policyId: string,
-    reviewedName: string,
-  ) => Promise<void>;
-  onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
+  onBulkMutateFleetAlertNotificationChannels: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
+  onBulkMutateFleetAlertPolicies: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
+  onBulkMutateWebhookRules: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -994,7 +996,7 @@ export function FleetWorkspace({
                 !currentPolicyAlertsEvidenceAvailable
                   ? "Current policy alert evidence is unavailable"
                   : currentTrafficStateUnknown
-                    ? "Unknown in loaded current policy-alert page; more may exist"
+                    ? "Unknown because capped current policy evidence did not include this VPS; open Alert Policies and narrow the selector or VPS."
                     : undefined
               }
               tone={trafficStateTone(state)}
@@ -1156,8 +1158,8 @@ export function FleetWorkspace({
                   ? "Current policy alert evidence is unavailable"
                   : currentPolicyAlertsTruncated
                     ? alerts?.length
-                      ? "Current policy-alert page is capped; this per-VPS count is a lower bound and more may exist"
-                      : "Unknown in loaded current policy-alert page; more may exist"
+                      ? "This per-VPS count is a lower bound from capped current policy evidence; open Alert Policies and narrow the selector or VPS."
+                      : "Unknown because capped current policy evidence did not include this VPS; open Alert Policies and narrow the selector or VPS."
                     : undefined
               }
             >
@@ -1947,7 +1949,7 @@ export function FleetWorkspace({
             alertsTruncated={policyAlertHistoryTruncated}
             canManagePolicies={canManageAlertPolicies}
             onDryRun={onDryRunFleetAlertPolicy}
-            onDelete={onDeleteFleetAlertPolicy}
+            onBulkMutate={onBulkMutateFleetAlertPolicies}
             onUpsert={onUpsertFleetAlertPolicy}
             policyAlerts={policyAlerts}
             policyFocusId={policyFocusId}
@@ -1993,8 +1995,10 @@ export function FleetWorkspace({
             webhookDeliveries={webhookRuleDeliveries}
             webhookDeliveriesTruncated={webhookRuleDeliveriesTruncated}
             webhookRules={webhookRules}
-            onDeleteAlertChannel={onDeleteFleetAlertNotificationChannel}
-            onDeleteWebhookRule={onDeleteWebhookRule}
+            onBulkMutateAlertChannels={
+              onBulkMutateFleetAlertNotificationChannels
+            }
+            onBulkMutateWebhookRules={onBulkMutateWebhookRules}
             onDispatchAlertNotifications={onDispatchFleetAlertNotifications}
             onDispatchWebhookRules={onDispatchWebhookRules}
             onDryRunWebhookRule={onDryRunWebhookRule}
@@ -3427,7 +3431,7 @@ function TrafficRulesDetail({
     trafficAccounting === null && trafficAccountingTruncated;
   const unknownTrafficPage = "Unknown in loaded traffic page; more may exist";
   const unknownCurrentPolicyAlertsPage =
-    "Unknown in loaded current policy-alert page; more may exist";
+    "Unknown because capped current policy evidence did not include this VPS; open Alert Policies and narrow to this VPS.";
   const selectedPolicyId =
     matchedPolicyRows[0]?.policy.id ??
     currentPolicyAlerts[0]?.policy_group_id ??
@@ -4104,7 +4108,7 @@ function TrafficRulesDetail({
               : currentPolicyAlerts.length === 0 && currentPolicyAlertsTruncated
                 ? unknownCurrentPolicyAlertsPage
                 : policiesTruncated
-                  ? "No matched policy state for this VPS appears in the loaded pages; more records may exist."
+                  ? "No matched policy state for this VPS appears in capped evidence; open Alert Policies and narrow to this VPS."
                   : "No matched policy rule state for this VPS."
           }
           getRowId={(row) => `${row.policy.id}:${row.rule.id}`}
@@ -4115,6 +4119,8 @@ function TrafficRulesDetail({
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.policies.${agent.id}`}
           title="Matched policies"
+          truncatedSearchEmpty="No matched policy state for this VPS matches the loaded capped evidence. Narrow the search or open Alert Policies with this VPS selector."
+          truncatedStatus="Matched policy rows are a lower bound from capped current evidence; open Alert Policies and narrow to this VPS."
         />
       </div>
       <div className="trafficRulesGridSection">
@@ -4125,7 +4131,7 @@ function TrafficRulesDetail({
             !policyAlertsEvidenceAvailable
               ? "Policy alert history is unavailable; retained rows may be stale."
               : policyAlertHistoryTruncated
-                ? "No policy alerts for this VPS appear in the loaded policy alert history; more records may exist."
+                ? "No policy alerts for this VPS appear in the newest history page; use an explicit alert export window for older evidence."
                 : "No issued policy alerts."
           }
           getRowId={(row) => row.id}
@@ -4136,6 +4142,8 @@ function TrafficRulesDetail({
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.alerts.${agent.id}`}
           title="Recent policy alerts"
+          truncatedSearchEmpty="No newest policy alert for this VPS matches. Use an explicit alert export window for authoritative older evidence."
+          truncatedStatus="Only the newest policy-alert history page is loaded; use an explicit alert export window for older evidence."
         />
       </div>
     </div>
@@ -4951,6 +4959,21 @@ function resourceCount(
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function alertConfigurationBulkRequest(
+  action: AlertConfigurationBulkRequest["action"],
+  rows: Array<{ id: string; name: string; updated_at: string }>,
+): AlertConfigurationBulkRequest {
+  return {
+    action,
+    confirmed: true,
+    items: rows.map((row) => ({
+      id: row.id,
+      reviewed_name: row.name,
+      expected_updated_at: row.updated_at,
+    })),
+  };
+}
+
 function selectedRecordSummary<T>(
   rows: T[] | null,
   singularLabel: string,
@@ -5760,39 +5783,6 @@ function requestRuleFromDraft(draft: PolicyRuleDraft): PolicyRuleRequest {
   };
 }
 
-function policyRequestFromRecord(
-  policy: FleetAlertPolicyRecord,
-  overrides: Partial<FleetAlertPolicyRequest> = {},
-): FleetAlertPolicyRequest {
-  return {
-    id: policy.id,
-    name: policy.name,
-    enabled: policy.enabled,
-    selector_expression: policy.selector_expression,
-    rules: policy.rules.map((rule) => ({
-      id: rule.id,
-      name: rule.name,
-      enabled: rule.enabled,
-      rule_kind: rule.rule_kind,
-      evidence_source: rule.evidence_source,
-      correlation_mode: rule.correlation_mode,
-      trigger_condition_expression: rule.trigger_condition_expression,
-      trigger_meta_condition: rule.trigger_meta_condition,
-      resolve_condition_expression: rule.resolve_condition_expression,
-      resolve_meta_condition: rule.resolve_meta_condition,
-      traffic_selector: rule.traffic_selector,
-      severity: rule.severity,
-      category: rule.category,
-      title_template: rule.title_template,
-      detail_template: rule.detail_template,
-    })),
-    notes: policy.notes,
-    confirmed: true,
-    preview_hash: null,
-    ...overrides,
-  };
-}
-
 function policyDraftValidationMessage(
   request: PolicyDryRunRequest | FleetAlertPolicyRequest,
   requireLabels = true,
@@ -6055,7 +6045,7 @@ export function FleetAlertPolicyManager({
   policyAlerts,
   policyFocusId,
   policyFilterClientId,
-  onDelete,
+  onBulkMutate,
   onDryRun,
   onUpsert,
 }: {
@@ -6071,7 +6061,9 @@ export function FleetAlertPolicyManager({
   policyAlerts: PolicyAlertRecord[];
   policyFocusId: string | null;
   policyFilterClientId: string | null;
-  onDelete: (policyId: string, reviewedName: string) => Promise<void>;
+  onBulkMutate: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDryRun: (request: PolicyDryRunRequest) => Promise<PolicyDryRunResponse>;
   onUpsert: (
     request: FleetAlertPolicyRequest,
@@ -6631,9 +6623,7 @@ export function FleetAlertPolicyManager({
     setDeleteError(null);
     setPolicyStatus("deleting policies", "progress");
     try {
-      for (const policy of rows) {
-        await onDelete(policy.id, policy.name);
-      }
+      await onBulkMutate(alertConfigurationBulkRequest("delete", rows));
       if (rows.some((policy) => policy.id === editingId)) {
         resetForm();
         updateEditorOpen(false);
@@ -6671,18 +6661,12 @@ export function FleetAlertPolicyManager({
       "progress",
     );
     try {
-      for (const policy of rows) {
-        const base = policyRequestFromRecord(policy, { enabled: nextEnabled });
-        const preview = await onDryRun({
-          id: base.id,
-          name: base.name,
-          enabled: base.enabled,
-          selector_expression: base.selector_expression,
-          rules: base.rules,
-          notes: base.notes,
-        });
-        await onUpsert({ ...base, preview_hash: preview.preview_hash });
-      }
+      await onBulkMutate(
+        alertConfigurationBulkRequest(
+          nextEnabled ? "enable" : "disable",
+          rows,
+        ),
+      );
       setPolicyStatus(
         `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "alert policy", "alert policies")}`,
         "success",
@@ -7698,14 +7682,15 @@ function IssuedPolicyAlertList({
         </p>
       ) : rowsTruncated ? (
         <p className="mutedText">
-          The loaded policy alert history is truncated; more episodes may exist.
+          Only the newest policy-alert history page is loaded; use an explicit
+          alert export window for older evidence.
         </p>
       ) : null}
       {alerts.length === 0 ? (
         <p className="mutedText">
           {evidenceAvailable
             ? rowsTruncated
-              ? "No episodes for this policy appear in the loaded history."
+              ? "No episodes for this policy appear in the newest history page; use an explicit alert export window for older evidence."
               : "No alert history for this policy."
             : "No retained policy alert rows are available."}
         </p>
@@ -7796,8 +7781,8 @@ export function FleetNotificationsHub({
   webhookDeliveries,
   webhookDeliveriesTruncated,
   webhookRules,
-  onDeleteAlertChannel,
-  onDeleteWebhookRule,
+  onBulkMutateAlertChannels,
+  onBulkMutateWebhookRules,
   onDispatchAlertNotifications,
   onDispatchWebhookRules,
   onDryRunWebhookRule,
@@ -7814,11 +7799,12 @@ export function FleetNotificationsHub({
   webhookDeliveries: WebhookRuleDeliveryRecord[];
   webhookDeliveriesTruncated: boolean;
   webhookRules: WebhookRuleRecord[];
-  onDeleteAlertChannel: (
-    channelId: string,
-    reviewedName: string,
-  ) => Promise<void>;
-  onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
+  onBulkMutateAlertChannels: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
+  onBulkMutateWebhookRules: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDispatchAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -7906,7 +7892,7 @@ export function FleetNotificationsHub({
             agents={agents}
             channels={alertChannels}
             deliveries={alertDeliveries}
-            onDelete={onDeleteAlertChannel}
+            onBulkMutate={onBulkMutateAlertChannels}
             onDispatch={onDispatchAlertNotifications}
             onOpenDeliveries={openDeliveries}
             onPreviewRows={setAlertPreviewRows}
@@ -7918,7 +7904,7 @@ export function FleetNotificationsHub({
           <WebhookRuleManager
             agents={agents}
             deliveries={webhookDeliveries}
-            onDelete={onDeleteWebhookRule}
+            onBulkMutate={onBulkMutateWebhookRules}
             onDispatch={onDispatchWebhookRules}
             onDryRun={onDryRunWebhookRule}
             onOpenDeliveries={openDeliveries}
@@ -8022,7 +8008,7 @@ export function FleetAlertNotificationManager({
   agents,
   channels,
   deliveries,
-  onDelete,
+  onBulkMutate,
   onDispatch,
   onOpenDeliveries,
   onPreviewRows,
@@ -8034,7 +8020,9 @@ export function FleetAlertNotificationManager({
   agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
   deliveries: FleetAlertNotificationDeliveryRecord[];
-  onDelete: (channelId: string, reviewedName: string) => Promise<void>;
+  onBulkMutate: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDispatch: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -8342,28 +8330,6 @@ export function FleetAlertNotificationManager({
     setChannelStatus(`viewing ${channel.name}`, "info");
   }
 
-  function requestFromChannel(
-    channel: FleetAlertNotificationChannelRecord,
-    overrides: Partial<FleetAlertNotificationChannelRequest> = {},
-  ): FleetAlertNotificationChannelRequest {
-    return {
-      id: channel.id,
-      name: channel.name,
-      scope_kind: channel.scope_kind,
-      scope_value: channel.scope_value,
-      min_severity: channel.min_severity,
-      categories: channel.categories,
-      operator_states: channel.operator_states,
-      delivery_kind: channel.delivery_kind,
-      target: channel.target,
-      cooldown_secs: channel.cooldown_secs,
-      enabled: channel.enabled,
-      notes: channel.notes,
-      confirmed: true,
-      ...overrides,
-    };
-  }
-
   function beginSaveMutation() {
     if (savePendingRef.current) {
       return false;
@@ -8446,9 +8412,7 @@ export function FleetAlertNotificationManager({
     setDeleteError(null);
     setChannelStatus("deleting channels", "progress");
     try {
-      for (const channel of rows) {
-        await onDelete(channel.id, channel.name);
-      }
+      await onBulkMutate(alertConfigurationBulkRequest("delete", rows));
       if (rows.some((channel) => channel.id === editingId)) {
         resetForm();
         setEditorOpen(false);
@@ -8484,9 +8448,12 @@ export function FleetAlertNotificationManager({
       "progress",
     );
     try {
-      for (const channel of rows) {
-        await onUpsert(requestFromChannel(channel, { enabled: nextEnabled }));
-      }
+      await onBulkMutate(
+        alertConfigurationBulkRequest(
+          nextEnabled ? "enable" : "disable",
+          rows,
+        ),
+      );
       setChannelStatus(
         `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "notification channel")}`,
         "success",
@@ -9449,6 +9416,8 @@ export function NotificationDeliveryHistoryGrid({
           ? "Notification delivery preview"
           : "Notification delivery history"
       }
+      truncatedSearchEmpty="No newest alert-notification delivery matches. Narrow the search or use retention/export evidence for an older window."
+      truncatedStatus="Only the newest alert-notification deliveries are loaded; narrow the search or use retention/export evidence for an older window."
     />
   );
 }
@@ -9589,7 +9558,7 @@ export function WebhookRuleManager({
   agents,
   deliveries,
   editorMode = "inline",
-  onDelete,
+  onBulkMutate,
   onDispatch,
   onDryRun,
   onEditorOpenChange,
@@ -9605,7 +9574,9 @@ export function WebhookRuleManager({
   agents: AgentView[];
   deliveries: WebhookRuleDeliveryRecord[];
   editorMode?: "inline" | "focused";
-  onDelete: (ruleId: string, reviewedName: string) => Promise<void>;
+  onBulkMutate: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDispatch: (
     request: WebhookRuleDispatchRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
@@ -9878,26 +9849,6 @@ export function WebhookRuleManager({
     setWebhookStatus(`viewing ${rule.name}`, "info");
   }
 
-  function requestFromRule(
-    rule: WebhookRuleRecord,
-    overrides: Partial<WebhookRuleRequest> = {},
-  ): WebhookRuleRequest {
-    return {
-      id: rule.id,
-      name: rule.name,
-      enabled: rule.enabled,
-      expression: rule.expression,
-      target: rule.target,
-      body_template: rule.body_template,
-      signing_secret: null,
-      clear_signing_secret: false,
-      cooldown_secs: rule.cooldown_secs,
-      notes: rule.notes,
-      confirmed: true,
-      ...overrides,
-    };
-  }
-
   function beginSaveMutation() {
     if (savePendingRef.current) {
       return false;
@@ -9982,9 +9933,7 @@ export function WebhookRuleManager({
     setDeleteError(null);
     setWebhookStatus("deleting webhook rules", "progress");
     try {
-      for (const rule of rows) {
-        await onDelete(rule.id, rule.name);
-      }
+      await onBulkMutate(alertConfigurationBulkRequest("delete", rows));
       if (rows.some((rule) => rule.id === editingId)) {
         resetForm();
         updateEditorOpen(false);
@@ -10020,9 +9969,12 @@ export function WebhookRuleManager({
       "progress",
     );
     try {
-      for (const rule of rows) {
-        await onUpsert(requestFromRule(rule, { enabled: nextEnabled }));
-      }
+      await onBulkMutate(
+        alertConfigurationBulkRequest(
+          nextEnabled ? "enable" : "disable",
+          rows,
+        ),
+      );
       setWebhookStatus(
         `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "webhook rule")}`,
         "success",

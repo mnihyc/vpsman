@@ -386,13 +386,17 @@ export function HomePanel({
                       ? "critical"
                       : warningAlerts > 0
                         ? "warning"
-                        : infoAlerts > 0 || alertsTruncated
-                          ? "info"
-                          : "ok"
+                        : alertsTruncated && activeAlerts.length === 0
+                          ? "neutral"
+                          : infoAlerts > 0 || alertsTruncated
+                            ? "info"
+                            : "ok"
                 }
               >
                 {fleetAlertsEvidenceAvailable
-                  ? `${criticalAlerts} critical / ${warningAlerts} warning / ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`
+                  ? alertsTruncated && activeAlerts.length === 0
+                    ? "Current alert count unavailable · open Fleet alerts"
+                    : `${criticalAlerts} critical / ${warningAlerts} warning / ${infoAlerts} info${alertsTruncated ? " · lower-bound current evidence; open Fleet alerts" : ""}`
                   : "Alert evidence unavailable"}
               </ConsoleStatusBadge>
               <ConsoleStatusBadge
@@ -577,7 +581,9 @@ export function HomePanel({
           <HomePostureMetric
             detail={
               fleetAlertsEvidenceAvailable
-                ? `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`
+                ? alertsTruncated && activeAlerts.length === 0
+                  ? "Current evidence is capped; open Fleet alerts to narrow the scope and review the authoritative occurrence feed"
+                  : `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? "; lower-bound current evidence—open Fleet alerts to narrow the scope" : ""}`
                 : "Fleet alert evidence is unavailable"
             }
             label="Actionable alerts"
@@ -588,13 +594,17 @@ export function HomePanel({
                   ? "critical"
                   : warningAlerts
                     ? "warning"
-                    : infoAlerts || alertsTruncated
-                      ? "info"
-                      : "ok"
+                    : alertsTruncated && activeAlerts.length === 0
+                      ? "neutral"
+                      : infoAlerts || alertsTruncated
+                        ? "info"
+                        : "ok"
             }
             value={
               fleetAlertsEvidenceAvailable
-                ? formatLowerBoundCount(activeAlerts.length, alertsTruncated)
+                ? alertsTruncated && activeAlerts.length === 0
+                  ? "Unknown"
+                  : formatLowerBoundCount(activeAlerts.length, alertsTruncated)
                 : "Unknown"
             }
           />

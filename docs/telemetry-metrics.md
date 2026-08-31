@@ -498,7 +498,7 @@ set or an unbounded export:
   lifecycle states, including Resolved episodes. Resolved history remains for
   90 days; endpoint result limits bound each response without shortening that
   stored history. Current and unresolved episodes are not retention candidates.
-- `GET /api/v1/fleet-alert-events` is a dedicated manual review feed for
+- `GET /api/v1/fleet-alert-events` is a dedicated occurrence review feed for
   unresolved occurrence episodes. It orders by
   `triggered_at DESC, episode UUID DESC` and returns
   `{items,next_cursor,has_more}` with an opaque exclusive cursor. Filters and
@@ -522,14 +522,17 @@ discarded when their source is unavailable so stale evidence is not promoted to
 current state. Retained history may remain visible with an explicit stale or
 unavailable warning.
 
-The console never polls or uncaps the event review feed. When the unified
-current snapshot is capped or unavailable, an operator can explicitly **Load
-older current incidents**. Pages are merged by stable alert ID and the fresher
-unified snapshot wins any duplicate. An explicit terminal cursor is distinct
-from source failure. After reaching it, **Refresh unresolved occurrences**
-atomically replaces the prior cursor walk from page one, so incidents resolved
-elsewhere disappear and new incidents beyond the unified cap remain
-discoverable.
+The console synchronizes unresolved occurrences when the alert panel opens and
+during the normal fleet reconciliation cadence. The sync revalidates loaded
+occurrences, removes rows resolved elsewhere, and discovers new incidents; it
+does not add a faster alert poll. **Load older incidents** appears only while a
+verified older-page cursor exists.
+
+A valid alert search continues through indexed occurrence pages until it fills
+the visible page or reaches the authoritative end. If another capped alert
+source can still contain matches, the console directs the operator to narrow
+the fleet, severity, or category instead of presenting an unactionable
+“more may exist” message.
 
 An episode has a required `record_kind` (`condition` or `event`) and required
 lifecycle with Triggered, Persisting, Unknown, or Resolved state, generation,

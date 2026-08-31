@@ -4,7 +4,7 @@ import {
   agentDisplayState,
   type AgentDisplayState,
 } from "../agentDisplayState";
-import { apiGet } from "../api";
+import { apiGet, LatestReadConsumer } from "../api";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { CountryFlag } from "../components/CountryFlag";
 import { snapshotSourceAvailable, type SnapshotSource } from "../homeSnapshot";
@@ -135,6 +135,12 @@ const NETWORK_SNAPSHOT_COHERENCE_MS = 180_000;
 const TELEMETRY_PROJECTION_WARNING_MS = 10_000;
 const PING_MISSED_CHECK_WINDOW_MS = 3 * 60_000;
 
+// FleetMonitorPanel is intentionally mounted in more than one workspace and
+// is remounted by React StrictMode. The HTTP owner must therefore outlive any
+// one panel instance: an old request drains before the latest desired query,
+// even when navigation replaces the component that requested it.
+const monitoringCardsReadConsumer = new LatestReadConsumer<void>();
+
 export function FleetMonitorPanel({
   agents,
   apiToken = "",
@@ -221,88 +227,78 @@ export function FleetMonitorPanel({
       return;
     }
     let active = true;
-    let inFlight = false;
-    let refreshPending = false;
     let refreshTimer: number | null = null;
     setMonitoringCards([]);
     setMonitoringError(null);
     setMonitoringSettledToken(null);
-    const loadCards = async (queueIfInFlight = false) => {
+    const loadCards = () => {
       if (!active) return;
       if (document.hidden) {
         hiddenMonitoringRefreshPendingRef.current = true;
         return;
       }
-      if (inFlight) {
-        if (queueIfInFlight) refreshPending = true;
-        return;
-      }
-      refreshPending = false;
-      inFlight = true;
-      try {
-        let offset = 0;
-        const loaded: MonitoringCardView[] = [];
-        const loadedIds = new Set<string>();
-        for (;;) {
-          const page = await apiGet<MonitoringCardsPageView>(
-            `/api/v1/monitoring/cards?limit=1000&offset=${offset}${embedded ? "&include_history=false" : "&history_mode=selected_aggregate"}`,
-            apiToken,
-          );
-          if (!active) return;
-          if (page.offset !== offset) {
-            throw new Error(
-              "Monitoring card pagination returned the wrong offset",
+      void monitoringCardsReadConsumer
+        .enqueue(async () => {
+          let offset = 0;
+          const loaded: MonitoringCardView[] = [];
+          const loadedIds = new Set<string>();
+          for (;;) {
+            const page = await apiGet<MonitoringCardsPageView>(
+              `/api/v1/monitoring/cards?limit=1000&offset=${offset}${embedded ? "&include_history=false" : "&history_mode=selected_aggregate"}`,
+              apiToken,
             );
-          }
-          if (page.items.some((item) => loadedIds.has(item.client.id))) {
-            throw new Error(
-              "Monitoring card pagination returned a duplicate VPS",
-            );
-          }
-          page.items.forEach((item) => loadedIds.add(item.client.id));
-          loaded.push(...page.items);
-          if (loaded.length > page.total) {
-            throw new Error(
-              "Monitoring card pagination exceeded its reported total",
-            );
-          }
-          if (page.next_offset === null) {
-            if (loaded.length !== page.total) {
+            // The HTTP request itself is allowed to finish, but an owner whose
+            // panel disappeared does not continue issuing pagination reads.
+            if (!active) return;
+            if (page.offset !== offset) {
               throw new Error(
-                "Monitoring card pagination ended before every VPS was returned",
+                "Monitoring card pagination returned the wrong offset",
               );
             }
-            break;
+            if (page.items.some((item) => loadedIds.has(item.client.id))) {
+              throw new Error(
+                "Monitoring card pagination returned a duplicate VPS",
+              );
+            }
+            page.items.forEach((item) => loadedIds.add(item.client.id));
+            loaded.push(...page.items);
+            if (loaded.length > page.total) {
+              throw new Error(
+                "Monitoring card pagination exceeded its reported total",
+              );
+            }
+            if (page.next_offset === null) {
+              if (loaded.length !== page.total) {
+                throw new Error(
+                  "Monitoring card pagination ended before every VPS was returned",
+                );
+              }
+              break;
+            }
+            if (
+              page.next_offset !== offset + page.items.length ||
+              page.next_offset > page.total ||
+              page.items.length === 0
+            ) {
+              throw new Error("Monitoring card pagination did not advance");
+            }
+            offset = page.next_offset;
           }
-          if (
-            page.next_offset !== offset + page.items.length ||
-            page.next_offset > page.total ||
-            page.items.length === 0
-          ) {
-            throw new Error("Monitoring card pagination did not advance");
-          }
-          offset = page.next_offset;
-        }
-        if (active) {
+          if (!active) return;
           setMonitoringCards(loaded);
           setMonitoringError(null);
-        }
-      } catch (error) {
-        if (active) {
+        })
+        .catch((error: unknown) => {
+          if (!active) return;
           setMonitoringError(
             error instanceof Error
               ? `Monitoring cards: ${error.message}`
               : "Monitoring cards are unavailable",
           );
-        }
-      } finally {
-        inFlight = false;
-        if (active) setMonitoringSettledToken(apiToken);
-        if (active && refreshPending && !document.hidden) {
-          refreshPending = false;
-          queueMicrotask(() => void loadCards());
-        }
-      }
+        })
+        .finally(() => {
+          if (active) setMonitoringSettledToken(apiToken);
+        });
     };
     const stopRefreshTimer = () => {
       if (refreshTimer !== null) {
@@ -326,7 +322,7 @@ export function FleetMonitorPanel({
       startRefreshTimer();
       if (hiddenMonitoringRefreshPendingRef.current) {
         hiddenMonitoringRefreshPendingRef.current = false;
-        void loadCards(true);
+        loadCards();
       }
     };
     if (initialMonitoringCards === null) {
@@ -362,7 +358,7 @@ export function FleetMonitorPanel({
     } else if (document.hidden) {
       hiddenMonitoringRefreshPendingRef.current = true;
     } else {
-      void loadCards();
+      loadCards();
     }
     document.addEventListener("visibilitychange", handleVisibilityChange);
     startRefreshTimer();
@@ -370,7 +366,7 @@ export function FleetMonitorPanel({
       hiddenMonitoringRefreshPendingRef.current = true;
     } else if (hiddenMonitoringRefreshPendingRef.current) {
       hiddenMonitoringRefreshPendingRef.current = false;
-      void loadCards(true);
+      loadCards();
     }
     return () => {
       active = false;

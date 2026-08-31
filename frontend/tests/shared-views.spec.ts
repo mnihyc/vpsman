@@ -540,6 +540,56 @@ test("unauthenticated public shares call only public monitoring APIs", async ({
   ).toBe(false);
 });
 
+test("public card bootstrap and polling share one latest-read owner", async ({
+  page,
+}) => {
+  await page.context().clearCookies();
+  await page.clock.install({ time: new Date("2026-06-02T10:02:00Z") });
+  await installPublicMonitoringApiMock(page);
+
+  let active = 0;
+  let maxActive = 0;
+  let started = 0;
+  let releaseFirst: (() => void) | undefined;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route(
+    /\/api\/v1\/public\/monitoring-shares\/[^/?]+\/data(?:\?.*)?$/,
+    async (route) => {
+      started += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        if (started === 1) await firstGate;
+        await route.fallback();
+      } finally {
+        active -= 1;
+      }
+    },
+  );
+
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+  await expect.poll(() => started).toBe(1);
+
+  // Three accepted 15-second producers arrive while initial pagination is
+  // held. They replace one trailing desire instead of starting HTTP reads.
+  await page.clock.runFor(45_000);
+  expect({ active, maxActive, started }).toEqual({
+    active: 1,
+    maxActive: 1,
+    started: 1,
+  });
+
+  releaseFirst?.();
+  await expect.poll(() => started).toBe(2);
+  await expect.poll(() => active).toBe(0);
+  expect(maxActive).toBe(1);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Customer network view" }),
+  ).toBeVisible();
+});
+
 test("public cards remain static when detail history is not shared", async ({
   page,
 }) => {

@@ -17,10 +17,12 @@ use crate::{
     },
     model_alert_notifications::FleetAlertNotificationMatchRule,
     model_alert_policies::AlertPolicyRuleKind,
+    model_alert_states::FleetAlertStateView,
     repository::Repository,
     repository_policy_lifecycle::{
+        lock_client_policy_suppressions_shared_in_tx, lock_policy_rule_generations_shared_in_tx,
         record_policy_evidence_in_tx, record_policy_source_scope_exits_in_tx,
-        resolve_policy_occurrence_episode_in_tx, PolicyEvidenceFact,
+        resolve_policy_occurrence_episode_prelocked_in_tx, PolicyEvidenceFact,
     },
     util::parse_timestamp_utc,
 };
@@ -85,6 +87,12 @@ struct ConditionProbe {
 #[derive(Default)]
 struct OperationalSnapshot {
     conditions: Vec<ConditionProbe>,
+}
+
+pub(crate) struct OperationalAlertEventSync {
+    pub(crate) current: Vec<OperationalAlertEpisodeRecord>,
+    pub(crate) head: Vec<OperationalAlertEpisodeRecord>,
+    pub(crate) states: Vec<FleetAlertStateView>,
 }
 
 impl Repository {
@@ -280,45 +288,295 @@ impl Repository {
         }
     }
 
+    /// Reads the newest unresolved occurrences and revalidates every occurrence
+    /// already retained by the caller from one PostgreSQL statement/snapshot.
+    /// Transport pagination therefore never becomes a second lifecycle owner:
+    /// a known id omitted from `current` is no longer an unresolved occurrence.
+    pub(crate) async fn sync_unresolved_operational_alert_events(
+        &self,
+        known_public_ids: &[String],
+        head_limit: usize,
+    ) -> Result<OperationalAlertEventSync> {
+        let head_limit = head_limit.clamp(1, OPERATIONAL_ALERT_SOURCE_LIMIT);
+        match self {
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH head AS MATERIALIZED (
+                        SELECT e.id
+                        FROM alert_episodes e
+                        WHERE e.record_kind = 'event'
+                          AND e.resolved_at IS NULL
+                        ORDER BY e.triggered_at DESC, e.id DESC
+                        LIMIT $2
+                    ), selected AS (
+                        SELECT head.id, true AS in_head, false AS is_known
+                        FROM head
+                        UNION ALL
+                        SELECT e.id, false AS in_head, true AS is_known
+                        FROM alert_episodes e
+                        WHERE e.public_id=ANY($1::text[])
+                          AND e.record_kind = 'event'
+                          AND e.resolved_at IS NULL
+                    ), deduplicated AS (
+                        SELECT id, bool_or(in_head) AS in_head,
+                               bool_or(is_known) AS is_known
+                        FROM selected
+                        GROUP BY id
+                    )
+                    SELECT
+                        e.id, e.public_id, e.producer_kind, e.natural_key, e.record_kind,
+                        e.trigger_generation, e.trigger_severity, e.trigger_category,
+                        e.severity, e.category, e.target_kind, e.target_id,
+                        e.client_id, e.title, e.detail, e.source_status, e.evidence,
+                        e.lifecycle_state, e.triggered_at::text AS triggered_at,
+                        e.last_confirmed_at::text AS last_confirmed_at,
+                        e.resolved_at::text AS resolved_at, e.resolution_reason,
+                        e.resolution_note, e.resolution_actor_id,
+                        e.created_at::text AS created_at,
+                        e.updated_at::text AS updated_at,
+                        triage.state AS triage_state,
+                        triage.muted_until_unix AS triage_muted_until_unix,
+                        triage.escalation_level AS triage_escalation_level,
+                        triage.revision AS triage_revision,
+                        triage.reason AS triage_reason,
+                        triage.actor_id AS triage_actor_id,
+                        triage.created_at::text AS triage_created_at,
+                        triage.updated_at::text AS triage_updated_at,
+                        selected.in_head, selected.is_known
+                    FROM deduplicated selected
+                    JOIN alert_episodes e ON e.id=selected.id
+                    LEFT JOIN fleet_alert_states triage ON triage.alert_id=e.public_id
+                    ORDER BY e.triggered_at DESC, e.id DESC
+                    "#,
+                )
+                .bind(known_public_ids)
+                .bind(head_limit as i64)
+                .fetch_all(pool)
+                .await?;
+                let mut head = Vec::new();
+                let mut current = Vec::new();
+                let mut states = Vec::new();
+                for row in rows {
+                    let in_head: bool = row.try_get("in_head")?;
+                    let is_known: bool = row.try_get("is_known")?;
+                    if let Some(state) = row.try_get::<Option<String>, _>("triage_state")? {
+                        states.push(FleetAlertStateView {
+                            alert_id: row.try_get("public_id")?,
+                            state,
+                            muted_until_unix: row.try_get("triage_muted_until_unix")?,
+                            escalation_level: row.try_get("triage_escalation_level")?,
+                            revision: row.try_get("triage_revision")?,
+                            reason: row.try_get("triage_reason")?,
+                            actor_id: row.try_get("triage_actor_id")?,
+                            created_at: row.try_get("triage_created_at")?,
+                            updated_at: row.try_get("triage_updated_at")?,
+                        });
+                    }
+                    let episode = operational_episode_from_row(row)?;
+                    if in_head {
+                        head.push(episode.clone());
+                    }
+                    if is_known {
+                        current.push(episode);
+                    }
+                }
+                Ok(OperationalAlertEventSync {
+                    current,
+                    head,
+                    states,
+                })
+            }
+        }
+    }
+
     pub(crate) async fn resolve_operational_alert_event(
         &self,
         public_id: &str,
         reason: &str,
         operator: &AuthContext,
     ) -> Result<OperationalAlertEpisodeRecord> {
-        let public_id = public_id.trim();
+        let (_, mut episodes) = self
+            .resolve_operational_alert_events(&[(public_id.to_string(), None)], reason, operator)
+            .await?;
+        episodes
+            .pop()
+            .context("fleet alert resolution returned no episode")
+    }
+
+    pub(crate) async fn resolve_operational_alert_events(
+        &self,
+        resolution_items: &[(String, Option<i64>)],
+        reason: &str,
+        operator: &AuthContext,
+    ) -> Result<(Uuid, Vec<OperationalAlertEpisodeRecord>)> {
         let reason = reason.trim();
-        anyhow::ensure!(!public_id.is_empty(), "fleet_alert_id_required");
+        anyhow::ensure!(
+            !resolution_items.is_empty() && resolution_items.len() <= 1_000,
+            "fleet_alert_resolution_items_invalid"
+        );
         anyhow::ensure!(
             reason.len() <= 1024 && !reason.is_empty(),
             "fleet_alert_resolution_reason_invalid"
         );
+        let mut unique_ids = BTreeSet::new();
+        let mut normalized_items = Vec::with_capacity(resolution_items.len());
+        for (public_id, expected_generation) in resolution_items {
+            let public_id = public_id.trim();
+            anyhow::ensure!(
+                !public_id.is_empty() && public_id.len() <= 192,
+                "fleet_alert_id_required"
+            );
+            anyhow::ensure!(
+                unique_ids.insert(public_id.to_string()),
+                "fleet_alert_resolution_duplicate_item"
+            );
+            if let Some(expected_generation) = expected_generation {
+                anyhow::ensure!(
+                    *expected_generation >= 1,
+                    "fleet_alert_resolution_generation_invalid"
+                );
+            }
+            normalized_items.push((public_id.to_string(), *expected_generation));
+        }
+        normalized_items.sort_by(|left, right| left.0.cmp(&right.0));
+        let normalized_ids = normalized_items
+            .iter()
+            .map(|(public_id, _)| public_id.clone())
+            .collect::<Vec<_>>();
+        let batch_id = Uuid::new_v4();
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let transitioned = resolve_policy_occurrence_episode_in_tx(
-                    &mut tx,
-                    public_id,
-                    reason,
-                    operator.operator.id,
+                let client_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT selected.client_id
+                    FROM (
+                        SELECT DISTINCT client_id
+                        FROM alert_episodes
+                        WHERE public_id=ANY($1::text[])
+                          AND client_id IS NOT NULL
+                    ) selected
+                    ORDER BY selected.client_id COLLATE "C"
+                    "#,
                 )
+                .bind(&normalized_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                let sql = format!(
-                    "{} WHERE public_id = $1 FOR UPDATE",
-                    operational_episode_select_sql("")
-                );
-                let row = sqlx::query(&sql)
-                    .bind(public_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .context("fleet_alert_not_found")?;
-                let episode = operational_episode_from_row(row)?;
-                if transitioned {
-                    insert_operational_resolution_audit_in_tx(&mut tx, &episode, operator, reason)
+                lock_client_policy_suppressions_shared_in_tx(&mut tx, &client_ids).await?;
+
+                let unresolved_generations = sqlx::query_as::<_, (Uuid, i32)>(
+                    r#"
+                    SELECT DISTINCT policy_rule_id, policy_rule_version
+                    FROM alert_episodes
+                    WHERE public_id=ANY($1::text[])
+                      AND resolved_at IS NULL
+                      AND policy_rule_id IS NOT NULL
+                      AND policy_rule_version IS NOT NULL
+                    ORDER BY policy_rule_id, policy_rule_version
+                    "#,
+                )
+                .bind(&normalized_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let locked_generations =
+                    lock_policy_rule_generations_shared_in_tx(&mut tx, &unresolved_generations)
                         .await?;
+                anyhow::ensure!(
+                    locked_generations == unresolved_generations.len(),
+                    "fleet_alert_resolution_snapshot_stale"
+                );
+
+                let state_owned_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT episode.public_id
+                    FROM alert_policy_evaluation_states AS state
+                    JOIN alert_episodes AS episode ON episode.id=state.active_episode_id
+                    WHERE episode.public_id=ANY($1::text[])
+                    ORDER BY state.policy_rule_id, state.rule_version,
+                             state.confirmation_bucket_key COLLATE "C"
+                    FOR UPDATE OF state
+                    "#,
+                )
+                .bind(&normalized_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let state_owned_id_set = state_owned_ids.iter().cloned().collect::<HashSet<_>>();
+                anyhow::ensure!(
+                    state_owned_id_set.len() == state_owned_ids.len(),
+                    "fleet_alert_resolution_state_owner_invalid"
+                );
+
+                let locked = sqlx::query_as::<_, (String, i64, Option<DateTime<Utc>>)>(
+                    r#"
+                    SELECT public_id, trigger_generation, resolved_at
+                    FROM alert_episodes
+                    WHERE public_id=ANY($1::text[])
+                    ORDER BY public_id COLLATE "C"
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&normalized_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(
+                    locked.len() == normalized_items.len(),
+                    "fleet_alert_not_found"
+                );
+                for (
+                    (locked_id, locked_generation, resolved_at),
+                    (expected_id, expected_generation),
+                ) in locked.iter().zip(&normalized_items)
+                {
+                    anyhow::ensure!(locked_id == expected_id, "fleet_alert_not_found");
+                    if let Some(expected_generation) = expected_generation {
+                        anyhow::ensure!(
+                            locked_generation == expected_generation,
+                            "fleet_alert_resolution_snapshot_stale"
+                        );
+                    }
+                    if resolved_at.is_none() {
+                        anyhow::ensure!(
+                            state_owned_id_set.contains(locked_id),
+                            "fleet_alert_resolution_snapshot_stale"
+                        );
+                    }
+                }
+
+                let mut episodes = Vec::with_capacity(normalized_ids.len());
+                for public_id in &normalized_ids {
+                    let transitioned = resolve_policy_occurrence_episode_prelocked_in_tx(
+                        &mut tx,
+                        public_id,
+                        reason,
+                        operator.operator.id,
+                    )
+                    .await?;
+                    let sql = format!(
+                        "{} WHERE public_id = $1 FOR UPDATE",
+                        operational_episode_select_sql("")
+                    );
+                    let row = sqlx::query(&sql)
+                        .bind(public_id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .context("fleet_alert_not_found")?;
+                    let episode = operational_episode_from_row(row)?;
+                    if transitioned {
+                        insert_operational_resolution_audit_in_tx(
+                            &mut tx,
+                            &episode,
+                            operator,
+                            reason,
+                            batch_id,
+                            normalized_ids.len(),
+                        )
+                        .await?;
+                    }
+                    episodes.push(episode);
                 }
                 tx.commit().await?;
-                Ok(episode)
+                Ok((batch_id, episodes))
             }
         }
     }
@@ -330,6 +588,21 @@ pub(crate) async fn reconcile_postgres_agent_alert_transition_in_tx(
     to_status: &str,
 ) -> Result<()> {
     reconcile_postgres_agent_alert_transition_at_in_tx(tx, client_id, to_status).await
+}
+
+pub(crate) async fn reconcile_postgres_deleted_agent_alert_transitions_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_ids: &[String],
+) -> Result<()> {
+    lock_postgres_operational_reconcile_clients_in_tx(tx, client_ids).await?;
+    record_policy_source_scope_exits_in_tx(
+        tx,
+        &["agent.status", "agent.access"],
+        client_ids,
+        &BTreeSet::new(),
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn reconcile_postgres_agent_alert_transition_at_in_tx(
@@ -717,6 +990,8 @@ fn operational_resolution_audit(
     episode: &OperationalAlertEpisodeRecord,
     operator: &AuthContext,
     reason: &str,
+    batch_id: Uuid,
+    batch_size: usize,
 ) -> AuditLogView {
     AuditLogView {
         id: Uuid::new_v4(),
@@ -731,6 +1006,9 @@ fn operational_resolution_audit(
             "trigger_generation": episode.trigger_generation,
             "resolution_reason": "operator_resolved",
             "resolution_note": reason,
+            "batch_id": batch_id,
+            "batch_size": batch_size,
+            "result": "succeeded",
             "operator_id": operator.operator.id,
             "operator_username": &operator.operator.username,
             "operator_role": &operator.operator.role,
@@ -747,8 +1025,10 @@ async fn insert_operational_resolution_audit_in_tx(
     episode: &OperationalAlertEpisodeRecord,
     operator: &AuthContext,
     reason: &str,
+    batch_id: Uuid,
+    batch_size: usize,
 ) -> Result<()> {
-    let audit = operational_resolution_audit(episode, operator, reason);
+    let audit = operational_resolution_audit(episode, operator, reason, batch_id, batch_size);
     sqlx::query(
         r#"
         INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata, created_at)

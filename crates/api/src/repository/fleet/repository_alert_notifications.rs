@@ -2,6 +2,8 @@ use crate::{
     model::AuthContext,
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
+        FleetAlertNotificationChannelBulkAction, FleetAlertNotificationChannelBulkOutcome,
+        FleetAlertNotificationChannelBulkRequest, FleetAlertNotificationChannelBulkResponse,
         FleetAlertNotificationChannelView, FleetAlertNotificationDeliveryView,
     },
     repository::Repository,
@@ -11,7 +13,7 @@ use crate::{
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, Executor, Postgres, Row};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -391,6 +393,178 @@ impl Repository {
                     .await?;
                 tx.commit().await?;
                 Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn bulk_mutate_fleet_alert_notification_channels(
+        &self,
+        request: &FleetAlertNotificationChannelBulkRequest,
+        operator: &AuthContext,
+    ) -> Result<FleetAlertNotificationChannelBulkResponse> {
+        anyhow::ensure!(
+            (1..=500).contains(&request.items.len()),
+            "fleet_alert_notification_channel_bulk_items_invalid"
+        );
+        let requested_ids = request.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let unique_ids = requested_ids.iter().copied().collect::<HashSet<_>>();
+        anyhow::ensure!(
+            unique_ids.len() == requested_ids.len(),
+            "fleet_alert_notification_channel_bulk_duplicate_item"
+        );
+
+        match self {
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, name, scope_kind, scope_value, min_severity,
+                        categories, operator_states, delivery_kind, target,
+                        cooldown_secs, enabled, notes, actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM fleet_alert_notification_channels
+                    WHERE id = ANY($1)
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&requested_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut current = rows
+                    .into_iter()
+                    .map(channel_from_row)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|channel| (channel.id, channel))
+                    .collect::<HashMap<_, _>>();
+                anyhow::ensure!(
+                    current.len() == request.items.len(),
+                    "fleet_alert_notification_channel_not_found"
+                );
+                let desired_enabled = match request.action {
+                    FleetAlertNotificationChannelBulkAction::Enable => Some(true),
+                    FleetAlertNotificationChannelBulkAction::Disable => Some(false),
+                    FleetAlertNotificationChannelBulkAction::Delete => None,
+                };
+                for item in &request.items {
+                    let channel = current
+                        .get(&item.id)
+                        .context("fleet_alert_notification_channel_not_found")?;
+                    anyhow::ensure!(
+                        channel.name == item.reviewed_name.trim()
+                            && channel.updated_at == item.expected_updated_at.trim(),
+                        "fleet_alert_notification_channel_bulk_review_stale"
+                    );
+                    if let Some(enabled) = desired_enabled {
+                        anyhow::ensure!(
+                            channel.enabled != enabled,
+                            "fleet_alert_notification_channel_bulk_state_stale"
+                        );
+                    }
+                }
+
+                let changed_rows = if let Some(enabled) = desired_enabled {
+                    sqlx::query(
+                        r#"
+                        UPDATE fleet_alert_notification_channels
+                        SET enabled = $2, actor_id = $3, updated_at = now()
+                        WHERE id = ANY($1)
+                        RETURNING
+                            id, name, scope_kind, scope_value, min_severity,
+                            categories, operator_states, delivery_kind, target,
+                            cooldown_secs, enabled, notes, actor_id,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        "#,
+                    )
+                    .bind(&requested_ids)
+                    .bind(enabled)
+                    .bind(operator.operator.id)
+                    .fetch_all(&mut *tx)
+                    .await?
+                } else {
+                    sqlx::query(
+                        r#"
+                        DELETE FROM fleet_alert_notification_channels
+                        WHERE id = ANY($1)
+                        RETURNING
+                            id, name, scope_kind, scope_value, min_severity,
+                            categories, operator_states, delivery_kind, target,
+                            cooldown_secs, enabled, notes, actor_id,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        "#,
+                    )
+                    .bind(&requested_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                };
+                current = changed_rows
+                    .into_iter()
+                    .map(channel_from_row)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|channel| (channel.id, channel))
+                    .collect();
+                anyhow::ensure!(
+                    current.len() == request.items.len(),
+                    "fleet_alert_notification_channel_bulk_snapshot_stale"
+                );
+
+                let (audit_action, result) = match request.action {
+                    FleetAlertNotificationChannelBulkAction::Enable => {
+                        ("fleet.alert_notification_channel_upserted", "enabled")
+                    }
+                    FleetAlertNotificationChannelBulkAction::Disable => {
+                        ("fleet.alert_notification_channel_upserted", "disabled")
+                    }
+                    FleetAlertNotificationChannelBulkAction::Delete => {
+                        ("fleet.alert_notification_channel_deleted", "deleted")
+                    }
+                };
+                let mut outcomes = Vec::with_capacity(request.items.len());
+                for item in &request.items {
+                    let channel = current
+                        .get(&item.id)
+                        .context("fleet_alert_notification_channel_bulk_snapshot_stale")?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, $2, $3, $4, NULL, $5)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(operator.operator.id)
+                    .bind(audit_action)
+                    .bind(format!("fleet_alert_notification_channel:{}", channel.id))
+                    .bind(notification_channel_metadata(channel, operator))
+                    .execute(&mut *tx)
+                    .await?;
+                    outcomes.push(FleetAlertNotificationChannelBulkOutcome {
+                        id: channel.id,
+                        name: channel.name.clone(),
+                        result: result.to_string(),
+                        record: (request.action != FleetAlertNotificationChannelBulkAction::Delete)
+                            .then(|| channel.clone()),
+                    });
+                }
+                if request.action != FleetAlertNotificationChannelBulkAction::Enable {
+                    // Source state changed once; the delivery worker remains the
+                    // sole owner of leases and terminal delivery transitions.
+                    sqlx::query("SELECT pg_notify('webhook_events', 'alert_notification')")
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                Ok(FleetAlertNotificationChannelBulkResponse {
+                    action: request.action,
+                    outcomes,
+                })
             }
         }
     }

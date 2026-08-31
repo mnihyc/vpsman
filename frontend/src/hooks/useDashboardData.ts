@@ -82,8 +82,6 @@ export function useDashboardData(activeView: ActiveView) {
   );
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
   const fleetReloadTimer = useRef<number | null>(null);
-  const inventoryReloadTimer = useRef<number | null>(null);
-  const topologyReloadTimer = useRef<number | null>(null);
   const networkEvidenceReloadTimer = useRef<number | null>(null);
   const networkEvidenceReloadedAt = useRef(0);
   const hasEnabledTunnelPlansRef = useRef(false);
@@ -91,14 +89,10 @@ export function useDashboardData(activeView: ActiveView) {
   const authGenerationRef = useRef(0);
   const jobDetailsInvalidationGenerationRef = useRef(0);
   const homeSnapshotGenerationRef = useRef(0);
-  const homeSnapshotStartedTokenRef = useRef("");
-  const initialViewForTokenRef = useRef<{
-    token: string;
-    view: ActiveView;
-    left: boolean;
-  } | null>(null);
-  const [homeSnapshotSettledToken, setHomeSnapshotSettledToken] = useState("");
-  const [homeSnapshotPendingToken, setHomeSnapshotPendingToken] = useState("");
+  const homeSnapshotStartedKeyRef = useRef("");
+  const homeVisitRef = useRef({ token: "", active: false, sequence: 0 });
+  const [homeSnapshotSettledKey, setHomeSnapshotSettledKey] = useState("");
+  const [homeSnapshotPendingKey, setHomeSnapshotPendingKey] = useState("");
   const [homeMonitoringCards, setHomeMonitoringCards] = useState<
     HomeSnapshotRecord["monitoring_cards"] | null
   >(null);
@@ -108,26 +102,20 @@ export function useDashboardData(activeView: ActiveView) {
   const hiddenOverviewRefreshPendingRef = useRef(false);
   const overviewVisibilityCatchupRef = useRef(false);
 
-  if (apiToken && initialViewForTokenRef.current?.token !== apiToken) {
-    initialViewForTokenRef.current = {
-      token: apiToken,
-      view: activeView,
-      left: false,
-    };
-  } else if (
-    apiToken &&
-    initialViewForTokenRef.current?.token === apiToken &&
-    activeView !== initialViewForTokenRef.current.view
-  ) {
-    initialViewForTokenRef.current.left = true;
+  if (homeVisitRef.current.token !== apiToken) {
+    homeVisitRef.current = { token: apiToken, active: false, sequence: 0 };
   }
-  const isInitialHomeVisit = Boolean(
-    apiToken &&
-    initialViewForTokenRef.current?.token === apiToken &&
-    initialViewForTokenRef.current.view === "Home" &&
-    !initialViewForTokenRef.current.left &&
-    activeView === "Home",
-  );
+  if (activeView === "Home" && !homeVisitRef.current.active) {
+    homeVisitRef.current.active = true;
+    homeVisitRef.current.sequence += 1;
+  } else if (activeView !== "Home") {
+    homeVisitRef.current.active = false;
+  }
+  const homeVisitKey =
+    apiToken && activeView === "Home"
+      ? `${apiToken}:${homeVisitRef.current.sequence}`
+      : "";
+  const homeSnapshotOwnsVisit = Boolean(homeVisitKey);
 
   useEffect(() => {
     activeViewRef.current = activeView;
@@ -199,19 +187,27 @@ export function useDashboardData(activeView: ActiveView) {
   const dashboardOverview = useDashboardOverviewData(apiToken, requireAuth);
   const fleet = useFleetData(apiToken, requireAuth);
   const audit = useAuditData(apiToken, requireAuth);
-  const inventory = useInventoryData(apiToken, requireAuth, fleet.loadFleet);
+  const inventory = useInventoryData(
+    apiToken,
+    requireAuth,
+    fleet.reconcileAgentTagMutation,
+  );
   const jobs = useJobsData(
     apiToken,
     requireAuth,
     fleet.loadFleet,
-    audit.loadAudits,
+    audit.loadAuditLogs,
   );
-  const schedules = useSchedulesData(apiToken, requireAuth, audit.loadAudits);
+  const schedules = useSchedulesData(
+    apiToken,
+    requireAuth,
+    audit.loadAuditLogs,
+  );
   const system = useSystemData(apiToken, requireAuth);
   const topology = useTopologyData(
     apiToken,
     requireAuth,
-    audit.loadAudits,
+    audit.loadAuditLogs,
     inventory.loadRuntimeConfigApplyStates,
   );
   useEffect(() => {
@@ -222,15 +218,15 @@ export function useDashboardData(activeView: ActiveView) {
   const portForwarding = usePortForwardingData(
     apiToken,
     requireAuth,
-    audit.loadAudits,
+    audit.loadAuditLogs,
   );
-  const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
+  const backups = useBackupsData(apiToken, requireAuth, audit.loadAuditLogs);
   const clearDashboardData = useCallback(() => {
     homeSnapshotGenerationRef.current += 1;
-    homeSnapshotStartedTokenRef.current = "";
-    initialViewForTokenRef.current = null;
-    setHomeSnapshotSettledToken("");
-    setHomeSnapshotPendingToken("");
+    homeSnapshotStartedKeyRef.current = "";
+    homeVisitRef.current = { token: "", active: false, sequence: 0 };
+    setHomeSnapshotSettledKey("");
+    setHomeSnapshotPendingKey("");
     setHomeMonitoringCards(null);
     hiddenFleetRefreshPendingRef.current = false;
     hiddenOverviewRefreshPendingRef.current = false;
@@ -238,8 +234,6 @@ export function useDashboardData(activeView: ActiveView) {
     for (const timer of [
       dashboardOverviewReloadTimer,
       fleetReloadTimer,
-      inventoryReloadTimer,
-      topologyReloadTimer,
       networkEvidenceReloadTimer,
     ]) {
       if (timer.current !== null) {
@@ -309,35 +303,6 @@ export function useDashboardData(activeView: ActiveView) {
       void fleet.loadFleet(true);
     }, 750);
   }, [fleet.loadFleet]);
-  const scheduleInventoryReload = useCallback(() => {
-    if (inventoryReloadTimer.current !== null) {
-      return;
-    }
-    inventoryReloadTimer.current = window.setTimeout(() => {
-      inventoryReloadTimer.current = null;
-      void inventory.loadTagInventory();
-    }, 1_000);
-  }, [inventory.loadTagInventory]);
-  const scheduleTopologyReload = useCallback(() => {
-    if (topologyReloadTimer.current !== null) {
-      return;
-    }
-    topologyReloadTimer.current = window.setTimeout(() => {
-      topologyReloadTimer.current = null;
-      void Promise.all([
-        topology.loadTunnelPlans(),
-        topology.loadNetworkAdapterDefinitions(),
-        topology.refreshNetworkEvidence(true),
-        portForwarding.loadPortForwardRules(),
-      ]);
-    }, 500);
-  }, [
-    topology.loadNetworkAdapterDefinitions,
-    topology.refreshNetworkEvidence,
-    topology.loadTunnelPlans,
-    portForwarding.loadPortForwardRules,
-  ]);
-
   const scheduleNetworkEvidenceReload = useCallback(() => {
     if (
       networkEvidenceReloadTimer.current !== null ||
@@ -366,12 +331,6 @@ export function useDashboardData(activeView: ActiveView) {
       if (fleetReloadTimer.current !== null) {
         window.clearTimeout(fleetReloadTimer.current);
       }
-      if (inventoryReloadTimer.current !== null) {
-        window.clearTimeout(inventoryReloadTimer.current);
-      }
-      if (topologyReloadTimer.current !== null) {
-        window.clearTimeout(topologyReloadTimer.current);
-      }
       if (networkEvidenceReloadTimer.current !== null) {
         window.clearTimeout(networkEvidenceReloadTimer.current);
       }
@@ -384,17 +343,15 @@ export function useDashboardData(activeView: ActiveView) {
       const visible = !documentIsHidden();
       setDocumentVisible(visible);
       if (!visible) {
-        const initialHomeSnapshotDeferred = Boolean(
-          apiToken &&
-          isInitialHomeVisit &&
-          homeSnapshotStartedTokenRef.current !== apiToken,
+        const homeSnapshotDeferred = Boolean(
+          homeVisitKey && homeSnapshotStartedKeyRef.current !== homeVisitKey,
         );
         hiddenFleetRefreshPendingRef.current = Boolean(
-          apiToken && !initialHomeSnapshotDeferred,
+          apiToken && !homeSnapshotDeferred,
         );
         hiddenOverviewRefreshPendingRef.current = Boolean(
           apiToken &&
-          !initialHomeSnapshotDeferred &&
+          !homeSnapshotDeferred &&
           (activeViewRef.current === "Home" ||
             activeViewRef.current === "Observability"),
         );
@@ -406,13 +363,12 @@ export function useDashboardData(activeView: ActiveView) {
         }
         return;
       }
-      const initialHomeSnapshotInFlight = Boolean(
-        apiToken &&
-        isInitialHomeVisit &&
-        homeSnapshotStartedTokenRef.current === apiToken &&
-        homeSnapshotSettledToken !== apiToken,
+      const homeSnapshotInFlight = Boolean(
+        homeVisitKey &&
+        homeSnapshotStartedKeyRef.current === homeVisitKey &&
+        homeSnapshotSettledKey !== homeVisitKey,
       );
-      if (initialHomeSnapshotInFlight) {
+      if (homeSnapshotInFlight) {
         return;
       }
       if (hiddenFleetRefreshPendingRef.current && apiToken) {
@@ -438,8 +394,8 @@ export function useDashboardData(activeView: ActiveView) {
     apiToken,
     dashboardOverview.loadDashboardOverview,
     fleet.loadFleet,
-    homeSnapshotSettledToken,
-    isInitialHomeVisit,
+    homeSnapshotSettledKey,
+    homeVisitKey,
   ]);
 
   useEffect(() => {
@@ -452,13 +408,13 @@ export function useDashboardData(activeView: ActiveView) {
     if (
       !apiToken ||
       !documentVisible ||
-      !isInitialHomeVisit ||
-      homeSnapshotStartedTokenRef.current === apiToken
+      !homeSnapshotOwnsVisit ||
+      homeSnapshotStartedKeyRef.current === homeVisitKey
     ) {
       return;
     }
-    homeSnapshotStartedTokenRef.current = apiToken;
-    setHomeSnapshotPendingToken(apiToken);
+    homeSnapshotStartedKeyRef.current = homeVisitKey;
+    setHomeSnapshotPendingKey(homeVisitKey);
     const generation = homeSnapshotGenerationRef.current + 1;
     homeSnapshotGenerationRef.current = generation;
     setHomeMonitoringCards(null);
@@ -474,14 +430,12 @@ export function useDashboardData(activeView: ActiveView) {
       system: system.beginHomeSystemDashboardHydration(),
     };
     const requestIsCurrent = () => {
-      const initialView = initialViewForTokenRef.current;
       return (
         generation === homeSnapshotGenerationRef.current &&
         readStoredAccessToken() === apiToken &&
         activeViewRef.current === "Home" &&
-        initialView?.token === apiToken &&
-        initialView.view === "Home" &&
-        !initialView.left
+        homeVisitRef.current.token === apiToken &&
+        `${apiToken}:${homeVisitRef.current.sequence}` === homeVisitKey
       );
     };
     const params = dashboardPreferencesToParams(
@@ -522,7 +476,7 @@ export function useDashboardData(activeView: ActiveView) {
           hydrationFences.dashboardOverview,
           snapshot.dashboard_overview,
         );
-        setHomeSnapshotSettledToken(apiToken);
+        setHomeSnapshotSettledKey(homeVisitKey);
       })
       .catch((error) => {
         if (!requestIsCurrent()) {
@@ -572,12 +526,12 @@ export function useDashboardData(activeView: ActiveView) {
           hydrationFences.dashboardOverview,
           unavailableSnapshotSource(message),
         );
-        setHomeSnapshotSettledToken(apiToken);
+        setHomeSnapshotSettledKey(homeVisitKey);
       })
       .finally(() => {
         if (generation === homeSnapshotGenerationRef.current) {
-          setHomeSnapshotPendingToken((current) =>
-            current === apiToken ? "" : current,
+          setHomeSnapshotPendingKey((current) =>
+            current === homeVisitKey ? "" : current,
           );
         }
       });
@@ -595,7 +549,8 @@ export function useDashboardData(activeView: ActiveView) {
     documentVisible,
     fleet.beginHomeFleetHydration,
     fleet.hydrateHomeFleet,
-    isInitialHomeVisit,
+    homeSnapshotOwnsVisit,
+    homeVisitKey,
     jobs.beginHomeJobsHydration,
     jobs.hydrateHomeJobs,
     requireAuth,
@@ -606,18 +561,18 @@ export function useDashboardData(activeView: ActiveView) {
   ]);
 
   useEffect(() => {
-    if (!apiToken || isInitialHomeVisit) {
+    if (!apiToken || homeSnapshotOwnsVisit) {
       return;
     }
     void access.loadCurrentOperatorProfile();
-  }, [access.loadCurrentOperatorProfile, apiToken, isInitialHomeVisit]);
+  }, [access.loadCurrentOperatorProfile, apiToken, homeSnapshotOwnsVisit]);
 
   useEffect(() => {
-    if (!apiToken || !documentVisible || isInitialHomeVisit) {
+    if (!apiToken || !documentVisible || homeSnapshotOwnsVisit) {
       return;
     }
     void fleet.loadFleet();
-  }, [apiToken, documentVisible, fleet.loadFleet, isInitialHomeVisit]);
+  }, [apiToken, documentVisible, fleet.loadFleet, homeSnapshotOwnsVisit]);
 
   useEffect(() => {
     if (!apiToken || wsState !== "connected" || !documentVisible) {
@@ -715,8 +670,8 @@ export function useDashboardData(activeView: ActiveView) {
           dashboardOverview.dashboardPreferences.refreshIntervalSecs,
         ),
       );
-    } else if (isInitialHomeVisit) {
-      if (homeSnapshotSettledToken !== apiToken) {
+    } else if (homeSnapshotOwnsVisit) {
+      if (homeSnapshotSettledKey !== homeVisitKey) {
         return;
       }
       timer = window.setTimeout(
@@ -740,8 +695,9 @@ export function useDashboardData(activeView: ActiveView) {
     documentVisible,
     dashboardOverview.dashboardPreferences.refreshIntervalSecs,
     dashboardOverview.loadDashboardOverview,
-    homeSnapshotSettledToken,
-    isInitialHomeVisit,
+    homeSnapshotOwnsVisit,
+    homeSnapshotSettledKey,
+    homeVisitKey,
   ]);
 
   useEffect(() => {
@@ -749,13 +705,7 @@ export function useDashboardData(activeView: ActiveView) {
       return;
     }
     if (activeView === "Home") {
-      if (!isInitialHomeVisit) {
-        void jobs.loadJobs();
-        void backups.loadBackups();
-        void audit.loadAudits();
-        void schedules.loadSchedules();
-        void system.loadSystemDashboard();
-      }
+      // The generation-fenced aggregate snapshot owns every Home activation.
     } else if (activeView === "Fleet") {
       void inventory.loadTagInventory();
     } else if (activeView === "Config") {
@@ -817,7 +767,6 @@ export function useDashboardData(activeView: ActiveView) {
     jobs.loadJobs,
     schedules.loadSchedules,
     system.loadSystemDashboard,
-    isInitialHomeVisit,
     topology.loadNetworkObservations,
     topology.loadNetworkAdapterDefinitions,
     topology.loadNetworkTrends,
@@ -879,7 +828,7 @@ export function useDashboardData(activeView: ActiveView) {
           return;
         }
         setWsState("reconnecting");
-        void access.loadCurrentOperator();
+        void access.loadCurrentOperatorProfile();
         const delay = Math.min(1_000 * 2 ** reconnectAttempt, 15_000);
         reconnectAttempt += 1;
         reconnectTimer = window.setTimeout(connect, delay);
@@ -918,6 +867,13 @@ export function useDashboardData(activeView: ActiveView) {
           if (currentView === "Network" || currentView === "Observability") {
             scheduleNetworkEvidenceReload();
           }
+        } else if (event.type === "fleet_state_invalidated") {
+          // Suspension and deletion responses update the initiating view
+          // immediately. They also change dependent alert/job state, so this
+          // typed event owns one coalesced authoritative full reconciliation
+          // for every browser, without separate tag-order, runtime-apply, or
+          // patch-generator reads or an independent overview refresh.
+          scheduleFleetReload();
         } else if (
           event.type === "agent_updated" ||
           event.type === "job_rejected"
@@ -930,15 +886,11 @@ export function useDashboardData(activeView: ActiveView) {
         ) {
           scheduleDashboardOverviewReload();
         }
-        if (
-          event.type === "agent_updated" &&
-          activeViewUsesInventoryData(currentView)
-        ) {
-          scheduleInventoryReload();
-        }
         if (event.type === "job_rejected") {
           void jobs.refreshLoadedJob(event.job_id);
-          void audit.loadAudits();
+          if (currentView === "Audit") {
+            void audit.loadAuditLogs();
+          }
         }
         if (event.type === "job_details_invalidated") {
           jobDetailsInvalidationGenerationRef.current += 1;
@@ -949,21 +901,48 @@ export function useDashboardData(activeView: ActiveView) {
         }
         if (event.type === "job_finished") {
           scheduleFleetReload();
-          void jobs.refreshLoadedJob(event.job_id);
-          void audit.loadAudits();
-          if (activeViewUsesInventoryData(currentView)) {
-            scheduleInventoryReload();
+          void jobs.refreshLoadedJob(event.job_id).then((job) => {
+            if (!job) {
+              return;
+            }
+            const activeJobView = activeViewRef.current;
+            if (
+              job.command_type === "runtime_config_sync" &&
+              (activeJobView === "Fleet" ||
+                activeJobView === "Config" ||
+                activeJobView === "Network")
+            ) {
+              void inventory.loadRuntimeConfigApplyStates();
+            }
+            if (
+              activeJobView === "Network" ||
+              activeJobView === "Observability"
+            ) {
+              void topology.refreshNetworkJobEvidence(
+                job.command_type,
+                activeJobView === "Network",
+              );
+            }
+          });
+          if (currentView === "Audit") {
+            void audit.loadAuditLogs();
           }
           if (currentView === "Home" || currentView === "Observability") {
             scheduleDashboardOverviewReload();
           }
-          if (currentView === "Network") {
-            scheduleTopologyReload();
-          }
         }
         if (event.type === "backup_artifact_recorded") {
-          void backups.loadBackups();
-          void audit.loadAudits();
+          if (
+            currentView === "Home" ||
+            currentView === "Jobs" ||
+            currentView === "Backups" ||
+            currentView === "Observability"
+          ) {
+            void backups.loadBackupRequestArtifactProjections();
+          }
+          if (currentView === "Audit") {
+            void audit.loadAuditLogs();
+          }
           if (currentView === "Home" || currentView === "Observability") {
             scheduleDashboardOverviewReload();
           }
@@ -982,19 +961,18 @@ export function useDashboardData(activeView: ActiveView) {
     };
   }, [
     apiToken,
-    access.loadCurrentOperator,
-    audit.loadAudits,
+    access.loadCurrentOperatorProfile,
+    audit.loadAuditLogs,
     fleet.replaceFleetSnapshot,
     fleet.loadFleetTelemetry,
-    backups.loadBackups,
+    backups.loadBackupRequestArtifactProjections,
     dashboardOverview.loadDashboardOverview,
     jobs.refreshLoadedJob,
+    inventory.loadRuntimeConfigApplyStates,
     scheduleDashboardOverviewReload,
     scheduleFleetReload,
-    scheduleInventoryReload,
     scheduleNetworkEvidenceReload,
-    scheduleTopologyReload,
-    portForwarding.loadPortForwardRules,
+    topology.refreshNetworkJobEvidence,
   ]);
 
   const handleAuth = useCallback(
@@ -1071,6 +1049,7 @@ export function useDashboardData(activeView: ActiveView) {
     clearTunnelPlanEvidence: topology.clearTunnelPlanEvidence,
     clientKeyRevocations: access.clientKeyRevocations,
     clearOperatorTotp: access.clearOperatorTotp,
+    clearOperatorTotps: access.clearOperatorTotps,
     cloneConfigurationPreset: inventory.cloneConfigurationPreset,
     configurationPresets: inventory.configurationPresets,
     configurationPresetsEvidenceAvailable:
@@ -1109,7 +1088,7 @@ export function useDashboardData(activeView: ActiveView) {
     createSchedule: schedules.createSchedule,
     previewEventScheduleTemplate: schedules.previewEventScheduleTemplate,
     updateSchedule: schedules.updateSchedule,
-    updateScheduleTargets: schedules.updateScheduleTargets,
+    bulkUpdateScheduleTargets: schedules.bulkUpdateScheduleTargets,
     enableSchedule: schedules.enableSchedule,
     disableSchedule: schedules.disableSchedule,
     deferSchedule: schedules.deferSchedule,
@@ -1132,11 +1111,11 @@ export function useDashboardData(activeView: ActiveView) {
     rotateTunnelPlanCredentials: topology.rotateTunnelPlanCredentials,
     disableTotp: access.disableTotp,
     handleAuth,
-    initialHomeMonitoringCards: isInitialHomeVisit
+    initialHomeMonitoringCards: homeSnapshotOwnsVisit
       ? homeMonitoringCards
       : undefined,
     initialHomeSnapshotPending:
-      isInitialHomeVisit && homeSnapshotPendingToken === apiToken,
+      homeSnapshotOwnsVisit && homeSnapshotPendingKey === homeVisitKey,
     jobs: jobs.jobs,
     jobsTruncated: jobs.jobsTruncated,
     jobApprovals: jobs.jobApprovals,
@@ -1176,8 +1155,17 @@ export function useDashboardData(activeView: ActiveView) {
     fleetAlertEventReviewStarted: fleet.fleetAlertEventReviewStarted,
     fleetAlertEventReviewLoading: fleet.fleetAlertEventReviewLoading,
     fleetAlertEventReviewError: fleet.fleetAlertEventReviewError,
+    fleetAlertEventReviewLimitNotice: fleet.fleetAlertEventReviewLimitNotice,
+    fleetAlertEventReviewVerified: fleet.fleetAlertEventReviewVerified,
+    fleetAlertEventSearchHasMore: fleet.fleetAlertEventSearchHasMore,
+    fleetAlertEventSearchQuery: fleet.fleetAlertEventSearchQuery,
+    fleetAlertEventSearchScannedCount: fleet.fleetAlertEventSearchScannedCount,
+    fleetAlertEventSearchItems: fleet.fleetAlertEventSearchItems,
+    activateFleetAlertEventReview: fleet.activateFleetAlertEventReview,
+    deactivateFleetAlertEventReview: fleet.deactivateFleetAlertEventReview,
     loadOlderFleetAlertEvents: fleet.loadOlderFleetAlertEvents,
-    refreshFleetAlertEvents: fleet.refreshFleetAlertEvents,
+    searchOlderFleetAlertEvents: fleet.searchOlderFleetAlertEvents,
+    syncFleetAlertEvents: fleet.syncFleetAlertEvents,
     fleetAlertPolicies: fleet.fleetAlertPolicies,
     configPolicyEvidenceAvailable: fleet.configPolicyEvidenceAvailable,
     vpsRuleEvidenceAvailable: fleet.vpsRuleEvidenceAvailable,
@@ -1219,6 +1207,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadJobRollouts: jobs.loadJobRollouts,
     loadJobOutputs: jobs.loadJobOutputs,
     loadJobOutputComparison: jobs.loadJobOutputComparison,
+    loadExactJobTargetStatuses: jobs.loadExactJobTargetStatuses,
     loadJobs: jobs.loadJobs,
     loadServerJobs: jobs.loadServerJobs,
     loadTerminalSessions: jobs.loadTerminalSessions,
@@ -1237,12 +1226,12 @@ export function useDashboardData(activeView: ActiveView) {
     dryRunFleetAlertPolicy: fleet.dryRunFleetAlertPolicy,
     upsertFleetAlertNotificationChannel:
       fleet.upsertFleetAlertNotificationChannel,
-    deleteFleetAlertNotificationChannel:
-      fleet.deleteFleetAlertNotificationChannel,
+    bulkMutateFleetAlertNotificationChannels:
+      fleet.bulkMutateFleetAlertNotificationChannels,
     dispatchFleetAlertNotifications: fleet.dispatchFleetAlertNotifications,
     processFleetAlertNotifications: fleet.processFleetAlertNotifications,
     upsertWebhookRule: fleet.upsertWebhookRule,
-    deleteWebhookRule: fleet.deleteWebhookRule,
+    bulkMutateWebhookRules: fleet.bulkMutateWebhookRules,
     dryRunWebhookRule: fleet.dryRunWebhookRule,
     dispatchWebhookRules: fleet.dispatchWebhookRules,
     processWebhookRuleDeliveries: fleet.processWebhookRuleDeliveries,
@@ -1309,9 +1298,11 @@ export function useDashboardData(activeView: ActiveView) {
     renderRuntimeConfigPatchGenerator:
       inventory.renderRuntimeConfigPatchGenerator,
     resolveBulkPreview: inventory.resolveBulkPreview,
+    resolveManyJobTargets: inventory.resolveManyJobTargets,
     resolveJobTargets: inventory.resolveJobTargets,
     revokeClientKey: access.revokeClientKey,
     revokeOperatorSession: access.revokeOperatorSession,
+    revokeOperatorSessions: access.revokeOperatorSessions,
     resetOperatorPassword: access.resetOperatorPassword,
     pruneHistoryRetention: audit.pruneHistoryRetention,
     setupTotp: access.setupTotp,
@@ -1330,6 +1321,7 @@ export function useDashboardData(activeView: ActiveView) {
     setSystemDashboardPointDensity: system.setSystemDashboardPointDensity,
     setSystemDashboardWindow: system.setSystemDashboardWindow,
     setOperatorStatus: access.setOperatorStatus,
+    setOperatorStatuses: access.setOperatorStatuses,
     loadSystemDashboard: system.loadSystemDashboard,
     suiteConfig: system.suiteConfig,
     suiteConfigError: system.suiteConfigError,
@@ -1371,7 +1363,7 @@ export function useDashboardData(activeView: ActiveView) {
     dryRunVpsRules: fleet.dryRunVpsRules,
     bulkUpsertVpsRules: fleet.bulkUpsertVpsRules,
     bulkUnsetVpsRules: fleet.bulkUnsetVpsRules,
-    deleteFleetAlertPolicy: fleet.deleteFleetAlertPolicy,
+    bulkMutateFleetAlertPolicies: fleet.bulkMutateFleetAlertPolicies,
     updateOperatorPreferences: access.updateOperatorPreferences,
     wsState,
   };
@@ -1381,17 +1373,4 @@ function dashboardRefreshIntervalMs(
   value: DashboardRefreshIntervalSecs,
 ): number {
   return value * 1000;
-}
-
-function activeViewUsesInventoryData(activeView: ActiveView): boolean {
-  return (
-    activeView === "Fleet" ||
-    activeView === "Config" ||
-    activeView === "Remote Operations" ||
-    activeView === "Jobs" ||
-    activeView === "Automation" ||
-    activeView === "Observability" ||
-    activeView === "Access" ||
-    activeView === "System"
-  );
 }

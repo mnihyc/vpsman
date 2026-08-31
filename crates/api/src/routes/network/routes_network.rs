@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     extract::{Path, Query, State},
@@ -20,8 +20,10 @@ use crate::{
     error::ApiError,
     model::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse,
-        ClearTunnelPlanEvidenceRequest, ClearTunnelPlanEvidenceResponse, CreateJobRequest,
-        CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkEvidenceQuery,
+        BulkTunnelPlanLifecycleOutcome, BulkTunnelPlanLifecycleRequest,
+        BulkTunnelPlanLifecycleResponse, ClearTunnelPlanEvidenceRequest,
+        ClearTunnelPlanEvidenceResponse, CreateJobRequest, CreateJobResponse,
+        CreateTunnelPlanRequest, HistoryQuery, NetworkAdapterDefinitionView, NetworkEvidenceQuery,
         NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
         RefreshTunnelPlanOspfStatusRequest, RuntimeConfigDispatchView,
         TunnelPlanEndpointRuntimeConfigView, TunnelPlanListItem, TunnelPlanMutationResponse,
@@ -32,6 +34,8 @@ use crate::{
     model_topology::TopologyGraphView,
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_configuration_presets::validate_network_adapter_definition_view,
+    repository_network::{TunnelPlanLifecycleUpdate, TunnelPlanLifecycleUpdateResult},
+    repository_network_adapters::runtime_tunnel_adapter_from_definition,
     repository_topology_graph::TopologyGraphStageError,
     routes_job_history::network_observation_filter,
     routes_jobs::create_job_from_internal_operator_mutation,
@@ -40,6 +44,8 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
+
+const MAX_BULK_TUNNEL_PLAN_LIFECYCLE_ITEMS: usize = 500;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -462,6 +468,177 @@ pub(crate) async fn disable_tunnel_plan(
     mutate_tunnel_plan_enabled(state, headers, plan_id, request, false).await
 }
 
+pub(crate) async fn bulk_tunnel_plan_lifecycle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkTunnelPlanLifecycleRequest>,
+) -> Result<Json<BulkTunnelPlanLifecycleResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
+    if !(1..=MAX_BULK_TUNNEL_PLAN_LIFECYCLE_ITEMS).contains(&request.items.len()) {
+        return Err(ApiError::bad_request("tunnel_plan_lifecycle_items_invalid"));
+    }
+    let requested_ids = request
+        .items
+        .iter()
+        .map(|item| item.plan_id)
+        .collect::<BTreeSet<_>>();
+    if requested_ids.len() != request.items.len() {
+        return Err(ApiError::bad_request(
+            "tunnel_plan_lifecycle_items_duplicate",
+        ));
+    }
+
+    let attempts = state
+        .repo
+        .tunnel_plan_record_attempts(&requested_ids.iter().copied().collect::<Vec<_>>())
+        .await
+        .map_err(tunnel_plan_unavailable)?;
+    let plans = attempts
+        .into_iter()
+        .map(|attempt| {
+            attempt
+                .plan
+                .map(|plan| (attempt.plan_id, plan))
+                .map_err(tunnel_plan_unavailable)
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut rejected = BTreeMap::new();
+    let mut candidates = Vec::new();
+    for item in &request.items {
+        let Some(plan) = plans.get(&item.plan_id) else {
+            rejected.insert(item.plan_id, "tunnel_plan_not_found");
+            continue;
+        };
+        if plan.revision != item.expected_revision {
+            rejected.insert(item.plan_id, "tunnel_plan_snapshot_stale");
+            continue;
+        }
+        candidates.push(plan);
+    }
+
+    if request.enabled && !candidates.is_empty() {
+        let endpoint_ids = candidates
+            .iter()
+            .flat_map(|plan| [plan.left_client_id.clone(), plan.right_client_id.clone()])
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let visible_endpoint_ids = state
+            .repo
+            .list_agents_for_client_ids(&endpoint_ids)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "vps_inventory_unavailable",
+                "The VPS inventory could not be loaded.",
+            ))?
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect::<BTreeSet<_>>();
+        for plan in &candidates {
+            if !visible_endpoint_ids.contains(&plan.left_client_id)
+                || !visible_endpoint_ids.contains(&plan.right_client_id)
+            {
+                rejected.insert(plan.id, "tunnel_plan_endpoint_agent_not_found");
+            }
+        }
+
+        let adapter_candidates = candidates
+            .iter()
+            .copied()
+            .filter(|plan| !rejected.contains_key(&plan.id))
+            .collect::<Vec<_>>();
+        for (plan_id, error_code) in
+            validate_tunnel_plan_adapter_bindings_bulk(&state, &adapter_candidates).await?
+        {
+            rejected.insert(plan_id, error_code);
+        }
+    }
+
+    let updates = request
+        .items
+        .iter()
+        .filter(|item| !rejected.contains_key(&item.plan_id))
+        .map(|item| TunnelPlanLifecycleUpdate {
+            plan_id: item.plan_id,
+            expected_revision: item.expected_revision,
+            enabled: request.enabled,
+        })
+        .collect::<Vec<_>>();
+    let mut committed = BTreeMap::new();
+    let mut runtime_client_ids = BTreeSet::new();
+    if !updates.is_empty() {
+        for result in state
+            .repo
+            .set_tunnel_plans_enabled_bulk(&updates, &operator)
+            .await
+            .map_err(tunnel_plan_repository_error)?
+        {
+            match result {
+                TunnelPlanLifecycleUpdateResult::Updated(plan) => {
+                    runtime_client_ids.insert(plan.left_client_id.clone());
+                    runtime_client_ids.insert(plan.right_client_id.clone());
+                    committed.insert(
+                        plan.id,
+                        BulkTunnelPlanLifecycleOutcome {
+                            plan_id: plan.id,
+                            status: "updated",
+                            revision: Some(plan.revision),
+                            error_code: None,
+                        },
+                    );
+                }
+                TunnelPlanLifecycleUpdateResult::Unchanged(plan) => {
+                    runtime_client_ids.insert(plan.left_client_id.clone());
+                    runtime_client_ids.insert(plan.right_client_id.clone());
+                    committed.insert(
+                        plan.id,
+                        BulkTunnelPlanLifecycleOutcome {
+                            plan_id: plan.id,
+                            status: "unchanged",
+                            revision: Some(plan.revision),
+                            error_code: None,
+                        },
+                    );
+                }
+                TunnelPlanLifecycleUpdateResult::Rejected {
+                    plan_id,
+                    error_code,
+                } => {
+                    rejected.insert(plan_id, error_code);
+                }
+            }
+        }
+    }
+
+    let reason = if request.enabled {
+        "tunnel_plan_enabled"
+    } else {
+        "tunnel_plan_disabled"
+    };
+    let sync =
+        dispatch_runtime_config_for_clients(&state, &operator, runtime_client_ids, reason).await;
+    let outcomes = request
+        .items
+        .into_iter()
+        .map(|item| {
+            if let Some(outcome) = committed.remove(&item.plan_id) {
+                outcome
+            } else {
+                BulkTunnelPlanLifecycleOutcome {
+                    plan_id: item.plan_id,
+                    status: "rejected",
+                    revision: plans.get(&item.plan_id).map(|plan| plan.revision),
+                    error_code: rejected.remove(&item.plan_id).map(str::to_string),
+                }
+            }
+        })
+        .collect();
+    Ok(Json(BulkTunnelPlanLifecycleResponse { outcomes, sync }))
+}
+
 pub(crate) async fn delete_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -872,6 +1049,153 @@ async fn validate_tunnel_plan_adapter_bindings(
     Ok(())
 }
 
+async fn validate_tunnel_plan_adapter_bindings_bulk(
+    state: &AppState,
+    plans: &[&TunnelPlanView],
+) -> Result<Vec<(Uuid, &'static str)>, ApiError> {
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let needs_runtime_adapters = plans
+        .iter()
+        .any(|plan| plan.plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter);
+    let runtime_adapters = if needs_runtime_adapters {
+        state
+            .repo
+            .list_network_adapter_definitions(Some("runtime_tunnel"))
+            .await
+            .map_err(ApiError::internal_mapper(
+                "runtime_tunnel_adapter_unavailable",
+                "Runtime tunnel adapters could not be loaded.",
+            ))?
+            .into_iter()
+            .map(|definition| (definition.id, definition))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let needs_routing_adapters = plans.iter().any(|plan| {
+        plan.plan.ospf.as_ref().is_some_and(|ospf| {
+            ospf.left_adapter_definition_id.is_some() || ospf.right_adapter_definition_id.is_some()
+        })
+    });
+    let routing_adapters = if needs_routing_adapters {
+        state
+            .repo
+            .list_network_adapter_definitions(Some("routing_cost"))
+            .await
+            .map_err(ApiError::internal_mapper(
+                "routing_cost_adapter_unavailable",
+                "Routing-cost adapters could not be loaded.",
+            ))?
+            .into_iter()
+            .map(|definition| (definition.id, definition))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let fallback_clients = plans
+        .iter()
+        .flat_map(|plan| {
+            let Some(ospf) = plan.plan.ospf.as_ref() else {
+                return [None, None];
+            };
+            [
+                ospf.left_adapter_definition_id
+                    .is_none()
+                    .then(|| plan.left_client_id.clone()),
+                ospf.right_adapter_definition_id
+                    .is_none()
+                    .then(|| plan.right_client_id.clone()),
+            ]
+        })
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let fallback_sources = if fallback_clients.is_empty() {
+        BTreeMap::new()
+    } else {
+        state
+            .repo
+            .effective_ospf_command_sources_for_clients(&fallback_clients)
+            .await
+            .map_err(|error| {
+                ApiError::internal(
+                    "ospf_command_sources_unavailable",
+                    "The OSPF command configuration could not be loaded.",
+                    error,
+                )
+            })?
+    };
+
+    let mut failures = Vec::new();
+    for plan in plans {
+        if let Err(error) = validate_tunnel_plan_adapter_bindings_from_catalog(
+            &plan.plan,
+            &runtime_adapters,
+            &routing_adapters,
+            &fallback_sources,
+        ) {
+            if error.status.is_server_error() {
+                return Err(error);
+            }
+            failures.push((plan.id, error.code));
+        }
+    }
+    Ok(failures)
+}
+
+fn validate_tunnel_plan_adapter_bindings_from_catalog(
+    plan: &TunnelPlan,
+    runtime_adapters: &BTreeMap<Uuid, NetworkAdapterDefinitionView>,
+    routing_adapters: &BTreeMap<Uuid, NetworkAdapterDefinitionView>,
+    fallback_sources: &BTreeMap<String, Option<crate::model::ResolvedOspfCommandSource>>,
+) -> Result<(), ApiError> {
+    if plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter {
+        let left_id = plan
+            .runtime_control
+            .left_adapter_definition_id
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_definition_required"))?;
+        let right_id = plan
+            .runtime_control
+            .right_adapter_definition_id
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("runtime_tunnel_adapter_definition_required"))?;
+        let left = runtime_adapter_from_catalog(left_id, runtime_adapters)
+            .map_err(|_| ApiError::conflict("runtime_tunnel_left_adapter_unavailable"))?;
+        let right = runtime_adapter_from_catalog(right_id, runtime_adapters)
+            .map_err(|_| ApiError::conflict("runtime_tunnel_right_adapter_unavailable"))?;
+        if !plan.runtime_control.traffic_limit.is_default()
+            && (left.traffic_limit_apply.is_none() || right.traffic_limit_apply.is_none())
+        {
+            return Err(ApiError::conflict(
+                "runtime_tunnel_adapter_traffic_limit_unsupported",
+            ));
+        }
+    }
+    if plan.ospf.is_some() {
+        resolve_routing_adapters_for_tunnel_plan_from_catalog(
+            plan,
+            routing_adapters,
+            fallback_sources,
+        )?;
+    }
+    Ok(())
+}
+
+fn runtime_adapter_from_catalog(
+    definition_id: &str,
+    definitions: &BTreeMap<Uuid, NetworkAdapterDefinitionView>,
+) -> anyhow::Result<vpsman_common::RuntimeTunnelAdapterCommands> {
+    let definition_id = Uuid::parse_str(definition_id)?;
+    let definition = definitions
+        .get(&definition_id)
+        .ok_or_else(|| anyhow::anyhow!("runtime_tunnel_adapter_definition_not_found"))?;
+    runtime_tunnel_adapter_from_definition(definition)
+}
+
 fn validate_tunnel_plan_ospf_cost_request(
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> Result<(), ApiError> {
@@ -1124,7 +1448,48 @@ async fn resolve_routing_adapter(
             "The routing-cost adapter could not be loaded.",
         ))?
         .ok_or_else(|| ApiError::conflict("routing_cost_adapter_definition_not_found"))?;
-    validate_network_adapter_definition_view(&definition)
+    routing_adapter_from_definition(&definition)
+}
+
+fn resolve_routing_adapters_for_tunnel_plan_from_catalog(
+    plan: &TunnelPlan,
+    definitions: &BTreeMap<Uuid, NetworkAdapterDefinitionView>,
+    fallback_sources: &BTreeMap<String, Option<crate::model::ResolvedOspfCommandSource>>,
+) -> Result<(RoutingCostAdapterCommands, RoutingCostAdapterCommands), ApiError> {
+    let ospf = plan
+        .ospf
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("tunnel_plan_ospf_disabled"))?;
+    let resolve = |definition_id: Option<&str>, client_id: &str| {
+        if let Some(definition_id) = definition_id {
+            let definition_id = Uuid::parse_str(definition_id)
+                .map_err(|_| ApiError::bad_request("routing_cost_adapter_definition_id_invalid"))?;
+            let definition = definitions
+                .get(&definition_id)
+                .ok_or_else(|| ApiError::conflict("routing_cost_adapter_definition_not_found"))?;
+            routing_adapter_from_definition(definition)
+        } else {
+            routing_commands_from_configuration_preset(
+                fallback_sources.get(client_id).and_then(Option::as_ref),
+            )
+        }
+    };
+    Ok((
+        resolve(
+            ospf.left_adapter_definition_id.as_deref(),
+            &plan.left_client_id,
+        )?,
+        resolve(
+            ospf.right_adapter_definition_id.as_deref(),
+            &plan.right_client_id,
+        )?,
+    ))
+}
+
+fn routing_adapter_from_definition(
+    definition: &NetworkAdapterDefinitionView,
+) -> Result<RoutingCostAdapterCommands, ApiError> {
+    validate_network_adapter_definition_view(definition)
         .map_err(|_| ApiError::conflict("routing_cost_adapter_definition_invalid"))?;
     let contract_version = definition
         .definition
@@ -1151,7 +1516,7 @@ async fn resolve_routing_adapter(
     Ok(RoutingCostAdapterCommands {
         source: vpsman_common::RoutingCostCommandSource::PlanOverride,
         definition_id: definition.id.to_string(),
-        definition_name: definition.name,
+        definition_name: definition.name.clone(),
         definition_hash: payload_hash(&definition_json),
         status,
         update,

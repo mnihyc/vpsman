@@ -1147,24 +1147,21 @@ async fn request_all_agent_disconnects(state: &GatewayState, reason: &str) {
     }
 }
 
-async fn register_session(state: &GatewayState, client_id: &str, session: GatewaySession) {
+async fn register_session_after_accepted_hello(
+    state: &GatewayState,
+    client_id: &str,
+    session: GatewaySession,
+) {
     let lifecycle_owner = state.client_lifecycle_owner(client_id).await;
     let _client_lifecycle = lifecycle_owner.write().await;
-    if state
+    // The API accepted this exact hello only after committing the durable
+    // online/auto-unsuspend transition. Reconcile the gateway-local fence
+    // under the same per-client owner that installs the accepted session.
+    state
         .client_suspension_fences
-        .read()
+        .write()
         .await
-        .get(client_id)
-        .copied()
-        .is_some_and(|fence| fence.active_at(std::time::Instant::now()))
-    {
-        let _ = session
-            .close_tx
-            .send(Some(GatewaySessionCloseRequest::Graceful(
-                "agent_suspended".to_string(),
-            )));
-        return;
-    }
+        .remove(client_id);
     let previous = state
         .sessions
         .write()
@@ -1349,7 +1346,7 @@ async fn handle_agent_frame(
             *client_id = Some(hello.client_id.clone());
             *process_incarnation_id = Some(hello.process_incarnation_id);
             context.ownership.set_client_id(hello.client_id.clone());
-            register_session(
+            register_session_after_accepted_hello(
                 context.state,
                 &hello.client_id,
                 GatewaySession {

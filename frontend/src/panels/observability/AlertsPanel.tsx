@@ -15,6 +15,8 @@ import {
 } from "../FleetWorkspace";
 import type {
   AgentView,
+  AlertConfigurationBulkRequest,
+  AlertConfigurationBulkResponse,
   FleetAlertNotificationChannelRecord,
   FleetAlertNotificationChannelRequest,
   FleetAlertNotificationDeliveryRecord,
@@ -47,14 +49,12 @@ type AlertsPanelProps = {
   fleetAlertHistory: FleetAlertRecord[];
   fleetAlertHistoryEvidenceAvailable: boolean;
   fleetAlertHistoryTruncated: boolean;
-  onDeleteFleetAlertNotificationChannel: (
-    channelId: string,
-    reviewedName: string,
-  ) => Promise<void>;
-  onDeleteFleetAlertPolicy: (
-    policyId: string,
-    reviewedName: string,
-  ) => Promise<void>;
+  onBulkMutateFleetAlertNotificationChannels: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
+  onBulkMutateFleetAlertPolicies: (
+    request: AlertConfigurationBulkRequest,
+  ) => Promise<AlertConfigurationBulkResponse>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -95,8 +95,8 @@ export function AlertsPanel({
   fleetAlertHistory,
   fleetAlertHistoryEvidenceAvailable,
   fleetAlertHistoryTruncated,
-  onDeleteFleetAlertNotificationChannel,
-  onDeleteFleetAlertPolicy,
+  onBulkMutateFleetAlertNotificationChannels,
+  onBulkMutateFleetAlertPolicies,
   onDispatchFleetAlertNotifications,
   onDryRunFleetAlertPolicy,
   onOpenFleetAlerts,
@@ -196,7 +196,7 @@ export function AlertsPanel({
                 detail={
                   !fleetAlertsEvidenceAvailable
                     ? "Current alert evidence is unavailable; cached rows are not presented as current"
-                    : `${activeFleetAlerts} active · ${unknownFleetAlerts} Unknown · ${actionableFleetAlerts} actionable${malformedFleetAlerts ? ` · ${malformedFleetAlerts} malformed` : ""}${fleetAlertsTruncated ? " in the loaded current page; more may exist" : ""}`
+                    : `${activeFleetAlerts} active · ${unknownFleetAlerts} Unknown · ${actionableFleetAlerts} actionable${malformedFleetAlerts ? ` · ${malformedFleetAlerts} malformed` : ""}${fleetAlertsTruncated ? " in capped current evidence; open triage to search current occurrences or narrow scope" : ""}`
                 }
                 label="Current alert episodes"
                 onAction={onOpenFleetAlerts}
@@ -215,7 +215,7 @@ export function AlertsPanel({
                   !fleetAlertHistoryEvidenceAvailable
                     ? "Alert episode history is unavailable; retained cached rows are not treated as fresh evidence"
                     : fleetAlertHistoryTruncated
-                      ? "Loaded alert episode history is truncated; more episodes may exist"
+                      ? "Only the newest retained-history page is loaded; open history and use an explicit export window for older evidence"
                       : "Condition and occurrence episodes across every lifecycle state"
                 }
                 label="Alert episode history"
@@ -234,7 +234,7 @@ export function AlertsPanel({
                 detail={
                   !currentPolicyAlertsEvidenceAvailable
                     ? "Current policy alert evidence is unavailable"
-                    : `${currentPolicyAlertsTruncated ? `At least ${urgentPolicyAlerts} active warning or critical alerts in the loaded current page; more may exist` : `${urgentPolicyAlerts} active warning or critical alerts`}; ${policyAlertsEvidenceAvailable ? `${policyAlerts.length} issued record${policyAlerts.length === 1 ? "" : "s"}${policyAlertHistoryTruncated ? " in the loaded history" : ""}` : "policy alert history unavailable"}`
+                    : `${currentPolicyAlertsTruncated ? `At least ${urgentPolicyAlerts} active warning or critical alerts in capped current evidence; open Policies and narrow the selector or policy` : `${urgentPolicyAlerts} active warning or critical alerts`}; ${policyAlertsEvidenceAvailable ? `${policyAlerts.length} issued record${policyAlerts.length === 1 ? "" : "s"}${policyAlertHistoryTruncated ? " in the newest history page; use an explicit alert export window for older evidence" : ""}` : "policy alert history unavailable"}`
                 }
                 label="Policy alert history"
                 onAction={() => setActiveTab("policies")}
@@ -259,7 +259,7 @@ export function AlertsPanel({
               />
               <MetricTile
                 actionLabel="Open failed deliveries"
-                detail={`${failedDeliveries} failed retained notification deliveries${fleetAlertNotificationsTruncated ? " in the loaded page" : ""}`}
+                detail={`${failedDeliveries} failed retained notification deliveries${fleetAlertNotificationsTruncated ? " in the newest loaded page; open failed deliveries and narrow the search" : ""}`}
                 label="Delivery history"
                 onAction={openDeliveryEvidence}
                 value={formatBoundedCount(
@@ -350,7 +350,7 @@ export function AlertsPanel({
               alertsEvidenceAvailable={policyAlertsEvidenceAvailable}
               alertsTruncated={policyAlertHistoryTruncated}
               canManagePolicies={canManageAlertPolicies}
-              onDelete={onDeleteFleetAlertPolicy}
+              onBulkMutate={onBulkMutateFleetAlertPolicies}
               onDryRun={onDryRunFleetAlertPolicy}
               onEditorOpenChange={setPolicyEditorOpen}
               onPolicyFocusChange={onPolicyFocusChange}
@@ -387,7 +387,7 @@ export function AlertsPanel({
               agents={agents}
               channels={fleetAlertNotificationChannels}
               deliveries={fleetAlertNotifications}
-              onDelete={onDeleteFleetAlertNotificationChannel}
+              onBulkMutate={onBulkMutateFleetAlertNotificationChannels}
               onDispatch={onDispatchFleetAlertNotifications}
               onOpenDeliveries={openDeliveryEvidence}
               onPreviewRows={previewDeliveries}

@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     net::IpAddr,
 };
 
 use anyhow::{Context, Result};
-use sqlx::{types::Json as SqlJson, Row};
+use sqlx::{types::Json as SqlJson, QueryBuilder, Row};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -17,8 +17,8 @@ use crate::{
     model::*,
     repository::Repository,
     repository_key_lifecycle::{
-        lock_postgres_definition_lifecycles_in_tx, lock_postgres_definitions_and_clients_in_tx,
-        require_visible_postgres_clients_in_tx,
+        lock_postgres_client_lifecycles_in_tx, lock_postgres_definition_lifecycles_in_tx,
+        lock_postgres_definitions_and_clients_in_tx, require_visible_postgres_clients_in_tx,
     },
     repository_network_observations::deactivate_postgres_automatic_observation_series_for_plan,
     repository_operational_alerts::reconcile_postgres_tunnel_alerts_for_clients_in_tx,
@@ -53,6 +53,23 @@ pub(crate) struct TunnelPlanIdentity {
     pub(crate) revision: i64,
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TunnelPlanLifecycleUpdate {
+    pub(crate) plan_id: Uuid,
+    pub(crate) expected_revision: i64,
+    pub(crate) enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TunnelPlanLifecycleUpdateResult {
+    Updated(TunnelPlanView),
+    Unchanged(TunnelPlanView),
+    Rejected {
+        plan_id: Uuid,
+        error_code: &'static str,
+    },
 }
 
 impl Repository {
@@ -780,46 +797,64 @@ impl Repository {
         enabled: bool,
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
-        let existing = self
-            .get_tunnel_plan_record(plan_id)
+        let result = self
+            .set_tunnel_plans_enabled_bulk(
+                &[TunnelPlanLifecycleUpdate {
+                    plan_id,
+                    expected_revision,
+                    enabled,
+                }],
+                operator,
+            )
             .await?
-            .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
-        let ospf_status = if enabled && existing.plan.ospf.is_some() {
-            "unverified"
-        } else {
-            "disabled"
+            .into_iter()
+            .next()
+            .context("tunnel_plan_lifecycle_result_missing")?;
+        let plan = match result {
+            TunnelPlanLifecycleUpdateResult::Updated(plan)
+            | TunnelPlanLifecycleUpdateResult::Unchanged(plan) => plan,
+            TunnelPlanLifecycleUpdateResult::Rejected { error_code, .. } => {
+                anyhow::bail!(error_code)
+            }
         };
+        Ok(self.enrich_committed_tunnel_plan_best_effort(plan).await)
+    }
+
+    pub(crate) async fn set_tunnel_plans_enabled_bulk(
+        &self,
+        updates: &[TunnelPlanLifecycleUpdate],
+        operator: &AuthContext,
+    ) -> Result<Vec<TunnelPlanLifecycleUpdateResult>> {
+        anyhow::ensure!(
+            (1..=500).contains(&updates.len()),
+            "tunnel_plan_lifecycle_items_invalid"
+        );
+        let requested_ids = updates
+            .iter()
+            .map(|update| update.plan_id)
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            requested_ids.len() == updates.len(),
+            "tunnel_plan_lifecycle_items_duplicate"
+        );
+        let enabled = updates[0].enabled;
+        anyhow::ensure!(
+            updates.iter().all(|update| update.enabled == enabled),
+            "tunnel_plan_lifecycle_action_mixed"
+        );
+
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                lock_visible_postgres_tunnel_endpoints(
-                    &mut tx,
-                    plan_id,
-                    &existing.left_client_id,
-                    &existing.right_client_id,
-                )
-                .await?;
-                let row = sqlx::query(
+                let definition_ids = requested_ids
+                    .iter()
+                    .map(|plan_id| format!("tunnel-plan:{plan_id}"))
+                    .collect::<Vec<_>>();
+                lock_postgres_definition_lifecycles_in_tx(&mut tx, &definition_ids).await?;
+
+                let locked_rows = sqlx::query(
                     r#"
-                    UPDATE tunnel_plans
-                    SET enabled = $2,
-                        actor_id = $3,
-                        revision = revision + 1,
-                        ospf_status = $4,
-                        left_ospf_status = $4,
-                        right_ospf_status = $4,
-                        desired_ospf_cost = NULL,
-                        left_current_ospf_cost = NULL,
-                        right_current_ospf_cost = NULL,
-                        left_ospf_job_id = NULL,
-                        right_ospf_job_id = NULL,
-                        connection_assessment = 'automatic',
-                        connection_assessment_note = NULL,
-                        connection_assessed_at = NULL,
-                        connection_assessed_by = NULL,
-                        updated_at = clock_timestamp()
-                    WHERE id = $1 AND deleted_at IS NULL AND revision = $5
-                    RETURNING
+                    SELECT
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
@@ -832,50 +867,260 @@ impl Repository {
                         updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at,
                         deleted_by, deleted_reason
+                    FROM tunnel_plans
+                    WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
+                    ORDER BY id
                     "#,
                 )
-                .bind(plan_id)
-                .bind(enabled)
-                .bind(persisted_actor_id(operator))
-                .bind(ospf_status)
-                .bind(expected_revision)
-                .fetch_optional(&mut *tx)
+                .bind(requested_ids.iter().copied().collect::<Vec<_>>())
+                .fetch_all(&mut *tx)
                 .await?;
-                let row = row.ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
-                let updated = tunnel_plan_from_row(&row)?;
-                if !enabled {
-                    deactivate_postgres_automatic_observation_series_for_plan(
-                        &mut tx, plan_id, None,
+                let plans = locked_rows
+                    .into_iter()
+                    .map(|row| {
+                        let plan = tunnel_plan_from_row(&row)?;
+                        Ok((plan.id, plan))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+
+                let mut required_client_ids = BTreeSet::new();
+                for update in updates {
+                    let Some(plan) = plans.get(&update.plan_id) else {
+                        continue;
+                    };
+                    if plan.revision != update.expected_revision {
+                        continue;
+                    }
+                    if enabled || plan.enabled != enabled {
+                        anyhow::ensure!(
+                            plan.left_client_id != plan.right_client_id,
+                            "tunnel_plan_endpoints_must_differ"
+                        );
+                        required_client_ids.insert(plan.left_client_id.clone());
+                        required_client_ids.insert(plan.right_client_id.clone());
+                    }
+                }
+                let required_client_ids = required_client_ids.into_iter().collect::<Vec<_>>();
+                lock_postgres_client_lifecycles_in_tx(&mut tx, &required_client_ids).await?;
+                let visible_client_ids = if required_client_ids.is_empty() {
+                    BTreeSet::new()
+                } else {
+                    sqlx::query_scalar::<_, String>(
+                        r#"
+                        SELECT id
+                        FROM visible_clients
+                        WHERE id = ANY($1::text[])
+                        ORDER BY id
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&required_client_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                };
+
+                let mut changed = Vec::new();
+                let mut results = BTreeMap::new();
+                for update in updates {
+                    let Some(plan) = plans.get(&update.plan_id) else {
+                        results.insert(
+                            update.plan_id,
+                            TunnelPlanLifecycleUpdateResult::Rejected {
+                                plan_id: update.plan_id,
+                                error_code: "tunnel_plan_not_found",
+                            },
+                        );
+                        continue;
+                    };
+                    if plan.revision != update.expected_revision {
+                        results.insert(
+                            update.plan_id,
+                            TunnelPlanLifecycleUpdateResult::Rejected {
+                                plan_id: update.plan_id,
+                                error_code: "tunnel_plan_snapshot_stale",
+                            },
+                        );
+                        continue;
+                    }
+                    if (enabled || plan.enabled != enabled)
+                        && (!visible_client_ids.contains(&plan.left_client_id)
+                            || !visible_client_ids.contains(&plan.right_client_id))
+                    {
+                        results.insert(
+                            update.plan_id,
+                            TunnelPlanLifecycleUpdateResult::Rejected {
+                                plan_id: update.plan_id,
+                                error_code: "tunnel_plan_endpoint_agent_not_found",
+                            },
+                        );
+                        continue;
+                    }
+                    if plan.enabled == enabled {
+                        results.insert(
+                            update.plan_id,
+                            TunnelPlanLifecycleUpdateResult::Unchanged(plan.clone()),
+                        );
+                    } else {
+                        changed.push((update, plan));
+                    }
+                }
+
+                if !changed.is_empty() {
+                    let changed_ids = changed
+                        .iter()
+                        .map(|(update, _)| update.plan_id)
+                        .collect::<Vec<_>>();
+                    let expected_revisions = changed
+                        .iter()
+                        .map(|(update, _)| update.expected_revision)
+                        .collect::<Vec<_>>();
+                    let ospf_statuses = changed
+                        .iter()
+                        .map(|(_, plan)| {
+                            if enabled && plan.plan.ospf.is_some() {
+                                "unverified"
+                            } else {
+                                "disabled"
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let updated_rows = sqlx::query(
+                        r#"
+                        WITH requested(id, expected_revision, ospf_status) AS (
+                            SELECT *
+                            FROM unnest($1::uuid[], $2::bigint[], $3::text[])
+                        )
+                        UPDATE tunnel_plans AS target
+                        SET enabled = $4,
+                            actor_id = $5,
+                            revision = target.revision + 1,
+                            ospf_status = requested.ospf_status,
+                            left_ospf_status = requested.ospf_status,
+                            right_ospf_status = requested.ospf_status,
+                            desired_ospf_cost = NULL,
+                            left_current_ospf_cost = NULL,
+                            right_current_ospf_cost = NULL,
+                            left_ospf_job_id = NULL,
+                            right_ospf_job_id = NULL,
+                            connection_assessment = 'automatic',
+                            connection_assessment_note = NULL,
+                            connection_assessed_at = NULL,
+                            connection_assessed_by = NULL,
+                            updated_at = clock_timestamp()
+                        FROM requested
+                        WHERE target.id = requested.id
+                          AND target.deleted_at IS NULL
+                          AND target.revision = requested.expected_revision
+                          AND target.enabled <> $4
+                        RETURNING
+                            target.id, target.name, target.kind, target.enabled, target.revision,
+                            target.left_client_id, target.right_client_id,
+                            target.input, target.plan, target.builtin_credentials,
+                            target.recommended_ospf_cost,
+                            target.ospf_status, target.left_ospf_status, target.right_ospf_status,
+                            target.desired_ospf_cost, target.left_current_ospf_cost,
+                            target.right_current_ospf_cost,
+                            target.left_ospf_job_id, target.right_ospf_job_id,
+                            target.connection_assessment, target.connection_assessment_note,
+                            target.connection_assessed_at::text AS connection_assessed_at,
+                            target.connection_assessed_by,
+                            target.created_at::text AS created_at,
+                            target.updated_at::text AS updated_at,
+                            target.deleted_at::text AS deleted_at,
+                            target.deleted_by, target.deleted_reason
+                        "#,
+                    )
+                    .bind(&changed_ids)
+                    .bind(&expected_revisions)
+                    .bind(&ospf_statuses)
+                    .bind(enabled)
+                    .bind(persisted_actor_id(operator))
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    let updated = updated_rows
+                        .into_iter()
+                        .map(|row| {
+                            let plan = tunnel_plan_from_row(&row)?;
+                            Ok((plan.id, plan))
+                        })
+                        .collect::<Result<BTreeMap<_, _>>>()?;
+
+                    if !enabled {
+                        sqlx::query(
+                            r#"
+                            UPDATE network_observation_series
+                            SET active = FALSE
+                            WHERE plan_id = ANY($1::uuid[]) AND active = TRUE
+                            "#,
+                        )
+                        .bind(&changed_ids)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+
+                    let action = if enabled {
+                        "network.tunnel_plan_enabled"
+                    } else {
+                        "network.tunnel_plan_disabled"
+                    };
+                    let mut audit = QueryBuilder::new(
+                        "INSERT INTO audit_logs \
+                         (id, actor_id, action, target, command_hash, metadata) ",
+                    );
+                    audit.push_values(updated.values(), |mut values, plan| {
+                        values
+                            .push_bind(Uuid::new_v4())
+                            .push_bind(persisted_actor_id(operator))
+                            .push_bind(action)
+                            .push_bind(format!("tunnel_plan:{}", plan.id))
+                            .push_bind(Option::<String>::None)
+                            .push_bind(tunnel_plan_enabled_metadata(plan, operator));
+                    });
+                    audit.build().execute(&mut *tx).await?;
+
+                    let affected_client_ids = updated
+                        .values()
+                        .flat_map(|plan| {
+                            [plan.left_client_id.clone(), plan.right_client_id.clone()]
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                        &mut tx,
+                        &affected_client_ids,
                     )
                     .await?;
+
+                    for (update, _) in &changed {
+                        if let Some(plan) = updated.get(&update.plan_id) {
+                            results.insert(
+                                update.plan_id,
+                                TunnelPlanLifecycleUpdateResult::Updated(plan.clone()),
+                            );
+                        } else {
+                            results.insert(
+                                update.plan_id,
+                                TunnelPlanLifecycleUpdateResult::Rejected {
+                                    plan_id: update.plan_id,
+                                    error_code: "tunnel_plan_snapshot_stale",
+                                },
+                            );
+                        }
+                    }
                 }
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, $3, $4, NULL, $5)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(persisted_actor_id(operator))
-                .bind(if enabled {
-                    "network.tunnel_plan_enabled"
-                } else {
-                    "network.tunnel_plan_disabled"
-                })
-                .bind(format!("tunnel_plan:{plan_id}"))
-                .bind(tunnel_plan_enabled_metadata(&updated, operator))
-                .execute(&mut *tx)
-                .await?;
-                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
-                    &mut tx,
-                    &[
-                        existing.left_client_id.clone(),
-                        existing.right_client_id.clone(),
-                    ],
-                )
-                .await?;
+
                 tx.commit().await?;
-                Ok(self.enrich_committed_tunnel_plan_best_effort(updated).await)
+                updates
+                    .iter()
+                    .map(|update| {
+                        results
+                            .remove(&update.plan_id)
+                            .context("tunnel_plan_lifecycle_result_missing")
+                    })
+                    .collect()
             }
         }
     }

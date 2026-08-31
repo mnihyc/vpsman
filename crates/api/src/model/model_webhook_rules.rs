@@ -55,6 +55,45 @@ pub(crate) struct DeleteWebhookRuleRequest {
     pub(crate) reviewed_name: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WebhookRuleBulkAction {
+    Enable,
+    Disable,
+    Delete,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WebhookRuleBulkItem {
+    pub(crate) id: Uuid,
+    pub(crate) reviewed_name: String,
+    pub(crate) expected_updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WebhookRuleBulkRequest {
+    pub(crate) action: WebhookRuleBulkAction,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) items: Vec<WebhookRuleBulkItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WebhookRuleBulkOutcome {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) result: String,
+    pub(crate) record: Option<WebhookRuleView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WebhookRuleBulkResponse {
+    pub(crate) action: WebhookRuleBulkAction,
+    pub(crate) outcomes: Vec<WebhookRuleBulkOutcome>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WebhookRuleDeliveryView {
     pub(crate) id: Uuid,

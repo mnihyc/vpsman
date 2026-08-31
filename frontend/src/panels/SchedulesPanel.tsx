@@ -58,7 +58,11 @@ import { useReviewGenerationGuard } from "../hooks/useReviewGenerationGuard";
 import { formatLowerBoundCount } from "../constants";
 import type {
   AgentView,
+  BulkResolveManyRequest,
+  BulkResolveManyResponse,
   BulkResolveResponse,
+  BulkUpdateScheduleTargetsRequest,
+  BulkUpdateScheduleTargetsResponse,
   CommandTemplateRecord,
   CreateJobResponse,
   CreateScheduleRequest,
@@ -71,7 +75,6 @@ import type {
   ScheduleRecord,
   ScheduleTriggerKind,
   UpdateScheduleRequest,
-  UpdateScheduleTargetsRequest,
 } from "../types";
 import {
   formatCompactTime,
@@ -87,6 +90,7 @@ import {
   SCHEDULE_EVENT_EXPRESSION_EXAMPLES,
   scheduleEventExpressionValidationMessage,
 } from "../eventExpression";
+
 import {
   ALERT_EVENT_ARGV_CONTROL_TOKENS,
   ALERT_EVENT_ARGV_HELPER_TOKENS,
@@ -96,6 +100,7 @@ import {
   ALERT_EVENT_ARGV_SCALAR_PATHS,
 } from "../generated/protocolContracts";
 
+const SCHEDULE_TARGET_UPDATE_BATCH_LIMIT = 500;
 const SCHEDULE_SELECTOR_STORAGE_KEY = "vpsman.schedules.selectorExpression";
 const EVENT_SCHEDULE_NOOP_ARGV = ["/bin/true"];
 const EVENT_SCHEDULE_ECHO_RECIPE =
@@ -150,9 +155,10 @@ export function SchedulesPanel({
   onOpenScheduledRuns,
   onPreviewEventTemplate,
   onRefresh,
+  onResolveManyTargets,
   onResolveTargets,
   onUpdateSchedule,
-  onUpdateScheduleTargets,
+  onBulkUpdateScheduleTargets,
   privilegeMaterial,
   schedules,
   schedulesTruncated,
@@ -191,6 +197,9 @@ export function SchedulesPanel({
     request: EventScheduleTemplatePreviewRequest,
   ) => Promise<EventScheduleTemplatePreviewResponse>;
   onRefresh: () => Promise<void>;
+  onResolveManyTargets: (
+    request: BulkResolveManyRequest,
+  ) => Promise<BulkResolveManyResponse>;
   onResolveTargets: (
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
@@ -198,10 +207,9 @@ export function SchedulesPanel({
     scheduleId: string,
     request: UpdateScheduleRequest,
   ) => Promise<void>;
-  onUpdateScheduleTargets: (
-    scheduleId: string,
-    request: UpdateScheduleTargetsRequest,
-  ) => Promise<void>;
+  onBulkUpdateScheduleTargets: (
+    request: BulkUpdateScheduleTargetsRequest,
+  ) => Promise<BulkUpdateScheduleTargetsResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
   schedules: ScheduleRecord[];
   schedulesTruncated: boolean;
@@ -1138,7 +1146,6 @@ export function SchedulesPanel({
     setPending(true);
     setScheduleLifecycleFeedback(null);
     setScheduleActionError(null);
-    let completedTargetUpdates = 0;
     try {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
@@ -1157,18 +1164,44 @@ export function SchedulesPanel({
               }),
           })),
         );
-        for (const update of reviewedUpdates) {
-          await onUpdateScheduleTargets(update.schedule.id, {
+        const response = await onBulkUpdateScheduleTargets({
+          confirmed: true,
+          items: reviewedUpdates.map((update) => ({
+            schedule_id: update.schedule.id,
             expected_definition_revision: update.schedule.definition_revision,
-            confirmed: true,
             privilege_assertion: update.privilegeAssertion,
+          })),
+        });
+        assertOrderedScheduleTargetOutcomes(reviewedUpdates, response);
+        const rejectedUpdates = reviewedUpdates.filter(
+          (_, index) => response.outcomes[index]?.status === "rejected",
+        );
+        const updatedCount = reviewedUpdates.length - rejectedUpdates.length;
+        if (rejectedUpdates.length > 0) {
+          setScheduleAction({
+            ...action,
+            selectedCount: rejectedUpdates.length,
+            updates: rejectedUpdates,
           });
-          completedTargetUpdates += 1;
+          const reasons = Array.from(
+            new Set(
+              response.outcomes
+                .filter((outcome) => outcome.status === "rejected")
+                .map(
+                  (outcome) =>
+                    outcome.error_code ?? "schedule target update rejected",
+                ),
+            ),
+          );
+          setScheduleActionError(
+            `${updatedCount} of ${reviewedUpdates.length} target snapshots updated; ${rejectedUpdates.length} rejected (${reasons.join(", ")}). Review the remaining schedules and retry.`,
+          );
+          return;
         }
         setScheduleAction(null);
         setScheduleLifecycleFeedback({
           message: `Updated fixed targets for ${countPhrase(
-            completedTargetUpdates,
+            updatedCount,
             "schedule",
           )}`,
           tone: "success",
@@ -1247,18 +1280,7 @@ export function SchedulesPanel({
     } catch (error) {
       const detail =
         error instanceof Error ? error.message : "Schedule action failed";
-      if (action.type === "targetUpdate" && completedTargetUpdates > 0) {
-        setScheduleAction({
-          ...action,
-          selectedCount: action.updates.length - completedTargetUpdates,
-          updates: action.updates.slice(completedTargetUpdates),
-        });
-        setScheduleActionError(
-          `${completedTargetUpdates} of ${action.updates.length} target snapshots updated before the failure: ${detail}`,
-        );
-      } else {
-        setScheduleActionError(detail);
-      }
+      setScheduleActionError(detail);
     } finally {
       setPending(false);
     }
@@ -1271,6 +1293,13 @@ export function SchedulesPanel({
         !scheduleOperationInvalid(schedule) &&
         scheduleTargetsNeedUpdate(schedule, agents, vpsRuleSearch),
     );
+    if (candidates.length > SCHEDULE_TARGET_UPDATE_BATCH_LIMIT) {
+      setScheduleLifecycleFeedback({
+        message: `Update targets accepts at most ${SCHEDULE_TARGET_UPDATE_BATCH_LIMIT} changed schedules in one reviewed batch; narrow the selection and retry.`,
+        tone: "warning",
+      });
+      return;
+    }
     if (candidates.length === 0) {
       setScheduleLifecycleFeedback({
         message:
@@ -1289,20 +1318,28 @@ export function SchedulesPanel({
     });
     setScheduleActionError(null);
     try {
-      const resolvedBySelector = new Map<string, string[]>();
+      const selectors = Array.from(
+        new Set(
+          candidates.map((schedule) => schedule.selector_expression.trim()),
+        ),
+      );
+      const resolution = await onResolveManyTargets({
+        items: selectors.map((selector_expression) => ({
+          selector_expression,
+        })),
+      });
+      assertOrderedSelectorResolution(selectors, resolution);
+      const resolvedBySelector = new Map(
+        resolution.outcomes.map((outcome) => [
+          outcome.selector_expression,
+          outcome.target_client_ids,
+        ]),
+      );
       const updates: ScheduleTargetUpdate[] = [];
       for (const schedule of candidates) {
         const selectorExpressionForIntent = schedule.selector_expression.trim();
-        let targetClientIds = resolvedBySelector.get(
-          selectorExpressionForIntent,
-        );
-        if (!targetClientIds) {
-          const resolved = await onResolveTargets({
-            selector_expression: selectorExpressionForIntent,
-          });
-          targetClientIds = resolved.targets.map((target) => target.id);
-          resolvedBySelector.set(selectorExpressionForIntent, targetClientIds);
-        }
+        const targetClientIds =
+          resolvedBySelector.get(selectorExpressionForIntent) ?? [];
         if (sameStringSet(fixedTargetIds(schedule), targetClientIds)) {
           continue;
         }
@@ -1599,14 +1636,19 @@ export function SchedulesPanel({
       description: (rows) =>
         describeScheduleTargetUpdate(rows, agents, vpsRuleSearch),
       label: "Update targets",
-      disabled: (rows) =>
-        pending ||
-        rows.length === 0 ||
-        !rows.some(
-          (schedule) =>
-            !scheduleOperationInvalid(schedule) &&
-            scheduleTargetsNeedUpdate(schedule, agents, vpsRuleSearch),
-        ),
+      disabled: (rows) => {
+        const changedCount = scheduleTargetUpdateCandidates(
+          rows,
+          agents,
+          vpsRuleSearch,
+        ).length;
+        return (
+          pending ||
+          rows.length === 0 ||
+          changedCount === 0 ||
+          changedCount > SCHEDULE_TARGET_UPDATE_BATCH_LIMIT
+        );
+      },
       icon: <Target size={14} />,
       onSelect: (rows) => void reviewScheduleTargetUpdates(rows),
     },
@@ -2830,11 +2872,10 @@ function describeScheduleTargetUpdate(
   if (rows.length === 0) {
     return "Select schedules to update their saved targets.";
   }
-  const changed = rows.filter(
-    (schedule) =>
-      !scheduleOperationInvalid(schedule) &&
-      scheduleTargetsNeedUpdate(schedule, agents, context),
-  );
+  const changed = scheduleTargetUpdateCandidates(rows, agents, context);
+  if (changed.length > SCHEDULE_TARGET_UPDATE_BATCH_LIMIT) {
+    return `Update targets accepts at most ${SCHEDULE_TARGET_UPDATE_BATCH_LIMIT} changed schedules in one reviewed batch; narrow the selection by ${changed.length - SCHEDULE_TARGET_UPDATE_BATCH_LIMIT} or more.`;
+  }
   if (changed.length > 0) {
     return `Update ${changed.length} of ${rows.length} selected ${
       rows.length === 1 ? "schedule" : "schedules"
@@ -2863,6 +2904,18 @@ function describeScheduleTargetUpdate(
   return rows.length === 1
     ? `${schedule.name}'s saved fixed targets already match its current audit selector resolution.`
     : "All selected schedules already match their current audit selector resolution.";
+}
+
+function scheduleTargetUpdateCandidates(
+  rows: ScheduleRecord[],
+  agents: AgentView[],
+  context: AgentSearchContext,
+): ScheduleRecord[] {
+  return rows.filter(
+    (schedule) =>
+      !scheduleOperationInvalid(schedule) &&
+      scheduleTargetsNeedUpdate(schedule, agents, context),
+  );
 }
 
 function currentScheduleTargetIds(
@@ -2936,6 +2989,40 @@ function sameStringSet(left: string[], right: string[]): boolean {
   return normalizedLeft.every(
     (value, index) => value === normalizedRight[index],
   );
+}
+
+function assertOrderedSelectorResolution(
+  selectors: string[],
+  response: BulkResolveManyResponse,
+): void {
+  if (
+    response.outcomes.length !== selectors.length ||
+    response.outcomes.some(
+      (outcome, index) =>
+        outcome.selector_expression !== selectors[index] ||
+        outcome.target_count !== outcome.target_client_ids.length,
+    )
+  ) {
+    throw new Error("Target resolution returned an invalid ordered result set");
+  }
+}
+
+function assertOrderedScheduleTargetOutcomes(
+  updates: Array<{ schedule: ScheduleRecord }>,
+  response: BulkUpdateScheduleTargetsResponse,
+): void {
+  if (
+    response.outcomes.length !== updates.length ||
+    response.outcomes.some(
+      (outcome, index) =>
+        outcome.schedule_id !== updates[index]?.schedule.id ||
+        (outcome.status !== "updated" && outcome.status !== "rejected"),
+    )
+  ) {
+    throw new Error(
+      "Schedule target update returned an invalid ordered result set",
+    );
+  }
 }
 
 function operationToCommandText(operation: JobOperation): string {

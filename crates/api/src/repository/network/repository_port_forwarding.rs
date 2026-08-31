@@ -1,4 +1,7 @@
-use std::{collections::HashMap, net::IpAddr};
+use std::{
+    collections::{BTreeSet, HashMap},
+    net::IpAddr,
+};
 
 use anyhow::{Context, Result};
 use sqlx::{types::Json as SqlJson, Row};
@@ -1579,91 +1582,131 @@ pub(crate) async fn lock_postgres_port_forward_client(
     Ok(())
 }
 
-pub(crate) async fn postgres_port_forwarding_blocks_agent_delete(
+pub(crate) async fn lock_postgres_port_forward_clients(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
-) -> Result<bool> {
-    let desired_or_pending = sqlx::query_scalar::<_, bool>(
+    client_ids: &[String],
+) -> Result<()> {
+    lock_postgres_client_lifecycles_in_tx(tx, client_ids).await?;
+    let lock_keys = client_ids
+        .iter()
+        .map(|client_id| format!("vpsman:port-forwarding:{client_id}"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    sqlx::query(
         r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM port_forward_rules
-            WHERE client_id = $1
-              AND (
-                    (deleted_at IS NULL AND enabled)
-                 OR (deleted_at IS NOT NULL AND removal_confirmed_at IS NULL AND forgotten_at IS NULL)
-              )
-        )
+        SELECT pg_advisory_xact_lock(hashtextextended(lock_key, 0))
+        FROM unnest($1::text[]) AS requested(lock_key)
+        ORDER BY lock_key COLLATE "C"
         "#,
     )
-    .bind(client_id)
-    .fetch_one(&mut **tx)
+    .bind(lock_keys)
+    .execute(&mut **tx)
     .await?;
-    if desired_or_pending {
-        return Ok(true);
-    }
-    let snapshot = sqlx::query_scalar::<_, SqlJson<serde_json::Value>>(
-        "SELECT snapshot FROM port_forward_runtime_state WHERE client_id = $1",
-    )
-    .bind(client_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(snapshot) = snapshot else {
-        return Ok(false);
-    };
-    let snapshot = match serde_json::from_value::<PortForwardRuntimeSnapshot>(snapshot.0) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            warn!(
-                event = "port_forward_runtime_snapshot_corrupt",
-                client_id = %client_id,
-                error = %error,
-                "malformed runtime evidence conservatively blocks agent deletion"
-            );
-            return Ok(true);
-        }
-    };
-    Ok(snapshot.owned_table_present == Some(true)
-        || (snapshot.owned_table_present.is_none()
-            && matches!(
-                snapshot.status,
-                PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Drifted
-            )
-            && (!snapshot.rules.is_empty() || snapshot.observed_hash.is_some())))
+    Ok(())
 }
 
-pub(crate) async fn archive_postgres_port_forwarding_for_agent_delete(
+pub(crate) async fn postgres_port_forwarding_blocked_clients_for_agent_delete(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
+    client_ids: &[String],
+) -> Result<BTreeSet<String>> {
+    let mut blocked = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT client_id
+        FROM port_forward_rules
+        WHERE client_id=ANY($1)
+          AND (
+                (deleted_at IS NULL AND enabled)
+             OR (deleted_at IS NOT NULL AND removal_confirmed_at IS NULL AND forgotten_at IS NULL)
+          )
+        "#,
+    )
+    .bind(client_ids)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let snapshots = sqlx::query(
+        r#"
+        SELECT client_id, snapshot
+        FROM port_forward_runtime_state
+        WHERE client_id=ANY($1)
+        ORDER BY client_id COLLATE "C"
+        "#,
+    )
+    .bind(client_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in snapshots {
+        let client_id: String = row.try_get("client_id")?;
+        if blocked.contains(&client_id) {
+            continue;
+        }
+        let snapshot = match serde_json::from_value::<PortForwardRuntimeSnapshot>(
+            row.try_get::<SqlJson<serde_json::Value>, _>("snapshot")?.0,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!(
+                    event = "port_forward_runtime_snapshot_corrupt",
+                    client_id = %client_id,
+                    error = %error,
+                    "malformed runtime evidence conservatively blocks agent deletion"
+                );
+                blocked.insert(client_id);
+                continue;
+            }
+        };
+        if snapshot.owned_table_present == Some(true)
+            || (snapshot.owned_table_present.is_none()
+                && matches!(
+                    snapshot.status,
+                    PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Drifted
+                )
+                && (!snapshot.rules.is_empty() || snapshot.observed_hash.is_some()))
+        {
+            blocked.insert(client_id);
+        }
+    }
+    Ok(blocked)
+}
+
+pub(crate) async fn archive_postgres_port_forwarding_for_agent_deletes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_ids: &[String],
     operator_id: Uuid,
     reason: Option<&str>,
-) -> Result<u64> {
+) -> Result<HashMap<String, u64>> {
     let deleted_reason = reason
         .map(|reason| format!("vps_deleted: {reason}"))
         .unwrap_or_else(|| "vps_deleted".to_string());
-    let result = sqlx::query(
+    let rows = sqlx::query_scalar::<_, String>(
         r#"
         UPDATE port_forward_rules
-        SET enabled = FALSE,
-            revision = revision + 1,
-            deleted_at = now(),
-            deleted_by = $2,
-            deleted_reason = $3,
-            removal_confirmed_at = now(),
-            updated_at = now()
-        WHERE client_id = $1 AND deleted_at IS NULL AND enabled = FALSE
+        SET enabled=FALSE, revision=revision + 1, deleted_at=now(),
+            deleted_by=$2, deleted_reason=$3, removal_confirmed_at=now(),
+            updated_at=now()
+        WHERE client_id=ANY($1) AND deleted_at IS NULL AND enabled=FALSE
+        RETURNING client_id
         "#,
     )
-    .bind(client_id)
+    .bind(client_ids)
     .bind(operator_id)
     .bind(deleted_reason)
-    .execute(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    sqlx::query("DELETE FROM port_forward_runtime_state WHERE client_id = $1")
-        .bind(client_id)
+    sqlx::query("DELETE FROM port_forward_runtime_state WHERE client_id=ANY($1)")
+        .bind(client_ids)
         .execute(&mut **tx)
         .await?;
-    Ok(result.rows_affected())
+    let mut counts = client_ids
+        .iter()
+        .map(|client_id| (client_id.clone(), 0_u64))
+        .collect::<HashMap<_, _>>();
+    for client_id in rows {
+        *counts.entry(client_id).or_default() += 1;
+    }
+    Ok(counts)
 }
 
 async fn postgres_port_forward_client_active(

@@ -123,6 +123,89 @@ async fn disconnect_bypasses_full_session_command_queue() {
 }
 
 #[tokio::test]
+async fn disconnect_batch_validates_before_mutation_and_preserves_order() {
+    let state = GatewayState::default();
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    let (close_tx, mut close_rx) = tokio::sync::watch::channel(None::<GatewaySessionCloseRequest>);
+    state.sessions.write().await.insert(
+        "client-b".to_string(),
+        GatewaySession {
+            session_id: uuid::Uuid::new_v4(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            sender,
+            close_tx,
+        },
+    );
+
+    let empty = disconnect_gateway_sessions(
+        &state,
+        GatewaySessionDisconnectBatchRequest {
+            items: vec![GatewaySessionDisconnect {
+                client_id: String::new(),
+                reason: "vps_deleted".to_string(),
+            }],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(empty, "session_disconnect_batch_empty_request_id");
+    assert!(state.sessions.read().await.contains_key("client-b"));
+
+    let duplicate = disconnect_gateway_sessions(
+        &state,
+        GatewaySessionDisconnectBatchRequest {
+            items: vec![
+                GatewaySessionDisconnect {
+                    client_id: "client-b".to_string(),
+                    reason: "vps_deleted".to_string(),
+                },
+                GatewaySessionDisconnect {
+                    client_id: "client-b".to_string(),
+                    reason: "vps_deleted".to_string(),
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        duplicate,
+        "session_disconnect_batch_duplicate_request_id:client-b"
+    );
+    assert!(state.sessions.read().await.contains_key("client-b"));
+
+    let result = disconnect_gateway_sessions(
+        &state,
+        GatewaySessionDisconnectBatchRequest {
+            items: vec![
+                GatewaySessionDisconnect {
+                    client_id: "client-b".to_string(),
+                    reason: "vps_deleted".to_string(),
+                },
+                GatewaySessionDisconnect {
+                    client_id: "client-a".to_string(),
+                    reason: "vps_deleted".to_string(),
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.results[0].client_id, "client-b");
+    assert!(result.results[0].disconnected);
+    assert_eq!(result.results[1].client_id, "client-a");
+    assert!(!result.results[1].disconnected);
+    assert!(state.sessions.read().await.is_empty());
+    close_rx.changed().await.unwrap();
+    assert_eq!(
+        close_rx.borrow().as_ref(),
+        Some(&GatewaySessionCloseRequest::Graceful(
+            "vps_deleted".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
 async fn command_enqueue_before_suspension_fence_is_reported_as_protected() {
     let state = GatewayState::default();
     let process_incarnation_id = uuid::Uuid::new_v4();
@@ -417,6 +500,161 @@ async fn repeated_prepare_keeps_enqueue_protection_and_expired_markers_are_prune
         "prepare already pruned the globally expired marker"
     );
     assert_eq!(state.command_enqueues.read().await.len(), 1);
+}
+
+#[tokio::test]
+async fn suspension_fence_batch_rejects_invalid_shape_before_any_mutation() {
+    let state = GatewayState::default();
+    let token = uuid::Uuid::new_v4();
+
+    let empty = prepare_gateway_client_suspension_fence_batch(
+        &state,
+        GatewayClientSuspensionFencePrepareBatchRequest { items: Vec::new() },
+    )
+    .await
+    .unwrap_err();
+    assert!(empty.contains("size_out_of_range"));
+
+    let duplicate = prepare_gateway_client_suspension_fence_batch(
+        &state,
+        GatewayClientSuspensionFencePrepareBatchRequest {
+            items: vec![
+                GatewayClientSuspensionFencePrepare {
+                    client_id: "client-a".to_string(),
+                    token,
+                    lease_secs: 60,
+                },
+                GatewayClientSuspensionFencePrepare {
+                    client_id: "client-a".to_string(),
+                    token: uuid::Uuid::new_v4(),
+                    lease_secs: 60,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        duplicate,
+        "suspension_fence_batch_duplicate_client_id:client-a"
+    );
+
+    let oversized = prepare_gateway_client_suspension_fence_batch(
+        &state,
+        GatewayClientSuspensionFencePrepareBatchRequest {
+            items: (0..=GATEWAY_CLIENT_SUSPENSION_FENCE_BATCH_MAX_ITEMS)
+                .map(|index| GatewayClientSuspensionFencePrepare {
+                    client_id: format!("client-{index}"),
+                    token: uuid::Uuid::new_v4(),
+                    lease_secs: 60,
+                })
+                .collect(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(oversized.contains("size_out_of_range"));
+    assert!(state.client_suspension_fences.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn suspension_fence_batches_preserve_order_and_isolate_per_client_conflicts() {
+    let state = GatewayState::default();
+    let client_a_token = uuid::Uuid::new_v4();
+    let client_b_token = uuid::Uuid::new_v4();
+    let protected_job_id = uuid::Uuid::new_v4();
+    state.command_enqueues.write().await.insert(
+        ("client-a".to_string(), protected_job_id),
+        GatewayCommandEnqueueMarker {
+            generation: uuid::Uuid::new_v4(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        },
+    );
+    assert!(
+        prepare_gateway_client_suspension_fence(
+            &state,
+            GatewayClientSuspensionFencePrepare {
+                client_id: "client-b".to_string(),
+                token: client_b_token,
+                lease_secs: 60,
+            },
+        )
+        .await
+        .accepted
+    );
+
+    let prepared = prepare_gateway_client_suspension_fence_batch(
+        &state,
+        GatewayClientSuspensionFencePrepareBatchRequest {
+            items: vec![
+                GatewayClientSuspensionFencePrepare {
+                    client_id: "client-b".to_string(),
+                    token: uuid::Uuid::new_v4(),
+                    lease_secs: 60,
+                },
+                GatewayClientSuspensionFencePrepare {
+                    client_id: "client-a".to_string(),
+                    token: client_a_token,
+                    lease_secs: 60,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.results[0].client_id, "client-b");
+    assert!(!prepared.results[0].accepted);
+    assert_eq!(prepared.results[1].client_id, "client-a");
+    assert!(prepared.results[1].accepted);
+    assert_eq!(prepared.results[1].enqueued_job_ids, vec![protected_job_id]);
+
+    let promoted = promote_gateway_client_suspension_fence_batch(
+        &state,
+        GatewayClientSuspensionFencePromoteBatchRequest {
+            items: vec![
+                GatewayClientSuspensionFencePromote {
+                    client_id: "client-b".to_string(),
+                    token: uuid::Uuid::new_v4(),
+                },
+                GatewayClientSuspensionFencePromote {
+                    client_id: "client-a".to_string(),
+                    token: client_a_token,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(promoted.results[0].client_id, "client-b");
+    assert!(!promoted.results[0].accepted);
+    assert_eq!(promoted.results[1].client_id, "client-a");
+    assert!(promoted.results[1].accepted);
+
+    let cleared = clear_gateway_client_suspension_fence_batch(
+        &state,
+        GatewayClientSuspensionFenceClearBatchRequest {
+            items: vec![
+                GatewayClientSuspensionFenceClear {
+                    client_id: "client-a".to_string(),
+                    expected_token: None,
+                    reason: "committed_unsuspend".to_string(),
+                },
+                GatewayClientSuspensionFenceClear {
+                    client_id: "client-b".to_string(),
+                    expected_token: Some(uuid::Uuid::new_v4()),
+                    reason: "stale_compensation".to_string(),
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(cleared.results[0].client_id, "client-a");
+    assert!(cleared.results[0].accepted);
+    assert!(!cleared.results[0].fenced);
+    assert_eq!(cleared.results[1].client_id, "client-b");
+    assert!(!cleared.results[1].accepted);
+    assert!(cleared.results[1].fenced);
 }
 
 #[tokio::test]

@@ -63,6 +63,10 @@ import {
 } from "../hooks/useReviewGenerationGuard";
 import type {
   ActiveView,
+  BulkOperatorMutationItem,
+  BulkOperatorMutationResponse,
+  BulkOperatorSessionRevokeItem,
+  BulkOperatorSessionRevokeResponse,
   JsonValue,
   OperatorAuthEventRecord,
   OperatorView,
@@ -100,11 +104,10 @@ type SystemPanelProps = {
   onDashboardPointDensityChange: (density: SystemDashboardPointDensity) => void;
   onDashboardRefresh: () => void;
   onDashboardWindowChange: (window: SystemDashboardWindow) => void;
-  onClearOperatorTotp: (
-    operatorId: string,
+  onClearOperatorTotps: (
+    items: BulkOperatorMutationItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorMutationResponse>;
   onCreateOperator: (
     username: string,
     role: string,
@@ -122,18 +125,16 @@ type SystemPanelProps = {
     adminRiskAcknowledged: boolean,
     privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
-  onRevokeOperatorSession: (
-    sessionId: string,
+  onRevokeOperatorSessions: (
+    items: BulkOperatorSessionRevokeItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorSessionRevokeResponse>;
   onSelectView: (view: ActiveView, subpage?: string) => void;
-  onSetOperatorStatus: (
-    operatorId: string,
+  onSetOperatorStatuses: (
+    items: BulkOperatorMutationItem[],
     status: "active" | "disabled" | "deleted",
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorMutationResponse>;
   onUpdateOperator: (
     operatorId: string,
     role: string,
@@ -220,6 +221,7 @@ const commonScopeOptions = [
 ];
 const defaultSessionTtlDays = 365;
 const defaultAdminSessionTtlDays = 30;
+const accessBulkActionLimit = 500;
 
 function defaultSessionTtlDaysForRole(role: string): number {
   return role === "admin" ? defaultAdminSessionTtlDays : defaultSessionTtlDays;
@@ -613,14 +615,14 @@ export function SystemPanel({
   onDashboardPointDensityChange,
   onDashboardRefresh,
   onDashboardWindowChange,
-  onClearOperatorTotp,
+  onClearOperatorTotps,
   onCreateOperator,
   onLoadSuiteConfig,
   onOpenPrivilegeUnlock,
   onResetOperatorPassword,
-  onRevokeOperatorSession,
+  onRevokeOperatorSessions,
   onSelectView,
-  onSetOperatorStatus,
+  onSetOperatorStatuses,
   onUpdateOperator,
   onUpdateSuiteConfig,
   onValidateSuiteConfig,
@@ -679,12 +681,12 @@ export function SystemPanel({
         currentOperator={operator}
         loadError={accessError}
         loadLoading={accessLoading}
-        onClearOperatorTotp={onClearOperatorTotp}
+        onClearOperatorTotps={onClearOperatorTotps}
         onCreateOperator={onCreateOperator}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onResetOperatorPassword={onResetOperatorPassword}
-        onRevokeOperatorSession={onRevokeOperatorSession}
-        onSetOperatorStatus={onSetOperatorStatus}
+        onRevokeOperatorSessions={onRevokeOperatorSessions}
+        onSetOperatorStatuses={onSetOperatorStatuses}
         onUpdateOperator={onUpdateOperator}
         operators={operators}
         privilegeMaterial={privilegeMaterial}
@@ -701,7 +703,7 @@ export function SystemPanel({
         loadError={accessError}
         loadLoading={accessLoading}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-        onRevokeOperatorSession={onRevokeOperatorSession}
+        onRevokeOperatorSessions={onRevokeOperatorSessions}
         privilegeMaterial={privilegeMaterial}
         sessions={operatorSessions}
         sessionsTruncated={operatorSessionsTruncated}
@@ -813,6 +815,44 @@ type PendingSessionRevoke = {
   privileges: Record<string, OperatorPrivilegeSnapshot>;
 };
 
+function operatorBulkFailureMessage(
+  response: BulkOperatorMutationResponse,
+  operators: OperatorView[],
+  action: string,
+): string | null {
+  const rejected = response.outcomes.flatMap((outcome, index) =>
+    outcome.status === "succeeded" && outcome.result
+      ? []
+      : [
+          `${operators[index]?.username ?? shortId(outcome.operator_id)}: ${outcome.error_message || outcome.error_code || "no updated operator record returned"}`,
+        ],
+  );
+  if (rejected.length === 0) {
+    return null;
+  }
+  const succeeded = response.outcomes.length - rejected.length;
+  return `${action} ${succeeded} of ${response.outcomes.length} operators. Rejected in request order: ${rejected.join("; ")}. Rejected rows remain selected; review them and retry.`;
+}
+
+function sessionBulkFailureMessage(
+  response: BulkOperatorSessionRevokeResponse,
+  sessions: OperatorSessionRecord[],
+  action: string,
+): string | null {
+  const rejected = response.outcomes.flatMap((outcome, index) =>
+    outcome.status === "succeeded" && outcome.result
+      ? []
+      : [
+          `${sessions[index]?.operator_username ?? shortId(outcome.session_id)} (${shortId(outcome.session_id)}): ${outcome.error_message || outcome.error_code || "no updated session record returned"}`,
+        ],
+  );
+  if (rejected.length === 0) {
+    return null;
+  }
+  const succeeded = response.outcomes.length - rejected.length;
+  return `${action} ${succeeded} of ${response.outcomes.length} bearer sessions. Rejected in request order: ${rejected.join("; ")}. Rejected rows remain selected; review them and retry.`;
+}
+
 type SessionEnrichment = {
   authEvent: OperatorAuthEventRecord | null;
   browser: string;
@@ -861,12 +901,12 @@ export function SystemUsersPanel({
   currentOperator,
   loadError,
   loadLoading,
-  onClearOperatorTotp,
+  onClearOperatorTotps,
   onCreateOperator,
   onOpenPrivilegeUnlock,
   onResetOperatorPassword,
-  onRevokeOperatorSession,
-  onSetOperatorStatus,
+  onRevokeOperatorSessions,
+  onSetOperatorStatuses,
   onUpdateOperator,
   operators,
   privilegeMaterial,
@@ -878,11 +918,10 @@ export function SystemUsersPanel({
   currentOperator: OperatorView | null;
   loadError?: string | null;
   loadLoading?: boolean;
-  onClearOperatorTotp: (
-    operatorId: string,
+  onClearOperatorTotps: (
+    items: BulkOperatorMutationItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorMutationResponse>;
   onCreateOperator: (
     username: string,
     role: string,
@@ -899,17 +938,15 @@ export function SystemUsersPanel({
     adminRiskAcknowledged: boolean,
     privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
-  onRevokeOperatorSession: (
-    sessionId: string,
+  onRevokeOperatorSessions: (
+    items: BulkOperatorSessionRevokeItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
-  onSetOperatorStatus: (
-    operatorId: string,
+  ) => Promise<BulkOperatorSessionRevokeResponse>;
+  onSetOperatorStatuses: (
+    items: BulkOperatorMutationItem[],
     status: "active" | "disabled" | "deleted",
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorMutationResponse>;
   onUpdateOperator: (
     operatorId: string,
     role: string,
@@ -1386,6 +1423,12 @@ export function SystemUsersPanel({
     if (operatorsToChange.length === 0) {
       return;
     }
+    if (operatorsToChange.length > accessBulkActionLimit) {
+      setActionError(
+        `Select at most ${accessBulkActionLimit} operators, then review this action again.`,
+      );
+      return;
+    }
     const adminRisk = operatorsToChange.some(
       (operator) => operator.role === "admin",
     );
@@ -1464,6 +1507,12 @@ export function SystemUsersPanel({
       );
       return;
     }
+    if (sessionsToRevoke.length > accessBulkActionLimit) {
+      setActionError(
+        `This operator has more than ${accessBulkActionLimit} loaded revocable sessions. Open Audit / Sessions, narrow the selection to ${accessBulkActionLimit} or fewer, then review again.`,
+      );
+      return;
+    }
     const adminRisk =
       operator.role === "admin" ||
       sessionsToRevoke.some((session) => session.operator_role === "admin");
@@ -1505,6 +1554,12 @@ export function SystemUsersPanel({
       (operator) => operator.totp_enabled && operator.status !== "deleted",
     );
     if (operatorsToChange.length === 0) {
+      return;
+    }
+    if (operatorsToChange.length > accessBulkActionLimit) {
+      setActionError(
+        `Select at most ${accessBulkActionLimit} operators, then review this action again.`,
+      );
       return;
     }
     const adminRisk = operatorsToChange.some(
@@ -1563,23 +1618,34 @@ export function SystemUsersPanel({
         );
         setActionStatus(`Updated operator ${pendingAction.operator.username}`);
       } else if (pendingAction.kind === "status") {
-        for (const operator of pendingAction.operators) {
-          await onSetOperatorStatus(
-            operator.id,
-            pendingAction.status,
-            pendingAction.adminRisk,
-            pendingAction.privileges[operator.id].privilegeAssertion,
-          );
-        }
+        const response = await onSetOperatorStatuses(
+          pendingAction.operators.map((operator) => ({
+            operator_id: operator.id,
+            privilege_assertion:
+              pendingAction.privileges[operator.id].privilegeAssertion,
+          })),
+          pendingAction.status,
+          pendingAction.adminRisk,
+        );
         const statusVerb =
           pendingAction.status === "active"
             ? "Enabled"
             : pendingAction.status === "disabled"
               ? "Disabled"
               : "Deleted";
-        setActionStatus(
-          `${statusVerb} ${pendingAction.operators.length} operator${pendingAction.operators.length === 1 ? "" : "s"}`,
+        const failure = operatorBulkFailureMessage(
+          response,
+          pendingAction.operators,
+          statusVerb,
         );
+        if (failure) {
+          setActionError(failure);
+          setActionStatus(null);
+        } else {
+          setActionStatus(
+            `${statusVerb} ${pendingAction.operators.length} operator${pendingAction.operators.length === 1 ? "" : "s"}`,
+          );
+        }
       } else if (pendingAction.kind === "password") {
         await onResetOperatorPassword(
           pendingAction.operator.id,
@@ -1592,27 +1658,49 @@ export function SystemUsersPanel({
           `Reset password for ${pendingAction.operator.username}`,
         );
       } else if (pendingAction.kind === "totp") {
-        for (const operator of pendingAction.operators) {
-          await onClearOperatorTotp(
-            operator.id,
-            pendingAction.adminRisk,
-            pendingAction.privileges[operator.id].privilegeAssertion,
+        const response = await onClearOperatorTotps(
+          pendingAction.operators.map((operator) => ({
+            operator_id: operator.id,
+            privilege_assertion:
+              pendingAction.privileges[operator.id].privilegeAssertion,
+          })),
+          pendingAction.adminRisk,
+        );
+        const failure = operatorBulkFailureMessage(
+          response,
+          pendingAction.operators,
+          "Cleared TOTP for",
+        );
+        if (failure) {
+          setActionError(failure);
+          setActionStatus(null);
+        } else {
+          setActionStatus(
+            `Cleared TOTP for ${pendingAction.operators.length} operator${pendingAction.operators.length === 1 ? "" : "s"}`,
           );
         }
-        setActionStatus(
-          `Cleared TOTP for ${pendingAction.operators.length} operator${pendingAction.operators.length === 1 ? "" : "s"}`,
-        );
       } else {
-        for (const session of pendingAction.sessions) {
-          await onRevokeOperatorSession(
-            session.id,
-            pendingAction.adminRisk,
-            pendingAction.privileges[session.id].privilegeAssertion,
+        const response = await onRevokeOperatorSessions(
+          pendingAction.sessions.map((session) => ({
+            session_id: session.id,
+            privilege_assertion:
+              pendingAction.privileges[session.id].privilegeAssertion,
+          })),
+          pendingAction.adminRisk,
+        );
+        const failure = sessionBulkFailureMessage(
+          response,
+          pendingAction.sessions,
+          "Revoked",
+        );
+        if (failure) {
+          setActionError(failure);
+          setActionStatus(null);
+        } else {
+          setActionStatus(
+            `Revoked ${pendingAction.sessions.length} bearer session${pendingAction.sessions.length === 1 ? "" : "s"} for ${pendingAction.operator.username}`,
           );
         }
-        setActionStatus(
-          `Revoked ${pendingAction.sessions.length} bearer session${pendingAction.sessions.length === 1 ? "" : "s"} for ${pendingAction.operator.username}`,
-        );
       }
       setPendingAction(null);
     } catch (error) {
@@ -1805,17 +1893,27 @@ export function SystemUsersPanel({
             },
             {
               label: "Revoke sessions",
-              description: (rows) =>
-                rows.length === 1
-                  ? `Revoke non-current active sessions for ${rows[0].username}.`
-                  : "Select exactly one operator whose sessions should be revoked.",
+              description: (rows) => {
+                const sessionCount =
+                  rows.length === 1
+                    ? (accessSummaries[rows[0].id]?.revokableSessions.length ??
+                      0)
+                    : 0;
+                return sessionCount > accessBulkActionLimit
+                  ? `More than ${accessBulkActionLimit} loaded sessions match; open Audit / Sessions and narrow the selection before review.`
+                  : rows.length === 1
+                    ? `Revoke non-current active sessions for ${rows[0].username}.`
+                    : "Select exactly one operator whose sessions should be revoked.";
+              },
               disabled: (rows) =>
                 rows.length !== 1 ||
                 reviewPending ||
                 actionPending ||
                 !canManageUsers ||
                 (accessSummaries[rows[0].id]?.revokableSessions.length ?? 0) ===
-                  0,
+                  0 ||
+                (accessSummaries[rows[0].id]?.revokableSessions.length ?? 0) >
+                  accessBulkActionLimit,
               icon: <UserX size={14} />,
               onSelect: (rows) =>
                 void submitOperatorSessionRevoke(
@@ -1826,14 +1924,17 @@ export function SystemUsersPanel({
             {
               label: "Enable",
               description: (rows) =>
-                rows.length === 1
-                  ? `Allow ${rows[0].username} to log in again.`
-                  : `Allow ${rows.length} disabled operators to log in again.`,
+                rows.length > accessBulkActionLimit
+                  ? `Select at most ${accessBulkActionLimit} operators; narrow the selection before review.`
+                  : rows.length === 1
+                    ? `Allow ${rows[0].username} to log in again.`
+                    : `Allow ${rows.length} disabled operators to log in again.`,
               disabled: (rows) =>
                 reviewPending ||
                 actionPending ||
                 !canManageUsers ||
                 rows.length === 0 ||
+                rows.length > accessBulkActionLimit ||
                 rows.some((row) => row.status !== "disabled"),
               icon: <CheckCircle2 size={14} />,
               onSelect: (rows) => void submitBulkStatus(rows, "active"),
@@ -1841,14 +1942,17 @@ export function SystemUsersPanel({
             {
               label: "Disable",
               description: (rows) =>
-                rows.length === 1
-                  ? `Block ${rows[0].username} login and revoke existing sessions.`
-                  : `Block login and revoke existing sessions for ${rows.length} operators.`,
+                rows.length > accessBulkActionLimit
+                  ? `Select at most ${accessBulkActionLimit} operators; narrow the selection before review.`
+                  : rows.length === 1
+                    ? `Block ${rows[0].username} login and revoke existing sessions.`
+                    : `Block login and revoke existing sessions for ${rows.length} operators.`,
               disabled: (rows) =>
                 reviewPending ||
                 actionPending ||
                 !canManageUsers ||
                 rows.length === 0 ||
+                rows.length > accessBulkActionLimit ||
                 rows.some((row) => row.status !== "active"),
               icon: <UserX size={14} />,
               onSelect: (rows) => void submitBulkStatus(rows, "disabled"),
@@ -1857,14 +1961,17 @@ export function SystemUsersPanel({
             {
               label: "Delete",
               description: (rows) =>
-                rows.length === 1
-                  ? `Delete ${rows[0].username} for login purposes and revoke existing sessions.`
-                  : `Delete ${rows.length} operators for login purposes and revoke existing sessions.`,
+                rows.length > accessBulkActionLimit
+                  ? `Select at most ${accessBulkActionLimit} operators; narrow the selection before review.`
+                  : rows.length === 1
+                    ? `Delete ${rows[0].username} for login purposes and revoke existing sessions.`
+                    : `Delete ${rows.length} operators for login purposes and revoke existing sessions.`,
               disabled: (rows) =>
                 reviewPending ||
                 actionPending ||
                 !canManageUsers ||
                 rows.length === 0 ||
+                rows.length > accessBulkActionLimit ||
                 rows.some((row) => row.status === "deleted"),
               icon: <Trash2 size={14} />,
               onSelect: (rows) => void submitBulkStatus(rows, "deleted"),
@@ -1873,14 +1980,17 @@ export function SystemUsersPanel({
             {
               label: "Clear TOTP",
               description: (rows) =>
-                rows.length === 1
-                  ? `Remove stored TOTP secret material for ${rows[0].username} and revoke existing sessions.`
-                  : `Remove stored TOTP secret material and revoke sessions for ${rows.length} operators.`,
+                rows.length > accessBulkActionLimit
+                  ? `Select at most ${accessBulkActionLimit} operators; narrow the selection before review.`
+                  : rows.length === 1
+                    ? `Remove stored TOTP secret material for ${rows[0].username} and revoke existing sessions.`
+                    : `Remove stored TOTP secret material and revoke sessions for ${rows.length} operators.`,
               disabled: (rows) =>
                 reviewPending ||
                 actionPending ||
                 !canManageUsers ||
                 rows.length === 0 ||
+                rows.length > accessBulkActionLimit ||
                 rows.some(
                   (row) => !row.totp_enabled || row.status === "deleted",
                 ),
@@ -2289,7 +2399,7 @@ function SystemSessionsPanel({
   loadError,
   loadLoading,
   onOpenPrivilegeUnlock,
-  onRevokeOperatorSession,
+  onRevokeOperatorSessions,
   privilegeMaterial,
   sessions,
   sessionsTruncated,
@@ -2299,11 +2409,10 @@ function SystemSessionsPanel({
   loadError: string | null;
   loadLoading: boolean;
   onOpenPrivilegeUnlock: () => void;
-  onRevokeOperatorSession: (
-    sessionId: string,
+  onRevokeOperatorSessions: (
+    items: BulkOperatorSessionRevokeItem[],
     adminRiskAcknowledged: boolean,
-    privilegeAssertion: PrivilegeAssertion,
-  ) => Promise<void>;
+  ) => Promise<BulkOperatorSessionRevokeResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
   sessions: OperatorSessionRecord[];
   sessionsTruncated: boolean;
@@ -2570,6 +2679,12 @@ function SystemSessionsPanel({
     if (sessionsToRevoke.length === 0) {
       return;
     }
+    if (sessionsToRevoke.length > accessBulkActionLimit) {
+      setError(
+        `Select at most ${accessBulkActionLimit} sessions; narrow the selection before review.`,
+      );
+      return;
+    }
     if (!privilegeMaterial) {
       setError("Local privilege unlock is required");
       onOpenPrivilegeUnlock();
@@ -2636,17 +2751,28 @@ function SystemSessionsPanel({
     setPending(true);
     setError(null);
     try {
-      const revokedCount = pendingRevoke.sessions.length;
-      for (const session of pendingRevoke.sessions) {
-        await onRevokeOperatorSession(
-          session.id,
-          pendingRevoke.adminRisk,
-          pendingRevoke.privileges[session.id].privilegeAssertion,
+      const response = await onRevokeOperatorSessions(
+        pendingRevoke.sessions.map((session) => ({
+          session_id: session.id,
+          privilege_assertion:
+            pendingRevoke.privileges[session.id].privilegeAssertion,
+        })),
+        pendingRevoke.adminRisk,
+      );
+      const failure = sessionBulkFailureMessage(
+        response,
+        pendingRevoke.sessions,
+        "Revoked",
+      );
+      if (failure) {
+        setError(failure);
+        setSessionStatus(null);
+      } else {
+        const revokedCount = pendingRevoke.sessions.length;
+        setSessionStatus(
+          `Revoked ${revokedCount} bearer session${revokedCount === 1 ? "" : "s"}`,
         );
       }
-      setSessionStatus(
-        `Revoked ${revokedCount} bearer session${revokedCount === 1 ? "" : "s"}`,
-      );
       setPendingRevoke(null);
     } catch (actionError) {
       setError(
@@ -2802,15 +2928,18 @@ function SystemSessionsPanel({
               {
                 label: "Revoke",
                 description: (rows) =>
-                  rows.length === 1
-                    ? `Revoke the bearer session for ${rows[0].operator_username}.`
-                    : `Revoke ${rows.length} selected bearer sessions.`,
+                  rows.length > accessBulkActionLimit
+                    ? `Select at most ${accessBulkActionLimit} sessions; narrow the selection before review.`
+                    : rows.length === 1
+                      ? `Revoke the bearer session for ${rows[0].operator_username}.`
+                      : `Revoke ${rows.length} selected bearer sessions.`,
                 tone: "danger",
                 icon: <UserX size={14} />,
                 disabled: (rows) =>
                   reviewPending ||
                   pending ||
                   rows.length === 0 ||
+                  rows.length > accessBulkActionLimit ||
                   rows.some(
                     (row) => row.current || !isOperatorSessionUsable(row),
                   ),
@@ -3080,11 +3209,16 @@ function OperatorAccessEvidencePanel({
         <button
           className="secondaryAction compactAction"
           disabled={
-            !userCanManage || pending || summary.revokableSessions.length === 0
+            !userCanManage ||
+            pending ||
+            summary.revokableSessions.length === 0 ||
+            summary.revokableSessions.length > accessBulkActionLimit
           }
           onClick={onRevokeSessions}
           title={
-            summary.revokableSessions.length > 0
+            summary.revokableSessions.length > accessBulkActionLimit
+              ? `More than ${accessBulkActionLimit} loaded sessions match. Open Audit / Sessions and narrow the selection to ${accessBulkActionLimit} or fewer.`
+              : summary.revokableSessions.length > 0
               ? `Revoke ${summary.revokableSessions.length} non-current active sessions for ${operator.username}.`
               : "No non-current active sessions are available to revoke for this user."
           }

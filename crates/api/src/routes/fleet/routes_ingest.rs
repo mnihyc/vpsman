@@ -121,12 +121,6 @@ pub(crate) async fn ingest_agent_hello(
             message: "agent hello ignored".to_string(),
         }));
     }
-    super::routes_inventory::clear_committed_agent_suspension_fence(
-        &state,
-        &event.hello.client_id,
-        "agent_online_auto_unsuspend",
-    )
-    .await;
     state.publish(WsEvent::AgentUpdated {
         client_id: event.hello.client_id,
         gateway_id: event.gateway_id,

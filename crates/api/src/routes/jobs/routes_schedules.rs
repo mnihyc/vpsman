@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
@@ -9,20 +11,26 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    gateway_client::GatewayControlResponseError,
     job_request::{
         fixed_target_selection, job_command_type_label, normalized_target_client_ids,
         normalized_target_client_ids_allow_empty, validate_job_command,
     },
     model::{
-        BulkResolveRequest, CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest,
-        EventScheduleTemplateEdgePreview, EventScheduleTemplateElementPreview,
-        EventScheduleTemplatePreviewContext, EventScheduleTemplatePreviewResponse, ListQuery,
-        PreviewEventScheduleTemplateRequest, SchedulePrivilegeMutationRequest, ScheduleTriggerKind,
-        ScheduleView, UpdateScheduleRequest, UpdateScheduleTargetsRequest,
+        BulkResolveRequest, BulkUpdateScheduleTargetsOutcome, BulkUpdateScheduleTargetsRequest,
+        BulkUpdateScheduleTargetsResponse, CreateJobRequest, CreateScheduleRequest,
+        DeferScheduleRequest, EventScheduleTemplateEdgePreview,
+        EventScheduleTemplateElementPreview, EventScheduleTemplatePreviewContext,
+        EventScheduleTemplatePreviewResponse, ListQuery, PreviewEventScheduleTemplateRequest,
+        SchedulePrivilegeMutationRequest, ScheduleTriggerKind, ScheduleView, UpdateScheduleRequest,
+        UpdateScheduleTargetsRequest,
     },
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
-    repository_schedules::next_cron_runs,
-    repository_schedules::ScheduleSnapshotExpectation,
+    repository::Repository,
+    repository_schedules::{
+        next_cron_runs, ScheduleSnapshotExpectation, ScheduleTargetBatchUpdate,
+        ScheduleTargetBatchUpdateResult,
+    },
     routes_jobs::create_job_from_saved_schedule,
     security::{operator_has_scope, require_vps_rule_selector_scope, SCOPE_SCHEDULES_READ},
     selector_expression::parse_selector_expression,
@@ -33,8 +41,11 @@ use vpsman_common::{
     alert_event_argv_template_hash, alert_event_argv_template_uses_path,
     alert_event_expression_anchor_kinds, encode_json, parse_and_validate_alert_event_expression,
     payload_hash, render_alert_event_argv_template, render_alert_event_job_command,
-    validate_alert_event_argv_template, JobCommand, PrivilegeAssertion, ALERT_EVENT_NOOP_ARGV,
+    validate_alert_event_argv_template, Expression, GatewayPrivilegeVerification,
+    GatewayPrivilegeVerificationBatchItem, JobCommand, PrivilegeAssertion, ALERT_EVENT_NOOP_ARGV,
 };
+
+const MAX_BULK_SCHEDULE_TARGET_UPDATES: usize = 500;
 
 #[derive(Clone, Copy)]
 enum ScheduleTargetResolutionMode {
@@ -443,6 +454,342 @@ pub(crate) async fn update_schedule_targets(
             .await
             .map_err(map_schedule_snapshot_error)?,
     ))
+}
+
+struct PendingScheduleTargetUpdate {
+    index: usize,
+    request: crate::model::BulkUpdateScheduleTargetsItemRequest,
+    schedule: ScheduleView,
+    selector_expression: String,
+    expression: Expression,
+}
+
+pub(crate) fn validate_bulk_schedule_target_selection(
+    request: &BulkUpdateScheduleTargetsRequest,
+) -> Result<(), ApiError> {
+    require_schedule_confirmed(request.confirmed)?;
+    if request.items.is_empty() {
+        return Err(ApiError::bad_request("schedule_target_selection_required"));
+    }
+    if request.items.len() > MAX_BULK_SCHEDULE_TARGET_UPDATES {
+        return Err(ApiError::bad_request("schedule_target_selection_too_large"));
+    }
+    let unique = request
+        .items
+        .iter()
+        .map(|item| item.schedule_id)
+        .collect::<BTreeSet<_>>();
+    if unique.len() != request.items.len() {
+        return Err(ApiError::bad_request("schedule_target_selection_duplicate"));
+    }
+    Ok(())
+}
+
+fn rejected_schedule_target_outcome(
+    schedule_id: Uuid,
+    error: ApiError,
+) -> BulkUpdateScheduleTargetsOutcome {
+    BulkUpdateScheduleTargetsOutcome {
+        schedule_id,
+        status: "rejected",
+        schedule: None,
+        error_code: Some(error.code.to_string()),
+    }
+}
+
+fn map_schedule_privilege_batch_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("ReplayProtectionSaturated") {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "privilege_replay_protection_saturated",
+            error,
+            public_message: Some(
+                "Privilege verification is temporarily saturated; no schedule target was changed."
+                    .to_string(),
+            ),
+        }
+    } else if error
+        .downcast_ref::<GatewayControlResponseError>()
+        .is_some_and(|response| matches!(response.status_code, 403 | 409))
+    {
+        ApiError::forbidden("privilege_verification_failed")
+    } else {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "privilege_verification_unavailable",
+            error,
+            public_message: Some(
+                "The gateway could not verify schedule-target privileges; no schedule target was changed."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+pub(crate) fn apply_schedule_privilege_batch_results(
+    results: Vec<vpsman_common::GatewayPrivilegeVerificationBatchItemResult>,
+    candidates: Vec<(usize, ScheduleTargetBatchUpdate)>,
+    outcomes: &mut [Option<BulkUpdateScheduleTargetsOutcome>],
+) -> Result<Vec<(usize, ScheduleTargetBatchUpdate)>, ApiError> {
+    if results.len() != candidates.len()
+        || results
+            .iter()
+            .zip(&candidates)
+            .any(|(result, (_, update))| result.request_id != update.schedule_id.to_string())
+    {
+        return Err(ApiError::internal(
+            "privilege_verification_result_invalid",
+            "The gateway returned an invalid schedule-target privilege result set.",
+            anyhow::anyhow!("bulk privilege results did not preserve request order"),
+        ));
+    }
+    let mut accepted = Vec::new();
+    for (result, (index, update)) in results.into_iter().zip(candidates) {
+        if result.approved {
+            accepted.push((index, update));
+        } else {
+            outcomes[index] = Some(rejected_schedule_target_outcome(
+                update.schedule_id,
+                ApiError::forbidden("privilege_verification_failed"),
+            ));
+        }
+    }
+    Ok(accepted)
+}
+
+pub(crate) async fn bulk_update_schedule_targets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkUpdateScheduleTargetsRequest>,
+) -> Result<Json<BulkUpdateScheduleTargetsResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "schedules:write")
+        .await?;
+    validate_bulk_schedule_target_selection(&request)?;
+
+    let schedule_ids = request
+        .items
+        .iter()
+        .map(|item| item.schedule_id)
+        .collect::<Vec<_>>();
+    let schedules = state
+        .repo
+        .schedules_by_ids(&schedule_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "schedules_unavailable",
+            "Schedules could not be loaded.",
+        ))?
+        .into_iter()
+        .map(|schedule| (schedule.id, schedule))
+        .collect::<HashMap<_, _>>();
+    let mut outcomes = vec![None; request.items.len()];
+    let mut pending = Vec::new();
+    for (index, item) in request.items.into_iter().enumerate() {
+        let Some(schedule) = schedules.get(&item.schedule_id).cloned() else {
+            outcomes[index] = Some(rejected_schedule_target_outcome(
+                item.schedule_id,
+                ApiError::not_found("schedule_not_found"),
+            ));
+            continue;
+        };
+        let validation = (|| -> Result<(String, Expression), ApiError> {
+            require_event_schedule_read_scopes(&operator.operator.scopes, schedule.trigger_kind)?;
+            require_schedule_revision(&schedule, item.expected_definition_revision)?;
+            require_valid_schedule_definition(&schedule)?;
+            let selector_expression = schedule.selector_expression.trim().to_string();
+            if selector_expression.is_empty() {
+                return Err(ApiError::conflict("schedule_selector_missing"));
+            }
+            let expression = parse_selector_expression(&selector_expression)
+                .map_err(|_| ApiError::conflict("schedule_selector_invalid"))?
+                .ok_or_else(|| ApiError::conflict("schedule_selector_invalid"))?;
+            require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+            Ok((selector_expression, expression))
+        })();
+        match validation {
+            Ok((selector_expression, expression)) => {
+                pending.push(PendingScheduleTargetUpdate {
+                    index,
+                    request: item,
+                    schedule,
+                    selector_expression,
+                    expression,
+                });
+            }
+            Err(error) => {
+                outcomes[index] = Some(rejected_schedule_target_outcome(item.schedule_id, error));
+            }
+        }
+    }
+
+    let agents = if pending.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .repo
+            .list_agents()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "schedule_targets_resolution_failed",
+                "Schedule targets could not be resolved.",
+            ))?
+    };
+    let needs_rules = pending
+        .iter()
+        .any(|update| vpsman_common::expression_references_vps_rules(&update.expression));
+    let rules_by_client = if needs_rules {
+        state
+            .repo
+            .vps_rule_contexts_for_agents(&agents)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "schedule_targets_resolution_failed",
+                "Schedule targets could not be resolved.",
+            ))?
+    } else {
+        HashMap::new()
+    };
+
+    #[cfg(test)]
+    let test_auto_approve = state.gateway.test_privilege_auto_approves();
+    #[cfg(not(test))]
+    let test_auto_approve = false;
+    let mut accepted = Vec::new();
+    let mut verification_candidates = Vec::new();
+    let mut verification_items = Vec::new();
+    for update in pending {
+        let mut target_client_ids = Repository::resolve_agents_for_expression_with_rule_contexts(
+            &agents,
+            &update.expression,
+            &rules_by_client,
+        )
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+        target_client_ids.sort();
+        target_client_ids.dedup();
+        if same_target_client_ids(&update.schedule.target_client_ids, &target_client_ids) {
+            outcomes[update.index] = Some(rejected_schedule_target_outcome(
+                update.schedule.id,
+                ApiError::conflict("schedule_targets_already_current"),
+            ));
+            continue;
+        }
+        let repository_update = ScheduleTargetBatchUpdate {
+            schedule_id: update.schedule.id,
+            target_client_ids: target_client_ids.clone(),
+            expectation: ScheduleSnapshotExpectation {
+                selector_expression: update.schedule.selector_expression.clone(),
+                target_client_ids: update.schedule.target_client_ids.clone(),
+                definition_revision: update.request.expected_definition_revision,
+            },
+        };
+        if test_auto_approve {
+            accepted.push((update.index, repository_update));
+            continue;
+        }
+        if !state.gateway.privilege_configured() {
+            return Err(ApiError::conflict("gateway_control_url_missing"));
+        }
+        let Some(assertion) = update.request.privilege_assertion.clone() else {
+            outcomes[update.index] = Some(rejected_schedule_target_outcome(
+                update.schedule.id,
+                ApiError::forbidden("privilege_assertion_required"),
+            ));
+            continue;
+        };
+        let resolved_targets = if target_client_ids.is_empty() {
+            Vec::new()
+        } else {
+            normalized_target_client_ids(&target_client_ids)?
+        };
+        let request_id = update.schedule.id.to_string();
+        let intent = serde_json::to_string(&stored_schedule_privilege_intent(
+            &update.schedule,
+            &request_id,
+            &resolved_targets,
+            "schedule.targets.update",
+            &update.selector_expression,
+            update.schedule.enabled,
+            update.schedule.deferred_until.as_deref(),
+            false,
+        ))
+        .map_err(|error| {
+            ApiError::internal(
+                "privilege_intent_invalid",
+                "The schedule-target privilege intent could not be prepared.",
+                error.into(),
+            )
+        })?;
+        verification_items.push(GatewayPrivilegeVerificationBatchItem {
+            request_id,
+            verification: GatewayPrivilegeVerification { intent, assertion },
+        });
+        verification_candidates.push((update.index, repository_update));
+    }
+
+    if !verification_items.is_empty() {
+        state.refresh_gateway_dispatch_timeouts();
+        let verification = state
+            .gateway
+            .verify_privileges(verification_items)
+            .await
+            .map_err(map_schedule_privilege_batch_error)?;
+        accepted.extend(apply_schedule_privilege_batch_results(
+            verification.results,
+            verification_candidates,
+            &mut outcomes,
+        )?);
+    }
+
+    if !accepted.is_empty() {
+        let repository_updates = accepted
+            .iter()
+            .map(|(_, update)| update.clone())
+            .collect::<Vec<_>>();
+        let repository_outcomes = state
+            .repo
+            .update_schedule_targets_bulk(&repository_updates, &operator)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "schedule_target_batch_update_failed",
+                "Schedule targets could not be updated.",
+            ))?;
+        for ((index, expected), outcome) in accepted.into_iter().zip(repository_outcomes) {
+            let response = match outcome {
+                ScheduleTargetBatchUpdateResult::Updated(schedule) => {
+                    debug_assert_eq!(schedule.id, expected.schedule_id);
+                    BulkUpdateScheduleTargetsOutcome {
+                        schedule_id: schedule.id,
+                        status: "updated",
+                        schedule: Some(*schedule),
+                        error_code: None,
+                    }
+                }
+                ScheduleTargetBatchUpdateResult::Rejected {
+                    schedule_id,
+                    error_code,
+                } => {
+                    debug_assert_eq!(schedule_id, expected.schedule_id);
+                    BulkUpdateScheduleTargetsOutcome {
+                        schedule_id,
+                        status: "rejected",
+                        schedule: None,
+                        error_code: Some(error_code.to_string()),
+                    }
+                }
+            };
+            outcomes[index] = Some(response);
+        }
+    }
+
+    Ok(Json(BulkUpdateScheduleTargetsResponse {
+        outcomes: outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("every validated schedule request has an outcome"))
+            .collect(),
+    }))
 }
 
 pub(crate) async fn enable_schedule(
@@ -944,6 +1291,42 @@ struct StoredSchedulePrivilegeRequest<'a> {
     assertion: Option<PrivilegeAssertion>,
 }
 
+fn stored_schedule_privilege_intent<'a>(
+    schedule: &'a ScheduleView,
+    schedule_id: &'a str,
+    resolved_targets: &'a [String],
+    action: &'a str,
+    selector_expression: &'a str,
+    enabled: bool,
+    deferred_until: Option<&'a str>,
+    deleted: bool,
+) -> SchedulePrivilegeIntent<'a> {
+    SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
+        action,
+        schedule_id: Some(schedule_id),
+        definition_revision: Some(schedule.definition_revision),
+        name: &schedule.name,
+        command_type: &schedule.command_type,
+        operation_payload_hash: &schedule.operation_payload_hash,
+        selector_expression,
+        resolved_targets,
+        trigger_kind: match schedule.trigger_kind {
+            ScheduleTriggerKind::Cron => "cron",
+            ScheduleTriggerKind::Event => "event",
+        },
+        cron_expr: schedule.cron_expr.as_deref(),
+        timezone: schedule.timezone.as_deref(),
+        event_expression: schedule.event_expression.as_deref(),
+        enabled,
+        catch_up_policy: schedule.catch_up_policy.as_deref(),
+        catch_up_limit: schedule.catch_up_limit,
+        retry_delay_secs: schedule.retry_delay_secs,
+        max_failures: schedule.max_failures,
+        deferred_until,
+        deleted,
+    })
+}
+
 async fn verify_schedule_privilege_for_stored_view(
     state: &AppState,
     schedule: &ScheduleView,
@@ -955,30 +1338,16 @@ async fn verify_schedule_privilege_for_stored_view(
         normalized_target_client_ids(request.target_client_ids)?
     };
     let schedule_id = schedule.id.to_string();
-    let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
-        action: request.action,
-        schedule_id: Some(&schedule_id),
-        definition_revision: Some(schedule.definition_revision),
-        name: &schedule.name,
-        command_type: &schedule.command_type,
-        operation_payload_hash: &schedule.operation_payload_hash,
-        selector_expression: request.selector_expression,
-        resolved_targets: &resolved_targets,
-        trigger_kind: match schedule.trigger_kind {
-            ScheduleTriggerKind::Cron => "cron",
-            ScheduleTriggerKind::Event => "event",
-        },
-        cron_expr: schedule.cron_expr.as_deref(),
-        timezone: schedule.timezone.as_deref(),
-        event_expression: schedule.event_expression.as_deref(),
-        enabled: request.enabled,
-        catch_up_policy: schedule.catch_up_policy.as_deref(),
-        catch_up_limit: schedule.catch_up_limit,
-        retry_delay_secs: schedule.retry_delay_secs,
-        max_failures: schedule.max_failures,
-        deferred_until: request.deferred_until,
-        deleted: request.deleted,
-    });
+    let privilege_intent = stored_schedule_privilege_intent(
+        schedule,
+        &schedule_id,
+        &resolved_targets,
+        request.action,
+        request.selector_expression,
+        request.enabled,
+        request.deferred_until,
+        request.deleted,
+    );
     verify_privilege_intent(state, &privilege_intent, request.assertion).await
 }
 

@@ -14,6 +14,8 @@ import {
   type SnapshotSource,
 } from "../homeSnapshot";
 import type {
+  BulkUpdateScheduleTargetsRequest,
+  BulkUpdateScheduleTargetsResponse,
   CreateJobResponse,
   CreateScheduleRequest,
   DeferScheduleRequest,
@@ -22,7 +24,6 @@ import type {
   SchedulePrivilegeMutationRequest,
   ScheduleRecord,
   UpdateScheduleRequest,
-  UpdateScheduleTargetsRequest,
 } from "../types";
 
 export function useSchedulesData(
@@ -155,19 +156,38 @@ export function useSchedulesData(
     [apiToken, loadSchedules, onAuditChanged],
   );
 
-  const updateScheduleTargets = useCallback(
-    async (scheduleId: string, request: UpdateScheduleTargetsRequest) => {
-      await apiPost<ScheduleRecord>(
-        `/api/v1/schedules/${scheduleId}/targets`,
+  const bulkUpdateScheduleTargets = useCallback(
+    async (request: BulkUpdateScheduleTargetsRequest) => {
+      const response = await apiPost<BulkUpdateScheduleTargetsResponse>(
+        "/api/v1/schedules/update-targets",
         apiToken,
         request,
       );
       if (currentApiToken.current !== apiToken) {
-        return;
+        return response;
       }
-      await Promise.all([loadSchedules(), onAuditChanged()]);
+      const updatedSchedules = new Map(
+        response.outcomes.flatMap((outcome) =>
+          outcome.status === "updated" && outcome.schedule
+            ? [[outcome.schedule.id, outcome.schedule] as const]
+            : [],
+        ),
+      );
+      if (updatedSchedules.size > 0) {
+        // The batch response contains the committed ScheduleRecord for every
+        // accepted target update. Claim this projection before applying those
+        // rows so an older list response cannot restore stale target snapshots.
+        schedulesLoadGeneration.current += 1;
+        setSchedules((current) =>
+          current.map(
+            (schedule) => updatedSchedules.get(schedule.id) ?? schedule,
+          ),
+        );
+      }
+      await onAuditChanged();
+      return response;
     },
-    [apiToken, loadSchedules, onAuditChanged],
+    [apiToken, onAuditChanged],
   );
 
   const enableSchedule = useCallback(
@@ -258,7 +278,7 @@ export function useSchedulesData(
     beginHomeSchedulesHydration,
     clearSchedules,
     updateSchedule,
-    updateScheduleTargets,
+    bulkUpdateScheduleTargets,
     enableSchedule,
     disableSchedule,
     deferSchedule,

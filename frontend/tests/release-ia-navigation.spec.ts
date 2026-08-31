@@ -801,14 +801,14 @@ test(
     await page
       .getByRole("combobox", { name: "Search fleet" })
       .fill("does-not-match");
-    await expect(shellAlertMetric.locator("strong")).toHaveText("0 loaded");
-    await expect(shellAlertMetric).toHaveClass(/\byellow\b/);
+    await expect(shellAlertMetric.locator("strong")).toHaveText("Unknown");
+    await expect(shellAlertMetric).toHaveClass(/\bneutral\b/);
     await expect(shellAlertMetric).toHaveAttribute(
       "title",
-      /loaded alert page; additional matching alerts may exist/,
+      /Open Fleet alerts to review the authoritative current occurrence feed/,
     );
-    await expect(alertMetric.locator("strong")).toHaveText("0");
-    await expect(alertMetric).toHaveClass(/\binfo\b/);
+    await expect(alertMetric.locator("strong")).toHaveText("Unknown");
+    await expect(alertMetric).toHaveClass(/\bneutral\b/);
     await expect(backupMetric.locator("strong")).toHaveText("0");
     await expect(backupMetric).toHaveClass(/\binfo\b/);
     await expect(transferMetric.locator("strong")).toHaveText("0");
@@ -818,11 +818,11 @@ test(
     await expect(shellAlertMetric.locator("strong")).toHaveText("≥1");
     await expect(shellAlertMetric).toHaveAttribute(
       "title",
-      /loaded alert page; additional matching alerts may exist/,
+      /Open Fleet alerts to review the authoritative current occurrence feed/,
     );
 
     await expect(alertMetric.locator("strong")).toHaveText("≥1");
-    await expect(alertMetric).toContainText("in loaded page");
+    await expect(alertMetric).toContainText("open Fleet alerts");
 
     await expect(backupMetric.locator("strong")).toHaveText("≥1");
     await expect(backupMetric).toContainText("≥1 artifact in the loaded page");
@@ -1032,10 +1032,10 @@ test(
       .filter({ hasText: "Policy alert history" });
     await expect(policyMetric.locator("strong")).toHaveText("200+");
     await expect(policyMetric).toContainText(
-      "At least 200 active warning or critical alerts in the loaded current page; more may exist",
+      "At least 200 active warning or critical alerts in capped current evidence; open Policies and narrow the selector or policy",
     );
     await expect(policyMetric).toContainText(
-      "200 issued records in the loaded history",
+      "200 issued records in the newest history page; use an explicit alert export window for older evidence",
     );
 
     const deliveryMetric = summary
@@ -1043,7 +1043,7 @@ test(
       .filter({ hasText: "Delivery history" });
     await expect(deliveryMetric.locator("strong")).toHaveText("200+");
     await expect(deliveryMetric).toContainText(
-      "200 failed retained notification deliveries in the loaded page",
+      "200 failed retained notification deliveries in the newest loaded page; open failed deliveries and narrow the search",
     );
   },
 );
@@ -3012,6 +3012,72 @@ test("startup WebSocket core preserves the in-flight Home telemetry snapshot", a
         ) ?? false,
     ),
   ).toBe(false);
+});
+
+test("returning Home uses one aggregate snapshot instead of domain reload waves", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      }
+    ).__vpsmanFetchRequests = [];
+    window.location.hash = "#/home/overview";
+  });
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
+  ).toBeVisible();
+
+  await expect
+    .poll(async () => {
+      const captured = await page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+            }
+          ).__vpsmanFetchRequests ?? [],
+      );
+      return captured.filter(
+        (request) =>
+          request.method === "GET" &&
+          new URL(request.url, "http://console.test").pathname ===
+            "/api/v1/home/snapshot",
+      ).length;
+    })
+    .toBe(1);
+  const captured = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+        }
+      ).__vpsmanFetchRequests ?? [],
+  );
+  const forbiddenDomainReloads = new Set([
+    "/api/v1/jobs",
+    "/api/v1/backups",
+    "/api/v1/backup-policies",
+    "/api/v1/backup-artifacts",
+    "/api/v1/restore-plans",
+    "/api/v1/migration-links",
+    "/api/v1/audit",
+    "/api/v1/history/retention-policies",
+    "/api/v1/schedules",
+    "/api/v1/system/dashboard",
+  ]);
+  expect(
+    captured.filter(
+      (request) =>
+        request.method === "GET" &&
+        forbiddenDomainReloads.has(
+          new URL(request.url, "http://console.test").pathname,
+        ),
+    ),
+  ).toEqual([]);
 });
 
 test("connected fleet consumes one aggregate telemetry invalidation without live polling", async ({

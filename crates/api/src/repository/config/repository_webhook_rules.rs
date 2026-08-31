@@ -3,20 +3,21 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{types::Json as SqlJson, Executor, Postgres, Row, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
-    validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
-    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
-    WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
-    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    expression_references_vps_rules, validate_template,
+    WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
+    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
 
 use crate::{
     model::{AgentView, AuthContext},
     model_webhook_rules::{
         CreateWebhookRuleRequest, WebhookDeliveryRotationRequest, WebhookDeliveryRotationResponse,
-        WebhookEventCandidate, WebhookEventRow, WebhookRuleDeliveryCandidate,
+        WebhookEventCandidate, WebhookEventRow, WebhookRuleBulkAction, WebhookRuleBulkOutcome,
+        WebhookRuleBulkRequest, WebhookRuleBulkResponse, WebhookRuleDeliveryCandidate,
         WebhookRuleDeliveryView, WebhookRuleView,
     },
     repository::Repository,
@@ -342,6 +343,162 @@ impl Repository {
                     .await?;
                 tx.commit().await?;
                 Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn bulk_mutate_webhook_rules(
+        &self,
+        request: &WebhookRuleBulkRequest,
+        operator: &AuthContext,
+        allow_vps_rule_selectors: bool,
+    ) -> Result<WebhookRuleBulkResponse> {
+        anyhow::ensure!(
+            (1..=500).contains(&request.items.len()),
+            "webhook_rule_bulk_items_invalid"
+        );
+        let requested_ids = request.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let unique_ids = requested_ids.iter().copied().collect::<HashSet<_>>();
+        anyhow::ensure!(
+            unique_ids.len() == requested_ids.len(),
+            "webhook_rule_bulk_duplicate_item"
+        );
+
+        match self {
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, name, enabled, expression, target, body_template,
+                        signing_secret, cooldown_secs, notes, actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM webhook_rules
+                    WHERE id = ANY($1)
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&requested_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut current = rows
+                    .into_iter()
+                    .map(webhook_rule_from_row)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|rule| (rule.id, rule))
+                    .collect::<HashMap<_, _>>();
+                anyhow::ensure!(
+                    current.len() == request.items.len(),
+                    "webhook_rule_not_found"
+                );
+                let desired_enabled = match request.action {
+                    WebhookRuleBulkAction::Enable => Some(true),
+                    WebhookRuleBulkAction::Disable => Some(false),
+                    WebhookRuleBulkAction::Delete => None,
+                };
+                for item in &request.items {
+                    let rule = current.get(&item.id).context("webhook_rule_not_found")?;
+                    anyhow::ensure!(
+                        rule.name == item.reviewed_name.trim()
+                            && rule.updated_at == item.expected_updated_at.trim(),
+                        "webhook_rule_bulk_review_stale"
+                    );
+                    if let Some(enabled) = desired_enabled {
+                        anyhow::ensure!(rule.enabled != enabled, "webhook_rule_bulk_state_stale");
+                        let expression = parse_selector_expression(&rule.expression)
+                            .map_err(|error| {
+                                anyhow::anyhow!("invalid selector expression: {error}")
+                            })?
+                            .context("selector expression is empty")?;
+                        anyhow::ensure!(
+                            allow_vps_rule_selectors
+                                || !expression_references_vps_rules(&expression),
+                            "vps_rule_selector_scope_required"
+                        );
+                    }
+                }
+
+                let changed_rows = if let Some(enabled) = desired_enabled {
+                    sqlx::query(
+                        r#"
+                        UPDATE webhook_rules
+                        SET enabled = $2, actor_id = $3, updated_at = now()
+                        WHERE id = ANY($1)
+                        RETURNING
+                            id, name, enabled, expression, target, body_template,
+                            signing_secret, cooldown_secs, notes, actor_id,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        "#,
+                    )
+                    .bind(&requested_ids)
+                    .bind(enabled)
+                    .bind(operator.operator.id)
+                    .fetch_all(&mut *tx)
+                    .await?
+                } else {
+                    sqlx::query(
+                        r#"
+                        DELETE FROM webhook_rules
+                        WHERE id = ANY($1)
+                        RETURNING
+                            id, name, enabled, expression, target, body_template,
+                            signing_secret, cooldown_secs, notes, actor_id,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        "#,
+                    )
+                    .bind(&requested_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                };
+                current = changed_rows
+                    .into_iter()
+                    .map(webhook_rule_from_row)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|rule| (rule.id, rule))
+                    .collect();
+                anyhow::ensure!(
+                    current.len() == request.items.len(),
+                    "webhook_rule_bulk_snapshot_stale"
+                );
+
+                let (audit_action, result) = match request.action {
+                    WebhookRuleBulkAction::Enable => ("webhook.rule_upserted", "enabled"),
+                    WebhookRuleBulkAction::Disable => ("webhook.rule_upserted", "disabled"),
+                    WebhookRuleBulkAction::Delete => ("webhook_rule.deleted", "deleted"),
+                };
+                let mut outcomes = Vec::with_capacity(request.items.len());
+                for item in &request.items {
+                    let rule = current
+                        .get(&item.id)
+                        .context("webhook_rule_bulk_snapshot_stale")?;
+                    insert_webhook_rule_audit_with_action(&mut tx, rule, operator, audit_action)
+                        .await?;
+                    outcomes.push(WebhookRuleBulkOutcome {
+                        id: rule.id,
+                        name: rule.name.clone(),
+                        result: result.to_string(),
+                        record: (request.action != WebhookRuleBulkAction::Delete)
+                            .then(|| rule.clone()),
+                    });
+                }
+                if request.action != WebhookRuleBulkAction::Enable {
+                    // Source state changed once; the delivery worker remains the
+                    // sole owner of leases and terminal delivery transitions.
+                    sqlx::query("SELECT pg_notify('webhook_events', 'webhook_rule_state')")
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                Ok(WebhookRuleBulkResponse {
+                    action: request.action,
+                    outcomes,
+                })
             }
         }
     }

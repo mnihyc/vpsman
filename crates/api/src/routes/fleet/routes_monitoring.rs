@@ -63,6 +63,7 @@ const MAX_SHARE_EXPIRY_SECS: u64 = 365 * 24 * 60 * 60;
 const MAX_MONITORING_SELECTOR_BYTES: usize = 4_096;
 const MAX_SHARE_SELECTOR_BYTES: usize = 65_535;
 const MAX_SHARE_TARGETS: usize = 1_000;
+const MAX_BULK_PING_TARGET_UPDATES: usize = 500;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct MonitoringCardsQuery {
@@ -460,42 +461,72 @@ pub(crate) async fn bulk_update_ping_targets(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
+    validate_bulk_ping_target_selection(&request.target_ids)?;
     let target_ids = request
         .target_ids
         .into_iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    if target_ids.is_empty() {
-        return Err(ApiError::bad_request("ping_target_selection_required"));
-    }
     let assignments = state
         .repo
-        .list_ping_target_assignment_records(None)
+        .list_ping_target_assignment_records_for_targets(&target_ids)
         .await
         .map_err(ApiError::internal_mapper(
             "ping_target_assignments_unavailable",
             "Ping-target assignments could not be loaded.",
         ))?;
+    let targets = state
+        .repo
+        .ping_target_records_by_ids(&target_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_target_unavailable",
+            "Ping targets could not be loaded.",
+        ))?
+        .into_iter()
+        .map(|target| (target.id, target))
+        .collect::<HashMap<_, _>>();
+    if targets.len() != target_ids.len() {
+        return Err(ApiError::not_found("ping_target_not_found"));
+    }
+    let mut selectors = BTreeSet::new();
+    for target_id in &target_ids {
+        let target = targets
+            .get(target_id)
+            .expect("every requested Ping target was loaded");
+        validate_monitoring_selector(&target.selector_expression, MAX_MONITORING_SELECTOR_BYTES)?;
+        require_monitoring_selector_scope(&operator.operator.scopes, &target.selector_expression)?;
+        selectors.insert(target.selector_expression.clone());
+    }
+    let selector_evidence =
+        resolve_saved_selectors_batch(&state, &selectors, MAX_MONITORING_SELECTOR_BYTES, true)
+            .await;
+    if selectors.iter().any(|selector| {
+        !selector_evidence
+            .evidence_available
+            .get(selector)
+            .copied()
+            .unwrap_or(false)
+    }) {
+        return Err(ApiError::internal(
+            "selector_targets_unavailable",
+            "Selector targets could not be resolved.",
+            anyhow::anyhow!("saved Ping-target selector evidence unavailable"),
+        ));
+    }
     let mut replacements = Vec::new();
     let mut changes = Vec::new();
     for target_id in &target_ids {
-        let target = state
-            .repo
-            .ping_target_record(*target_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "ping_target_unavailable",
-                "The Ping target could not be loaded.",
-            ))?
-            .ok_or_else(|| ApiError::not_found("ping_target_not_found"))?;
-        require_monitoring_selector_scope(&operator.operator.scopes, &target.selector_expression)?;
-        let resolved = resolve_selector(
-            &state,
-            &target.selector_expression,
-            MAX_MONITORING_SELECTOR_BYTES,
-        )
-        .await?;
+        let target = targets
+            .get(target_id)
+            .cloned()
+            .expect("every requested Ping target was loaded");
+        let resolved = selector_evidence
+            .resolved_client_ids
+            .get(&target.selector_expression)
+            .cloned()
+            .expect("every validated Ping selector was resolved");
         let current = assignments
             .iter()
             .filter(|assignment| assignment.target_id == *target_id)
@@ -542,6 +573,16 @@ pub(crate) async fn bulk_update_ping_targets(
         changes,
         runtime_sync,
     }))
+}
+
+pub(crate) fn validate_bulk_ping_target_selection(target_ids: &[Uuid]) -> Result<(), ApiError> {
+    if target_ids.is_empty() {
+        return Err(ApiError::bad_request("ping_target_selection_required"));
+    }
+    if target_ids.len() > MAX_BULK_PING_TARGET_UPDATES {
+        return Err(ApiError::bad_request("ping_target_selection_too_large"));
+    }
+    Ok(())
 }
 
 pub(crate) async fn make_primary_ping_target(
