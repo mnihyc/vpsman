@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ExternalLink,
   Pause,
@@ -60,6 +60,7 @@ export function RolloutsPanel({
   jobs,
   rollouts: initialRollouts,
   rolloutsTruncated,
+  requestsEnabled,
   onCancelJob,
   onLoadRollouts,
   onOpenJobDetails,
@@ -69,6 +70,7 @@ export function RolloutsPanel({
   jobs: JobHistoryRecord[];
   rollouts: JobRolloutRecord[];
   rolloutsTruncated: boolean;
+  requestsEnabled: boolean;
   onCancelJob: (jobId: string, reason: string) => Promise<CancelJobResponse>;
   onLoadRollouts: () => Promise<JobRolloutRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
@@ -89,12 +91,11 @@ export function RolloutsPanel({
   const feedbackRef = useRef<HTMLDivElement | null>(null);
   const [selectedJobId, setSelectedJobId] = useState(readRolloutJobRoute);
   const [reviewAction, setReviewAction] = useState<ReviewAction | null>(null);
+  const loadedOwnerRef = useRef<
+    (() => Promise<JobRolloutRecord[]>) | null
+  >(null);
 
   useEffect(() => setRollouts(initialRollouts), [initialRollouts]);
-
-  useEffect(() => {
-    void reload();
-  }, []);
 
   useEffect(() => {
     const applyRoute = () => setSelectedJobId(readRolloutJobRoute());
@@ -130,7 +131,7 @@ export function RolloutsPanel({
     return () => window.cancelAnimationFrame(frame);
   }, [feedback, selected?.job_id]);
 
-  async function reload() {
+  const reload = useCallback(async () => {
     if (loadingRef.current) return;
     loadingRef.current = true;
     setLoading(true);
@@ -150,7 +151,13 @@ export function RolloutsPanel({
       loadingRef.current = false;
       setLoading(false);
     }
-  }
+  }, [onLoadRollouts]);
+
+  useEffect(() => {
+    if (!requestsEnabled || loadedOwnerRef.current === onLoadRollouts) return;
+    loadedOwnerRef.current = onLoadRollouts;
+    void reload();
+  }, [onLoadRollouts, reload, requestsEnabled]);
 
   function openRollout(rollout: JobRolloutRecord) {
     setRolloutJobRoute(rollout.job_id);

@@ -70,6 +70,7 @@ export function TopologyEvidencePanel({
   clientLabel,
   error,
   jobs,
+  loading,
   observations,
   onLoadObservations,
   onLoadOspfRecommendations,
@@ -90,6 +91,7 @@ export function TopologyEvidencePanel({
   clientLabel: (clientId: string) => string;
   error: string | null;
   jobs: JobHistoryRecord[];
+  loading: boolean;
   observations: NetworkObservationRecord[];
   onLoadObservations: (query?: NetworkEvidenceQuery) => Promise<void>;
   onLoadOspfRecommendations: () => Promise<void>;
@@ -248,7 +250,11 @@ export function TopologyEvidencePanel({
   const evidenceFeedbackMessage =
     refreshError ??
     error ??
-    (refreshing ? "Refreshing network evidence" : null);
+    (refreshing
+      ? "Refreshing network evidence"
+      : loading
+        ? "Loading network evidence"
+        : null);
   const outputFeedbackMessage =
     outputError ??
     (outputLoading ? "Loading retained command output" : outputNotice);
@@ -391,10 +397,10 @@ export function TopologyEvidencePanel({
         <div className="headerActionStack">
           <button
             className="secondaryAction"
-            disabled={refreshing}
+            disabled={refreshing || loading}
             onClick={() => void refreshEvidence()}
             title={
-              refreshing
+              refreshing || loading
                 ? "Network evidence is already refreshing"
                 : "Refresh retained topology measurements and command evidence for the selected range"
             }
@@ -408,7 +414,7 @@ export function TopologyEvidencePanel({
             tone={
               refreshError || error
                 ? "danger"
-                : refreshing
+                : refreshing || loading
                   ? "progress"
                   : "success"
             }

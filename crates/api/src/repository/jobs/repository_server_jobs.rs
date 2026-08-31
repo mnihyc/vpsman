@@ -311,31 +311,77 @@ impl Repository {
                 .bind(json!({ "domains": preview.domains }))
                 .fetch_one(&mut *tx)
                 .await?;
-                for artifact in &matched_artifacts {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO server_job_artifact_cleanup_targets (
-                            server_job_id,
-                            artifact_id,
-                            domain,
-                            object_key,
-                            sha256_hex,
-                            size_bytes,
-                            status_at_review
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        "#,
+                let artifact_ids = matched_artifacts
+                    .iter()
+                    .map(|artifact| artifact.id)
+                    .collect::<Vec<_>>();
+                let artifact_domains = matched_artifacts
+                    .iter()
+                    .map(|artifact| artifact.domain.clone())
+                    .collect::<Vec<_>>();
+                let artifact_object_keys = matched_artifacts
+                    .iter()
+                    .map(|artifact| artifact.object_key.clone())
+                    .collect::<Vec<_>>();
+                let artifact_sha256 = matched_artifacts
+                    .iter()
+                    .map(|artifact| artifact.sha256_hex.clone())
+                    .collect::<Vec<_>>();
+                let artifact_sizes = matched_artifacts
+                    .iter()
+                    .map(|artifact| artifact.size_bytes)
+                    .collect::<Vec<_>>();
+                let artifact_statuses = matched_artifacts
+                    .iter()
+                    .map(|artifact| artifact.status.clone())
+                    .collect::<Vec<_>>();
+                sqlx::query(
+                    r#"
+                    INSERT INTO server_job_artifact_cleanup_targets (
+                        server_job_id,
+                        artifact_id,
+                        domain,
+                        object_key,
+                        sha256_hex,
+                        size_bytes,
+                        status_at_review
                     )
-                    .bind(job_id)
-                    .bind(artifact.id)
-                    .bind(&artifact.domain)
-                    .bind(&artifact.object_key)
-                    .bind(&artifact.sha256_hex)
-                    .bind(artifact.size_bytes)
-                    .bind(&artifact.status)
-                    .execute(&mut *tx)
-                    .await?;
-                }
+                    SELECT
+                        $1,
+                        target.artifact_id,
+                        target.domain,
+                        target.object_key,
+                        target.sha256_hex,
+                        target.size_bytes,
+                        target.status_at_review
+                    FROM unnest(
+                        $2::uuid[],
+                        $3::text[],
+                        $4::text[],
+                        $5::text[],
+                        $6::bigint[],
+                        $7::text[]
+                    ) WITH ORDINALITY AS target(
+                        artifact_id,
+                        domain,
+                        object_key,
+                        sha256_hex,
+                        size_bytes,
+                        status_at_review,
+                        input_order
+                    )
+                    ORDER BY target.input_order
+                    "#,
+                )
+                .bind(job_id)
+                .bind(&artifact_ids)
+                .bind(&artifact_domains)
+                .bind(&artifact_object_keys)
+                .bind(&artifact_sha256)
+                .bind(&artifact_sizes)
+                .bind(&artifact_statuses)
+                .execute(&mut *tx)
+                .await?;
                 tx.commit().await?;
                 Ok(server_job_from_row(row)?)
             }

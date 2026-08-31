@@ -13,6 +13,25 @@ fn cleanup_review_limit_fails_instead_of_returning_a_partial_preview() {
 }
 
 #[test]
+fn cleanup_job_persists_reviewed_targets_in_one_ordered_set_insert() {
+    let source = include_str!("repository_server_jobs.rs");
+    let creation = source
+        .split("pub(crate) async fn create_artifact_cleanup_job")
+        .nth(1)
+        .and_then(|source| source.split("pub(crate) async fn list_server_jobs").next())
+        .expect("artifact cleanup job creation body");
+    assert_eq!(
+        creation
+            .matches("INSERT INTO server_job_artifact_cleanup_targets")
+            .count(),
+        1
+    );
+    assert!(creation.contains("FROM unnest("));
+    assert!(creation.contains("WITH ORDINALITY AS target"));
+    assert!(creation.contains("ORDER BY target.input_order"));
+}
+
+#[test]
 fn cleanup_preview_rejects_invalid_or_overflowing_size_totals() {
     let candidate = |id, size_bytes| ServerArtifactCleanupCandidate {
         id,

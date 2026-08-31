@@ -64,6 +64,13 @@ pub(crate) struct MonitoringShareTargetReplacement {
     pub(crate) next_client_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct MonitoringShareTargetRevisionRecord {
+    pub(crate) share_id: Uuid,
+    pub(crate) updated_at: String,
+    pub(crate) target_client_ids: Vec<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct MonitoringShareDefinitionUpdate {
     pub(crate) expected_share: MonitoringShareRecord,

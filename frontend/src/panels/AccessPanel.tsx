@@ -440,7 +440,7 @@ export function AccessPanel({
     (session) => session.current,
   );
   useEffect(() => {
-    const context = `${operator?.id ?? ""}:${currentBearerSession?.id ?? ""}`;
+    const context = operator?.id ?? "";
     if (totpEnrollmentContextRef.current === null) {
       totpEnrollmentContextRef.current = context;
       return;
@@ -455,7 +455,7 @@ export function AccessPanel({
     setTotpSetup(null);
     setTotpError(null);
     setTotpPending(false);
-  }, [currentBearerSession?.id, operator?.id]);
+  }, [operator?.id]);
   const adminMfaRisk = operator?.role === "admin" && !operator.totp_enabled;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const nextIdentityClientId = keyLifecycleReport?.suggested_client_id ?? "";

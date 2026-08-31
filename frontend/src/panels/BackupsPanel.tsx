@@ -764,11 +764,29 @@ export function BackupsPanel({
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const restorePlansTruncated = restorePlans.length >= HISTORY_DETAIL_LIMIT;
   const migrationLinksTruncated = migrationLinks.length >= HISTORY_DETAIL_LIMIT;
-  const status = `${formatLowerBoundCount(backupPolicies.length, backupPoliciesTruncated)}${backupPoliciesTruncated ? " loaded" : ""} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${formatLowerBoundCount(backups.length, backupsTruncated)}${backupsTruncated ? " loaded" : ""} backup request${
-    backups.length === 1 ? "" : "s"
-  }, ${formatLowerBoundCount(artifacts.length, artifactsTruncated)}${artifactsTruncated ? " loaded" : ""} artifact${artifacts.length === 1 ? "" : "s"}, ${formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}${restorePlansTruncated ? " loaded" : ""} restore plan${
-    restorePlans.length === 1 ? "" : "s"
-  }, ${formatLowerBoundCount(migrationLinks.length, migrationLinksTruncated)}${migrationLinksTruncated ? " loaded" : ""} migration mapping${migrationLinks.length === 1 ? "" : "s"}`;
+  const statusParts: string[] = [];
+  if (["overview", "requests", "policies"].includes(backupSubpage)) {
+    statusParts.push(
+      `${formatLowerBoundCount(backupPolicies.length, backupPoliciesTruncated)}${backupPoliciesTruncated ? " loaded" : ""} polic${backupPolicies.length === 1 ? "y" : "ies"}`,
+    );
+  }
+  if (backupSubpage !== "policies") {
+    statusParts.push(
+      `${formatLowerBoundCount(backups.length, backupsTruncated)}${backupsTruncated ? " loaded" : ""} backup request${backups.length === 1 ? "" : "s"}`,
+      `${formatLowerBoundCount(artifacts.length, artifactsTruncated)}${artifactsTruncated ? " loaded" : ""} artifact${artifacts.length === 1 ? "" : "s"}`,
+    );
+  }
+  if (["overview", "restore", "migration"].includes(backupSubpage)) {
+    statusParts.push(
+      `${formatLowerBoundCount(restorePlans.length, restorePlansTruncated)}${restorePlansTruncated ? " loaded" : ""} restore plan${restorePlans.length === 1 ? "" : "s"}`,
+    );
+  }
+  if (["overview", "migration"].includes(backupSubpage)) {
+    statusParts.push(
+      `${formatLowerBoundCount(migrationLinks.length, migrationLinksTruncated)}${migrationLinksTruncated ? " loaded" : ""} migration mapping${migrationLinks.length === 1 ? "" : "s"}`,
+    );
+  }
+  const status = statusParts.join(", ");
   const backupPageFeedbackMessage =
     error ?? (loading ? backupSubpageMeta.loading : null);
   const backupPageFeedbackTone = error ? "danger" : "progress";

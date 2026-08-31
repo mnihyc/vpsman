@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    is_fleet_alert_notification_delivery_status,
+    is_fleet_alert_notification_delivery_status, payload_hash,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
@@ -633,6 +633,9 @@ impl Repository {
         candidates: &[FleetAlertNotificationCandidate],
         operator: &AuthContext,
     ) -> Result<Vec<FleetAlertNotificationDeliveryView>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
         let now = unix_now();
         match self {
             Self::Postgres(pool) => {
@@ -644,24 +647,45 @@ impl Repository {
                     .into_iter()
                     .collect::<Vec<_>>();
                 channel_ids.sort_unstable();
-                let enabled_channel_ids = sqlx::query_scalar::<_, Uuid>(
+                let current_channel_revisions = sqlx::query(
                     r#"
-                    SELECT id
+                    SELECT
+                        id, name, scope_kind, scope_value, min_severity,
+                        categories, operator_states, delivery_kind, target,
+                        cooldown_secs, enabled, notes, actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
                     FROM fleet_alert_notification_channels
-                    WHERE id = ANY($1) AND enabled = TRUE
+                    WHERE id = ANY($1::uuid[])
                     ORDER BY id
+                    FOR UPDATE
                     "#,
                 )
                 .bind(&channel_ids)
                 .fetch_all(&mut *tx)
                 .await?
                 .into_iter()
-                .collect::<HashSet<_>>();
+                .map(channel_from_row)
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|channel| channel.enabled && channel.configuration_error.is_none())
+                .map(|channel| {
+                    (
+                        channel.id,
+                        fleet_alert_notification_channel_revision_hash(&channel),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
                 let mut persisted = Vec::new();
                 for candidate in candidates {
-                    if !enabled_channel_ids.contains(&candidate.channel_id) {
+                    if current_channel_revisions.get(&candidate.channel_id)
+                        != Some(&candidate.channel_revision_hash)
+                    {
                         continue;
                     }
+                    // The exact channel row remains locked through commit, so
+                    // cooldown admission for this channel is serialized with
+                    // every competing manual dispatch and definition edit.
                     let duplicate = sqlx::query_scalar::<_, i64>(
                         r#"
                         SELECT 1::bigint
@@ -1275,6 +1299,28 @@ fn channel_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertNotification
     })
 }
 
+pub(crate) fn fleet_alert_notification_channel_revision_hash(
+    channel: &FleetAlertNotificationChannelView,
+) -> String {
+    payload_hash(
+        json!({
+            "id": channel.id,
+            "name": &channel.name,
+            "scope_kind": &channel.scope_kind,
+            "scope_value": &channel.scope_value,
+            "min_severity": &channel.min_severity,
+            "categories": &channel.categories,
+            "operator_states": &channel.operator_states,
+            "delivery_kind": &channel.delivery_kind,
+            "target": &channel.target,
+            "cooldown_secs": channel.cooldown_secs,
+            "enabled": channel.enabled,
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
 fn fleet_alert_notification_channel_material_matches(
     existing: &FleetAlertNotificationChannelView,
     candidate: &FleetAlertNotificationChannelView,
@@ -1635,6 +1681,9 @@ mod ownership_tests {
             assert!(source_transition.contains("pg_notify('webhook_events'"));
             assert!(!source_transition.contains("UPDATE fleet_alert_notification_deliveries"));
         }
-        assert!(!producer.contains("FOR UPDATE"));
+        assert!(producer.contains("FROM fleet_alert_notification_channels"));
+        assert!(producer.contains("ORDER BY id"));
+        assert!(producer.contains("FOR UPDATE"));
+        assert!(!producer.contains("UPDATE fleet_alert_notification_deliveries"));
     }
 }

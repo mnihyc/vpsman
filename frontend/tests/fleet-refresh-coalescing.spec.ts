@@ -139,6 +139,104 @@ test("Network overview activation has one bounded exact subpage owner", async ({
   ]);
 });
 
+test("hidden Network route visits hydrate the final exact owner once", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "visibility is viewport independent",
+  );
+  await installVisibilityControl(page, false);
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Network", "Overview");
+  await clearTrackedRequests(page);
+
+  await setDocumentHidden(page, true);
+  await openConsoleSubpage(page, "Network", "Graph");
+  await openConsoleSubpage(page, "Network", "Overview");
+  await page.waitForTimeout(100);
+  let requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/network/topology-graph",
+    "/api/v1/network/ospf-update-plans",
+    "/api/v1/tunnel-plans",
+  ]) {
+    expect(pathCount(requests, path), `${path} stayed hidden`).toBe(0);
+  }
+
+  await setDocumentHidden(page, false);
+  await expect
+    .poll(async () => {
+      const visibleRequests = await trackedRequests(page);
+      return {
+        graph: pathCount(visibleRequests, "/api/v1/network/topology-graph") > 0,
+        ospfPlans:
+          pathCount(visibleRequests, "/api/v1/network/ospf-update-plans") > 0,
+        tunnelPlans:
+          pathCount(visibleRequests, "/api/v1/tunnel-plans") > 0,
+      };
+    })
+    .toEqual({ graph: true, ospfPlans: true, tunnelPlans: true });
+  requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/network/topology-graph",
+    "/api/v1/network/ospf-update-plans",
+    "/api/v1/tunnel-plans",
+  ]) {
+    expect(pathCount(requests, path)).toBeLessThanOrEqual(2);
+  }
+  expect(pathCount(requests, "/api/v1/runtime-config/apply-state")).toBe(0);
+});
+
+test("topology source failures stay with their exact route consumers", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "source ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      if (method === "GET" && url.pathname === "/api/v1/tunnel-plans") {
+        return new Response(
+          JSON.stringify({
+            error: "topology_scope_probe",
+            message: "Tunnel source failed",
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 503 },
+        );
+      }
+      return originalFetch(input, init);
+    };
+  });
+
+  await openConsoleSubpage(page, "Network", "Tests");
+  await expect(page.getByText("Tunnel plans unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Topology Scope Probe: Tunnel source failed/i)).toBeVisible();
+
+  await openConsoleSubpage(page, "Network", "Graph");
+  await expect(page.getByText(/Topology Scope Probe: Tunnel source failed/i)).toHaveCount(0);
+
+  await openConsoleSubpage(page, "Network", "OSPF");
+  await expect(page.getByText(/Topology Scope Probe: Tunnel source failed/i)).toBeVisible();
+});
+
 test("bursty unknown job completions share history ownership and retain every projection classification", async ({
   page,
 }, testInfo) => {
@@ -256,26 +354,26 @@ test("bursty unknown job completions share history ownership and retain every pr
     .poll(async () => {
       const requests = await trackedRequests(page);
       return {
-        applyState:
-          pathCount(requests, "/api/v1/runtime-config/apply-state") > 0,
-        networkEvidence:
-          pathCount(requests, "/api/v1/network/observations") > 0,
-        routingEvidence:
-          pathCount(requests, "/api/v1/network/ospf-recommendations") > 0,
+        graph: pathCount(requests, "/api/v1/network/topology-graph") > 0,
+        ospfPlans:
+          pathCount(requests, "/api/v1/network/ospf-update-plans") > 0,
       };
     })
-    .toEqual({
-      applyState: true,
-      networkEvidence: true,
-      routingEvidence: true,
-    });
+    .toEqual({ graph: true, ospfPlans: true });
   const requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/network/topology-graph",
+    "/api/v1/network/ospf-update-plans",
+  ]) {
+    expect(pathCount(requests, path)).toBeLessThanOrEqual(2);
+  }
   for (const path of [
     "/api/v1/runtime-config/apply-state",
     "/api/v1/network/observations",
+    "/api/v1/network/observation-trends",
     "/api/v1/network/ospf-recommendations",
   ]) {
-    expect(pathCount(requests, path)).toBeLessThanOrEqual(2);
+    expect(pathCount(requests, path), `${path} is not rendered`).toBe(0);
   }
   const requestState = await page.evaluate(
     () =>
@@ -466,6 +564,49 @@ test("Access exact mutation survives an older aggregate and a rejected source", 
   await expect(
     page.getByText(/Operators: .*Operator source unavailable/i),
   ).toBeVisible();
+});
+
+test("Access manual refresh follows the canonical visible projection", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "projection ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Access", "VPS identities");
+  const accessPanel = page.locator(".accessMain");
+  const refresh = accessPanel.getByRole("button", {
+    name: "Refresh",
+    exact: true,
+  });
+  await expect(refresh).toBeEnabled();
+  await clearTrackedRequests(page);
+  await refresh.click();
+  await expect
+    .poll(async () => {
+      const requests = await trackedRequests(page);
+      return {
+        keyLifecycle:
+          pathCount(requests, "/api/v1/key-lifecycle/report") > 0,
+        revocations:
+          pathCount(requests, "/api/v1/client-key-revocations") > 0,
+      };
+    })
+    .toEqual({ keyLifecycle: true, revocations: true });
+  const requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/operators",
+    "/api/v1/operator-sessions",
+    "/api/v1/gateway-sessions",
+    "/api/v1/terminal-sessions",
+  ]) {
+    expect(pathCount(requests, path), `${path} is outside VPS identities`).toBe(
+      0,
+    );
+  }
 });
 
 test("committed backup prune reconciles request linkage and artifacts once", async ({
@@ -1630,6 +1771,107 @@ test("hidden WS bursts, reconnect, and timers produce one visible catch-up per s
     .map((request) => new URL(request.url, "http://localhost"))
     .find((url) => url.pathname === "/api/v1/monitoring/cards");
   expect(cardsUrl?.searchParams.get("include_history")).toBe("false");
+});
+
+test("a rejected job received while hidden catches up through Jobs history only", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "visibility is viewport independent",
+  );
+  await installVisibilityControl(page, false);
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Jobs", "History");
+
+  const rejectedJobId = "50000000-0000-4000-8000-000000000001";
+  await page.evaluate((jobId) => {
+    const originalFetch = window.fetch.bind(window);
+    const record = {
+      actor_id: null,
+      command_type: "hidden rejection probe",
+      completed_at: "2026-06-02T10:01:00Z",
+      created_at: "2026-06-02T10:01:00Z",
+      id: jobId,
+      max_timeout_secs: 60,
+      payload_hash: "f".repeat(64),
+      privileged: false,
+      source_schedule_id: null,
+      status: "rejected",
+      target_count: 1,
+    };
+    const state = { itemGets: 0, listGets: 0 };
+    Object.defineProperty(window, "__vpsmanHiddenRejectedJob", {
+      configurable: true,
+      value: state,
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      if (method === "GET" && url.pathname === "/api/v1/jobs") {
+        state.listGets += 1;
+        return new Response(JSON.stringify([record]), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+      if (method === "GET" && /^\/api\/v1\/jobs\/[^/]+$/.test(url.pathname)) {
+        state.itemGets += 1;
+      }
+      return originalFetch(input, init);
+    };
+  }, rejectedJobId);
+
+  await setDocumentHidden(page, true);
+  await page.evaluate((jobId) => {
+    const socket = (
+      window as typeof window & { __vpsmanTestWebSockets: EventTarget[] }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          job_id: jobId,
+          status: "rejected",
+          type: "job_rejected",
+        }),
+      }),
+    );
+  }, rejectedJobId);
+  await page.waitForTimeout(100);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __vpsmanHiddenRejectedJob: { itemGets: number; listGets: number };
+          }
+        ).__vpsmanHiddenRejectedJob,
+    ),
+  ).toEqual({ itemGets: 0, listGets: 0 });
+
+  await setDocumentHidden(page, false);
+  await expect(page.getByText("hidden rejection probe")).toBeVisible();
+  const requestState = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __vpsmanHiddenRejectedJob: { itemGets: number; listGets: number };
+        }
+      ).__vpsmanHiddenRejectedJob,
+  );
+  expect(requestState.listGets).toBeGreaterThan(0);
+  expect(requestState.listGets).toBeLessThanOrEqual(2);
+  expect(requestState.itemGets).toBe(0);
 });
 
 test("hide and show during a held Home bootstrap waits for Home before one catch-up", async ({

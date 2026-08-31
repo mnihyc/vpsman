@@ -20,7 +20,7 @@ use crate::{
         WebhookRuleDryRunRequest, WebhookRuleDryRunView, WebhookRuleProcessRequest,
         WebhookRuleView,
     },
-    repository_webhook_rules::dry_run_webhook_delivery,
+    repository_webhook_rules::{dry_run_webhook_delivery, webhook_rule_revision_hash},
     security::{operator_has_scope, SCOPE_CONFIG_READ},
     selector_expression::{agent_expression_context, parse_selector_expression},
     state::AppState,
@@ -596,16 +596,7 @@ fn webhook_candidate_for_event_with_vps_rules(
         "event_id": event_id,
     });
     let hash = payload_hash(dedupe_fingerprint.to_string().as_bytes());
-    let rule_revision_hash = payload_hash(&serde_json::to_vec(&json!({
-        "id": rule.id,
-        "name": &rule.name,
-        "enabled": rule.enabled,
-        "expression": &rule.expression,
-        "target": &rule.target,
-        "body_template": &rule.body_template,
-        "cooldown_secs": rule.cooldown_secs,
-        "signing_secret": &rule.signing_secret,
-    }))?);
+    let rule_revision_hash = webhook_rule_revision_hash(rule)?;
     Ok(Some(WebhookRuleDeliveryCandidate {
         rule_id: rule.id,
         rule_name: rule.name.clone(),

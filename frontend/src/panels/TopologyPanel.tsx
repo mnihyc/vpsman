@@ -161,6 +161,7 @@ const DEFAULT_OSPF_POLICY: OspfCostPolicy = {
 
 export function TopologyPanel({
   activeSubpage,
+  requestsEnabled,
   agents,
   apiToken,
   configurationSources,
@@ -240,10 +241,28 @@ export function TopologyPanel({
   );
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, clientNames);
-  const [adapterDefinitionsLoadError, setAdapterDefinitionsLoadError] =
-    useState<string | null>(null);
+  const loadedSubpageKeyRef = useRef<string | null>(null);
+  const subpageVisitRef = useRef({
+    apiToken: "",
+    sequence: 0,
+    subpage: "",
+  });
+  if (
+    subpageVisitRef.current.apiToken !== apiToken ||
+    subpageVisitRef.current.subpage !== activeSubpage
+  ) {
+    subpageVisitRef.current = {
+      apiToken,
+      sequence: subpageVisitRef.current.sequence + 1,
+      subpage: activeSubpage,
+    };
+  }
+  const subpageVisitKey = `${apiToken}\u0000${subpageVisitRef.current.sequence}`;
 
   useEffect(() => {
+    if (!requestsEnabled) return;
+    if (loadedSubpageKeyRef.current === subpageVisitKey) return;
+    loadedSubpageKeyRef.current = subpageVisitKey;
     if (activeSubpage === "graph") {
       void Promise.all([
         onLoadTopologyGraph(),
@@ -274,17 +293,10 @@ export function TopologyPanel({
     }
     if (activeSubpage === "port_forwards") void onLoadPortForwardRules();
     if (activeSubpage === "tunnel_plans") {
-      setAdapterDefinitionsLoadError(null);
       void onRefresh();
       void onLoadTopologyGraph();
       void onLoadConfigurationSources().catch(() => undefined);
-      void onLoadNetworkAdapterDefinitions().catch((loadError) => {
-        setAdapterDefinitionsLoadError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Network adapter definitions unavailable",
-        );
-      });
+      void onLoadNetworkAdapterDefinitions();
     }
   }, [
     activeSubpage,
@@ -298,6 +310,8 @@ export function TopologyPanel({
     onLoadNetworkAdapterDefinitions,
     onLoadTopologyGraph,
     onRefresh,
+    requestsEnabled,
+    subpageVisitKey,
   ]);
 
   if (activeSubpage === "port_forwards") {
@@ -353,6 +367,7 @@ export function TopologyPanel({
     return (
       <TopologyNetworkTestControls
         agents={agents}
+        error={error}
         loading={loading}
         networkTrends={networkTrends}
         onCreateJob={onCreateJob}
@@ -374,6 +389,8 @@ export function TopologyPanel({
     return (
       <TopologyOspfUpdateControls
         agents={agents}
+        error={error}
+        loading={loading}
         onOpenJobDetails={onOpenJobDetails}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onOpenAdapterDefinitions={() =>
@@ -401,6 +418,7 @@ export function TopologyPanel({
         clientLabel={clientLabel}
         error={error}
         jobs={jobs}
+        loading={loading}
         observations={networkObservations}
         onLoadObservations={onLoadNetworkObservations}
         onLoadOspfRecommendations={onLoadOspfRecommendations}
@@ -448,7 +466,7 @@ export function TopologyPanel({
       apiToken={apiToken}
       configurationSources={configurationSources}
       configurationSourcesEvidenceState={configurationSourcesEvidenceState}
-      error={error ?? adapterDefinitionsLoadError}
+      error={error}
       initialAdapterKind={initialAdapterKind}
       initialPlanWorkflow={initialPlanWorkflow}
       loading={loading}
@@ -464,7 +482,9 @@ export function TopologyPanel({
       onOpenAdapterDefinitions={onOpenAdapterDefinitions}
       onOpenConfigurationSources={onOpenConfigurationSources}
       onQueryNetworkObservations={onQueryNetworkObservations}
-      onRefresh={onRefresh}
+      onRefresh={async () => {
+        await Promise.all([onRefresh(), onLoadTopologyGraph()]);
+      }}
       onRotateTunnelPlanCredentials={onRotateTunnelPlanCredentials}
       onSetTunnelPlanEnabled={onSetTunnelPlanEnabled}
       onUpdateTunnelConnectionAssessment={onUpdateTunnelConnectionAssessment}
@@ -6287,6 +6307,7 @@ type ClearEvidenceSnapshot = {
 
 type TopologyPanelProps = {
   activeSubpage: string;
+  requestsEnabled: boolean;
   agents: AgentView[];
   apiToken: string;
   configurationSources: ConfigurationSourceView[];

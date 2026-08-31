@@ -905,7 +905,11 @@ export function App() {
     setPrivilegeUnlockOpen(false);
     setPrivilegeRestoreError(null);
   }, []);
-  const dashboard = useDashboardData(activeView);
+  const activeSubpage = normalizeSubpage(
+    activeView,
+    activeSubpages[activeView],
+  );
+  const dashboard = useDashboardData(activeView, activeSubpage);
   const privilegeAuthContextRef = useRef({
     apiToken: dashboard.apiToken,
     operatorId: dashboard.operator?.id ?? null,
@@ -1196,10 +1200,6 @@ export function App() {
           !suspendedClientIds.has(plan.right_client_id),
       ),
     [dashboard.tunnelPlans, suspendedClientIds],
-  );
-  const activeSubpage = normalizeSubpage(
-    activeView,
-    activeSubpages[activeView],
   );
   const selectedAgent = useMemo(
     () =>
@@ -2083,7 +2083,7 @@ export function App() {
         onDeleteTag={dashboard.deleteTag}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSchedules={() => selectView("Automation", "schedules")}
-        onRefresh={dashboard.loadTagInventory}
+        onRefresh={dashboard.loadTagOrder}
         onResolveBulk={dashboard.resolveBulkPreview}
         onUpdateTagOrder={dashboard.updateTagOrder}
         privilegeMaterial={privilegeMaterial}
@@ -2105,7 +2105,6 @@ export function App() {
           dashboard.jobsError,
           dashboard.backupsError,
           dashboard.auditError,
-          dashboard.tagsError,
           dashboard.configurationSourcesError,
           dashboard.runtimeConfigApplyError,
           dashboard.topologyError,
@@ -2125,12 +2124,12 @@ export function App() {
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
         recordBounds={recordPageBounds}
+        requestsEnabled={dashboard.documentVisible}
         loading={
           dashboard.jobsLoading ||
           dashboard.backupsLoading ||
           dashboard.topologyLoading ||
           dashboard.auditLoading ||
-          dashboard.tagsLoading ||
           dashboard.configurationSourcesLoading ||
           dashboard.runtimeConfigApplyLoading
         }
@@ -2422,7 +2421,10 @@ export function App() {
           onOpenDispatchPreset={openJobDispatchPreset}
           onOpenJobDetails={openJobDetails}
           onOpenJobHistory={() => selectView("Jobs", "history")}
-          onRefresh={dashboard.loadJobs}
+          onRefresh={() => {
+            void dashboard.loadAgentUpdateReleases();
+            void dashboard.loadJobHistory();
+          }}
           releases={dashboard.agentUpdateReleases}
           releasesTruncated={dashboard.agentUpdateReleasesTruncated}
           suiteConfig={canInspectSuitePolicy ? dashboard.suiteConfig : null}
@@ -2468,6 +2470,7 @@ export function App() {
           onLoadRollouts={dashboard.loadJobRollouts}
           onOpenJobDetails={openJobDetails}
           onUpdateRollout={dashboard.updateJobRollout}
+          requestsEnabled={dashboard.documentVisible}
           rollouts={dashboard.jobRollouts}
           rolloutsTruncated={dashboard.jobRolloutsTruncated}
         />
@@ -2487,7 +2490,10 @@ export function App() {
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
         onOpenRemoteTerminal={() => selectView("Remote Operations", "terminal")}
         onOpenSchedules={() => selectView("Automation", "schedules")}
-        onRefresh={dashboard.loadJobs}
+        onRefresh={() => {
+          void dashboard.loadCommandTemplates();
+          void dashboard.loadJobHistory();
+        }}
       />
     );
   }
@@ -2522,6 +2528,7 @@ export function App() {
         onOpenOspf={() => selectView("Network", "ospf")}
         onOpenTests={() => selectView("Network", "tests")}
         ospfRecommendations={monitorOspfRecommendations}
+        requestsEnabled={dashboard.documentVisible}
         telemetryTunnels={monitorTelemetryTunnels}
         tunnelPlans={monitorTunnelPlans}
       />
@@ -2534,6 +2541,7 @@ export function App() {
         agents={dashboard.agents}
         apiToken={dashboard.apiToken}
         onResolveTargets={dashboard.resolveJobTargets}
+        requestsEnabled={dashboard.documentVisible}
       />
     );
   }
@@ -2546,6 +2554,7 @@ export function App() {
         initialSelectorExpression={sharedViewSeed ?? "*"}
         onInitialSelectorConsumed={() => setSharedViewSeed(null)}
         onResolveTargets={dashboard.resolveBulkPreview}
+        requestsEnabled={dashboard.documentVisible}
       />
     );
   }
@@ -2555,7 +2564,12 @@ export function App() {
       <JobsPanel
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
-        error={dashboard.jobsError}
+        error={combineErrors(
+          dashboard.jobsError,
+          panelSubpage === "scheduled_runs"
+            ? dashboard.schedulesError
+            : null,
+        )}
         jobApprovals={dashboard.jobApprovals}
         jobs={dashboard.jobs}
         schedules={dashboard.schedules}
@@ -2565,7 +2579,10 @@ export function App() {
         fileTransferSources={dashboard.fileTransferSources}
         fileTransferSourcesTruncated={dashboard.fileTransferSourcesTruncated}
         jobDetailsInvalidation={dashboard.jobDetailsInvalidation}
-        loading={dashboard.jobsLoading}
+        loading={
+          dashboard.jobsLoading ||
+          (panelSubpage === "scheduled_runs" && dashboard.schedulesLoading)
+        }
         onApproveJobApproval={dashboard.approveJobApproval}
         onCreateJob={dashboard.createJob}
         onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
@@ -2586,7 +2603,19 @@ export function App() {
         onOpenRemoteOperations={(subpage) =>
           selectView("Remote Operations", subpage)
         }
-        onRefresh={dashboard.loadJobs}
+        onRefresh={() => {
+          if (panelSubpage === "approvals") {
+            void dashboard.loadJobApprovals();
+          } else if (panelSubpage === "dispatch") {
+            void dashboard.loadCommandTemplates();
+            void dashboard.loadFileTransferSources();
+          } else {
+            void dashboard.loadJobHistory();
+            if (panelSubpage === "scheduled_runs") {
+              void dashboard.loadSchedules();
+            }
+          }
+        }}
         onResolveTargets={dashboard.resolveJobTargets}
         onRejectJobApproval={dashboard.rejectJobApproval}
         onSelectSubpage={(subpage) => selectReleaseDestination("Jobs", subpage)}
@@ -2643,7 +2672,19 @@ export function App() {
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSessionEvidence={() => selectView("Audit", "sessions")}
-        onRefresh={dashboard.loadTerminalSessions}
+        onRefresh={() => {
+          if (panelSubpage === "terminal") {
+            void dashboard.loadTerminalSessions();
+          } else if (panelSubpage === "transfers") {
+            void dashboard.loadFileTransfers();
+            void dashboard.loadFileTransferSources();
+            void dashboard.loadCommandTemplates();
+          } else if (panelSubpage === "processes") {
+            void dashboard.loadProcessSupervisorInventory();
+            void dashboard.loadFileTransferSources();
+            void dashboard.loadCommandTemplates();
+          }
+        }}
         onResolveTargets={dashboard.resolveJobTargets}
         onSaveFileTransferHandoff={dashboard.saveFileTransferHandoff}
         onSelectSubpage={(subpage) =>
@@ -2690,11 +2731,12 @@ export function App() {
         onCreateCleanupJob={dashboard.createArtifactCleanupJob}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onPreviewCleanup={dashboard.previewArtifactCleanup}
-        onRefreshJobs={dashboard.loadJobs}
+        onRefreshJobs={dashboard.loadServerJobs}
         onRefreshSchedules={dashboard.loadSchedules}
         onResolveManyTargets={dashboard.resolveManyJobTargets}
         onSelectSubpage={(subpage) => selectView("System", subpage)}
         privilegeMaterial={privilegeMaterial}
+        requestsEnabled={dashboard.documentVisible}
       />
     );
   }
@@ -2731,10 +2773,25 @@ export function App() {
   }
 
   function renderNetworkPanel(panelSubpage: string) {
+    const topologyPanelError = combineErrors(
+      dashboard.topologyError,
+      panelSubpage === "evidence" ? dashboard.jobsError : null,
+      panelSubpage === "tunnel_plans"
+        ? dashboard.configurationSourcesError
+        : null,
+      panelSubpage === "graph" ? dashboard.runtimeConfigApplyError : null,
+    );
+    const topologyPanelLoading =
+      dashboard.topologyLoading ||
+      (panelSubpage === "evidence" && dashboard.jobsLoading) ||
+      (panelSubpage === "tunnel_plans" &&
+        dashboard.configurationSourcesLoading) ||
+      (panelSubpage === "graph" && dashboard.runtimeConfigApplyLoading);
     return (
       <div className="workspace singleColumn">
         <TopologyPanel
           activeSubpage={panelSubpage}
+          requestsEnabled={dashboard.documentVisible}
           agents={dashboard.agents}
           apiToken={dashboard.apiToken}
           configurationSources={dashboard.configurationSources}
@@ -2745,15 +2802,10 @@ export function App() {
                 ? "available"
                 : "unavailable"
           }
-          error={combineErrors(
-            dashboard.topologyError,
-            dashboard.tagsError,
-            dashboard.configurationSourcesError,
-            dashboard.runtimeConfigApplyError,
-          )}
+          error={topologyPanelError}
           initialAdapterKind={networkAdapterWorkflowIntent}
           jobs={dashboard.jobs}
-          loading={dashboard.topologyLoading}
+          loading={topologyPanelLoading}
           initialPlanWorkflow={networkPlanWorkflowIntent}
           initialTargetIntent={
             workflowTargetIntent?.destination === "network_graph"
@@ -2866,7 +2918,11 @@ export function App() {
         }
         onOpenEvidence={openAuditEvidenceReference}
         onPruneHistoryRetention={dashboard.pruneHistoryRetention}
-        onRefresh={dashboard.loadAudits}
+        onRefresh={
+          panelSubpage === "events" || panelSubpage.startsWith("events:id:")
+            ? dashboard.loadAuditLogs
+            : dashboard.loadAudits
+        }
         onUpsertHistoryRetentionPolicy={dashboard.upsertHistoryRetentionPolicy}
       />
     );
@@ -2911,7 +2967,41 @@ export function App() {
           selectView("Remote Operations", "transfers");
         }}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
-        onRefresh={dashboard.loadBackups}
+        onRefresh={async () => {
+          if (panelSubpage === "overview") {
+            await dashboard.loadBackups();
+            return;
+          }
+          if (panelSubpage === "requests") {
+            await Promise.all([
+              dashboard.loadBackupRequests(),
+              dashboard.loadBackupPolicies(),
+              dashboard.loadBackupArtifacts(),
+            ]);
+            return;
+          }
+          if (panelSubpage === "policies") {
+            await dashboard.loadBackupPolicies();
+            return;
+          }
+          if (panelSubpage === "artifacts") {
+            await Promise.all([
+              dashboard.loadBackupArtifacts(),
+              dashboard.loadBackupRequests(),
+            ]);
+            return;
+          }
+          const loads = [
+            dashboard.loadBackupRequests(),
+            dashboard.loadBackupArtifacts(),
+            dashboard.loadRestorePlans(),
+            dashboard.loadFileTransfers(),
+          ];
+          if (panelSubpage === "migration") {
+            loads.push(dashboard.loadMigrationLinks());
+          }
+          await Promise.all(loads);
+        }}
         onResolveTargets={dashboard.resolveJobTargets}
         onSelectSubpage={(subpage) => selectView("Backups", subpage)}
         privilegeMaterial={privilegeMaterial}
@@ -2923,15 +3013,22 @@ export function App() {
   }
 
   function renderAccessPanel(panelSubpage: string) {
+    const overviewOwnsTerminalSessions = panelSubpage === "overview";
     return (
       <AccessPanel
         activeSubpage={panelSubpage}
         apiToken={dashboard.apiToken}
-        error={dashboard.accessError}
+        error={combineErrors(
+          dashboard.accessError,
+          overviewOwnsTerminalSessions ? dashboard.jobsError : null,
+        )}
         gatewaySessions={dashboard.gatewaySessions}
         initialIdentityWorkflow={accessIdentityWorkflowIntent}
         lastLiveEvent={dashboard.lastLiveEvent}
-        loading={dashboard.accessLoading}
+        loading={
+          dashboard.accessLoading ||
+          (overviewOwnsTerminalSessions && dashboard.jobsLoading)
+        }
         onClearSession={clearOperatorSession}
         onClearOperatorTotps={dashboard.clearOperatorTotps}
         onConfirmTotp={dashboard.confirmTotp}
@@ -2946,7 +3043,24 @@ export function App() {
         onOpenTerminalSessions={() =>
           selectView("Remote Operations", "terminal")
         }
-        onRefresh={dashboard.loadCurrentOperator}
+        onRefresh={async () => {
+          if (panelSubpage === "vps_identities") {
+            await dashboard.loadAccessVpsIdentities();
+            return;
+          }
+          if (panelSubpage === "gateway_sessions") {
+            await dashboard.loadAccessGatewaySessions();
+            return;
+          }
+          if (panelSubpage === "privilege_vault") {
+            await dashboard.loadCurrentOperatorProfile();
+            return;
+          }
+          await Promise.all([
+            dashboard.loadAccessOverview(),
+            dashboard.loadTerminalSessions(),
+          ]);
+        }}
         onResetOperatorPassword={dashboard.resetOperatorPassword}
         onRevokeClientKey={dashboard.revokeClientKey}
         onRevokeOperatorSessions={dashboard.revokeOperatorSessions}
@@ -3022,7 +3136,11 @@ export function App() {
           <FleetMonitorPanel
             agents={monitorVisibleAgents}
             apiToken={dashboard.apiToken}
-            apiError={dashboard.apiError}
+            apiError={combineErrors(
+              dashboard.apiError,
+              dashboard.jobsError,
+              dashboard.backupsError,
+            )}
             backups={dashboard.backups}
             failedJobCount={
               dashboard.jobs.filter((job) => isFailedJobStatus(job.status))
@@ -3176,8 +3294,8 @@ export function App() {
               onLoadJobTargets={dashboard.loadJobTargets}
               onOpenJobDetails={openJobDetails}
               onRefresh={() => {
-                void dashboard.loadJobs();
-                void dashboard.loadAudits();
+                void dashboard.loadJobHistory();
+                void dashboard.loadAuditLogs();
               }}
             />
           </div>
@@ -3192,6 +3310,11 @@ export function App() {
               agents={dashboard.agents}
               audits={dashboard.audits}
               auditsTruncated={dashboard.auditsTruncated}
+              error={combineErrors(
+                dashboard.auditError,
+                dashboard.jobsError,
+                dashboard.accessError,
+              )}
               jobs={dashboard.jobs}
               jobsTruncated={dashboard.jobsTruncated}
               loading={
@@ -3202,10 +3325,10 @@ export function App() {
               onClearSession={clearOperatorSession}
               onOpenPrivilegeUnlock={openPrivilegeUnlock}
               onRefresh={() => {
-                void dashboard.loadAudits();
-                void dashboard.loadJobs();
+                void dashboard.loadAuditLogs();
+                void dashboard.loadJobHistory();
                 void dashboard.loadTerminalSessions();
-                void dashboard.loadCurrentOperator();
+                void dashboard.loadAccessAuditSessions();
               }}
               onRevokeOperatorSessions={dashboard.revokeOperatorSessions}
               operator={dashboard.operator}
@@ -3226,7 +3349,7 @@ export function App() {
     }
     if (activeView === "Access") {
       if (activeSubpage === "operators") return renderSystemPanel("users");
-      return renderAccessPanel(accessSubpage(activeSubpage));
+      return renderAccessPanel(activeSubpage);
     }
     if (activeView === "System") {
       if (activeSubpage.split(":")[0] === "maintenance")
@@ -3630,13 +3753,6 @@ function networkSubpage(subpage: string) {
   ) {
     return subpage;
   }
-  return "overview";
-}
-
-function accessSubpage(subpage: string) {
-  if (subpage === "vps_identities") return "clients";
-  if (subpage === "gateway_sessions") return "gateway";
-  if (subpage === "privilege_vault") return "privilege";
   return "overview";
 }
 

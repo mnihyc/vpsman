@@ -13,22 +13,27 @@ import type {
   AuthResponse,
   DashboardRefreshIntervalSecs,
   JobDetailsInvalidationSignal,
+  JobHistoryRecord,
+  JobStatus,
 } from "../types";
 import { parseWsEvent } from "../utils";
-import { useAccessData } from "./useAccessData";
+import { type AccessProjection, useAccessData } from "./useAccessData";
 import { useAuditData } from "./useAuditData";
-import { useBackupsData } from "./useBackupsData";
+import { type BackupProjection, useBackupsData } from "./useBackupsData";
 import {
   dashboardPreferencesToParams,
   useDashboardOverviewData,
 } from "./useDashboardOverviewData";
 import { useFleetData } from "./useFleetData";
 import { useInventoryData } from "./useInventoryData";
-import { useJobsData } from "./useJobsData";
+import { type JobProjectionSource, useJobsData } from "./useJobsData";
 import { usePortForwardingData } from "./usePortForwardingData";
 import { useSchedulesData } from "./useSchedulesData";
 import { useSystemData } from "./useSystemData";
-import { useTopologyData } from "./useTopologyData";
+import {
+  type TopologySource,
+  useTopologyData,
+} from "./useTopologyData";
 
 const FLEET_FALLBACK_REFRESH_MS = 15_000;
 const FLEET_FULL_RECONCILE_MS = 60_000;
@@ -56,17 +61,219 @@ function hasStoredAuthSession(): boolean {
   return Boolean(readStoredAccessToken() || readStoredRefreshToken());
 }
 
-function viewOwnsLiveJobHistory(view: ActiveView): boolean {
-  return view === "Home" || view === "Jobs";
+function routeOwnsLiveJobHistory(view: ActiveView, subpage: string): boolean {
+  return jobProjectionSourcesForRoute(view, subpage).includes("jobHistory");
 }
 
-function viewNeedsFinishedJobClassification(view: ActiveView): boolean {
+function routeOwnsDashboardOverview(view: ActiveView, subpage: string): boolean {
   return (
-    view === "Fleet" ||
-    view === "Config" ||
-    view === "Network" ||
-    view === "Observability"
+    view === "Home" ||
+    (view === "Observability" &&
+      (subpage === "fleet_metrics" || subpage === "dashboards"))
   );
+}
+
+function viewNeedsFinishedJobClassification(
+  view: ActiveView,
+  subpage: string,
+): boolean {
+  return (
+    (view === "Fleet" &&
+      (subpage === "monitor" || subpage.startsWith("instance_detail"))) ||
+    (view === "Config" && subpage !== "sources") ||
+    (view === "Backups" &&
+      backupProjectionSourcesForRoute(view, subpage).includes("requests")) ||
+    (view === "Network" &&
+      [
+        "overview",
+        "graph",
+        "tunnel_plans",
+        "tests",
+        "ospf",
+        "evidence",
+      ].includes(subpage)) ||
+    (view === "Observability" && subpage === "network_metrics")
+  );
+}
+
+function backupArtifactProjectionSourcesForRoute(
+  view: ActiveView,
+  subpage: string,
+): BackupProjection[] {
+  return backupProjectionSourcesForRoute(view, subpage).filter(
+    (source) => source === "requests" || source === "artifacts",
+  );
+}
+
+function jobProjectionSourcesForRoute(
+  view: ActiveView,
+  subpage: string,
+): JobProjectionSource[] {
+  if (view === "Home") {
+    return ["jobHistory", "fileTransfers", "terminalSessions"];
+  }
+  if (view === "Fleet") {
+    return subpage === "monitor" || subpage.startsWith("instance_detail")
+      ? ["jobHistory", "fileTransfers"]
+      : [];
+  }
+  if (view === "Config") {
+    return subpage === "sources" ? [] : ["jobHistory"];
+  }
+  if (view === "Remote Operations") {
+    if (subpage === "terminal") return ["terminalSessions"];
+    if (subpage === "files") return ["fileTransfers"];
+    if (subpage === "transfers") {
+      return ["fileTransfers", "fileTransferSources", "commandTemplates"];
+    }
+    if (subpage === "processes") {
+      return [
+        "processSupervisorInventory",
+        "fileTransferSources",
+        "commandTemplates",
+      ];
+    }
+    return [];
+  }
+  if (view === "Jobs") {
+    if (subpage === "approvals") return ["jobApprovals"];
+    if (subpage === "dispatch") {
+      return ["fileTransferSources", "commandTemplates"];
+    }
+    if (subpage === "artifacts") {
+      return ["agentUpdateReleases", "fileTransferSources"];
+    }
+    return ["jobHistory"];
+  }
+  if (view === "Automation") {
+    if (subpage === "schedules") return ["commandTemplates"];
+    if (subpage === "rollouts") return ["jobHistory", "jobRollouts"];
+    if (subpage === "agent_updates") {
+      return ["jobHistory", "agentUpdateReleases"];
+    }
+    if (subpage === "runbooks") return ["jobHistory", "commandTemplates"];
+    return [];
+  }
+  if (view === "Network") {
+    return subpage === "evidence" ? ["jobHistory"] : [];
+  }
+  if (view === "Backups") {
+    return subpage === "restore" || subpage === "migration"
+      ? ["fileTransfers"]
+      : [];
+  }
+  if (view === "Audit") {
+    if (subpage === "job_evidence") return ["jobHistory"];
+    if (subpage === "sessions") return ["jobHistory", "terminalSessions"];
+    return [];
+  }
+  if (view === "Access") {
+    return subpage === "overview" ? ["terminalSessions"] : [];
+  }
+  if (
+    view === "System" &&
+    (subpage === "maintenance:artifacts" || subpage === "maintenance:jobs")
+  ) {
+    return ["serverJobs"];
+  }
+  return [];
+}
+
+function backupProjectionSourcesForRoute(
+  view: ActiveView,
+  subpage: string,
+): BackupProjection[] {
+  if (view === "Home") return ["requests", "artifacts"];
+  if (view === "Fleet") {
+    if (subpage === "monitor") return ["requests"];
+    if (subpage.startsWith("instance_detail")) {
+      return ["requests", "artifacts"];
+    }
+    return [];
+  }
+  if (view === "Jobs" && subpage === "artifacts") return ["artifacts"];
+  if (view !== "Backups") return [];
+  if (subpage === "requests") return ["requests", "policies", "artifacts"];
+  if (subpage === "policies") return ["policies"];
+  if (subpage === "artifacts") return ["artifacts", "requests"];
+  if (subpage === "restore") {
+    return ["requests", "artifacts", "restorePlans"];
+  }
+  if (subpage === "migration") {
+    return ["requests", "artifacts", "restorePlans", "migrationLinks"];
+  }
+  return ["requests", "policies", "artifacts", "restorePlans", "migrationLinks"];
+}
+
+function accessProjectionSourcesForRoute(
+  view: ActiveView,
+  subpage: string,
+): AccessProjection[] {
+  if (view === "Home" || view === "System") return ["profile"];
+  if (view === "Audit" && subpage === "sessions") {
+    return ["profile", "operatorSessions", "operatorAuthEvents"];
+  }
+  if (view !== "Access") return [];
+  if (subpage === "operators") {
+    return [
+      "profile",
+      "operators",
+      "operatorSessions",
+      "operatorAuthEvents",
+    ];
+  }
+  if (subpage === "vps_identities") {
+    return ["profile", "clientKeyRevocations", "keyLifecycleReport"];
+  }
+  if (subpage === "gateway_sessions") {
+    return ["profile", "gatewaySessions", "keyLifecycleReport"];
+  }
+  if (subpage === "privilege_vault") return ["profile"];
+  return [
+    "profile",
+    "operators",
+    "operatorSessions",
+    "clientKeyRevocations",
+    "keyLifecycleReport",
+    "gatewaySessions",
+  ];
+}
+
+function topologyProjectionSourcesForRoute(
+  view: ActiveView,
+  subpage: string,
+): TopologySource[] {
+  if (view === "Fleet" && subpage.startsWith("instance_detail")) {
+    return ["networkObservations", "networkTrends"];
+  }
+  if (view === "Observability" && subpage === "network_metrics") {
+    return [
+      "tunnelPlans",
+      "networkObservations",
+      "networkTrends",
+      "ospfRecommendations",
+    ];
+  }
+  if (view !== "Network") return [];
+  if (subpage === "overview") {
+    return ["tunnelPlans", "topologyGraph", "ospfUpdatePlans"];
+  }
+  if (subpage === "graph") return ["topologyGraph"];
+  if (subpage === "tests") return ["tunnelPlans", "networkTrends"];
+  if (subpage === "ospf") return ["tunnelPlans", "ospfUpdatePlans"];
+  if (subpage === "evidence") {
+    return [
+      "tunnelPlans",
+      "networkObservations",
+      "networkTrends",
+      "ospfRecommendations",
+      "ospfUpdatePlans",
+    ];
+  }
+  if (subpage === "tunnel_plans") {
+    return ["tunnelPlans", "networkAdapterDefinitions", "topologyGraph"];
+  }
+  return [];
 }
 
 function persistAuthSession(auth: AuthResponse): void {
@@ -79,7 +286,7 @@ function clearStoredAuthSession(): void {
   window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
 }
 
-export function useDashboardData(activeView: ActiveView) {
+export function useDashboardData(activeView: ActiveView, activeSubpage: string) {
   const [apiToken, setApiToken] = useState(() => readStoredAccessToken());
   const [authRequired, setAuthRequired] = useState(
     () => !hasStoredAuthSession(),
@@ -104,15 +311,37 @@ export function useDashboardData(activeView: ActiveView) {
   const homeSnapshotGenerationRef = useRef(0);
   const homeSnapshotStartedKeyRef = useRef("");
   const homeVisitRef = useRef({ token: "", active: false, sequence: 0 });
+  const routeVisitRef = useRef({ token: "", route: "", sequence: 0 });
   const [homeSnapshotSettledKey, setHomeSnapshotSettledKey] = useState("");
   const [homeSnapshotPendingKey, setHomeSnapshotPendingKey] = useState("");
   const [homeMonitoringCards, setHomeMonitoringCards] = useState<
     HomeSnapshotRecord["monitoring_cards"] | null
   >(null);
   const clearDashboardDataRef = useRef<() => void>(() => undefined);
+  const setAuthenticatedOperatorRef = useRef<
+    (operator: AuthResponse["operator"]) => void
+  >(() => undefined);
   const activeViewRef = useRef(activeView);
+  const activeSubpageRef = useRef(activeSubpage);
   const hiddenFleetRefreshPendingRef = useRef(false);
   const hiddenOverviewRefreshPendingRef = useRef(false);
+  const hiddenNetworkEvidenceRefreshPendingRef = useRef(false);
+  const hiddenBackupRefreshPendingRef = useRef(false);
+  const hiddenAuditRefreshPendingRef = useRef(false);
+  const hiddenOperatorProfileRefreshPendingRef = useRef(false);
+  const routeHydrationKeyRef = useRef("");
+  const suiteConfigHydrationKeyRef = useRef("");
+  const globalProfileHydrationTokenRef = useRef("");
+  const hiddenJobDetailIdsRef = useRef(new Set<string>());
+  const hiddenJobHistoryEventsRef = useRef(
+    new Map<
+      string,
+      { refreshRenderedEffects: boolean; status: JobStatus }
+    >(),
+  );
+  const hiddenResolvedJobEffectsRef = useRef(
+    new Map<string, JobHistoryRecord>(),
+  );
   const overviewVisibilityCatchupRef = useRef(false);
 
   if (homeVisitRef.current.token !== apiToken) {
@@ -129,10 +358,25 @@ export function useDashboardData(activeView: ActiveView) {
       ? `${apiToken}:${homeVisitRef.current.sequence}`
       : "";
   const homeSnapshotOwnsVisit = Boolean(homeVisitKey);
+  const activeRouteKey = `${activeView}\u0000${activeSubpage}`;
+  if (
+    routeVisitRef.current.token !== apiToken ||
+    routeVisitRef.current.route !== activeRouteKey
+  ) {
+    routeVisitRef.current = {
+      token: apiToken,
+      route: activeRouteKey,
+      sequence: routeVisitRef.current.sequence + 1,
+    };
+  }
+  const routeVisitKey = apiToken
+    ? `${apiToken}\u0000${routeVisitRef.current.sequence}`
+    : "";
 
   useEffect(() => {
     activeViewRef.current = activeView;
-  }, [activeView]);
+    activeSubpageRef.current = activeSubpage;
+  }, [activeSubpage, activeView]);
 
   const forceAuthRequired = useCallback(() => {
     authGenerationRef.current += 1;
@@ -166,6 +410,7 @@ export function useDashboardData(activeView: ActiveView) {
         }
         persistAuthSession(auth);
         setAuthRefreshError(null);
+        setAuthenticatedOperatorRef.current(auth.operator);
         setApiToken(auth.access_token);
         setAuthRequired(false);
       })
@@ -197,6 +442,17 @@ export function useDashboardData(activeView: ActiveView) {
     void refreshStoredAuth();
   }, [refreshStoredAuth]);
   const access = useAccessData(apiToken, requireAuth);
+  setAuthenticatedOperatorRef.current = access.setAuthenticatedOperator;
+  const activeAccessProjectionSources = accessProjectionSourcesForRoute(
+    activeView,
+    activeSubpage,
+  );
+  const activeAccessError = access.accessSourcesError(
+    activeAccessProjectionSources,
+  );
+  const activeAccessLoading =
+    (activeView === "Home" && access.accessLoading) ||
+    access.accessSourcesLoading(activeAccessProjectionSources);
   const dashboardOverview = useDashboardOverviewData(apiToken, requireAuth);
   const fleet = useFleetData(apiToken, requireAuth);
   const audit = useAuditData(apiToken, requireAuth);
@@ -211,6 +467,14 @@ export function useDashboardData(activeView: ActiveView) {
     fleet.loadFleet,
     audit.loadAuditLogs,
   );
+  const activeJobProjectionSources = jobProjectionSourcesForRoute(
+    activeView,
+    activeSubpage,
+  );
+  const activeJobsError = jobs.jobSourcesError(activeJobProjectionSources);
+  const activeJobsLoading =
+    (activeView === "Home" && jobs.jobsLoading) ||
+    jobs.jobSourcesLoading(activeJobProjectionSources);
   const schedules = useSchedulesData(
     apiToken,
     requireAuth,
@@ -223,6 +487,16 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAuditLogs,
     inventory.loadRuntimeConfigApplyStates,
   );
+  const activeTopologyProjectionSources = topologyProjectionSourcesForRoute(
+    activeView,
+    activeSubpage,
+  );
+  const activeTopologyError = topology.topologySourcesError(
+    activeTopologyProjectionSources,
+  );
+  const activeTopologyLoading = topology.topologySourcesLoading(
+    activeTopologyProjectionSources,
+  );
   useEffect(() => {
     hasEnabledTunnelPlansRef.current = topology.tunnelPlans.some(
       (plan) => plan.enabled && !plan.deleted_at,
@@ -234,15 +508,38 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAuditLogs,
   );
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAuditLogs);
+  const activeBackupProjectionSources = backupProjectionSourcesForRoute(
+    activeView,
+    activeSubpage,
+  );
+  const activeBackupsError = backups.backupSourcesError(
+    activeBackupProjectionSources,
+  );
+  const activeBackupsLoading =
+    ((activeView === "Home" ||
+      (activeView === "Backups" && activeSubpage === "overview")) &&
+      backups.backupsLoading) ||
+    backups.backupSourcesLoading(activeBackupProjectionSources);
   const clearDashboardData = useCallback(() => {
     homeSnapshotGenerationRef.current += 1;
     homeSnapshotStartedKeyRef.current = "";
     homeVisitRef.current = { token: "", active: false, sequence: 0 };
+    routeVisitRef.current = { token: "", route: "", sequence: 0 };
     setHomeSnapshotSettledKey("");
     setHomeSnapshotPendingKey("");
     setHomeMonitoringCards(null);
     hiddenFleetRefreshPendingRef.current = false;
     hiddenOverviewRefreshPendingRef.current = false;
+    hiddenNetworkEvidenceRefreshPendingRef.current = false;
+    hiddenBackupRefreshPendingRef.current = false;
+    hiddenAuditRefreshPendingRef.current = false;
+    hiddenOperatorProfileRefreshPendingRef.current = false;
+    routeHydrationKeyRef.current = "";
+    suiteConfigHydrationKeyRef.current = "";
+    globalProfileHydrationTokenRef.current = "";
+    hiddenJobDetailIdsRef.current.clear();
+    hiddenJobHistoryEventsRef.current.clear();
+    hiddenResolvedJobEffectsRef.current.clear();
     overviewVisibilityCatchupRef.current = false;
     for (const timer of [
       dashboardOverviewReloadTimer,
@@ -317,24 +614,123 @@ export function useDashboardData(activeView: ActiveView) {
     }, 750);
   }, [fleet.loadFleet]);
   const scheduleNetworkEvidenceReload = useCallback(() => {
-    if (
-      networkEvidenceReloadTimer.current !== null ||
-      !hasEnabledTunnelPlansRef.current
-    ) {
+    if (!hasEnabledTunnelPlansRef.current) {
+      return;
+    }
+    if (documentIsHidden()) {
+      hiddenNetworkEvidenceRefreshPendingRef.current = true;
+      return;
+    }
+    if (networkEvidenceReloadTimer.current !== null) {
       return;
     }
     const elapsed = Date.now() - networkEvidenceReloadedAt.current;
     const delay = Math.max(0, 60_000 - elapsed);
     networkEvidenceReloadTimer.current = window.setTimeout(() => {
       networkEvidenceReloadTimer.current = null;
+      if (documentIsHidden()) {
+        hiddenNetworkEvidenceRefreshPendingRef.current = true;
+        return;
+      }
       const currentView = activeViewRef.current;
       if (currentView !== "Network" && currentView !== "Observability") {
         return;
       }
+      const currentSubpage = activeSubpageRef.current;
+      if (
+        currentView === "Observability" &&
+        currentSubpage !== "network_metrics"
+      ) {
+        return;
+      }
       networkEvidenceReloadedAt.current = Date.now();
-      void topology.refreshNetworkEvidence(currentView === "Network");
+      void topology.refreshRenderedNetworkEvidence(currentSubpage);
     }, delay);
-  }, [topology.refreshNetworkEvidence]);
+  }, [topology.refreshRenderedNetworkEvidence]);
+
+  const refreshBackupArtifactProjectionsForRoute = useCallback(
+    (view: ActiveView, subpage: string) => {
+      const sources = backupArtifactProjectionSourcesForRoute(view, subpage);
+      const ownsRequests = sources.includes("requests");
+      const ownsArtifacts = sources.includes("artifacts");
+      if (ownsRequests && ownsArtifacts) {
+        void backups.loadBackupRequestArtifactProjections();
+      } else if (ownsRequests) {
+        void backups.loadBackupRequests();
+      } else if (ownsArtifacts) {
+        void backups.loadBackupArtifacts();
+      }
+    },
+    [
+      backups.loadBackupArtifacts,
+      backups.loadBackupRequestArtifactProjections,
+      backups.loadBackupRequests,
+    ],
+  );
+
+  const refreshRenderedJobEffects = useCallback(
+    (job: JobHistoryRecord) => {
+      const currentView = activeViewRef.current;
+      const currentSubpage = activeSubpageRef.current;
+      if (
+        job.command_type === "runtime_config_sync" &&
+        ((currentView === "Config" && currentSubpage !== "sources") ||
+          (currentView === "Fleet" &&
+            currentSubpage.startsWith("instance_detail")) ||
+          (currentView === "Network" && currentSubpage === "graph"))
+      ) {
+        void inventory.loadRuntimeConfigApplyStates();
+      }
+      if (
+        job.command_type === "runtime_config_sync" &&
+        currentView === "Network" &&
+        currentSubpage === "tunnel_plans"
+      ) {
+        void topology.loadTunnelPlans();
+      }
+      if (
+        job.command_type === "backup" &&
+        [
+          "partial_success",
+          "rejected",
+          "failed",
+          "agent_timeout",
+          "control_timeout",
+          "canceled",
+        ].includes(job.status) &&
+        backupProjectionSourcesForRoute(
+          currentView,
+          currentSubpage,
+        ).includes("requests")
+      ) {
+        void backups.loadBackupRequests();
+      }
+      if (
+        ((currentView === "Network" &&
+          [
+            "overview",
+            "graph",
+            "tunnel_plans",
+            "tests",
+            "ospf",
+            "evidence",
+          ].includes(currentSubpage)) ||
+          (currentView === "Observability" &&
+            currentSubpage === "network_metrics"))
+      ) {
+        void topology.refreshNetworkJobEvidence(
+          job.command_type,
+          currentSubpage,
+        );
+      }
+    },
+    [
+      backups.loadBackupRequests,
+      inventory.loadRuntimeConfigApplyStates,
+      topology.loadTunnelPlans,
+      topology.refreshNetworkJobEvidence,
+    ],
+  );
 
   useEffect(
     () => () => {
@@ -365,11 +761,20 @@ export function useDashboardData(activeView: ActiveView) {
         hiddenOverviewRefreshPendingRef.current = Boolean(
           apiToken &&
           !homeSnapshotDeferred &&
-          (activeViewRef.current === "Home" ||
-            activeViewRef.current === "Observability"),
+          routeOwnsDashboardOverview(
+            activeViewRef.current,
+            activeSubpageRef.current,
+          ),
         );
-        for (const timer of [dashboardOverviewReloadTimer, fleetReloadTimer]) {
+        for (const timer of [
+          dashboardOverviewReloadTimer,
+          fleetReloadTimer,
+          networkEvidenceReloadTimer,
+        ]) {
           if (timer.current !== null) {
+            if (timer === networkEvidenceReloadTimer) {
+              hiddenNetworkEvidenceRefreshPendingRef.current = true;
+            }
             window.clearTimeout(timer.current);
             timer.current = null;
           }
@@ -381,22 +786,105 @@ export function useDashboardData(activeView: ActiveView) {
         homeSnapshotStartedKeyRef.current === homeVisitKey &&
         homeSnapshotSettledKey !== homeVisitKey,
       );
-      if (homeSnapshotInFlight) {
-        return;
-      }
-      if (hiddenFleetRefreshPendingRef.current && apiToken) {
+      if (
+        !homeSnapshotInFlight &&
+        hiddenFleetRefreshPendingRef.current &&
+        apiToken
+      ) {
         hiddenFleetRefreshPendingRef.current = false;
         void fleet.loadFleet(true);
       }
+      const overviewRefreshPending = hiddenOverviewRefreshPendingRef.current;
+      const currentRouteOwnsOverview = routeOwnsDashboardOverview(
+        activeViewRef.current,
+        activeSubpageRef.current,
+      );
+      if (!currentRouteOwnsOverview) {
+        hiddenOverviewRefreshPendingRef.current = false;
+      }
       if (
-        hiddenOverviewRefreshPendingRef.current &&
+        !homeSnapshotInFlight &&
+        overviewRefreshPending &&
         apiToken &&
-        (activeViewRef.current === "Home" ||
-          activeViewRef.current === "Observability")
+        currentRouteOwnsOverview
       ) {
         hiddenOverviewRefreshPendingRef.current = false;
         overviewVisibilityCatchupRef.current = true;
         void dashboardOverview.loadDashboardOverview();
+      }
+      const currentView = activeViewRef.current;
+      const currentSubpage = activeSubpageRef.current;
+      const currentVisitWasHydrated =
+        routeHydrationKeyRef.current === routeVisitKey;
+      if (hiddenNetworkEvidenceRefreshPendingRef.current && apiToken) {
+        hiddenNetworkEvidenceRefreshPendingRef.current = false;
+        if (
+          currentVisitWasHydrated &&
+          hasEnabledTunnelPlansRef.current &&
+          (currentView === "Network" ||
+            (currentView === "Observability" &&
+              currentSubpage === "network_metrics"))
+        ) {
+          networkEvidenceReloadedAt.current = Date.now();
+          void topology.refreshRenderedNetworkEvidence(currentSubpage);
+        }
+      }
+      if (hiddenBackupRefreshPendingRef.current && apiToken) {
+        hiddenBackupRefreshPendingRef.current = false;
+        if (currentVisitWasHydrated) {
+          refreshBackupArtifactProjectionsForRoute(
+            currentView,
+            currentSubpage,
+          );
+        }
+      }
+      if (hiddenAuditRefreshPendingRef.current && apiToken) {
+        hiddenAuditRefreshPendingRef.current = false;
+        if (currentVisitWasHydrated && currentView === "Audit") {
+          void audit.loadAuditLogs();
+        }
+      }
+      if (hiddenOperatorProfileRefreshPendingRef.current && apiToken) {
+        hiddenOperatorProfileRefreshPendingRef.current = false;
+        const newVisitHydratesProfile =
+          !currentVisitWasHydrated &&
+          (currentView === "Access" ||
+            currentView === "System" ||
+            (currentView === "Audit" && currentSubpage === "sessions"));
+        if (!newVisitHydratesProfile) {
+          void access.loadCurrentOperatorProfile();
+        }
+      }
+      if (hiddenJobDetailIdsRef.current.size > 0) {
+        const jobIds = [...hiddenJobDetailIdsRef.current];
+        hiddenJobDetailIdsRef.current.clear();
+        if (currentView === "Jobs") {
+          jobDetailsInvalidationGenerationRef.current += 1;
+          setJobDetailsInvalidation({
+            generation: jobDetailsInvalidationGenerationRef.current,
+            job_ids: jobIds,
+          });
+        }
+      }
+      const jobEvents = [...hiddenJobHistoryEventsRef.current];
+      hiddenJobHistoryEventsRef.current.clear();
+      const resolvedJobEffects = [
+        ...hiddenResolvedJobEffectsRef.current.values(),
+      ];
+      hiddenResolvedJobEffectsRef.current.clear();
+      if (currentVisitWasHydrated) {
+        for (const job of resolvedJobEffects) {
+          refreshRenderedJobEffects(job);
+        }
+        for (const [jobId, event] of jobEvents) {
+          void jobs
+            .refreshJobHistoryAfterEvent(jobId, event.status)
+            .then((job) => {
+              if (job && event.refreshRenderedEffects) {
+                refreshRenderedJobEffects(job);
+              }
+            });
+        }
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -405,10 +893,18 @@ export function useDashboardData(activeView: ActiveView) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [
     apiToken,
+    access.loadCurrentOperatorProfile,
+    audit.loadAuditLogs,
+    backups.loadBackupRequests,
     dashboardOverview.loadDashboardOverview,
     fleet.loadFleet,
     homeSnapshotSettledKey,
     homeVisitKey,
+    jobs.refreshJobHistoryAfterEvent,
+    refreshRenderedJobEffects,
+    refreshBackupArtifactProjectionsForRoute,
+    routeVisitKey,
+    topology.refreshRenderedNetworkEvidence,
   ]);
 
   useEffect(() => {
@@ -574,11 +1070,37 @@ export function useDashboardData(activeView: ActiveView) {
   ]);
 
   useEffect(() => {
-    if (!apiToken || homeSnapshotOwnsVisit) {
+    const routeOwnsProfile =
+      activeView === "Access" ||
+      activeView === "System" ||
+      (activeView === "Audit" && activeSubpage === "sessions");
+    if (!apiToken) {
+      globalProfileHydrationTokenRef.current = "";
       return;
     }
+    if (access.operator) {
+      globalProfileHydrationTokenRef.current = apiToken;
+      return;
+    }
+    if (
+      !documentVisible ||
+      homeSnapshotOwnsVisit ||
+      routeOwnsProfile ||
+      globalProfileHydrationTokenRef.current === apiToken
+    ) {
+      return;
+    }
+    globalProfileHydrationTokenRef.current = apiToken;
     void access.loadCurrentOperatorProfile();
-  }, [access.loadCurrentOperatorProfile, apiToken, homeSnapshotOwnsVisit]);
+  }, [
+    access.loadCurrentOperatorProfile,
+    access.operator,
+    activeSubpage,
+    activeView,
+    apiToken,
+    documentVisible,
+    homeSnapshotOwnsVisit,
+  ]);
 
   useEffect(() => {
     if (!apiToken || !documentVisible || homeSnapshotOwnsVisit) {
@@ -650,7 +1172,7 @@ export function useDashboardData(activeView: ActiveView) {
     if (
       !apiToken ||
       !documentVisible ||
-      (activeView !== "Home" && activeView !== "Observability")
+      !routeOwnsDashboardOverview(activeView, activeSubpage)
     ) {
       return;
     }
@@ -704,6 +1226,7 @@ export function useDashboardData(activeView: ActiveView) {
     };
   }, [
     activeView,
+    activeSubpage,
     apiToken,
     documentVisible,
     dashboardOverview.dashboardPreferences.refreshIntervalSecs,
@@ -714,79 +1237,226 @@ export function useDashboardData(activeView: ActiveView) {
   ]);
 
   useEffect(() => {
-    if (!apiToken) {
+    if (!apiToken || !documentVisible) {
       return;
     }
+    if (routeHydrationKeyRef.current === routeVisitKey) {
+      return;
+    }
+    routeHydrationKeyRef.current = routeVisitKey;
     if (activeView === "Home") {
       // The generation-fenced aggregate snapshot owns every Home activation.
     } else if (activeView === "Fleet") {
-      void inventory.loadTagInventory();
+      if (activeSubpage === "instances") {
+        void inventory.loadTagOrder();
+      } else if (activeSubpage === "monitor") {
+        void jobs.loadJobHistory();
+        void backups.loadBackupRequests();
+        void jobs.loadFileTransfers();
+      } else if (activeSubpage.startsWith("group")) {
+        void inventory.loadTagOrder();
+        void schedules.loadSchedules();
+      } else if (activeSubpage.startsWith("instance_detail")) {
+        void inventory.loadRuntimeConfigApplyStates();
+        void jobs.loadJobHistory();
+        void jobs.loadFileTransfers();
+        void backups.loadBackupRequestArtifactProjections();
+        void audit.loadAuditLogs();
+        void topology.loadNetworkObservations();
+        void topology.loadNetworkTrends();
+      }
     } else if (activeView === "Config") {
-      void inventory.loadTagInventory();
-      void jobs.loadJobs();
+      if (activeSubpage !== "sources") {
+        void inventory.loadTagInventory();
+        void jobs.loadJobHistory();
+      }
     } else if (activeView === "Remote Operations") {
-      void jobs.loadJobs();
-      void inventory.loadTagInventory();
+      if (activeSubpage === "terminal") {
+        void jobs.loadTerminalSessions();
+      } else if (activeSubpage === "files") {
+        void jobs.loadFileTransfers();
+      } else if (
+        activeSubpage === "transfers" ||
+        activeSubpage === "processes"
+      ) {
+        if (activeSubpage === "transfers") void jobs.loadFileTransfers();
+        if (activeSubpage === "processes") {
+          void jobs.loadProcessSupervisorInventory();
+        }
+        void jobs.loadFileTransferSources();
+        void jobs.loadCommandTemplates();
+      }
     } else if (activeView === "Jobs") {
-      void jobs.loadJobs();
-      void backups.loadBackups();
-      void inventory.loadTagInventory();
+      if (activeSubpage === "history" || activeSubpage === "scheduled_runs") {
+        void jobs.loadJobHistory();
+        if (activeSubpage === "scheduled_runs") {
+          void schedules.loadSchedules();
+        }
+      } else if (activeSubpage === "approvals") {
+        void jobs.loadJobApprovals();
+      } else if (activeSubpage === "dispatch") {
+        void jobs.loadCommandTemplates();
+        void jobs.loadFileTransferSources();
+      } else if (activeSubpage === "artifacts") {
+        void jobs.loadAgentUpdateReleases();
+        void jobs.loadFileTransferSources();
+      } else {
+        void jobs.loadJobHistory();
+      }
+      if (activeSubpage === "artifacts") {
+        void backups.loadBackupArtifacts();
+      }
     } else if (activeView === "Automation") {
-      void schedules.loadSchedules();
-      void jobs.loadJobs();
-      void inventory.loadTagInventory();
+      if (activeSubpage === "schedules") {
+        void schedules.loadSchedules();
+        void jobs.loadCommandTemplates();
+      } else if (activeSubpage === "rollouts") {
+        void jobs.loadJobHistory();
+      } else if (activeSubpage === "agent_updates") {
+        void jobs.loadJobHistory();
+        void jobs.loadAgentUpdateReleases();
+      } else if (activeSubpage === "runbooks") {
+        void jobs.loadJobHistory();
+        void jobs.loadCommandTemplates();
+      }
     } else if (activeView === "Network") {
       // The mounted Network subpage owns its exact projection sources.
-      void jobs.loadJobs();
+      if (activeSubpage === "evidence") void jobs.loadJobHistory();
     } else if (activeView === "Backups") {
-      void backups.loadBackups();
-      void jobs.loadJobs();
+      if (activeSubpage === "overview") {
+        void backups.loadBackups();
+      } else if (activeSubpage === "requests") {
+        void backups.loadBackupRequests();
+        void backups.loadBackupPolicies();
+        void backups.loadBackupArtifacts();
+      } else if (activeSubpage === "policies") {
+        void backups.loadBackupPolicies();
+      } else if (activeSubpage === "artifacts") {
+        void backups.loadBackupArtifacts();
+        void backups.loadBackupRequests();
+      } else if (activeSubpage === "restore") {
+        void backups.loadBackupRequests();
+        void backups.loadBackupArtifacts();
+        void backups.loadRestorePlans();
+        void jobs.loadFileTransfers();
+      } else if (activeSubpage === "migration") {
+        void backups.loadBackupRequests();
+        void backups.loadBackupArtifacts();
+        void backups.loadRestorePlans();
+        void backups.loadMigrationLinks();
+        void jobs.loadFileTransfers();
+      }
     } else if (activeView === "Observability") {
-      void inventory.loadTagInventory();
-      void topology.loadTunnelPlans();
-      void topology.loadNetworkObservations();
-      void topology.loadNetworkTrends();
-      void topology.loadOspfRecommendations();
-      void jobs.loadJobs();
-      void backups.loadBackups();
+      if (activeSubpage === "network_metrics") {
+        void topology.loadTunnelPlans();
+        void topology.loadOspfRecommendations();
+      }
     } else if (activeView === "Audit") {
-      void audit.loadAudits();
-      void jobs.loadJobs();
-      void access.loadCurrentOperator();
+      if (activeSubpage === "retention_export") {
+        void audit.loadAudits();
+      } else {
+        void audit.loadAuditLogs();
+      }
+      if (activeSubpage === "job_evidence" || activeSubpage === "sessions") {
+        void jobs.loadJobHistory();
+      }
+      if (activeSubpage === "sessions") {
+        void jobs.loadTerminalSessions();
+        void access.loadAccessAuditSessions();
+      }
     } else if (activeView === "Access") {
-      void access.loadCurrentOperator();
-      void inventory.loadTagInventory();
+      if (activeSubpage === "operators") {
+        void access.loadAccessOperators();
+      } else if (activeSubpage === "vps_identities") {
+        void access.loadAccessVpsIdentities();
+      } else if (activeSubpage === "gateway_sessions") {
+        void access.loadAccessGatewaySessions();
+      } else if (activeSubpage === "privilege_vault") {
+        void access.loadCurrentOperatorProfile();
+      } else {
+        void access.loadAccessOverview();
+      }
+      if (activeSubpage === "overview") void jobs.loadTerminalSessions();
     } else if (activeView === "System") {
-      void access.loadCurrentOperator();
-      void inventory.loadTagInventory();
-      void system.loadSystemDashboard();
+      void access.loadCurrentOperatorProfile();
+      if (activeSubpage === "overview" || activeSubpage === "capacity") {
+        void system.loadSystemDashboard();
+      } else if (activeSubpage === "preferences") {
+        void inventory.loadTagOrder();
+      } else if (
+        activeSubpage === "maintenance:artifacts" ||
+        activeSubpage === "maintenance:jobs"
+      ) {
+        void jobs.loadServerJobs();
+      }
     }
   }, [
-    access.loadCurrentOperator,
+    access.loadAccessAuditSessions,
+    access.loadAccessGatewaySessions,
+    access.loadAccessOperators,
+    access.loadAccessOverview,
+    access.loadAccessVpsIdentities,
+    access.loadCurrentOperatorProfile,
+    activeSubpage,
     activeView,
     apiToken,
+    documentVisible,
+    audit.loadAuditLogs,
     audit.loadAudits,
+    backups.loadBackupArtifacts,
+    backups.loadBackupPolicies,
+    backups.loadBackupRequestArtifactProjections,
+    backups.loadBackupRequests,
     backups.loadBackups,
+    backups.loadMigrationLinks,
+    backups.loadRestorePlans,
     inventory.loadTagInventory,
-    jobs.loadJobs,
+    inventory.loadTagOrder,
+    inventory.loadRuntimeConfigApplyStates,
+    jobs.loadFileTransfers,
+    jobs.loadAgentUpdateReleases,
+    jobs.loadCommandTemplates,
+    jobs.loadFileTransferSources,
+    jobs.loadJobApprovals,
+    jobs.loadJobHistory,
+    jobs.loadProcessSupervisorInventory,
+    jobs.loadServerJobs,
+    jobs.loadTerminalSessions,
     schedules.loadSchedules,
     system.loadSystemDashboard,
     topology.loadNetworkObservations,
     topology.loadNetworkTrends,
     topology.loadOspfRecommendations,
     topology.loadTunnelPlans,
+    routeVisitKey,
   ]);
 
   useEffect(() => {
     if (
       !apiToken ||
+      !documentVisible ||
       access.operator?.role !== "admin" ||
-      (activeView !== "Automation" && activeView !== "System")
+      !(
+        (activeView === "Automation" && activeSubpage === "agent_updates") ||
+        (activeView === "System" && activeSubpage === "suite_config")
+      )
     ) {
       return;
     }
+    if (suiteConfigHydrationKeyRef.current === routeVisitKey) {
+      return;
+    }
+    suiteConfigHydrationKeyRef.current = routeVisitKey;
     void system.loadSuiteConfig();
-  }, [access.operator?.role, activeView, apiToken, system.loadSuiteConfig]);
+  }, [
+    access.operator?.role,
+    activeSubpage,
+    activeView,
+    apiToken,
+    documentVisible,
+    routeVisitKey,
+    system.loadSuiteConfig,
+  ]);
 
   useEffect(() => {
     if (!apiToken) {
@@ -828,7 +1498,11 @@ export function useDashboardData(activeView: ActiveView) {
           return;
         }
         setWsState("reconnecting");
-        void access.loadCurrentOperatorProfile();
+        if (documentIsHidden()) {
+          hiddenOperatorProfileRefreshPendingRef.current = true;
+        } else {
+          void access.loadCurrentOperatorProfile();
+        }
         const delay = Math.min(1_000 * 2 ** reconnectAttempt, 15_000);
         reconnectAttempt += 1;
         reconnectTimer = window.setTimeout(connect, delay);
@@ -864,7 +1538,20 @@ export function useDashboardData(activeView: ActiveView) {
           } else {
             void fleet.loadFleetTelemetry(true);
           }
-          if (currentView === "Network" || currentView === "Observability") {
+          const currentSubpage = activeSubpageRef.current;
+          if (
+            (currentView === "Network" &&
+              [
+                "overview",
+                "graph",
+                "tunnel_plans",
+                "tests",
+                "ospf",
+                "evidence",
+              ].includes(currentSubpage)) ||
+            (currentView === "Observability" &&
+              currentSubpage === "network_metrics")
+          ) {
             scheduleNetworkEvidenceReload();
           }
         } else if (event.type === "fleet_state_invalidated") {
@@ -881,7 +1568,10 @@ export function useDashboardData(activeView: ActiveView) {
           scheduleFleetReload();
         }
         if (
-          (currentView === "Home" || currentView === "Observability") &&
+          routeOwnsDashboardOverview(
+            currentView,
+            activeSubpageRef.current,
+          ) &&
           (event.type === "agent_updated" || event.type === "job_rejected")
         ) {
           scheduleDashboardOverviewReload();
@@ -891,9 +1581,23 @@ export function useDashboardData(activeView: ActiveView) {
             event.job_id,
             event.status,
           );
-          if (
-            !documentIsHidden() &&
-            viewOwnsLiveJobHistory(currentView)
+          if (documentIsHidden()) {
+            if (
+              routeOwnsLiveJobHistory(
+                currentView,
+                activeSubpageRef.current,
+              )
+            ) {
+              hiddenJobHistoryEventsRef.current.set(
+                event.job_id,
+                { refreshRenderedEffects: false, status: event.status },
+              );
+            }
+          } else if (
+            routeOwnsLiveJobHistory(
+              currentView,
+              activeSubpageRef.current,
+            )
           ) {
             void jobs.refreshJobHistoryAfterEvent(
               event.job_id,
@@ -901,15 +1605,27 @@ export function useDashboardData(activeView: ActiveView) {
             );
           }
           if (currentView === "Audit") {
-            void audit.loadAuditLogs();
+            if (documentIsHidden()) {
+              hiddenAuditRefreshPendingRef.current = true;
+            } else {
+              void audit.loadAuditLogs();
+            }
           }
         }
         if (event.type === "job_details_invalidated") {
-          jobDetailsInvalidationGenerationRef.current += 1;
-          setJobDetailsInvalidation({
-            generation: jobDetailsInvalidationGenerationRef.current,
-            job_ids: event.job_ids,
-          });
+          if (documentIsHidden()) {
+            if (currentView === "Jobs") {
+              for (const jobId of event.job_ids) {
+                hiddenJobDetailIdsRef.current.add(jobId);
+              }
+            }
+          } else if (currentView === "Jobs") {
+            jobDetailsInvalidationGenerationRef.current += 1;
+            setJobDetailsInvalidation({
+              generation: jobDetailsInvalidationGenerationRef.current,
+              job_ids: event.job_ids,
+            });
+          }
         }
         if (event.type === "job_finished") {
           scheduleFleetReload();
@@ -920,9 +1636,31 @@ export function useDashboardData(activeView: ActiveView) {
           );
           const refreshHistory =
             eventVisible &&
-            (viewOwnsLiveJobHistory(currentView) ||
+            (routeOwnsLiveJobHistory(
+              currentView,
+              activeSubpageRef.current,
+            ) ||
               (!loadedJob &&
-                viewNeedsFinishedJobClassification(currentView)));
+                viewNeedsFinishedJobClassification(
+                  currentView,
+                  activeSubpageRef.current,
+                )));
+          if (
+            !eventVisible &&
+            (routeOwnsLiveJobHistory(
+              currentView,
+              activeSubpageRef.current,
+            ) ||
+              viewNeedsFinishedJobClassification(
+                currentView,
+                activeSubpageRef.current,
+              ))
+          ) {
+            hiddenJobHistoryEventsRef.current.set(event.job_id, {
+              refreshRenderedEffects: true,
+              status: event.status,
+            });
+          }
           const refreshedJob = refreshHistory
             ? jobs.refreshJobHistoryAfterEvent(event.job_id, event.status)
             : Promise.resolve(loadedJob);
@@ -933,45 +1671,57 @@ export function useDashboardData(activeView: ActiveView) {
             if (!eventVisible) {
               return;
             }
-            const activeJobView = activeViewRef.current;
-            if (
-              job.command_type === "runtime_config_sync" &&
-              (activeJobView === "Fleet" ||
-                activeJobView === "Config" ||
-                activeJobView === "Network")
-            ) {
-              void inventory.loadRuntimeConfigApplyStates();
+            if (documentIsHidden()) {
+              hiddenResolvedJobEffectsRef.current.set(job.id, job);
+              return;
             }
-            if (
-              activeJobView === "Network" ||
-              activeJobView === "Observability"
-            ) {
-              void topology.refreshNetworkJobEvidence(
-                job.command_type,
-                activeJobView === "Network",
-              );
-            }
+            refreshRenderedJobEffects(job);
           });
           if (currentView === "Audit") {
-            void audit.loadAuditLogs();
+            if (documentIsHidden()) {
+              hiddenAuditRefreshPendingRef.current = true;
+            } else {
+              void audit.loadAuditLogs();
+            }
           }
-          if (currentView === "Home" || currentView === "Observability") {
+          if (
+            routeOwnsDashboardOverview(
+              currentView,
+              activeSubpageRef.current,
+            )
+          ) {
             scheduleDashboardOverviewReload();
           }
         }
         if (event.type === "backup_artifact_recorded") {
-          if (
-            currentView === "Home" ||
-            currentView === "Jobs" ||
-            currentView === "Backups" ||
-            currentView === "Observability"
-          ) {
-            void backups.loadBackupRequestArtifactProjections();
+          const currentSubpage = activeSubpageRef.current;
+          const artifactSources = backupArtifactProjectionSourcesForRoute(
+            currentView,
+            currentSubpage,
+          );
+          if (artifactSources.length > 0) {
+            if (documentIsHidden()) {
+              hiddenBackupRefreshPendingRef.current = true;
+            } else {
+              refreshBackupArtifactProjectionsForRoute(
+                currentView,
+                currentSubpage,
+              );
+            }
           }
           if (currentView === "Audit") {
-            void audit.loadAuditLogs();
+            if (documentIsHidden()) {
+              hiddenAuditRefreshPendingRef.current = true;
+            } else {
+              void audit.loadAuditLogs();
+            }
           }
-          if (currentView === "Home" || currentView === "Observability") {
+          if (
+            routeOwnsDashboardOverview(
+              currentView,
+              activeSubpageRef.current,
+            )
+          ) {
             scheduleDashboardOverviewReload();
           }
         }
@@ -993,15 +1743,14 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAuditLogs,
     fleet.replaceFleetSnapshot,
     fleet.loadFleetTelemetry,
-    backups.loadBackupRequestArtifactProjections,
     dashboardOverview.loadDashboardOverview,
     jobs.reconcileJobStatusEvent,
     jobs.refreshJobHistoryAfterEvent,
-    inventory.loadRuntimeConfigApplyStates,
+    refreshRenderedJobEffects,
+    refreshBackupArtifactProjectionsForRoute,
     scheduleDashboardOverviewReload,
     scheduleFleetReload,
     scheduleNetworkEvidenceReload,
-    topology.refreshNetworkJobEvidence,
   ]);
 
   const handleAuth = useCallback(
@@ -1044,8 +1793,8 @@ export function useDashboardData(activeView: ActiveView) {
   }, [apiToken, clearDashboardData]);
 
   return {
-    accessError: access.accessError,
-    accessLoading: access.accessLoading,
+    accessError: activeAccessError,
+    accessLoading: activeAccessLoading,
     agents: fleet.agents,
     apiError: fleet.apiError,
     apiToken,
@@ -1071,9 +1820,9 @@ export function useDashboardData(activeView: ActiveView) {
     backupsTruncated: backups.backupsTruncated,
     migrationLinks: backups.migrationLinks,
     restorePlans: backups.restorePlans,
-    backupsError: backups.backupsError,
+    backupsError: activeBackupsError,
     backupsEvidenceAvailable: backups.backupsEvidenceAvailable,
-    backupsLoading: backups.backupsLoading,
+    backupsLoading: activeBackupsLoading,
     clearSession,
     clearTunnelPlanEvidence: topology.clearTunnelPlanEvidence,
     clientKeyRevocations: access.clientKeyRevocations,
@@ -1091,6 +1840,7 @@ export function useDashboardData(activeView: ActiveView) {
     configurationSourcesLoading: inventory.configurationSourcesLoading,
     configurationSources: inventory.configurationSources,
     confirmTotp: access.confirmTotp,
+    documentVisible,
     createOperator: access.createOperator,
     updateAgentAlias: fleet.updateAgentAlias,
     upsertAgentIdentity: access.upsertAgentIdentity,
@@ -1153,9 +1903,9 @@ export function useDashboardData(activeView: ActiveView) {
     deleteCommandTemplate: jobs.deleteCommandTemplate,
     agentUpdateReleases: jobs.agentUpdateReleases,
     agentUpdateReleasesTruncated: jobs.agentUpdateReleasesTruncated,
-    jobsError: jobs.jobsError,
+    jobsError: activeJobsError,
     jobsEvidenceAvailable: jobs.jobsEvidenceAvailable,
-    jobsLoading: jobs.jobsLoading,
+    jobsLoading: activeJobsLoading,
     keyLifecycleReport: access.keyLifecycleReport,
     processSupervisorInventory: jobs.processSupervisorInventory,
     processSupervisorInventoryTruncated:
@@ -1218,10 +1968,22 @@ export function useDashboardData(activeView: ActiveView) {
     jobDetailsInvalidation,
     terminalAccessToken: apiToken,
     loadAudits: audit.loadAudits,
+    loadAuditLogs: audit.loadAuditLogs,
     loadAuditEvent: audit.loadAuditEvent,
     loadHistoryExport: audit.loadHistoryExport,
+    loadBackupArtifacts: backups.loadBackupArtifacts,
+    loadBackupPolicies: backups.loadBackupPolicies,
+    loadBackupRequests: backups.loadBackupRequests,
     loadBackups: backups.loadBackups,
+    loadMigrationLinks: backups.loadMigrationLinks,
+    loadRestorePlans: backups.loadRestorePlans,
+    loadAccessAuditSessions: access.loadAccessAuditSessions,
+    loadAccessGatewaySessions: access.loadAccessGatewaySessions,
+    loadAccessOperators: access.loadAccessOperators,
+    loadAccessOverview: access.loadAccessOverview,
+    loadAccessVpsIdentities: access.loadAccessVpsIdentities,
     loadCurrentOperator: access.loadCurrentOperator,
+    loadCurrentOperatorProfile: access.loadCurrentOperatorProfile,
     downloadFileTransferHandoff: jobs.downloadFileTransferHandoff,
     downloadFileTransferSource: jobs.downloadFileTransferSource,
     downloadFileDownloadBundle: jobs.downloadFileDownloadBundle,
@@ -1237,7 +1999,13 @@ export function useDashboardData(activeView: ActiveView) {
     loadJobOutputs: jobs.loadJobOutputs,
     loadJobOutputComparison: jobs.loadJobOutputComparison,
     loadExactJobTargetStatuses: jobs.loadExactJobTargetStatuses,
+    loadCommandTemplates: jobs.loadCommandTemplates,
+    loadFileTransfers: jobs.loadFileTransfers,
+    loadFileTransferSources: jobs.loadFileTransferSources,
+    loadJobApprovals: jobs.loadJobApprovals,
+    loadJobHistory: jobs.loadJobHistory,
     loadJobs: jobs.loadJobs,
+    loadProcessSupervisorInventory: jobs.loadProcessSupervisorInventory,
     loadServerJobs: jobs.loadServerJobs,
     loadTerminalSessions: jobs.loadTerminalSessions,
     loadTerminalReplay: jobs.loadTerminalReplay,
@@ -1270,6 +2038,7 @@ export function useDashboardData(activeView: ActiveView) {
     cancelJob: jobs.cancelJob,
     previewArtifactCleanup: jobs.previewArtifactCleanup,
     loadTagInventory: inventory.loadTagInventory,
+    loadTagOrder: inventory.loadTagOrder,
     deleteConfigurationPreset: inventory.deleteConfigurationPreset,
     loadConfigurationInventory: inventory.loadConfigurationInventory,
     loadConfigurationSources: inventory.loadConfigurationSources,
@@ -1373,9 +2142,9 @@ export function useDashboardData(activeView: ActiveView) {
     runtimeConfigApplyStates: inventory.runtimeConfigApplyStates,
     runtimeConfigPatchGenerators: inventory.runtimeConfigPatchGenerators,
     telemetryRollups: fleet.telemetryRollups,
-    topologyError: topology.topologyError,
+    topologyError: activeTopologyError,
     topologyGraph: topology.topologyGraph,
-    topologyLoading: topology.topologyLoading,
+    topologyLoading: activeTopologyLoading,
     tunnelPlanCorruptions: topology.tunnelPlanCorruptions,
     tunnelPlans: topology.tunnelPlans,
     portForwardRules: portForwarding.portForwardRules,

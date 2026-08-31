@@ -50,7 +50,7 @@ const TOPOLOGY_SOURCE_ORDER = [
   "topologyGraph",
 ] as const;
 
-type TopologySource = (typeof TOPOLOGY_SOURCE_ORDER)[number];
+export type TopologySource = (typeof TOPOLOGY_SOURCE_ORDER)[number];
 
 const TOPOLOGY_SOURCE_LABELS: Record<TopologySource, string> = {
   tunnelPlans: "Tunnel plans",
@@ -93,6 +93,8 @@ export function useTopologyData(
     useState<TopologyGraph>(emptyTopologyGraph());
   const [topologyError, setTopologyError] = useState<string | null>(null);
   const [topologyLoading, setTopologyLoading] = useState(false);
+  const [topologySourceLoadingVersion, setTopologySourceLoadingVersion] =
+    useState(0);
   const topologyErrors = useRef<Partial<Record<TopologySource, string>>>({});
   const topologyPendingLoads = useRef(new Set<string>());
   const networkObservationQuery = useRef<NetworkEvidenceQuery>({});
@@ -119,6 +121,31 @@ export function useTopologyData(
     topologyGraph: new LatestReadConsumer(),
   });
 
+  const topologySourcesError = useCallback(
+    (sources: readonly TopologySource[]) => {
+      void topologyError;
+      const sourceErrors: Partial<Record<TopologySource, string>> = {};
+      for (const source of sources) {
+        const message = topologyErrors.current[source];
+        if (message) sourceErrors[source] = message;
+      }
+      return summarizeTopologyErrors(sourceErrors);
+    },
+    [topologyError],
+  );
+
+  const topologySourcesLoading = useCallback(
+    (sources: readonly TopologySource[]) => {
+      void topologySourceLoadingVersion;
+      return sources.some((source) =>
+        Array.from(topologyPendingLoads.current).some((pending) =>
+          pending.startsWith(`${source}:`),
+        ),
+      );
+    },
+    [topologySourceLoadingVersion],
+  );
+
   const beginTopologyLoad = useCallback((source: TopologySource) => {
     const generation = topologyLoadGenerations.current[source] + 1;
     topologyLoadGenerations.current[source] = generation;
@@ -129,6 +156,7 @@ export function useTopologyData(
     }
     topologyPendingLoads.current.add(`${source}:${generation}`);
     setTopologyLoading(true);
+    setTopologySourceLoadingVersion((version) => version + 1);
     delete topologyErrors.current[source];
     setTopologyError(summarizeTopologyErrors(topologyErrors.current));
     return generation;
@@ -138,6 +166,7 @@ export function useTopologyData(
     (source: TopologySource, generation: number) => {
       topologyPendingLoads.current.delete(`${source}:${generation}`);
       setTopologyLoading(topologyPendingLoads.current.size > 0);
+      setTopologySourceLoadingVersion((version) => version + 1);
     },
     [],
   );
@@ -155,41 +184,42 @@ export function useTopologyData(
         return;
       }
       const generation = beginTopologyLoad(source);
-      return topologyLoadConsumers.current[source].enqueue(async () => {
-        try {
-          const value = await request();
-          if (
-            apiTokenRef.current !== apiToken ||
-            topologyLoadGenerations.current[source] !== generation
-          ) {
-            return;
-          }
-          apply(value);
-          delete topologyErrors.current[source];
-          setTopologyError(summarizeTopologyErrors(topologyErrors.current));
-        } catch (error) {
-          if (
-            apiTokenRef.current !== apiToken ||
-            topologyLoadGenerations.current[source] !== generation
-          ) {
-            return;
-          }
-          if (isApiUnauthorized(error)) {
-            onUnauthorized();
-            reset();
-            topologyErrors.current[source] = "Operator login required";
-          } else {
-            topologyErrors.current[source] =
-              error instanceof Error ? error.message : fallback;
-          }
-          setTopologyError(summarizeTopologyErrors(topologyErrors.current));
-          if (rethrow) {
+      const sharedLoad = topologyLoadConsumers.current[source].enqueue(
+        async () => {
+          try {
+            const value = await request();
+            if (
+              apiTokenRef.current !== apiToken ||
+              topologyLoadGenerations.current[source] !== generation
+            ) {
+              return;
+            }
+            apply(value);
+            delete topologyErrors.current[source];
+            setTopologyError(summarizeTopologyErrors(topologyErrors.current));
+          } catch (error) {
+            if (
+              apiTokenRef.current !== apiToken ||
+              topologyLoadGenerations.current[source] !== generation
+            ) {
+              return;
+            }
+            if (isApiUnauthorized(error)) {
+              onUnauthorized();
+              reset();
+              topologyErrors.current[source] = "Operator login required";
+            } else {
+              topologyErrors.current[source] =
+                error instanceof Error ? error.message : fallback;
+            }
+            setTopologyError(summarizeTopologyErrors(topologyErrors.current));
             throw error;
+          } finally {
+            finishTopologyLoad(source, generation);
           }
-        } finally {
-          finishTopologyLoad(source, generation);
-        }
-      });
+        },
+      );
+      return rethrow ? sharedLoad : sharedLoad.catch(() => undefined);
     },
     [apiToken, beginTopologyLoad, finishTopologyLoad, onUnauthorized],
   );
@@ -385,8 +415,49 @@ export function useTopologyData(
     ],
   );
 
+  const refreshRenderedNetworkEvidence = useCallback(
+    async (subpage: string) => {
+      const observationQuery = networkObservationQuery.current;
+      const trendQuery = networkTrendQuery.current;
+      const liveTrend = matchesLiveEvidenceWindow(trendQuery.window);
+      const liveGraph = topologyGraphQuery.current.window !== "custom";
+      if (subpage === "network_metrics") {
+        await Promise.all([
+          refreshRecentNetworkObservations(observationQuery),
+          ...(liveTrend ? [loadNetworkTrends(trendQuery)] : []),
+          loadOspfRecommendations(),
+        ]);
+      } else if (subpage === "evidence") {
+        await Promise.all([
+          refreshRecentNetworkObservations(observationQuery),
+          ...(liveTrend ? [loadNetworkTrends(trendQuery)] : []),
+          loadOspfRecommendations(),
+          loadOspfUpdatePlans(),
+        ]);
+      } else if (subpage === "tests") {
+        if (liveTrend) await loadNetworkTrends(trendQuery);
+      } else if (subpage === "ospf") {
+        await loadOspfUpdatePlans();
+      } else if (subpage === "overview") {
+        await Promise.all([
+          loadOspfUpdatePlans(),
+          ...(liveGraph ? [loadTopologyGraph(topologyGraphQuery.current)] : []),
+        ]);
+      } else if (subpage === "graph" || subpage === "tunnel_plans") {
+        if (liveGraph) await loadTopologyGraph(topologyGraphQuery.current);
+      }
+    },
+    [
+      loadNetworkTrends,
+      loadOspfRecommendations,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      refreshRecentNetworkObservations,
+    ],
+  );
+
   const refreshNetworkJobEvidence = useCallback(
-    async (commandType: string, includeTopologyGraph: boolean) => {
+    async (commandType: string, subpage: string) => {
       if (
         commandType === "network_status" ||
         commandType === "network_probe" ||
@@ -395,11 +466,14 @@ export function useTopologyData(
         const observationQuery = networkObservationQuery.current;
         const trendQuery = networkTrendQuery.current;
         await Promise.all([
-          refreshRecentNetworkObservations(observationQuery),
-          ...(matchesLiveEvidenceWindow(trendQuery.window)
+          ...(["network_metrics", "evidence"].includes(subpage)
+            ? [refreshRecentNetworkObservations(observationQuery)]
+            : []),
+          ...(["network_metrics", "evidence", "tests"].includes(subpage) &&
+          matchesLiveEvidenceWindow(trendQuery.window)
             ? [loadNetworkTrends(trendQuery)]
             : []),
-          ...(includeTopologyGraph &&
+          ...(["overview", "graph", "tunnel_plans"].includes(subpage) &&
           topologyGraphQuery.current.window !== "custom"
             ? [loadTopologyGraph(topologyGraphQuery.current)]
             : []),
@@ -410,7 +484,14 @@ export function useTopologyData(
         commandType === "network_routing_status" ||
         commandType === "network_routing_apply"
       ) {
-        await Promise.all([loadOspfRecommendations(), loadOspfUpdatePlans()]);
+        await Promise.all([
+          ...(["network_metrics", "evidence"].includes(subpage)
+            ? [loadOspfRecommendations()]
+            : []),
+          ...(["overview", "ospf", "evidence"].includes(subpage)
+            ? [loadOspfUpdatePlans()]
+            : []),
+        ]);
       }
     },
     [
@@ -772,6 +853,7 @@ export function useTopologyData(
     setTopologyGraph(emptyTopologyGraph());
     setTopologyError(null);
     setTopologyLoading(false);
+    setTopologySourceLoadingVersion((version) => version + 1);
   }, []);
 
   return {
@@ -795,6 +877,7 @@ export function useTopologyData(
     queryNetworkObservations,
     queryNetworkTrends,
     refreshNetworkEvidence,
+    refreshRenderedNetworkEvidence,
     refreshNetworkJobEvidence,
     networkTrends,
     ospfRecommendations,
@@ -809,6 +892,8 @@ export function useTopologyData(
     topologyError,
     topologyGraph,
     topologyLoading,
+    topologySourcesError,
+    topologySourcesLoading,
     tunnelPlans,
     tunnelPlanCorruptions,
   };

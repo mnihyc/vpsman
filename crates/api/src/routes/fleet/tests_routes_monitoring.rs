@@ -77,6 +77,22 @@ fn bulk_ping_target_preview_uses_one_set_based_target_and_selector_read() {
 }
 
 #[test]
+fn bulk_monitoring_share_refresh_uses_one_review_and_selector_snapshot() {
+    let source = include_str!("routes_monitoring.rs");
+    let (_, bulk) = source
+        .split_once("pub(crate) async fn bulk_update_monitoring_share_targets")
+        .expect("monitoring-share bulk-update route");
+    let (bulk, _) = bulk
+        .split_once("pub(crate) async fn revoke_monitoring_shares")
+        .expect("monitoring-share bulk-update route end");
+    assert_eq!(bulk.matches("monitoring_share_records_by_ids").count(), 1);
+    assert_eq!(bulk.matches("resolve_saved_selectors_batch").count(), 1);
+    assert!(!bulk.contains("monitoring_share_record(*share_id)"));
+    assert!(!bulk.contains("resolve_selector("));
+    assert!(!bulk.contains("monitoring_share_not_found_after_update"));
+}
+
+#[test]
 fn retained_client_detail_uses_complete_projection_owners() {
     let source = include_str!("routes_monitoring.rs");
     let (_, detail) = source

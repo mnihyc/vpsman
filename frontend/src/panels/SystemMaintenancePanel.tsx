@@ -116,6 +116,7 @@ export function SystemMaintenancePanel({
   onResolveManyTargets,
   onSelectSubpage,
   privilegeMaterial,
+  requestsEnabled,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -141,6 +142,7 @@ export function SystemMaintenancePanel({
   ) => Promise<BulkResolveManyResponse>;
   onSelectSubpage: (subpage: string) => void;
   privilegeMaterial: PrivilegeMaterial | null;
+  requestsEnabled: boolean;
 }) {
   const activeTab = maintenanceTabFromSubpage(activeSubpage);
 
@@ -181,6 +183,7 @@ export function SystemMaintenancePanel({
           onRefreshSchedules={onRefreshSchedules}
           onResolveManyTargets={onResolveManyTargets}
           privilegeMaterial={privilegeMaterial}
+          requestsEnabled={requestsEnabled}
         />
       ) : null}
 
@@ -207,6 +210,7 @@ function StaleSelectorMaintenancePanel({
   onRefreshSchedules,
   onResolveManyTargets,
   privilegeMaterial,
+  requestsEnabled,
 }: {
   agents: AgentView[];
   apiToken: string;
@@ -216,6 +220,7 @@ function StaleSelectorMaintenancePanel({
     request: BulkResolveManyRequest,
   ) => Promise<BulkResolveManyResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
+  requestsEnabled: boolean;
 }) {
   const vpsRuleSearch = useVpsRuleSearchContext();
   const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
@@ -233,8 +238,16 @@ function StaleSelectorMaintenancePanel({
   const [review, setReview] = useState<SelectorUpdateReview | null>(null);
   const feedbackRef = useRef<HTMLDivElement | null>(null);
   const previousFeedbackRef = useRef<string | null>(null);
+  const loadedApiTokenRef = useRef<string | null>(null);
+  const resourceLoadGenerationRef = useRef(0);
+  const resourceApiTokenRef = useRef(apiToken);
+  if (resourceApiTokenRef.current !== apiToken) {
+    resourceApiTokenRef.current = apiToken;
+    resourceLoadGenerationRef.current += 1;
+  }
 
   const refreshResources = useCallback(async () => {
+    const generation = ++resourceLoadGenerationRef.current;
     setLoading(true);
     setScheduleLoadError(null);
     setPingLoadError(null);
@@ -244,6 +257,12 @@ function StaleSelectorMaintenancePanel({
       apiGet<PingTargetView[]>("/api/v1/ping-targets", apiToken),
       loadAllMonitoringShares(apiToken),
     ]);
+    if (
+      resourceLoadGenerationRef.current !== generation ||
+      resourceApiTokenRef.current !== apiToken
+    ) {
+      return;
+    }
     if (scheduleResult.status === "fulfilled") {
       setSchedules(scheduleResult.value);
     } else {
@@ -266,8 +285,11 @@ function StaleSelectorMaintenancePanel({
   }, [apiToken]);
 
   useEffect(() => {
+    if (!requestsEnabled) return;
+    if (loadedApiTokenRef.current === apiToken) return;
+    loadedApiTokenRef.current = apiToken;
     void refreshResources();
-  }, [refreshResources]);
+  }, [apiToken, refreshResources, requestsEnabled]);
 
   useEffect(() => {
     if (privilegeMaterial && error === SCHEDULE_TARGET_PRIVILEGE_REQUIRED) {

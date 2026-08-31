@@ -79,6 +79,7 @@ export function SessionEvidencePanel({
   agents,
   audits,
   auditsTruncated,
+  error,
   jobs,
   jobsTruncated,
   loading,
@@ -98,6 +99,7 @@ export function SessionEvidencePanel({
   agents: AgentView[];
   audits: AuditLogRecord[];
   auditsTruncated: boolean;
+  error: string | null;
   jobs: JobHistoryRecord[];
   jobsTruncated: boolean;
   loading: boolean;
@@ -396,6 +398,8 @@ export function SessionEvidencePanel({
           </button>
         </div>
       </div>
+
+      <ActionFeedback message={error} tone="danger" />
 
       <div className="metricGrid" aria-label="Session evidence summary">
         <div className="metricCard">

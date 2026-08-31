@@ -28,3 +28,31 @@ fn update_hostname_json_distinguishes_omitted_null_and_string_values() {
         UpdateTargetHostname::Replace(" New.App.Internal. ".to_string())
     );
 }
+
+#[test]
+fn bulk_port_forwarding_batches_validation_and_runtime_dispatch() {
+    let source = include_str!("../routes/network/routes_port_forwarding.rs");
+    let bulk = source
+        .split("pub(crate) async fn bulk_mutate_port_forward_rules")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("pub(crate) async fn resolve_network_hostname")
+                .next()
+        })
+        .expect("bulk port-forwarding route body");
+    assert!(bulk.contains("require_agents(&state, &client_ids, true).await?"));
+    assert_eq!(
+        bulk.matches("dispatch_runtime_config_for_clients(").count(),
+        1
+    );
+    assert!(!bulk.contains("sync_client("));
+
+    let validation = source
+        .split("async fn require_agents")
+        .nth(1)
+        .and_then(|source| source.split("async fn sync_client").next())
+        .expect("batched port-forwarding validation helper");
+    assert!(validation.contains("list_agents_for_client_ids(&requested)"));
+    assert!(!validation.contains(".list_agents()"));
+}

@@ -53,6 +53,7 @@ type NetworkMetricsPanelProps = {
   onOpenOspf: () => void;
   onOpenTests: () => void;
   ospfRecommendations: NetworkOspfRecommendationRecord[];
+  requestsEnabled: boolean;
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 };
@@ -117,6 +118,7 @@ export function NetworkMetricsPanel({
   onOpenOspf,
   onOpenTests,
   ospfRecommendations,
+  requestsEnabled,
   telemetryTunnels,
   tunnelPlans,
 }: NetworkMetricsPanelProps) {
@@ -138,16 +140,30 @@ export function NetworkMetricsPanel({
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const refreshGenerationRef = useRef(0);
+  const loadedEvidenceOwnerRef = useRef<{
+    observations: NetworkMetricsPanelProps["onLoadNetworkObservations"];
+    trends: NetworkMetricsPanelProps["onLoadNetworkTrends"];
+  } | null>(null);
 
   useEffect(() => setDraftFilters(filters), [filters]);
 
   useEffect(() => {
-    if (!networkMetricFiltersEqual(filters, DEFAULT_NETWORK_FILTERS)) {
-      void refreshEvidence(DEFAULT_NETWORK_EVIDENCE_WINDOW, filters);
+    if (!requestsEnabled) return;
+    const owner = loadedEvidenceOwnerRef.current;
+    if (
+      owner?.observations === onLoadNetworkObservations &&
+      owner.trends === onLoadNetworkTrends
+    ) {
+      return;
     }
+    loadedEvidenceOwnerRef.current = {
+      observations: onLoadNetworkObservations,
+      trends: onLoadNetworkTrends,
+    };
+    void refreshEvidence(evidenceWindow, filters);
     // The initial history entry is the authoritative applied filter state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onLoadNetworkObservations, onLoadNetworkTrends, requestsEnabled]);
 
   useEffect(() => {
     const applyRoute = () => setSelectedMetric(readNetworkMetricRoute());

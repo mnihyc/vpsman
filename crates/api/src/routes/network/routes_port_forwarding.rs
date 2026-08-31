@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, net::IpAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
+    time::Duration,
+};
 
 use axum::{
     extract::{Path, State},
@@ -340,13 +344,11 @@ pub(crate) async fn bulk_mutate_port_forward_rules(
         request.action,
         PortForwardBulkAction::Enable | PortForwardBulkAction::Reapply
     ) {
-        for client_id in selected
+        let client_ids = selected
             .iter()
-            .map(|rule| rule.client_id.as_str())
-            .collect::<BTreeSet<_>>()
-        {
-            require_agent(&state, client_id, true).await?;
-        }
+            .map(|rule| rule.client_id.clone())
+            .collect::<BTreeSet<_>>();
+        require_agents(&state, &client_ids, true).await?;
     }
     let rules = state
         .repo
@@ -362,20 +364,45 @@ pub(crate) async fn bulk_mutate_port_forward_rules(
         .iter()
         .map(|rule| rule.client_id.clone())
         .collect::<BTreeSet<_>>();
+    let sync_client_ids = client_ids
+        .iter()
+        .filter(|client_id| {
+            !matches!(request.action, PortForwardBulkAction::Delete)
+                || selected.iter().any(|rule| {
+                    rule.client_id == client_id.as_str() && !is_never_applied_disabled_draft(rule)
+                })
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut dispatched = dispatch_runtime_config_for_clients(
+        &state,
+        &operator,
+        sync_client_ids.iter().cloned(),
+        bulk_sync_reason(request.action),
+    )
+    .await
+    .into_iter()
+    .map(|outcome| {
+        (
+            outcome.client_id.clone(),
+            PortForwardSyncView {
+                status: outcome.status,
+                job_id: outcome.job_id,
+                error: outcome.error,
+            },
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
     let mut sync = Vec::with_capacity(client_ids.len());
     for client_id in client_ids {
-        let requires_sync = !matches!(request.action, PortForwardBulkAction::Delete)
-            || selected
-                .iter()
-                .any(|rule| rule.client_id == client_id && !is_never_applied_disabled_draft(rule));
-        let result = if requires_sync {
-            sync_client(
-                &state,
-                &operator,
-                &client_id,
-                bulk_sync_reason(request.action),
-            )
-            .await
+        let result = if sync_client_ids.contains(&client_id) {
+            dispatched
+                .remove(&client_id)
+                .unwrap_or_else(|| PortForwardSyncView {
+                    status: "not_queued".to_string(),
+                    job_id: None,
+                    error: Some("VPS is no longer available".to_string()),
+                })
         } else {
             no_sync("retired_disabled_draft")
         };
@@ -512,18 +539,38 @@ async fn require_agent(
     client_id: &str,
     require_capability: bool,
 ) -> Result<(), ApiError> {
-    let agent = state
+    require_agents(
+        state,
+        &BTreeSet::from([client_id.to_string()]),
+        require_capability,
+    )
+    .await
+}
+
+async fn require_agents(
+    state: &AppState,
+    client_ids: &BTreeSet<String>,
+    require_capability: bool,
+) -> Result<(), ApiError> {
+    let requested = client_ids.iter().cloned().collect::<Vec<_>>();
+    let agents = state
         .repo
-        .list_agents()
+        .list_agents_for_client_ids(&requested)
         .await
         .map_err(ApiError::internal_mapper(
             "vps_inventory_unavailable",
             "The VPS inventory could not be loaded.",
         ))?
         .into_iter()
-        .find(|agent| agent.id == client_id)
-        .ok_or_else(|| ApiError::bad_request("port_forward_agent_not_found"))?;
-    if require_capability && !agent.capabilities.port_forwarding.supported() {
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<BTreeMap<_, _>>();
+    for client_id in client_ids {
+        let agent = agents
+            .get(client_id)
+            .ok_or_else(|| ApiError::bad_request("port_forward_agent_not_found"))?;
+        if !require_capability || agent.capabilities.port_forwarding.supported() {
+            continue;
+        }
         let capability = &agent.capabilities.port_forwarding;
         let reason = capability.reason.clone().unwrap_or_else(|| {
             format!(

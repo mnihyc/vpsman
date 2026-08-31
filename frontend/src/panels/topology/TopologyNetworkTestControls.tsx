@@ -65,6 +65,7 @@ import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
 export function TopologyNetworkTestControls({
   agents,
+  error,
   loading,
   networkTrends,
   onCreateJob,
@@ -80,6 +81,7 @@ export function TopologyNetworkTestControls({
   tunnelPlans,
 }: {
   agents: AgentView[];
+  error: string | null;
   loading: boolean;
   networkTrends: NetworkObservationTrendRecord[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
@@ -179,6 +181,7 @@ export function TopologyNetworkTestControls({
   const executionActionError =
     actionError && executionHasStarted ? actionError : null;
   const networkTestFeedbackMessage =
+    error ??
     topActionError ??
     (reviewPending && reviewAction
       ? `Preparing ${actionLabel(reviewAction).toLowerCase()} review`
@@ -587,12 +590,22 @@ export function TopologyNetworkTestControls({
           <div>
             <h2>Network tests</h2>
             <span>
-              {loading ? "Loading tunnel plans" : "No saved tunnel plans"}
+              {error
+                ? "Tunnel plans unavailable"
+                : loading
+                  ? "Loading tunnel plans"
+                  : "No saved tunnel plans"}
             </span>
           </div>
           <ShieldCheck aria-hidden="true" size={20} />
         </div>
-        {loading ? (
+        {error ? (
+          <ActionFeedback
+            className="localActionFeedback"
+            message={error}
+            tone="danger"
+          />
+        ) : loading ? (
           <ActionFeedback
             className="localActionFeedback"
             message="Loading tunnel plans"
@@ -638,7 +651,7 @@ export function TopologyNetworkTestControls({
           className="localActionFeedback"
           message={networkTestFeedbackMessage}
           ref={feedbackRef}
-          tone={topActionError ? "danger" : "progress"}
+          tone={error || topActionError ? "danger" : "progress"}
         />
         <div className="topologyNetworkTestGroups">
           <section

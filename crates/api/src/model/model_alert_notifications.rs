@@ -175,6 +175,7 @@ pub(crate) struct FleetAlertNotificationProcessRequest {
 #[derive(Clone, Debug)]
 pub(crate) struct FleetAlertNotificationCandidate {
     pub(crate) channel_id: Uuid,
+    pub(crate) channel_revision_hash: String,
     pub(crate) channel_name: String,
     pub(crate) alert_id: String,
     pub(crate) alert_severity: String,

@@ -30,7 +30,7 @@ import type { PrivilegeAssertion } from "../privilege";
 
 const ACCESS_BULK_LIMIT = 500;
 
-type AccessProjection =
+export type AccessProjection =
   | "profile"
   | "operators"
   | "operatorSessions"
@@ -41,6 +41,7 @@ type AccessProjection =
 
 type AccessProjectionGenerations = Record<AccessProjection, number>;
 type AccessProjectionFailures = Record<AccessProjection, string | null>;
+type AccessAggregateProjection = Exclude<AccessProjection, "profile">;
 
 const ACCESS_PROJECTIONS: readonly AccessProjection[] = [
   "profile",
@@ -53,7 +54,7 @@ const ACCESS_PROJECTIONS: readonly AccessProjection[] = [
 ];
 
 const ACCESS_AGGREGATE_PROJECTIONS = ACCESS_PROJECTIONS.filter(
-  (projection): projection is Exclude<AccessProjection, "profile"> =>
+  (projection): projection is AccessAggregateProjection =>
     projection !== "profile",
 );
 
@@ -109,6 +110,8 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   >([]);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [accessLoading, setAccessLoading] = useState(false);
+  const [accessSourceLoadingVersion, setAccessSourceLoadingVersion] =
+    useState(0);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [preferencesSaving, setPreferencesSaving] = useState(false);
   // Loading is presentation-global, but reads and mutations are projection-local.
@@ -121,6 +124,10 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const accessProjectionFailures = useRef<AccessProjectionFailures>(
     emptyAccessProjectionFailures(),
   );
+  const accessSourceLoadTokens = useRef(
+    new Map<AccessProjection, Set<number>>(),
+  );
+  const nextAccessSourceLoadToken = useRef(0);
   const accessReadConsumers = useRef({
     profile: new LatestReadConsumer<OperatorView>(),
     operators: new LatestReadConsumer<OperatorView[]>(),
@@ -143,6 +150,63 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     );
   }, []);
 
+  const trackAccessSourceLoad = useCallback(
+    async <T,>(
+      sources: readonly AccessProjection[],
+      load: () => Promise<T>,
+    ): Promise<T> => {
+      const token = ++nextAccessSourceLoadToken.current;
+      for (const source of sources) {
+        const sourceTokens =
+          accessSourceLoadTokens.current.get(source) ?? new Set<number>();
+        sourceTokens.add(token);
+        accessSourceLoadTokens.current.set(source, sourceTokens);
+      }
+      setAccessSourceLoadingVersion((version) => version + 1);
+      try {
+        return await load();
+      } finally {
+        for (const source of sources) {
+          const currentTokens = accessSourceLoadTokens.current.get(source);
+          currentTokens?.delete(token);
+          if (currentTokens?.size === 0) {
+            accessSourceLoadTokens.current.delete(source);
+          }
+        }
+        setAccessSourceLoadingVersion((version) => version + 1);
+      }
+    },
+    [],
+  );
+
+  const accessSourcesLoading = useCallback(
+    (sources: readonly AccessProjection[]) => {
+      void accessSourceLoadingVersion;
+      return sources.some(
+        (source) =>
+          (accessSourceLoadTokens.current.get(source)?.size ?? 0) > 0,
+      );
+    },
+    [accessSourceLoadingVersion],
+  );
+
+  const accessSourcesError = useCallback(
+    (sources: readonly AccessProjection[]) => {
+      const allSourceError = formatAccessProjectionFailures(
+        accessProjectionFailures.current,
+      );
+      if (accessError && accessError !== allSourceError) {
+        return accessError;
+      }
+      const sourceFailures = emptyAccessProjectionFailures();
+      for (const source of sources) {
+        sourceFailures[source] = accessProjectionFailures.current[source];
+      }
+      return formatAccessProjectionFailures(sourceFailures);
+    },
+    [accessError],
+  );
+
   function resetAccessRecords() {
     accessLoadOperationGeneration.current += 1;
     for (const projection of ACCESS_PROJECTIONS) {
@@ -156,6 +220,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     accessReadConsumers.current.keyLifecycleReport.discardPending();
     accessReadConsumers.current.gatewaySessions.discardPending([]);
     accessProjectionFailures.current = emptyAccessProjectionFailures();
+    accessSourceLoadTokens.current.clear();
     operatorRef.current = null;
     setOperator(null);
     setOperators([]);
@@ -168,6 +233,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     setGatewaySessions([]);
     setAccessError(null);
     setAccessLoading(false);
+    setAccessSourceLoadingVersion((version) => version + 1);
     setPreferencesError(null);
     setPreferencesSaving(false);
   }
@@ -175,6 +241,8 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const setAuthenticatedOperator = useCallback(
     (nextOperator: OperatorView | null) => {
       accessProjectionGenerations.current.profile += 1;
+      accessProjectionFailures.current.profile = null;
+      publishAccessSourceErrors();
       if (nextOperator) {
         accessProjectionGenerations.current.operators += 1;
       }
@@ -192,7 +260,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         );
       });
     },
-    [],
+    [publishAccessSourceErrors],
   );
 
   const storeOperators = useCallback((records: OperatorView[]) => {
@@ -434,7 +502,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, onUnauthorized, publishAccessSourceErrors],
   );
 
-  const loadCurrentOperatorProfile = useCallback(async () => {
+  const loadCurrentOperatorProfileUntracked = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
       return;
     }
@@ -493,6 +561,15 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     }
   }, [apiToken, onUnauthorized, publishAccessSourceErrors]);
 
+  const loadCurrentOperatorProfile = useCallback(
+    () =>
+      trackAccessSourceLoad(
+        ["profile"],
+        loadCurrentOperatorProfileUntracked,
+      ),
+    [loadCurrentOperatorProfileUntracked, trackAccessSourceLoad],
+  );
+
   const beginHomeOperatorHydration = useCallback((): HomeOperatorHydrationFence => {
     setAccessLoading(true);
     accessProjectionFailures.current.profile = null;
@@ -541,16 +618,20 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, publishAccessSourceErrors],
   );
 
-  const loadCurrentOperator = useCallback(async () => {
-    if (currentApiToken.current !== apiToken) {
-      return;
-    }
-    const operationGeneration = ++accessLoadOperationGeneration.current;
-    const profileGeneration = ++accessProjectionGenerations.current.profile;
-    accessProjectionFailures.current.profile = null;
-    setAccessLoading(true);
-    publishAccessSourceErrors();
-    try {
+  const loadCurrentOperatorSources = useCallback(
+    (requestedSources: readonly AccessAggregateProjection[]) =>
+      trackAccessSourceLoad(["profile", ...requestedSources], async () => {
+        if (currentApiToken.current !== apiToken) {
+          return;
+        }
+        const requested = new Set(requestedSources);
+        const operationGeneration = ++accessLoadOperationGeneration.current;
+        const profileGeneration =
+          ++accessProjectionGenerations.current.profile;
+        accessProjectionFailures.current.profile = null;
+        setAccessLoading(true);
+        publishAccessSourceErrors();
+        try {
       const nextOperator = await accessReadConsumers.current.profile.enqueue(
         () => apiGet<OperatorView>("/api/v1/auth/me", apiToken),
       );
@@ -580,13 +661,25 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       // that lands while these requests are active advances only its affected
       // projection; unaffected aggregate results still commit.
       const generations = accessProjectionGenerations.current;
-      const operatorGeneration = ++generations.operators;
-      const sessionGeneration = ++generations.operatorSessions;
-      const authEventGeneration = ++generations.operatorAuthEvents;
-      const revocationGeneration = ++generations.clientKeyRevocations;
-      const keyLifecycleGeneration = ++generations.keyLifecycleReport;
-      const gatewayGeneration = ++generations.gatewaySessions;
-      for (const projection of ACCESS_AGGREGATE_PROJECTIONS) {
+      const operatorGeneration = requested.has("operators")
+        ? ++generations.operators
+        : null;
+      const sessionGeneration = requested.has("operatorSessions")
+        ? ++generations.operatorSessions
+        : null;
+      const authEventGeneration = requested.has("operatorAuthEvents")
+        ? ++generations.operatorAuthEvents
+        : null;
+      const revocationGeneration = requested.has("clientKeyRevocations")
+        ? ++generations.clientKeyRevocations
+        : null;
+      const keyLifecycleGeneration = requested.has("keyLifecycleReport")
+        ? ++generations.keyLifecycleReport
+        : null;
+      const gatewayGeneration = requested.has("gatewaySessions")
+        ? ++generations.gatewaySessions
+        : null;
+      for (const projection of requestedSources) {
         accessProjectionFailures.current[projection] = null;
       }
       publishAccessSourceErrors();
@@ -598,18 +691,20 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
       ] = await Promise.allSettled([
-        accessReadConsumers.current.gatewaySessions.enqueue(() =>
-          apiGet<GatewaySessionRecord[]>(
-            `/api/v1/gateway-sessions?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-        ),
-        nextOperator.role === "admin"
+        requested.has("gatewaySessions")
+          ? accessReadConsumers.current.gatewaySessions.enqueue(() =>
+              apiGet<GatewaySessionRecord[]>(
+                `/api/v1/gateway-sessions?limit=${FLEET_DETAIL_LIMIT}`,
+                apiToken,
+              ),
+            )
+          : Promise.resolve([]),
+        requested.has("operators") && nextOperator.role === "admin"
           ? accessReadConsumers.current.operators.enqueue(() =>
               apiGet<OperatorView[]>("/api/v1/operators", apiToken),
             )
           : Promise.resolve([]),
-        nextOperator.role === "admin"
+        requested.has("operatorSessions") && nextOperator.role === "admin"
           ? accessReadConsumers.current.operatorSessions.enqueue(() =>
               apiGet<OperatorSessionRecord[]>(
                 `/api/v1/operator-sessions?limit=${FLEET_DETAIL_LIMIT}`,
@@ -617,7 +712,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
               ),
             )
           : Promise.resolve([]),
-        nextOperator.role === "admin"
+        requested.has("operatorAuthEvents") && nextOperator.role === "admin"
           ? accessReadConsumers.current.operatorAuthEvents.enqueue(() =>
               apiGet<OperatorAuthEventRecord[]>(
                 `/api/v1/operator-auth-events?limit=${FLEET_DETAIL_LIMIT}`,
@@ -625,6 +720,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
               ),
             )
           : Promise.resolve([]),
+        requested.has("clientKeyRevocations") &&
         nextOperator.role === "admin"
           ? accessReadConsumers.current.clientKeyRevocations.enqueue(() =>
               apiGet<ClientKeyRevocationView[]>(
@@ -633,7 +729,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
               ),
             )
           : Promise.resolve([]),
-        nextOperator.role === "admin"
+        requested.has("keyLifecycleReport") && nextOperator.role === "admin"
           ? accessReadConsumers.current.keyLifecycleReport.enqueue(() =>
               apiGet<KeyLifecycleReportView>(
                 "/api/v1/key-lifecycle/report",
@@ -647,20 +743,26 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       }
       const sourceIsCurrent = {
         operators:
+          operatorGeneration !== null &&
           accessProjectionGenerations.current.operators === operatorGeneration,
         operatorSessions:
+          sessionGeneration !== null &&
           accessProjectionGenerations.current.operatorSessions ===
           sessionGeneration,
         operatorAuthEvents:
+          authEventGeneration !== null &&
           accessProjectionGenerations.current.operatorAuthEvents ===
           authEventGeneration,
         clientKeyRevocations:
+          revocationGeneration !== null &&
           accessProjectionGenerations.current.clientKeyRevocations ===
           revocationGeneration,
         keyLifecycleReport:
+          keyLifecycleGeneration !== null &&
           accessProjectionGenerations.current.keyLifecycleReport ===
           keyLifecycleGeneration,
         gatewaySessions:
+          gatewayGeneration !== null &&
           accessProjectionGenerations.current.gatewaySessions ===
           gatewayGeneration,
       };
@@ -811,8 +913,66 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       ) {
         setAccessLoading(false);
       }
-    }
-  }, [apiToken, onUnauthorized, publishAccessSourceErrors]);
+        }
+      }),
+    [
+      apiToken,
+      onUnauthorized,
+      publishAccessSourceErrors,
+      trackAccessSourceLoad,
+    ],
+  );
+
+  const loadCurrentOperator = useCallback(
+    () => loadCurrentOperatorSources(ACCESS_AGGREGATE_PROJECTIONS),
+    [loadCurrentOperatorSources],
+  );
+
+  const loadAccessOverview = useCallback(
+    () =>
+      loadCurrentOperatorSources([
+        "operators",
+        "operatorSessions",
+        "clientKeyRevocations",
+        "keyLifecycleReport",
+        "gatewaySessions",
+      ]),
+    [loadCurrentOperatorSources],
+  );
+
+  const loadAccessOperators = useCallback(
+    () =>
+      loadCurrentOperatorSources([
+        "operators",
+        "operatorSessions",
+        "operatorAuthEvents",
+      ]),
+    [loadCurrentOperatorSources],
+  );
+
+  const loadAccessVpsIdentities = useCallback(
+    () =>
+      loadCurrentOperatorSources([
+        "clientKeyRevocations",
+        "keyLifecycleReport",
+      ]),
+    [loadCurrentOperatorSources],
+  );
+
+  const loadAccessGatewaySessions = useCallback(
+    () =>
+      loadCurrentOperatorSources(["gatewaySessions", "keyLifecycleReport"]),
+    [loadCurrentOperatorSources],
+  );
+
+  const loadAccessAuditSessions = useCallback(
+    () =>
+      loadCurrentOperatorSources([
+        "operatorSessions",
+        "operatorAuthEvents",
+      ]),
+    [loadCurrentOperatorSources],
+  );
 
   const createOperator = useCallback(
     async (
@@ -1426,6 +1586,8 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   return {
     accessError,
     accessLoading,
+    accessSourcesError,
+    accessSourcesLoading,
     beginHomeOperatorHydration,
     clearAccess: clearOperator,
     clearOperator,
@@ -1439,6 +1601,11 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     gatewaySessions,
     hydrateHomeOperator,
     keyLifecycleReport,
+    loadAccessAuditSessions,
+    loadAccessGatewaySessions,
+    loadAccessOperators,
+    loadAccessOverview,
+    loadAccessVpsIdentities,
     loadCurrentOperatorProfile,
     loadCurrentOperator,
     operator,

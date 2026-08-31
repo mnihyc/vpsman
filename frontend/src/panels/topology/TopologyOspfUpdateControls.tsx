@@ -50,6 +50,8 @@ const encoder = new TextEncoder();
 
 export function TopologyOspfUpdateControls({
   agents,
+  error,
+  loading,
   ospfUpdatePlans,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
@@ -64,6 +66,8 @@ export function TopologyOspfUpdateControls({
   tunnelPlans,
 }: {
   agents: AgentView[];
+  error: string | null;
+  loading: boolean;
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
@@ -353,11 +357,24 @@ export function TopologyOspfUpdateControls({
         <div className="sectionHeader">
           <div>
             <h2>OSPF cost control</h2>
-            <span>No OSPF-enabled tunnel plans</span>
+            <span>
+              {error
+                ? "OSPF state unavailable"
+                : loading
+                  ? "Loading OSPF state"
+                  : "No OSPF-enabled tunnel plans"}
+            </span>
           </div>
           <Gauge size={20} />
         </div>
-        <div className="emptyState compactEmptyState">
+        {error || loading ? (
+          <ActionFeedback
+            className="localActionFeedback topologyOspfActionFeedback"
+            message={error ?? "Loading OSPF cost state"}
+            tone={error ? "danger" : "progress"}
+          />
+        ) : (
+          <div className="emptyState compactEmptyState">
           <strong>OSPF is opt-in per tunnel plan</strong>
           <span>
             The inherited OSPF updater is intentionally unconfigured. Assign an
@@ -390,7 +407,8 @@ export function TopologyOspfUpdateControls({
               Open tunnel plans
             </button>
           </div>
-        </div>
+          </div>
+        )}
       </section>
     );
   }
@@ -414,10 +432,10 @@ export function TopologyOspfUpdateControls({
           <ShieldCheck aria-hidden="true" size={20} />
           <button
             className="secondaryAction compactAction"
-            disabled={refreshing}
+            disabled={refreshing || loading}
             onClick={() => void refreshData()}
             title={
-              refreshing
+              refreshing || loading
                 ? "OSPF plans, endpoint status, and recommendations are already refreshing"
                 : "Refresh saved plans, endpoint cost status, and recommendations"
             }
@@ -451,9 +469,13 @@ export function TopologyOspfUpdateControls({
       </div>
       <ActionFeedback
         className="localActionFeedback topologyOspfActionFeedback"
-        message={feedback?.message}
+        message={
+          error ??
+          feedback?.message ??
+          (loading ? "Loading OSPF cost state" : null)
+        }
         ref={feedbackRef}
-        tone={feedback?.tone}
+        tone={error ? "danger" : loading ? "progress" : feedback?.tone}
       />
       <ConsoleDataGrid
         actions={planActions}

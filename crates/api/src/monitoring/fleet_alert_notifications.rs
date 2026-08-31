@@ -22,7 +22,9 @@ use crate::{
         FleetAlertNotificationDeliveryView, FleetAlertNotificationDispatchRequest,
         FleetAlertNotificationMatchRule, FleetAlertNotificationProcessRequest,
     },
-    repository_alert_notifications::notification_status_for_kind,
+    repository_alert_notifications::{
+        fleet_alert_notification_channel_revision_hash, notification_status_for_kind,
+    },
     state::AppState,
     unix_now,
 };
@@ -361,6 +363,7 @@ fn notification_candidates(
             let dedupe_key = notification_dedupe_key(channel, alert);
             candidates.push(FleetAlertNotificationCandidate {
                 channel_id: channel.id,
+                channel_revision_hash: fleet_alert_notification_channel_revision_hash(channel),
                 channel_name: channel.name.clone(),
                 alert_id: alert.id.clone(),
                 alert_severity: alert.severity.clone(),

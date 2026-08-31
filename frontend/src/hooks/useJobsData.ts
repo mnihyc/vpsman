@@ -73,6 +73,7 @@ const JOB_ERROR_SOURCE_ORDER = [
   "commandTemplates",
 ] as const;
 type JobErrorSource = (typeof JOB_ERROR_SOURCE_ORDER)[number];
+export type JobProjectionSource = JobErrorSource | "serverJobs";
 
 type HomeJobsHydrationFence = {
   inventory: number;
@@ -128,6 +129,7 @@ export function useJobsData(
   const [jobsError, setJobsError] = useState<string | null>(null);
   const [serverJobsError, setServerJobsError] = useState<string | null>(null);
   const [jobsLoading, setJobsLoading] = useState(false);
+  const [jobSourceLoadingVersion, setJobSourceLoadingVersion] = useState(0);
   const [jobsEvidenceAvailable, setJobsEvidenceAvailable] = useState(false);
   const jobsRef = useRef<JobHistoryRecord[]>([]);
   const jobRolloutsRef = useRef<JobRolloutRecord[]>([]);
@@ -171,6 +173,10 @@ export function useJobsData(
     createProjectionOverlay<CommandTemplateRecord>(),
   );
   const jobSourceErrors = useRef<Partial<Record<JobErrorSource, string>>>({});
+  const jobSourceLoadTokens = useRef(
+    new Map<JobProjectionSource, Set<number>>(),
+  );
+  const nextJobSourceLoadToken = useRef(0);
   const jobHistoryEvidenceAvailable = useRef(false);
   const fileTransfersEvidenceAvailable = useRef(false);
   const currentApiToken = useRef(apiToken);
@@ -190,6 +196,50 @@ export function useJobsData(
         fileTransfersEvidenceAvailable.current,
     );
   }, []);
+
+  const trackJobSourceLoad = useCallback(
+    async <T,>(source: JobProjectionSource, load: () => Promise<T>): Promise<T> => {
+      const token = ++nextJobSourceLoadToken.current;
+      const sourceTokens = jobSourceLoadTokens.current.get(source) ?? new Set();
+      sourceTokens.add(token);
+      jobSourceLoadTokens.current.set(source, sourceTokens);
+      setJobSourceLoadingVersion((version) => version + 1);
+      try {
+        return await load();
+      } finally {
+        const currentTokens = jobSourceLoadTokens.current.get(source);
+        currentTokens?.delete(token);
+        if (currentTokens?.size === 0) jobSourceLoadTokens.current.delete(source);
+        setJobSourceLoadingVersion((version) => version + 1);
+      }
+    },
+    [],
+  );
+
+  const jobSourcesLoading = useCallback(
+    (sources: readonly JobProjectionSource[]) => {
+      void jobSourceLoadingVersion;
+      return sources.some(
+        (source) => (jobSourceLoadTokens.current.get(source)?.size ?? 0) > 0,
+      );
+    },
+    [jobSourceLoadingVersion],
+  );
+
+  const jobSourcesError = useCallback(
+    (sources: readonly JobProjectionSource[]) => {
+      void jobsError;
+      const errors = sources.flatMap((source) => {
+        const error =
+          source === "serverJobs"
+            ? serverJobsError
+            : jobSourceErrors.current[source];
+        return error ? [error] : [];
+      });
+      return errors.length > 0 ? errors.join("; ") : null;
+    },
+    [jobsError, serverJobsError],
+  );
 
   const loadJobHistory = useCallback((): Promise<JobHistoryRecord[]> => {
     if (currentApiToken.current !== apiToken) {
@@ -355,340 +405,178 @@ export function useJobsData(
     [apiToken, publishJobsError, publishJobsEvidence],
   );
 
-  const loadJobs = useCallback(async () => {
-    if (currentApiToken.current !== apiToken) {
-      return;
-    }
-    const loadingGeneration = ++jobsLoadGeneration.current;
-    setJobsLoading(true);
+  const loadJobApprovals = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) return;
+    const generation = ++jobApprovalsLoadGeneration.current;
+    const overlayRevision = jobApprovalsOverlay.current.revision;
+    setProjectionError(jobSourceErrors.current, "jobApprovals", null);
+    publishJobsError();
     try {
-      await jobsLoadConsumer.current.enqueue(async () => {
-        if (currentApiToken.current !== apiToken) {
-          return;
-        }
-        const approvalsGeneration = ++jobApprovalsLoadGeneration.current;
-        const approvalsOverlayRevision = jobApprovalsOverlay.current.revision;
-        const rolloutsGeneration = ++jobRolloutsLoadGeneration.current;
-        const rolloutsOverlayRevision = jobRolloutsOverlay.current.revision;
-        const releasesGeneration = ++agentUpdateReleasesLoadGeneration.current;
-        const releasesOverlayRevision =
-          agentUpdateReleasesOverlay.current.revision;
-        const processSupervisorGeneration =
-          ++processSupervisorInventoryLoadGeneration.current;
-        const fileTransfersGeneration = ++fileTransfersLoadGeneration.current;
-        const fileTransferSourcesGeneration =
-          ++fileTransferSourcesLoadGeneration.current;
-        const fileTransferSourcesOverlayRevision =
-          fileTransferSourcesOverlay.current.revision;
-        const terminalGeneration = ++terminalSessionsLoadGeneration.current;
-        const serverGeneration = ++serverJobsLoadGeneration.current;
-        const serverOverlayRevision = serverJobsOverlay.current.revision;
-        const commandTemplatesGeneration =
-          ++commandTemplatesLoadGeneration.current;
-        const commandTemplatesOverlayRevision =
-          commandTemplatesOverlay.current.revision;
-        for (const source of JOB_ERROR_SOURCE_ORDER) {
-          setProjectionError(jobSourceErrors.current, source, null);
-        }
-        publishJobsError();
-        setServerJobsError(null);
-        const [
-          jobsResult,
-          jobApprovalsResult,
-          jobRolloutsResult,
-          releasesResult,
-          processSupervisorInventoryResult,
-          fileTransfersResult,
-          fileTransferSourcesResult,
-          terminalSessionsResult,
-          serverJobsResult,
-          commandTemplatesResult,
-        ] = await Promise.allSettled([
-          loadJobHistory(),
-          apiGet<JobApprovalRecord[]>(
-            buildListPath("/api/v1/job-approvals", {
-              limit: FLEET_DETAIL_LIMIT,
-              sort: "requested_at",
-              dir: "desc",
-            }),
-            apiToken,
-          ),
-          apiGet<JobRolloutRecord[]>(
-            `/api/v1/job-rollouts?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<AgentUpdateReleaseRecord[]>(
-            `/api/v1/agent-update-releases?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<ProcessSupervisorInventoryRecord[]>(
-            `/api/v1/process-supervisor/inventory?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<FileTransferSessionRecord[]>(
-            `/api/v1/file-transfers?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<FileTransferSourceArtifactRecord[]>(
-            `/api/v1/file-transfer-sources?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<TerminalSessionRecord[]>(
-            `/api/v1/terminal-sessions?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<ServerJobRecord[]>(
-            `/api/v1/server-jobs?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-          apiGet<CommandTemplateRecord[]>(
-            `/api/v1/command-templates?limit=${FLEET_DETAIL_LIMIT}`,
-            apiToken,
-          ),
-        ]);
-        if (currentApiToken.current !== apiToken) {
-          return;
-        }
-        const settledResults = [
-          jobsResult,
-          jobApprovalsResult,
-          jobRolloutsResult,
-          releasesResult,
-          processSupervisorInventoryResult,
-          fileTransfersResult,
-          fileTransferSourcesResult,
-          terminalSessionsResult,
-          serverJobsResult,
-          commandTemplatesResult,
-        ];
-        const unauthorized = settledResults.some(
-          (result) =>
-            result.status === "rejected" && isApiUnauthorized(result.reason),
-        );
-        if (unauthorized) {
-          onUnauthorized();
-          jobHistoryEvidenceAvailable.current = false;
-          fileTransfersEvidenceAvailable.current = false;
-          publishJobsEvidence();
-          jobsRef.current = [];
-          setJobs([]);
-          setJobApprovals([]);
-          setJobRollouts([]);
-          jobRolloutsRef.current = [];
-          setAgentUpdateReleases([]);
-          setProcessSupervisorInventory([]);
-          setFileTransfers([]);
-          setFileTransferSources([]);
-          setTerminalSessions([]);
-          setServerJobs([]);
-          setCommandTemplates([]);
-          setJobsTruncated(false);
-          setJobRolloutsTruncated(false);
-          setAgentUpdateReleasesTruncated(false);
-          setProcessSupervisorInventoryTruncated(false);
-          setFileTransfersTruncated(false);
-          setFileTransferSourcesTruncated(false);
-          setTerminalSessionsTruncated(false);
-          setCommandTemplatesTruncated(false);
-          jobSourceErrors.current = {
-            jobHistory: "Operator login required",
-          };
-          publishJobsError();
-          setServerJobsError("Operator login required");
-          return;
-        }
-        if (jobApprovalsLoadGeneration.current === approvalsGeneration) {
-          if (jobApprovalsResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              jobApprovalsResult.value,
-              jobApprovalsOverlay.current,
-              approvalsOverlayRevision,
-              (record) => record.id,
-              compareRequestedRecords,
-              FLEET_DETAIL_LIMIT,
-            );
-            setJobApprovals(merged.records);
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "jobApprovals",
-            settledSourceFailure("Job approvals", jobApprovalsResult),
-          );
-        }
-        if (jobRolloutsLoadGeneration.current === rolloutsGeneration) {
-          if (jobRolloutsResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              jobRolloutsResult.value,
-              jobRolloutsOverlay.current,
-              rolloutsOverlayRevision,
-              (record) => record.job_id,
-              compareCreatedRecords,
-              FLEET_DETAIL_LIMIT,
-            );
-            jobRolloutsRef.current = merged.records;
-            setJobRollouts(merged.records);
-            setJobRolloutsTruncated(merged.truncated);
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "jobRollouts",
-            settledSourceFailure("Job rollouts", jobRolloutsResult),
-          );
-        }
-        if (agentUpdateReleasesLoadGeneration.current === releasesGeneration) {
-          if (releasesResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              releasesResult.value,
-              agentUpdateReleasesOverlay.current,
-              releasesOverlayRevision,
-              (record) => record.id,
-              compareCreatedRecords,
-              FLEET_DETAIL_LIMIT,
-            );
-            setAgentUpdateReleases(merged.records);
-            setAgentUpdateReleasesTruncated(merged.truncated);
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "agentUpdateReleases",
-            settledSourceFailure("Agent update releases", releasesResult),
-          );
-        }
-        if (
-          processSupervisorInventoryLoadGeneration.current ===
-          processSupervisorGeneration
-        ) {
-          if (processSupervisorInventoryResult.status === "fulfilled") {
-            setProcessSupervisorInventory(
-              processSupervisorInventoryResult.value,
-            );
-            setProcessSupervisorInventoryTruncated(
-              processSupervisorInventoryResult.value.length >=
-                FLEET_DETAIL_LIMIT,
-            );
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "processSupervisorInventory",
-            settledSourceFailure(
-              "Process supervisor inventory",
-              processSupervisorInventoryResult,
-            ),
-          );
-        }
-        if (fileTransfersLoadGeneration.current === fileTransfersGeneration) {
-          if (fileTransfersResult.status === "fulfilled") {
-            setFileTransfers(fileTransfersResult.value);
-            setFileTransfersTruncated(
-              fileTransfersResult.value.length >= FLEET_DETAIL_LIMIT,
-            );
-            fileTransfersEvidenceAvailable.current = true;
-          } else {
-            fileTransfersEvidenceAvailable.current = false;
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "fileTransfers",
-            settledSourceFailure("File transfer sessions", fileTransfersResult),
-          );
-          publishJobsEvidence();
-        }
-        if (
-          fileTransferSourcesLoadGeneration.current ===
-          fileTransferSourcesGeneration
-        ) {
-          if (fileTransferSourcesResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              fileTransferSourcesResult.value,
-              fileTransferSourcesOverlay.current,
-              fileTransferSourcesOverlayRevision,
-              (record) => record.id,
-              compareCreatedRecords,
-              FLEET_DETAIL_LIMIT,
-            );
-            setFileTransferSources(merged.records);
-            setFileTransferSourcesTruncated(merged.truncated);
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "fileTransferSources",
-            settledSourceFailure(
-              "File transfer sources",
-              fileTransferSourcesResult,
-            ),
-          );
-        }
-        if (terminalSessionsLoadGeneration.current === terminalGeneration) {
-          if (terminalSessionsResult.status === "fulfilled") {
-            setTerminalSessions(terminalSessionsResult.value);
-            setTerminalSessionsTruncated(
-              terminalSessionsResult.value.length >= FLEET_DETAIL_LIMIT,
-            );
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "terminalSessions",
-            settledSourceFailure("Terminal sessions", terminalSessionsResult),
-          );
-        }
-        if (serverJobsLoadGeneration.current === serverGeneration) {
-          if (serverJobsResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              serverJobsResult.value,
-              serverJobsOverlay.current,
-              serverOverlayRevision,
-              (record) => record.id,
-              compareCreatedRecords,
-              FLEET_DETAIL_LIMIT,
-            );
-            setServerJobs(merged.records);
-            setServerJobsError(null);
-          } else {
-            setServerJobsError(
-              serverJobsResult.reason instanceof Error
-                ? `Maintenance jobs: ${serverJobsResult.reason.message}`
-                : "Maintenance job inventory unavailable",
-            );
-          }
-        }
-        if (
-          commandTemplatesLoadGeneration.current === commandTemplatesGeneration
-        ) {
-          if (commandTemplatesResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              commandTemplatesResult.value,
-              commandTemplatesOverlay.current,
-              commandTemplatesOverlayRevision,
-              (record) => record.id,
-              compareCommandTemplates,
-              FLEET_DETAIL_LIMIT,
-            );
-            setCommandTemplates(merged.records);
-            setCommandTemplatesTruncated(merged.truncated);
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "commandTemplates",
-            settledSourceFailure("Command templates", commandTemplatesResult),
-          );
-        }
-        publishJobsError();
-      });
-    } finally {
+      const records = await apiGet<JobApprovalRecord[]>(
+        buildListPath("/api/v1/job-approvals", {
+          limit: FLEET_DETAIL_LIMIT,
+          sort: "requested_at",
+          dir: "desc",
+        }),
+        apiToken,
+      );
       if (
-        jobsLoadGeneration.current === loadingGeneration &&
-        currentApiToken.current === apiToken
-      ) {
-        setJobsLoading(false);
-      }
+        jobApprovalsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      setJobApprovals(
+        mergeProjectionRead(
+          records,
+          jobApprovalsOverlay.current,
+          overlayRevision,
+          (record) => record.id,
+          compareRequestedRecords,
+          FLEET_DETAIL_LIMIT,
+        ).records,
+      );
+    } catch (error) {
+      if (
+        jobApprovalsLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      if (isApiUnauthorized(error)) onUnauthorized();
+      setProjectionError(
+        jobSourceErrors.current,
+        "jobApprovals",
+        isApiUnauthorized(error)
+          ? "Operator login required"
+          : error instanceof Error
+            ? `Job approvals: ${error.message}`
+            : "Job approvals unavailable",
+      );
     }
-  }, [
-    apiToken,
-    onUnauthorized,
-    publishJobsError,
-    publishJobsEvidence,
-    loadJobHistory,
-  ]);
+    publishJobsError();
+  }, [apiToken, onUnauthorized, publishJobsError]);
+
+  const loadProcessSupervisorInventory = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) return;
+    const generation = ++processSupervisorInventoryLoadGeneration.current;
+    setProjectionError(jobSourceErrors.current, "processSupervisorInventory", null);
+    publishJobsError();
+    try {
+      const records = await apiGet<ProcessSupervisorInventoryRecord[]>(
+        `/api/v1/process-supervisor/inventory?limit=${FLEET_DETAIL_LIMIT}`,
+        apiToken,
+      );
+      if (
+        processSupervisorInventoryLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      setProcessSupervisorInventory(records);
+      setProcessSupervisorInventoryTruncated(
+        records.length >= FLEET_DETAIL_LIMIT,
+      );
+    } catch (error) {
+      if (
+        processSupervisorInventoryLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      if (isApiUnauthorized(error)) onUnauthorized();
+      setProjectionError(
+        jobSourceErrors.current,
+        "processSupervisorInventory",
+        isApiUnauthorized(error)
+          ? "Operator login required"
+          : error instanceof Error
+            ? `Process supervisor inventory: ${error.message}`
+            : "Process supervisor inventory unavailable",
+      );
+    }
+    publishJobsError();
+  }, [apiToken, onUnauthorized, publishJobsError]);
+
+  const loadFileTransferSources = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) return;
+    const generation = ++fileTransferSourcesLoadGeneration.current;
+    const overlayRevision = fileTransferSourcesOverlay.current.revision;
+    setProjectionError(jobSourceErrors.current, "fileTransferSources", null);
+    publishJobsError();
+    try {
+      const records = await apiGet<FileTransferSourceArtifactRecord[]>(
+        `/api/v1/file-transfer-sources?limit=${FLEET_DETAIL_LIMIT}`,
+        apiToken,
+      );
+      if (
+        fileTransferSourcesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      const merged = mergeProjectionRead(
+        records,
+        fileTransferSourcesOverlay.current,
+        overlayRevision,
+        (record) => record.id,
+        compareCreatedRecords,
+        FLEET_DETAIL_LIMIT,
+      );
+      setFileTransferSources(merged.records);
+      setFileTransferSourcesTruncated(merged.truncated);
+    } catch (error) {
+      if (
+        fileTransferSourcesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      if (isApiUnauthorized(error)) onUnauthorized();
+      setProjectionError(
+        jobSourceErrors.current,
+        "fileTransferSources",
+        isApiUnauthorized(error)
+          ? "Operator login required"
+          : error instanceof Error
+            ? `File transfer sources: ${error.message}`
+            : "File transfer sources unavailable",
+      );
+    }
+    publishJobsError();
+  }, [apiToken, onUnauthorized, publishJobsError]);
+
+  const loadCommandTemplates = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) return;
+    const generation = ++commandTemplatesLoadGeneration.current;
+    const overlayRevision = commandTemplatesOverlay.current.revision;
+    setProjectionError(jobSourceErrors.current, "commandTemplates", null);
+    publishJobsError();
+    try {
+      const records = await apiGet<CommandTemplateRecord[]>(
+        `/api/v1/command-templates?limit=${FLEET_DETAIL_LIMIT}`,
+        apiToken,
+      );
+      if (
+        commandTemplatesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      const merged = mergeProjectionRead(
+        records,
+        commandTemplatesOverlay.current,
+        overlayRevision,
+        (record) => record.id,
+        compareCommandTemplates,
+        FLEET_DETAIL_LIMIT,
+      );
+      setCommandTemplates(merged.records);
+      setCommandTemplatesTruncated(merged.truncated);
+    } catch (error) {
+      if (
+        commandTemplatesLoadGeneration.current !== generation ||
+        currentApiToken.current !== apiToken
+      ) return;
+      if (isApiUnauthorized(error)) onUnauthorized();
+      setProjectionError(
+        jobSourceErrors.current,
+        "commandTemplates",
+        isApiUnauthorized(error)
+          ? "Operator login required"
+          : error instanceof Error
+            ? `Command templates: ${error.message}`
+            : "Command templates unavailable",
+      );
+    }
+    publishJobsError();
+  }, [apiToken, onUnauthorized, publishJobsError]);
 
   const loadAgentUpdateReleases = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
@@ -1097,6 +985,94 @@ export function useJobsData(
       );
     }
   }, [apiToken, onUnauthorized]);
+
+  const trackedLoadJobHistory = useCallback(
+    () => trackJobSourceLoad("jobHistory", loadJobHistory),
+    [loadJobHistory, trackJobSourceLoad],
+  );
+  const trackedLoadJobApprovals = useCallback(
+    () => trackJobSourceLoad("jobApprovals", loadJobApprovals),
+    [loadJobApprovals, trackJobSourceLoad],
+  );
+  const trackedLoadJobRollouts = useCallback(
+    () => trackJobSourceLoad("jobRollouts", loadJobRollouts),
+    [loadJobRollouts, trackJobSourceLoad],
+  );
+  const trackedLoadAgentUpdateReleases = useCallback(
+    () => trackJobSourceLoad("agentUpdateReleases", loadAgentUpdateReleases),
+    [loadAgentUpdateReleases, trackJobSourceLoad],
+  );
+  const trackedLoadProcessSupervisorInventory = useCallback(
+    () =>
+      trackJobSourceLoad(
+        "processSupervisorInventory",
+        loadProcessSupervisorInventory,
+      ),
+    [loadProcessSupervisorInventory, trackJobSourceLoad],
+  );
+  const trackedLoadFileTransfers = useCallback(
+    () => trackJobSourceLoad("fileTransfers", loadFileTransfers),
+    [loadFileTransfers, trackJobSourceLoad],
+  );
+  const trackedLoadFileTransferSources = useCallback(
+    () => trackJobSourceLoad("fileTransferSources", loadFileTransferSources),
+    [loadFileTransferSources, trackJobSourceLoad],
+  );
+  const trackedLoadTerminalSessions = useCallback(
+    () => trackJobSourceLoad("terminalSessions", loadTerminalSessions),
+    [loadTerminalSessions, trackJobSourceLoad],
+  );
+  const trackedLoadServerJobs = useCallback(
+    () => trackJobSourceLoad("serverJobs", loadServerJobs),
+    [loadServerJobs, trackJobSourceLoad],
+  );
+  const trackedLoadCommandTemplates = useCallback(
+    () => trackJobSourceLoad("commandTemplates", loadCommandTemplates),
+    [loadCommandTemplates, trackJobSourceLoad],
+  );
+
+  const loadJobs = useCallback(async () => {
+    if (currentApiToken.current !== apiToken) {
+      return;
+    }
+    const loadingGeneration = ++jobsLoadGeneration.current;
+    setJobsLoading(true);
+    try {
+      await jobsLoadConsumer.current.enqueue(async () => {
+        await Promise.allSettled([
+          trackedLoadJobHistory(),
+          trackedLoadJobApprovals(),
+          trackedLoadJobRollouts(),
+          trackedLoadAgentUpdateReleases(),
+          trackedLoadProcessSupervisorInventory(),
+          trackedLoadFileTransfers(),
+          trackedLoadFileTransferSources(),
+          trackedLoadTerminalSessions(),
+          trackedLoadServerJobs(),
+          trackedLoadCommandTemplates(),
+        ]);
+      });
+    } finally {
+      if (
+        jobsLoadGeneration.current === loadingGeneration &&
+        currentApiToken.current === apiToken
+      ) {
+        setJobsLoading(false);
+      }
+    }
+  }, [
+    apiToken,
+    trackedLoadAgentUpdateReleases,
+    trackedLoadCommandTemplates,
+    trackedLoadFileTransfers,
+    trackedLoadFileTransferSources,
+    trackedLoadJobApprovals,
+    trackedLoadJobHistory,
+    trackedLoadJobRollouts,
+    trackedLoadProcessSupervisorInventory,
+    trackedLoadServerJobs,
+    trackedLoadTerminalSessions,
+  ]);
 
   const loadJobTargets = useCallback(
     async (jobId: string) => {
@@ -1929,6 +1905,7 @@ export function useJobsData(
     clearProjectionOverlay(serverJobsOverlay.current);
     clearProjectionOverlay(commandTemplatesOverlay.current);
     jobSourceErrors.current = {};
+    jobSourceLoadTokens.current.clear();
     jobHistoryEvidenceAvailable.current = false;
     fileTransfersEvidenceAvailable.current = false;
     jobsRef.current = [];
@@ -1956,6 +1933,7 @@ export function useJobsData(
     setJobsError(null);
     setServerJobsError(null);
     setJobsLoading(false);
+    setJobSourceLoadingVersion((version) => version + 1);
     setJobsEvidenceAvailable(false);
   }, []);
 
@@ -1984,6 +1962,8 @@ export function useJobsData(
     jobsError,
     jobsEvidenceAvailable,
     jobsLoading,
+    jobSourcesError,
+    jobSourcesLoading,
     processSupervisorInventory,
     processSupervisorInventoryTruncated,
     serverJobs,
@@ -1996,7 +1976,7 @@ export function useJobsData(
     reconcileJobStatusEvent,
     refreshJobHistoryAfterEvent,
     loadJobRollout,
-    loadJobRollouts,
+    loadJobRollouts: trackedLoadJobRollouts,
     createArtifactCleanupJob,
     createFileTransferHandoff,
     previewArtifactCleanup,
@@ -2014,17 +1994,22 @@ export function useJobsData(
     loadJobOutputComparison,
     loadExactJobTargetStatuses,
     loadJobTargets,
-    loadFileTransfers,
+    loadFileTransfers: trackedLoadFileTransfers,
     loadHostProcessInventory,
     loadHostPackageUpdatePlan,
     loadHostPackageUpdatePlans,
     loadHostServiceInventory,
     loadHostStorageInventory,
+    loadCommandTemplates: trackedLoadCommandTemplates,
+    loadFileTransferSources: trackedLoadFileTransferSources,
+    loadJobApprovals: trackedLoadJobApprovals,
+    loadJobHistory: trackedLoadJobHistory,
     loadJobs,
-    loadAgentUpdateReleases,
-    loadServerJobs,
+    loadProcessSupervisorInventory: trackedLoadProcessSupervisorInventory,
+    loadAgentUpdateReleases: trackedLoadAgentUpdateReleases,
+    loadServerJobs: trackedLoadServerJobs,
     loadTerminalReplay,
-    loadTerminalSessions,
+    loadTerminalSessions: trackedLoadTerminalSessions,
     updateJobRollout,
     deleteCommandTemplate,
     upsertCommandTemplate,

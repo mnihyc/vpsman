@@ -157,11 +157,13 @@ export function SharedViewsPanel({
   initialSelectorExpression = "*",
   onInitialSelectorConsumed,
   onResolveTargets,
+  requestsEnabled,
 }: {
   agents: AgentView[];
   apiToken: string;
   initialSelectorExpression?: string;
   onInitialSelectorConsumed?: () => void;
+  requestsEnabled: boolean;
   onResolveTargets: (
     selectorExpression: string,
   ) => Promise<BulkResolveResponse>;
@@ -202,6 +204,7 @@ export function SharedViewsPanel({
     useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+  const loadedApiTokenRef = useRef<string | null>(null);
   const authoritativeTargetRevisions = useRef(
     new Map<string, MonitoringShareRevisionView>(),
   );
@@ -286,11 +289,11 @@ export function SharedViewsPanel({
   }, [loadShares]);
 
   useEffect(() => {
+    if (!requestsEnabled) return;
+    if (loadedApiTokenRef.current === apiToken) return;
+    loadedApiTokenRef.current = apiToken;
     void loadShares();
-    return () => {
-      loadGeneration.current += 1;
-    };
-  }, [loadShares]);
+  }, [apiToken, loadShares, requestsEnabled]);
 
   useEffect(() => {
     const message = loadError ?? feedback?.message;

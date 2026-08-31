@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
-use sqlx::{postgres::PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgPool, types::Json as SqlJson, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::AgentRuntimeConfig;
 
@@ -850,89 +852,101 @@ impl Repository {
         match guard {
             RuntimeConfigDesiredStateGuard::Postgres { mut tx } => {
                 let mutation: Result<Vec<RuntimeConfigOverrideView>> = async {
-                    for replacement in &replacements {
-                        let current = sqlx::query(
-                            r#"
+                    let current = sqlx::query(
+                        r#"
                         SELECT client_id, toml, reason, updated_at::text AS updated_at, updated_by
                         FROM client_runtime_config_overrides
-                        WHERE client_id = $1
+                        WHERE client_id = ANY($1::text[])
+                        ORDER BY client_id
                         FOR UPDATE
                         "#,
-                        )
-                        .bind(&replacement.client_id)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .map(runtime_config_override_from_row)
-                        .transpose()?;
+                    )
+                    .bind(&client_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .map(runtime_config_override_from_row)
+                    .collect::<Result<Vec<_>>>()?;
+                    let current_by_client = current
+                        .iter()
+                        .map(|record| (record.client_id.as_str(), record))
+                        .collect::<HashMap<_, _>>();
+                    for replacement in &replacements {
                         anyhow::ensure!(
-                            runtime_config_override_revision(current.as_ref())
+                            runtime_config_override_revision(
+                                current_by_client.get(replacement.client_id.as_str()).copied()
+                            )
                                 == replacement.expected_revision,
                             "runtime_config_override_review_stale"
                         );
                     }
-                    for replacement in &replacements {
-                        if let Some(toml) = replacement.toml.as_deref() {
-                            sqlx::query(
-                                r#"
-                            INSERT INTO client_runtime_config_overrides (
-                                client_id, toml, reason, updated_by, updated_at
-                            )
-                            VALUES ($1, $2, $3, $4, now())
-                            ON CONFLICT (client_id)
-                            DO UPDATE SET
-                                toml = EXCLUDED.toml,
-                                reason = EXCLUDED.reason,
-                                updated_by = EXCLUDED.updated_by,
-                                updated_at = now()
-                            "#,
-                            )
-                            .bind(&replacement.client_id)
-                            .bind(toml)
-                            .bind(reason)
-                            .bind(operator.operator.id)
-                            .execute(&mut *tx)
-                            .await?;
-                        } else {
-                            sqlx::query(
-                                r#"
-                                UPDATE client_runtime_config_overrides
-                                SET reason = $2, updated_by = $3, updated_at = now()
-                                WHERE client_id = $1
-                                "#,
-                            )
-                            .bind(&replacement.client_id)
-                            .bind(reason)
-                            .bind(operator.operator.id)
-                            .execute(&mut *tx)
-                            .await?;
-                            sqlx::query(
-                                "DELETE FROM client_runtime_config_overrides WHERE client_id = $1",
-                            )
-                            .bind(&replacement.client_id)
-                            .execute(&mut *tx)
-                            .await?;
-                        }
+                    let upserts = replacements
+                        .iter()
+                        .filter(|replacement| replacement.toml.is_some())
+                        .collect::<Vec<_>>();
+                    if !upserts.is_empty() {
+                        let mut query = QueryBuilder::<Postgres>::new(
+                            "INSERT INTO client_runtime_config_overrides (client_id, toml, reason, updated_by, updated_at) ",
+                        );
+                        query.push_values(upserts, |mut row, replacement| {
+                            row.push_bind(&replacement.client_id)
+                                .push_bind(replacement.toml.as_deref().expect("upsert TOML"))
+                                .push_bind(reason)
+                                .push_bind(operator.operator.id)
+                                .push("now()");
+                        });
+                        query.push(
+                            " ON CONFLICT (client_id) DO UPDATE SET toml = EXCLUDED.toml, reason = EXCLUDED.reason, updated_by = EXCLUDED.updated_by, updated_at = now()",
+                        );
+                        query.build().execute(&mut *tx).await?;
+                    }
+                    let reset_client_ids = replacements
+                        .iter()
+                        .filter(|replacement| replacement.toml.is_none())
+                        .map(|replacement| replacement.client_id.clone())
+                        .collect::<Vec<_>>();
+                    if !reset_client_ids.is_empty() {
+                        // Preserve the established trigger evidence: the DELETE
+                        // observes this request's reason and actor from OLD.
                         sqlx::query(
                             r#"
-                        INSERT INTO audit_logs (id, actor_id, action, target, metadata)
-                        VALUES ($1, $2, $3, $4, $5)
-                        "#,
+                            UPDATE client_runtime_config_overrides
+                            SET reason = $2, updated_by = $3, updated_at = now()
+                            WHERE client_id = ANY($1::text[])
+                            "#,
                         )
-                        .bind(Uuid::new_v4())
+                        .bind(&reset_client_ids)
+                        .bind(reason)
                         .bind(operator.operator.id)
-                        .bind(if replacement.toml.is_some() {
-                            "runtime_config.client_override_replaced"
-                        } else {
-                            "runtime_config.client_override_reset"
-                        })
-                        .bind(format!("client:{}", replacement.client_id))
-                        .bind(runtime_config_override_audit_metadata(
-                            &replacement.client_id,
-                            reason,
-                            operator,
-                        ))
                         .execute(&mut *tx)
                         .await?;
+                        sqlx::query(
+                            "DELETE FROM client_runtime_config_overrides WHERE client_id = ANY($1::text[])",
+                        )
+                        .bind(&reset_client_ids)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    if !replacements.is_empty() {
+                        let mut audits = QueryBuilder::<Postgres>::new(
+                            "INSERT INTO audit_logs (id, actor_id, action, target, metadata) ",
+                        );
+                        audits.push_values(&replacements, |mut row, replacement| {
+                            row.push_bind(Uuid::new_v4())
+                                .push_bind(operator.operator.id)
+                                .push_bind(if replacement.toml.is_some() {
+                                    "runtime_config.client_override_replaced"
+                                } else {
+                                    "runtime_config.client_override_reset"
+                                })
+                                .push_bind(format!("client:{}", replacement.client_id))
+                                .push_bind(SqlJson(runtime_config_override_audit_metadata(
+                                    &replacement.client_id,
+                                    reason,
+                                    operator,
+                                )));
+                        });
+                        audits.build().execute(&mut *tx).await?;
                     }
                     let selected = sqlx::query(
                         r#"
@@ -1066,5 +1080,21 @@ mod lock_order_tests {
             .contains("OLD.process_incarnation_id IS DISTINCT FROM NEW.process_incarnation_id"));
         assert!(lifecycle.contains("next_attempt_at = LEAST(work.next_attempt_at, now())"));
         assert!(lifecycle.contains("pg_notify('runtime_config_reconcile', 'ready')"));
+    }
+
+    #[test]
+    fn runtime_config_bulk_cas_uses_set_based_validation_mutation_and_audit() {
+        let source = include_str!("repository_runtime_config.rs");
+        let section = source
+            .split_once("pub(crate) async fn replace_runtime_config_overrides_cas_locked")
+            .expect("runtime-config bulk CAS")
+            .1
+            .split_once("fn runtime_config_override_from_row")
+            .expect("runtime-config bulk CAS boundary")
+            .0;
+        assert!(section.contains("WHERE client_id = ANY($1::text[])"));
+        assert!(!section.contains("WHERE client_id = $1"));
+        assert!(section.contains("QueryBuilder::<Postgres>::new"));
+        assert!(section.contains("audits.push_values"));
     }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -119,6 +119,7 @@ type VpsDetailPanelProps = {
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
   recordBounds: VpsDetailRecordBounds;
+  requestsEnabled: boolean;
   loading: boolean;
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
@@ -187,6 +188,7 @@ export function VpsDetailPanel({
   fleetAlertPolicies,
   jobs,
   recordBounds,
+  requestsEnabled,
   loading,
   networkObservations,
   networkTrends,
@@ -226,6 +228,9 @@ export function VpsDetailPanel({
     "Summary",
   );
   const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
+  const loadedSourceOwnerRef =
+    useRef<VpsDetailPanelProps["onLoadConfigurationSources"] | null>(null);
+  const sourceLoadGenerationRef = useRef(0);
   const policyAlertHistoryTruncated =
     policyAlertsEvidenceAvailable && policyAlertsTruncated;
   const agentId = agent?.id ?? null;
@@ -234,21 +239,24 @@ export function VpsDetailPanel({
       setSourceLoadError(null);
       return;
     }
-    let active = true;
+    if (!requestsEnabled) return;
+    if (loadedSourceOwnerRef.current === onLoadConfigurationSources) {
+      return;
+    }
+    loadedSourceOwnerRef.current = onLoadConfigurationSources;
+    const generation = ++sourceLoadGenerationRef.current;
     setSourceLoadError(null);
-    void onLoadConfigurationSources().catch((error) => {
-      if (active) {
-        setSourceLoadError(
-          error instanceof Error
-            ? `Configuration sources: ${error.message}`
-            : "Configuration sources are unavailable",
-        );
-      }
-    });
-    return () => {
-      active = false;
-    };
-  }, [agentId, onLoadConfigurationSources]);
+    void onLoadConfigurationSources()
+      .catch((error) => {
+        if (sourceLoadGenerationRef.current === generation) {
+          setSourceLoadError(
+            error instanceof Error
+              ? `Configuration sources: ${error.message}`
+              : "Configuration sources are unavailable",
+          );
+        }
+      });
+  }, [agentId, onLoadConfigurationSources, requestsEnabled]);
   const related = useMemo(
     () =>
       agent

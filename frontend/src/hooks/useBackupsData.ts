@@ -38,7 +38,7 @@ import type {
 
 const BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 
-type BackupProjection =
+export type BackupProjection =
   | "artifacts"
   | "migrationLinks"
   | "policies"
@@ -119,6 +119,8 @@ export function useBackupsData(
   );
   const [backupsError, setBackupsError] = useState<string | null>(null);
   const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupSourceLoadingVersion, setBackupSourceLoadingVersion] =
+    useState(0);
   const [backupsEvidenceAvailable, setBackupsEvidenceAvailable] =
     useState(false);
   // The operation fence owns only the shared loading indicator. Revisions and
@@ -143,6 +145,10 @@ export function useBackupsData(
   const backupProjectionFailuresRef = useRef<BackupProjectionFailures>(
     emptyBackupProjectionFailures(),
   );
+  const backupSourceLoadTokens = useRef(
+    new Map<BackupProjection, Set<number>>(),
+  );
+  const nextBackupSourceLoadToken = useRef(0);
   const backupRequestsEvidenceAvailableRef = useRef(false);
   const backupArtifactsEvidenceAvailableRef = useRef(false);
   const backupsRef = useRef(backups);
@@ -169,6 +175,48 @@ export function useBackupsData(
     );
   }, []);
 
+  const trackBackupSourceLoad = useCallback(
+    async <T,>(source: BackupProjection, load: () => Promise<T>): Promise<T> => {
+      const token = ++nextBackupSourceLoadToken.current;
+      const sourceTokens = backupSourceLoadTokens.current.get(source) ?? new Set();
+      sourceTokens.add(token);
+      backupSourceLoadTokens.current.set(source, sourceTokens);
+      setBackupSourceLoadingVersion((version) => version + 1);
+      try {
+        return await load();
+      } finally {
+        const currentTokens = backupSourceLoadTokens.current.get(source);
+        currentTokens?.delete(token);
+        if (currentTokens?.size === 0) backupSourceLoadTokens.current.delete(source);
+        setBackupSourceLoadingVersion((version) => version + 1);
+      }
+    },
+    [],
+  );
+
+  const backupSourcesLoading = useCallback(
+    (sources: readonly BackupProjection[]) => {
+      void backupSourceLoadingVersion;
+      return sources.some(
+        (source) => (backupSourceLoadTokens.current.get(source)?.size ?? 0) > 0,
+      );
+    },
+    [backupSourceLoadingVersion],
+  );
+
+  const backupSourcesError = useCallback(
+    (sources: readonly BackupProjection[]) => {
+      if (backupsError === "Operator login required") return backupsError;
+      void backupsError;
+      const errors = sources.flatMap((source) => {
+        const error = backupProjectionFailuresRef.current[source];
+        return error ? [error] : [];
+      });
+      return errors.length > 0 ? errors.join("; ") : null;
+    },
+    [backupsError],
+  );
+
   const handleBackupsUnauthorized = useCallback(() => {
     backupsLoadOperationGeneration.current += 1;
     const generations = backupProjectionGenerationsRef.current;
@@ -186,6 +234,8 @@ export function useBackupsData(
     backupRequestsEvidenceAvailableRef.current = false;
     backupArtifactsEvidenceAvailableRef.current = false;
     backupProjectionFailuresRef.current = emptyBackupProjectionFailures();
+    backupSourceLoadTokens.current.clear();
+    setBackupSourceLoadingVersion((version) => version + 1);
     setBackupsEvidenceAvailable(false);
     backupsRef.current = [];
     setBackups([]);
@@ -682,6 +732,175 @@ export function useBackupsData(
     publishBackupsEvidence,
   ]);
 
+  const loadBackupPolicies = useCallback((): Promise<void> => {
+    if (apiTokenRef.current !== apiToken) return Promise.resolve();
+    const operationGeneration = ++backupsLoadOperationGeneration.current;
+    const generation = ++backupProjectionGenerationsRef.current.policies;
+    backupProjectionFailuresRef.current.policies = null;
+    setBackupsLoading(true);
+    publishBackupsError();
+    return (async () => {
+      try {
+        const records = await backupLoadConsumersRef.current.policies.enqueue(
+          () =>
+            apiGet<BackupPolicyRecord[]>(
+              `/api/v1/backup-policies?limit=${FLEET_DETAIL_LIMIT}`,
+              apiToken,
+            ),
+        );
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupProjectionGenerationsRef.current.policies !== generation
+        ) {
+          return;
+        }
+        backupPoliciesRef.current = records;
+        setBackupPolicies(records);
+        setBackupPoliciesTruncated(records.length >= FLEET_DETAIL_LIMIT);
+        backupProjectionFailuresRef.current.policies = null;
+        publishBackupsError();
+      } catch (error) {
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupProjectionGenerationsRef.current.policies !== generation
+        ) {
+          return;
+        }
+        if (isApiUnauthorized(error)) handleBackupsUnauthorized();
+        else {
+          backupProjectionFailuresRef.current.policies = settledSourceFailure(
+            "Backup policies",
+            { status: "rejected", reason: error },
+          );
+          publishBackupsError();
+        }
+      } finally {
+        if (
+          apiTokenRef.current === apiToken &&
+          backupsLoadOperationGeneration.current === operationGeneration
+        ) {
+          setBackupsLoading(false);
+        }
+      }
+    })();
+  }, [
+    apiToken,
+    handleBackupsUnauthorized,
+    publishBackupsError,
+  ]);
+
+  const loadRestorePlans = useCallback((): Promise<void> => {
+    if (apiTokenRef.current !== apiToken) return Promise.resolve();
+    const operationGeneration = ++backupsLoadOperationGeneration.current;
+    const generation = ++backupProjectionGenerationsRef.current.restorePlans;
+    backupProjectionFailuresRef.current.restorePlans = null;
+    setBackupsLoading(true);
+    publishBackupsError();
+    return (async () => {
+      try {
+        const records = await backupLoadConsumersRef.current.restorePlans.enqueue(
+          () =>
+            apiGet<RestorePlanRecord[]>(
+              buildListPath("/api/v1/restore-plans", {
+                limit: HISTORY_DETAIL_LIMIT,
+                sort: "created_at",
+                dir: "desc",
+              }),
+              apiToken,
+            ),
+        );
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupProjectionGenerationsRef.current.restorePlans !== generation
+        ) {
+          return;
+        }
+        restorePlansRef.current = records;
+        setRestorePlans(records);
+        backupProjectionFailuresRef.current.restorePlans = null;
+        publishBackupsError();
+      } catch (error) {
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupProjectionGenerationsRef.current.restorePlans !== generation
+        ) {
+          return;
+        }
+        if (isApiUnauthorized(error)) handleBackupsUnauthorized();
+        else {
+          backupProjectionFailuresRef.current.restorePlans = settledSourceFailure(
+            "Restore plans",
+            { status: "rejected", reason: error },
+          );
+          publishBackupsError();
+        }
+      } finally {
+        if (
+          apiTokenRef.current === apiToken &&
+          backupsLoadOperationGeneration.current === operationGeneration
+        ) {
+          setBackupsLoading(false);
+        }
+      }
+    })();
+  }, [apiToken, handleBackupsUnauthorized, publishBackupsError]);
+
+  const loadMigrationLinks = useCallback((): Promise<void> => {
+    if (apiTokenRef.current !== apiToken) return Promise.resolve();
+    const operationGeneration = ++backupsLoadOperationGeneration.current;
+    const generation = ++backupProjectionGenerationsRef.current.migrationLinks;
+    backupProjectionFailuresRef.current.migrationLinks = null;
+    setBackupsLoading(true);
+    publishBackupsError();
+    return (async () => {
+      try {
+        const records = await backupLoadConsumersRef.current.migrationLinks.enqueue(
+          () =>
+            apiGet<MigrationLinkRecord[]>(
+              buildListPath("/api/v1/migration-links", {
+                limit: HISTORY_DETAIL_LIMIT,
+                sort: "created_at",
+                dir: "desc",
+              }),
+              apiToken,
+            ),
+        );
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupProjectionGenerationsRef.current.migrationLinks !== generation
+        ) {
+          return;
+        }
+        migrationLinksRef.current = records;
+        setMigrationLinks(records);
+        backupProjectionFailuresRef.current.migrationLinks = null;
+        publishBackupsError();
+      } catch (error) {
+        if (
+          apiTokenRef.current !== apiToken ||
+          backupProjectionGenerationsRef.current.migrationLinks !== generation
+        ) {
+          return;
+        }
+        if (isApiUnauthorized(error)) handleBackupsUnauthorized();
+        else {
+          backupProjectionFailuresRef.current.migrationLinks = settledSourceFailure(
+            "Migration links",
+            { status: "rejected", reason: error },
+          );
+          publishBackupsError();
+        }
+      } finally {
+        if (
+          apiTokenRef.current === apiToken &&
+          backupsLoadOperationGeneration.current === operationGeneration
+        ) {
+          setBackupsLoading(false);
+        }
+      }
+    })();
+  }, [apiToken, handleBackupsUnauthorized, publishBackupsError]);
+
   const loadBackupRequestArtifactProjections =
     useCallback((): Promise<void> => {
       if (apiTokenRef.current !== apiToken) {
@@ -784,6 +1003,38 @@ export function useBackupsData(
       publishBackupsError,
       publishBackupsEvidence,
     ]);
+
+  const trackedLoadBackupRequests = useCallback(
+    () => trackBackupSourceLoad("requests", loadBackupRequests),
+    [loadBackupRequests, trackBackupSourceLoad],
+  );
+  const trackedLoadBackupPolicies = useCallback(
+    () => trackBackupSourceLoad("policies", loadBackupPolicies),
+    [loadBackupPolicies, trackBackupSourceLoad],
+  );
+  const trackedLoadBackupArtifacts = useCallback(
+    () => trackBackupSourceLoad("artifacts", loadBackupArtifacts),
+    [loadBackupArtifacts, trackBackupSourceLoad],
+  );
+  const trackedLoadRestorePlans = useCallback(
+    () => trackBackupSourceLoad("restorePlans", loadRestorePlans),
+    [loadRestorePlans, trackBackupSourceLoad],
+  );
+  const trackedLoadMigrationLinks = useCallback(
+    () => trackBackupSourceLoad("migrationLinks", loadMigrationLinks),
+    [loadMigrationLinks, trackBackupSourceLoad],
+  );
+  const trackedLoadBackupRequestArtifactProjections = useCallback(() => {
+    let sharedLoad: Promise<void> | null = null;
+    const load = () => {
+      sharedLoad ??= loadBackupRequestArtifactProjections();
+      return sharedLoad;
+    };
+    return Promise.all([
+      trackBackupSourceLoad("requests", load),
+      trackBackupSourceLoad("artifacts", load),
+    ]).then(() => undefined);
+  }, [loadBackupRequestArtifactProjections, trackBackupSourceLoad]);
 
   const createBackupRequest = useCallback(
     async (request: CreateBackupRequest) => {
@@ -1052,6 +1303,7 @@ export function useBackupsData(
     backupLoadConsumersRef.current.restorePlans.discardPending([]);
     homeBackupsHydrationRef.current = null;
     backupProjectionFailuresRef.current = emptyBackupProjectionFailures();
+    backupSourceLoadTokens.current.clear();
     backupRequestsEvidenceAvailableRef.current = false;
     backupArtifactsEvidenceAvailableRef.current = false;
     backupsRef.current = [];
@@ -1069,6 +1321,7 @@ export function useBackupsData(
     setMigrationLinks([]);
     setBackupsError(null);
     setBackupsLoading(false);
+    setBackupSourceLoadingVersion((version) => version + 1);
     setBackupsEvidenceAvailable(false);
   }, []);
 
@@ -1085,6 +1338,8 @@ export function useBackupsData(
     backupsError,
     backupsEvidenceAvailable,
     backupsLoading,
+    backupSourcesError,
+    backupSourcesLoading,
     hydrateHomeBackups,
     createBackupRequest,
     createBackupPolicy,
@@ -1098,8 +1353,13 @@ export function useBackupsData(
     pruneBackupPolicies,
     uploadBackupArtifact,
     uploadBackupArtifactChunked,
-    loadBackupArtifacts,
-    loadBackupRequestArtifactProjections,
+    loadBackupArtifacts: trackedLoadBackupArtifacts,
+    loadBackupPolicies: trackedLoadBackupPolicies,
+    loadBackupRequests: trackedLoadBackupRequests,
+    loadBackupRequestArtifactProjections:
+      trackedLoadBackupRequestArtifactProjections,
+    loadMigrationLinks: trackedLoadMigrationLinks,
+    loadRestorePlans: trackedLoadRestorePlans,
     loadBackups,
   };
 }

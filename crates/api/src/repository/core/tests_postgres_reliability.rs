@@ -5074,6 +5074,7 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
         .record_fleet_alert_notification_deliveries(
             &[FleetAlertNotificationCandidate {
                 channel_id,
+                channel_revision_hash: "deleted-channel-revision".to_string(),
                 channel_name: "deleted-channel".to_string(),
                 alert_id: "agent_status:stale".to_string(),
                 alert_severity: "critical".to_string(),
@@ -5135,6 +5136,151 @@ async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
         .await
         .unwrap();
     assert!(webhook_deliveries.is_empty());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_manual_delivery_dispatches_fence_revisions_and_dedupe_concurrently() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let channel_id = Uuid::new_v4();
+    let channel_request = |target: &str| CreateFleetAlertNotificationChannelRequest {
+        id: Some(channel_id),
+        name: "dispatch-owner-channel".to_string(),
+        scope_kind: "global".to_string(),
+        scope_value: None,
+        min_severity: Some("warning".to_string()),
+        categories: Some(vec!["agent_status".to_string()]),
+        operator_states: Some(vec!["open".to_string()]),
+        delivery_kind: "webhook".to_string(),
+        target: target.to_string(),
+        cooldown_secs: Some(60),
+        enabled: Some(true),
+        notes: None,
+        confirmed: true,
+    };
+    let original_channel = db
+        .repo
+        .upsert_fleet_alert_notification_channel(
+            &channel_request("https://www.cloudflare.com/dispatch-owner-original"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let notification_candidate =
+        |channel: &crate::model_alert_notifications::FleetAlertNotificationChannelView| {
+            FleetAlertNotificationCandidate {
+                channel_id: channel.id,
+                channel_revision_hash:
+                    crate::repository_alert_notifications::fleet_alert_notification_channel_revision_hash(
+                        channel,
+                    ),
+                channel_name: channel.name.clone(),
+                alert_id: "agent_status:dispatch-owner".to_string(),
+                alert_severity: "critical".to_string(),
+                alert_category: "agent_status".to_string(),
+                status: "queued".to_string(),
+                delivery_kind: channel.delivery_kind.clone(),
+                target: channel.target.clone(),
+                dedupe_key: "dispatch-owner-channel-dedupe".to_string(),
+                payload: json!({"schema": "test"}),
+                cooldown_until_unix: crate::unix_now() as i64 + 60,
+            }
+        };
+    let stale_notification = notification_candidate(&original_channel);
+    let current_channel = db
+        .repo
+        .upsert_fleet_alert_notification_channel(
+            &channel_request("https://www.cloudflare.com/dispatch-owner-current"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(db
+        .repo
+        .record_fleet_alert_notification_deliveries(&[stale_notification], &operator)
+        .await
+        .unwrap()
+        .is_empty());
+    let current_notification = notification_candidate(&current_channel);
+    let (left, right) = tokio::join!(
+        db.repo.record_fleet_alert_notification_deliveries(
+            std::slice::from_ref(&current_notification),
+            &operator,
+        ),
+        db.repo.record_fleet_alert_notification_deliveries(
+            std::slice::from_ref(&current_notification),
+            &operator,
+        ),
+    );
+    assert_eq!(left.unwrap().len() + right.unwrap().len(), 1);
+
+    let rule_id = Uuid::new_v4();
+    let rule_request = |target: &str| CreateWebhookRuleRequest {
+        id: Some(rule_id),
+        name: "dispatch-owner-rule".to_string(),
+        enabled: true,
+        expression: "interval.1min".to_string(),
+        target: target.to_string(),
+        body_template: String::new(),
+        signing_secret: None,
+        clear_signing_secret: false,
+        cooldown_secs: Some(60),
+        notes: None,
+        confirmed: true,
+    };
+    let original_rule = db
+        .repo
+        .upsert_webhook_rule(
+            &rule_request("https://www.cloudflare.com/dispatch-rule-original"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let webhook_candidate =
+        |rule: &crate::model_webhook_rules::WebhookRuleView| WebhookRuleDeliveryCandidate {
+            rule_id: rule.id,
+            rule_name: rule.name.clone(),
+            event_kind: "manual.test".to_string(),
+            event_id: "dispatch-owner-event".to_string(),
+            target: rule.target.clone(),
+            dedupe_key: "dispatch-owner-rule-dedupe".to_string(),
+            payload: json!({"schema": "test"}),
+            matched_vps: Vec::new(),
+            message: "test".to_string(),
+            rule_revision_hash: crate::repository_webhook_rules::webhook_rule_revision_hash(rule)
+                .unwrap(),
+            signing_secret: rule.signing_secret.clone(),
+            cooldown_until_unix: crate::unix_now() as i64 + 60,
+            actor_id: Some(operator.operator.id),
+        };
+    let stale_webhook = webhook_candidate(&original_rule);
+    let current_rule = db
+        .repo
+        .upsert_webhook_rule(
+            &rule_request("https://www.cloudflare.com/dispatch-rule-current"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(db
+        .repo
+        .record_webhook_rule_deliveries(&[stale_webhook])
+        .await
+        .unwrap()
+        .is_empty());
+    let current_webhook = webhook_candidate(&current_rule);
+    let (left, right) = tokio::join!(
+        db.repo
+            .record_webhook_rule_deliveries(std::slice::from_ref(&current_webhook)),
+        db.repo
+            .record_webhook_rule_deliveries(std::slice::from_ref(&current_webhook)),
+    );
+    assert_eq!(left.unwrap().len() + right.unwrap().len(), 1);
 
     db.cleanup().await;
 }
@@ -5659,13 +5805,13 @@ async fn postgres_webhook_rule_state_change_leaves_delivery_terminalization_to_w
     }
 
     fn delivery(
-        rule_id: Uuid,
+        rule: &crate::model_webhook_rules::WebhookRuleView,
         operator_id: Uuid,
         event_id: &str,
         signing_secret: Option<&str>,
     ) -> WebhookRuleDeliveryCandidate {
         WebhookRuleDeliveryCandidate {
-            rule_id,
+            rule_id: rule.id,
             rule_name: "signed-lifecycle-rule".to_string(),
             event_kind: "manual.test".to_string(),
             event_id: event_id.to_string(),
@@ -5674,7 +5820,8 @@ async fn postgres_webhook_rule_state_change_leaves_delivery_terminalization_to_w
             payload: json!({"event_id": event_id}),
             matched_vps: Vec::new(),
             message: "lifecycle test".to_string(),
-            rule_revision_hash: "signed-lifecycle-revision".to_string(),
+            rule_revision_hash: crate::repository_webhook_rules::webhook_rule_revision_hash(rule)
+                .unwrap(),
             signing_secret: signing_secret.map(str::to_string),
             cooldown_until_unix: 0,
             actor_id: Some(operator_id),
@@ -5719,13 +5866,13 @@ async fn postgres_webhook_rule_state_change_leaves_delivery_terminalization_to_w
 
     let retryable = [
         delivery(
-            rule_id,
+            &rotated,
             operator.operator.id,
             "signed-lifecycle-1",
             Some("beta-secret"),
         ),
         delivery(
-            rule_id,
+            &rotated,
             operator.operator.id,
             "signed-lifecycle-2",
             Some("beta-secret"),
@@ -5783,7 +5930,7 @@ async fn postgres_webhook_rule_state_change_leaves_delivery_terminalization_to_w
     assert_eq!(
         db.repo
             .record_webhook_rule_deliveries(&[delivery(
-                rule_id,
+                &cleared,
                 operator.operator.id,
                 "signed-lifecycle-3",
                 None,
@@ -35189,6 +35336,33 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
         .create_monitoring_share(share.clone(), &operator)
         .await
         .unwrap();
+    let stale_noop_expected = db
+        .repo
+        .monitoring_share_record(share_id)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query(
+        "UPDATE monitoring_share_links SET updated_at = updated_at + interval '1 microsecond' WHERE id = $1",
+    )
+    .bind(share_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let stale_noop = db
+        .repo
+        .replace_monitoring_share_targets_bulk(
+            &[crate::model_monitoring::MonitoringShareTargetReplacement {
+                next_client_ids: stale_noop_expected.target_client_ids(),
+                expected_share: stale_noop_expected,
+            }],
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale_noop
+        .to_string()
+        .contains("monitoring_share_preview_stale"));
     // Model a revision already ahead of the current wall clock. This is the
     // deterministic form of a queued transaction whose `now()` snapshot was
     // taken before the writer it waited for. Every share mutation must advance

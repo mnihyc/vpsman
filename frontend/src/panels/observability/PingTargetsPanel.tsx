@@ -111,9 +111,11 @@ export function PingTargetsPanel({
   agents,
   apiToken,
   onResolveTargets,
+  requestsEnabled,
 }: {
   agents: AgentView[];
   apiToken: string;
+  requestsEnabled: boolean;
   onResolveTargets: (
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
@@ -151,6 +153,8 @@ export function PingTargetsPanel({
   const [selectorExpression, setSelectorExpression] = useState("*");
   const pageFeedbackRef = useRef<HTMLDivElement | null>(null);
   const editorFeedbackRef = useRef<HTMLDivElement | null>(null);
+  const loadedApiTokenRef = useRef<string | null>(null);
+  const loadGenerationRef = useRef(0);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -185,7 +189,10 @@ export function PingTargetsPanel({
   }, [editor, error]);
 
   useEffect(() => {
-    let active = true;
+    if (!requestsEnabled) return;
+    if (loadedApiTokenRef.current === apiToken) return;
+    loadedApiTokenRef.current = apiToken;
+    const generation = ++loadGenerationRef.current;
     invalidateReviewGeneration();
     setReviewPending(false);
     setLoading(true);
@@ -201,20 +208,17 @@ export function PingTargetsPanel({
     setLifecycleReview(null);
     void apiGet<PingTargetView[]>("/api/v1/ping-targets", apiToken)
       .then((records) => {
-        if (!active) return;
+        if (loadGenerationRef.current !== generation) return;
         setTargets(records);
       })
       .catch((cause) => {
-        if (!active) return;
+        if (loadGenerationRef.current !== generation) return;
         setError(errorMessage(cause));
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (loadGenerationRef.current === generation) setLoading(false);
       });
-    return () => {
-      active = false;
-    };
-  }, [apiToken, invalidateReviewGeneration]);
+  }, [apiToken, invalidateReviewGeneration, requestsEnabled]);
 
   const parsedSelector = useMemo(
     () => parseSearchExpression(selectorExpression),

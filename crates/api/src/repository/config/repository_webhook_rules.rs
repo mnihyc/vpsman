@@ -6,7 +6,7 @@ use sqlx::{types::Json as SqlJson, Executor, Postgres, QueryBuilder, Row, Transa
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
-    expression_references_vps_rules, validate_template,
+    expression_references_vps_rules, payload_hash, validate_template,
     WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
@@ -570,6 +570,9 @@ impl Repository {
         &self,
         candidates: &[WebhookRuleDeliveryCandidate],
     ) -> Result<Vec<WebhookRuleDeliveryView>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -580,47 +583,46 @@ impl Repository {
                     .into_iter()
                     .collect::<Vec<_>>();
                 rule_ids.sort_unstable();
-                let existing_rule_ids = sqlx::query_scalar::<_, Uuid>(
+                let current_rule_revisions = sqlx::query(
                     r#"
-                    SELECT id
+                    SELECT
+                        id, name, enabled, expression, target, body_template,
+                        signing_secret, cooldown_secs, notes, actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
                     FROM webhook_rules
-                    WHERE id = ANY($1)
+                    WHERE id = ANY($1::uuid[])
                     ORDER BY id
+                    FOR UPDATE
                     "#,
                 )
                 .bind(&rule_ids)
                 .fetch_all(&mut *tx)
                 .await?
                 .into_iter()
-                .collect::<HashSet<_>>();
+                .map(webhook_rule_from_row)
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|rule| rule.enabled)
+                .map(|rule| Ok((rule.id, webhook_rule_revision_hash(&rule)?)))
+                .collect::<Result<HashMap<_, _>>>()?;
                 let mut persisted = Vec::new();
                 for candidate in candidates {
-                    if !existing_rule_ids.contains(&candidate.rule_id) {
-                        continue;
-                    }
-                    let duplicate = sqlx::query_scalar::<_, i64>(
-                        r#"
-                        SELECT 1::bigint
-                        FROM webhook_rule_deliveries
-                        WHERE rule_id = $1
-                          AND event_id = $2
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(candidate.rule_id)
-                    .bind(&candidate.event_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .is_some();
-                    if duplicate {
+                    if current_rule_revisions.get(&candidate.rule_id)
+                        != Some(&candidate.rule_revision_hash)
+                    {
                         continue;
                     }
                     let delivery = webhook_delivery_from_candidate(
                         candidate,
                         WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
                     );
-                    let row = insert_delivery_query(&delivery).fetch_one(&mut *tx).await?;
-                    persisted.push(webhook_delivery_from_row(row)?);
+                    if let Some(row) = insert_delivery_query(&delivery)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                    {
+                        persisted.push(webhook_delivery_from_row(row)?);
+                    }
                 }
                 if !persisted.is_empty() {
                     insert_webhook_dispatch_audit(&mut tx, &persisted).await?;
@@ -1039,6 +1041,7 @@ fn insert_delivery_query(
             delivered_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, NULL, $15, CASE WHEN $6 = 'delivered' THEN now() ELSE NULL END)
+        ON CONFLICT (rule_id, event_id) DO NOTHING
         RETURNING
             id,
             rule_id,
@@ -1076,6 +1079,19 @@ fn insert_delivery_query(
     .bind(delivery.cooldown_until_unix)
     .bind(delivery.attempt_count)
     .bind(delivery.actor_id)
+}
+
+pub(crate) fn webhook_rule_revision_hash(rule: &WebhookRuleView) -> Result<String> {
+    Ok(payload_hash(&serde_json::to_vec(&json!({
+        "id": rule.id,
+        "name": &rule.name,
+        "enabled": rule.enabled,
+        "expression": &rule.expression,
+        "target": &rule.target,
+        "body_template": &rule.body_template,
+        "cooldown_secs": rule.cooldown_secs,
+        "signing_secret": &rule.signing_secret,
+    }))?))
 }
 
 fn webhook_rule_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleView> {

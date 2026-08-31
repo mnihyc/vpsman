@@ -10,11 +10,11 @@ use vpsman_common::{
 use crate::{
     model::{
         AgentView, AuthContext, MonitoringShareDefinitionUpdate, MonitoringShareRecord,
-        MonitoringShareTargetRecord, MonitoringShareTargetReplacement, MonitoringShareView,
-        MonitoringShareVisibilityView, PingRollupView, PingTargetAssignmentRecord,
-        PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
-        PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView, SystemInformationView,
-        TelemetryUptimeView,
+        MonitoringShareTargetRecord, MonitoringShareTargetReplacement,
+        MonitoringShareTargetRevisionRecord, MonitoringShareView, MonitoringShareVisibilityView,
+        PingRollupView, PingTargetAssignmentRecord, PingTargetAssignmentReplacement,
+        PingTargetAssignmentView, PingTargetDetailView, PingTargetRecord,
+        PingTargetRuntimeSyncView, PingTargetView, SystemInformationView, TelemetryUptimeView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -1421,9 +1421,23 @@ impl Repository {
         &self,
         share_id: Uuid,
     ) -> Result<Option<MonitoringShareRecord>> {
+        Ok(self
+            .monitoring_share_records_by_ids(&[share_id])
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    pub(crate) async fn monitoring_share_records_by_ids(
+        &self,
+        share_ids: &[Uuid],
+    ) -> Result<Vec<MonitoringShareRecord>> {
+        if share_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         match self {
             Self::Postgres(pool) => {
-                let row = sqlx::query(
+                let rows = sqlx::query(
                     r#"
                     SELECT
                         s.id,
@@ -1454,14 +1468,17 @@ impl Repository {
                         ) AS target_public_client_keys
                     FROM monitoring_share_links s
                     LEFT JOIN monitoring_share_targets st ON st.share_id = s.id
-                    WHERE s.id = $1
+                    WHERE s.id = ANY($1::uuid[])
                     GROUP BY s.id
+                    ORDER BY s.id
                     "#,
                 )
-                .bind(share_id)
-                .fetch_optional(pool)
+                .bind(share_ids)
+                .fetch_all(pool)
                 .await?;
-                row.map(monitoring_share_record_from_row).transpose()
+                rows.into_iter()
+                    .map(monitoring_share_record_from_row)
+                    .collect()
             }
         }
     }
@@ -1620,7 +1637,7 @@ impl Repository {
         &self,
         replacements: &[MonitoringShareTargetReplacement],
         operator: &AuthContext,
-    ) -> Result<()> {
+    ) -> Result<Vec<MonitoringShareTargetRevisionRecord>> {
         if replacements.is_empty() {
             bail!("monitoring_share_selection_required");
         }
@@ -1645,9 +1662,6 @@ impl Repository {
             })
             .map(|replacement| replacement.expected_share.id)
             .collect::<BTreeSet<_>>();
-        if changed_share_ids.is_empty() {
-            return Ok(());
-        }
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -1736,79 +1750,118 @@ impl Repository {
                         bail!("monitoring_share_preview_stale");
                     }
                 }
-                let mut target_share_ids = Vec::new();
-                let mut target_client_ids = Vec::new();
-                let mut target_public_client_keys = Vec::new();
-                for replacement in replacements.iter().filter(|replacement| {
-                    changed_share_ids.contains(&replacement.expected_share.id)
-                }) {
-                    let existing_keys = replacement
-                        .expected_share
-                        .targets
-                        .iter()
-                        .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
-                        .collect::<HashMap<_, _>>();
-                    let targets = normalized_client_ids(&replacement.next_client_ids)
-                        .into_iter()
-                        .map(|client_id| MonitoringShareTargetRecord {
-                            public_client_key: existing_keys
-                                .get(&client_id)
-                                .cloned()
-                                .unwrap_or_else(generate_token),
-                            client_id,
-                        })
-                        .collect::<Vec<_>>();
-                    validate_monitoring_share_targets(&targets)?;
-                    for target in targets {
-                        target_share_ids.push(replacement.expected_share.id);
-                        target_client_ids.push(target.client_id);
-                        target_public_client_keys.push(target.public_client_key);
+                if !changed_share_ids.is_empty() {
+                    let mut target_share_ids = Vec::new();
+                    let mut target_client_ids = Vec::new();
+                    let mut target_public_client_keys = Vec::new();
+                    for replacement in replacements.iter().filter(|replacement| {
+                        changed_share_ids.contains(&replacement.expected_share.id)
+                    }) {
+                        let existing_keys = replacement
+                            .expected_share
+                            .targets
+                            .iter()
+                            .map(|target| {
+                                (target.client_id.clone(), target.public_client_key.clone())
+                            })
+                            .collect::<HashMap<_, _>>();
+                        let targets = normalized_client_ids(&replacement.next_client_ids)
+                            .into_iter()
+                            .map(|client_id| MonitoringShareTargetRecord {
+                                public_client_key: existing_keys
+                                    .get(&client_id)
+                                    .cloned()
+                                    .unwrap_or_else(generate_token),
+                                client_id,
+                            })
+                            .collect::<Vec<_>>();
+                        validate_monitoring_share_targets(&targets)?;
+                        for target in targets {
+                            target_share_ids.push(replacement.expected_share.id);
+                            target_client_ids.push(target.client_id);
+                            target_public_client_keys.push(target.public_client_key);
+                        }
                     }
-                }
-                let changed_share_ids = changed_share_ids.iter().copied().collect::<Vec<_>>();
-                sqlx::query("DELETE FROM monitoring_share_targets WHERE share_id=ANY($1::uuid[])")
+                    let changed_share_ids = changed_share_ids.iter().copied().collect::<Vec<_>>();
+                    sqlx::query(
+                        "DELETE FROM monitoring_share_targets WHERE share_id=ANY($1::uuid[])",
+                    )
                     .bind(&changed_share_ids)
                     .execute(&mut *tx)
                     .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO monitoring_share_targets (
-                        share_id, client_id, public_client_key
+                    sqlx::query(
+                        r#"
+                        INSERT INTO monitoring_share_targets (
+                            share_id, client_id, public_client_key
+                        )
+                        SELECT target.share_id, target.client_id, target.public_client_key
+                        FROM unnest($1::UUID[], $2::TEXT[], $3::TEXT[])
+                             AS target(share_id, client_id, public_client_key)
+                        "#,
                     )
-                    SELECT target.share_id, target.client_id, target.public_client_key
-                    FROM unnest($1::UUID[], $2::TEXT[], $3::TEXT[])
-                         AS target(share_id, client_id, public_client_key)
+                    .bind(target_share_ids)
+                    .bind(target_client_ids)
+                    .bind(target_public_client_keys)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        r#"
+                        UPDATE monitoring_share_links
+                        SET updated_at=GREATEST(
+                            clock_timestamp(), updated_at + interval '1 microsecond'
+                        )
+                        WHERE id=ANY($1::uuid[])
+                        "#,
+                    )
+                    .bind(&changed_share_ids)
+                    .execute(&mut *tx)
+                    .await?;
+                    insert_monitoring_audit(
+                        &mut tx,
+                        Some(operator.operator.id),
+                        "monitoring_share.targets_bulk_updated",
+                        "monitoring_shares:bulk",
+                        share_target_updates_audit_metadata(replacements, operator),
+                    )
+                    .await?;
+                }
+                let revisions = sqlx::query(
+                    r#"
+                    SELECT
+                        s.id AS share_id,
+                        s.updated_at::text AS updated_at,
+                        COALESCE(
+                            array_agg(target.client_id ORDER BY target.client_id)
+                                FILTER (WHERE target.client_id IS NOT NULL),
+                            ARRAY[]::TEXT[]
+                        ) AS target_client_ids
+                    FROM monitoring_share_links s
+                    LEFT JOIN monitoring_share_targets target ON target.share_id = s.id
+                    WHERE s.id = ANY($1::uuid[])
+                    GROUP BY s.id
+                    ORDER BY s.id
                     "#,
                 )
-                .bind(target_share_ids)
-                .bind(target_client_ids)
-                .bind(target_public_client_keys)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE monitoring_share_links
-                    SET updated_at=GREATEST(
-                        clock_timestamp(), updated_at + interval '1 microsecond'
-                    )
-                    WHERE id=ANY($1::uuid[])
-                    "#,
-                )
-                .bind(changed_share_ids)
-                .execute(&mut *tx)
-                .await?;
-                insert_monitoring_audit(
-                    &mut tx,
-                    Some(operator.operator.id),
-                    "monitoring_share.targets_bulk_updated",
-                    "monitoring_shares:bulk",
-                    share_target_updates_audit_metadata(replacements, operator),
-                )
-                .await?;
+                .bind(&ids)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .map(|row| {
+                    Ok(MonitoringShareTargetRevisionRecord {
+                        share_id: row.try_get("share_id")?,
+                        updated_at: row.try_get("updated_at")?,
+                        target_client_ids: row.try_get("target_client_ids")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+                anyhow::ensure!(
+                    revisions.len() == ids.len(),
+                    "monitoring_share_preview_stale"
+                );
                 tx.commit().await?;
+                Ok(revisions)
             }
         }
-        Ok(())
     }
 
     pub(crate) async fn update_monitoring_share_definition(

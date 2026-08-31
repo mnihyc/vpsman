@@ -328,5 +328,10 @@ fn rule_mutations_signal_but_never_terminalize_worker_delivery_rows() {
         assert!(source_transition.contains("pg_notify('webhook_events'"));
         assert!(!source_transition.contains("UPDATE webhook_rule_deliveries"));
     }
-    assert!(!producer.contains("FOR UPDATE"));
+    assert!(producer.contains("FROM webhook_rules"));
+    assert!(producer.contains("ORDER BY id"));
+    assert!(producer.contains("FOR UPDATE"));
+    assert!(!producer.contains("SELECT 1::bigint"));
+    assert!(source.contains("ON CONFLICT (rule_id, event_id) DO NOTHING"));
+    assert!(!producer.contains("UPDATE webhook_rule_deliveries"));
 }

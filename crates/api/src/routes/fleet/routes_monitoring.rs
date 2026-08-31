@@ -985,24 +985,60 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
             "monitoring_share_selection_too_large",
         ));
     }
+    let shares = state
+        .repo
+        .monitoring_share_records_by_ids(&share_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_unavailable",
+            "The shared monitoring views could not be loaded.",
+        ))?;
+    if shares.len() != share_ids.len() {
+        return Err(ApiError::not_found("monitoring_share_not_found"));
+    }
+    let shares = shares
+        .into_iter()
+        .map(|share| (share.id, share))
+        .collect::<HashMap<_, _>>();
+    let mut selectors = BTreeSet::new();
+    for share_id in &share_ids {
+        let share = shares
+            .get(share_id)
+            .expect("every requested monitoring share was loaded");
+        if monitoring_share_status(share, crate::unix_now()) != "active" {
+            return Err(ApiError::conflict("monitoring_share_not_active"));
+        }
+        validate_monitoring_selector(&share.selector_expression, MAX_SHARE_SELECTOR_BYTES)?;
+        require_monitoring_selector_scope(&operator.operator.scopes, &share.selector_expression)?;
+        selectors.insert(share.selector_expression.clone());
+    }
+    let selector_evidence =
+        resolve_saved_selectors_batch(&state, &selectors, MAX_SHARE_SELECTOR_BYTES, true).await;
+    if selectors.iter().any(|selector| {
+        !selector_evidence
+            .evidence_available
+            .get(selector)
+            .copied()
+            .unwrap_or(false)
+    }) {
+        return Err(ApiError::internal(
+            "selector_targets_unavailable",
+            "Selector targets could not be resolved.",
+            anyhow::anyhow!("saved monitoring-share selector evidence unavailable"),
+        ));
+    }
     let mut changes = Vec::with_capacity(share_ids.len());
     let mut replacements = Vec::with_capacity(share_ids.len());
     for share_id in &share_ids {
-        let share = state
-            .repo
-            .monitoring_share_record(*share_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_share_unavailable",
-                "The shared monitoring view could not be loaded.",
-            ))?
-            .ok_or_else(|| ApiError::not_found("monitoring_share_not_found"))?;
-        if monitoring_share_status(&share, crate::unix_now()) != "active" {
-            return Err(ApiError::conflict("monitoring_share_not_active"));
-        }
-        require_monitoring_selector_scope(&operator.operator.scopes, &share.selector_expression)?;
-        let resolved =
-            resolve_selector(&state, &share.selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
+        let share = shares
+            .get(share_id)
+            .cloned()
+            .expect("every requested monitoring share was loaded");
+        let resolved = selector_evidence
+            .resolved_client_ids
+            .get(&share.selector_expression)
+            .cloned()
+            .expect("every validated monitoring-share selector was resolved");
         validate_monitoring_share_targets(&resolved)?;
         let current = share
             .target_client_ids()
@@ -1034,45 +1070,32 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
     if request.preview_hash.as_deref() != Some(preview_hash.as_str()) {
         return Err(ApiError::conflict("monitoring_share_preview_stale"));
     }
-    state
+    let committed = state
         .repo
         .replace_monitoring_share_targets_bulk(&replacements, &operator)
         .await
         .map_err(share_repository_error)?;
-    let mut revisions = Vec::with_capacity(share_ids.len());
-    for share_id in &share_ids {
-        let share = state
-            .repo
-            .monitoring_share_record(*share_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "monitoring_share_unavailable",
-                "The updated shared monitoring view could not be loaded.",
-            ))?
-            .ok_or_else(|| {
-                ApiError::internal(
-                    "monitoring_share_not_found_after_update",
-                    "The updated shared monitoring view could not be loaded.",
-                    anyhow::anyhow!("monitoring share disappeared after target update"),
-                )
-            })?;
-        let mut target_client_ids = share.target_client_ids();
-        target_client_ids.sort();
-        target_client_ids.dedup();
-        revisions.push(MonitoringShareRevisionView {
-            share_id: share.id,
-            updated_at: share.updated_at,
-            target_count: target_client_ids.len(),
-            target_client_ids,
-            // The selector was resolved successfully as part of this request,
-            // so the committed frozen target set is current and has usable
-            // refresh evidence. Inactive status is still safe to report as
-            // evidence-available because its retained frozen targets remain
-            // immutable evidence.
-            target_update_available: false,
-            target_update_evidence_available: true,
-        });
-    }
+    let revisions = committed
+        .into_iter()
+        .map(|revision| {
+            let mut target_client_ids = revision.target_client_ids;
+            target_client_ids.sort();
+            target_client_ids.dedup();
+            MonitoringShareRevisionView {
+                share_id: revision.share_id,
+                updated_at: revision.updated_at,
+                target_count: target_client_ids.len(),
+                target_client_ids,
+                // The selector was resolved successfully as part of this request,
+                // so the committed frozen target set is current and has usable
+                // refresh evidence. Inactive status is still safe to report as
+                // evidence-available because its retained frozen targets remain
+                // immutable evidence.
+                target_update_available: false,
+                target_update_evidence_available: true,
+            }
+        })
+        .collect();
     Ok(Json(BulkUpdateMonitoringShareTargetsResponse {
         preview_hash,
         applied: true,

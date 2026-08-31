@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{bail, ensure, Result};
 use serde_json::json;
 use sqlx::{postgres::PgRow, Row};
@@ -25,11 +27,7 @@ impl Repository {
                 .bind(limit.clamp(1, 200))
                 .fetch_all(pool)
                 .await?;
-                let mut views = Vec::with_capacity(rows.len());
-                for row in rows {
-                    views.push(postgres_rollout_view(pool, row).await?);
-                }
-                Ok(views)
+                postgres_rollout_views(pool, rows).await
             }
         }
     }
@@ -374,9 +372,46 @@ fn postgres_rollout_select() -> &'static str {
 
 async fn postgres_rollout_view(pool: &sqlx::PgPool, row: PgRow) -> Result<JobRolloutView> {
     let job_id: Uuid = row.try_get("job_id")?;
-    let target_rows = sqlx::query(
-        r#"
+    let target_rows = postgres_rollout_target_rows(pool, &[job_id]).await?;
+    postgres_rollout_view_from_rows(row, target_rows)
+}
+
+async fn postgres_rollout_views(
+    pool: &sqlx::PgPool,
+    rows: Vec<PgRow>,
+) -> Result<Vec<JobRolloutView>> {
+    let job_ids = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("job_id"))
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+    let target_rows = postgres_rollout_target_rows(pool, &job_ids).await?;
+    let mut targets_by_job = HashMap::<Uuid, Vec<PgRow>>::new();
+    for target in target_rows {
+        let job_id: Uuid = target.try_get("rollout_job_id")?;
+        targets_by_job.entry(job_id).or_default().push(target);
+    }
+    rows.into_iter()
+        .map(|row| {
+            let job_id: Uuid = row.try_get("job_id")?;
+            postgres_rollout_view_from_rows(row, targets_by_job.remove(&job_id).unwrap_or_default())
+        })
+        .collect()
+}
+
+async fn postgres_rollout_target_rows(pool: &sqlx::PgPool, job_ids: &[Uuid]) -> Result<Vec<PgRow>> {
+    if job_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query(postgres_rollout_targets_select())
+        .bind(job_ids)
+        .fetch_all(pool)
+        .await?)
+}
+
+fn postgres_rollout_targets_select() -> &'static str {
+    r#"
         SELECT
+            assignment.job_id AS rollout_job_id,
             assignment.client_id,
             assignment.batch_index,
             target.status,
@@ -385,14 +420,9 @@ async fn postgres_rollout_view(pool: &sqlx::PgPool, row: PgRow) -> Result<JobRol
         JOIN job_targets target
           ON target.job_id = assignment.job_id
          AND target.client_id = assignment.client_id
-        WHERE assignment.job_id = $1
-        ORDER BY assignment.batch_index, assignment.client_id
-        "#,
-    )
-    .bind(job_id)
-    .fetch_all(pool)
-    .await?;
-    postgres_rollout_view_from_rows(row, target_rows)
+        WHERE assignment.job_id = ANY($1::uuid[])
+        ORDER BY assignment.job_id, assignment.batch_index, assignment.client_id
+    "#
 }
 
 async fn postgres_rollout_view_in_tx(
@@ -512,4 +542,26 @@ fn normalized_reason(reason: Option<&str>, fallback: &str) -> String {
 
 fn is_rollout_terminal(status: &str) -> bool {
     matches!(status, ROLLOUT_STATUS_COMPLETED | ROLLOUT_STATUS_ABORTED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollout_list_loads_all_target_evidence_once_in_stable_target_order() {
+        let source = include_str!("repository_job_rollouts.rs");
+        let list = source
+            .split("pub(crate) async fn list_job_rollouts")
+            .nth(1)
+            .and_then(|source| source.split("pub(crate) async fn get_job_rollout").next())
+            .expect("job rollout list body");
+        assert!(list.contains("postgres_rollout_views(pool, rows).await"));
+        assert!(!list.contains("for row in rows"));
+
+        let targets = postgres_rollout_targets_select();
+        assert!(targets.contains("assignment.job_id = ANY($1::uuid[])"));
+        assert!(targets
+            .contains("ORDER BY assignment.job_id, assignment.batch_index, assignment.client_id"));
+    }
 }
