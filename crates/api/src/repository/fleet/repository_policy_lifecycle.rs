@@ -1207,6 +1207,54 @@ pub(crate) async fn recompute_policy_evidence_pending_in_tx(
     .unwrap_or(false))
 }
 
+/// Recomputes the same durable work bit for a definition-change set in one
+/// statement. The caller does not observe an individual boolean; it owns the
+/// whole post-mutation fence and commits only after every supplied identity is
+/// consistent with its remaining exact-version targets.
+pub(crate) async fn recompute_policy_evidences_pending_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    evidence_ids: &[Uuid],
+) -> Result<()> {
+    if evidence_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        WITH desired AS MATERIALIZED (
+            SELECT evidence.id, EXISTS (
+                SELECT 1
+                FROM alert_policy_evidence_targets target
+                WHERE target.evidence_id=evidence.id
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM alert_policy_evidence_receipts receipt
+                        WHERE receipt.policy_rule_id=target.policy_rule_id
+                          AND receipt.rule_version=target.rule_version
+                          AND receipt.evidence_seq=evidence.evidence_seq
+                  )
+            ) AS evaluation_pending
+            FROM alert_policy_evidence evidence
+            WHERE evidence.id=ANY($1::uuid[])
+        ), locked AS MATERIALIZED (
+            SELECT evidence.id, desired.evaluation_pending
+            FROM alert_policy_evidence evidence
+            JOIN desired ON desired.id=evidence.id
+            WHERE evidence.evaluation_pending IS DISTINCT FROM desired.evaluation_pending
+            ORDER BY evidence.id
+            FOR UPDATE OF evidence
+        )
+        UPDATE alert_policy_evidence evidence
+        SET evaluation_pending=locked.evaluation_pending
+        FROM locked
+        WHERE evidence.id=locked.id
+        "#,
+    )
+    .bind(evidence_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Linearizes a definition change after every committed target for the affected
 /// generation has reached an exact-version receipt. Callers own only those
 /// generation rows, never a repository-global arm.
@@ -1254,6 +1302,21 @@ pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
     .bind(rule_ids)
     .fetch_all(&mut **tx)
     .await?;
+    let rule_generations = candidates
+        .iter()
+        .map(|candidate| {
+            Ok((
+                candidate.try_get::<Uuid, _>("rule_id")?,
+                candidate.try_get::<i32, _>("rule_version")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let evidence_ids = candidates
+        .iter()
+        .map(|candidate| candidate.try_get::<Uuid, _>("evidence_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rules = load_evaluator_rules_by_generation_in_tx(tx, &rule_generations).await?;
+    let evidences = load_stored_evidences_in_tx(tx, &evidence_ids).await?;
     let mut drained_evidence_ids = BTreeSet::new();
     for candidate in candidates {
         let rule_id: Uuid = candidate.try_get("rule_id")?;
@@ -1261,25 +1324,23 @@ pub(crate) async fn drain_policy_rule_pending_evidence_in_tx(
         let evidence_id: Uuid = candidate.try_get("evidence_id")?;
         let evidence_seq: i64 = candidate.try_get("evidence_seq")?;
         let subject_suspended: bool = candidate.try_get("subject_suspended")?;
-        let rule = load_evaluator_rule_by_id_in_tx(tx, rule_id, rule_version).await?;
-        let evidence = load_stored_evidence_in_tx(tx, evidence_id).await?;
-        if receipt_exists_in_tx(tx, &rule, evidence_seq).await? {
+        let rule = rules
+            .get(&(rule_id, rule_version))
+            .context("alert policy generation missing while draining evidence")?;
+        let evidence = evidences
+            .get(&evidence_id)
+            .context("alert policy evidence missing while draining definition fence")?;
+        if receipt_exists_in_tx(tx, rule, evidence_seq).await? {
             continue;
         }
         if subject_suspended {
-            record_receipt_in_tx(
-                tx,
-                &rule,
-                &evidence,
-                "out_of_scope",
-                Some("client_suspended"),
-            )
-            .await?;
+            record_receipt_in_tx(tx, rule, evidence, "out_of_scope", Some("client_suspended"))
+                .await?;
             drained_evidence_ids.insert(evidence_id);
             continue;
         }
         if let PolicyRuleEvaluationDisposition::Retry(error) =
-            evaluate_rule_to_receipt_in_tx(tx, &rule, &evidence, Some("definition_fence_drain"))
+            evaluate_rule_to_receipt_in_tx(tx, rule, evidence, Some("definition_fence_drain"))
                 .await?
         {
             return Err(error);
@@ -1662,105 +1723,111 @@ pub(crate) async fn evaluate_policy_rule_baselines_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     rule_ids: &[Uuid],
 ) -> Result<usize> {
-    let definitions = sqlx::query(
+    let candidates = sqlx::query(
         r#"
-        SELECT rule.id, rule.rule_version, rule.evidence_source,
-               rule.armed_after_evidence_seq
+        SELECT rule.id AS rule_id, rule.rule_version,
+               current_fact.evidence_id
         FROM policy_rules rule
         JOIN policy_groups group_row ON group_row.id=rule.group_id
+        JOIN alert_policy_effective_current_evidence current_fact
+          ON current_fact.source_kind=rule.evidence_source
+         AND current_fact.evidence_seq <= rule.armed_after_evidence_seq
         WHERE rule.id=ANY($1::uuid[]) AND rule.enabled AND group_row.enabled
           AND rule.rule_kind IN ('metric','state')
-        ORDER BY rule.id
+        ORDER BY rule.id, current_fact.natural_key,
+                 current_fact.subject_client_id
         "#,
     )
     .bind(rule_ids)
     .fetch_all(&mut **tx)
     .await?;
+    let rule_generations = candidates
+        .iter()
+        .map(|candidate| {
+            Ok((
+                candidate.try_get::<Uuid, _>("rule_id")?,
+                candidate.try_get::<i32, _>("rule_version")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let evidence_ids = candidates
+        .iter()
+        .map(|candidate| candidate.try_get::<Uuid, _>("evidence_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rules = load_evaluator_rules_by_generation_in_tx(tx, &rule_generations).await?;
+    let evidences = load_stored_evidences_in_tx(tx, &evidence_ids).await?;
     let mut evaluated = 0_usize;
-    for definition in definitions {
-        let rule_id: Uuid = definition.try_get("id")?;
-        let rule_version: i32 = definition.try_get("rule_version")?;
-        let source: String = definition.try_get("evidence_source")?;
-        let boundary: i64 = definition.try_get("armed_after_evidence_seq")?;
-        let evidence_ids = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT current_fact.evidence_id
-            FROM alert_policy_effective_current_evidence current_fact
-            WHERE current_fact.source_kind=$1
-              AND current_fact.evidence_seq <= $2
-            ORDER BY current_fact.natural_key,current_fact.subject_client_id
-            "#,
-        )
-        .bind(&source)
-        .bind(boundary)
-        .fetch_all(&mut **tx)
-        .await?;
-        for evidence_id in evidence_ids {
-            let rule = load_evaluator_rule_by_id_in_tx(tx, rule_id, rule_version).await?;
-            let evidence = load_stored_evidence_in_tx(tx, evidence_id).await?;
-            if receipt_exists_in_tx(tx, &rule, evidence.evidence_seq).await? {
-                continue;
+    for candidate in candidates {
+        let rule_id: Uuid = candidate.try_get("rule_id")?;
+        let rule_version: i32 = candidate.try_get("rule_version")?;
+        let evidence_id: Uuid = candidate.try_get("evidence_id")?;
+        let rule = rules
+            .get(&(rule_id, rule_version))
+            .context("alert policy baseline generation missing")?;
+        let evidence = evidences
+            .get(&evidence_id)
+            .context("alert policy baseline evidence missing")?;
+        if receipt_exists_in_tx(tx, rule, evidence.evidence_seq).await? {
+            continue;
+        }
+        if !evidence_subject_scope_revision_is_current_in_tx(tx, evidence).await? {
+            // The policy mutation owns this generation. A stale baseline
+            // is terminal for that arm; the scope-revision owner appends
+            // the current fact above the new boundary.
+            record_receipt_in_tx(
+                tx,
+                rule,
+                evidence,
+                "unknown",
+                Some("armed_baseline_scope_revision_stale"),
+            )
+            .await?;
+            evaluated += 1;
+            continue;
+        }
+        sqlx::query("SAVEPOINT alert_policy_baseline_evaluation")
+            .execute(&mut **tx)
+            .await?;
+        match evaluate_rule_in_tx(tx, rule, evidence, false).await {
+            Ok(result) => {
+                sqlx::query("RELEASE SAVEPOINT alert_policy_baseline_evaluation")
+                    .execute(&mut **tx)
+                    .await?;
+                record_receipt_in_tx(tx, rule, evidence, result, Some("armed_baseline")).await?;
             }
-            if !evidence_subject_scope_revision_is_current_in_tx(tx, &evidence).await? {
-                // The policy mutation owns this generation. A stale baseline
-                // is terminal for that arm; the scope-revision owner appends
-                // the current fact above the new boundary.
+            Err(error) => {
+                sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_baseline_evaluation")
+                    .execute(&mut **tx)
+                    .await?;
+                sqlx::query("RELEASE SAVEPOINT alert_policy_baseline_evaluation")
+                    .execute(&mut **tx)
+                    .await?;
+                let detail = if is_lineage_overflow_error(&error) {
+                    Some("policy_schedule_lineage_overflow")
+                } else {
+                    error
+                        .downcast_ref::<DeterministicPolicyEvaluationError>()
+                        .map(|error| error.0.as_str())
+                };
+                let Some(detail) = detail else {
+                    return Err(error);
+                };
                 record_receipt_in_tx(
                     tx,
-                    &rule,
-                    &evidence,
-                    "unknown",
-                    Some("armed_baseline_scope_revision_stale"),
+                    rule,
+                    evidence,
+                    if is_lineage_overflow_error(&error) {
+                        "lineage_overflow"
+                    } else {
+                        "error"
+                    },
+                    Some(detail),
                 )
                 .await?;
-                evaluated += 1;
-                continue;
+                audit_policy_evaluation_skip_in_tx(tx, rule, evidence, detail).await?;
             }
-            sqlx::query("SAVEPOINT alert_policy_baseline_evaluation")
-                .execute(&mut **tx)
-                .await?;
-            match evaluate_rule_in_tx(tx, &rule, &evidence, false).await {
-                Ok(result) => {
-                    sqlx::query("RELEASE SAVEPOINT alert_policy_baseline_evaluation")
-                        .execute(&mut **tx)
-                        .await?;
-                    record_receipt_in_tx(tx, &rule, &evidence, result, Some("armed_baseline"))
-                        .await?;
-                }
-                Err(error) => {
-                    sqlx::query("ROLLBACK TO SAVEPOINT alert_policy_baseline_evaluation")
-                        .execute(&mut **tx)
-                        .await?;
-                    sqlx::query("RELEASE SAVEPOINT alert_policy_baseline_evaluation")
-                        .execute(&mut **tx)
-                        .await?;
-                    let detail = if is_lineage_overflow_error(&error) {
-                        Some("policy_schedule_lineage_overflow")
-                    } else {
-                        error
-                            .downcast_ref::<DeterministicPolicyEvaluationError>()
-                            .map(|error| error.0.as_str())
-                    };
-                    let Some(detail) = detail else {
-                        return Err(error);
-                    };
-                    record_receipt_in_tx(
-                        tx,
-                        &rule,
-                        &evidence,
-                        if is_lineage_overflow_error(&error) {
-                            "lineage_overflow"
-                        } else {
-                            "error"
-                        },
-                        Some(detail),
-                    )
-                    .await?;
-                    audit_policy_evaluation_skip_in_tx(tx, &rule, &evidence, detail).await?;
-                }
-            }
-            evaluated += 1;
         }
+        evaluated += 1;
     }
     Ok(evaluated)
 }
@@ -1835,7 +1902,9 @@ pub(crate) async fn resolve_policy_rules_for_definition_change_in_tx(
     let rows = sqlx::query(
         r#"
         SELECT episode.id, episode.policy_rule_id, episode.policy_rule_version,
-               COALESCE(episode.last_evidence_id, episode.trigger_evidence_id) AS evidence_id
+               COALESCE(episode.last_evidence_id, episode.trigger_evidence_id) AS evidence_id,
+               episode.trigger_generation, episode.lifecycle_state,
+               episode.schedule_lineage, episode.triggered_at
         FROM alert_episodes episode
         WHERE episode.policy_rule_id=ANY($1::uuid[])
           AND episode.resolved_at IS NULL
@@ -1846,16 +1915,40 @@ pub(crate) async fn resolve_policy_rules_for_definition_change_in_tx(
     .bind(rule_ids)
     .fetch_all(&mut **tx)
     .await?;
+    let generations = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<Uuid, _>("policy_rule_id")?,
+                row.try_get::<i32, _>("policy_rule_version")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let evidence_ids = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("evidence_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rules = load_evaluator_rules_by_generation_in_tx(tx, &generations).await?;
+    let evidences = load_stored_evidences_in_tx(tx, &evidence_ids).await?;
     for row in rows {
         let episode_id: Uuid = row.try_get("id")?;
         let rule_id: Uuid = row.try_get("policy_rule_id")?;
         let rule_version: i32 = row.try_get("policy_rule_version")?;
         let evidence_id: Uuid = row.try_get("evidence_id")?;
-        let rule = load_evaluator_rule_by_id_in_tx(tx, rule_id, rule_version).await?;
-        let evidence = load_stored_evidence_in_tx(tx, evidence_id).await?;
-        let episode = load_active_episode_in_tx(tx, Some(episode_id))
-            .await?
-            .context("active policy episode missing")?;
+        let rule = rules
+            .get(&(rule_id, rule_version))
+            .context("active policy episode generation missing")?;
+        let evidence = evidences
+            .get(&evidence_id)
+            .context("active policy episode evidence missing")?;
+        let episode = ActiveEpisode {
+            id: episode_id,
+            last_evidence_id: evidence_id,
+            generation: row.try_get("trigger_generation")?,
+            lifecycle_state: row.try_get("lifecycle_state")?,
+            schedule_lineage: row.try_get("schedule_lineage")?,
+            triggered_at: row.try_get("triggered_at")?,
+        };
         let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut **tx)
             .await?;
@@ -1885,24 +1978,25 @@ pub(crate) async fn resolve_policy_rules_for_definition_change_in_tx(
         .bind(now)
         .execute(&mut **tx)
         .await?;
-        emit_lifecycle_edge_in_tx(tx, &rule, &evidence, &episode, "alert.resolved", now).await?;
+        emit_lifecycle_edge_in_tx(tx, rule, evidence, &episode, "alert.resolved", now).await?;
     }
     Ok(())
 }
 
-/// Resolves one occurrence after the caller has acquired the subject
-/// suppression fence, immutable policy generation, evaluation-state row, and
-/// episode row in that order. Keeping acquisition in the batch owner avoids
-/// lifecycle-owner lock inversion while this helper owns only the transition.
-pub(crate) async fn resolve_policy_occurrence_episode_prelocked_in_tx(
+/// Resolves an ordered reviewed occurrence set after the caller has acquired
+/// the subject suppression fences, immutable policy generations,
+/// evaluation-state rows, and episode rows in that order. Immutable rule and
+/// evidence snapshots are loaded once; every episode still performs the exact
+/// same ordered state transition, confirmation cleanup and lifecycle edge.
+pub(crate) async fn resolve_policy_occurrence_episodes_prelocked_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    public_id: &str,
+    public_ids: &[String],
     resolution_note: &str,
     actor_id: Uuid,
-) -> Result<bool> {
-    let row = sqlx::query(
+) -> Result<BTreeSet<String>> {
+    let rows = sqlx::query(
         r#"
-        SELECT episode.id, episode.record_kind, episode.resolved_at,
+        SELECT episode.public_id, episode.id, episode.record_kind, episode.resolved_at,
                episode.resolution_reason, episode.resolution_note,
                episode.resolution_actor_id, episode.last_confirmed_at,
                episode.policy_rule_id, episode.policy_rule_version,
@@ -1911,111 +2005,157 @@ pub(crate) async fn resolve_policy_occurrence_episode_prelocked_in_tx(
                episode.lifecycle_state, episode.schedule_lineage,
                episode.triggered_at
         FROM alert_episodes episode
-        WHERE episode.public_id=$1
+        WHERE episode.public_id=ANY($1::text[])
+        ORDER BY episode.public_id COLLATE "C"
         FOR UPDATE OF episode
         "#,
     )
-    .bind(public_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .context("fleet_alert_not_found")?;
-    anyhow::ensure!(
-        row.try_get::<String, _>("record_kind")? == "event",
-        "fleet_alert_condition_not_operator_resolvable"
-    );
-    if row
-        .try_get::<Option<DateTime<Utc>>, _>("resolved_at")?
-        .is_some()
-    {
+    .bind(public_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    anyhow::ensure!(rows.len() == public_ids.len(), "fleet_alert_not_found");
+
+    let mut candidates = Vec::with_capacity(rows.len());
+    for (row, expected_public_id) in rows.into_iter().zip(public_ids) {
+        let public_id: String = row.try_get("public_id")?;
+        anyhow::ensure!(&public_id == expected_public_id, "fleet_alert_not_found");
         anyhow::ensure!(
-            row.try_get::<Option<String>, _>("resolution_reason")?
-                .as_deref()
-                == Some("operator_resolved")
-                && row
-                    .try_get::<Option<String>, _>("resolution_note")?
-                    .is_some_and(|note| note.trim() == resolution_note.trim())
-                && row.try_get::<Option<Uuid>, _>("resolution_actor_id")? == Some(actor_id),
-            "fleet_alert_already_resolved"
+            row.try_get::<String, _>("record_kind")? == "event",
+            "fleet_alert_condition_not_operator_resolvable"
         );
-        return Ok(false);
+        let resolved_at: Option<DateTime<Utc>> = row.try_get("resolved_at")?;
+        if resolved_at.is_some() {
+            anyhow::ensure!(
+                row.try_get::<Option<String>, _>("resolution_reason")?
+                    .as_deref()
+                    == Some("operator_resolved")
+                    && row
+                        .try_get::<Option<String>, _>("resolution_note")?
+                        .is_some_and(|note| note.trim() == resolution_note.trim())
+                    && row.try_get::<Option<Uuid>, _>("resolution_actor_id")? == Some(actor_id),
+                "fleet_alert_already_resolved"
+            );
+            continue;
+        }
+        candidates.push(OccurrenceResolutionCandidate {
+            public_id,
+            id: row.try_get("id")?,
+            last_confirmed_at: row.try_get("last_confirmed_at")?,
+            rule_id: row.try_get("policy_rule_id")?,
+            rule_version: row.try_get("policy_rule_version")?,
+            evidence_id: row.try_get("evidence_id")?,
+            trigger_generation: row.try_get("trigger_generation")?,
+            lifecycle_state: row.try_get("lifecycle_state")?,
+            schedule_lineage: row.try_get("schedule_lineage")?,
+            triggered_at: row.try_get("triggered_at")?,
+        });
     }
-    let rule_id: Uuid = row.try_get("policy_rule_id")?;
-    let rule_version: i32 = row.try_get("policy_rule_version")?;
-    let evidence_id: Uuid = row.try_get("evidence_id")?;
-    let rule = load_evaluator_rule_by_id_in_tx(tx, rule_id, rule_version).await?;
-    anyhow::ensure!(
-        rule.kind == AlertPolicyRuleKind::Occurrence,
-        "fleet_alert_condition_not_operator_resolvable"
-    );
-    let mut evidence = load_stored_evidence_in_tx(tx, evidence_id).await?;
-    let episode = ActiveEpisode {
-        id: row.try_get("id")?,
-        last_evidence_id: evidence_id,
-        generation: row.try_get("trigger_generation")?,
-        lifecycle_state: row.try_get("lifecycle_state")?,
-        schedule_lineage: row.try_get("schedule_lineage")?,
-        triggered_at: row.try_get("triggered_at")?,
-    };
-    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(&mut **tx)
+    let generations = candidates
+        .iter()
+        .map(|candidate| (candidate.rule_id, candidate.rule_version))
+        .collect::<Vec<_>>();
+    let evidence_ids = candidates
+        .iter()
+        .map(|candidate| candidate.evidence_id)
+        .collect::<Vec<_>>();
+    let rules = load_evaluator_rules_by_generation_in_tx(tx, &generations).await?;
+    let evidences = load_stored_evidences_in_tx(tx, &evidence_ids).await?;
+    let mut transitioned = BTreeSet::new();
+    for candidate in &candidates {
+        let rule = rules
+            .get(&(candidate.rule_id, candidate.rule_version))
+            .context("fleet alert policy generation missing")?;
+        anyhow::ensure!(
+            rule.kind == AlertPolicyRuleKind::Occurrence,
+            "fleet_alert_condition_not_operator_resolvable"
+        );
+        let mut evidence = evidences
+            .get(&candidate.evidence_id)
+            .context("fleet alert evidence missing")?
+            .clone();
+        let episode = ActiveEpisode {
+            id: candidate.id,
+            last_evidence_id: candidate.evidence_id,
+            generation: candidate.trigger_generation,
+            lifecycle_state: candidate.lifecycle_state.clone(),
+            schedule_lineage: candidate.schedule_lineage.clone(),
+            triggered_at: candidate.triggered_at,
+        };
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut **tx)
+            .await?;
+        let resolved_at = now.max(candidate.last_confirmed_at);
+        sqlx::query(
+            r#"
+            UPDATE alert_episodes
+            SET lifecycle_state='resolved', resolved_at=$2,
+                resolution_reason='operator_resolved', resolution_note=$3,
+                resolution_actor_id=$4, updated_at=$2
+            WHERE id=$1 AND resolved_at IS NULL
+            "#,
+        )
+        .bind(episode.id)
+        .bind(resolved_at)
+        .bind(resolution_note)
+        .bind(actor_id)
+        .execute(&mut **tx)
         .await?;
-    let resolved_at = now.max(row.try_get::<DateTime<Utc>, _>("last_confirmed_at")?);
-    sqlx::query(
-        r#"
-        UPDATE alert_episodes
-        SET lifecycle_state='resolved', resolved_at=$2,
-            resolution_reason='operator_resolved', resolution_note=$3,
-            resolution_actor_id=$4, updated_at=$2
-        WHERE id=$1 AND resolved_at IS NULL
-        "#,
-    )
-    .bind(episode.id)
-    .bind(resolved_at)
-    .bind(resolution_note)
-    .bind(actor_id)
-    .execute(&mut **tx)
-    .await?;
-    let bucket = effective_confirmation_bucket(&rule, &evidence)?;
-    evidence.confirmation_bucket_key.clone_from(&bucket);
-    let updated = sqlx::query(
-        r#"
-        UPDATE alert_policy_evaluation_states
-        SET active_episode_id=NULL,
-            occurrence_cohort_id=$4, truth_state='not_matched',
-            next_transition_at=NULL,
-            trigger_confirmed_duration_secs=0, trigger_segment_started_at=NULL,
-            resolve_confirmed_duration_secs=0, resolve_segment_started_at=NULL,
-            last_evaluated_at=$5, updated_at=$5
-        WHERE policy_rule_id=$1 AND rule_version=$2
-          AND confirmation_bucket_key=$3 AND active_episode_id=$6
-        "#,
-    )
-    .bind(rule.id)
-    .bind(rule.rule_version)
-    .bind(&bucket)
-    .bind(Uuid::new_v4())
-    .bind(resolved_at)
-    .bind(episode.id)
-    .execute(&mut **tx)
-    .await?;
-    anyhow::ensure!(
-        updated.rows_affected() == 1,
-        "fleet_alert_resolution_snapshot_stale"
-    );
-    clear_confirmations_in_tx(tx, &rule, &evidence, GatePhase::Trigger).await?;
-    clear_confirmations_in_tx(tx, &rule, &evidence, GatePhase::Resolve).await?;
-    let mut resolved = episode;
-    resolved.lifecycle_state = "resolved".to_string();
-    emit_lifecycle_edge_in_tx(
-        tx,
-        &rule,
-        &evidence,
-        &resolved,
-        "alert.resolved",
-        resolved_at,
-    )
-    .await?;
-    Ok(true)
+        let bucket = effective_confirmation_bucket(rule, &evidence)?;
+        evidence.confirmation_bucket_key.clone_from(&bucket);
+        let updated = sqlx::query(
+            r#"
+            UPDATE alert_policy_evaluation_states
+            SET active_episode_id=NULL,
+                occurrence_cohort_id=$4, truth_state='not_matched',
+                next_transition_at=NULL,
+                trigger_confirmed_duration_secs=0, trigger_segment_started_at=NULL,
+                resolve_confirmed_duration_secs=0, resolve_segment_started_at=NULL,
+                last_evaluated_at=$5, updated_at=$5
+            WHERE policy_rule_id=$1 AND rule_version=$2
+              AND confirmation_bucket_key=$3 AND active_episode_id=$6
+            "#,
+        )
+        .bind(rule.id)
+        .bind(rule.rule_version)
+        .bind(&bucket)
+        .bind(Uuid::new_v4())
+        .bind(resolved_at)
+        .bind(episode.id)
+        .execute(&mut **tx)
+        .await?;
+        anyhow::ensure!(
+            updated.rows_affected() == 1,
+            "fleet_alert_resolution_snapshot_stale"
+        );
+        clear_confirmations_in_tx(tx, rule, &evidence, GatePhase::Trigger).await?;
+        clear_confirmations_in_tx(tx, rule, &evidence, GatePhase::Resolve).await?;
+        let mut resolved = episode;
+        resolved.lifecycle_state = "resolved".to_string();
+        emit_lifecycle_edge_in_tx(
+            tx,
+            rule,
+            &evidence,
+            &resolved,
+            "alert.resolved",
+            resolved_at,
+        )
+        .await?;
+        transitioned.insert(candidate.public_id.clone());
+    }
+    Ok(transitioned)
+}
+
+struct OccurrenceResolutionCandidate {
+    public_id: String,
+    id: Uuid,
+    last_confirmed_at: DateTime<Utc>,
+    rule_id: Uuid,
+    rule_version: i32,
+    evidence_id: Uuid,
+    trigger_generation: i64,
+    lifecycle_state: String,
+    schedule_lineage: Vec<Uuid>,
+    triggered_at: DateTime<Utc>,
 }
 
 async fn evaluate_rule_in_tx(
@@ -2879,6 +3019,58 @@ async fn load_evaluator_rule_by_id_in_tx(
     evaluator_rule_from_row(row)
 }
 
+async fn load_evaluator_rules_by_generation_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    generations: &[(Uuid, i32)],
+) -> Result<HashMap<(Uuid, i32), EvaluatorRule>> {
+    let generations = generations.iter().copied().collect::<BTreeSet<_>>();
+    if generations.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rule_ids = generations
+        .iter()
+        .map(|(rule_id, _)| *rule_id)
+        .collect::<Vec<_>>();
+    let rule_versions = generations
+        .iter()
+        .map(|(_, rule_version)| *rule_version)
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT rule.id, rule.group_id, group_row.name AS group_name,
+               group_row.selector_expression AS group_selector,
+               rule.rule_version, rule.name, rule.rule_kind, rule.evidence_source,
+               rule.correlation_mode, rule.trigger_condition_expression,
+               rule.trigger_meta_condition, rule.resolve_condition_expression,
+               rule.resolve_meta_condition, rule.severity, rule.category,
+               rule.title_template, rule.detail_template, rule.system_seed_key,
+               rule.armed_after_evidence_seq, rule.armed_at
+        FROM unnest($1::uuid[], $2::integer[])
+             AS requested(id, rule_version)
+        JOIN policy_rules rule
+          ON rule.id=requested.id AND rule.rule_version=requested.rule_version
+        JOIN policy_groups group_row ON group_row.id=rule.group_id
+        ORDER BY rule.id, rule.rule_version
+        "#,
+    )
+    .bind(rule_ids)
+    .bind(rule_versions)
+    .fetch_all(&mut **tx)
+    .await?;
+    let rules = rows
+        .into_iter()
+        .map(evaluator_rule_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        rules.len() == generations.len(),
+        "alert policy generation missing"
+    );
+    Ok(rules
+        .into_iter()
+        .map(|rule| ((rule.id, rule.rule_version), rule))
+        .collect())
+}
+
 async fn lock_evaluator_rule_generation_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     rule_id: Uuid,
@@ -2944,6 +3136,47 @@ async fn load_stored_evidence_in_tx(
     .bind(evidence_id)
     .fetch_one(&mut **tx)
     .await?;
+    stored_evidence_from_row(row)
+}
+
+async fn load_stored_evidences_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    evidence_ids: &[Uuid],
+) -> Result<HashMap<Uuid, StoredEvidence>> {
+    let evidence_ids = evidence_ids.iter().copied().collect::<BTreeSet<_>>();
+    if evidence_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT id, evidence_seq, source_kind, source_event_id, fact_kind,
+               natural_key, confirmation_bucket_key, subject_client_id,
+               target_kind, target_id, source_status, completeness,
+               subject_snapshot, payload, observed_at, state_started_at, causation_id,
+               schedule_lineage, created_at
+        FROM alert_policy_evidence
+        WHERE id=ANY($1::uuid[])
+        ORDER BY id
+        "#,
+    )
+    .bind(evidence_ids.iter().copied().collect::<Vec<_>>())
+    .fetch_all(&mut **tx)
+    .await?;
+    let evidences = rows
+        .into_iter()
+        .map(stored_evidence_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        evidences.len() == evidence_ids.len(),
+        "alert policy evidence missing"
+    );
+    Ok(evidences
+        .into_iter()
+        .map(|evidence| (evidence.id, evidence))
+        .collect())
+}
+
+fn stored_evidence_from_row(row: PgRow) -> Result<StoredEvidence> {
     Ok(StoredEvidence {
         id: row.try_get("id")?,
         evidence_seq: row.try_get("evidence_seq")?,

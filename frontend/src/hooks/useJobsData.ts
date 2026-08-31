@@ -29,6 +29,7 @@ import type {
   CreateJobResponse,
   DecideJobApprovalRequest,
   JobHistoryRecord,
+  JobStatus,
   JobRolloutRecord,
   JobApprovalDecisionResponse,
   JobApprovalRecord,
@@ -131,11 +132,17 @@ export function useJobsData(
   const jobsRef = useRef<JobHistoryRecord[]>([]);
   const jobRolloutsRef = useRef<JobRolloutRecord[]>([]);
   const jobsLoadConsumer = useRef(new LatestReadConsumer());
+  const jobHistoryLoadConsumer = useRef(
+    new LatestReadConsumer<JobHistoryRecord[]>(),
+  );
   const jobsLoadGeneration = useRef(0);
   const jobHistoryLoadGeneration = useRef(0);
   const jobApprovalsLoadGeneration = useRef(0);
   const processSupervisorInventoryLoadGeneration = useRef(0);
   const jobRowRefreshGeneration = useRef(new Map<string, number>());
+  const jobRowRefreshInFlight = useRef(
+    new Map<string, Promise<JobHistoryRecord | null>>(),
+  );
   const jobRolloutsLoadGeneration = useRef(0);
   const agentUpdateReleasesLoadGeneration = useRef(0);
   const fileTransfersLoadGeneration = useRef(0);
@@ -183,6 +190,71 @@ export function useJobsData(
         fileTransfersEvidenceAvailable.current,
     );
   }, []);
+
+  const loadJobHistory = useCallback((): Promise<JobHistoryRecord[]> => {
+    if (currentApiToken.current !== apiToken) {
+      return Promise.resolve(jobsRef.current);
+    }
+    return jobHistoryLoadConsumer.current.enqueue(async () => {
+      const generation = jobHistoryLoadGeneration.current + 1;
+      jobHistoryLoadGeneration.current = generation;
+      const overlayRevision = jobHistoryOverlay.current.revision;
+      try {
+        const records = await apiGet<JobHistoryRecord[]>(
+          buildListPath("/api/v1/jobs", {
+            limit: HISTORY_DETAIL_LIMIT,
+            sort: "created_at",
+            dir: "desc",
+          }),
+          apiToken,
+        );
+        if (
+          currentApiToken.current !== apiToken ||
+          jobHistoryLoadGeneration.current !== generation
+        ) {
+          return jobsRef.current;
+        }
+        const merged = mergeProjectionRead(
+          records,
+          jobHistoryOverlay.current,
+          overlayRevision,
+          (record) => record.id,
+          compareCreatedRecords,
+          HISTORY_DETAIL_LIMIT,
+        );
+        jobsRef.current = merged.records;
+        setJobs(merged.records);
+        setJobsTruncated(merged.truncated);
+        jobHistoryEvidenceAvailable.current = true;
+        setProjectionError(jobSourceErrors.current, "jobHistory", null);
+        publishJobsEvidence();
+        publishJobsError();
+        return merged.records;
+      } catch (error) {
+        if (
+          currentApiToken.current === apiToken &&
+          jobHistoryLoadGeneration.current === generation
+        ) {
+          jobHistoryEvidenceAvailable.current = false;
+          setProjectionError(
+            jobSourceErrors.current,
+            "jobHistory",
+            isApiUnauthorized(error)
+              ? "Operator login required"
+              : error instanceof Error
+                ? `Job history: ${error.message}`
+                : "Job history unavailable",
+          );
+          publishJobsEvidence();
+          publishJobsError();
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+          }
+        }
+        throw error;
+      }
+    });
+  }, [apiToken, onUnauthorized, publishJobsError, publishJobsEvidence]);
 
   const rethrowDirectRequestError = useCallback(
     (error: unknown): never => {
@@ -294,8 +366,6 @@ export function useJobsData(
         if (currentApiToken.current !== apiToken) {
           return;
         }
-        const jobHistoryGeneration = ++jobHistoryLoadGeneration.current;
-        const jobHistoryOverlayRevision = jobHistoryOverlay.current.revision;
         const approvalsGeneration = ++jobApprovalsLoadGeneration.current;
         const approvalsOverlayRevision = jobApprovalsOverlay.current.revision;
         const rolloutsGeneration = ++jobRolloutsLoadGeneration.current;
@@ -334,14 +404,7 @@ export function useJobsData(
           serverJobsResult,
           commandTemplatesResult,
         ] = await Promise.allSettled([
-          apiGet<JobHistoryRecord[]>(
-            buildListPath("/api/v1/jobs", {
-              limit: HISTORY_DETAIL_LIMIT,
-              sort: "created_at",
-              dir: "desc",
-            }),
-            apiToken,
-          ),
+          loadJobHistory(),
           apiGet<JobApprovalRecord[]>(
             buildListPath("/api/v1/job-approvals", {
               limit: FLEET_DETAIL_LIMIT,
@@ -433,30 +496,6 @@ export function useJobsData(
           publishJobsError();
           setServerJobsError("Operator login required");
           return;
-        }
-        if (jobHistoryLoadGeneration.current === jobHistoryGeneration) {
-          if (jobsResult.status === "fulfilled") {
-            const merged = mergeProjectionRead(
-              jobsResult.value,
-              jobHistoryOverlay.current,
-              jobHistoryOverlayRevision,
-              (record) => record.id,
-              compareCreatedRecords,
-              HISTORY_DETAIL_LIMIT,
-            );
-            jobsRef.current = merged.records;
-            setJobs(merged.records);
-            setJobsTruncated(merged.truncated);
-            jobHistoryEvidenceAvailable.current = true;
-          } else {
-            jobHistoryEvidenceAvailable.current = false;
-          }
-          setProjectionError(
-            jobSourceErrors.current,
-            "jobHistory",
-            settledSourceFailure("Job history", jobsResult),
-          );
-          publishJobsEvidence();
         }
         if (jobApprovalsLoadGeneration.current === approvalsGeneration) {
           if (jobApprovalsResult.status === "fulfilled") {
@@ -643,7 +682,13 @@ export function useJobsData(
         setJobsLoading(false);
       }
     }
-  }, [apiToken, onUnauthorized, publishJobsError, publishJobsEvidence]);
+  }, [
+    apiToken,
+    onUnauthorized,
+    publishJobsError,
+    publishJobsEvidence,
+    loadJobHistory,
+  ]);
 
   const loadAgentUpdateReleases = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
@@ -1097,7 +1142,7 @@ export function useJobsData(
   );
 
   const refreshJobRecord = useCallback(
-    async (
+    (
       jobId: string,
       includeIfMissing: boolean,
     ): Promise<JobHistoryRecord | null> => {
@@ -1105,60 +1150,140 @@ export function useJobsData(
         currentApiToken.current !== apiToken ||
         (!includeIfMissing && !jobsRef.current.some((job) => job.id === jobId))
       ) {
-        return null;
+        return Promise.resolve(null);
+      }
+      const inFlight = jobRowRefreshInFlight.current.get(jobId);
+      if (inFlight) {
+        return inFlight;
       }
       const rowGeneration =
         (jobRowRefreshGeneration.current.get(jobId) ?? 0) + 1;
       jobRowRefreshGeneration.current.set(jobId, rowGeneration);
-      try {
-        const refreshed = await apiGet<JobHistoryRecord>(
-          `/api/v1/jobs/${encodeURIComponent(jobId)}`,
-          apiToken,
-        );
-        if (
-          currentApiToken.current !== apiToken ||
-          jobRowRefreshGeneration.current.get(jobId) !== rowGeneration
-        ) {
+      const request = (async () => {
+        try {
+          const refreshed = await apiGet<JobHistoryRecord>(
+            `/api/v1/jobs/${encodeURIComponent(jobId)}`,
+            apiToken,
+          );
+          if (
+            currentApiToken.current !== apiToken ||
+            jobRowRefreshGeneration.current.get(jobId) !== rowGeneration
+          ) {
+            return null;
+          }
+          if (
+            !includeIfMissing &&
+            !jobsRef.current.some((job) => job.id === refreshed.id)
+          ) {
+            return refreshed;
+          }
+          recordProjectionUpsert(
+            jobHistoryOverlay.current,
+            refreshed.id,
+            refreshed,
+          );
+          const merged = upsertBoundedProjection(
+            jobsRef.current,
+            refreshed,
+            (job) => job.id,
+            compareCreatedRecords,
+            HISTORY_DETAIL_LIMIT,
+          );
+          jobsRef.current = merged.records;
+          setJobs(merged.records);
+          if (merged.insertedBeyondBound) {
+            setJobsTruncated(true);
+          }
+          return refreshed;
+        } catch (error) {
+          if (currentApiToken.current === apiToken && isApiUnauthorized(error)) {
+            onUnauthorized();
+          }
           return null;
         }
-        if (
-          !includeIfMissing &&
-          !jobsRef.current.some((job) => job.id === refreshed.id)
-        ) {
-          return refreshed;
+      })();
+      jobRowRefreshInFlight.current.set(jobId, request);
+      void request.finally(() => {
+        if (jobRowRefreshInFlight.current.get(jobId) === request) {
+          jobRowRefreshInFlight.current.delete(jobId);
         }
-        recordProjectionUpsert(
-          jobHistoryOverlay.current,
-          refreshed.id,
-          refreshed,
-        );
-        const merged = upsertBoundedProjection(
-          jobsRef.current,
-          refreshed,
-          (job) => job.id,
-          compareCreatedRecords,
-          HISTORY_DETAIL_LIMIT,
-        );
-        jobsRef.current = merged.records;
-        setJobs(merged.records);
-        if (merged.insertedBeyondBound) {
-          setJobsTruncated(true);
-        }
-        return refreshed;
-      } catch (error) {
-        if (currentApiToken.current === apiToken && isApiUnauthorized(error)) {
-          onUnauthorized();
-        }
-        return null;
-      }
+      });
+      return request;
     },
     [apiToken, onUnauthorized],
   );
 
-  const refreshLoadedJob = useCallback(
-    (jobId: string): Promise<JobHistoryRecord | null> =>
-      refreshJobRecord(jobId, true),
-    [refreshJobRecord],
+  const reconcileJobStatusEvent = useCallback(
+    (jobId: string, status: JobStatus): JobHistoryRecord | null => {
+      const current = jobsRef.current.find((job) => job.id === jobId);
+      if (!current) {
+        return null;
+      }
+      const reconciled = { ...current, status };
+      // The overlay revision fences an older aggregate/Home snapshot even
+      // when the status value was already visible locally.
+      recordProjectionUpsert(
+        jobHistoryOverlay.current,
+        reconciled.id,
+        reconciled,
+      );
+      const merged = upsertBoundedProjection(
+        jobsRef.current,
+        reconciled,
+        (job) => job.id,
+        compareCreatedRecords,
+        HISTORY_DETAIL_LIMIT,
+      );
+      jobsRef.current = merged.records;
+      setJobs(merged.records);
+      return reconciled;
+    },
+    [],
+  );
+
+  const refreshJobHistoryAfterEvent = useCallback(
+    async (
+      jobId: string,
+      status: JobStatus,
+    ): Promise<JobHistoryRecord | null> => {
+      if (currentApiToken.current !== apiToken) {
+        return null;
+      }
+      try {
+        const records = await loadJobHistory();
+        if (currentApiToken.current !== apiToken) {
+          return null;
+        }
+        const observed = records.find((job) => job.id === jobId);
+        if (!observed) {
+          // A very old, long-running job can finish outside the bounded recent
+          // page. Preserve that rare exact classification without restoring
+          // per-event point reads for the normal burst path.
+          const exact = await refreshJobRecord(jobId, true);
+          if (!exact) {
+            return jobsRef.current.find((job) => job.id === jobId) ?? null;
+          }
+          return (
+            reconcileJobStatusEvent(jobId, status) ?? { ...exact, status }
+          );
+        }
+        // Reapply the typed event after the authoritative list so an older
+        // response cannot regress the terminal status. The server list still
+        // supplies exact completion metadata and any previously unseen row.
+        return reconcileJobStatusEvent(jobId, status);
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          return null;
+        }
+        return jobsRef.current.find((job) => job.id === jobId) ?? null;
+      }
+    },
+    [
+      apiToken,
+      loadJobHistory,
+      reconcileJobStatusEvent,
+      refreshJobRecord,
+    ],
   );
 
   const cancelJob = useCallback(
@@ -1782,6 +1907,7 @@ export function useJobsData(
     jobsLoadGeneration.current += 1;
     jobsLoadConsumer.current.discardPending();
     jobHistoryLoadGeneration.current += 1;
+    jobHistoryLoadConsumer.current.discardPending([]);
     jobApprovalsLoadGeneration.current += 1;
     jobRolloutsLoadGeneration.current += 1;
     agentUpdateReleasesLoadGeneration.current += 1;
@@ -1807,6 +1933,7 @@ export function useJobsData(
     fileTransfersEvidenceAvailable.current = false;
     jobsRef.current = [];
     jobRowRefreshGeneration.current.clear();
+    jobRowRefreshInFlight.current.clear();
     jobRolloutsRef.current = [];
     setJobs([]);
     setJobApprovals([]);
@@ -1866,7 +1993,8 @@ export function useJobsData(
     cancelServerJob,
     cancelJob,
     loadJob,
-    refreshLoadedJob,
+    reconcileJobStatusEvent,
+    refreshJobHistoryAfterEvent,
     loadJobRollout,
     loadJobRollouts,
     createArtifactCleanupJob,

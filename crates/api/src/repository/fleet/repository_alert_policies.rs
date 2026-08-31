@@ -8,7 +8,7 @@ use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::PgRow, types::Json as SqlJson, Row};
+use sqlx::{postgres::PgRow, types::Json as SqlJson, Postgres, QueryBuilder, Row};
 use tokio::sync::Notify;
 use uuid::Uuid;
 use vpsman_common::{
@@ -2854,13 +2854,11 @@ impl Repository {
                     &baseline_rule_ids,
                 )
                 .await?;
-                for evidence_id in drained_evidence_ids {
-                    crate::repository_policy_lifecycle::recompute_policy_evidence_pending_in_tx(
-                        &mut tx,
-                        evidence_id,
-                    )
-                    .await?;
-                }
+                crate::repository_policy_lifecycle::recompute_policy_evidences_pending_in_tx(
+                    &mut tx,
+                    &drained_evidence_ids,
+                )
+                .await?;
                 group = policy_groups_for_identity_in_tx(&mut tx, Some(group.id), &group.name)
                     .await?
                     .into_iter()
@@ -3025,13 +3023,11 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 anyhow::ensure!(deleted.rows_affected() == 1, "fleet_alert_policy_not_found");
-                for evidence_id in drained_evidence_ids {
-                    crate::repository_policy_lifecycle::recompute_policy_evidence_pending_in_tx(
-                        &mut tx,
-                        evidence_id,
-                    )
-                    .await?;
-                }
+                crate::repository_policy_lifecycle::recompute_policy_evidences_pending_in_tx(
+                    &mut tx,
+                    &drained_evidence_ids,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -3394,13 +3390,11 @@ impl Repository {
                     );
                 }
 
-                for evidence_id in drained_evidence_ids {
-                    crate::repository_policy_lifecycle::recompute_policy_evidence_pending_in_tx(
-                        &mut tx,
-                        evidence_id,
-                    )
-                    .await?;
-                }
+                crate::repository_policy_lifecycle::recompute_policy_evidences_pending_in_tx(
+                    &mut tx,
+                    &drained_evidence_ids,
+                )
+                .await?;
 
                 let (audit_action, result) = match request.action {
                     FleetAlertPolicyBulkAction::Enable => {
@@ -3411,34 +3405,41 @@ impl Repository {
                     }
                     FleetAlertPolicyBulkAction::Delete => ("fleet.alert_policy_deleted", "deleted"),
                 };
-                let mut outcomes = Vec::with_capacity(request.items.len());
-                for item in &request.items {
-                    let policy = policies
-                        .get(&item.id)
-                        .context("fleet_alert_policy_bulk_snapshot_stale")?;
-                    sqlx::query(
-                        r#"
-                        INSERT INTO audit_logs (
-                            id, actor_id, action, target, command_hash, metadata
-                        )
-                        VALUES ($1, $2, $3, $4, NULL, $5)
-                        "#,
+                let ordered_policies = request
+                    .items
+                    .iter()
+                    .map(|item| {
+                        policies
+                            .get(&item.id)
+                            .context("fleet_alert_policy_bulk_snapshot_stale")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut audit = QueryBuilder::<Postgres>::new(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
                     )
-                    .bind(Uuid::new_v4())
-                    .bind(operator.operator.id)
-                    .bind(audit_action)
-                    .bind(format!("fleet_alert_policy:{}", policy.id))
-                    .bind(policy_group_metadata(policy, operator))
-                    .execute(&mut *tx)
-                    .await?;
-                    outcomes.push(FleetAlertPolicyBulkOutcome {
+                    "#,
+                );
+                audit.push_values(&ordered_policies, |mut row, policy| {
+                    row.push_bind(Uuid::new_v4())
+                        .push_bind(operator.operator.id)
+                        .push_bind(audit_action)
+                        .push_bind(format!("fleet_alert_policy:{}", policy.id))
+                        .push("NULL")
+                        .push_bind(policy_group_metadata(policy, operator));
+                });
+                audit.build().execute(&mut *tx).await?;
+                let outcomes: Vec<FleetAlertPolicyBulkOutcome> = ordered_policies
+                    .into_iter()
+                    .map(|policy| FleetAlertPolicyBulkOutcome {
                         id: policy.id,
                         name: policy.name.clone(),
                         result: result.to_string(),
                         record: (request.action != FleetAlertPolicyBulkAction::Delete)
                             .then(|| policy.clone()),
-                    });
-                }
+                    })
+                    .collect();
 
                 let telemetry_activation_changed = if touches_telemetry_activation {
                     reconcile_telemetry_policy_activation_request_in_tx(&mut tx).await?

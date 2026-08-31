@@ -3732,10 +3732,30 @@ test("job terminal events update loaded history rows without replacing the page"
         };
       }),
     )
-    .toEqual({ itemGetIds: [loadedJobId], listGets: 0 });
+    .toEqual({ itemGetIds: [], listGets: 1 });
 
   const unknownJobId = "20000000-0000-4000-8000-000000000001";
   await page.evaluate((jobId) => {
+    const state = (
+      window as typeof window & {
+        __vpsmanJobHistoryStress?: {
+          jobs: Array<Record<string, unknown>>;
+        };
+      }
+    ).__vpsmanJobHistoryStress;
+    state?.jobs.unshift({
+      actor_id: null,
+      command_type: "runtime_config_sync",
+      completed_at: "2026-06-02T10:01:00Z",
+      created_at: "2026-06-02T10:01:00Z",
+      id: jobId,
+      max_timeout_secs: 60,
+      payload_hash: "f".repeat(64),
+      privileged: false,
+      source_schedule_id: null,
+      status: "rejected",
+      target_count: 1,
+    });
     const socket = (
       window as typeof window & {
         __vpsmanTestWebSockets: Array<EventTarget>;
@@ -3751,32 +3771,35 @@ test("job terminal events update loaded history rows without replacing the page"
       }),
     );
   }, unknownJobId);
-  await page.waitForTimeout(100);
-  expect(
-    await page.evaluate((jobId) => {
-      const state = (
-        window as typeof window & {
-          __vpsmanJobHistoryStress?: {
-            itemGetIds: string[];
-            listGets: number;
-          };
-        }
-      ).__vpsmanJobHistoryStress;
-      return {
-        itemGetIds: state?.itemGetIds ?? [],
-        listGets: state?.listGets ?? -1,
-        unknownRequested: state?.itemGetIds.includes(jobId) ?? false,
-      };
-    }, unknownJobId),
-  ).toEqual({
-    itemGetIds: [loadedJobId],
-    listGets: 0,
-    unknownRequested: false,
-  });
-  await expect(jobsGrid.getByTitle(unknownJobId)).toHaveCount(0);
+  await expect(jobsGrid).toContainText("16 of 16 jobs");
+  await expect
+    .poll(() =>
+      page.evaluate((jobId) => {
+        const state = (
+          window as typeof window & {
+            __vpsmanJobHistoryStress?: {
+              itemGetIds: string[];
+              listGets: number;
+            };
+          }
+        ).__vpsmanJobHistoryStress;
+        return {
+          itemGetIds: state?.itemGetIds ?? [],
+          listGets: state?.listGets ?? -1,
+          unknownRequested: state?.itemGetIds.includes(jobId) ?? false,
+        };
+      }, unknownJobId),
+    )
+    .toEqual({
+      itemGetIds: [],
+      listGets: 2,
+      unknownRequested: false,
+    });
   await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
 
   const historySearch = jobsGrid.getByLabel("Job records search");
+  await historySearch.fill(unknownJobId);
+  await expect(jobsGrid.getByTitle(unknownJobId)).toHaveCount(1);
   await historySearch.fill("history probe 14");
   await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("1 / 1");
   await expect(loadedRow).toBeVisible();
@@ -3816,7 +3839,7 @@ test("job terminal events update loaded history rows without replacing the page"
     }),
   });
   await historyPanel.getByRole("button", { name: "Refresh" }).click();
-  await expect(jobsGrid).toContainText("16 of 16 jobs");
+  await expect(jobsGrid).toContainText("17 of 17 jobs");
   await expect
     .poll(() =>
       page.evaluate(
@@ -3828,7 +3851,7 @@ test("job terminal events update loaded history rows without replacing the page"
           ).__vpsmanJobHistoryStress?.listGets ?? -1,
       ),
     )
-    .toBe(1);
+    .toBe(3);
   await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
   await expect(jobsGrid.getByTitle(manualJobId)).toHaveCount(0);
   await jobsGrid.getByLabel("Job records previous page").click();

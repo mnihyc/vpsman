@@ -48,9 +48,7 @@ use vpsman_common::{
 
 const BULK_RESOLVE_MANY_ITEM_LIMIT: usize = 500;
 const AGENT_SUSPENSION_FENCE_LEASE_SECS: u64 = 60;
-const AGENT_SUSPENSION_DB_BUDGET_SECS: u64 = 30;
 const AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS: u64 = 5;
-const AGENT_DELETE_DB_BUDGET_SECS: u64 = 60;
 
 const MAX_PATCH_GENERATOR_BODY_BYTES: usize = 16 * 1024;
 const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
@@ -220,21 +218,11 @@ async fn mutate_delete_agents(
     let repository_outcomes = if approved_client_ids.is_empty() {
         Vec::new()
     } else {
-        tokio::time::timeout(
-            Duration::from_secs(AGENT_DELETE_DB_BUDGET_SECS),
-            state
-                .repo
-                .delete_agents(&approved_client_ids, request.reason.as_deref(), operator),
-        )
-        .await
-        .map_err(|error| {
-            ApiError::internal(
-                "agent_delete_timeout",
-                "The VPS deletions did not commit within their transaction budget.",
-                error.into(),
-            )
-        })?
-        .map_err(agent_mutation_error)?
+        state
+            .repo
+            .delete_agents(&approved_client_ids, request.reason.as_deref(), operator)
+            .await
+            .map_err(agent_mutation_error)?
     };
 
     let mut deleted_by_client = HashMap::new();
@@ -430,6 +418,9 @@ fn delete_agent_rejection_message(code: &str) -> &'static str {
         }
         "privilege_assertion_required" => "A privilege assertion is required for this VPS.",
         "privilege_verification_failed" => "The privilege assertion for this VPS was rejected.",
+        "agent_delete_target_failed" => {
+            "This VPS deletion transaction failed. Review its current state and retry this VPS; other reviewed targets were processed independently."
+        }
         _ => "The VPS deletion was rejected.",
     }
 }
@@ -442,6 +433,11 @@ fn delete_agent_rejection_error(code: &str) -> ApiError {
         }
         "privilege_assertion_required" => ApiError::forbidden("privilege_assertion_required"),
         "privilege_verification_failed" => ApiError::forbidden("privilege_verification_failed"),
+        "agent_delete_target_failed" => ApiError::internal(
+            "agent_delete_target_failed",
+            "The VPS deletion transaction failed. Review its current state and retry this VPS.",
+            anyhow::anyhow!("exact-client VPS deletion transaction failed"),
+        ),
         _ => ApiError::conflict("agent_delete_rejected"),
     }
 }
@@ -590,30 +586,21 @@ async fn mutate_agent_suspensions(
     let repository_outcomes = if database_client_ids.is_empty() {
         Vec::new()
     } else {
-        match tokio::time::timeout(
-            Duration::from_secs(AGENT_SUSPENSION_DB_BUDGET_SECS),
-            state.repo.mutate_agent_suspensions(
+        match state
+            .repo
+            .mutate_agent_suspensions(
                 request.action,
                 &database_client_ids,
                 request.reason.as_deref(),
                 operator,
                 &protected_job_ids,
-            ),
-        )
-        .await
+            )
+            .await
         {
-            Ok(Ok(outcomes)) => outcomes,
-            Ok(Err(error)) => {
-                compensate_agent_suspension_fences(state, &prepared_tokens).await;
-                return Err(agent_mutation_error(error));
-            }
+            Ok(outcomes) => outcomes,
             Err(error) => {
                 compensate_agent_suspension_fences(state, &prepared_tokens).await;
-                return Err(ApiError::internal(
-                    "agent_suspension_timeout",
-                    "The VPS suspension changes did not commit within their dispatch-fence budget.",
-                    error.into(),
-                ));
+                return Err(agent_mutation_error(error));
             }
         }
     };
@@ -763,6 +750,9 @@ fn agent_suspension_rejection_message(code: &str) -> &'static str {
         "agent_suspend_gateway_fence_conflict" => {
             "The gateway could not establish the VPS dispatch fence."
         }
+        "agent_suspension_target_failed" => {
+            "This VPS suspension transaction failed. Review its current state and retry this VPS; other reviewed targets were processed independently."
+        }
         _ => "The VPS suspension change was rejected.",
     }
 }
@@ -777,6 +767,11 @@ fn agent_suspension_rejection_error(code: &str) -> ApiError {
         "agent_suspend_gateway_fence_conflict" => {
             ApiError::conflict("agent_suspend_gateway_fence_conflict")
         }
+        "agent_suspension_target_failed" => ApiError::internal(
+            "agent_suspension_target_failed",
+            "The VPS suspension transaction failed. Review its current state and retry this VPS.",
+            anyhow::anyhow!("exact-client VPS suspension transaction failed"),
+        ),
         _ => ApiError::conflict("agent_suspension_rejected"),
     }
 }

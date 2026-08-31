@@ -594,17 +594,8 @@ impl Repository {
                         bail!("ping_target_preview_stale");
                     }
                 }
-                let mut removed_assignments = 0_u64;
-                for replacement in replacements {
-                    removed_assignments = removed_assignments.saturating_add(
-                        replace_postgres_ping_assignments(
-                            &mut tx,
-                            replacement.expected_target.id,
-                            &normalized_client_ids(&replacement.next_client_ids),
-                        )
-                        .await?,
-                    );
-                }
+                let removed_assignments =
+                    replace_postgres_ping_assignments_bulk(&mut tx, replacements).await?;
                 if !changed_target_ids.is_empty() {
                     sqlx::query(
                         "UPDATE ping_targets SET updated_by = $2, updated_at = now() WHERE id = ANY($1::UUID[])",
@@ -1745,6 +1736,9 @@ impl Repository {
                         bail!("monitoring_share_preview_stale");
                     }
                 }
+                let mut target_share_ids = Vec::new();
+                let mut target_client_ids = Vec::new();
+                let mut target_public_client_keys = Vec::new();
                 for replacement in replacements.iter().filter(|replacement| {
                     changed_share_ids.contains(&replacement.expected_share.id)
                 }) {
@@ -1765,44 +1759,44 @@ impl Repository {
                         })
                         .collect::<Vec<_>>();
                     validate_monitoring_share_targets(&targets)?;
-                    sqlx::query("DELETE FROM monitoring_share_targets WHERE share_id = $1")
-                        .bind(replacement.expected_share.id)
-                        .execute(&mut *tx)
-                        .await?;
-                    if !targets.is_empty() {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO monitoring_share_targets (
-                                share_id, client_id, public_client_key
-                            )
-                            SELECT $1, target.client_id, target.public_client_key
-                            FROM unnest($2::TEXT[], $3::TEXT[])
-                                AS target(client_id, public_client_key)
-                            "#,
-                        )
-                        .bind(replacement.expected_share.id)
-                        .bind(
-                            targets
-                                .iter()
-                                .map(|target| target.client_id.clone())
-                                .collect::<Vec<_>>(),
-                        )
-                        .bind(
-                            targets
-                                .iter()
-                                .map(|target| target.public_client_key.clone())
-                                .collect::<Vec<_>>(),
-                        )
-                        .execute(&mut *tx)
-                        .await?;
+                    for target in targets {
+                        target_share_ids.push(replacement.expected_share.id);
+                        target_client_ids.push(target.client_id);
+                        target_public_client_keys.push(target.public_client_key);
                     }
-                    sqlx::query(
-                        "UPDATE monitoring_share_links SET updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = $1",
-                    )
-                    .bind(replacement.expected_share.id)
+                }
+                let changed_share_ids = changed_share_ids.iter().copied().collect::<Vec<_>>();
+                sqlx::query("DELETE FROM monitoring_share_targets WHERE share_id=ANY($1::uuid[])")
+                    .bind(&changed_share_ids)
                     .execute(&mut *tx)
                     .await?;
-                }
+                sqlx::query(
+                    r#"
+                    INSERT INTO monitoring_share_targets (
+                        share_id, client_id, public_client_key
+                    )
+                    SELECT target.share_id, target.client_id, target.public_client_key
+                    FROM unnest($1::UUID[], $2::TEXT[], $3::TEXT[])
+                         AS target(share_id, client_id, public_client_key)
+                    "#,
+                )
+                .bind(target_share_ids)
+                .bind(target_client_ids)
+                .bind(target_public_client_keys)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    UPDATE monitoring_share_links
+                    SET updated_at=GREATEST(
+                        clock_timestamp(), updated_at + interval '1 microsecond'
+                    )
+                    WHERE id=ANY($1::uuid[])
+                    "#,
+                )
+                .bind(changed_share_ids)
+                .execute(&mut *tx)
+                .await?;
                 insert_monitoring_audit(
                     &mut tx,
                     Some(operator.operator.id),
@@ -2621,6 +2615,63 @@ async fn replace_postgres_ping_assignments(
     )
     .bind(target_id)
     .bind(target_client_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(removed)
+}
+
+async fn replace_postgres_ping_assignments_bulk(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replacements: &[PingTargetAssignmentReplacement],
+) -> Result<u64> {
+    let target_ids = replacements
+        .iter()
+        .map(|replacement| replacement.expected_target.id)
+        .collect::<Vec<_>>();
+    let mut desired_target_ids = Vec::new();
+    let mut desired_client_ids = Vec::new();
+    for replacement in replacements {
+        for client_id in normalized_client_ids(&replacement.next_client_ids) {
+            desired_target_ids.push(replacement.expected_target.id);
+            desired_client_ids.push(client_id);
+        }
+    }
+    let removed = sqlx::query(
+        r#"
+        WITH desired AS MATERIALIZED (
+            SELECT *
+            FROM unnest($2::UUID[], $3::TEXT[])
+                 AS item(target_id, client_id)
+        )
+        DELETE FROM ping_target_assignments assignment
+        USING visible_clients client
+        WHERE client.id = assignment.client_id
+          AND assignment.target_id = ANY($1::UUID[])
+          AND NOT EXISTS (
+              SELECT 1
+              FROM desired
+              WHERE desired.target_id = assignment.target_id
+                AND desired.client_id = assignment.client_id
+          )
+        "#,
+    )
+    .bind(&target_ids)
+    .bind(&desired_target_ids)
+    .bind(&desired_client_ids)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_target_assignments (target_id, client_id)
+        SELECT item.target_id, item.client_id
+        FROM unnest($1::UUID[], $2::TEXT[])
+             AS item(target_id, client_id)
+        ON CONFLICT (target_id, client_id) DO NOTHING
+        "#,
+    )
+    .bind(desired_target_ids)
+    .bind(desired_client_ids)
     .execute(&mut **tx)
     .await?;
     Ok(removed)

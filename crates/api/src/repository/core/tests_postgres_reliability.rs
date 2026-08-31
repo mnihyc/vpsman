@@ -537,6 +537,87 @@ async fn postgres_policy_evidence_pending_owner_is_explicit_and_indexed() {
 }
 
 #[tokio::test]
+async fn postgres_policy_pending_batch_locks_only_changed_evidence() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let unchanged_id = Uuid::new_v4();
+    let changed_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO alert_policy_evidence (
+            id,source_kind,source_event_id,fact_kind,natural_key,
+            confirmation_bucket_key,subject_client_id,target_kind,target_id,
+            source_status,completeness,subject_snapshot,payload,observed_at,
+            state_started_at,schedule_lineage,evaluation_pending
+        )
+        SELECT
+            item.id,'backup.failure',item.id::text,'occurrence',item.id::text,
+            item.id::text,NULL,'backup_request',item.id::text,
+            'execution_failed','complete','{}'::jsonb,
+            '{"status":"execution_failed"}'::jsonb,clock_timestamp(),
+            NULL,ARRAY[]::uuid[],item.evaluation_pending
+        FROM unnest($1::uuid[],$2::boolean[])
+             AS item(id,evaluation_pending)
+        "#,
+    )
+    .bind(vec![unchanged_id, changed_id])
+    .bind(vec![false, true])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let mut owner = db.pool.begin().await.unwrap();
+    crate::repository_policy_lifecycle::recompute_policy_evidences_pending_in_tx(
+        &mut owner,
+        &[unchanged_id, changed_id],
+    )
+    .await
+    .unwrap();
+
+    let mut unchanged_probe = db.pool.begin().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM alert_policy_evidence WHERE id=$1 FOR UPDATE NOWAIT",
+        )
+        .bind(unchanged_id)
+        .fetch_one(&mut *unchanged_probe)
+        .await
+        .unwrap(),
+        unchanged_id,
+        "an unchanged pending bit must not widen the definition transaction's lock set"
+    );
+    unchanged_probe.rollback().await.unwrap();
+
+    let mut changed_probe = db.pool.begin().await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM alert_policy_evidence WHERE id=$1 FOR UPDATE NOWAIT",
+        )
+        .bind(changed_id)
+        .fetch_one(&mut *changed_probe)
+        .await
+        .is_err(),
+        "the row whose pending bit changed must remain owned until commit"
+    );
+    changed_probe.rollback().await.unwrap();
+
+    owner.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM alert_policy_evidence WHERE id=ANY($1::uuid[]) AND evaluation_pending",
+        )
+        .bind(vec![unchanged_id, changed_id])
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_pending_evidence_drain_continues_beyond_one_page() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -11156,6 +11237,121 @@ async fn postgres_batch_suspension_preserves_order_and_commits_valid_peers() {
 }
 
 #[tokio::test]
+async fn postgres_batch_unsuspend_isolates_target_failure_and_emits_one_explicit_batch_wake() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let valid_first = "batch-unsuspend-valid-first";
+    let inconsistent = "batch-unsuspend-inconsistent";
+    let valid_last = "batch-unsuspend-valid-last";
+    for client_id in [valid_first, inconsistent, valid_last] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET status='suspended', suspended_at=now(),
+            suspended_from_status=CASE
+                WHEN id=$1 THEN NULL
+                ELSE 'offline'
+            END
+        WHERE id=ANY($2)
+        "#,
+    )
+    .bind(inconsistent)
+    .bind(vec![valid_first, inconsistent, valid_last])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut listener = PgListener::connect_with(&db.pool).await.unwrap();
+    listener.listen("webhook_events").await.unwrap();
+
+    let operator = postgres_network_operator(&db.repo).await;
+    let requested = vec![
+        valid_first.to_string(),
+        inconsistent.to_string(),
+        valid_last.to_string(),
+    ];
+    let outcomes = db
+        .repo
+        .mutate_agent_suspensions(
+            crate::model::AgentSuspensionAction::Unsuspend,
+            &requested,
+            None,
+            &operator,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        &outcomes[0],
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied {
+            client_id,
+            ..
+        } if client_id == valid_first
+    ));
+    assert!(matches!(
+        &outcomes[1],
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Rejected {
+            client_id,
+            code: "agent_suspension_target_failed",
+        } if client_id == inconsistent
+    ));
+    assert!(matches!(
+        &outcomes[2],
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied {
+            client_id,
+            ..
+        } if client_id == valid_last
+    ));
+    let states = sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"
+        SELECT id, status, suspended_from_status
+        FROM clients
+        WHERE id=ANY($1)
+        ORDER BY id
+        "#,
+    )
+    .bind(&requested)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (inconsistent.to_string(), "suspended".to_string(), None),
+            (valid_first.to_string(), "offline".to_string(), None),
+            (valid_last.to_string(), "offline".to_string(), None),
+        ]
+    );
+    let mut batch_wakes = 0;
+    let mut status_event_wakes = 0;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(100), listener.recv()).await {
+            Ok(Ok(notification)) if notification.payload() == "alert_notification" => {
+                batch_wakes += 1;
+            }
+            Ok(Ok(notification)) if notification.payload().starts_with("vps.status_changed:") => {
+                status_event_wakes += 1;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("webhook listener failed: {error}"),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        status_event_wakes, 2,
+        "each committed status event must wake"
+    );
+    assert_eq!(
+        batch_wakes, 1,
+        "one suspension batch owns one explicit wake"
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_batch_delete_preserves_order_and_commits_valid_peers() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -11255,6 +11451,140 @@ async fn postgres_batch_delete_preserves_order_and_commits_valid_peers() {
         .unwrap(),
         1
     );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_fleet_batch_lifecycle_transactions_do_not_prelock_later_clients() {
+    async fn wait_for_advisory_waiter(pool: &PgPool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks locks
+                        JOIN pg_stat_activity activity ON activity.pid=locks.pid
+                        WHERE activity.datname=current_database()
+                          AND locks.locktype='advisory'
+                          AND NOT locks.granted
+                    )
+                    "#,
+                )
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("exact-client lifecycle mutation did not reach its blocked target");
+    }
+
+    async fn prove_later_client_is_unowned(pool: &PgPool, client_id: &str) {
+        let mut probe = pool.begin().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx(
+                &mut probe,
+                &[client_id.to_string()],
+            ),
+        )
+        .await
+        .expect("a blocked target retained the later client's lifecycle owner")
+        .unwrap();
+        probe.rollback().await.unwrap();
+    }
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let suspend_later = "exact-suspend-a";
+    let suspend_blocked = "exact-suspend-b";
+    for client_id in [suspend_later, suspend_blocked] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+        sqlx::query("UPDATE clients SET status='offline' WHERE id=$1")
+            .bind(client_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let mut suspend_gate = db.pool.begin().await.unwrap();
+    crate::repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx(
+        &mut suspend_gate,
+        &[suspend_blocked.to_string()],
+    )
+    .await
+    .unwrap();
+    let suspend_repo = db.repo.clone();
+    let suspend_operator = operator.clone();
+    let suspend_task = tokio::spawn(async move {
+        suspend_repo
+            .mutate_agent_suspensions(
+                crate::model::AgentSuspensionAction::Suspend,
+                &[suspend_blocked.to_string(), suspend_later.to_string()],
+                Some("exact owner proof"),
+                &suspend_operator,
+                &HashMap::new(),
+            )
+            .await
+    });
+    wait_for_advisory_waiter(&db.pool).await;
+    prove_later_client_is_unowned(&db.pool, suspend_later).await;
+    suspend_gate.commit().await.unwrap();
+    let suspend_outcomes = tokio::time::timeout(Duration::from_secs(20), suspend_task)
+        .await
+        .expect("exact-client suspension did not finish")
+        .unwrap()
+        .unwrap();
+    assert_eq!(suspend_outcomes.len(), 2);
+    assert!(suspend_outcomes.iter().all(|outcome| matches!(
+        outcome,
+        crate::repository_inventory::AgentSuspensionRepositoryOutcome::Applied { .. }
+    )));
+
+    let delete_later = "exact-delete-a";
+    let delete_blocked = "exact-delete-b";
+    for client_id in [delete_later, delete_blocked] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+    let mut delete_gate = db.pool.begin().await.unwrap();
+    crate::repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx(
+        &mut delete_gate,
+        &[delete_blocked.to_string()],
+    )
+    .await
+    .unwrap();
+    let delete_repo = db.repo.clone();
+    let delete_operator = operator.clone();
+    let delete_task = tokio::spawn(async move {
+        delete_repo
+            .delete_agents(
+                &[delete_blocked.to_string(), delete_later.to_string()],
+                Some("exact owner proof"),
+                &delete_operator,
+            )
+            .await
+    });
+    wait_for_advisory_waiter(&db.pool).await;
+    prove_later_client_is_unowned(&db.pool, delete_later).await;
+    delete_gate.commit().await.unwrap();
+    let delete_outcomes = tokio::time::timeout(Duration::from_secs(20), delete_task)
+        .await
+        .expect("exact-client deletion did not finish")
+        .unwrap()
+        .unwrap();
+    assert_eq!(delete_outcomes.len(), 2);
+    assert!(delete_outcomes.iter().all(|outcome| matches!(
+        outcome,
+        crate::repository_inventory::DeleteAgentRepositoryOutcome::Applied(_)
+    )));
+
     db.cleanup().await;
 }
 

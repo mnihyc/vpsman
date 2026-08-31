@@ -540,15 +540,13 @@ impl Repository {
                         .map(|schedule| (schedule.id, schedule))
                         .collect::<std::collections::BTreeMap<_, _>>()
                 };
-                for schedule in updated.values() {
-                    record_postgres_schedule_audit(
-                        &mut tx,
-                        schedule,
-                        operator,
-                        "schedule.targets_updated",
-                    )
-                    .await?;
-                }
+                record_postgres_schedule_audits(
+                    &mut tx,
+                    updated.values(),
+                    operator,
+                    "schedule.targets_updated",
+                )
+                .await?;
                 let outcomes = updates
                     .iter()
                     .map(|update| {
@@ -1281,6 +1279,39 @@ async fn record_postgres_schedule_audit(
         serde_json::Value::Null,
     )
     .await
+}
+
+async fn record_postgres_schedule_audits<'a>(
+    tx: &mut Transaction<'_, Postgres>,
+    schedules: impl IntoIterator<Item = &'a ScheduleView>,
+    operator: &AuthContext,
+    action: &str,
+) -> Result<()> {
+    let schedules = schedules.into_iter().collect::<Vec<_>>();
+    if schedules.is_empty() {
+        return Ok(());
+    }
+    let mut query = QueryBuilder::<Postgres>::new(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        "#,
+    );
+    query.push_values(schedules, |mut row, schedule| {
+        row.push_bind(Uuid::new_v4())
+            .push_bind(operator.operator.id)
+            .push_bind(action)
+            .push_bind(format!("schedule:{}", schedule.id))
+            .push("NULL")
+            .push_bind(schedule_audit_metadata(
+                schedule,
+                operator,
+                serde_json::Value::Null,
+            ));
+    });
+    query.build().execute(&mut **tx).await?;
+    Ok(())
 }
 
 async fn record_postgres_schedule_audit_with_extra(

@@ -25,8 +25,11 @@ pub(crate) struct GatewayState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
     pub(crate) client_lifecycle_owners: Arc<GatewayClientLifecycleOwners>,
     pub(crate) client_suspension_fences: Arc<RwLock<HashMap<String, GatewayClientSuspensionFence>>>,
+    /// Recent dispatch markers are indexed by their lifecycle owner so a
+    /// suspension fence reads only that client's jobs. Global expiry cleanup
+    /// remains a background maintenance concern.
     pub(crate) command_enqueues:
-        Arc<RwLock<HashMap<(String, uuid::Uuid), GatewayCommandEnqueueMarker>>>,
+        Arc<RwLock<HashMap<String, HashMap<uuid::Uuid, GatewayCommandEnqueueMarker>>>>,
     pub(crate) privilege_assertions: Arc<Mutex<PrivilegeAssertionReplayCache>>,
     pub(crate) disconnected_at: Arc<RwLock<HashMap<String, Instant>>>,
     pub(crate) forward_metrics: Arc<GatewayForwardMetrics>,
@@ -92,9 +95,13 @@ impl GatewayState {
 
     pub(crate) async fn prune_expired_command_enqueues(&self, now: Instant) -> usize {
         let mut enqueues = self.command_enqueues.write().await;
-        let before = enqueues.len();
-        enqueues.retain(|_, marker| marker.expires_at > now);
-        before.saturating_sub(enqueues.len())
+        let before = enqueues.values().map(HashMap::len).sum::<usize>();
+        enqueues.retain(|_, client_enqueues| {
+            client_enqueues.retain(|_, marker| marker.expires_at > now);
+            !client_enqueues.is_empty()
+        });
+        let after = enqueues.values().map(HashMap::len).sum::<usize>();
+        before.saturating_sub(after)
     }
 }
 

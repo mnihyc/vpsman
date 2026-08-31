@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{types::Json as SqlJson, Executor, Postgres, Row, Transaction};
+use sqlx::{types::Json as SqlJson, Executor, Postgres, QueryBuilder, Row, Transaction};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
@@ -472,21 +472,32 @@ impl Repository {
                     WebhookRuleBulkAction::Disable => ("webhook.rule_upserted", "disabled"),
                     WebhookRuleBulkAction::Delete => ("webhook_rule.deleted", "deleted"),
                 };
-                let mut outcomes = Vec::with_capacity(request.items.len());
-                for item in &request.items {
-                    let rule = current
-                        .get(&item.id)
-                        .context("webhook_rule_bulk_snapshot_stale")?;
-                    insert_webhook_rule_audit_with_action(&mut tx, rule, operator, audit_action)
-                        .await?;
-                    outcomes.push(WebhookRuleBulkOutcome {
+                let ordered_rules = request
+                    .items
+                    .iter()
+                    .map(|item| {
+                        current
+                            .get(&item.id)
+                            .context("webhook_rule_bulk_snapshot_stale")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                insert_webhook_rule_audits_with_action(
+                    &mut tx,
+                    &ordered_rules,
+                    operator,
+                    audit_action,
+                )
+                .await?;
+                let outcomes: Vec<WebhookRuleBulkOutcome> = ordered_rules
+                    .into_iter()
+                    .map(|rule| WebhookRuleBulkOutcome {
                         id: rule.id,
                         name: rule.name.clone(),
                         result: result.to_string(),
                         record: (request.action != WebhookRuleBulkAction::Delete)
                             .then(|| rule.clone()),
-                    });
-                }
+                    })
+                    .collect();
                 if request.action != WebhookRuleBulkAction::Enable {
                     // Source state changed once; the delivery worker remains the
                     // sole owner of leases and terminal delivery transitions.
@@ -1190,6 +1201,34 @@ async fn insert_webhook_rule_audit_with_action(
     .bind(webhook_rule_metadata(rule, operator))
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+async fn insert_webhook_rule_audits_with_action(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rules: &[&WebhookRuleView],
+    operator: &AuthContext,
+    action: &str,
+) -> Result<()> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let mut query = QueryBuilder::<Postgres>::new(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        "#,
+    );
+    query.push_values(rules, |mut row, rule| {
+        row.push_bind(Uuid::new_v4())
+            .push_bind(operator.operator.id)
+            .push_bind(action)
+            .push_bind(format!("webhook_rule:{}", rule.id))
+            .push("NULL")
+            .push_bind(webhook_rule_metadata(rule, operator));
+    });
+    query.build().execute(&mut **tx).await?;
     Ok(())
 }
 

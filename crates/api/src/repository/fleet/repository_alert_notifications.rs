@@ -12,7 +12,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use sqlx::{types::Json as SqlJson, Executor, Postgres, Row};
+use sqlx::{types::Json as SqlJson, Executor, Postgres, QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use tracing::warn;
 use uuid::Uuid;
@@ -525,34 +525,41 @@ impl Repository {
                         ("fleet.alert_notification_channel_deleted", "deleted")
                     }
                 };
-                let mut outcomes = Vec::with_capacity(request.items.len());
-                for item in &request.items {
-                    let channel = current
-                        .get(&item.id)
-                        .context("fleet_alert_notification_channel_bulk_snapshot_stale")?;
-                    sqlx::query(
-                        r#"
-                        INSERT INTO audit_logs (
-                            id, actor_id, action, target, command_hash, metadata
-                        )
-                        VALUES ($1, $2, $3, $4, NULL, $5)
-                        "#,
+                let ordered_channels = request
+                    .items
+                    .iter()
+                    .map(|item| {
+                        current
+                            .get(&item.id)
+                            .context("fleet_alert_notification_channel_bulk_snapshot_stale")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut audit = QueryBuilder::<Postgres>::new(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
                     )
-                    .bind(Uuid::new_v4())
-                    .bind(operator.operator.id)
-                    .bind(audit_action)
-                    .bind(format!("fleet_alert_notification_channel:{}", channel.id))
-                    .bind(notification_channel_metadata(channel, operator))
-                    .execute(&mut *tx)
-                    .await?;
-                    outcomes.push(FleetAlertNotificationChannelBulkOutcome {
+                    "#,
+                );
+                audit.push_values(&ordered_channels, |mut row, channel| {
+                    row.push_bind(Uuid::new_v4())
+                        .push_bind(operator.operator.id)
+                        .push_bind(audit_action)
+                        .push_bind(format!("fleet_alert_notification_channel:{}", channel.id))
+                        .push("NULL")
+                        .push_bind(notification_channel_metadata(channel, operator));
+                });
+                audit.build().execute(&mut *tx).await?;
+                let outcomes: Vec<FleetAlertNotificationChannelBulkOutcome> = ordered_channels
+                    .into_iter()
+                    .map(|channel| FleetAlertNotificationChannelBulkOutcome {
                         id: channel.id,
                         name: channel.name.clone(),
                         result: result.to_string(),
                         record: (request.action != FleetAlertNotificationChannelBulkAction::Delete)
                             .then(|| channel.clone()),
-                    });
-                }
+                    })
+                    .collect();
                 if request.action != FleetAlertNotificationChannelBulkAction::Enable {
                     // Source state changed once; the delivery worker remains the
                     // sole owner of leases and terminal delivery transitions.

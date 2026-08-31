@@ -251,21 +251,31 @@ export function TopologyPanel({
       ]);
     }
     if (activeSubpage === "overview") {
-      void Promise.all([onLoadTopologyGraph(), onLoadOspfUpdatePlans()]);
+      void Promise.all([
+        onRefresh(),
+        onLoadTopologyGraph(),
+        onLoadOspfUpdatePlans(),
+      ]);
     }
     if (activeSubpage === "evidence") {
       void Promise.all([
+        onRefresh(),
         onLoadNetworkObservations(),
         onLoadNetworkTrends(),
         onLoadOspfRecommendations(),
         onLoadOspfUpdatePlans(),
       ]);
     }
-    if (activeSubpage === "tests") void onLoadNetworkTrends();
-    if (activeSubpage === "ospf") void onLoadOspfUpdatePlans();
+    if (activeSubpage === "tests") {
+      void Promise.all([onRefresh(), onLoadNetworkTrends()]);
+    }
+    if (activeSubpage === "ospf") {
+      void Promise.all([onRefresh(), onLoadOspfUpdatePlans()]);
+    }
     if (activeSubpage === "port_forwards") void onLoadPortForwardRules();
     if (activeSubpage === "tunnel_plans") {
       setAdapterDefinitionsLoadError(null);
+      void onRefresh();
       void onLoadTopologyGraph();
       void onLoadConfigurationSources().catch(() => undefined);
       void onLoadNetworkAdapterDefinitions().catch((loadError) => {
@@ -287,6 +297,7 @@ export function TopologyPanel({
     onLoadPortForwardRules,
     onLoadNetworkAdapterDefinitions,
     onLoadTopologyGraph,
+    onRefresh,
   ]);
 
   if (activeSubpage === "port_forwards") {

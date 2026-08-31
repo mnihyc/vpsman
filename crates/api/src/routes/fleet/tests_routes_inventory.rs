@@ -1,5 +1,7 @@
 use super::{
     agent_delete_invalidation_event, agent_suspension_invalidation_event,
+    agent_suspension_rejection_error, agent_suspension_rejection_message,
+    delete_agent_rejection_error, delete_agent_rejection_message,
     peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
     validate_bulk_agent_suspension_request, validate_bulk_delete_agents_request,
     validate_bulk_resolve_many_request, validate_persisted_tag_name, validate_suspend_agent_status,
@@ -11,6 +13,7 @@ use crate::model::{
     BulkDeleteAgentsRequest, BulkResolveManyItem, BulkResolveManyRequest,
     TelemetryNetworkRateQuery, TelemetryRollupQuery,
 };
+use axum::http::StatusCode;
 #[test]
 fn selector_batch_is_bounded_normalized_unique_and_ordered() {
     let request = BulkResolveManyRequest {
@@ -195,6 +198,35 @@ fn deletion_invalidation_is_absent_for_zero_success_and_exact_for_partial_succes
         agent_delete_invalidation_event(&affected),
         Some(crate::model::WsEvent::FleetStateInvalidated)
     ));
+}
+
+#[test]
+fn exact_client_transaction_failures_are_actionable_and_singletons_remain_server_errors() {
+    let suspension_message = agent_suspension_rejection_message("agent_suspension_target_failed");
+    assert!(suspension_message.contains("retry this VPS"));
+    assert!(suspension_message.contains("processed independently"));
+    let suspension_error = agent_suspension_rejection_error("agent_suspension_target_failed");
+    assert_eq!(suspension_error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(suspension_error.code, "agent_suspension_target_failed");
+
+    let deletion_message = delete_agent_rejection_message("agent_delete_target_failed");
+    assert!(deletion_message.contains("retry this VPS"));
+    assert!(deletion_message.contains("processed independently"));
+    let deletion_error = delete_agent_rejection_error("agent_delete_target_failed");
+    assert_eq!(deletion_error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(deletion_error.code, "agent_delete_target_failed");
+}
+
+#[test]
+fn exact_client_batches_are_not_canceled_after_partial_commits() {
+    let source = include_str!("routes_inventory.rs");
+
+    assert!(!source.contains("AGENT_SUSPENSION_DB_BUDGET_SECS"));
+    assert!(!source.contains("AGENT_DELETE_DB_BUDGET_SECS"));
+    assert!(!source.contains("\"agent_suspension_timeout\""));
+    assert!(!source.contains("\"agent_delete_timeout\""));
+    assert!(source.contains("AGENT_SUSPENSION_FENCE_CONTROL_ATTEMPT_SECS"));
+    assert!(source.contains("AGENT_SUSPENSION_FENCE_LEASE_SECS"));
 }
 
 #[test]

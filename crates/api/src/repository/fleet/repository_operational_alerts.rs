@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use sqlx::{postgres::PgRow, Row};
+use sqlx::{postgres::PgRow, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 use vpsman_common::{
     alert_policy_state_source_event_id, alert_policy_state_source_revision_event_id,
@@ -22,7 +22,7 @@ use crate::{
     repository_policy_lifecycle::{
         lock_client_policy_suppressions_shared_in_tx, lock_policy_rule_generations_shared_in_tx,
         record_policy_evidence_in_tx, record_policy_source_scope_exits_in_tx,
-        resolve_policy_occurrence_episode_prelocked_in_tx, PolicyEvidenceFact,
+        resolve_policy_occurrence_episodes_prelocked_in_tx, PolicyEvidenceFact,
     },
     util::parse_timestamp_utc,
 };
@@ -543,38 +543,46 @@ impl Repository {
                     }
                 }
 
-                let mut episodes = Vec::with_capacity(normalized_ids.len());
-                for public_id in &normalized_ids {
-                    let transitioned = resolve_policy_occurrence_episode_prelocked_in_tx(
-                        &mut tx,
-                        public_id,
-                        reason,
-                        operator.operator.id,
-                    )
-                    .await?;
-                    let sql = format!(
-                        "{} WHERE public_id = $1 FOR UPDATE",
-                        operational_episode_select_sql("")
-                    );
-                    let row = sqlx::query(&sql)
-                        .bind(public_id)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .context("fleet_alert_not_found")?;
-                    let episode = operational_episode_from_row(row)?;
-                    if transitioned {
-                        insert_operational_resolution_audit_in_tx(
-                            &mut tx,
-                            &episode,
-                            operator,
-                            reason,
-                            batch_id,
-                            normalized_ids.len(),
-                        )
-                        .await?;
-                    }
-                    episodes.push(episode);
-                }
+                let transitioned_ids = resolve_policy_occurrence_episodes_prelocked_in_tx(
+                    &mut tx,
+                    &normalized_ids,
+                    reason,
+                    operator.operator.id,
+                )
+                .await?;
+                let sql = operational_episode_select_sql(
+                    r#"
+                    WHERE e.public_id=ANY($1::text[])
+                    ORDER BY e.public_id COLLATE "C"
+                    FOR UPDATE OF e
+                    "#,
+                );
+                let episodes = sqlx::query(&sql)
+                    .bind(&normalized_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .map(operational_episode_from_row)
+                    .collect::<Result<Vec<_>>>()?;
+                anyhow::ensure!(
+                    episodes.len() == normalized_ids.len()
+                        && episodes
+                            .iter()
+                            .map(|episode| &episode.public_id)
+                            .eq(normalized_ids.iter()),
+                    "fleet_alert_not_found"
+                );
+                insert_operational_resolution_audits_in_tx(
+                    &mut tx,
+                    episodes
+                        .iter()
+                        .filter(|episode| transitioned_ids.contains(episode.public_id.as_str())),
+                    operator,
+                    reason,
+                    batch_id,
+                    normalized_ids.len(),
+                )
+                .await?;
                 tx.commit().await?;
                 Ok((batch_id, episodes))
             }
@@ -1020,30 +1028,39 @@ fn operational_resolution_audit(
     }
 }
 
-async fn insert_operational_resolution_audit_in_tx(
+async fn insert_operational_resolution_audits_in_tx<'a>(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    episode: &OperationalAlertEpisodeRecord,
+    episodes: impl IntoIterator<Item = &'a OperationalAlertEpisodeRecord>,
     operator: &AuthContext,
     reason: &str,
     batch_id: Uuid,
     batch_size: usize,
 ) -> Result<()> {
-    let audit = operational_resolution_audit(episode, operator, reason, batch_id, batch_size);
-    sqlx::query(
+    let audits = episodes
+        .into_iter()
+        .map(|episode| {
+            operational_resolution_audit(episode, operator, reason, batch_id, batch_size)
+        })
+        .collect::<Vec<_>>();
+    if audits.is_empty() {
+        return Ok(());
+    }
+    let mut query = QueryBuilder::<Postgres>::new(
         r#"
         INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
         "#,
-    )
-    .bind(audit.id)
-    .bind(audit.actor_id)
-    .bind(&audit.action)
-    .bind(&audit.target)
-    .bind(&audit.command_hash)
-    .bind(&audit.metadata)
-    .bind(&audit.created_at)
-    .execute(&mut **tx)
-    .await?;
+    );
+    query.push_values(audits, |mut row, audit| {
+        row.push_bind(audit.id)
+            .push_bind(audit.actor_id)
+            .push_bind(audit.action)
+            .push_bind(audit.target)
+            .push_bind(audit.command_hash)
+            .push_bind(audit.metadata)
+            .push_bind(audit.created_at)
+            .push_unseparated("::timestamptz");
+    });
+    query.build().execute(&mut **tx).await?;
     Ok(())
 }
 

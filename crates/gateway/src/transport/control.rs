@@ -708,7 +708,9 @@ async fn dispatch_gateway_command(
                 .command_enqueues
                 .write()
                 .await
-                .insert(enqueue_key.clone(), enqueue_marker);
+                .entry(enqueue_key.0.clone())
+                .or_default()
+                .insert(enqueue_key.1, enqueue_marker);
             if let Err(error) = session
                 .sender
                 .try_send(GatewaySessionMessage::Command(Box::new(GatewayCommand {
@@ -760,16 +762,32 @@ async fn rollback_failed_command_enqueue(
     inserted_marker: GatewayCommandEnqueueMarker,
     prior_marker: Option<GatewayCommandEnqueueMarker>,
 ) {
+    let (client_id, job_id) = enqueue_key;
     let mut command_enqueues = state.command_enqueues.write().await;
-    if command_enqueues.get(&enqueue_key) != Some(&inserted_marker) {
+    if command_enqueues
+        .get(&client_id)
+        .and_then(|client_enqueues| client_enqueues.get(&job_id))
+        != Some(&inserted_marker)
+    {
         // A same-key dispatch linearized after this attempt. Its marker owns
         // the registry entry and must survive this failed attempt's rollback.
         return;
     }
     if let Some(prior_marker) = prior_marker {
-        command_enqueues.insert(enqueue_key, prior_marker);
+        command_enqueues
+            .entry(client_id)
+            .or_default()
+            .insert(job_id, prior_marker);
     } else {
-        command_enqueues.remove(&enqueue_key);
+        let remove_client = command_enqueues
+            .get_mut(&client_id)
+            .is_some_and(|client_enqueues| {
+                client_enqueues.remove(&job_id);
+                client_enqueues.is_empty()
+            });
+        if remove_client {
+            command_enqueues.remove(&client_id);
+        }
     }
 }
 
@@ -933,15 +951,16 @@ async fn protected_enqueued_job_ids(
     now: Instant,
 ) -> Vec<uuid::Uuid> {
     let mut command_enqueues = state.command_enqueues.write().await;
-    command_enqueues.retain(|_, marker| marker.expires_at > now);
-    let mut job_ids = command_enqueues
-        .iter()
-        .filter_map(|((enqueued_client_id, job_id), _)| {
-            (enqueued_client_id == client_id).then_some(*job_id)
-        })
-        .collect::<Vec<_>>();
+    let Some(client_enqueues) = command_enqueues.get_mut(client_id) else {
+        return Vec::new();
+    };
+    client_enqueues.retain(|_, marker| marker.expires_at > now);
+    let mut job_ids = client_enqueues.keys().copied().collect::<Vec<_>>();
+    let remove_client = job_ids.is_empty();
+    if remove_client {
+        command_enqueues.remove(client_id);
+    }
     job_ids.sort();
-    job_ids.dedup();
     job_ids
 }
 

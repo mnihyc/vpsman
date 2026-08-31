@@ -452,25 +452,37 @@ async fn prepared_fence_expires_or_compensates_but_promoted_fence_requires_commi
 }
 
 #[tokio::test]
-async fn repeated_prepare_keeps_enqueue_protection_and_expired_markers_are_pruned() {
+async fn repeated_prepare_keeps_exact_client_enqueue_protection() {
     let state = GatewayState::default();
     let token = uuid::Uuid::new_v4();
     let protected_job_id = uuid::Uuid::new_v4();
     let expired_job_id = uuid::Uuid::new_v4();
-    state.command_enqueues.write().await.insert(
-        ("client-a".to_string(), protected_job_id),
-        GatewayCommandEnqueueMarker {
-            generation: uuid::Uuid::new_v4(),
-            expires_at: Instant::now() + Duration::from_secs(120),
-        },
-    );
-    state.command_enqueues.write().await.insert(
-        ("client-b".to_string(), expired_job_id),
-        GatewayCommandEnqueueMarker {
-            generation: uuid::Uuid::new_v4(),
-            expires_at: Instant::now() - Duration::from_secs(1),
-        },
-    );
+    state
+        .command_enqueues
+        .write()
+        .await
+        .entry("client-a".to_string())
+        .or_default()
+        .insert(
+            protected_job_id,
+            GatewayCommandEnqueueMarker {
+                generation: uuid::Uuid::new_v4(),
+                expires_at: Instant::now() + Duration::from_secs(120),
+            },
+        );
+    state
+        .command_enqueues
+        .write()
+        .await
+        .entry("client-b".to_string())
+        .or_default()
+        .insert(
+            expired_job_id,
+            GatewayCommandEnqueueMarker {
+                generation: uuid::Uuid::new_v4(),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
 
     let first = prepare_gateway_client_suspension_fence(
         &state,
@@ -496,8 +508,8 @@ async fn repeated_prepare_keeps_enqueue_protection_and_expired_markers_are_prune
 
     assert_eq!(
         state.prune_expired_command_enqueues(Instant::now()).await,
-        0,
-        "prepare already pruned the globally expired marker"
+        1,
+        "exact-client reads leave unrelated expiry to the cleanup owner"
     );
     assert_eq!(state.command_enqueues.read().await.len(), 1);
 }
@@ -563,13 +575,19 @@ async fn suspension_fence_batches_preserve_order_and_isolate_per_client_conflict
     let client_a_token = uuid::Uuid::new_v4();
     let client_b_token = uuid::Uuid::new_v4();
     let protected_job_id = uuid::Uuid::new_v4();
-    state.command_enqueues.write().await.insert(
-        ("client-a".to_string(), protected_job_id),
-        GatewayCommandEnqueueMarker {
-            generation: uuid::Uuid::new_v4(),
-            expires_at: Instant::now() + Duration::from_secs(120),
-        },
-    );
+    state
+        .command_enqueues
+        .write()
+        .await
+        .entry("client-a".to_string())
+        .or_default()
+        .insert(
+            protected_job_id,
+            GatewayCommandEnqueueMarker {
+                generation: uuid::Uuid::new_v4(),
+                expires_at: Instant::now() + Duration::from_secs(120),
+            },
+        );
     assert!(
         prepare_gateway_client_suspension_fence(
             &state,
@@ -675,23 +693,37 @@ async fn failed_same_key_enqueue_cannot_erase_a_later_dispatch_marker() {
         .command_enqueues
         .write()
         .await
-        .insert(key.clone(), first_marker)
+        .entry(key.0.clone())
+        .or_default()
+        .insert(key.1, first_marker)
         .is_none());
     let second_prior = state
         .command_enqueues
         .write()
         .await
-        .insert(key.clone(), second_marker);
+        .entry(key.0.clone())
+        .or_default()
+        .insert(key.1, second_marker);
 
     rollback_failed_command_enqueue(&state, key.clone(), first_marker, None).await;
     assert_eq!(
-        state.command_enqueues.read().await.get(&key),
+        state
+            .command_enqueues
+            .read()
+            .await
+            .get(&key.0)
+            .and_then(|client_enqueues| client_enqueues.get(&key.1)),
         Some(&second_marker)
     );
 
     rollback_failed_command_enqueue(&state, key.clone(), second_marker, second_prior).await;
     assert_eq!(
-        state.command_enqueues.read().await.get(&key),
+        state
+            .command_enqueues
+            .read()
+            .await
+            .get(&key.0)
+            .and_then(|client_enqueues| client_enqueues.get(&key.1)),
         Some(&first_marker)
     );
 }

@@ -85,6 +85,210 @@ function liveSnapshotCount(requests: TrackedRequest[]): number {
   }).length;
 }
 
+test("Network overview activation has one bounded exact subpage owner", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "request ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await clearTrackedRequests(page);
+
+  await openConsoleSubpage(page, "Network", "Overview");
+  await expect
+    .poll(async () => {
+      const requests = await trackedRequests(page);
+      return {
+        graph: pathCount(requests, "/api/v1/network/topology-graph") > 0,
+        ospfPlans:
+          pathCount(requests, "/api/v1/network/ospf-update-plans") > 0,
+        tunnelPlans: pathCount(requests, "/api/v1/tunnel-plans") > 0,
+      };
+    })
+    .toEqual({ graph: true, ospfPlans: true, tunnelPlans: true });
+
+  const requests = await trackedRequests(page);
+  // StrictMode replays the sole activation effect in the development harness;
+  // each exact source still remains within one active and one trailing read.
+  for (const path of [
+    "/api/v1/network/topology-graph",
+    "/api/v1/network/ospf-update-plans",
+    "/api/v1/tunnel-plans",
+  ]) {
+    expect(pathCount(requests, path)).toBeLessThanOrEqual(2);
+  }
+  expect(
+    [
+      "/api/v1/network-adapter-definitions",
+      "/api/v1/network/observations",
+      "/api/v1/network/observation-trends",
+      "/api/v1/network/ospf-recommendations",
+      "/api/v1/port-forward-rules",
+      "/api/v1/runtime-config/apply-state",
+    ].map((path) => [path, pathCount(requests, path)]),
+  ).toEqual([
+    ["/api/v1/network-adapter-definitions", 0],
+    ["/api/v1/network/observations", 0],
+    ["/api/v1/network/observation-trends", 0],
+    ["/api/v1/network/ospf-recommendations", 0],
+    ["/api/v1/port-forward-rules", 0],
+    ["/api/v1/runtime-config/apply-state", 0],
+  ]);
+});
+
+test("bursty unknown job completions share history ownership and retain every projection classification", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "request ownership is viewport independent",
+  );
+  await installConsoleApiMock(page, { storedAuthSession: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Network", "Overview");
+  await clearTrackedRequests(page);
+  await page.evaluate(() => {
+    const commandTypes = [
+      "runtime_config_sync",
+      "network_probe",
+      "network_routing_apply",
+    ];
+    const records = Array.from({ length: 24 }, (_, index) => ({
+      actor_id: null,
+      command_type: commandTypes[index % commandTypes.length],
+      completed_at: new Date(
+        Date.parse("2026-06-02T10:00:00Z") + index * 1_000,
+      ).toISOString(),
+      created_at: new Date(
+        Date.parse("2026-06-02T09:59:00Z") + index * 1_000,
+      ).toISOString(),
+      id: `40000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      max_timeout_secs: 60,
+      payload_hash: String(index).padStart(64, "0"),
+      privileged: false,
+      source_schedule_id: null,
+      status: "completed",
+      target_count: 1,
+    }));
+    const originalFetch = window.fetch.bind(window);
+    const state: {
+      historyGets: number;
+      itemGets: number;
+      releaseFirst: (() => void) | null;
+    } = { historyGets: 0, itemGets: 0, releaseFirst: null };
+    Object.defineProperty(window, "__vpsmanJobEventBurst", {
+      configurable: true,
+      value: state,
+    });
+    window.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.href,
+      );
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      if (method === "GET" && url.pathname === "/api/v1/jobs") {
+        state.historyGets += 1;
+        if (state.historyGets === 1) {
+          await new Promise<void>((resolve) => {
+            state.releaseFirst = resolve;
+          });
+        }
+        return new Response(JSON.stringify(records), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+      if (method === "GET" && /^\/api\/v1\/jobs\/[^/]+$/.test(url.pathname)) {
+        state.itemGets += 1;
+      }
+      return originalFetch(input, init);
+    };
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: EventTarget[];
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    for (const record of records) {
+      socket?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            job_id: record.id,
+            status: "completed",
+            type: "job_finished",
+          }),
+        }),
+      );
+    }
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanJobEventBurst: { historyGets: number };
+            }
+          ).__vpsmanJobEventBurst.historyGets,
+      ),
+    )
+    .toBe(1);
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __vpsmanJobEventBurst: { releaseFirst: (() => void) | null };
+      }
+    ).__vpsmanJobEventBurst;
+    state.releaseFirst?.();
+    state.releaseFirst = null;
+  });
+
+  await expect
+    .poll(async () => {
+      const requests = await trackedRequests(page);
+      return {
+        applyState:
+          pathCount(requests, "/api/v1/runtime-config/apply-state") > 0,
+        networkEvidence:
+          pathCount(requests, "/api/v1/network/observations") > 0,
+        routingEvidence:
+          pathCount(requests, "/api/v1/network/ospf-recommendations") > 0,
+      };
+    })
+    .toEqual({
+      applyState: true,
+      networkEvidence: true,
+      routingEvidence: true,
+    });
+  const requests = await trackedRequests(page);
+  for (const path of [
+    "/api/v1/runtime-config/apply-state",
+    "/api/v1/network/observations",
+    "/api/v1/network/ospf-recommendations",
+  ]) {
+    expect(pathCount(requests, path)).toBeLessThanOrEqual(2);
+  }
+  const requestState = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __vpsmanJobEventBurst: { historyGets: number; itemGets: number };
+        }
+      ).__vpsmanJobEventBurst,
+  );
+  expect(requestState.historyGets).toBeLessThanOrEqual(2);
+  expect(requestState.itemGets).toBe(0);
+});
+
 function fullSnapshotCount(requests: TrackedRequest[]): number {
   return requests.filter((request) => {
     const url = new URL(request.url, "http://localhost");
@@ -954,7 +1158,7 @@ test("Fleet mutation records preserve unrelated tail across both aggregate compl
   ).toHaveLength(0);
 });
 
-test("job_finished overlays its exact row onto an older held Home job page", async ({
+test("job_finished source refresh overlays an older held Home job page", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1012,7 +1216,7 @@ test("job_finished overlays its exact row onto an older held Home job page", asy
       return payload;
     };
     const originalFetch = window.fetch.bind(window);
-    const state = { exactGets: 0 };
+    const state = { historyGets: 0 };
     Object.defineProperty(window, "__vpsmanJobsProjectionRace", {
       configurable: true,
       value: state,
@@ -1028,14 +1232,17 @@ test("job_finished overlays its exact row onto an older held Home job page", asy
         window.location.href,
       );
       const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
-      if (method === "GET" && url.pathname === `/api/v1/jobs/${jobId}`) {
-        state.exactGets += 1;
+      if (method === "GET" && url.pathname === "/api/v1/jobs") {
+        state.historyGets += 1;
         return new Response(
-          JSON.stringify({
-            ...staleJob,
-            completed_at: "2026-06-02T10:00:10Z",
-            status: "completed",
-          }),
+          JSON.stringify([
+            {
+              ...staleJob,
+              completed_at: "2026-06-02T10:00:10Z",
+              status: "completed",
+            },
+            unaffectedFailedJob,
+          ]),
           { headers: { "Content-Type": "application/json" }, status: 200 },
         );
       }
@@ -1065,9 +1272,9 @@ test("job_finished overlays its exact row onto an older held Home job page", asy
         () =>
           (
             window as typeof window & {
-              __vpsmanJobsProjectionRace: { exactGets: number };
+              __vpsmanJobsProjectionRace: { historyGets: number };
             }
-          ).__vpsmanJobsProjectionRace.exactGets,
+          ).__vpsmanJobsProjectionRace.historyGets,
       ),
     )
     .toBe(1);

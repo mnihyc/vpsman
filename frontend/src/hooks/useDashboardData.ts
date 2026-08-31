@@ -56,6 +56,19 @@ function hasStoredAuthSession(): boolean {
   return Boolean(readStoredAccessToken() || readStoredRefreshToken());
 }
 
+function viewOwnsLiveJobHistory(view: ActiveView): boolean {
+  return view === "Home" || view === "Jobs";
+}
+
+function viewNeedsFinishedJobClassification(view: ActiveView): boolean {
+  return (
+    view === "Fleet" ||
+    view === "Config" ||
+    view === "Network" ||
+    view === "Observability"
+  );
+}
+
 function persistAuthSession(auth: AuthResponse): void {
   window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, auth.access_token);
   window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, auth.refresh_token);
@@ -723,15 +736,7 @@ export function useDashboardData(activeView: ActiveView) {
       void jobs.loadJobs();
       void inventory.loadTagInventory();
     } else if (activeView === "Network") {
-      void inventory.loadRuntimeConfigApplyStates();
-      void portForwarding.loadPortForwardRules();
-      void topology.loadTunnelPlans();
-      void topology.loadNetworkAdapterDefinitions();
-      void topology.loadNetworkObservations();
-      void topology.loadNetworkTrends();
-      void topology.loadOspfRecommendations();
-      void topology.loadOspfUpdatePlans();
-      void topology.loadTopologyGraph();
+      // The mounted Network subpage owns its exact projection sources.
       void jobs.loadJobs();
     } else if (activeView === "Backups") {
       void backups.loadBackups();
@@ -763,18 +768,13 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAudits,
     backups.loadBackups,
     inventory.loadTagInventory,
-    inventory.loadRuntimeConfigApplyStates,
     jobs.loadJobs,
     schedules.loadSchedules,
     system.loadSystemDashboard,
     topology.loadNetworkObservations,
-    topology.loadNetworkAdapterDefinitions,
     topology.loadNetworkTrends,
     topology.loadOspfRecommendations,
-    topology.loadOspfUpdatePlans,
-    topology.loadTopologyGraph,
     topology.loadTunnelPlans,
-    portForwarding.loadPortForwardRules,
   ]);
 
   useEffect(() => {
@@ -887,7 +887,19 @@ export function useDashboardData(activeView: ActiveView) {
           scheduleDashboardOverviewReload();
         }
         if (event.type === "job_rejected") {
-          void jobs.refreshLoadedJob(event.job_id);
+          jobs.reconcileJobStatusEvent(
+            event.job_id,
+            event.status,
+          );
+          if (
+            !documentIsHidden() &&
+            viewOwnsLiveJobHistory(currentView)
+          ) {
+            void jobs.refreshJobHistoryAfterEvent(
+              event.job_id,
+              event.status,
+            );
+          }
           if (currentView === "Audit") {
             void audit.loadAuditLogs();
           }
@@ -901,8 +913,24 @@ export function useDashboardData(activeView: ActiveView) {
         }
         if (event.type === "job_finished") {
           scheduleFleetReload();
-          void jobs.refreshLoadedJob(event.job_id).then((job) => {
+          const eventVisible = !documentIsHidden();
+          const loadedJob = jobs.reconcileJobStatusEvent(
+            event.job_id,
+            event.status,
+          );
+          const refreshHistory =
+            eventVisible &&
+            (viewOwnsLiveJobHistory(currentView) ||
+              (!loadedJob &&
+                viewNeedsFinishedJobClassification(currentView)));
+          const refreshedJob = refreshHistory
+            ? jobs.refreshJobHistoryAfterEvent(event.job_id, event.status)
+            : Promise.resolve(loadedJob);
+          void refreshedJob.then((job) => {
             if (!job) {
+              return;
+            }
+            if (!eventVisible) {
               return;
             }
             const activeJobView = activeViewRef.current;
@@ -967,7 +995,8 @@ export function useDashboardData(activeView: ActiveView) {
     fleet.loadFleetTelemetry,
     backups.loadBackupRequestArtifactProjections,
     dashboardOverview.loadDashboardOverview,
-    jobs.refreshLoadedJob,
+    jobs.reconcileJobStatusEvent,
+    jobs.refreshJobHistoryAfterEvent,
     inventory.loadRuntimeConfigApplyStates,
     scheduleDashboardOverviewReload,
     scheduleFleetReload,
