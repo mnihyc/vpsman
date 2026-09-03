@@ -3216,11 +3216,7 @@ export function App() {
             }
             fileTransfers={dashboard.fileTransfers}
             fleetAlerts={dashboard.fleetAlerts}
-            fleetAlertsEvidenceAvailable={
-              dashboard.fleetAlertsEvidenceAvailable
-            }
             jobs={dashboard.jobs}
-            recordBounds={recordPageBounds}
             runningJobCount={Math.max(
               dashboard.jobs.filter((job) => isActiveJobStatus(job.status))
                 .length,

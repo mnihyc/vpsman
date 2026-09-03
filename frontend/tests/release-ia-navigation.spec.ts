@@ -841,13 +841,14 @@ test(
     const signals = card.getByLabel("Operational signals for edge-sfo-01");
     await expect(
       signals.locator(".vpsMonitorSignal").filter({ hasText: "Alerts" }),
-    ).toContainText("≥1 warning");
+    ).toContainText("1 warning");
     await expect(
       signals.locator(".vpsMonitorSignal").filter({ hasText: "Backup" }),
-    ).toContainText("≥1 recorded");
+    ).toHaveCount(0);
     await expect(
       signals.locator(".vpsMonitorSignal").filter({ hasText: "Transfer" }),
-    ).toContainText("≥1 failed");
+    ).toContainText("1 failed");
+    await expect(signals.locator(".vpsMonitorSignal")).toHaveCount(2);
     await expect(card).not.toContainText("counts use capped loaded pages");
 
     await card.click();
@@ -857,24 +858,31 @@ test(
       .filter({ hasText: "Alerts" });
     await expect(alertFact.locator("strong")).toHaveText("≥4 current");
     await expect(alertFact).toContainText("1 actionable");
-    await expect(alertFact).toContainText("fleet alert page is capped");
+    await expect(alertFact).toContainText(
+      "this is a lower bound—open Fleet Alerts and narrow the VPS scope",
+    );
 
     await openConsoleSubpage(page, "Fleet", "Monitor");
     await page.getByRole("combobox", { name: "Search fleet" }).fill("nyc");
     const nycCard = page
       .getByLabel("VPS monitor cards")
       .locator(".vpsMonitorCard", { hasText: "backup-nyc-03" });
+    const nycSignals = nycCard.getByLabel(
+      "Operational signals for backup-nyc-03",
+    );
     await expect(
-      nycCard
-        .getByLabel("Operational signals for backup-nyc-03")
-        .locator(".vpsMonitorSignal")
-        .filter({ hasText: "Backup" }),
-    ).toContainText("None in loaded page");
+      nycSignals.locator(".vpsMonitorSignal").filter({ hasText: "Alerts" }),
+    ).toContainText("1 warning");
+    await expect(
+      nycSignals.locator(".vpsMonitorSignal").filter({ hasText: "Backup" }),
+    ).toHaveCount(0);
+    await expect(nycSignals.locator(".vpsMonitorSignal")).toHaveCount(1);
+    await expect(nycSignals).not.toContainText("None in loaded page");
 
     await openConsoleSubpage(page, "Fleet", "Alerts");
     await expect(
       page.getByLabel("Fleet alerts").locator(".fleetAlertHeader small"),
-    ).toContainText("Loaded page:");
+    ).toContainText("Capped condition evidence:");
   },
 );
 

@@ -4804,8 +4804,8 @@ use crate::{
     },
     repository_system_dashboard::SYSTEM_DASHBOARD_SNAPSHOT_SQL,
     repository_telemetry_rollups::{
-        raw_telemetry_network_rate_candidate_keys_sql, raw_telemetry_network_rate_payload_sql,
-        LATEST_TELEMETRY_NETWORK_RATES_SQL,
+        aggregate_selected_network_history_oracle, raw_telemetry_network_rate_candidate_keys_sql,
+        raw_telemetry_network_rate_payload_sql, LATEST_TELEMETRY_NETWORK_RATES_SQL,
     },
     repository_terminal_sessions::upsert_postgres_terminal_session,
     runtime_config_workspace::{preview_runtime_config_override, runtime_config_override_revision},
@@ -13001,6 +13001,36 @@ async fn postgres_raw_network_readers_expand_only_projected_canonical_payloads()
         (200, 400)
     );
     assert_eq!(projected_eth0.sample_count, 3);
+
+    let all_selection = NetworkRateInterfaceSelection::all(&[client_id.to_string()]);
+    let expected_aggregate = aggregate_selected_network_history_oracle(projected_network.clone());
+    let selected_aggregate = db
+        .repo
+        .list_monitoring_card_raw_network_history_selected(
+            10,
+            base + 30,
+            base + 30,
+            60,
+            &all_selection,
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected_aggregate.len(), expected_aggregate.len());
+    for (actual, expected) in selected_aggregate.iter().zip(&expected_aggregate) {
+        assert_eq!(actual.client_id, expected.client_id);
+        assert_eq!(actual.interface, expected.interface);
+        assert_eq!(actual.bucket_start, expected.bucket_start);
+        assert_eq!(actual.bucket_secs, expected.bucket_secs);
+        assert_eq!(actual.sample_count, expected.sample_count);
+        assert_eq!(actual.rx_bytes_avg, expected.rx_bytes_avg);
+        assert_eq!(actual.tx_bytes_avg, expected.tx_bytes_avg);
+        assert_eq!(actual.rx_bytes_delta, expected.rx_bytes_delta);
+        assert_eq!(actual.tx_bytes_delta, expected.tx_bytes_delta);
+        assert_eq!(actual.rx_bps_avg, expected.rx_bps_avg);
+        assert_eq!(actual.tx_bps_avg, expected.tx_bps_avg);
+        assert_eq!(actual.latest_observed_at, expected.latest_observed_at);
+        assert_eq!(actual.updated_at, expected.updated_at);
+    }
 
     let mut exact_selection = NetworkRateInterfaceSelection::default();
     exact_selection.select_exact(

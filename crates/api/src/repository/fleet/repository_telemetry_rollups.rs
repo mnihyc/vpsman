@@ -1370,6 +1370,10 @@ const TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL: &str = r#"
 WITH requested AS MATERIALIZED (
     SELECT DISTINCT client_id
     FROM UNNEST($1::TEXT[]) requested(client_id)
+), exact_selected_streams AS MATERIALIZED (
+    SELECT DISTINCT selected.client_id, selected.interface
+    FROM UNNEST($7::TEXT[], $8::TEXT[])
+        selected(client_id, interface)
 ), resolved_interface_policies AS MATERIALIZED (
     SELECT policy.*
     FROM public.resolve_telemetry_interface_policies(ARRAY(
@@ -1394,7 +1398,14 @@ WITH requested AS MATERIALIZED (
       ON policy.client_id = heads.client_id
     CROSS JOIN LATERAL unnest(heads.network_generation_interfaces)
         selected(interface)
+    LEFT JOIN exact_selected_streams exact_selection
+      ON exact_selection.client_id = heads.client_id
+     AND exact_selection.interface = selected.interface
     WHERE heads.complete
+      AND (
+          heads.client_id = ANY($6::TEXT[])
+          OR exact_selection.client_id IS NOT NULL
+      )
       AND public.telemetry_interface_is_admitted_resolved(
           policy.admission_mode,
           policy.interface_patterns,
@@ -1742,14 +1753,60 @@ WITH requested AS MATERIALIZED (
       AND state.tx_counter_epoch = state.previous_tx_epoch
       AND state.rx_bytes_last >= state.previous_rx_bytes
       AND state.tx_bytes_last >= state.previous_tx_bytes
+), selected_output AS MATERIALIZED (
+    SELECT derived.client_id, derived.interface,
+           derived.chart_start_unix, derived.effective_step,
+           derived.sample_count, derived.rx_bytes_avg,
+           derived.tx_bytes_avg, derived.rx_bytes_delta,
+           derived.tx_bytes_delta, derived.rx_bps_avg,
+           derived.tx_bps_avg, derived.latest_observed_at,
+           derived.updated_at
+    FROM derived
+    WHERE NOT $9::BOOLEAN
+
+    UNION ALL
+
+    -- Counter transitions remain interface-owned through `derived`. Cards
+    -- combine only those already-validated rates, matching the former Rust
+    -- fold without transferring every interface point out of PostgreSQL.
+    SELECT derived.client_id, ''::TEXT,
+           derived.chart_start_unix, derived.effective_step,
+           max(derived.sample_count),
+           LEAST(
+               sum(derived.rx_bytes_avg::NUMERIC),
+               9223372036854775807::NUMERIC
+           )::BIGINT,
+           LEAST(
+               sum(derived.tx_bytes_avg::NUMERIC),
+               9223372036854775807::NUMERIC
+           )::BIGINT,
+           LEAST(
+               sum(derived.rx_bytes_delta::NUMERIC),
+               9223372036854775807::NUMERIC
+           )::BIGINT,
+           LEAST(
+               sum(derived.tx_bytes_delta::NUMERIC),
+               9223372036854775807::NUMERIC
+           )::BIGINT,
+           sum(
+               derived.rx_bps_avg
+               ORDER BY derived.interface COLLATE "C"
+           ),
+           sum(
+               derived.tx_bps_avg
+               ORDER BY derived.interface COLLATE "C"
+           ),
+           max(derived.latest_observed_at), max(derived.updated_at)
+    FROM derived
+    WHERE $9::BOOLEAN
+    GROUP BY derived.client_id, derived.chart_start_unix,
+             derived.effective_step
 ), output AS MATERIALIZED (
     SELECT requested.client_id, FALSE AS has_point,
            NULL::TEXT AS interface, NULL::BIGINT AS chart_start_unix,
            $4::INTEGER AS effective_step,
            NULL::BIGINT AS sample_count,
            NULL::BIGINT AS rx_bytes_avg, NULL::BIGINT AS tx_bytes_avg,
-           NULL::BIGINT AS rx_bytes_last, NULL::BIGINT AS tx_bytes_last,
-           NULL::BIGINT AS rx_counter_epoch, NULL::BIGINT AS tx_counter_epoch,
            NULL::BIGINT AS rx_bytes_delta, NULL::BIGINT AS tx_bytes_delta,
            NULL::DOUBLE PRECISION AS rx_bps_avg,
            NULL::DOUBLE PRECISION AS tx_bps_avg,
@@ -1757,15 +1814,14 @@ WITH requested AS MATERIALIZED (
            NULL::TIMESTAMPTZ AS updated_at
     FROM requested
     UNION ALL
-    SELECT derived.client_id, TRUE, derived.interface,
-           derived.chart_start_unix, derived.effective_step,
-           derived.sample_count, derived.rx_bytes_avg, derived.tx_bytes_avg,
-           derived.rx_bytes_last, derived.tx_bytes_last,
-           derived.rx_counter_epoch, derived.tx_counter_epoch,
-           derived.rx_bytes_delta, derived.tx_bytes_delta,
-           derived.rx_bps_avg, derived.tx_bps_avg,
-           derived.latest_observed_at, derived.updated_at
-    FROM derived
+    SELECT selected.client_id, TRUE, selected.interface,
+           selected.chart_start_unix, selected.effective_step,
+           selected.sample_count, selected.rx_bytes_avg,
+           selected.tx_bytes_avg, selected.rx_bytes_delta,
+           selected.tx_bytes_delta, selected.rx_bps_avg,
+           selected.tx_bps_avg, selected.latest_observed_at,
+           selected.updated_at
+    FROM selected_output selected
 )
 SELECT output.client_id, output.has_point, output.interface,
        CASE WHEN output.has_point
@@ -1776,8 +1832,6 @@ SELECT output.client_id, output.has_point, output.interface,
             THEN LEAST(output.sample_count, 2147483647)::INTEGER
        END AS sample_count,
        output.rx_bytes_avg, output.tx_bytes_avg,
-       output.rx_bytes_last, output.tx_bytes_last,
-       output.rx_counter_epoch, output.tx_counter_epoch,
        output.rx_bytes_delta, output.tx_bytes_delta,
        output.rx_bps_avg, output.tx_bps_avg,
        CASE WHEN output.has_point
@@ -2217,19 +2271,19 @@ impl Repository {
         // canonical durable-plus-projected owner. The shared reader preserves
         // exact counter transitions across raw retention and compaction.
         let projection = self
-            .list_projected_telemetry_network_history(
+            .query_projected_telemetry_network_history(
                 points_per_series,
                 start_unix,
                 end_unix,
                 step_secs,
                 selection,
+                aggregate_selected_interfaces,
             )
             .await?;
-        let rows = project_network_rate_selection(projection.rows, selection);
         if aggregate_selected_interfaces {
-            Ok(aggregate_selected_network_history(rows))
+            Ok(projection.rows)
         } else {
-            Ok(rows)
+            Ok(project_network_rate_selection(projection.rows, selection))
         }
     }
 
@@ -2671,6 +2725,26 @@ impl Repository {
         step_secs: i32,
         selection: &NetworkRateInterfaceSelection,
     ) -> Result<TelemetryNetworkHistoryProjection> {
+        self.query_projected_telemetry_network_history(
+            points_per_series,
+            start_unix,
+            end_unix,
+            step_secs,
+            selection,
+            false,
+        )
+        .await
+    }
+
+    async fn query_projected_telemetry_network_history(
+        &self,
+        points_per_series: i64,
+        start_unix: u64,
+        end_unix: u64,
+        step_secs: i32,
+        selection: &NetworkRateInterfaceSelection,
+        aggregate_selected_interfaces: bool,
+    ) -> Result<TelemetryNetworkHistoryProjection> {
         let client_ids = selection.client_ids();
         if client_ids.is_empty() {
             return Ok(TelemetryNetworkHistoryProjection {
@@ -2680,6 +2754,7 @@ impl Repository {
         }
         let points_per_series = points_per_series.clamp(2, 1_440) as usize;
         let step_secs = normalized_dashboard_step_secs(step_secs);
+        let (all_client_ids, exact_client_ids, exact_interfaces) = selection.query_parts();
         match self {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL)
@@ -2688,6 +2763,10 @@ impl Repository {
                     .bind(end_unix.min(i64::MAX as u64) as i64)
                     .bind(step_secs)
                     .bind(points_per_series as i64)
+                    .bind(&all_client_ids)
+                    .bind(&exact_client_ids)
+                    .bind(&exact_interfaces)
+                    .bind(aggregate_selected_interfaces)
                     .fetch_all(pool)
                     .await?;
                 let requested_clients = client_ids.iter().collect::<HashSet<_>>().len();
@@ -3638,7 +3717,8 @@ fn project_network_rate_selection(
         .collect()
 }
 
-fn aggregate_selected_network_history(
+#[cfg(test)]
+pub(crate) fn aggregate_selected_network_history_oracle(
     rows: Vec<TelemetryNetworkRateView>,
 ) -> Vec<TelemetryNetworkRateView> {
     let mut points =

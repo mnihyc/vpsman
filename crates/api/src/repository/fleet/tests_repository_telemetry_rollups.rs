@@ -379,7 +379,7 @@ fn network_interface_policy_has_one_coherent_api_read_boundary() {
     let (raw_dashboard, _) = raw_dashboard
         .split_once("pub(crate) async fn dashboard_telemetry_start_unix")
         .expect("raw dashboard network reader boundary");
-    assert!(raw_dashboard.contains("list_projected_telemetry_network_history("));
+    assert!(raw_dashboard.contains("query_projected_telemetry_network_history("));
     assert!(raw_dashboard.contains("project_network_rate_selection("));
     assert!(!raw_dashboard.contains("telemetry_samples"));
     assert!(!raw_dashboard.contains("resolve_telemetry_interface_policies"));
@@ -1058,6 +1058,25 @@ fn client_detail_repository_has_no_second_owner_fallback() {
 
 #[test]
 fn selected_network_history_aggregation_preserves_the_existing_card_contract() {
+    let selected_streams = TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .find("selected_streams AS MATERIALIZED")
+        .expect("selected stream boundary");
+    let transition_derivation = TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .find("derived AS MATERIALIZED")
+        .expect("per-interface transition boundary");
+    let aggregate_output = TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .find("selected_output AS MATERIALIZED")
+        .expect("selected aggregate boundary");
+    assert!(selected_streams < transition_derivation);
+    assert!(transition_derivation < aggregate_output);
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("FROM UNNEST($7::TEXT[], $8::TEXT[])\n        selected(client_id, interface)"));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("PARTITION BY state.client_id, state.interface"));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL.contains(
+        "GROUP BY derived.client_id, derived.chart_start_unix,\n             derived.effective_step"
+    ));
+
     let point = |interface: &str,
                  sample_count: i32,
                  rx_bytes_avg: i64,
@@ -1082,7 +1101,7 @@ fn selected_network_history_aggregation_preserves_the_existing_card_contract() {
         tx_bps_avg,
         updated_at: updated_at.to_string(),
     };
-    let rows = aggregate_selected_network_history(vec![
+    let rows = aggregate_selected_network_history_oracle(vec![
         point("eth0", 2, 10, 20, 3, 4, 5.0, 6.0, "10:00:30", "10:00:31"),
         point("eth1", 3, 30, 40, 7, 8, 9.0, 10.0, "10:00:40", "10:00:41"),
     ]);
@@ -1341,7 +1360,7 @@ fn raw_network_payload_consumers_require_stored_bits_and_current_policy() {
     let (raw_dashboard, _) = raw_dashboard
         .split_once("pub(crate) async fn dashboard_telemetry_start_unix")
         .expect("raw dashboard host reader end");
-    assert!(raw_dashboard.contains("list_projected_telemetry_network_history("));
+    assert!(raw_dashboard.contains("query_projected_telemetry_network_history("));
     assert!(raw_dashboard.contains("project_network_rate_selection("));
     assert!(!raw_dashboard.contains("get_bit("));
     assert!(!raw_dashboard.contains("telemetry_samples"));

@@ -688,16 +688,10 @@ export function HomePanel({
           failedJobCount={failedJobs}
           fileTransfers={fileTransfers}
           fleetAlerts={fleetAlerts}
-          fleetAlertsEvidenceAvailable={fleetAlertsEvidenceAvailable}
           jobs={jobs}
           initialMonitoringCards={initialMonitoringCards}
           initialMonitoringCardsPending={initialMonitoringCardsPending}
           maxCards={8}
-          recordBounds={{
-            backups: recordBounds.backups,
-            fileTransfers: recordBounds.fileTransfers,
-            fleetAlerts: recordBounds.fleetAlerts,
-          }}
           runningJobCount={runningJobs}
           showCountryFlags={showCountryFlags}
           telemetryRollups={telemetryRollups}
