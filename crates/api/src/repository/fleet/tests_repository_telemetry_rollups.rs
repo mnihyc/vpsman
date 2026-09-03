@@ -906,8 +906,22 @@ fn client_detail_projection_preserves_complete_resource_and_interface_contracts(
     assert!(network.contains("'predecessor'::TEXT"));
     assert!(network.contains("PARTITION BY state.client_id, state.interface"));
     assert!(network.contains("state.rx_counter_epoch = state.previous_rx_epoch"));
-    assert!(network.contains("derived.sample_count, derived.rx_bytes_avg"));
-    assert!(network.contains("derived.rx_bytes_avg, derived.tx_bytes_avg"));
+    let (_, selected_per_interface) = network
+        .split_once("selected_output AS MATERIALIZED (")
+        .expect("selected network output");
+    let (selected_per_interface, _) = selected_per_interface
+        .split_once("FROM derived\n    WHERE NOT $9::BOOLEAN")
+        .expect("per-interface selected network output");
+    for field in [
+        "derived.sample_count",
+        "derived.rx_bytes_avg",
+        "derived.tx_bytes_avg",
+    ] {
+        assert!(
+            selected_per_interface.contains(field),
+            "per-interface network output omits {field}"
+        );
+    }
     assert!(!network.contains("sum(point.rx_bytes_avg"));
     assert!(network.contains("output.updated_at"));
     assert!(!network.contains("telemetry_dashboard_network_sparse_states"));
@@ -955,7 +969,19 @@ fn unified_projection_preserves_fractional_resource_times_nulls_and_terminal_net
     assert!(network.contains("extract(epoch FROM rate.latest_observed_at)::BIGINT"));
     assert!(network.contains("max(source.terminal_values) AS terminal_values"));
     assert!(network.contains("to_timestamp(row.terminal_values[1])"));
-    assert!(network.contains("derived.sample_count, derived.rx_bytes_avg, derived.tx_bytes_avg"));
+    let (_, selected_per_interface) = network
+        .split_once("selected_output AS MATERIALIZED (")
+        .expect("selected network output");
+    let (selected_per_interface, _) = selected_per_interface
+        .split_once("FROM derived\n    WHERE NOT $9::BOOLEAN")
+        .expect("per-interface selected network output");
+    for field in [
+        "derived.sample_count",
+        "derived.rx_bytes_avg",
+        "derived.tx_bytes_avg",
+    ] {
+        assert!(selected_per_interface.contains(field));
+    }
     for weighted_reduction in [
         "sum(point.rx_bytes_avg",
         "sum(point.tx_bytes_avg",
