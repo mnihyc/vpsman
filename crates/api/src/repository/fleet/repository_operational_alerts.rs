@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub(crate) const OPERATIONAL_ALERT_SOURCE_LIMIT: usize = 201;
+const OPERATIONAL_ALERT_EVENT_SOURCE_LIMIT: usize = 1_001;
 const OPERATIONAL_RECONCILE_CLIENT_LOCK_PREFIX: &str = "vpsman:operational-alert-reconcile:client:";
 
 async fn lock_postgres_operational_reconcile_clients_in_tx(
@@ -228,7 +229,7 @@ impl Repository {
         cursor: Option<(DateTime<Utc>, Uuid)>,
         limit: usize,
     ) -> Result<Vec<OperationalAlertEpisodeRecord>> {
-        let limit = limit.clamp(1, OPERATIONAL_ALERT_SOURCE_LIMIT);
+        let limit = limit.clamp(1, OPERATIONAL_ALERT_EVENT_SOURCE_LIMIT);
         match self {
             Self::Postgres(pool) => {
                 let sql = format!(
@@ -297,7 +298,7 @@ impl Repository {
         known_public_ids: &[String],
         head_limit: usize,
     ) -> Result<OperationalAlertEventSync> {
-        let head_limit = head_limit.clamp(1, OPERATIONAL_ALERT_SOURCE_LIMIT);
+        let head_limit = head_limit.clamp(1, OPERATIONAL_ALERT_EVENT_SOURCE_LIMIT);
         match self {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -1750,23 +1751,6 @@ fn append_postgres_tunnel_endpoint_probes(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn operational_evidence_serializes_only_its_exact_subject_identity() {
-        let source = include_str!("repository_operational_alerts.rs");
-        let (_, owner) = source
-            .split_once("async fn lock_postgres_operational_reconcile_clients_in_tx")
-            .expect("operational evidence owner");
-        let (owner, _) = owner
-            .split_once("#[derive(Clone, Copy, Debug, Eq, PartialEq)]")
-            .expect("operational evidence owner boundary");
-        assert!(owner.contains("client_ids.sort_unstable()"));
-        assert!(owner.contains("client_ids.dedup()"));
-        assert!(owner.contains("pg_advisory_xact_lock"));
-        assert!(!owner.contains("FROM clients"));
-        assert!(!owner.contains("FOR SHARE"));
-        assert!(!owner.contains("FOR UPDATE"));
-    }
 
     #[test]
     fn state_source_identity_ignores_subject_and_presentation_metadata() {

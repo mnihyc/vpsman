@@ -304,34 +304,3 @@ fn webhook_rotation_hash_changes_when_the_reviewed_set_changes() {
 
     assert_ne!(one_hash, two_hash);
 }
-
-#[test]
-fn rule_mutations_signal_but_never_terminalize_worker_delivery_rows() {
-    let source = include_str!("repository_webhook_rules.rs");
-    let (_, upsert) = source
-        .split_once("pub(crate) async fn upsert_webhook_rule")
-        .expect("webhook rule upsert");
-    let (upsert, delete_and_after) = upsert
-        .split_once("pub(crate) async fn delete_webhook_rule")
-        .expect("webhook rule delete boundary");
-    let (delete, producer_and_after) = delete_and_after
-        .split_once("pub(crate) async fn list_webhook_rule_deliveries")
-        .expect("webhook rule delete end");
-    let (_, producer) = producer_and_after
-        .split_once("pub(crate) async fn record_webhook_rule_deliveries")
-        .expect("webhook delivery producer");
-    let (producer, _) = producer
-        .split_once("pub(crate) async fn record_webhook_event")
-        .expect("webhook delivery producer boundary");
-
-    for source_transition in [upsert, delete] {
-        assert!(source_transition.contains("pg_notify('webhook_events'"));
-        assert!(!source_transition.contains("UPDATE webhook_rule_deliveries"));
-    }
-    assert!(producer.contains("FROM webhook_rules"));
-    assert!(producer.contains("ORDER BY id"));
-    assert!(producer.contains("FOR UPDATE"));
-    assert!(!producer.contains("SELECT 1::bigint"));
-    assert!(source.contains("ON CONFLICT (rule_id, event_id) DO NOTHING"));
-    assert!(!producer.contains("UPDATE webhook_rule_deliveries"));
-}

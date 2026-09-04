@@ -3073,7 +3073,7 @@ impl Repository {
             "fleet_alert_policy_bulk_confirmation_required"
         );
         anyhow::ensure!(
-            (1..=500).contains(&request.items.len()),
+            (1..=1_000).contains(&request.items.len()),
             "fleet_alert_policy_bulk_items_invalid"
         );
         let requested_ids = request.items.iter().map(|item| item.id).collect::<Vec<_>>();
@@ -3517,9 +3517,8 @@ impl Repository {
         start_unix: Option<u64>,
         end_unix: Option<u64>,
     ) -> Result<Vec<PolicyAlertRecord>> {
-        // Fleet alerts expose at most 200 rows. The snapshot loader may request
-        // one sentinel row so it can report an exact truncation boundary
-        // without a separate COUNT query.
+        // Snapshot alert evidence remains capped at 200 rows and may request
+        // one sentinel row to report truncation without a COUNT query.
         self.list_policy_alerts_matching(
             query,
             Some(limit.clamp(1, MAX_POLICY_ALERT_CANDIDATE_ROWS)),

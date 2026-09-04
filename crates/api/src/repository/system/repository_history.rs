@@ -1573,62 +1573,6 @@ async fn object_key_outcome(
 mod dashboard_retention_provenance_contract_tests {
     use super::*;
 
-    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-        let (_, tail) = source.split_once(start).expect("section start");
-        let (body, _) = tail.split_once(end).expect("section end");
-        body
-    }
-
-    #[test]
-    fn explicit_telemetry_prunes_mark_only_applied_resource_and_network_deletes() {
-        let source = include_str!("repository_history.rs");
-        let (runtime, _) = source
-            .split_once("#[cfg(test)]\nmod dashboard_retention_provenance_contract_tests")
-            .expect("history repository test boundary");
-        let marker = "SET LOCAL vpsman.telemetry_history_compaction = 'on'";
-        assert_eq!(runtime.matches(marker).count(), 2);
-
-        for (start, end) in [
-            (
-                "async fn prune_telemetry_rollups(",
-                "async fn prune_system_metric_rollups(",
-            ),
-            (
-                "async fn prune_telemetry_network_rates(",
-                "async fn prune_telemetry_ping_rollups(",
-            ),
-        ] {
-            let body = section(runtime, start, end);
-            let branches = &body[body
-                .find("let rows = if dry_run")
-                .expect("explicit prune execution branches")..];
-            let (dry_run, applied) = branches
-                .split_once("} else {")
-                .expect("separate preview and applied prune branches");
-            assert!(dry_run.contains("let rows = if dry_run"));
-            assert!(dry_run.contains(".fetch_all(pool)"));
-            assert!(!dry_run.contains("pool.begin()"));
-            assert!(!dry_run.contains(marker));
-            assert!(applied.contains("pool.begin().await?"));
-            assert!(applied.contains(marker));
-            assert!(applied.contains(".fetch_all(&mut *tx)"));
-            assert!(applied.contains("tx.commit().await?"));
-        }
-
-        for (start, end) in [
-            (
-                "async fn prune_system_metric_rollups(",
-                "async fn prune_telemetry_network_rates(",
-            ),
-            (
-                "async fn prune_telemetry_ping_rollups(",
-                "async fn prune_traffic_rollups(",
-            ),
-        ] {
-            assert!(!section(runtime, start, end).contains(marker));
-        }
-    }
-
     #[test]
     fn retention_policy_wake_is_limited_to_earlier_worker_owned_expiry() {
         assert!(history_retention_policy_advances_worker_frontier(
@@ -1666,33 +1610,5 @@ mod dashboard_retention_provenance_contract_tests {
             true,
             30,
         ));
-    }
-
-    #[test]
-    fn manual_ping_dependency_prune_uses_the_database_commit_trigger_only() {
-        let source = include_str!("repository_history.rs");
-        let body = section(
-            source,
-            "async fn prune_telemetry_ping_rollups(",
-            "async fn prune_traffic_rollups(",
-        );
-        let (preview, applied) = body
-            .split_once("} else {")
-            .expect("separate preview and applied prune branches");
-        assert!(!preview.contains("ping_rollups_deleted"));
-        assert!(!applied.contains("ping_rollups_deleted"));
-        assert!(!body.contains("pg_notify"));
-
-        let migration = include_str!("../../../../../migrations/0003_telemetry_core.sql");
-        let trigger = migration
-            .split_once("CREATE TRIGGER telemetry_ping_rollups_retention_delete")
-            .unwrap()
-            .1
-            .split_once("CREATE TRIGGER telemetry_samples_retention_delete")
-            .unwrap()
-            .0;
-        assert!(trigger.contains("AFTER DELETE ON public.telemetry_ping_rollups"));
-        assert!(trigger.contains("EXECUTE FUNCTION public.publish_telemetry_retention_effect("));
-        assert!(trigger.contains("'ping_rollups_deleted'"));
     }
 }

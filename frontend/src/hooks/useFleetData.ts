@@ -77,7 +77,7 @@ const FLEET_DETAIL_ERROR_SOURCE_ORDER = [
   "current policy alerts",
   "notification deliveries",
 ] as const;
-const FLEET_ALERT_EVENT_PAGE_LIMIT = 200;
+const FLEET_ALERT_EVENT_PAGE_LIMIT = 1_000;
 const FLEET_ALERT_EVENT_SYNC_ID_LIMIT = 5_000;
 const FLEET_DELIVERY_LIST_LIMIT = 200;
 type FleetErrorSource = (typeof FLEET_ERROR_SOURCE_ORDER)[number];

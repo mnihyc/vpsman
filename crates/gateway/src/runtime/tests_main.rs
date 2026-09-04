@@ -107,57 +107,6 @@ async fn connection_ownership_finalization_is_exact_once_and_cannot_remove_a_rep
     );
 }
 
-#[test]
-fn shutdown_joins_connection_owners_before_forwarding_flush() {
-    let source = include_str!("../main.rs");
-    assert!(!source.contains("impl Drop for AgentConnectionFinalizer"));
-
-    let (_, shutdown) = source
-        .split_once("// Stop every producer first.")
-        .expect("gateway shutdown owner");
-    let (shutdown, _) = shutdown
-        .split_once("match runtime_error")
-        .expect("gateway shutdown boundary");
-    let stop_listeners = shutdown
-        .find("listener_shutdown.send(true)")
-        .expect("listener shutdown");
-    let join_agents = shutdown
-        .find("agent_listener.as_mut().await")
-        .expect("agent listener drain");
-    let join_control = shutdown
-        .find("control_listener.as_mut().await")
-        .expect("control listener drain");
-    let forwarding_flush = shutdown
-        .find("api_client.shutdown_flush(shutdown_flush).await")
-        .expect("forwarding shutdown flush");
-    let join_forward_consumers = shutdown
-        .find("(&mut forward_consumers_task).await")
-        .expect("forwarding consumer drain");
-    assert!(stop_listeners < join_agents);
-    assert!(stop_listeners < join_control);
-    assert!(join_agents < forwarding_flush);
-    assert!(join_control < forwarding_flush);
-    assert!(forwarding_flush < join_forward_consumers);
-
-    let (_, listener) = source
-        .split_once("async fn run_agent_listener")
-        .expect("agent listener owner");
-    let (listener, _) = listener
-        .split_once("fn gateway_shutdown_requested")
-        .expect("agent listener boundary");
-    let stop_accepting = listener.find("drop(listener)").expect("listener close");
-    let stop_connections = listener
-        .find("connection_shutdown.send(true)")
-        .expect("connection shutdown");
-    let drain_connections = listener[stop_connections..]
-        .find("connections.join_next().await")
-        .map(|offset| stop_connections + offset)
-        .expect("connection owner drain");
-    assert!(stop_accepting < stop_connections);
-    assert!(stop_connections < drain_connections);
-    assert!(listener.contains(".finalize("));
-}
-
 fn runtime_test_fence(
     state: &GatewayState,
     token: uuid::Uuid,

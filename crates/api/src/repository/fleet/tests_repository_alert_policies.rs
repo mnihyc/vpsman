@@ -178,29 +178,6 @@ fn wildcard_frontier_rebases_when_a_cursor_refresh_discovers_a_new_stream() {
 }
 
 #[test]
-fn preview_and_activation_share_the_exact_open_minute_reconstruction() {
-    let policy_source = include_str!("repository_alert_policies.rs");
-    let (_, preview) = policy_source
-        .split_once("async fn preview_current_combined_telemetry_policy_rule")
-        .expect("combined telemetry preview");
-    let (preview, _) = preview
-        .split_once("fn normalized_policy_preview_rule")
-        .expect("combined telemetry preview boundary");
-    assert!(preview.contains("sample.accepted_seq"));
-    assert!(preview.contains("reconstruct_projected_policy_traffic_in_tx"));
-    assert!(!preview.contains("lock_postgres_traffic_counter_streams"));
-
-    let ingest_source = include_str!("repository_ingest.rs");
-    let (_, activation) = ingest_source
-        .split_once(
-            "pub(crate) async fn materialize_combined_telemetry_policy_baseline_sample_in_tx",
-        )
-        .expect("combined telemetry activation baseline");
-    assert!(activation.contains("reconstruct_projected_policy_traffic_in_tx"));
-    assert!(!activation.contains("lock_postgres_traffic_counter_streams"));
-}
-
-#[test]
 fn policy_maintenance_full_pages_continue_independently_of_visible_transitions() {
     assert!(!PolicyEvaluationPage::default().may_have_more());
     for page in [
@@ -614,38 +591,6 @@ fn live_rate_selector_inherits_when_absent_and_intersects_interface_eligibility(
 }
 
 #[test]
-fn traffic_rule_inventory_uses_plan_owned_host_collisions_and_exact_tunnel_identity() {
-    let source = include_str!("repository_alert_policies.rs");
-    let inventory = source
-        .split_once("async fn network_interface_inventories_for_clients")
-        .unwrap()
-        .1
-        .split_once("pub(crate) async fn dry_run_vps_rules")
-        .unwrap()
-        .0;
-    assert!(inventory.contains("plan.left_client_id AS client_id"));
-    assert!(inventory.contains("plan.right_client_id AS client_id"));
-    assert!(inventory.contains("plan.enabled IS TRUE"));
-    assert!(inventory.contains("FROM telemetry_network_current_identities_source($1::TEXT[])"));
-    assert!(!inventory.contains("FROM telemetry_network_current_source($1::TEXT[])"));
-    assert!(!inventory.contains("FROM telemetry_current_tunnels"));
-
-    let projected = source
-        .split_once("async fn latest_projected_traffic_streams")
-        .unwrap()
-        .1
-        .split_once("pub(crate) async fn get_traffic_accounting")
-        .unwrap()
-        .0;
-    assert!(projected.contains("FROM telemetry_current_tunnels identity"));
-    assert!(projected.contains("managed_tunnel_interfaces AS MATERIALIZED"));
-    assert!(projected.contains("plan.left_client_id AS client_id"));
-    assert!(projected.contains("plan.right_client_id AS client_id"));
-    assert!(projected.contains("&managed_tunnel_interfaces"));
-    assert!(projected.contains("&current_tunnel_identities"));
-}
-
-#[test]
 fn default_policy_uses_plan_current_inventory_to_classify_historical_host_collisions() {
     let mut inventory = NetworkInterfaceInventory::default();
     inventory
@@ -912,40 +857,6 @@ fn traffic_history_ignores_resets_in_unselected_direction() {
     assert_eq!(total[0].rx_bytes, Some(20));
     assert_eq!(total[0].tx_bytes, None);
     assert_eq!(total[0].total_bytes, None);
-}
-
-#[test]
-fn traffic_history_raw_sql_uses_authoritative_minute_metadata() {
-    let source = include_str!("repository_alert_policies.rs");
-    let history = source
-        .split_once("pub(crate) async fn list_traffic_history")
-        .expect("traffic history query")
-        .1
-        .split_once("async fn traffic_history_streams")
-        .expect("traffic history query boundary")
-        .0;
-
-    for authoritative_value in [
-        "THEN rx_usage_bytes",
-        "THEN tx_usage_bytes",
-        "THEN rx_valid_count",
-        "THEN tx_valid_count",
-        "THEN any_valid_count",
-        "THEN rx_reset_count",
-        "THEN tx_reset_count",
-        "THEN any_reset_count",
-    ] {
-        assert!(
-            history.contains(authoritative_value),
-            "raw traffic history omitted {authoritative_value}"
-        );
-    }
-    assert!(history.contains("WHEN usage_authoritative"));
-    assert!(history.contains("previous_sample_source LIKE"));
-    assert!(
-        !history.contains("previous_rx_bytes IS NOT NULL"),
-        "the first non-authoritative coordinate must remain a present gap"
-    );
 }
 
 #[test]

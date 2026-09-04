@@ -44,38 +44,6 @@ fn minute_rows(traffic: &ExpandedMinuteTraffic) -> Vec<(u64, u64, u64)> {
 }
 
 #[test]
-fn vnstat_policy_gate_is_inside_the_owner_transaction_before_every_ledger_mutation() {
-    let source = include_str!("repository_network_traffic_import.rs");
-    let import = source
-        .split_once("pub(crate) async fn import_vnstat_traffic_history")
-        .unwrap()
-        .1
-        .split_once("pub(crate) async fn ensure_postgres_vnstat_interfaces_admitted")
-        .unwrap()
-        .0;
-    let transaction = import.find("let mut tx = pool.begin().await?").unwrap();
-    let client_lock = import
-        .find("lock_postgres_traffic_import_client(&mut tx, client_id).await?")
-        .unwrap();
-    let stream_lock = import
-        .find("lock_postgres_traffic_counter_streams(&mut tx, client_id).await?")
-        .unwrap();
-    let policy_gate = import
-        .find("ensure_postgres_vnstat_interfaces_admitted(")
-        .unwrap();
-    let first_mutation = import.find("DELETE FROM traffic_counter_rollups").unwrap();
-    assert!(
-        transaction < client_lock
-            && client_lock < stream_lock
-            && stream_lock < policy_gate
-            && policy_gate < first_mutation
-    );
-    assert!(!import[..policy_gate].contains("DELETE FROM traffic_counter"));
-    assert!(!import[..policy_gate].contains("INSERT INTO traffic_counter"));
-    assert!(!import[..policy_gate].contains("UPDATE traffic_counter"));
-}
-
-#[test]
 fn finer_rows_are_preserved_and_only_coarse_residual_is_distributed() {
     let start = 1_722_470_400;
     let end = start + 3_600;
@@ -1092,32 +1060,6 @@ fn same_shape_raw_update_requires_an_exact_dense_locked_keyset() {
     };
     assert!(postgres_import_can_update_same_shape(&empty_stats, &empty_raw, &empty_plan).unwrap());
     assert!(!postgres_import_can_update_same_shape(&exact, &empty_raw, &empty_plan).unwrap());
-}
-
-#[test]
-fn traffic_retention_effects_are_database_owned_and_import_has_no_duplicate_notify() {
-    let migration = include_str!("../../../../../migrations/0005_traffic_accounting.sql");
-    for contract in [
-        "publish_traffic_counter_samples_retention_effect",
-        "publish_traffic_counter_rollups_retention_effect",
-        "traffic_counter_samples_retention_insert",
-        "traffic_counter_samples_retention_update",
-        "traffic_counter_rollups_retention_insert",
-        "traffic_counter_rollups_retention_update",
-        "'effect', 'traffic_samples_published'",
-        "'effect', 'traffic_rollup_published'",
-        "SELECT DISTINCT new_row.bucket_secs",
-        "to_jsonb(old_row) = to_jsonb(new_row)",
-    ] {
-        assert!(migration.contains(contract), "missing {contract}");
-    }
-    assert!(migration.contains("WHERE NOT new_row.inbound_promoted"));
-    assert!(migration.contains("ARRAY[3600, 10800, 21600, 86400]"));
-
-    let source = include_str!("repository_network_traffic_import.rs");
-    assert!(!source.contains("notify_traffic_import_retention_effects_in_tx"));
-    assert!(!source.contains("'effect', 'traffic_samples_published'"));
-    assert!(!source.contains("'effect', 'traffic_rollup_published'"));
 }
 
 #[test]

@@ -826,7 +826,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<Vec<TunnelPlanLifecycleUpdateResult>> {
         anyhow::ensure!(
-            (1..=500).contains(&updates.len()),
+            (1..=1_000).contains(&updates.len()),
             "tunnel_plan_lifecycle_items_invalid"
         );
         let requested_ids = updates

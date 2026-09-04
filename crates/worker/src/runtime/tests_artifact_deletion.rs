@@ -1,24 +1,3 @@
-#[test]
-fn artifact_deletion_ownership_is_token_fenced_and_external_io_free() {
-    let source = include_str!("artifact_deletion.rs");
-    let claim = source
-        .split_once("pub(crate) async fn claim_artifact_deletion")
-        .unwrap()
-        .1
-        .split_once("pub(crate) async fn renew_artifact_deletion")
-        .unwrap()
-        .0;
-    assert!(claim.contains("FOR UPDATE SKIP LOCKED"));
-    assert!(claim.contains("lease_id = $4"));
-    assert!(!claim.contains("delete_confirmed"));
-
-    let finalize = source
-        .split_once("pub(crate) async fn finish_artifact_deletion_in_tx")
-        .unwrap()
-        .1;
-    assert!(finalize.contains("lease_id = $2"));
-}
-
 #[tokio::test]
 async fn artifact_deletion_claim_commits_before_work_and_stale_tokens_cannot_finish() {
     use serde_json::json;

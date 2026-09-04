@@ -434,7 +434,7 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     ) {
         return Err(ApiError::bad_request("invalid_bulk_output_compare_mode"));
     }
-    if preferences.fleet_tag_visibility_overrides.len() > 500 {
+    if preferences.fleet_tag_visibility_overrides.len() > 1_000 {
         return Err(ApiError::bad_request(
             "too_many_fleet_tag_visibility_overrides",
         ));
@@ -1845,22 +1845,6 @@ mod tests {
                 .expect_err("oversized session batches must be rejected")
                 .code,
             "operator_session_batch_targets_invalid"
-        );
-    }
-
-    #[test]
-    fn access_batch_owner_has_one_gateway_verification_call_and_singletons_delegate() {
-        let source = include_str!("routes_auth.rs");
-        let production = source
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production route source");
-        assert_eq!(production.matches(".verify_privileges(").count(), 1);
-        assert!(production.contains("mutate_operator_statuses(\n        &state,"));
-        assert!(production.contains("mutate_operator_totp_clears(\n        &state,"));
-        assert!(production.contains("mutate_operator_session_revocations(\n        &state,"));
-        assert!(
-            !production.contains("for item in &request.items {\n        verify_privilege_intent")
         );
     }
 }

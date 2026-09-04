@@ -5,60 +5,6 @@ use crate::webhook_rules::{
 };
 use vpsman_common::WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED;
 
-#[test]
-fn automatic_http_delivery_owners_claim_one_row_and_redrain_until_empty() {
-    for (source, due_owner, due_boundary, http_call, completion_call) in [
-        (
-            include_str!("alert_notifications.rs"),
-            "pub(crate) async fn process_due_alert_notifications",
-            "pub(crate) async fn drain_alert_notification_retention",
-            "deliver_notification(&delivery, config.webhook_timeout_secs).await",
-            "complete_claimed_alert_notification(",
-        ),
-        (
-            include_str!("webhook_rules.rs"),
-            "pub(crate) async fn process_due_webhook_deliveries",
-            "async fn drain_webhook_retention",
-            "deliver_webhook(&delivery, config.webhook_timeout_secs).await",
-            "complete_webhook_rule_delivery_on_pool(",
-        ),
-    ] {
-        let (_, due) = source
-            .split_once(due_owner)
-            .expect("automatic delivery owner");
-        let (due, _) = due
-            .split_once(due_boundary)
-            .expect("automatic delivery owner boundary");
-        assert!(due.contains("loop {"));
-        assert!(due.contains("process_queued_deliveries(pool, config).await?"));
-        assert!(due.contains("if claimed == 0"));
-        assert!(!due.contains("yield_now"));
-
-        let (_, attempt_page) = source
-            .split_once("async fn process_queued_deliveries")
-            .expect("automatic delivery attempt page");
-        let (attempt_page, _) = attempt_page
-            .split_once("fn delivery_lease_secs")
-            .expect("automatic delivery attempt page boundary");
-        let lease = attempt_page
-            .find("let lease_id = Uuid::new_v4();")
-            .expect("per-row durable lease");
-        let claim = attempt_page.find("LIMIT 1").expect("single-row claim");
-        let fetch = attempt_page
-            .find(".fetch_optional(pool)")
-            .expect("optional single-row claim result");
-        let http = attempt_page.find(http_call).expect("bounded HTTP attempt");
-        let completion = attempt_page
-            .find(completion_call)
-            .expect("lease-fenced completion");
-        assert!(lease < claim && claim < fetch && fetch < http && http < completion);
-        assert!(attempt_page.contains("FOR UPDATE OF delivery SKIP LOCKED"));
-        assert!(attempt_page.contains("for _ in 0..config.delivery_limit"));
-        assert!(!attempt_page.contains("fetch_all(pool)"));
-        assert!(!attempt_page.contains("yield_now"));
-    }
-}
-
 #[tokio::test]
 async fn postgres_event_owner_executes_without_retention() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {

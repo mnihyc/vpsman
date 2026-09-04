@@ -29,7 +29,7 @@ import type {
 import type { PrivilegeAssertion } from "../privilege";
 import { sanitizeOperatorPreferences } from "../utils";
 
-const ACCESS_BULK_LIMIT = 500;
+const ACCESS_BULK_LIMIT = 1_000;
 
 export type AccessProjection =
   | "profile"

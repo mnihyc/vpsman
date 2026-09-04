@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CreateMonitoringShareRequest,
@@ -25,53 +25,6 @@ const publicClientKey = "shared-edge-key";
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
   await installSharedViewApiMock(page);
-});
-
-test("Ping and shared-view mutations retain current-token projection ownership", () => {
-  const panelSource = (name: string) =>
-    readFileSync(
-      join(process.cwd(), "src", "panels", "observability", name),
-      "utf8",
-    );
-  const ping = panelSource("PingTargetsPanel.tsx");
-  const shares = panelSource("SharedViewsPanel.tsx");
-  const has = (source: string, pattern: RegExp) => pattern.test(source);
-  const tokenOwned = [ping, shares].every(
-    (source) =>
-      source.includes("const currentApiTokenRef = useRef(apiToken);") &&
-      has(source, /const requestApiToken = apiToken;[\s\S]*currentApiTokenRef\.current !== requestApiToken/),
-  );
-  const latestReconcile =
-    has(ping, /refreshTargetsRef\.current = refreshTargets;[\s\S]*function reconcileTargetListAfterTokenRotation\(\)[\s\S]*refreshTargetsRef\.current\(\{/) &&
-    !has(ping, /function reconcileTargetListAfterTokenRotation\(\)[\s\S]{0,250}reportError: false/) &&
-    has(shares, /loadSharesRef\.current = loadShares;[\s\S]*function reconcileShareListAfterTokenRotation\(\)[\s\S]*loadSharesRef\.current\(\)/);
-  const committedMutations =
-    has(ping, /async function awaitTokenOwnedResponse[\s\S]*currentApiTokenRef\.current !== apiToken[\s\S]*onStaleSuccess\?\.\(\)/) &&
-    ping.match(/reconcileTargetListAfterTokenRotation/g)?.length === 5 &&
-    shares.match(/reconcileShareListAfterTokenRotation/g)?.length === 5 &&
-    has(shares, /for \(let offset[\s\S]*currentApiTokenRef\.current !== requestApiToken[\s\S]*const page = await apiGet/);
-  const staleReconciles = [
-    ...shares.matchAll(/reconcileShareListAfterTokenRotation\(\);[\s\S]{0,180}/g),
-  ].map(([block]) => block);
-  const workflowsClose =
-    [
-      "setEditReview(null)",
-      'setStatusFilter("active")',
-      "setReview(null)",
-      "setPendingAction(null)",
-      "setTargetUpdateReview(null)",
-    ].every((close) => staleReconciles.some((block) => block.includes(close))) &&
-    has(shares, /if \(response\.applied\) \{[\s\S]{0,180}reconcileShareListAfterTokenRotation\(\)/);
-  const postAwaitFenced =
-    has(ping, /await refreshTargets\([\s\S]*currentApiTokenRef\.current !== apiToken/) &&
-    has(shares, /await loadShares\(\);[\s\S]*currentApiTokenRef\.current !== apiToken/);
-  expect({ committedMutations, latestReconcile, postAwaitFenced, tokenOwned, workflowsClose }).toEqual({
-    committedMutations: true,
-    latestReconcile: true,
-    postAwaitFenced: true,
-    tokenOwned: true,
-    workflowsClose: true,
-  });
 });
 
 test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", async ({

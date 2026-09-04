@@ -63,7 +63,7 @@ const MAX_SHARE_EXPIRY_SECS: u64 = 365 * 24 * 60 * 60;
 const MAX_MONITORING_SELECTOR_BYTES: usize = 4_096;
 const MAX_SHARE_SELECTOR_BYTES: usize = 65_535;
 const MAX_SHARE_TARGETS: usize = 1_000;
-const MAX_BULK_PING_TARGET_UPDATES: usize = 500;
+const MAX_BULK_PING_TARGET_UPDATES: usize = 1_000;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct MonitoringCardsQuery {

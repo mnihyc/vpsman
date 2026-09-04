@@ -100,7 +100,7 @@ import {
   ALERT_EVENT_ARGV_SCALAR_PATHS,
 } from "../generated/protocolContracts";
 
-const SCHEDULE_TARGET_UPDATE_BATCH_LIMIT = 500;
+const SCHEDULE_TARGET_UPDATE_BATCH_LIMIT = 1_000;
 const SCHEDULE_SELECTOR_STORAGE_KEY = "vpsman.schedules.selectorExpression";
 const EVENT_SCHEDULE_NOOP_ARGV = ["/bin/true"];
 const EVENT_SCHEDULE_ECHO_RECIPE =

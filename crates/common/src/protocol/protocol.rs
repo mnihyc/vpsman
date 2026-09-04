@@ -1181,7 +1181,7 @@ pub struct GatewaySessionDisconnectResult {
     pub message: String,
 }
 
-pub const GATEWAY_CONTROL_BATCH_MAX_ITEMS: usize = 500;
+pub const GATEWAY_CONTROL_BATCH_MAX_ITEMS: usize = 1_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewaySessionDisconnectBatchRequest {
@@ -1258,7 +1258,7 @@ pub struct GatewayClientDispatchFenceClear {
     pub reason: String,
 }
 
-pub const GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS: usize = 500;
+pub const GATEWAY_CLIENT_DISPATCH_FENCE_BATCH_MAX_ITEMS: usize = 1_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

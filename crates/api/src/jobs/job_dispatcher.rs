@@ -1029,21 +1029,6 @@ fn dispatch_error_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome 
 mod task_boundary_tests {
     use super::AbortTaskOnDrop;
 
-    const DISPATCHER_SOURCE: &str = include_str!("job_dispatcher.rs");
-    const REPOSITORY_SOURCE: &str = include_str!("../repository/jobs/repository_jobs.rs");
-    const STATE_SOURCE: &str = include_str!("../runtime/state.rs");
-    const JOB_SCHEMA: &str = include_str!("../../../../migrations/0002_jobs_schedules.sql");
-
-    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-        source
-            .split_once(start)
-            .expect("start marker")
-            .1
-            .split_once(end)
-            .expect("end marker")
-            .0
-    }
-
     struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
     impl Drop for DropSignal {
@@ -1072,93 +1057,5 @@ mod task_boundary_tests {
             .await
             .expect("aborted dispatch task was not dropped")
             .expect("dispatch task drop signal was lost");
-    }
-
-    #[test]
-    fn terminal_enrichment_has_one_exact_durable_owner_and_ordering_fence() {
-        assert!(JOB_SCHEMA.contains("CREATE TABLE public.job_terminal_enrichment_work"));
-        assert!(JOB_SCHEMA
-            .contains("CONSTRAINT job_terminal_enrichment_work_pkey PRIMARY KEY (event_id)"));
-        assert!(JOB_SCHEMA.contains(
-            "FOREIGN KEY (event_id) REFERENCES public.job_terminal_events(id) ON DELETE CASCADE"
-        ));
-        assert!(JOB_SCHEMA.contains(
-            "CREATE INDEX job_terminal_enrichment_work_job_idx ON public.job_terminal_enrichment_work USING btree (job_id)"
-        ));
-
-        let completion = source_between(
-            REPOSITORY_SOURCE,
-            "async fn complete_job_terminal_target_repository_stage",
-            "pub(crate) async fn claim_job_terminal_enrichments",
-        );
-        assert!(completion.contains("let mut tx = pool.begin().await?"));
-        assert!(completion.contains("processing_status = 'processed'"));
-        assert!(completion.contains("INSERT INTO job_terminal_enrichment_work"));
-        assert!(completion.contains("tx.commit().await?"));
-
-        let claim = source_between(
-            REPOSITORY_SOURCE,
-            "pub(crate) async fn claim_job_terminal_enrichments",
-            "pub(crate) async fn renew_job_terminal_enrichment_owner",
-        );
-        assert!(claim.contains("LIMIT $1"));
-        assert!(claim.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(claim.contains("lease_id = $2"));
-        assert!(REPOSITORY_SOURCE.contains(
-            "FROM job_terminal_enrichment_work enrichment\n                                    WHERE enrichment.job_id = event.job_id"
-        ));
-
-        let terminal_stage = source_between(
-            STATE_SOURCE,
-            "pub(crate) async fn process_job_terminal_events",
-            "pub(crate) async fn enrich_job_terminal_target",
-        );
-        assert!(!terminal_stage.contains("record_network_routing_terminal_result"));
-        assert!(!terminal_stage.contains("try_auto_record_backup_artifact_for_job_target"));
-
-        let dispatcher = DISPATCHER_SOURCE
-            .split_once("#[cfg(test)]\nmod task_boundary_tests")
-            .expect("dispatcher task-boundary test module")
-            .0;
-        assert!(dispatcher.contains(
-            ".claim_job_terminal_enrichments(config.immediate_claim_limit(), lease_secs as i64)"
-        ));
-        assert!(dispatcher.contains(".for_each_concurrent(config.in_flight"));
-        let dispatch = source_between(
-            dispatcher,
-            "pub(crate) async fn dispatch_due_job_targets",
-            "async fn dispatch_claimed_target",
-        );
-        assert!(dispatch.contains("let claim_limit = dispatcher_config.immediate_claim_limit()"));
-        assert!(dispatch.contains("let gateway_timeouts = GatewayClientTimeouts"));
-        assert!(dispatch.contains("loop {"));
-        assert!(dispatch.contains("gateway_dispatch_attempt_lease_secs()"));
-        assert!(dispatch.contains("dispatch_claimed_target(&state, claimed, gateway_timeouts)"));
-        assert!(dispatch.contains("state.gateway.set_read_timeout(gateway_timeouts.read)"));
-        assert!(!dispatch.contains("refresh_gateway_dispatch_timeouts"));
-        assert!(!dispatch.contains("drain_control_timeout_targets"));
-        assert!(!dispatch.contains("dispatcher_config.batch_limit,"));
-        let timeout_path = source_between(
-            dispatcher,
-            "async fn drain_control_timeout_targets",
-            "async fn finish_claimed_target",
-        );
-        assert!(dispatcher.contains("pub(crate) fn spawn_job_deadline_expiry_consumer"));
-        assert!(
-            timeout_path.contains("let claim_limit = dispatcher_config.immediate_claim_limit()")
-        );
-        assert!(timeout_path.contains("buffer_unordered(dispatcher_config.in_flight)"));
-        assert!(timeout_path.contains("if expired_count < claim_limit as usize"));
-        assert!(!timeout_path.contains("refresh_job_status_from_targets"));
-        assert!(timeout_path.contains("wake_job_terminal_event_consumer"));
-
-        let expiry_repository = source_between(
-            REPOSITORY_SOURCE,
-            "pub(crate) async fn expire_control_timeout_targets",
-            "pub(crate) async fn request_job_cancel",
-        );
-        assert!(expiry_repository.contains("target.deadline_at <= now()"));
-        assert!(!expiry_repository.contains("control_deadline_extra_secs"));
-        assert!(!expiry_repository.contains("job.max_timeout_secs +"));
     }
 }

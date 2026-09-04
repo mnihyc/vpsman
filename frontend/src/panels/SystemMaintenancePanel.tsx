@@ -77,8 +77,8 @@ type Feedback = {
   tone: ActionFeedbackTone;
 };
 
-const SCHEDULE_TARGET_UPDATE_BATCH_LIMIT = 500;
-const PING_TARGET_UPDATE_BATCH_LIMIT = 500;
+const SCHEDULE_TARGET_UPDATE_BATCH_LIMIT = 1_000;
+const PING_TARGET_UPDATE_BATCH_LIMIT = 1_000;
 const MONITORING_SHARE_UPDATE_BATCH_LIMIT = 1_000;
 
 const maintenanceTabs: Array<{

@@ -89,7 +89,7 @@ pub(crate) fn normalized_target_client_ids_allow_empty(
             ids.push(id.to_string());
         }
     }
-    if ids.len() > 500 {
+    if ids.len() > 1_000 {
         return Err(ApiError::bad_request("too_many_fixed_targets"));
     }
     Ok(ids)

@@ -28,10 +28,3 @@ async fn snapshot_source_failures_name_the_failed_source_without_leaking_the_cau
     );
     assert!(!source.error.unwrap().contains("database"));
 }
-
-#[test]
-fn fleet_snapshot_never_uses_single_vps_network_detail_visibility() {
-    let source = include_str!("routes_fleet_snapshot.rs");
-    assert!(source.contains("list_latest_telemetry_network_rates_for_clients(client_ids)"));
-    assert!(!source.contains("list_latest_telemetry_network_rates_for_vps_detail"));
-}

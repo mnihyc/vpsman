@@ -224,7 +224,7 @@ const commonScopeOptions = [
 ];
 const defaultSessionTtlDays = 365;
 const defaultAdminSessionTtlDays = 30;
-const accessBulkActionLimit = 500;
+const accessBulkActionLimit = 1_000;
 
 function defaultSessionTtlDaysForRole(role: string): number {
   return role === "admin" ? defaultAdminSessionTtlDays : defaultSessionTtlDays;

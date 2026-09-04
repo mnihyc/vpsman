@@ -354,7 +354,7 @@ impl Repository {
         allow_vps_rule_selectors: bool,
     ) -> Result<WebhookRuleBulkResponse> {
         anyhow::ensure!(
-            (1..=500).contains(&request.items.len()),
+            (1..=1_000).contains(&request.items.len()),
             "webhook_rule_bulk_items_invalid"
         );
         let requested_ids = request.items.iter().map(|item| item.id).collect::<Vec<_>>();

@@ -503,7 +503,7 @@ async fn resolve_override_targets(
             "configuration_source_override_targets_required",
         ));
     }
-    if selected.len() > 500 {
+    if selected.len() > 1_000 {
         return Err(ApiError::bad_request(
             "configuration_source_override_targets_too_many",
         ));

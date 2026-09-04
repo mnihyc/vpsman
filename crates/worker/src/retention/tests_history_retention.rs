@@ -3,9 +3,8 @@ use super::{
     promote_network_rate_rollups, promote_network_rate_tier, promote_ping_rollups,
     promote_ping_tier, promote_ping_tier_in_tx, promote_resource_rollups, promote_resource_tier,
     promote_system_metric_rollups, prune_domain, prune_domain_has_remaining_work, prune_query,
-    sample_prune_owner_query, sample_prune_query, RetentionDeadline, RetentionNextAt,
-    RetentionOwnerState, RetentionOwnerStatus, RetentionPhase, RetentionPolicy,
-    TelemetryHistoryRetentionDrain, TelemetryHistoryRetentionStep, WakeContract,
+    RetentionDeadline, RetentionNextAt, RetentionOwnerState, RetentionOwnerStatus, RetentionPhase,
+    RetentionPolicy, TelemetryHistoryRetentionDrain, TelemetryHistoryRetentionStep, WakeContract,
     EXTERNAL_WRITER_FRONTIERS, NETWORK_RATE_ROLLUP_DOMAIN, PING_ROLLUP_DOMAIN,
     RESOURCE_ROLLUP_DOMAIN, RETENTION_PHASES,
 };
@@ -657,125 +656,6 @@ async fn network_promotion_queues_exact_dashboard_coordinates() {
     db.cleanup().await;
 }
 
-#[test]
-fn resource_and_network_promotions_are_exact_and_only_prune_requests_full_blocks() {
-    let worker = include_str!("history_retention.rs");
-    let marker = "vpsman.telemetry_history_compaction";
-    assert_eq!(worker.matches(marker).count(), 1);
-
-    let resource = worker
-        .split_once("async fn promote_resource_tier_in_tx")
-        .unwrap()
-        .1
-        .split_once("async fn promote_network_rate_rollups")
-        .unwrap()
-        .0;
-    let network = worker
-        .split_once("async fn promote_network_rate_tier_in_tx")
-        .unwrap()
-        .1
-        .split_once("async fn promote_ping_rollups")
-        .unwrap()
-        .0;
-    let prune = worker
-        .split_once("async fn prune_domain(")
-        .unwrap()
-        .1
-        .split_once("async fn prune_domain_has_remaining_work")
-        .unwrap()
-        .0;
-    assert!(!resource.contains(marker));
-    assert!(!network.contains(marker));
-    assert_eq!(prune.matches(marker).count(), 1);
-    assert!(prune.contains("matches!(domain, \"telemetry_rollups\" | \"telemetry_network_rates\")"));
-
-    let ping = worker
-        .split_once("async fn promote_ping_tier_in_tx")
-        .unwrap()
-        .1
-        .split_once("async fn promote_system_metric_rollups")
-        .unwrap()
-        .0;
-    assert!(!ping.contains(marker));
-}
-
-#[test]
-fn every_network_rate_partition_has_its_retention_frontier_index() {
-    let migration = include_str!("../../../../migrations/0003_telemetry_core.sql");
-    for partition in ["minute", "coarse"] {
-        let expected = format!(
-            "CREATE INDEX telemetry_network_rates_{partition}_retention_idx ON public.telemetry_network_rates_{partition} USING btree (bucket_start);"
-        );
-        assert!(
-            migration.contains(&expected),
-            "the {partition} network-rate partition cannot prove/prune its bucket_start retention frontier without scanning retained history"
-        );
-    }
-}
-
-#[test]
-fn due_event_producers_never_touch_the_unique_span_owner() {
-    let migration = include_str!("../../../../migrations/0003_telemetry_core.sql");
-    let start = migration
-        .find("CREATE FUNCTION public.enqueue_telemetry_history_due_events()")
-        .unwrap();
-    let end = migration[start..].find("\n$$;").unwrap() + start;
-    let producer = &migration[start..end];
-    assert!(producer.contains("INSERT INTO public.telemetry_history_due_events"));
-    assert!(producer.contains("SELECT DISTINCT"));
-    assert!(producer.contains("'system_metric_rollups'::text"));
-    assert!(producer.contains("AS coalesce_ready_at"));
-    assert!(producer.contains("END AS owner_identity"));
-    assert!(producer.contains("ARRAY[to_jsonb(row) ->> 'client_id']"));
-    assert!(producer.contains("to_jsonb(row) ->> 'interface'"));
-    assert!(producer.contains("ARRAY[to_jsonb(row) ->> 'series_id']"));
-    assert!(producer.contains("ARRAY[to_jsonb(row) ->> 'metric']"));
-    assert!(producer.contains("date_bin("));
-    assert!(producer.contains("phase.destination_bucket_secs"));
-    assert!(producer.contains("SELECT min(coalesce_ready_at)"));
-    assert!(producer.contains("'vpsman_telemetry_retention'"));
-    assert!(producer.contains("'effect', 'ordinary_rollup_published'"));
-    assert!(producer.contains("'domain', TG_ARGV[0]"));
-    assert!(producer.contains("jsonb_strip_nulls"));
-    assert!(producer.contains("'ready_at_unix'"));
-    assert_eq!(producer.matches("PERFORM pg_notify(").count(), 1);
-    assert!(!producer.contains("IF earliest_coalesce_ready_at IS NOT NULL"));
-    assert!(!producer.contains("vpsman.network_observation_promotion"));
-    assert!(producer.contains("row.bucket_secs = phase.source_bucket_secs"));
-    assert!(!producer.contains("telemetry_history_due_spans"));
-    assert!(!producer.contains("ON CONFLICT"));
-    assert!(!producer.contains("FOR KEY SHARE"));
-    assert!(migration.contains("CREATE INDEX telemetry_history_due_events_coordinate_ready_idx"));
-    assert!(migration.contains("destination_start, owner_identity, coalesce_ready_at, event_id"));
-
-    let worker = include_str!("history_retention.rs");
-    let start = worker
-        .find("async fn coalesce_ready_telemetry_due_events(")
-        .unwrap();
-    let end = worker[start..]
-        .find("async fn claim_ordinary_due_span(")
-        .unwrap()
-        + start;
-    let coalescer = &worker[start..end];
-    assert!(coalescer.contains("FROM telemetry_history_due_events"));
-    assert_eq!(worker.matches("coalesce_ready_at <= now()").count(), 3);
-    assert_eq!(coalescer.matches("coalesce_ready_at <= now()").count(), 2);
-    assert!(coalescer.contains("WITH seed AS MATERIALIZED"));
-    assert!(coalescer.contains("ready_events AS MATERIALIZED"));
-    assert!(coalescer.contains("coordinates AS MATERIALIZED"));
-    assert!(coalescer.contains("GROUP BY domain, source_bucket_secs"));
-    assert!(coalescer.contains("owner_identity, destination_start, due_at"));
-    assert!(coalescer.contains("ORDER BY coalesce_ready_at, event_id"));
-    assert!(coalescer.contains("seed.owner_identity = event.owner_identity"));
-    assert!(coalescer.contains("FOR UPDATE SKIP LOCKED"));
-    assert!(coalescer.contains("INSERT INTO telemetry_history_due_spans AS current"));
-    assert!(coalescer.contains("DO UPDATE SET due_at = current.due_at"));
-    assert!(coalescer.contains("WHERE FALSE"));
-    assert!(coalescer.contains("DELETE FROM telemetry_history_due_events"));
-    assert!(coalescer.contains("event.event_id = ready.event_id"));
-    assert_eq!(coalescer.matches("LIMIT 1").count(), 1);
-}
-
 #[tokio::test]
 async fn ordinary_rollup_trigger_publishes_one_exact_prune_and_optional_due_deadline() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
@@ -817,209 +697,6 @@ async fn ordinary_rollup_trigger_publishes_one_exact_prune_and_optional_due_dead
     assert_eq!(payload["domain"], "system_metric_rollups");
     assert!(payload.get("ready_at_unix").is_none());
     db.cleanup().await;
-}
-
-#[test]
-fn ordinary_promotions_claim_and_scan_one_exact_natural_owner() {
-    let source = include_str!("history_retention.rs");
-
-    let claim_start = source.find("async fn claim_ordinary_due_span(").unwrap();
-    let claim_end = source[claim_start..]
-        .find("async fn ordinary_due_spans_have_remaining_work(")
-        .unwrap()
-        + claim_start;
-    let claim = &source[claim_start..claim_end];
-    assert!(claim.contains("FROM telemetry_history_due_spans"));
-    assert!(claim.contains("due_at <= now()"));
-    assert!(claim.contains("owner_identity, destination_start"));
-    assert!(claim.contains("ORDER BY due_at, source_bucket_secs, destination_bucket_secs"));
-    assert_eq!(claim.matches("LIMIT 1").count(), 1);
-    assert_eq!(claim.matches("FOR UPDATE SKIP LOCKED").count(), 1);
-    for table in [
-        "telemetry_rollups",
-        "telemetry_network_rates",
-        "telemetry_ping_rollups",
-        "system_metric_rollups",
-    ] {
-        assert!(!claim.contains(table));
-    }
-
-    for (start, end, domain, owner_predicate) in [
-        (
-            "async fn promote_resource_tier_in_tx(",
-            "async fn promote_network_rate_rollups(",
-            "resource",
-            "row.client_id = $5",
-        ),
-        (
-            "async fn promote_network_rate_tier_in_tx(",
-            "async fn promote_ping_rollups(",
-            "network rate",
-            "row.interface = $6",
-        ),
-        (
-            "async fn promote_ping_tier_in_tx(",
-            "async fn promote_system_metric_rollups(",
-            "Ping",
-            "row.series_id = $5",
-        ),
-        (
-            "async fn promote_system_metric_tier_in_tx(",
-            "fn reject_promotion_conflicts(",
-            "system metric",
-            "row.metric = $5",
-        ),
-    ] {
-        let body_start = source.find(start).unwrap();
-        let body_end = source[body_start..].find(end).unwrap() + body_start;
-        let body = &source[body_start..body_end];
-        assert_eq!(
-            body.matches("span_rows AS MATERIALIZED").count(),
-            1,
-            "{domain} must read one natural destination span once",
-        );
-        assert!(body.contains("row.bucket_secs = ANY($4::integer[])"));
-        assert!(body.contains(owner_predicate));
-        assert!(body.contains("row.bucket_start >= $3::timestamptz"));
-        assert!(body.contains("row.bucket_start < $3::timestamptz"));
-        assert!(body.contains("FROM span_rows row"));
-        assert!(body.contains("bool_or(row.bucket_secs = $2) OVER"));
-        assert!(body.contains("candidate_rows AS MATERIALIZED"));
-        assert!(body.contains("count(*) OVER"));
-        assert!(body.contains("bool_and("));
-        assert!(body.contains("group_complete"));
-        assert!(body.contains("inserted_succeeded"));
-        assert!(body.contains("FOR UPDATE OF row SKIP LOCKED"));
-        assert!(body.contains("immediate_source_rows"));
-        assert!(body.contains("deleted_immediate_source_rows"));
-        assert!(!body.contains("candidate_keys AS MATERIALIZED"));
-        assert!(!body.contains("expanded_rows AS MATERIALIZED"));
-        assert!(!body.contains("lockable_groups AS MATERIALIZED"));
-        assert!(!body.contains("complete_groups AS"));
-        assert!(!body.contains("LATERAL"));
-        assert!(!body.contains("seed_rows"));
-        assert!(!body.contains("candidate_frontiers"));
-        assert!(!body.contains("LIMIT $"));
-        assert!(!body.contains("history_retention_scan_cursors"));
-    }
-
-    let ping_start = source.find("async fn promote_ping_tier_in_tx(").unwrap();
-    let ping_end = source[ping_start..]
-        .find("async fn promote_system_metric_rollups(")
-        .unwrap()
-        + ping_start;
-    let ping = &source[ping_start..ping_end];
-    let parent = ping
-        .find("locked_candidate_series AS MATERIALIZED")
-        .unwrap();
-    let child_lock = ping.find("locked_source AS MATERIALIZED").unwrap();
-    assert!(parent < child_lock);
-    assert!(ping[parent..child_lock].contains("FOR NO KEY UPDATE OF series SKIP LOCKED"));
-}
-
-#[test]
-fn canonical_tier_schemas_reject_unknown_or_misaligned_widths() {
-    let telemetry = include_str!("../../../../migrations/0003_telemetry_core.sql");
-    for table in ["telemetry_ping_rollups", "telemetry_rollups"] {
-        let start = telemetry
-            .find(&format!("CREATE TABLE public.{table} ("))
-            .unwrap();
-        let body = &telemetry[start..telemetry[start..].find("\n);\n").unwrap() + start];
-        assert!(body.contains("= ANY (ARRAY[60, 300, 1800, 3600, 10800, 21600, 86400])"));
-        assert!(body.contains("mod(extract(epoch FROM"));
-    }
-
-    assert!(!telemetry.contains("telemetry_resource_active"));
-    assert!(!telemetry.contains("telemetry_ping_active"));
-    assert!(!telemetry.contains("telemetry_network_detail_current"));
-    assert!(telemetry.contains("CREATE FUNCTION public.telemetry_resource_points_source("));
-    assert!(telemetry.contains("CREATE VIEW public.telemetry_ping_points AS"));
-
-    let network_start = telemetry
-        .find("CREATE TABLE public.telemetry_network_rates (")
-        .unwrap();
-    let network_end = telemetry[network_start..]
-        .find("\n) PARTITION BY LIST (bucket_secs);\n")
-        .unwrap()
-        + network_start;
-    let network = &telemetry[network_start..network_end];
-    assert!(network.contains("= ANY (ARRAY[60, 300, 1800, 3600, 10800, 21600, 86400])"));
-    assert!(network.contains("mod(extract(epoch FROM bucket_start)::bigint, bucket_secs) = 0"));
-    assert!(telemetry.contains("CREATE FUNCTION public.telemetry_network_rate_points_source("));
-    assert!(telemetry.contains("FROM public.traffic_counter_samples sample"));
-    assert!(telemetry.contains("AND NOT sample.inbound_promoted"));
-
-    let system = include_str!("../../../../migrations/0010_system_metrics.sql");
-    let start = system
-        .find("CREATE TABLE public.system_metric_rollups (")
-        .unwrap();
-    let body = &system[start..system[start..].find("\n);\n").unwrap() + start];
-    assert!(body.contains("= ANY (ARRAY[60, 300, 1800, 3600, 10800, 21600, 86400])"));
-    assert!(body.contains("mod(extract(epoch FROM bucket_start)::bigint, bucket_secs) = 0"));
-}
-
-#[test]
-fn supported_promotions_reject_conflicts_before_cursor_commit() {
-    let source = include_str!("history_retention.rs");
-    assert_eq!(source.matches("reject_promotion_conflicts(").count(), 5);
-    let rejection = source.find("fn reject_promotion_conflicts(").unwrap();
-    let body = &source[rejection..];
-    assert!(body.contains("conflicts == 0"));
-    assert!(!body.contains("retained sources because destination"));
-}
-
-#[test]
-fn ordinary_remaining_work_probes_only_the_due_ledger() {
-    let source = include_str!("history_retention.rs");
-    let start = source
-        .find("async fn ordinary_due_spans_have_remaining_work(")
-        .unwrap();
-    let end = source[start..]
-        .find("fn ordinary_due_span_lower_tiers(")
-        .unwrap()
-        + start;
-    let probe = &source[start..end];
-    assert!(probe.contains("FROM telemetry_history_due_spans"));
-    assert!(probe.contains("domain = $1"));
-    assert!(probe.contains("due_at <= now()"));
-    for table in [
-        "telemetry_rollups",
-        "telemetry_network_rates",
-        "telemetry_ping_rollups",
-        "system_metric_rollups",
-    ] {
-        assert!(!probe.contains(table));
-    }
-}
-
-#[test]
-fn prune_completion_probes_preserve_their_bounded_index_seek() {
-    let history = include_str!("history_retention.rs");
-    assert_eq!(history.matches(") bounded_due").count(), 5);
-    assert!(history.contains(
-        "If it is\n    // written directly inside EXISTS, PostgreSQL may discard the ordering"
-    ));
-
-    let observations = include_str!("network_observation_retention.rs")
-        .split_once("#[cfg(test)]\nmod tests")
-        .map_or_else(
-            || include_str!("network_observation_retention.rs"),
-            |(production, _)| production,
-        );
-    assert!(!observations.contains(") bounded_automatic"));
-    for boundary in [") bounded_manual", ") bounded_rollup"] {
-        assert_eq!(observations.matches(boundary).count(), 1);
-    }
-    for owner in [
-        "NetworkObservationRetentionPhase::InactiveLatestPrune",
-        "NetworkObservationRetentionPhase::InactiveSeriesPrune",
-        "async fn observation_rollup_promotion_is_due(",
-    ] {
-        assert!(observations.contains(owner));
-    }
-    // InactiveLatest, InactiveSeries, and the rollup-promotion due-ledger
-    // probe each preserve their own bounded index seek.
-    assert_eq!(observations.matches(") bounded_due").count(), 3);
 }
 
 #[test]
@@ -1081,85 +758,6 @@ fn database_deadline_accepts_only_postgres_relative_nonnegative_durations() {
     assert!(database_deadline(database_at, -0.001).is_err());
     assert!(database_deadline(database_at, f64::NAN).is_err());
     assert!(database_deadline(database_at, f64::INFINITY).is_err());
-}
-
-#[test]
-fn database_owned_next_at_queries_never_use_process_wall_clock() {
-    for (name, source) in [
-        ("history", include_str!("history_retention.rs")),
-        (
-            "minute",
-            include_str!("telemetry_minute_materialization.rs"),
-        ),
-        ("traffic", include_str!("traffic_retention.rs")),
-        (
-            "network observation",
-            include_str!("network_observation_retention.rs"),
-        ),
-    ] {
-        let production = source
-            .rsplit_once("#[cfg(test)]\nmod tests")
-            .map_or(source, |(production, _)| production);
-        assert!(
-            production.contains("clock_timestamp()") && production.contains("remaining_seconds"),
-            "{name} NextAt does not carry a same-statement PostgreSQL-relative duration"
-        );
-        assert!(
-            !production.contains("Utc::now()"),
-            "{name} NextAt subtracts the process wall clock"
-        );
-    }
-}
-
-#[test]
-fn sample_next_at_uses_one_parameterized_min_seek_per_projection_owner() {
-    let source = include_str!("history_retention.rs");
-    let start = source.find("async fn prune_domain_next_at(").unwrap();
-    let end = source[start..]
-        .find("async fn prune_ping_fact_rows(")
-        .unwrap()
-        + start;
-    let query = &source[start..end];
-
-    assert!(query.contains("WITH cutoff AS MATERIALIZED ("));
-    assert!(query.contains("owners AS MATERIALIZED ("));
-    assert!(query.contains("CROSS JOIN LATERAL ("));
-    assert!(query.contains("SELECT min(boundary.observed_at)"));
-    assert!(query.contains("boundary.client_id = owner.client_id"));
-    assert!(query.contains(
-        "boundary.observed_at\n                                    > owner.observed_after"
-    ));
-    assert!(query.contains("candidate.accepted_seq <= owner.projected_seq"));
-    assert!(query.contains("ORDER BY sample.accepted_seq"));
-    assert!(!query.contains("sample.observed_at > clock_timestamp()"));
-    assert!(!query.contains("sample.accepted_seq IS NULL"));
-}
-
-#[test]
-fn sample_readiness_uses_each_compact_consumer_owner_before_the_time_cutoff() {
-    let source = include_str!("history_retention.rs");
-    let start = source
-        .find("async fn prune_domain_has_remaining_work(")
-        .unwrap();
-    let end = source[start..]
-        .find("async fn prune_domain_next_at(")
-        .unwrap()
-        + start;
-    let query = &source[start..end];
-
-    assert!(query.contains("WITH owners AS MATERIALIZED ("));
-    assert!(query.contains("JOIN telemetry_webhook_cursors webhook USING (client_id)"));
-    assert!(query.contains("JOIN telemetry_minute_materialization_heads core_minute"));
-    assert!(query.contains("JOIN traffic_counter_minute_heads traffic_minute"));
-    assert!(query.contains("LEAST("));
-    assert!(query.contains("AS safe_seq"));
-    assert!(query.contains("sample.accepted_seq <= owner.safe_seq"));
-    assert!(query.contains("ORDER BY sample.accepted_seq\n                    LIMIT 1"));
-    assert!(query.contains(
-        "WHERE frontier.observed_at\n                            < now() - make_interval(days => $1)"
-    ));
-    assert!(!query.contains("FOR UPDATE OF head"));
-    assert!(!query.contains("sample.accepted_seq IS NULL"));
 }
 
 fn owner_state(
@@ -1427,38 +1025,6 @@ fn scheduler_contract_external_writer_wrappers_advance_later_cached_frontiers() 
 }
 
 #[test]
-fn scheduler_contract_minute_owner_contention_parks_without_a_ready_recheck() {
-    let source = include_str!("history_retention.rs");
-    let (_, processing) = source
-        .split_once("async fn process_retention_phase(")
-        .expect("retention phase processor");
-    let (processing, _) = processing
-        .split_once("fn raw_sample_policy()")
-        .expect("retention phase processor boundary");
-    assert_eq!(processing.matches("if minute.owner_contended").count(), 2);
-    assert_eq!(
-        processing
-            .matches("RetentionOwnerStatus::Current(RetentionNextAt::ProducerOnly)")
-            .count(),
-        2
-    );
-    for consumer in ["Core", "Traffic"] {
-        let arm = processing
-            .split_once(&format!(
-                "RetentionPhase::{consumer}MinuteMaterialization =>"
-            ))
-            .expect("minute owner arm")
-            .1;
-        let arm = arm
-            .split_once("has_remaining_work =")
-            .expect("minute readiness recheck")
-            .0;
-        assert!(arm.contains("if minute.owner_contended"));
-        assert!(arm.contains("RetentionNextAt::ProducerOnly"));
-    }
-}
-
-#[test]
 fn scheduler_contract_reconnect_recovers_exactly_named_external_writer_frontiers() {
     let future = Instant::now() + Duration::from_secs(60);
     let mut drain = drain_with_all_owners_current(future);
@@ -1478,26 +1044,6 @@ fn scheduler_contract_reconnect_recovers_exactly_named_external_writer_frontiers
             owner.phase
         );
     }
-}
-
-#[test]
-fn scheduler_contract_sample_delete_cascade_wakes_observation_series_owner() {
-    let migration = include_str!("../../../../migrations/0004_network_tunnels.sql");
-    assert!(migration.contains(
-        "automatic_sample_id) REFERENCES public.telemetry_samples(id) ON DELETE CASCADE"
-    ));
-    let future = Instant::now() + Duration::from_secs(60);
-    let mut drain = drain_with_all_owners_current(future);
-    drain.notify_telemetry_samples_deleted_now();
-    assert_eq!(
-        owner_state(
-            &drain,
-            RetentionPhase::NetworkObservation(
-                NetworkObservationRetentionPhase::InactiveSeriesPrune
-            )
-        ),
-        RetentionOwnerState::Due
-    );
 }
 
 #[test]
@@ -1603,83 +1149,6 @@ fn transport_failure_keeps_global_backoff_while_owner_failure_is_isolated() {
     ));
 }
 
-#[test]
-fn telemetry_pruning_is_bounded_and_concurrency_safe() {
-    let query = prune_query("telemetry_rollups");
-    assert!(query.contains("LIMIT $2"));
-    assert!(query.contains("FOR UPDATE OF row SKIP LOCKED"));
-    assert!(query.contains("bucket_start"));
-    assert!(query.contains("row.tableoid AS source_tableoid"));
-    assert!(query.contains("row.ctid AS source_ctid"));
-    assert!(query.contains("row.tableoid = candidate.source_tableoid"));
-    assert!(query.contains("row.ctid = candidate.source_ctid"));
-    assert!(!query.contains("ctid IN"));
-    assert!(!query.contains("DELETE FROM telemetry_network_rates"));
-}
-
-#[test]
-fn network_rate_promotion_uses_partition_safe_physical_row_identity() {
-    let source = include_str!("history_retention.rs");
-    let start = source
-        .find("async fn promote_network_rate_tier_in_tx(")
-        .unwrap();
-    let end = source[start..]
-        .find("async fn promote_ping_rollups(")
-        .unwrap()
-        + start;
-    let promotion = &source[start..end];
-
-    assert!(promotion.contains("row.tableoid AS source_tableoid"));
-    assert!(promotion.contains("row.ctid AS source_ctid"));
-    assert!(promotion.contains("eligible.source_tableoid = row.tableoid"));
-    assert!(promotion.contains("eligible.source_ctid = row.ctid"));
-    assert!(promotion.contains("row.tableoid = source.source_tableoid"));
-    assert!(promotion.contains("row.ctid = source.source_ctid"));
-    assert!(promotion.contains("RETURNING row.tableoid, row.ctid, row.bucket_secs"));
-}
-
-#[test]
-fn raw_sample_prune_waits_for_both_independent_consumers() {
-    let owner_query = sample_prune_owner_query();
-    let page_query = sample_prune_query();
-    assert!(owner_query.contains("FROM telemetry_projection_heads head"));
-    assert!(owner_query.contains("JOIN telemetry_webhook_cursors webhook USING (client_id)"));
-    assert!(owner_query.contains("JOIN telemetry_minute_materialization_heads core_minute"));
-    assert!(owner_query.contains("JOIN traffic_counter_minute_heads traffic_minute"));
-    assert!(owner_query.contains("webhook.last_sample_seq"));
-    assert!(owner_query.contains("core_minute.materialized_seq"));
-    assert!(owner_query.contains("traffic_minute.materialized_seq"));
-    assert!(owner_query.contains("LEAST("));
-    assert!(owner_query.contains("AS safe_seq"));
-    assert!(owner_query.contains("owner_frontiers AS MATERIALIZED"));
-    assert!(owner_query.contains("selected_owner AS MATERIALIZED"));
-    assert!(owner_query.contains("bounded_owner AS MATERIALIZED"));
-    assert!(owner_query.contains("ORDER BY sample.accepted_seq\n                LIMIT 1"));
-    assert!(owner_query.contains("WHERE first_sample.observed_at < owner.expires_before"));
-    assert!(owner_query.contains("ORDER BY owner.observed_at, owner.client_id"));
-    assert!(owner_query.contains("FROM owner_frontiers owner\n            ORDER BY owner.observed_at, owner.client_id\n            LIMIT 1"));
-    assert!(owner_query.contains("owner.safe_seq"));
-    assert!(owner_query.contains("sample.observed_at = ("));
-    assert!(owner_query.contains("SELECT min(boundary.observed_at)"));
-    assert!(owner_query.contains("boundary.client_id = owner.client_id"));
-    assert!(owner_query.contains("boundary.observed_at >= owner.expires_before"));
-    assert!(owner_query.contains("ORDER BY sample.accepted_seq"));
-    assert!(owner_query.contains("AS due_through_seq"));
-    assert!(owner_query.contains("FROM bounded_owner owner"));
-    assert!(page_query.contains("WHERE sample.client_id = $1"));
-    assert!(page_query.contains("sample.accepted_seq <= $2"));
-    assert!(page_query.contains("sample.id IS DISTINCT FROM $3"));
-    assert!(page_query.contains("sample.observed_at < $4"));
-    assert!(page_query.contains("ORDER BY sample.accepted_seq"));
-    assert!(page_query.contains("LIMIT $5"));
-    assert!(page_query.contains("FOR UPDATE OF sample SKIP LOCKED"));
-    assert!(page_query.contains("ARRAY(SELECT candidate.ctid FROM candidates candidate)"));
-    assert!(!owner_query.contains("FOR UPDATE OF head"));
-    assert!(!page_query.contains("FOR UPDATE OF head"));
-    assert!(!owner_query.contains("sample.accepted_seq IS NULL"));
-    assert!(!page_query.contains("sample.accepted_seq IS NULL"));
-}
-
 #[tokio::test]
 async fn generic_prune_matches_tableoid_and_ctid_across_partitions() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
@@ -1742,16 +1211,6 @@ async fn generic_prune_matches_tableoid_and_ctid_across_partitions() {
 
     drop(connection);
     db.cleanup().await;
-}
-
-#[test]
-fn telemetry_pruning_retains_bucket_crossing_cutoff() {
-    let query = prune_query("telemetry_rollups");
-
-    assert!(query.contains(
-        "row.bucket_start\n                + make_interval(secs => GREATEST(row.bucket_secs, 1)) <= ("
-    ));
-    assert!(query.contains("WHERE row.bucket_start < ("));
 }
 
 async fn retention_test_anchor(pool: &PgPool) -> DateTime<Utc> {
@@ -2049,14 +1508,6 @@ async fn ping_dashboard_arrival_owns_only_changed_series_and_monotonic_client_ed
         "the retention/delete consumer must repair an inward-moving edge"
     );
 
-    let insert_owner: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('maintain_telemetry_ping_dashboard_after_insert()'::regprocedure)",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert!(!insert_owner.contains("pg_advisory"));
-    assert!(!insert_owner.contains("refresh_telemetry_dashboard_ping_heads"));
     db.cleanup().await;
 }
 

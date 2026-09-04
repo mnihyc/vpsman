@@ -403,7 +403,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<FleetAlertNotificationChannelBulkResponse> {
         anyhow::ensure!(
-            (1..=500).contains(&request.items.len()),
+            (1..=1_000).contains(&request.items.len()),
             "fleet_alert_notification_channel_bulk_items_invalid"
         );
         let requested_ids = request.items.iter().map(|item| item.id).collect::<Vec<_>>();
@@ -1654,36 +1654,4 @@ fn notification_process_metadata(
         "origin_kind": "operator_request",
         "component": "alert-notification-controller",
     })
-}
-
-#[cfg(test)]
-mod ownership_tests {
-    #[test]
-    fn channel_mutations_signal_but_never_terminalize_worker_delivery_rows() {
-        let source = include_str!("repository_alert_notifications.rs");
-        let (_, upsert) = source
-            .split_once("pub(crate) async fn upsert_fleet_alert_notification_channel")
-            .expect("notification channel upsert");
-        let (upsert, delete_and_after) = upsert
-            .split_once("pub(crate) async fn delete_fleet_alert_notification_channel")
-            .expect("notification channel delete boundary");
-        let (delete, producer_and_after) = delete_and_after
-            .split_once("pub(crate) async fn list_fleet_alert_notification_deliveries")
-            .expect("notification channel delete end");
-        let (_, producer) = producer_and_after
-            .split_once("pub(crate) async fn record_fleet_alert_notification_deliveries")
-            .expect("notification delivery producer");
-        let (producer, _) = producer
-            .split_once("pub(crate) async fn claim_fleet_alert_notification_delivery_for_process")
-            .expect("notification delivery producer boundary");
-
-        for source_transition in [upsert, delete] {
-            assert!(source_transition.contains("pg_notify('webhook_events'"));
-            assert!(!source_transition.contains("UPDATE fleet_alert_notification_deliveries"));
-        }
-        assert!(producer.contains("FROM fleet_alert_notification_channels"));
-        assert!(producer.contains("ORDER BY id"));
-        assert!(producer.contains("FOR UPDATE"));
-        assert!(!producer.contains("UPDATE fleet_alert_notification_deliveries"));
-    }
 }

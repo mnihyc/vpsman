@@ -53,9 +53,10 @@ use crate::{
     util::{limit_or_default, parse_timestamp_utc},
 };
 
-const FLEET_ALERT_EVENT_PAGE_LIMIT: usize = 200;
+const FLEET_ALERT_ACTION_LIMIT: usize = 1_000;
+const FLEET_ALERT_EVENT_PAGE_LIMIT: usize = FLEET_ALERT_ACTION_LIMIT;
 const FLEET_ALERT_EVENT_SYNC_ID_LIMIT: usize = 5_000;
-const ALERT_CONFIGURATION_BULK_ITEM_LIMIT: usize = 500;
+const ALERT_CONFIGURATION_BULK_ITEM_LIMIT: usize = 1_000;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct FleetAlertEventCursor {
@@ -141,8 +142,11 @@ pub(crate) async fn list_fleet_alert_events(
         operator_state: query.operator_state,
         include_muted: query.include_muted,
     };
-    validate_alert_query(&fleet_query)?;
-    let limit = fleet_query.limit.unwrap_or(50).clamp(1, 200) as usize;
+    validate_alert_event_query(&fleet_query)?;
+    let limit = fleet_query
+        .limit
+        .unwrap_or(50)
+        .clamp(1, FLEET_ALERT_EVENT_PAGE_LIMIT as i64) as usize;
     let cursor = decode_fleet_alert_event_cursor(query.cursor.as_deref())?;
     let mut episodes = state
         .repo
@@ -454,7 +458,7 @@ fn validate_bulk_fleet_alert_resolution(
             "fleet_alert_resolution_reason_invalid",
         ));
     }
-    if request.items.is_empty() || request.items.len() > 1_000 {
+    if request.items.is_empty() || request.items.len() > FLEET_ALERT_ACTION_LIMIT {
         return Err(ApiError::bad_request(
             "fleet_alert_resolution_items_invalid",
         ));
@@ -1110,6 +1114,19 @@ fn validate_alert_query(query: &FleetAlertQuery) -> Result<(), ApiError> {
             return Err(ApiError::bad_request("fleet_alert_limit_invalid"));
         }
     }
+    validate_alert_query_fields(query)
+}
+
+fn validate_alert_event_query(query: &FleetAlertQuery) -> Result<(), ApiError> {
+    if let Some(limit) = query.limit {
+        if !(1..=FLEET_ALERT_EVENT_PAGE_LIMIT as i64).contains(&limit) {
+            return Err(ApiError::bad_request("fleet_alert_limit_invalid"));
+        }
+    }
+    validate_alert_query_fields(query)
+}
+
+fn validate_alert_query_fields(query: &FleetAlertQuery) -> Result<(), ApiError> {
     if let Some(client_id) = query.client_id.as_deref() {
         if client_id.is_empty() || client_id.len() > 128 {
             return Err(ApiError::bad_request("fleet_alert_client_id_invalid"));
@@ -1184,7 +1201,7 @@ fn validate_bulk_alert_state_request(
             "fleet_alert_state_confirmation_required",
         ));
     }
-    if request.items.is_empty() || request.items.len() > 1_000 {
+    if request.items.is_empty() || request.items.len() > FLEET_ALERT_ACTION_LIMIT {
         return Err(ApiError::bad_request("fleet_alert_state_items_invalid"));
     }
     let mut alert_ids = HashSet::with_capacity(request.items.len());

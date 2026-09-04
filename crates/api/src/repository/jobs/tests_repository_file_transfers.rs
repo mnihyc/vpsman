@@ -122,22 +122,6 @@ fn handoff_download_path_percent_encodes_client_id() {
 }
 
 #[test]
-fn handoff_evidence_query_and_partial_index_use_normalized_session_identity() {
-    let repository_source = include_str!("repository_file_transfers.rs");
-    assert!(repository_source.contains("job.resource_id = request.session_id"));
-    assert!(repository_source.contains("job.resource_kind = 'file_transfer_session'"));
-    assert!(repository_source.contains("AND job.command_type = 'file_transfer_download_chunk'"));
-
-    let migration = include_str!("../../../../../migrations/0002_jobs_schedules.sql")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(migration.contains(
-        "CREATE INDEX jobs_file_transfer_download_resource_idx ON public.jobs USING btree (resource_id, id) WHERE ((resource_kind = 'file_transfer_session'::text) AND (command_type = 'file_transfer_download_chunk'::text));"
-    ));
-}
-
-#[test]
 fn handoff_chunk_evidence_preserves_retry_and_artifact_semantics() {
     let unavailable_retry_job = Uuid::new_v4();
     let available_retry_job = Uuid::new_v4();

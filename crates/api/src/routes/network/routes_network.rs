@@ -45,7 +45,7 @@ use crate::{
     util::limit_or_default,
 };
 
-const MAX_BULK_TUNNEL_PLAN_LIFECYCLE_ITEMS: usize = 500;
+const MAX_BULK_TUNNEL_PLAN_LIFECYCLE_ITEMS: usize = 1_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

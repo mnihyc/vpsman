@@ -218,7 +218,7 @@ fn normalize_fleet_tag_visibility_overrides(
     let mut normalized = BTreeMap::new();
     for (tag, visible) in values {
         let tag = tag.trim();
-        if tag.is_empty() || tag.len() > 128 || normalized.len() >= 500 {
+        if tag.is_empty() || tag.len() > 128 || normalized.len() >= 1_000 {
             continue;
         }
         normalized.insert(tag.to_string(), visible);

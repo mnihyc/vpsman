@@ -265,8 +265,23 @@ fn fleet_alert_bulk_validation_rejects_duplicates_and_overflow() {
     assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "fleet_alert_state_duplicate_item");
 
+    let bounded = BulkUpdateFleetAlertStatesRequest {
+        action: "acknowledge".to_string(),
+        items: (0..FLEET_ALERT_ACTION_LIMIT)
+            .map(|index| BulkFleetAlertStateItem {
+                alert_id: format!("alert:bounded:{index}"),
+                expected_revision: 0,
+            })
+            .collect(),
+        muted_for_secs: None,
+        reason: None,
+        confirmed: true,
+    };
+    validate_bulk_alert_state_request(&bounded)
+        .expect("every occurrence loaded in one action-sized page must be actionable");
+
     let overflow = BulkUpdateFleetAlertStatesRequest {
-        items: (0..=1_000)
+        items: (0..=FLEET_ALERT_ACTION_LIMIT)
             .map(|index| BulkFleetAlertStateItem {
                 alert_id: format!("alert:overflow:{index}"),
                 expected_revision: 0,
@@ -306,10 +321,22 @@ fn fleet_alert_bulk_resolution_freezes_unique_bounded_generations() {
     let error = validate_bulk_fleet_alert_resolution(&invalid_generation).unwrap_err();
     assert_eq!(error.code, "fleet_alert_resolution_generation_invalid");
 
+    let bounded: BulkResolveFleetAlertsRequest = serde_json::from_value(serde_json::json!({
+        "confirmed": true,
+        "reason": "Reviewed complete incident selection",
+        "items": (0..FLEET_ALERT_ACTION_LIMIT).map(|index| serde_json::json!({
+            "alert_id": format!("alert:bounded:{index}"),
+            "expected_trigger_generation": 1
+        })).collect::<Vec<_>>()
+    }))
+    .unwrap();
+    validate_bulk_fleet_alert_resolution(&bounded)
+        .expect("every occurrence loaded in one action-sized page must be resolvable");
+
     let overflow: BulkResolveFleetAlertsRequest = serde_json::from_value(serde_json::json!({
         "confirmed": true,
         "reason": "Reviewed bounded incident selection",
-        "items": (0..=1_000).map(|index| serde_json::json!({
+        "items": (0..=FLEET_ALERT_ACTION_LIMIT).map(|index| serde_json::json!({
             "alert_id": format!("alert:overflow:{index}"),
             "expected_trigger_generation": 1
         })).collect::<Vec<_>>()
@@ -349,4 +376,26 @@ fn fleet_alert_event_sync_ids_are_unique_normalized_and_request_bounded() {
     .unwrap_err();
     assert_eq!(overflow.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(overflow.code, "fleet_alert_event_sync_items_invalid");
+}
+
+#[test]
+fn current_alert_occurrence_page_accepts_the_atomic_action_capacity() {
+    let query = FleetAlertQuery {
+        limit: Some(FLEET_ALERT_EVENT_PAGE_LIMIT as i64),
+        client_id: None,
+        severity: None,
+        category: None,
+        operator_state: None,
+        include_muted: Some(true),
+    };
+    validate_alert_event_query(&query).expect("one atomic alert selection must be loadable");
+
+    let oversized = FleetAlertQuery {
+        limit: Some(FLEET_ALERT_EVENT_PAGE_LIMIT as i64 + 1),
+        ..query
+    };
+    assert_eq!(
+        validate_alert_event_query(&oversized).unwrap_err().code,
+        "fleet_alert_limit_invalid"
+    );
 }

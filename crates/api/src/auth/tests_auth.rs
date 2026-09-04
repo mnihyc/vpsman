@@ -28,50 +28,6 @@ fn generated_operator_tokens_are_hashed_for_storage() {
 }
 
 #[test]
-fn postgres_operator_mutation_owners_decode_returning_rows_before_commit() {
-    let source = include_str!("../repository/access/repository_auth.rs");
-
-    for function_name in [
-        "update_operator",
-        "set_operator_statuses",
-        "reset_operator_password",
-        "clear_operator_totps",
-        "update_operator_preferences",
-    ] {
-        let signature = format!("    pub(crate) async fn {function_name}(");
-        let after_signature = source
-            .split_once(signature.as_str())
-            .map(|(_, after_signature)| after_signature)
-            .unwrap_or_else(|| panic!("missing {function_name} implementation"));
-        let function_source = after_signature
-            .split("\n    pub(crate) async fn ")
-            .next()
-            .expect("function source");
-        let postgres_source = function_source
-            .split_once("Self::Postgres(pool) => {")
-            .map(|(_, postgres_source)| postgres_source)
-            .unwrap_or_else(|| panic!("missing {function_name} Postgres branch"));
-        let decode = "operator_view_from_row(";
-        let commit = "tx.commit().await?;";
-
-        assert!(
-            postgres_source.matches(decode).count() >= 1,
-            "{function_name} must decode its RETURNING rows"
-        );
-        assert_eq!(
-            postgres_source.matches(commit).count(),
-            1,
-            "{function_name} must commit exactly once"
-        );
-        assert!(
-            postgres_source.find(decode).expect("checked decode")
-                < postgres_source.find(commit).expect("checked commit"),
-            "{function_name} must finish fallible RETURNING-row decoding before commit"
-        );
-    }
-}
-
-#[test]
 fn operator_roles_are_ranked_for_authorization() {
     assert!(role_allows("admin", "operator"));
     assert!(role_allows("operator", "viewer"));

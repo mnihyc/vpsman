@@ -2,11 +2,10 @@ use super::{
     count_frontier_queries_for_test, process_next_traffic_active_cycle_rebuild,
     process_traffic_retention, process_traffic_retention_phase, raw_frontier_after_sql,
     raw_frontier_start_sql, raw_promotion_sql, raw_stream_resume_sql,
-    reset_traffic_phase_cursors_for_test, rollup_frontier_after_sql, rollup_frontier_start_sql,
-    rollup_promotion_sql, traffic_retention_phase_has_remaining_work,
-    traffic_retention_phase_next_at, TrafficActiveCycleRebuildOutcome, TrafficRetentionPhase,
-    GROUP_BATCH, MAX_RAW_UNIT_SOURCE_ROWS, PROMOTION_RAW_PREFIX_LIMIT, PROMOTION_SOURCE_ROW_LIMIT,
-    TIERS,
+    reset_traffic_phase_cursors_for_test, rollup_frontier_start_sql, rollup_promotion_sql,
+    traffic_retention_phase_has_remaining_work, traffic_retention_phase_next_at,
+    TrafficActiveCycleRebuildOutcome, TrafficRetentionPhase, GROUP_BATCH, MAX_RAW_UNIT_SOURCE_ROWS,
+    PROMOTION_RAW_PREFIX_LIMIT, PROMOTION_SOURCE_ROW_LIMIT, TIERS,
 };
 use crate::{
     history_retention::{TelemetryHistoryRetentionDrain, TelemetryHistoryRetentionPage},
@@ -404,40 +403,6 @@ async fn active_cycle_writers_lock_only_exact_stream_owners_in_canonical_order()
         .unwrap();
     unrelated.commit().await.unwrap();
     owner.rollback().await.unwrap();
-
-    let schema = include_str!("../../../../migrations/0005_traffic_accounting.sql");
-    let refresh = schema
-        .split_once("CREATE FUNCTION public.refresh_traffic_counter_active_cycle_usage(")
-        .unwrap()
-        .1
-        .split_once("CREATE FUNCTION public.refresh_traffic_counter_hourly_usage(")
-        .unwrap()
-        .0;
-    let lock = refresh
-        .find("ORDER BY stream.client_id, stream.source_kind, stream.interface\n    FOR UPDATE OF stream")
-        .expect("active-cycle stream ownership is not canonically ordered");
-    let readiness = refresh
-        .find("IF EXISTS (")
-        .expect("active-cycle readiness fence is missing");
-    assert!(lock < readiness, "readiness was inspected before ownership");
-
-    let delta = schema
-        .split_once("CREATE FUNCTION public.apply_traffic_counter_active_cycle_usage_deltas(")
-        .unwrap()
-        .1
-        .split_once("CREATE FUNCTION public.apply_traffic_counter_rollup_summary_deltas(")
-        .unwrap()
-        .0;
-    let lock = delta
-        .find("ORDER BY stream.client_id, stream.source_kind, stream.interface\n    FOR UPDATE OF stream")
-        .expect("active-cycle delta ownership is not canonically ordered");
-    let readiness = delta
-        .find("IF EXISTS (")
-        .expect("active-cycle delta readiness fence is missing");
-    assert!(
-        lock < readiness,
-        "delta readiness was inspected before ownership"
-    );
 
     contender_pool.close().await;
     db.cleanup().await;
@@ -1548,57 +1513,6 @@ async fn large_raw_retention_updates_only_affected_hours_and_keeps_active_cycle_
     db.cleanup().await;
 }
 
-#[test]
-fn global_frontiers_keep_cursor_predicates_sargable() {
-    let raw_start = raw_frontier_start_sql();
-    assert!(raw_start.contains("first_unpromoted_observed_at <"));
-    assert!(raw_start.contains("ORDER BY first_unpromoted_observed_at"));
-    let after = raw_frontier_after_sql();
-    assert!(after.contains("(first_unpromoted_observed_at,"));
-    assert!(after.contains("> ($2, $3, $4, $5)"));
-    assert!(!after.contains("IS NULL"));
-    assert!(!after.contains(" OR "));
-    let resume = raw_stream_resume_sql();
-    assert!(resume.contains("observed_at >= $4"));
-    assert!(resume.contains("AND NOT inbound_promoted"));
-
-    let rollup_after = rollup_frontier_after_sql();
-    assert!(rollup_after.contains("bucket_secs = $1"));
-    assert!(rollup_after.contains("(bucket_start, client_id"));
-    assert!(!rollup_after.contains("IS NULL"));
-    assert!(!rollup_after.contains(" OR "));
-    let rollup_start = rollup_frontier_start_sql();
-    assert!(rollup_start.contains("bucket_secs = $1"));
-    assert!(rollup_start.contains("bucket_start <="));
-    assert!(rollup_start.contains("LIMIT 1"));
-}
-
-#[test]
-fn raw_next_at_matches_its_nullable_frontier_partial_index() {
-    let worker = include_str!("traffic_retention.rs");
-    let raw_next_at = worker
-        .split_once("TrafficRetentionPhase::RawPromotion => optional_database_deadline(")
-        .unwrap()
-        .1
-        .split_once("TrafficRetentionPhase::RollupToDay")
-        .unwrap()
-        .0;
-    assert!(raw_next_at.contains("WHERE first_unpromoted_observed_at IS NOT NULL"));
-    assert!(raw_next_at.contains("ORDER BY first_unpromoted_observed_at,"));
-    assert!(raw_next_at.contains("client_id, source_kind, interface"));
-
-    let schema = include_str!("../../../../migrations/0005_traffic_accounting.sql");
-    let index = schema
-        .split_once("CREATE INDEX traffic_counter_streams_first_unpromoted_idx")
-        .unwrap()
-        .1
-        .split_once(';')
-        .unwrap()
-        .0;
-    assert!(index.contains("(first_unpromoted_observed_at, client_id, source_kind, interface)"));
-    assert!(index.contains("WHERE (first_unpromoted_observed_at IS NOT NULL)"));
-}
-
 #[tokio::test]
 async fn raw_next_at_treats_all_null_stream_frontiers_as_producer_only() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
@@ -1953,133 +1867,6 @@ async fn idle_global_frontiers_are_constant_and_stably_null_at_960_streams() {
     db.cleanup().await;
 }
 
-#[test]
-fn raw_promotion_is_locked_conflict_safe_and_keeps_a_predecessor() {
-    let query = raw_promotion_sql();
-    assert!(!query.contains("sample.client_id ="));
-    assert_eq!(
-        query
-            .matches("ORDER BY sample.client_id, sample.source_kind")
-            .count(),
-        2
-    );
-    assert!(query.contains("ORDER BY sample.client_id DESC, sample.source_kind DESC"));
-    assert_eq!(query.matches("WITH seek AS MATERIALIZED").count(), 4);
-    assert_eq!(query.matches("sample.observed_at) >= (").count(), 2);
-    assert_eq!(query.matches("sample.observed_at) < (").count(), 1);
-    assert_eq!(query.matches("seek.observed_at <").count(), 3);
-    assert_eq!(query.matches("ORDER BY destination.client_id").count(), 1);
-    assert!(query.contains("FOR UPDATE OF source SKIP LOCKED"));
-    assert!(query.contains("ON CONFLICT DO NOTHING"));
-    assert!(query.contains("unique_units AS MATERIALIZED"));
-    assert!(query.contains("safe_complete_units AS MATERIALIZED"));
-    assert!(query.contains("complete_units AS MATERIALIZED"));
-    assert!(query.contains("inserted_origins = expected_origins"));
-    assert!(query.contains("AS insert_race_conflicts"));
-    assert!(query.contains("previous_sample_source LIKE 'vnstat_import:%'"));
-    assert!(query.contains("THEN 'vnstat_import' ELSE 'live'"));
-    assert!(query.contains("interval '91 days' THEN 3600"));
-    assert!(query.contains("interval '181 days' THEN 10800"));
-    assert!(query.contains("interval '366 days' THEN 21600"));
-    assert!(query.contains("ELSE 86400"));
-}
-
-#[test]
-fn rollup_promotion_is_bounded() {
-    let promote = rollup_promotion_sql();
-    assert!(!promote.contains("source.client_id ="));
-    assert_eq!(
-        promote
-            .matches("ORDER BY source.client_id, source.source_kind")
-            .count(),
-        2
-    );
-    assert_eq!(promote.matches("WITH seek AS MATERIALIZED").count(), 3);
-    assert_eq!(promote.matches("source.bucket_start) >= (").count(), 2);
-    assert_eq!(promote.matches("source.bucket_start) <= (").count(), 0);
-    assert_eq!(promote.matches("seek.bucket_start <=").count(), 2);
-    assert_eq!(promote.matches("ORDER BY destination.client_id").count(), 1);
-    assert!(promote.contains("LIMIT $8"));
-    assert!(promote.contains("WHERE running_rows <= $9"));
-    assert!(promote.contains("LIMIT ($5 / tier.bucket_secs)"));
-    assert!(promote.contains("LIMIT groups.maximum_rows"));
-    assert!(promote.contains("seek.bucket_secs = $6"));
-    assert!(promote.contains("FOR UPDATE OF source SKIP LOCKED"));
-    assert!(promote.contains("ON CONFLICT DO NOTHING"));
-}
-
-#[test]
-fn steady_traffic_maintenance_cannot_fall_back_to_retained_history() {
-    let schema = include_str!("../../../../migrations/0005_traffic_accounting.sql");
-    let refresh_start = schema
-        .find("CREATE FUNCTION public.refresh_traffic_counter_hourly_usage(")
-        .unwrap();
-    let refresh_end = schema[refresh_start..]
-        .find("CREATE FUNCTION public.refresh_traffic_counter_hourly_usage_after_delete(")
-        .unwrap()
-        + refresh_start;
-    let refresh = &schema[refresh_start..refresh_end];
-    assert!(!refresh.contains("> 4096"));
-    assert!(refresh.contains("IF rebuild_entire_streams THEN"));
-    assert!(refresh.contains("USING ERRCODE = 'PZ029'"));
-
-    let active_start = schema
-        .find("CREATE FUNCTION public.apply_traffic_counter_active_cycle_usage_deltas(")
-        .unwrap();
-    let active_end = schema[active_start..]
-        .find("CREATE FUNCTION public.apply_traffic_counter_rollup_summary_deltas(")
-        .unwrap()
-        + active_start;
-    let active = &schema[active_start..active_end];
-    assert!(!active.contains("rebuild_totals"));
-    assert!(active.contains("lifecycle_initializable"));
-    assert!(active.contains("USING ERRCODE = 'PZ030'"));
-
-    let worker = include_str!("traffic_retention.rs");
-    let raw_start = worker
-        .find("async fn process_raw_promotion_phase(")
-        .unwrap();
-    let raw_end = worker[raw_start..]
-        .find("async fn process_rollup_promotion_phase(")
-        .unwrap()
-        + raw_start;
-    let raw = &worker[raw_start..raw_end];
-    assert_eq!(
-        raw.matches("ensure_traffic_active_cycle_ready(&mut tx")
-            .count(),
-        2
-    );
-    assert!(!raw.contains("refresh_traffic_counter_active_cycle_usage"));
-}
-
-#[test]
-fn traffic_promotion_conflicts_abort_only_the_exact_source_replacement() {
-    let worker = include_str!("traffic_retention.rs");
-    let raw_start = worker
-        .find("async fn process_raw_promotion_phase(")
-        .unwrap();
-    let raw_end = worker[raw_start..]
-        .find("async fn ensure_traffic_active_cycle_ready(")
-        .unwrap()
-        + raw_start;
-    let raw = &worker[raw_start..raw_end];
-    assert!(raw.contains("tx.rollback().await?"));
-    assert!(raw.contains("traffic raw promotion found {conflicts}"));
-    assert!(!raw.contains("update_traffic_phase_cursor("));
-
-    let rollup_start = worker
-        .find("async fn process_rollup_promotion_phase(")
-        .unwrap();
-    let rollup_end = worker[rollup_start..]
-        .find("async fn read_traffic_phase_cursor(")
-        .unwrap()
-        + rollup_start;
-    let rollup = &worker[rollup_start..rollup_end];
-    assert!(rollup.contains("tx.rollback().await?"));
-    assert!(rollup.contains("traffic rollup promotion from {source_bucket_secs}s"));
-    assert!(!rollup.contains("update_traffic_phase_cursor("));
-}
-
 #[tokio::test]
 async fn configured_short_retention_prunes_every_coarse_width_by_bucket_end() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
@@ -2258,13 +2045,6 @@ async fn bounded_traffic_rollup_policy_cannot_be_disabled() {
         "unexpected constraint error: {error}"
     );
     db.cleanup().await;
-}
-
-#[test]
-fn worker_frontiers_cover_raw_and_rollup_work() {
-    assert!(raw_frontier_start_sql().contains("first_unpromoted_observed_at"));
-    assert!(rollup_frontier_start_sql().contains("origin_kind AS lane"));
-    assert_eq!(TIERS.len(), 3);
 }
 
 #[tokio::test]

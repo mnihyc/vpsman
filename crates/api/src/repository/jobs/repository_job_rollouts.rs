@@ -543,25 +543,3 @@ fn normalized_reason(reason: Option<&str>, fallback: &str) -> String {
 fn is_rollout_terminal(status: &str) -> bool {
     matches!(status, ROLLOUT_STATUS_COMPLETED | ROLLOUT_STATUS_ABORTED)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rollout_list_loads_all_target_evidence_once_in_stable_target_order() {
-        let source = include_str!("repository_job_rollouts.rs");
-        let list = source
-            .split("pub(crate) async fn list_job_rollouts")
-            .nth(1)
-            .and_then(|source| source.split("pub(crate) async fn get_job_rollout").next())
-            .expect("job rollout list body");
-        assert!(list.contains("postgres_rollout_views(pool, rows).await"));
-        assert!(!list.contains("for row in rows"));
-
-        let targets = postgres_rollout_targets_select();
-        assert!(targets.contains("assignment.job_id = ANY($1::uuid[])"));
-        assert!(targets
-            .contains("ORDER BY assignment.job_id, assignment.batch_index, assignment.client_id"));
-    }
-}

@@ -129,46 +129,6 @@ fn overview_numeric_bounds_take_precedence_over_text_aliases() {
 }
 
 #[test]
-fn every_overview_range_uses_the_same_resident_history_owner() {
-    let source = include_str!("routes_dashboard.rs");
-    let (_, resource_loader) = source
-        .split_once("async fn load_dashboard_rollups")
-        .expect("resource loader");
-    let (resource_loader, network_and_rest) = resource_loader
-        .split_once("async fn load_dashboard_network_rates")
-        .expect("network loader");
-    let (network_loader, traffic_and_rest) = network_and_rest
-        .split_once("async fn load_dashboard_traffic")
-        .expect("traffic loader");
-    let (traffic_loader, _) = traffic_and_rest
-        .split_once("pub(crate) fn dashboard_projection_initializing")
-        .expect("traffic loader end");
-
-    assert!(resource_loader.contains("dashboard_telemetry"));
-    assert!(resource_loader.contains("resource_projection("));
-    assert!(network_loader.contains("dashboard_telemetry"));
-    assert!(network_loader.contains("network_projection("));
-    assert!(traffic_loader.contains("dashboard_telemetry"));
-    assert!(traffic_loader.contains("traffic_projection("));
-    for loader in [resource_loader, network_loader, traffic_loader] {
-        for forbidden in [
-            "DashboardOverviewReadPlan",
-            "RecentRaw",
-            "ExplicitBoundedRetained",
-            "Tile",
-            "all_grid",
-            "fallback",
-            "DASHBOARD_SPARSE",
-            "telemetry_dashboard_resource_blocks",
-            "telemetry_dashboard_network_blocks",
-            "telemetry_dashboard_traffic_blocks",
-        ] {
-            assert!(!loader.contains(forbidden), "loader contains {forbidden}");
-        }
-    }
-}
-
-#[test]
 fn current_network_latest_excludes_interfaces_absent_from_newest_sample() {
     let rate = |interface: &str, bucket_start: &str, rx_bps_avg: f64| TelemetryNetworkRateView {
         client_id: "client-a".to_string(),

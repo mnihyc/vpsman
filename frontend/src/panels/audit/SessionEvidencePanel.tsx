@@ -73,7 +73,7 @@ type OperatorSessionEvidenceState = {
 };
 
 const TERMINAL_STALE_FLOOR_MS = 60 * 60 * 1000;
-const accessBulkActionLimit = 500;
+const accessBulkActionLimit = 1_000;
 
 export function SessionEvidencePanel({
   agents,

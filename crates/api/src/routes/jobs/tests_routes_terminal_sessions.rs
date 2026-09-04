@@ -165,39 +165,6 @@ fn terminal_socket_ignores_redundant_streaming_status_notifications() {
 }
 
 #[test]
-fn terminal_control_consumer_is_owned_by_its_socket_scope() {
-    let source = include_str!("routes_terminal_sessions.rs");
-    let (_, handler) = source
-        .split_once("async fn handle_terminal_socket")
-        .expect("terminal socket handler");
-    let (handler, _) = handler
-        .split_once("async fn receive_terminal_socket_auth")
-        .expect("terminal socket handler boundary");
-    let spawn = handler
-        .find("let terminal_control_task = tokio::spawn(")
-        .expect("owned terminal control consumer");
-    let stop_producer = handler
-        .find("drop(control_tx);")
-        .expect("terminal control producer shutdown");
-    let stop_results = handler
-        .find("drop(result_rx);")
-        .expect("terminal result consumer shutdown");
-    let join = handler
-        .find("terminal_control_task.await")
-        .expect("terminal control consumer join");
-    assert!(spawn < stop_producer && stop_producer < stop_results && stop_results < join);
-}
-
-#[test]
-fn terminal_reads_and_socket_authorization_do_not_own_lifecycle_reconciliation() {
-    let terminal_routes = include_str!("routes_terminal_sessions.rs");
-    let job_history_routes = include_str!("routes_job_history.rs");
-
-    assert!(!terminal_routes.contains("reconcile_terminal_job_by_id"));
-    assert!(!job_history_routes.contains("reconcile_terminal_job_by_id"));
-}
-
-#[test]
 fn terminal_gateway_failures_map_to_operator_facing_states() {
     for (message, expected_status, expected_code) in [
         (

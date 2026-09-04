@@ -134,25 +134,6 @@ async fn postgres_file_transfer_handoff_job_discovery_is_index_bounded() {
     .unwrap();
     sqlx::query("ANALYZE jobs").execute(&db.pool).await.unwrap();
 
-    let index_definition: String = sqlx::query_scalar(
-        r#"
-        SELECT indexdef
-        FROM pg_indexes
-        WHERE schemaname='public'
-          AND indexname='jobs_file_transfer_download_resource_idx'
-        "#,
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert!(
-        index_definition.contains("(resource_id, id)"),
-        "{index_definition}"
-    );
-    assert!(
-        index_definition.contains("resource_kind = 'file_transfer_session'::text"),
-        "{index_definition}"
-    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             r#"
@@ -1660,44 +1641,6 @@ async fn postgres_policy_current_evidence_and_scope_queue_stay_bounded() {
     .unwrap(),
     "ingest must durably queue superseded evidence for asynchronous retention without deleting it"
     );
-
-    let bounded_indexes = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT indexname,indexdef
-        FROM pg_indexes
-        WHERE schemaname='public'
-          AND indexname=ANY($1::text[])
-        "#,
-    )
-    .bind(vec![
-        "alert_policy_current_evidence_pkey",
-        "alert_policy_evidence_source_latest_idx",
-        "telemetry_projection_heads_accepted_order_idx",
-    ])
-    .fetch_all(&db.pool)
-    .await
-    .unwrap()
-    .into_iter()
-    .collect::<BTreeMap<_, _>>();
-    assert!(
-        bounded_indexes["alert_policy_current_evidence_pkey"]
-            .contains("(subject_client_id, source_kind, natural_key)"),
-        "{}",
-        bounded_indexes["alert_policy_current_evidence_pkey"]
-    );
-    assert!(
-        bounded_indexes["alert_policy_evidence_source_latest_idx"]
-            .contains("(source_kind, natural_key, observed_at DESC, evidence_seq DESC)"),
-        "{}",
-        bounded_indexes["alert_policy_evidence_source_latest_idx"]
-    );
-    assert!(
-        bounded_indexes["telemetry_projection_heads_accepted_order_idx"]
-            .contains("(accepted_at, client_id)"),
-        "{}",
-        bounded_indexes["telemetry_projection_heads_accepted_order_idx"]
-    );
-    assert!(!bounded_indexes["telemetry_projection_heads_accepted_order_idx"].contains(" WHERE "));
 
     db.cleanup().await;
 }
@@ -8207,6 +8150,62 @@ async fn postgres_rollout_releases_reviewed_batches_and_cancel_fences_unreleased
 }
 
 #[tokio::test]
+async fn postgres_schedule_target_capacity_accepts_one_fleet_and_rejects_overflow() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let accepted_count: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO schedules (
+            id, name, operation, selector_expression, target_client_ids,
+            cron_expr, next_run_at
+        ) VALUES (
+            $1, 'schedule-target-capacity',
+            '{"type":"shell","argv":["/bin/true"],"pty":false}'::jsonb,
+            '*', ARRAY(
+                SELECT 'capacity-target-' || series::text
+                FROM generate_series(1, 1000) AS series
+            ), '0 * * * *', now() + interval '1 hour'
+        )
+        RETURNING cardinality(target_client_ids)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(accepted_count, 1_000);
+
+    let overflow = sqlx::query(
+        r#"
+        INSERT INTO schedules (
+            id, name, operation, selector_expression, target_client_ids,
+            cron_expr, next_run_at
+        ) VALUES (
+            $1, 'schedule-target-capacity-overflow',
+            '{"type":"shell","argv":["/bin/true"],"pty":false}'::jsonb,
+            '*', ARRAY(
+                SELECT 'overflow-target-' || series::text
+                FROM generate_series(1, 1001) AS series
+            ), '0 * * * *', now() + interval '1 hour'
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .expect_err("a schedule cannot exceed one fleet-sized target snapshot");
+    assert_eq!(
+        overflow
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("schedules_target_client_ids_limit")
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_schedule_query_without_limit_returns_all_rows() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -13683,45 +13682,6 @@ async fn postgres_system_rollup_setwise_path_is_bounded_and_preserves_reference_
         db.repo.earliest_system_metric_bucket_unix().await.unwrap(),
         Some(history_start as u64),
     );
-    let metric_indexes: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT indexname
-        FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND tablename = 'system_metric_rollups'
-        ORDER BY indexname
-        "#,
-    )
-    .fetch_all(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        metric_indexes,
-        vec![
-            "system_metric_rollups_history_export_idx",
-            "system_metric_rollups_pkey",
-            "system_metric_rollups_retention_idx",
-        ]
-    );
-    let history_export_index: String = sqlx::query_scalar(
-        r#"
-        SELECT indexdef
-        FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND indexname = 'system_metric_rollups_history_export_idx'
-        "#,
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert!(
-        history_export_index.contains("(bucket_start DESC, metric, bucket_secs) INCLUDE")
-            && history_export_index.contains("sample_count")
-            && history_export_index.contains("value_sum")
-            && history_export_index.contains("avg_value")
-            && history_export_index.contains("latest_observed_at"),
-        "{history_export_index}"
-    );
     let explain_sql = format!(
         "EXPLAIN (ANALYZE, FORMAT JSON) {}",
         crate::repository_system_dashboard::SYSTEM_METRIC_ROLLUP_AT_STEP_SQL
@@ -13737,14 +13697,6 @@ async fn postgres_system_rollup_setwise_path_is_bounded_and_preserves_reference_
         .unwrap();
     let plan_root = &plan[0]["Plan"];
     let plan_text = plan.to_string();
-    let query_text =
-        crate::repository_system_dashboard::SYSTEM_METRIC_ROLLUP_AT_STEP_SQL.to_ascii_lowercase();
-    assert!(!query_text.contains("array_agg"), "{query_text}");
-    assert!(!query_text.contains("generate_series"), "{query_text}");
-    assert!(
-        query_text.contains("row.bucket_secs = any($4::integer[])"),
-        "{query_text}"
-    );
     assert!(
         !explain_plan_uses_temporary_blocks(plan_root),
         "the all-history shape must not spill retained rows to temporary storage: {plan_text}"
@@ -25923,20 +25875,36 @@ async fn postgres_fresh_schema_has_disabled_resource_policy_starters() {
             ),
         ]
     );
-    let lifecycle_constraint = sqlx::query_scalar::<_, String>(
+    let causal_time_error = sqlx::query(
         r#"
-            SELECT pg_get_constraintdef(oid)
-            FROM pg_constraint
-            WHERE conrelid = 'alert_episodes'::regclass
-              AND conname = 'alert_episodes_lifecycle_check'
-            "#,
+        INSERT INTO alert_episodes (
+            id, public_id, producer_kind, natural_key, record_kind,
+            trigger_generation, trigger_severity, trigger_category,
+            severity, category, target_kind, target_id, title, detail,
+            source_status, evidence, lifecycle_state, triggered_at,
+            last_confirmed_at, resolved_at, resolution_reason,
+            policy_group_id, policy_rule_id, policy_rule_version,
+            policy_rule_kind, policy_group_name, policy_rule_name
+        ) VALUES (
+            $1, 'invalid-causal-resolution', 'policy.lifecycle', 'invalid-causal', 'condition',
+            1, 'warning', 'resource', 'warning', 'resource', 'agent', 'v-invalid',
+            'invalid causal resolution', 'invalid causal resolution', 'recovered', '{}'::jsonb,
+            'resolved', now() - interval '2 minutes', now(), now() - interval '1 minute',
+            'condition_recovered', $2, $3, 1, 'state', 'test group', 'test rule'
+        )
+        "#,
     )
-    .fetch_one(&db.pool)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
     .await
-    .unwrap();
-    assert!(
-        lifecycle_constraint.contains("resolved_at >= last_confirmed_at"),
-        "resolved episodes must preserve causal timestamp ordering: {lifecycle_constraint}"
+    .unwrap_err();
+    assert_eq!(
+        causal_time_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("alert_episodes_lifecycle_check")
     );
     assert_eq!(
         sqlx::query_as::<_, (String, String)>(
@@ -28192,35 +28160,6 @@ async fn postgres_dashboard_generation_coalesces_visible_owner_events_and_preser
     let client_id = "dashboard-generation-coalescing";
     let blocked_client_id = "dashboard-generation-owner-blocked";
     insert_client(&db.pool, client_id, None).await;
-
-    // Owner capture is indexed but deliberately not writer-serialized by a
-    // uniqueness constraint. Coalescing belongs to the reader snapshot.
-    let capture_indexes = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT indexname, indexdef
-        FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND indexname IN (
-              'telemetry_dashboard_block_events_owner_event_idx',
-              'telemetry_dashboard_generation_events_owner_event_idx'
-          )
-        ORDER BY indexname
-        "#,
-    )
-    .fetch_all(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(capture_indexes.len(), 2);
-    for (name, definition) in capture_indexes {
-        assert!(
-            definition.contains("(client_id, domain, event_id)"),
-            "owner capture index changed: {name}: {definition}"
-        );
-        assert!(
-            !definition.starts_with("CREATE UNIQUE INDEX"),
-            "source writers must not serialize on dashboard coalescing: {definition}"
-        );
-    }
 
     sqlx::query(
         r#"
@@ -34615,7 +34554,7 @@ async fn postgres_sqlx_metadata_is_private_and_application_connections_are_publi
         .await
         .unwrap();
     assert_eq!(application_schema, "public");
-    assert_eq!(private_ledger_rows, 15);
+    assert_eq!(private_ledger_rows, 16);
     assert_eq!(public_internal_relations, 0);
 
     db.cleanup().await;

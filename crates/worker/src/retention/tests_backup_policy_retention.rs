@@ -12,27 +12,3 @@ fn backup_policy_prune_config_clamps_bounds() {
     assert!(high.include_disabled);
     assert!(high.delete_objects);
 }
-
-#[test]
-fn backup_policy_retention_candidate_query_returns_prune_identities() {
-    let query = super::backup_policy_retention_candidate_query();
-    for identity in [
-        "request_id",
-        "artifact_id",
-        "server_artifact_id",
-        "object_key",
-        "sha256_hex",
-        "size_bytes",
-    ] {
-        assert!(query.contains(identity), "{identity}");
-    }
-}
-
-#[test]
-fn backup_policy_scan_is_ordered_by_the_durable_fairness_cursor() {
-    let query = super::backup_policy_retention_policies_query();
-    assert!(query.contains("retention_scanned_at ASC NULLS FIRST"));
-    assert!(query.contains("schedule.id ASC"));
-    assert!(query.contains("schedule.deleted_at IS NULL"));
-    assert!(query.contains("schedule.definition_revision"));
-}

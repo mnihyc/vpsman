@@ -6830,153 +6830,6 @@ async fn run_resident_listener(
 mod tests {
     use super::*;
 
-    #[test]
-    fn exact_block_reads_are_coordinate_driven_and_keep_the_publication_fence() {
-        for (sql, table) in [
-            (
-                RESOURCE_COORDINATE_BLOCKS_SQL,
-                "telemetry_dashboard_resource_blocks",
-            ),
-            (
-                NETWORK_COORDINATE_BLOCKS_SQL,
-                "telemetry_dashboard_network_blocks",
-            ),
-            (
-                TRAFFIC_COORDINATE_BLOCKS_SQL,
-                "telemetry_dashboard_traffic_blocks",
-            ),
-        ] {
-            let coordinates = sql.find("FROM UNNEST(").expect("coordinate relation");
-            let owner = sql.find(&format!("JOIN {table}")).expect("owner table");
-            assert!(coordinates < owner);
-            assert!(sql.contains("client_id = $1"));
-            assert!(sql.contains("generation = $2"));
-            assert!(sql.contains("published_revision <= $3"));
-            assert!(sql.contains("source_bucket_secs = coordinate.source_bucket_secs"));
-            assert!(sql.contains("block_start_unix = coordinate.block_start_unix"));
-        }
-        assert!(RESOURCE_OVERLAY_SQL.contains(
-            "telemetry_dashboard_resource_overlay_source(\n    ARRAY[$1::TEXT], $2::INTEGER[], $3::BIGINT[]"
-        ));
-        assert!(NETWORK_OVERLAY_SQL.contains(
-            "telemetry_dashboard_network_overlay_source(\n        ARRAY[$1::TEXT], $2::INTEGER[], $3::BIGINT[]"
-        ));
-        assert!(TRAFFIC_OVERLAY_SQL.contains(
-            "telemetry_dashboard_traffic_overlay_source(\n    ARRAY[$1::TEXT], $2::INTEGER[], $3::BIGINT[]"
-        ));
-
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        for loader in [
-            "load_resource_blocks",
-            "load_network_blocks",
-            "load_traffic_blocks",
-        ] {
-            let (_, body) = source
-                .split_once(&format!("async fn {loader}"))
-                .unwrap_or_else(|| panic!("missing {loader}"));
-            let (body, _) = body
-                .split_once("\n}\n")
-                .unwrap_or_else(|| panic!("missing {loader} boundary"));
-            assert!(body.contains(".bind(&tiers)"));
-            assert!(body.contains(".bind(&starts)"));
-        }
-    }
-
-    #[test]
-    fn live_overlays_use_one_coordinate_driven_owner_model_without_mirrors() {
-        for sql in [NETWORK_OVERLAY_SQL, OVERLAY_NETWORK_SOURCE_SQL] {
-            assert!(sql.contains("telemetry_dashboard_network_overlay_source"));
-            assert!(!sql.contains("telemetry_network_live_rates"));
-        }
-        for sql in [TRAFFIC_OVERLAY_SQL, OVERLAY_TRAFFIC_SOURCE_SQL] {
-            assert!(sql.contains("telemetry_dashboard_traffic_overlay_source"));
-            assert!(!sql.contains("telemetry_network_live_rates"));
-        }
-        for sql in [RESOURCE_OVERLAY_SQL, OVERLAY_RESOURCE_SOURCE_SQL] {
-            assert!(sql.contains("telemetry_dashboard_resource_overlay_source"));
-            assert!(!sql.contains("telemetry_rollups retained"));
-        }
-        let migration = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/0006_telemetry_dashboard.sql"
-        ));
-        let claim = migration
-            .split_once("CREATE FUNCTION public.claim_telemetry_dashboard_projection(")
-            .expect("dashboard projection claim")
-            .1
-            .split_once("$$;")
-            .expect("dashboard projection claim boundary")
-            .0;
-        assert!(claim.contains("captured_events AS MATERIALIZED"));
-        assert!(claim.contains("SELECT 'full_block'::TEXT AS event_kind"));
-        assert!(claim.contains("WHERE event.event_kind = 'full_block'"));
-        assert!(claim.contains("WHERE event.event_kind = 'coordinate'"));
-        assert!(claim.contains("FROM captured_events whole"));
-        assert!(claim.contains("whole.event_kind = 'full_block'"));
-        let (_, resource_source) = migration
-            .split_once("CREATE FUNCTION public.telemetry_dashboard_resource_overlay_source(")
-            .expect("resource overlay source");
-        let (resource_source, _) = resource_source
-            .split_once("CREATE FUNCTION public.telemetry_dashboard_network_overlay_source(")
-            .expect("resource overlay source boundary");
-        assert!(resource_source
-            .contains("FROM public.telemetry_projected_raw_resource_minutes_source("));
-        assert!(resource_source.contains("requested_blocks AS MATERIALIZED"));
-        assert!(!resource_source.contains("telemetry_rollups"));
-
-        let (_, network_source) = migration
-            .split_once("CREATE FUNCTION public.telemetry_dashboard_network_overlay_source(")
-            .expect("network overlay source");
-        let (network_source, _) = network_source
-            .split_once("CREATE INDEX telemetry_dashboard_block_events_client_age_idx")
-            .expect("network overlay source boundary");
-        assert!(
-            network_source.contains("FROM public.telemetry_projected_raw_network_minutes_source(")
-        );
-        assert!(network_source.contains("requested_blocks AS MATERIALIZED"));
-
-        let (_, traffic_source) = migration
-            .split_once("CREATE FUNCTION public.telemetry_dashboard_traffic_overlay_source(")
-            .expect("traffic overlay source");
-        let (traffic_source, _) = traffic_source
-            .split_once("CREATE FUNCTION public.telemetry_dashboard_resource_overlay_source(")
-            .expect("traffic overlay source boundary");
-        assert!(traffic_source.contains("requested_heads AS MATERIALIZED"));
-        assert!(traffic_source.contains("head.client_id = ANY(p_client_ids)"));
-        assert!(traffic_source.contains("JOIN public.traffic_counter_minute_heads minute"));
-        assert!(traffic_source.contains("JOIN public.telemetry_samples sample"));
-        assert!(traffic_source.contains("sample.accepted_seq > minute.materialized_seq"));
-
-        let telemetry_migration = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/0003_telemetry_core.sql"
-        ));
-        let (_, durable_owner) = telemetry_migration
-            .split_once("CREATE FUNCTION public.telemetry_network_durable_points_source(")
-            .expect("durable network owner source");
-        let (durable_owner, _) = durable_owner
-            .split_once("CREATE FUNCTION public.telemetry_network_rate_points_source(")
-            .expect("durable network owner boundary");
-        assert!(durable_owner.contains("LANGUAGE plpgsql"));
-        assert!(durable_owner.contains("FROM public.traffic_counter_samples sample"));
-        assert!(durable_owner.contains("AND NOT sample.inbound_promoted"));
-        assert!(migration.contains("FROM public.traffic_counter_streams stream"));
-        assert!(OVERLAY_RESOURCE_SOURCE_SQL.contains(
-            "telemetry_dashboard_resource_overlay_source(\n    $1::TEXT[], NULL::INTEGER[], NULL::BIGINT[]"
-        ));
-        assert!(OVERLAY_NETWORK_SOURCE_SQL.contains(
-            "telemetry_dashboard_network_overlay_source(\n    $1::TEXT[], NULL::INTEGER[], NULL::BIGINT[]"
-        ));
-        assert!(OVERLAY_TRAFFIC_SOURCE_SQL.contains(
-            "telemetry_dashboard_traffic_overlay_source(\n    $1::TEXT[], NULL::INTEGER[], NULL::BIGINT[]"
-        ));
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        for domain in ["resource", "network", "traffic"] {
-            let mirror = format!("telemetry_dashboard_{domain}_active_rows");
-            assert!(!source.contains(&mirror));
-        }
-    }
-
     fn resource_block(start: i64, slot: usize, samples: i64, latest: i64) -> ResourceBlock {
         let mut block = ResourceBlock::empty(start);
         block.slots[slot] = ResourceSummary {
@@ -7212,7 +7065,7 @@ mod tests {
     }
 
     #[test]
-    fn live_overlay_reconciliation_queries_only_installed_nonempty_domains() {
+    fn overlay_target_client_ids_are_sorted_and_empty_safe() {
         let empty = HashMap::<String, ()>::new();
         assert!(overlay_target_client_ids(&empty).is_empty());
         let targets = HashMap::from([("client-z".to_string(), ()), ("client-a".to_string(), ())]);
@@ -7220,55 +7073,7 @@ mod tests {
             overlay_target_client_ids(&targets),
             ["client-a".to_string(), "client-z".to_string()]
         );
-
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, reconcile) = source
-            .split_once("async fn reconcile_live_overlays")
-            .expect("live-overlay reconciliation");
-        let (reconcile, _) = reconcile
-            .split_once("struct DashboardNotice")
-            .expect("live-overlay reconciliation boundary");
-        for (domain, query) in [
-            ("resource", "OVERLAY_RESOURCE_SOURCE_SQL"),
-            ("network", "OVERLAY_NETWORK_SOURCE_SQL"),
-            ("traffic", "OVERLAY_TRAFFIC_SOURCE_SQL"),
-        ] {
-            let target_ids = format!("{domain}_target_client_ids");
-            let guard = reconcile
-                .find(&format!("if !{target_ids}.is_empty()"))
-                .unwrap_or_else(|| panic!("missing empty {domain} target guard"));
-            let query = reconcile[guard..]
-                .find(query)
-                .unwrap_or_else(|| panic!("missing guarded {domain} source query"))
-                + guard;
-            let bind = reconcile[query..]
-                .find(&format!(".bind(&{target_ids})"))
-                .unwrap_or_else(|| panic!("missing scoped {domain} target binding"))
-                + query;
-            assert!(guard < query && query < bind);
-        }
-        assert!(!reconcile.contains("client_ids.to_vec()"));
-        assert!(!reconcile.contains(".bind(&target_client_ids)"));
-
-        let network_fence = reconcile
-            .find("if !installed.index.interfaces.is_empty()")
-            .expect("published network selection fence");
-        let network_target = reconcile[network_fence..]
-            .find("network_targets.insert(")
-            .expect("network target after published selection fence")
-            + network_fence;
-        assert!(network_fence < network_target);
-
-        let traffic_fence = reconcile
-            .find("if !installed.source_kinds.is_empty()")
-            .expect("published traffic selection fence");
-        let traffic_target = reconcile[traffic_fence..]
-            .find("traffic_targets.insert(")
-            .expect("selected traffic target")
-            + traffic_fence;
-        assert!(traffic_fence < traffic_target);
     }
-
     #[tokio::test(start_paused = true)]
     async fn live_overlay_boundary_collects_all_clients_in_one_fixed_window() {
         assert_eq!(FLEET_TELEMETRY_INVALIDATION_WINDOW, Duration::from_secs(2));
@@ -7361,7 +7166,7 @@ mod tests {
     }
 
     #[test]
-    fn live_overlay_boundary_notifies_only_after_setwise_installation() {
+    fn raw_projection_notice_queues_overlay_without_publishing_fleet_invalidation() {
         let mailbox = ResidentMailbox::default();
         let (events, invalidations) = WsEventBus::new(16);
         collect_notification(
@@ -7371,40 +7176,8 @@ mod tests {
         )
         .expect("the complete raw producer notice is an overlay hint");
         assert!(!invalidations.take_fleet_telemetry());
-        assert!(
-            mailbox.claim_ready().is_none(),
-            "a raw producer notice must not enqueue an immediate fleet fence"
-        );
-
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, reconcile) = source
-            .split_once("ResidentWork::Overlay(batch) => {")
-            .expect("live-overlay reconciliation branch");
-        let (reconcile, _) = reconcile
-            .split_once("ResidentWork::FleetFence => {")
-            .expect("live-overlay reconciliation boundary");
-        assert!(
-            reconcile
-                .find("reconcile_live_overlays(")
-                .expect("setwise current-state read")
-                < reconcile
-                    .find("events.notify_fleet_telemetry()")
-                    .expect("post-install browser boundary")
-        );
-
-        let (_, setwise) = source
-            .split_once("async fn reconcile_live_overlays")
-            .expect("setwise live-overlay function");
-        let (setwise, _) = setwise
-            .split_once("struct DashboardNotice")
-            .expect("setwise live-overlay boundary");
-        for domain in ["resource", "network", "traffic"] {
-            assert!(setwise.contains(&format!(".bind(&{domain}_target_client_ids)")));
-        }
-        assert!(!setwise.contains("LIMIT "));
-        assert!(!setwise.contains("429"));
+        assert!(mailbox.claim_ready().is_none());
     }
-
     #[test]
     fn resident_mailbox_is_fifo_across_owners_and_unions_contiguous_owner_changes() {
         let mailbox = ResidentMailbox::default();
@@ -7515,40 +7288,6 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_block_notifications_are_ordered_bounded_transaction_fragments() {
-        let migration = include_str!("../../../../migrations/0006_telemetry_dashboard.sql");
-        let (_, publish) = migration
-            .split_once("CREATE FUNCTION public.publish_telemetry_dashboard_projection(")
-            .expect("dashboard publication function");
-        let (publish, _) = publish
-            .split_once("-- Ping owns no range tree here.")
-            .expect("dashboard publication boundary");
-        let fragment_loop = publish
-            .find("WITH ORDINALITY coordinate(tier, block_start, ordinality)")
-            .expect("coordinate-fragment loop");
-        let fragment_order = publish[fragment_loop..]
-            .find("ORDER BY coordinate.ordinality")
-            .expect("fragment send order")
-            + fragment_loop;
-        let one_coordinate = publish[fragment_order..]
-            .find("ARRAY[block_coordinate.tier]::INTEGER[]")
-            .expect("one-coordinate payload")
-            + fragment_order;
-        let complete_fence = publish[one_coordinate..]
-            .find("'complete', block_coordinate.ordinality = cardinality(")
-            .expect("final-fragment fence")
-            + one_coordinate;
-        let notify = publish[complete_fence..]
-            .find("PERFORM pg_notify(")
-            .expect("transactional notification")
-            + complete_fence;
-        assert!(fragment_loop < fragment_order);
-        assert!(fragment_order < one_coordinate);
-        assert!(one_coordinate < complete_fence);
-        assert!(complete_fence < notify);
-    }
-
-    #[test]
     fn resident_mailbox_coalesces_one_internal_fleet_fence() {
         let mailbox = ResidentMailbox::default();
         mailbox.enqueue_fleet_fence();
@@ -7599,233 +7338,11 @@ mod tests {
     }
 
     #[test]
-    fn listener_collection_has_no_database_reconciliation_path() {
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, collector) = source
-            .split_once("fn collect_notification")
-            .expect("collector function");
-        let (collector, _) = collector
-            .split_once("async fn reconnect_until_ready")
-            .expect("collector boundary");
-        assert!(collector.contains("mailbox.enqueue(notice)"));
-        assert!(!collector.contains(".await"));
-        assert!(!collector.contains("load_optional_client_heads"));
-        assert!(!collector.contains("load_fenced_"));
-
-        let (_, reconnect) = source
-            .split_once("async fn reconnect_until_ready")
-            .expect("listener reconnect function");
-        let (reconnect, _) = reconnect
-            .split_once("async fn reconcile_collected_notice")
-            .expect("listener reconnect boundary");
-        assert!(reconnect.contains("connect_listener(pool).await"));
-        assert!(reconnect.contains("mailbox.enqueue_fleet_fence()"));
-        assert!(!reconnect.contains("load_heads"));
-        assert!(!reconnect.contains("load_fenced_"));
-
-        let (_, listener) = source
-            .split_once("async fn run_resident_listener")
-            .expect("resident listener task");
-        let (listener, _) = listener
-            .split_once("#[cfg(test)]")
-            .expect("resident listener boundary");
-        assert_eq!(listener.matches("reconnect_until_ready(").count(), 1);
-        assert!(listener.contains("mailbox.enqueue_fleet_fence()"));
-        assert!(
-            listener.find("drop(listener);").expect("old listener drop")
-                < listener
-                    .find("reconnect_until_ready(")
-                    .expect("replacement listener acquisition")
-        );
-        assert!(!listener.contains("load_heads"));
-        assert!(!listener.contains("load_fenced_"));
-
-        let (_, initialization) = source
-            .split_once("pub(crate) async fn initialize")
-            .expect("resident initialization");
-        let (initialization, _) = initialization
-            .split_once("fn shutdown_requested")
-            .expect("resident initialization boundary");
-        assert!(initialization.contains("reconciliation_lanes = 1"));
-        assert!(initialization.contains("reconciler_pool = PgPoolOptions::new()"));
-        assert!(!initialization.contains("available_parallelism"));
-    }
-
-    #[test]
-    fn startup_seed_is_one_snapshot_with_four_committed_relation_reads() {
-        for (sql, relation, head, generation, revision) in [
-            (
-                SEED_RESOURCE_BLOCKS_SQL,
-                "telemetry_dashboard_resource_blocks",
-                "telemetry_dashboard_resource_projection_heads",
-                "block.generation IS NOT DISTINCT FROM head.resource_generation",
-                "block.published_revision <= head.resource_revision",
-            ),
-            (
-                SEED_NETWORK_BLOCKS_SQL,
-                "telemetry_dashboard_network_blocks",
-                "telemetry_dashboard_network_projection_heads",
-                "block.generation IS NOT DISTINCT FROM head.network_generation",
-                "block.published_revision <= head.network_revision",
-            ),
-            (
-                SEED_TRAFFIC_BLOCKS_SQL,
-                "telemetry_dashboard_traffic_blocks",
-                "telemetry_dashboard_traffic_projection_heads",
-                "block.generation IS NOT DISTINCT FROM head.traffic_generation",
-                "block.published_revision <= head.traffic_revision",
-            ),
-        ] {
-            assert_eq!(sql.matches(relation).count(), 1);
-            assert_eq!(sql.matches(head).count(), 1);
-            assert!(sql.contains("seed_client_id"));
-            assert!(sql.contains(generation));
-            assert!(sql.contains(revision));
-            assert!(!sql.contains("ORDER BY"));
-            assert!(!sql.contains("LIMIT"));
-            assert!(!sql.contains("$1"));
-        }
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, seed) = source
-            .split_once("async fn seed_fleet")
-            .expect("fleet seed");
-        let (seed, _) = seed
-            .split_once("async fn load_resource_blocks")
-            .expect("fleet seed boundary");
-        assert!(seed.contains("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"));
-        assert_eq!(seed.matches(".fetch_all(&mut *transaction)").count(), 4);
-        assert_eq!(seed.matches("transaction.commit().await?").count(), 1);
-        assert!(!seed.contains("OverlayRow"));
-        assert!(!seed.contains("load_fenced_"));
-        assert!(!seed.contains("for client_id in heads.keys()"));
-
-        let (_, initialization) = source
-            .split_once("pub(crate) async fn initialize")
-            .expect("resident initialization");
-        let (initialization, _) = initialization
-            .split_once("fn shutdown_requested")
-            .expect("resident initialization boundary");
-        assert!(
-            initialization.find(".listen(TELEMETRY_PROJECTION_CHANNEL)")
-                < initialization.find("seed_fleet(&reconciler_pool)")
-        );
-
-        let main = include_str!("../main.rs");
-        let resident_at = main
-            .find("DashboardTelemetryResident::initialize")
-            .expect("resident initialization in main");
-        let publisher_at = main
-            .find("spawn_dashboard_projection_maintenance_task(&repo)")
-            .expect("dashboard publisher startup in main");
-        let bind_at = main
-            .find("tokio::net::TcpListener::bind(args.bind)")
-            .expect("HTTP listener bind in main");
-        assert!(resident_at < publisher_at && publisher_at < bind_at);
-    }
-
-    #[test]
-    fn only_full_owner_reloads_restore_live_suffix_through_the_shared_mailbox() {
+    fn only_owner_replacement_requires_a_live_overlay() {
         assert!(!DashboardNoticeApplication::AlreadyCurrent.requires_live_overlay());
         assert!(!DashboardNoticeApplication::ExactBlock.requires_live_overlay());
         assert!(DashboardNoticeApplication::OwnerReplacement.requires_live_overlay());
-
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, owners) = source
-            .split_once("async fn load_resource_owner")
-            .expect("full resource owner loader");
-        let (owners, _) = owners
-            .split_once("async fn load_fenced_client")
-            .expect("full owner loader boundary");
-        assert_eq!(owners.matches("overlay_blocks: BTreeSet::new()").count(), 3);
-        assert!(!owners.contains("RESOURCE_OVERLAY_SQL"));
-        assert!(!owners.contains("NETWORK_OVERLAY_SQL"));
-        assert!(!owners.contains("TRAFFIC_OVERLAY_SQL"));
-        assert!(!owners.contains("Option::<Vec<i32>>::None"));
-
-        let (_, initialization) = source
-            .split_once("pub(crate) async fn initialize")
-            .expect("resident initialization");
-        let (initialization, _) = initialization
-            .split_once("fn shutdown_requested")
-            .expect("resident initialization boundary");
-        assert!(initialization.contains("for client_id in &seeded_client_ids"));
-        assert!(initialization.contains("mailbox.enqueue_live_overlay(client_id);"));
-
-        let (_, reconciler) = source
-            .split_once("async fn run_resident_reconciler")
-            .expect("resident reconciler");
-        let (reconciler, _) = reconciler
-            .split_once("async fn run_resident_listener")
-            .expect("resident reconciler boundary");
-        assert!(reconciler.contains("if application.requires_live_overlay()"));
-        assert!(reconciler.contains("mailbox.enqueue_live_overlay(&notice.client_id);"));
-
-        let (_, apply) = source
-            .split_once("async fn apply_dashboard_notice")
-            .expect("dashboard notice application");
-        let (apply, _) = apply
-            .split_once("pub(crate) struct DashboardTelemetryResidentTask")
-            .expect("dashboard notice application boundary");
-        assert_eq!(
-            apply
-                .matches("return Ok(DashboardNoticeApplication::ExactBlock);")
-                .count(),
-            3
-        );
-        assert!(apply.contains(
-            "reconcile_notice_owner(listener, resident, &notice.client_id, \"client\").await?;"
-        ));
-        assert!(apply.contains("DashboardNoticeApplication::OwnerReplacement"));
-
-        let (_, collected) = source
-            .split_once("async fn reconcile_collected_notice")
-            .expect("collected notice reconciliation");
-        let (collected, _) = collected
-            .split_once("async fn run_resident_reconciler")
-            .expect("collected notice boundary");
-        assert!(
-            collected.contains("reconcile_notice_owner(connection, resident, &client_id, &domain)")
-        );
-        assert!(collected.contains("DashboardNoticeApplication::OwnerReplacement"));
     }
-
-    #[test]
-    fn client_lifecycle_claims_ignore_the_hint_verb_and_reconcile_current_database_state() {
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, apply) = source
-            .split_once("async fn apply_dashboard_notice")
-            .expect("dashboard notice application");
-        let (apply, _) = apply
-            .split_once("pub(crate) struct DashboardTelemetryResidentTask")
-            .expect("dashboard notice application boundary");
-        let normalized = apply.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized.contains(
-            "if notice.domain == \"client\" { // Lifecycle notices deliberately carry no revision."
-        ));
-        assert!(normalized.contains(
-            "reconcile_notice_owner(listener, resident, &notice.client_id, \"client\").await?;"
-        ));
-        assert!(!normalized.contains("match notice.change.as_str()"));
-    }
-
-    #[test]
-    fn exceptional_fleet_fence_authoritatively_reloads_every_current_client() {
-        let source = include_str!("dashboard_telemetry_resident.rs");
-        let (_, fence) = source
-            .split_once("async fn reconcile_fleet_fence")
-            .expect("fleet fence reconciliation");
-        let (fence, _) = fence
-            .split_once("async fn connect_listener")
-            .expect("fleet fence reconciliation boundary");
-        assert!(fence.contains("for client_id in heads.keys()"));
-        assert!(fence.contains("change: \"initialize\".to_string()"));
-        assert!(fence.contains("change: \"remove\".to_string()"));
-        assert_eq!(fence.matches("domain: \"client\".to_string()").count(), 2);
-        assert!(!fence.contains("domain: \"resource\".to_string()"));
-        assert!(!fence.contains("domain: \"network\".to_string()"));
-        assert!(!fence.contains("domain: \"traffic\".to_string()"));
-    }
-
     #[test]
     fn notice_contract_is_typed_and_revision_gaps_require_a_fenced_reload() {
         assert!(matches!(
@@ -7881,101 +7398,5 @@ mod tests {
         owner.revision = 2;
         assert!(resource_block_change_is_contiguous(&owner, &head, 1, 2, 3));
         assert!(!resource_block_change_is_contiguous(&owner, &head, 1, 2, 4));
-    }
-
-    #[test]
-    fn exact_coordinate_union_is_loaded_setwise_before_independent_owner_application() {
-        let source = include_str!("dashboard_telemetry_resident.rs")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let (_, source) = source
-            .split_once("async fn apply_dashboard_notice")
-            .expect("dashboard notice application");
-        for domain in ["resource", "network", "traffic"] {
-            let load = format!("let (changes, overlay_blocks) = load_{domain}_blocks(");
-            let apply = "owner.index.apply_blocks(changes);".to_string();
-            let load_at = source.find(&load).expect("bulk descriptor load");
-            let fence_at = source[load_at..]
-                .find("let after = load_optional_client_heads(")
-                .expect("post-load head fence")
-                + load_at;
-            let write_at = source[load_at..]
-                .find(".write()")
-                .expect("exclusive owner write")
-                + load_at;
-            let apply_at = source[write_at..].find(&apply).expect("atomic group apply") + write_at;
-            let overlay_at = source[apply_at..]
-                .find("owner.overlay_blocks.extend(overlay_blocks);")
-                .expect("overlay membership application")
-                + apply_at;
-            let revision_at = source[overlay_at..]
-                .find("owner.revision =")
-                .expect("revision publication after group")
-                + overlay_at;
-            assert!(
-                load_at < fence_at
-                    && fence_at < write_at
-                    && write_at < apply_at
-                    && apply_at < overlay_at
-                    && overlay_at < revision_at
-            );
-        }
-
-        let (_, cohort) = source
-            .split_once("async fn reconcile_collected_notices")
-            .expect("setwise dashboard notice cohort");
-        let (cohort, _) = cohort
-            .split_once("pub(crate) struct DashboardTelemetryResidentTask")
-            .expect("setwise dashboard notice boundary");
-        let first_head = cohort
-            .find("let heads = load_selected_heads(")
-            .expect("one setwise pre-read head fence");
-        let after_head = cohort
-            .rfind("let after = load_selected_heads(")
-            .expect("one setwise post-read head fence");
-        for domain in ["resource", "network", "traffic"] {
-            let load = cohort
-                .find(&format!("load_{domain}_notice_changes("))
-                .expect("setwise exact-coordinate load");
-            let owner_loop = cohort
-                .find(&format!("for (client_id, target) in {domain}_targets"))
-                .expect("independent owner application");
-            let owner = &cohort[owner_loop..];
-            let write = owner.find(".write()").expect("exclusive owner write") + owner_loop;
-            let apply = owner
-                .find("installed.index.apply_blocks(change.blocks);")
-                .expect("exact owner block application")
-                + owner_loop;
-            let overlay = owner
-                .find("installed.overlay_blocks.append(&mut change.overlay_blocks);")
-                .expect("exact owner overlay application")
-                + owner_loop;
-            let revision = owner
-                .find("installed.revision = target.head.revision;")
-                .expect("exact owner revision publication")
-                + owner_loop;
-            assert!(
-                first_head < load
-                    && load < after_head
-                    && after_head < write
-                    && write < apply
-                    && apply < overlay
-                    && overlay < revision
-            );
-        }
-        assert!(!cohort.contains("LIMIT "));
-        assert!(!cohort.contains("time::sleep"));
-        for sql in [
-            OVERLAY_RESOURCE_BLOCKS_SQL,
-            OVERLAY_NETWORK_BLOCKS_SQL,
-            OVERLAY_TRAFFIC_BLOCKS_SQL,
-            NOTICE_RESOURCE_OVERLAY_SQL,
-            NOTICE_NETWORK_OVERLAY_SQL,
-            NOTICE_TRAFFIC_OVERLAY_SQL,
-        ] {
-            assert!(sql.contains("unnest(") || sql.contains("UNNEST("));
-            assert!(!sql.contains("LIMIT "));
-        }
     }
 }

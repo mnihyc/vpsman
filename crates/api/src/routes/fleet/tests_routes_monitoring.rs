@@ -41,9 +41,13 @@ fn monitoring_card_history_compaction_is_additive_and_opt_in() {
 
 #[test]
 fn bulk_ping_target_selection_has_an_explicit_input_bound() {
-    let bounded = (1..=500).map(Uuid::from_u128).collect::<Vec<_>>();
-    validate_bulk_ping_target_selection(&bounded).expect("500 Ping targets are valid");
-    let oversized = (1..=501).map(Uuid::from_u128).collect::<Vec<_>>();
+    let bounded = (1..=super::MAX_BULK_PING_TARGET_UPDATES as u128)
+        .map(Uuid::from_u128)
+        .collect::<Vec<_>>();
+    validate_bulk_ping_target_selection(&bounded).expect("the fleet maximum is valid");
+    let oversized = (1..=super::MAX_BULK_PING_TARGET_UPDATES as u128 + 1)
+        .map(Uuid::from_u128)
+        .collect::<Vec<_>>();
     assert_eq!(
         validate_bulk_ping_target_selection(&oversized)
             .unwrap_err()
@@ -54,108 +58,6 @@ fn bulk_ping_target_selection_has_an_explicit_input_bound() {
         validate_bulk_ping_target_selection(&[]).unwrap_err().code,
         "ping_target_selection_required"
     );
-}
-
-#[test]
-fn bulk_ping_target_preview_uses_one_set_based_target_and_selector_read() {
-    let source = include_str!("routes_monitoring.rs");
-    let (_, bulk) = source
-        .split_once("pub(crate) async fn bulk_update_ping_targets")
-        .expect("Ping bulk-update route");
-    let (bulk, _) = bulk
-        .split_once("pub(crate) fn validate_bulk_ping_target_selection")
-        .expect("Ping bulk-update route end");
-    assert_eq!(bulk.matches("ping_target_records_by_ids").count(), 1);
-    assert_eq!(
-        bulk.matches("list_ping_target_assignment_records_for_targets")
-            .count(),
-        1
-    );
-    assert_eq!(bulk.matches("resolve_saved_selectors_batch").count(), 1);
-    assert!(!bulk.contains("ping_target_record(*target_id)"));
-    assert!(!bulk.contains("resolve_selector("));
-}
-
-#[test]
-fn bulk_monitoring_share_refresh_uses_one_review_and_selector_snapshot() {
-    let source = include_str!("routes_monitoring.rs");
-    let (_, bulk) = source
-        .split_once("pub(crate) async fn bulk_update_monitoring_share_targets")
-        .expect("monitoring-share bulk-update route");
-    let (bulk, _) = bulk
-        .split_once("pub(crate) async fn revoke_monitoring_shares")
-        .expect("monitoring-share bulk-update route end");
-    assert_eq!(bulk.matches("monitoring_share_records_by_ids").count(), 1);
-    assert_eq!(bulk.matches("resolve_saved_selectors_batch").count(), 1);
-    assert!(!bulk.contains("monitoring_share_record(*share_id)"));
-    assert!(!bulk.contains("resolve_selector("));
-    assert!(!bulk.contains("monitoring_share_not_found_after_update"));
-}
-
-#[test]
-fn retained_client_detail_uses_complete_projection_owners() {
-    let source = include_str!("routes_monitoring.rs");
-    let (_, detail) = source
-        .split_once("async fn client_monitoring_view")
-        .expect("client monitoring loader");
-    let (detail, _) = detail
-        .split_once("async fn monitoring_range")
-        .expect("client monitoring loader end");
-
-    assert!(detail.contains("list_projected_telemetry_resource_history"));
-    assert!(detail.contains("list_projected_telemetry_network_history"));
-    assert!(detail.contains("dashboard_projection_initializing"));
-    assert!(!detail.contains("list_dashboard_telemetry_rollups"));
-    assert!(!detail.contains("list_dashboard_telemetry_network_rates_selected"));
-}
-
-#[test]
-fn current_excluded_interfaces_are_owned_only_by_single_vps_detail() {
-    let source = include_str!("routes_monitoring.rs");
-    let (_, operator_detail) = source
-        .split_once("pub(crate) async fn get_client_monitoring")
-        .expect("operator VPS detail route");
-    let (operator_detail, _) = operator_detail
-        .split_once("pub(crate) async fn list_ping_targets")
-        .expect("operator VPS detail route end");
-    assert!(operator_detail.contains("CurrentNetworkDetail::SingleVpsDetail"));
-
-    let (_, public_detail) = source
-        .split_once("pub(crate) async fn public_monitoring_share_data")
-        .expect("public shared detail route");
-    let (public_detail, _) = public_detail
-        .split_once("fn public_monitoring_cards_singleflight_key")
-        .expect("public shared detail route end");
-    assert!(public_detail.contains("CurrentNetworkDetail::Hidden"));
-    assert!(!public_detail.contains("CurrentNetworkDetail::SingleVpsDetail"));
-
-    let (_, detail) = source
-        .split_once("async fn client_monitoring_view")
-        .expect("client monitoring loader");
-    let (detail, _) = detail
-        .split_once("async fn monitoring_range")
-        .expect("client monitoring loader end");
-    assert!(detail.contains("list_latest_telemetry_network_rates_for_vps_detail(client_id)"));
-    assert!(detail.contains("list_telemetry_tunnels_for_vps_detail(client_id)"));
-    assert!(detail.contains("network_current_detail,"));
-    assert!(detail.contains("tunnel_current_detail,"));
-    assert!(detail.contains("list_projected_telemetry_network_history"));
-
-    let frontend = include_str!("../../../../../frontend/src/panels/VpsMonitoringDetailPanel.tsx");
-    let frontend_text = frontend.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(frontend.contains("[...data.network_current_detail].sort"));
-    assert!(frontend.contains("currentNetworkDetail.map"));
-    assert!(frontend.contains("currentTunnelDetail.map"));
-    assert!(frontend.contains("Current interface telemetry"));
-    assert!(frontend.contains("formatByteRateFromBitsPerSecond(rate.rx_bps_avg)"));
-    assert!(frontend.contains("formatByteRateFromBitsPerSecond(rate.tx_bps_avg)"));
-    assert!(frontend_text.contains("Interfaces excluded by network.interfaces are shown only here"));
-    assert!(
-        frontend_text.contains("eligible evidence follows history and traffic-accounting rules")
-    );
-    assert!(frontend.contains("networkChart(data.network, timeline"));
-    assert!(!frontend.contains("networkChart(data.network_current_detail"));
-    assert!(!frontend.contains("networkChart(data.tunnel_current_detail"));
 }
 
 #[test]

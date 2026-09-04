@@ -46,7 +46,7 @@ use vpsman_common::{
     GATEWAY_CONTROL_BATCH_MAX_ITEMS, MAX_RUNTIME_CONFIG_FIELD_BYTES,
 };
 
-const BULK_RESOLVE_MANY_ITEM_LIMIT: usize = 500;
+const BULK_RESOLVE_MANY_ITEM_LIMIT: usize = 1_000;
 const CLIENT_LIFECYCLE_FENCE_LEASE_SECS: u64 = 60;
 const CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS: u64 = 5;
 // Renewal is derived from the lease, leaving two complete intervals for a

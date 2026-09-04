@@ -1,7 +1,23 @@
 use super::{
-    AgentMetrics, ConnectionStat, CpuStat, DiskStat, MemoryStat,
-    DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1,
+    ordinal_admission_mask_has_exact_shape, AgentMetrics, ConnectionStat, CpuStat, DiskStat,
+    MemoryStat, DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1,
 };
+
+#[test]
+fn ordinal_admission_masks_require_exact_length_and_zero_unused_bits() {
+    assert!(ordinal_admission_mask_has_exact_shape(&[], 0));
+    assert!(ordinal_admission_mask_has_exact_shape(&[0b1111_1111], 8));
+    assert!(ordinal_admission_mask_has_exact_shape(&[0b0000_0111], 3));
+    assert!(ordinal_admission_mask_has_exact_shape(
+        &[0b1111_1111, 0b0000_0001],
+        9
+    ));
+
+    assert!(!ordinal_admission_mask_has_exact_shape(&[], 1));
+    assert!(!ordinal_admission_mask_has_exact_shape(&[0], 9));
+    assert!(!ordinal_admission_mask_has_exact_shape(&[0, 0], 8));
+    assert!(!ordinal_admission_mask_has_exact_shape(&[0b1000_0111], 3));
+}
 
 #[test]
 fn cpu_utilization_is_an_optional_additive_wire_field() {

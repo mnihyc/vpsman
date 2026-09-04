@@ -46,7 +46,7 @@ const MAX_JOB_OUTPUT_ARCHIVE_STREAM_BYTES: u64 = 1024 * 1024 * 1024;
 const JOB_OUTPUT_LIST_DEFAULT_LIMIT: i64 = 200;
 const JOB_OUTPUT_LIST_MAX_LIMIT: i64 = 1000;
 const MAX_JOB_OUTPUT_EXPORT_ROWS: usize = 10_000;
-const JOB_TARGET_STATUS_BATCH_MAX_ITEMS: usize = 500;
+const JOB_TARGET_STATUS_BATCH_MAX_ITEMS: usize = 1_000;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FileDownloadBundleQuery {

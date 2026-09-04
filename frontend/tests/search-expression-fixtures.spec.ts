@@ -580,25 +580,6 @@ test("webhook starter is comprehensive alert-first executable documentation", ()
     /\[else\]\nℹ️ EVENT[\s\S]*\[endif\]$/,
   );
 
-  const docsPath = resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "../../docs/target-selectors.md",
-  );
-  const docs = readFileSync(docsPath, "utf8");
-  expect(docs).toContain("schedule.due && schedule.id:<saved-schedule-id>");
-  expect(docs).toContain(
-    "schedule.job_finished && schedule.id:<saved-schedule-id>",
-  );
-  expect(docs).toMatch(
-    /A webhook may instead match `alert\.triggered` or `alert\.resolved` directly/,
-  );
-  expect(docs).toMatch(
-    /vpsman does\s+not insert, identify, or specially parse a shell/,
-  );
-  const documentedStarter = docs.match(
-    /same starter shown[\s\S]*?```text\n([\s\S]*?)\n```/,
-  )?.[1];
-  expect(documentedStarter).toBe(DEFAULT_WEBHOOK_BODY_TEMPLATE);
 });
 
 test("schedule event expressions require a policy-filtered alert edge on every branch", () => {

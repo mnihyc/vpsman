@@ -386,7 +386,10 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<Vec<ScheduleTargetBatchUpdateResult>> {
         ensure!(!updates.is_empty(), "schedule_target_selection_required");
-        ensure!(updates.len() <= 500, "schedule_target_selection_too_large");
+        ensure!(
+            updates.len() <= 1_000,
+            "schedule_target_selection_too_large"
+        );
         let unique_schedule_ids = updates
             .iter()
             .map(|update| update.schedule_id)

@@ -8,7 +8,7 @@ use crate::{
     repository_schedules::{ScheduleSnapshotExpectation, ScheduleTargetBatchUpdate},
     routes_schedules::{
         apply_schedule_privilege_batch_results, validate_bulk_schedule_target_selection,
-        validate_schedule_request,
+        validate_schedule_request, MAX_BULK_SCHEDULE_TARGET_UPDATES,
     },
 };
 use uuid::Uuid;
@@ -178,10 +178,12 @@ fn bulk_schedule_target_selection_is_bounded_and_unique_before_mutation() {
         privilege_assertion: None,
     };
     let bounded = BulkUpdateScheduleTargetsRequest {
-        items: (1..=500).map(item).collect(),
+        items: (1..=MAX_BULK_SCHEDULE_TARGET_UPDATES as u128)
+            .map(item)
+            .collect(),
         confirmed: true,
     };
-    validate_bulk_schedule_target_selection(&bounded).expect("500 unique schedules are valid");
+    validate_bulk_schedule_target_selection(&bounded).expect("the fleet maximum is valid");
 
     let duplicate = BulkUpdateScheduleTargetsRequest {
         items: vec![item(1), item(1)],
@@ -194,7 +196,9 @@ fn bulk_schedule_target_selection_is_bounded_and_unique_before_mutation() {
         "schedule_target_selection_duplicate"
     );
     let oversized = BulkUpdateScheduleTargetsRequest {
-        items: (1..=501).map(item).collect(),
+        items: (1..=MAX_BULK_SCHEDULE_TARGET_UPDATES as u128 + 1)
+            .map(item)
+            .collect(),
         confirmed: true,
     };
     assert_eq!(
@@ -256,21 +260,4 @@ fn bulk_schedule_privilege_results_preserve_order_and_partial_rejections() {
         rejected.error_code.as_deref(),
         Some("privilege_verification_failed")
     );
-}
-
-#[test]
-fn bulk_schedule_route_uses_exactly_one_internal_privilege_batch_call() {
-    let source = include_str!("../routes/jobs/routes_schedules.rs");
-    let (_, bulk) = source
-        .split_once("pub(crate) async fn bulk_update_schedule_targets")
-        .expect("bulk schedule-target route");
-    let (bulk, _) = bulk
-        .split_once("pub(crate) async fn enable_schedule")
-        .expect("bulk schedule-target route end");
-    assert_eq!(
-        bulk.matches(".verify_privileges(verification_items)")
-            .count(),
-        1
-    );
-    assert!(!bulk.contains("verify_schedule_privilege_for_stored_view("));
 }

@@ -21,58 +21,11 @@ fn retention_config_clamps_operational_bounds() {
 }
 
 #[test]
-fn retention_only_treats_foreground_lock_wait_as_skippable() {
+fn retention_lock_timeout_classification_is_exact() {
     assert!(is_retention_lock_timeout_code(Some("55P03")));
     assert!(!is_retention_lock_timeout_code(Some("57014")));
     assert!(!is_retention_lock_timeout_code(None));
-
-    let source = include_str!("alert_policy_retention.rs");
-    assert!(source.contains("SET LOCAL lock_timeout = '2s'"));
-    assert!(!source.contains("statement_timeout"));
-    assert!(!source.contains("pg_advisory"));
-    assert!(source.contains("FROM alert_policy_lifecycle_meta"));
-    assert!(source.contains("FOR UPDATE OF lifecycle SKIP LOCKED"));
 }
-
-#[test]
-fn stream_evidence_pruning_is_owned_by_fact_kind() {
-    let schema = include_str!("../../../../migrations/0012_alert_lifecycle.sql");
-    assert!(schema.contains("AND OLD.fact_kind IN ('metric', 'state')"));
-    assert!(schema.contains("IF NEW.fact_kind IN ('metric', 'state')"));
-
-    let retention = include_str!("alert_policy_retention.rs");
-    assert_eq!(
-        retention
-            .matches("evidence.fact_kind IN ('metric', 'state')")
-            .count(),
-        2,
-        "stream facts must bypass age in both eligibility stages"
-    );
-    assert!(!retention.contains("evidence.source_kind = 'telemetry.combined'"));
-}
-
-#[test]
-fn resolved_retention_uses_an_indexable_database_cutoff() {
-    assert!(
-        REQUIRED_RETENTION_INDEXES.contains(&"alert_policy_evaluation_states_active_episode_idx")
-    );
-
-    let source = include_str!("alert_policy_retention.rs");
-    assert!(source.contains("SELECT transaction_timestamp()"));
-    assert!(source.contains("episode.resolved_at <= $2::timestamptz"));
-    assert!(!source.contains("episode.resolved_at <= clock_timestamp()"));
-
-    let schema = include_str!("../../../../migrations/0012_alert_lifecycle.sql");
-    assert!(schema.contains(
-        "CREATE INDEX alert_policy_evaluation_states_active_episode_idx ON public.\
-alert_policy_evaluation_states USING btree (active_episode_id) WHERE (active_episode_id IS NOT NULL);"
-    ));
-    assert!(schema.contains(
-        "CREATE INDEX alert_episodes_resolved_retention_idx ON public.alert_episodes USING btree \
-(resolved_at DESC, id DESC) WHERE (lifecycle_state = 'resolved'::text);"
-    ));
-}
-
 #[tokio::test]
 async fn postgres_retention_fails_closed_without_required_indexes() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {

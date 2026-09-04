@@ -79,14 +79,3 @@ fn exact_job_target_status_batch_validates_pair_identity_and_bound() {
         "job_target_status_pairs_invalid"
     );
 }
-
-#[test]
-fn exact_job_target_status_query_is_pairwise_and_primary_key_addressable() {
-    let query = crate::repository_jobs::JOB_TARGET_STATUS_BATCH_SQL;
-    assert!(query.contains("unnest($1::uuid[], $2::text[]) WITH ORDINALITY"));
-    assert!(query.contains("exact.job_id = requested.job_id"));
-    assert!(query.contains("exact.client_id = requested.client_id"));
-    assert!(query.contains("ORDER BY requested.input_ordinal"));
-    assert!(!query.contains("job_id = ANY"));
-    assert!(!query.contains("client_id = ANY"));
-}

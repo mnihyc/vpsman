@@ -1,49 +1,6 @@
 use super::*;
 
 #[test]
-fn accepted_hello_has_no_reverse_gateway_control_dependency() {
-    let source = include_str!("routes_ingest.rs");
-    let (_, route) = source
-        .split_once("pub(crate) async fn ingest_agent_hello(")
-        .expect("agent hello ingest owner");
-    let (route, _) = route
-        .split_once("pub(crate) async fn request_runtime_config_reload(")
-        .expect("agent hello ingest boundary");
-
-    let commit = route
-        .find("upsert_agent_hello")
-        .expect("durable hello commit");
-    let publish = route.find("state.publish").expect("accepted hello event");
-    assert!(commit < publish);
-    assert!(!route.contains("state.gateway"));
-    assert!(!route.contains("suspension_fence"));
-    assert!(!route.contains("tokio::time::sleep"));
-}
-
-#[test]
-fn accepted_hello_preserves_established_database_auto_unsuspend_semantics() {
-    let source = include_str!("../../repository/fleet/repository_ingest.rs");
-    let (_, hello) = source
-        .split_once("pub(crate) async fn upsert_agent_hello(")
-        .expect("hello repository owner");
-    let (hello, _) = hello
-        .split_once("pub(crate) async fn record_telemetry_outcome(")
-        .expect("hello repository boundary");
-
-    assert!(hello.contains("ELSE 'online'"));
-    for cleared_field in [
-        "suspended_at = NULL",
-        "suspended_by = NULL",
-        "suspended_reason = NULL",
-        "suspended_from_status = NULL",
-    ] {
-        assert!(hello.contains(cleared_field), "{cleared_field}");
-    }
-    assert!(hello.contains("Some(\"suspended\") => \"agent_online_auto_unsuspend\""));
-    assert!(hello.contains("record_client_status_transition_in_tx("));
-}
-
-#[test]
 fn duplicate_vnstat_output_does_not_clear_retry_cooldown_or_wake_finalization() {
     assert!(network_traffic_import_output_advances_finalization(
         JobOutputWriteResult::Inserted

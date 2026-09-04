@@ -25,7 +25,7 @@ use crate::{
     util::{limit_or_default, parse_timestamp_utc},
 };
 
-const WEBHOOK_RULE_BULK_ITEM_LIMIT: usize = 500;
+const WEBHOOK_RULE_BULK_ITEM_LIMIT: usize = 1_000;
 use vpsman_common::{
     is_webhook_rule_delivery_history_status, is_webhook_rule_delivery_process_status,
     validate_template,

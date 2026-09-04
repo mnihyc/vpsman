@@ -1272,7 +1272,7 @@ function normalizeFleetTagVisibilityOverrides(
     const trimmed = tag.trim();
     if (
       !isValidPreferenceTagName(trimmed) ||
-      Object.keys(normalized).length >= 500
+      Object.keys(normalized).length >= 1_000
     ) {
       continue;
     }
@@ -1285,7 +1285,7 @@ function validateFleetTagVisibilityOverrides(
   values: Record<string, boolean>,
 ): string | null {
   const entries = Object.keys(values);
-  if (entries.length > 500) {
+  if (entries.length > 1_000) {
     return "Fleet tag visibility has too many overrides.";
   }
   if (entries.some((tag) => !isValidPreferenceTagName(tag))) {

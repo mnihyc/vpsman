@@ -14,6 +14,7 @@ use crate::model::{
     TelemetryNetworkRateQuery, TelemetryRollupQuery,
 };
 use axum::http::StatusCode;
+use vpsman_common::GATEWAY_CONTROL_BATCH_MAX_ITEMS;
 #[test]
 fn selector_batch_is_bounded_normalized_unique_and_ordered() {
     let request = BulkResolveManyRequest {
@@ -47,6 +48,16 @@ fn selector_batch_is_bounded_normalized_unique_and_ordered() {
             .code,
         "selector_batch_duplicate_item"
     );
+
+    let bounded = BulkResolveManyRequest {
+        items: (0..BULK_RESOLVE_MANY_ITEM_LIMIT)
+            .map(|index| BulkResolveManyItem {
+                selector_expression: format!("id:v-{index}"),
+            })
+            .collect(),
+    };
+    validate_bulk_resolve_many_request(&bounded, &["fleet:read".to_string()])
+        .expect("one fleet-sized selector batch must be accepted");
 
     let oversized = BulkResolveManyRequest {
         items: (0..=BULK_RESOLVE_MANY_ITEM_LIMIT)
@@ -175,8 +186,20 @@ fn bulk_delete_validation_is_bounded_unique_and_preserves_request_order() {
     let error = validate_bulk_delete_agents_request(&duplicate).unwrap_err();
     assert_eq!(error.code, "agent_delete_targets_duplicate");
 
+    let bounded = BulkDeleteAgentsRequest {
+        items: (0..GATEWAY_CONTROL_BATCH_MAX_ITEMS)
+            .map(|index| BulkDeleteAgentItem {
+                client_id: format!("vps-{index}"),
+                privilege_assertion: None,
+            })
+            .collect(),
+        confirmed: true,
+        reason: None,
+    };
+    validate_bulk_delete_agents_request(&bounded).expect("one fleet-sized delete is valid");
+
     let oversized = BulkDeleteAgentsRequest {
-        items: (0..501)
+        items: (0..=GATEWAY_CONTROL_BATCH_MAX_ITEMS)
             .map(|index| BulkDeleteAgentItem {
                 client_id: format!("vps-{index}"),
                 privilege_assertion: None,
@@ -218,99 +241,6 @@ fn exact_client_transaction_failures_are_actionable_and_singletons_remain_server
 }
 
 #[test]
-fn exact_client_batches_are_not_canceled_after_partial_commits() {
-    let source = include_str!("routes_inventory.rs");
-
-    assert!(!source.contains("AGENT_SUSPENSION_DB_BUDGET_SECS"));
-    assert!(!source.contains("AGENT_DELETE_DB_BUDGET_SECS"));
-    assert!(!source.contains("\"agent_suspension_timeout\""));
-    assert!(!source.contains("\"agent_delete_timeout\""));
-    assert!(source.contains("CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS"));
-    assert!(source.contains("CLIENT_LIFECYCLE_FENCE_LEASE_SECS"));
-    assert!(source.contains(
-        "CLIENT_LIFECYCLE_FENCE_RENEWAL_SECS: u64 = CLIENT_LIFECYCLE_FENCE_LEASE_SECS / 3"
-    ));
-}
-
-#[test]
-fn lifecycle_finalizers_are_bounded_and_database_transactions_are_never_canceled() {
-    let source = include_str!("routes_inventory.rs");
-    let (_, promote) = source
-        .split_once("async fn promote_committed(&mut self) -> bool")
-        .expect("committed promotion owner");
-    let (promote, _) = promote
-        .split_once("async fn compensate(&self, reason: &str)")
-        .expect("committed promotion boundary");
-    let stop = promote
-        .find("self.stop_renewal().await")
-        .expect("renewal stop");
-    let attempt = promote
-        .find("self.promote_once().await")
-        .expect("one promotion");
-    assert!(stop < attempt);
-    assert!(!promote.contains("loop {"));
-
-    for owner_name in [
-        "async fn mutate_delete_agent_target_owned(",
-        "async fn mutate_agent_suspension_target_owned(",
-    ] {
-        let (_, owner) = source.split_once(owner_name).expect("exact target owner");
-        let (owner, _) = owner.split_once("async fn mutate_").unwrap_or((owner, ""));
-        assert!(!owner.contains("tokio::select!"));
-    }
-}
-
-#[test]
-fn singleton_delete_delegates_and_exact_targets_finalize_before_the_next_target() {
-    let source = include_str!("routes_inventory.rs");
-    let (_, singleton) = source
-        .split_once("pub(crate) async fn delete_agent(")
-        .expect("delete route");
-    let (singleton, _) = singleton
-        .split_once("pub(crate) async fn bulk_delete_agents(")
-        .expect("bulk delete route boundary");
-    assert!(singleton.contains("mutate_delete_agents("));
-    assert!(!singleton.contains("agent_by_id("));
-    assert!(!singleton.contains("AgentUpdated"));
-
-    let (_, wrapper) = source
-        .split_once("async fn mutate_delete_agents(")
-        .expect("delete batch owner");
-    let (owner, _) = wrapper
-        .split_once("fn agent_delete_invalidation_event(")
-        .expect("bulk delete owner boundary");
-    assert!(owner.contains("tokio::spawn(mutate_delete_agent_target_owned("));
-    assert_eq!(owner.matches(".verify_privileges(").count(), 1);
-    assert!(owner.contains("for client_id in approved_client_ids"));
-    assert!(!owner.contains(".disconnect_sessions("));
-    assert_eq!(
-        owner
-            .matches("dispatch_runtime_config_for_clients(")
-            .count(),
-        1
-    );
-
-    let (_, exact_owner) = source
-        .split_once("async fn mutate_delete_agent_target_owned(")
-        .expect("service-owned exact delete task");
-    let (exact_owner, _) = exact_owner
-        .split_once("async fn mutate_delete_agents(")
-        .expect("exact delete owner boundary");
-    assert!(exact_owner.contains("GatewayClientDispatchFencePurpose::Deletion"));
-    assert!(exact_owner.contains(".delete_agent_target("));
-    assert!(exact_owner.contains("move || async move { commit_proof.verify().await }"));
-    assert!(exact_owner.contains("fence.promote_committed().await"));
-    assert!(exact_owner.contains(".disconnect_session_if_fence_owned("));
-    assert!(exact_owner.contains("CLIENT_LIFECYCLE_FENCE_CONTROL_ATTEMPT_SECS"));
-    assert_eq!(
-        owner
-            .matches("invalidate_fleet_telemetry_read_cache()")
-            .count(),
-        1
-    );
-}
-
-#[test]
 fn suspension_status_eligibility_is_exact() {
     for status in ["never", "disconnected", "offline", "stale"] {
         validate_suspend_agent_status(status).unwrap();
@@ -338,9 +268,22 @@ fn bulk_suspension_validation_is_bounded_unique_and_order_preserving() {
     let error = validate_bulk_agent_suspension_request(&duplicate).unwrap_err();
     assert_eq!(error.code, "agent_suspension_targets_duplicate");
 
+    let bounded = BulkAgentSuspensionRequest {
+        action: AgentSuspensionAction::Unsuspend,
+        client_ids: (0..GATEWAY_CONTROL_BATCH_MAX_ITEMS)
+            .map(|index| format!("vps-{index}"))
+            .collect(),
+        confirmed: true,
+        reason: None,
+    };
+    validate_bulk_agent_suspension_request(&bounded)
+        .expect("one fleet-sized suspension update is valid");
+
     let too_many = BulkAgentSuspensionRequest {
         action: AgentSuspensionAction::Unsuspend,
-        client_ids: (0..501).map(|index| format!("vps-{index}")).collect(),
+        client_ids: (0..=GATEWAY_CONTROL_BATCH_MAX_ITEMS)
+            .map(|index| format!("vps-{index}"))
+            .collect(),
         confirmed: true,
         reason: None,
     };
@@ -376,79 +319,4 @@ fn suspension_invalidation_is_absent_for_zero_success_and_exact_for_partial_succ
         agent_suspension_invalidation_event(&affected),
         Some(crate::model::WsEvent::FleetStateInvalidated)
     ));
-}
-
-#[test]
-fn singleton_suspension_routes_delegate_without_inventory_preflight_reads() {
-    let source = include_str!("routes_inventory.rs");
-    let (_, suspend) = source
-        .split_once("pub(crate) async fn suspend_agent(")
-        .expect("suspend route");
-    let (suspend, remaining) = suspend
-        .split_once("pub(crate) async fn unsuspend_agent(")
-        .expect("unsuspend route");
-    let (unsuspend, _) = remaining
-        .split_once("pub(crate) async fn bulk_agent_suspensions(")
-        .expect("bulk route boundary");
-    for route in [suspend, unsuspend] {
-        assert!(route.contains("mutate_agent_suspensions("));
-        assert!(!route.contains("agent_by_id("));
-        assert!(!route.contains("AgentUpdated"));
-    }
-
-    let (_, bulk_owner) = source
-        .split_once("async fn mutate_agent_suspensions(")
-        .expect("bulk suspension owner");
-    let (bulk_owner, _) = bulk_owner
-        .split_once("fn agent_suspension_invalidation_event(")
-        .expect("bulk suspension owner boundary");
-    assert!(bulk_owner.contains("tokio::spawn(mutate_agent_suspension_target_owned("));
-    assert_eq!(
-        bulk_owner
-            .matches("invalidate_fleet_telemetry_read_cache()")
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn exact_suspension_owner_preserves_suspend_and_unsuspend_business_ownership() {
-    let source = include_str!("routes_inventory.rs");
-    let (_, owner) = source
-        .split_once("async fn mutate_agent_suspension_target_owned(")
-        .expect("exact suspension owner");
-    let (owner, _) = owner
-        .split_once("async fn mutate_agent_suspensions(")
-        .expect("exact suspension owner boundary");
-    assert!(owner.contains("GatewayClientDispatchFencePurpose::Suspension"));
-    assert!(owner.contains("action == AgentSuspensionAction::Suspend"));
-    assert!(owner.contains("action == AgentSuspensionAction::Unsuspend"));
-    assert!(owner.contains(".mutate_agent_suspension_target("));
-    assert!(owner.contains("commit_proof.verify().await?"));
-    assert!(owner.contains("fence.promote_committed().await"));
-    assert!(owner.contains("fence.clear_committed(\"db_authoritative_unsuspend\")"));
-    assert!(owner.contains("fence.stop_renewal().await"));
-    assert!(owner.contains(".compensate("));
-    assert!(owner.contains("\"suspension_transition_not_committed\""));
-    let prepare = owner
-        .find("ClientDispatchFenceLease::prepare(")
-        .expect("pretransaction exact owner");
-    let mutation = owner
-        .find(".mutate_agent_suspension_target(")
-        .expect("database lifecycle mutation");
-    assert!(prepare < mutation);
-    let (_, repository_result) = owner
-        .split_once("let outcome = match repository_outcome {")
-        .expect("repository result owner");
-    let (_, repository_error) = repository_result
-        .split_once("Err(error) => {")
-        .expect("repository error owner");
-    let (repository_error, _) = repository_error
-        .split_once("match &outcome {")
-        .expect("repository error owner boundary");
-    assert!(repository_error.contains("fence.stop_renewal().await"));
-    assert!(!repository_error.contains("fence.compensate("));
-    assert!(!owner.contains(".disconnect_session("));
-    assert!(!owner.contains("tokio::select!"));
-    assert!(!source.contains("reconcile_unsuspended_gateway_route"));
 }

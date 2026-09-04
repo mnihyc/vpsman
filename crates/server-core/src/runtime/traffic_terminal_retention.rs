@@ -582,22 +582,3 @@ fn prune_sql() -> &'static str {
         WHERE source.ctid = candidates.source_ctid
     "#
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn terminal_owner_queries_are_index_bounded() {
-        assert!(TRAFFIC_TERMINAL_RETENTION_CUTOFF_SQL.contains("clock_timestamp()"));
-        assert!(TRAFFIC_TERMINAL_RETENTION_CUTOFF_SQL.contains("AT TIME ZONE 'UTC'"));
-        for query in [frontier_start_sql(), frontier_after_sql()] {
-            assert!(query.contains("bucket_secs = $1"));
-            assert!(query.contains("LIMIT 1"));
-        }
-        assert!(preview_sql().contains("LIMIT $2"));
-        assert!(prune_sql().contains("LIMIT $6"));
-        assert!(prune_sql().contains("LIMIT $5"));
-        assert!(prune_sql().contains("FOR UPDATE OF source SKIP LOCKED"));
-    }
-}

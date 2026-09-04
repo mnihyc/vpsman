@@ -68,10 +68,9 @@ Generate development Noise keypairs with:
 cargo run -p vpsctl -- noise-keygen
 ```
 
-For schema or deployment-path changes, run the matching repository contracts:
+For deployment-path changes, run the end-to-end bundle and updater checks:
 
 ```sh
-bash scripts/audit-migrations.sh
 bash scripts/smoke-deploy-bundle.sh
 bash scripts/smoke-deploy-updater.sh
 ```

@@ -45,7 +45,7 @@ use vpsman_common::{
     GatewayPrivilegeVerificationBatchItem, JobCommand, PrivilegeAssertion, ALERT_EVENT_NOOP_ARGV,
 };
 
-const MAX_BULK_SCHEDULE_TARGET_UPDATES: usize = 500;
+pub(crate) const MAX_BULK_SCHEDULE_TARGET_UPDATES: usize = 1_000;
 
 #[derive(Clone, Copy)]
 enum ScheduleTargetResolutionMode {
