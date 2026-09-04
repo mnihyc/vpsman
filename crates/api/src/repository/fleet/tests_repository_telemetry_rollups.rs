@@ -1102,6 +1102,26 @@ fn selected_network_history_aggregation_preserves_the_existing_card_contract() {
     assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL.contains(
         "GROUP BY derived.client_id, derived.chart_start_unix,\n             derived.effective_step"
     ));
+    let direct_minute = TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .find("FROM telemetry_network_rates_minute minute")
+        .expect("selected aggregate minute owner");
+    assert!(direct_minute < transition_derivation);
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("WHERE NOT $9::BOOLEAN OR $4::INTEGER <> 60"));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL.contains(
+        "JOIN selected_streams stream\n      ON stream.client_id = minute.client_id\n     AND stream.interface = minute.interface"
+    ));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("minute.bucket_start >= date_trunc(\n              'minute', to_timestamp($2)"));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("sample.source_kind = 'host'\n      AND NOT sample.inbound_promoted"));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("SELECT predecessor.*\n    FROM selected_streams stream"));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL.contains(
+        "minute.bucket_start < date_trunc(\n                          'minute', to_timestamp($2)"
+    ));
+    assert!(TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL
+        .contains("LIMIT 1\n    ) predecessor ON $9::BOOLEAN AND $4::INTEGER = 60"));
 
     let point = |interface: &str,
                  sample_count: i32,

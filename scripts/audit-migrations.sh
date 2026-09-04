@@ -29,6 +29,7 @@ expected_files=(
   0012_alert_lifecycle.sql
   0013_seed_defaults.sql
   0014_network_rate_selector_default.sql
+  0015_dashboard_coordinate_preparation.sql
 )
 
 [[ -d "$MIGRATIONS_DIR" ]] || fail "missing migrations directory"
@@ -347,9 +348,9 @@ done
 [[ "$(grep -Ec '^CREATE INDEX telemetry_network_rates_coarse_' "$telemetry_schema")" -eq 3 ]] ||
   fail "network-rate coarse owner must have exactly three independently consumed non-PK indexes"
 # Parent statement triggers own every write, so production DML must target the
-# logical parent. The bounded raw/export reader is the one intentional physical
-# read owner: its minute/coarse Merge Append exposes the global index stop to a
-# generic PostgreSQL plan before admission. Keep that exception exact.
+# logical parent. The bounded raw/export reader and the selected Cards minute
+# reader are the intentional physical read owners: each states its complete
+# physical partition and owner key before PostgreSQL plans the bounded scan.
 network_reader="$ROOT_DIR/crates/api/src/repository/fleet/repository_telemetry_rollups.rs"
 raw_candidate_body="$(
   sed -n \
@@ -367,14 +368,26 @@ unexpected_network_leaf_refs="$(
 )"
 [[ -z "$unexpected_network_leaf_refs" ]] ||
   fail "production Rust names a network-rate physical leaf outside its bounded reader"
-network_reader_without_candidate="$(
+cards_minute_body="$(
+  sed -n \
+    '/^const TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL: &str = r#"/,/^"#;/p' \
+    "$network_reader"
+)"
+[[ "$(grep -c 'FROM telemetry_network_rates_minute minute' <<<"$cards_minute_body")" -eq 2 ]] ||
+  fail "selected Cards history does not have exactly one range and predecessor minute owner"
+grep -Fq 'JOIN selected_streams stream' <<<"$cards_minute_body" ||
+  fail "selected Cards minute owner is not joined to exact selected streams"
+grep -Fq 'WHERE NOT $9::BOOLEAN OR $4::INTEGER <> 60' <<<"$cards_minute_body" ||
+  fail "general network history can enter the Cards-only physical minute branch"
+network_reader_without_physical_owners="$(
   sed \
-    '/^pub(crate) fn raw_telemetry_network_rate_candidate_keys_sql(/,/^\/\/ Candidate keys are already page bounded\./d' \
+    -e '/^pub(crate) fn raw_telemetry_network_rate_candidate_keys_sql(/,/^\/\/ Candidate keys are already page bounded\./d' \
+    -e '/^const TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL: &str = r#"/,/^"#;/d' \
     "$network_reader"
 )"
 if grep -qE 'telemetry_network_rates_(minute|coarse)' \
-    <<<"$network_reader_without_candidate"; then
-  fail "network-rate physical leaf escaped the bounded raw candidate owner"
+    <<<"$network_reader_without_physical_owners"; then
+  fail "network-rate physical leaf escaped its two bounded read owners"
 fi
 if grep -Fq 'history_retention_policies_network_observations_min_days_check' \
   "$MIGRATIONS_DIR/0003_telemetry_core.sql"; then
@@ -477,6 +490,36 @@ grep -Fq "COALESCE(rate_rule -> 'selectors', '[]'::JSONB)" \
   fail "an explicit empty network-rate selector is not preserved"
 if grep -Fq "IF rate_rule IS NULL" <<<"$network_selection_correction_body"; then
   fail "incremental network-rate correction still treats absence as none"
+fi
+dashboard_coordinate_preparation="$MIGRATIONS_DIR/0015_dashboard_coordinate_preparation.sql"
+if grep -Eiq '^(ALTER|DROP|TRUNCATE|CREATE[[:space:]]+(TABLE|INDEX|TYPE|SEQUENCE)|SET)\b' \
+  "$dashboard_coordinate_preparation"; then
+  fail "dashboard coordinate preparation changes persistent storage or database settings"
+fi
+for function in \
+  acquire_telemetry_dashboard_coordinate_projection_owners \
+  telemetry_dashboard_coordinate_projection_claims \
+  prepare_telemetry_dashboard_resource_coordinate_blocks \
+  prepare_telemetry_dashboard_network_coordinate_blocks \
+  prepare_telemetry_dashboard_traffic_coordinate_blocks \
+  complete_telemetry_dashboard_coordinate_projection; do
+  grep -Fq "CREATE FUNCTION public.$function" "$dashboard_coordinate_preparation" ||
+    fail "dashboard coordinate preparation lacks $function"
+done
+coordinate_acquisition_body="$(
+  sed -n '/CREATE FUNCTION public.acquire_telemetry_dashboard_coordinate_projection_owners(/,/^\$\$;/p' \
+    "$dashboard_coordinate_preparation"
+)"
+grep -Fq 'pg_try_advisory_lock(candidate.owner_id)' \
+  <<<"$coordinate_acquisition_body" ||
+  fail "dashboard coordinate preparation lacks exact session ownership"
+if grep -Eq '(^|[^[:alnum:]_])LIMIT([^[:alnum:]_]|$)' \
+  <<<"$coordinate_acquisition_body"; then
+  fail "dashboard coordinate acquisition contains an artificial batch cap"
+fi
+if grep -Eq 'telemetry_network_durable_points_source|telemetry_dashboard_traffic_source_points' \
+  "$dashboard_coordinate_preparation"; then
+  fail "dashboard coordinate preparation retained a per-owner procedural source executor"
 fi
 grep -Fq 'INSERT INTO public.telemetry_dashboard_generation_events (' \
   "$network_selection_correction" ||
@@ -989,9 +1032,9 @@ grep -Fq 'postgres_sqlx_metadata_is_private_and_application_connections_are_publ
   fail "private SQLx catalog contract does not inspect exactly one ledger"
 grep -Fq 'assert_eq!(application_schema, "public");' "$SQLX_CATALOG_TEST" ||
   fail "private SQLx catalog contract does not prove the application schema"
-grep -Fq 'assert_eq!(private_ledger_rows, 14);' "$SQLX_CATALOG_TEST" ||
+grep -Fq 'assert_eq!(private_ledger_rows, 15);' "$SQLX_CATALOG_TEST" ||
   fail "private SQLx catalog contract does not prove all ordinary migrations"
 grep -Fq 'assert_eq!(public_internal_relations, 0);' "$SQLX_CATALOG_TEST" ||
   fail "private SQLx catalog contract does not reject public internal relations"
 
-printf '{"migration_audit":"ok","model":"domain_baseline_incremental","migration_count":14,"schema_files":12,"seed_statements":31}\n'
+printf '{"migration_audit":"ok","model":"domain_baseline_incremental","migration_count":15,"schema_files":12,"seed_statements":31}\n'

@@ -1435,9 +1435,11 @@ WITH requested AS MATERIALIZED (
             - make_interval(secs => 86400)
       AND suffix.bucket_start <= to_timestamp($3)
 ), bounded_durable AS MATERIALIZED (
-    -- The paired arrays are one exact stream relation.  One function executor
-    -- retains the per-stream index stops without paying one PL/pgSQL startup
-    -- for every selected interface.
+    -- General detail ranges can span retained tiers, so their paired exact
+    -- stream relation keeps the canonical per-stream physical stops. Cards
+    -- request one recent 60-second window: its physical owner is already the
+    -- minute partition, where one time-leading scan and an exact stream join
+    -- avoid turning a fleet read into one executor invocation per interface.
     SELECT durable.*
     FROM selected_stream_arrays streams
     CROSS JOIN LATERAL telemetry_network_durable_points_source(
@@ -1449,6 +1451,124 @@ WITH requested AS MATERIALIZED (
         ($5::BIGINT + 1)
             * ((GREATEST($4, 60)::BIGINT + 59) / 60)
     ) durable
+    WHERE NOT $9::BOOLEAN OR $4::INTEGER <> 60
+
+    UNION ALL
+
+    SELECT minute.*
+    FROM telemetry_network_rates_minute minute
+    JOIN selected_streams stream
+      ON stream.client_id = minute.client_id
+     AND stream.interface = minute.interface
+    WHERE $9::BOOLEAN
+      AND $4::INTEGER = 60
+      AND minute.bucket_secs = 60
+      AND minute.bucket_start >= date_trunc(
+              'minute', to_timestamp($2)
+          )
+      AND minute.bucket_start <= to_timestamp($3)
+
+    UNION ALL
+
+    SELECT sample.client_id,
+           sample.interface,
+           sample.observed_at AS bucket_start,
+           60::INTEGER AS bucket_secs,
+           sample.sample_count,
+           sample.rx_bytes_sum,
+           sample.tx_bytes_sum,
+           round(
+               sample.rx_bytes_sum / sample.sample_count::NUMERIC
+           )::BIGINT AS rx_bytes_avg,
+           round(
+               sample.tx_bytes_sum / sample.sample_count::NUMERIC
+           )::BIGINT AS tx_bytes_avg,
+           sample.rx_bytes AS rx_bytes_last,
+           sample.tx_bytes AS tx_bytes_last,
+           sample.rx_counter_epoch,
+           sample.tx_counter_epoch,
+           sample.latest_observed_at,
+           sample.updated_at
+    FROM traffic_counter_samples sample
+    JOIN selected_streams stream
+      ON stream.client_id = sample.client_id
+     AND stream.interface = sample.interface
+    WHERE $9::BOOLEAN
+      AND $4::INTEGER = 60
+      AND sample.source_kind = 'host'
+      AND NOT sample.inbound_promoted
+      AND sample.observed_at >= date_trunc(
+              'minute', to_timestamp($2)
+          )
+      AND sample.observed_at <= to_timestamp($3)
+
+    UNION ALL
+
+    -- Preserve the canonical strict predecessor used to derive the first
+    -- visible counter delta.  This is one bounded index stop per selected
+    -- stream, rather than another range/function execution per stream.
+    SELECT predecessor.*
+    FROM selected_streams stream
+    JOIN LATERAL (
+        SELECT candidate.*
+        FROM (
+            (
+                SELECT minute.*
+                FROM telemetry_network_rates_minute minute
+                WHERE minute.bucket_secs = 60
+                  AND minute.client_id = stream.client_id
+                  AND minute.interface = stream.interface
+                  AND minute.bucket_start < date_trunc(
+                          'minute', to_timestamp($2)
+                      )
+                  AND minute.bucket_start >= to_timestamp($2)
+                        - make_interval(secs => 86400)
+                ORDER BY minute.bucket_start DESC
+                LIMIT 1
+            )
+
+            UNION ALL
+
+            (
+                SELECT sample.client_id,
+                       sample.interface,
+                       sample.observed_at AS bucket_start,
+                       60::INTEGER AS bucket_secs,
+                       sample.sample_count,
+                       sample.rx_bytes_sum,
+                       sample.tx_bytes_sum,
+                       round(
+                           sample.rx_bytes_sum
+                               / sample.sample_count::NUMERIC
+                       )::BIGINT AS rx_bytes_avg,
+                       round(
+                           sample.tx_bytes_sum
+                               / sample.sample_count::NUMERIC
+                       )::BIGINT AS tx_bytes_avg,
+                       sample.rx_bytes AS rx_bytes_last,
+                       sample.tx_bytes AS tx_bytes_last,
+                       sample.rx_counter_epoch,
+                       sample.tx_counter_epoch,
+                       sample.latest_observed_at,
+                       sample.updated_at
+                FROM traffic_counter_samples sample
+                WHERE sample.client_id = stream.client_id
+                  AND sample.source_kind = 'host'
+                  AND sample.interface = stream.interface
+                  AND NOT sample.inbound_promoted
+                  AND sample.observed_at < date_trunc(
+                          'minute', to_timestamp($2)
+                      )
+                  AND sample.observed_at >= to_timestamp($2)
+                        - make_interval(secs => 86400)
+                ORDER BY sample.observed_at DESC
+                LIMIT 1
+            )
+        ) candidate
+        ORDER BY candidate.bucket_start DESC,
+                 candidate.latest_observed_at DESC
+        LIMIT 1
+    ) predecessor ON $9::BOOLEAN AND $4::INTEGER = 60
 ), canonical_points AS MATERIALIZED (
     SELECT durable.*
     FROM bounded_durable durable

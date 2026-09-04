@@ -13179,6 +13179,143 @@ async fn postgres_raw_network_readers_expand_only_projected_canonical_payloads()
 }
 
 #[tokio::test]
+async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_fleet() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let prefix = "cards-setwise-";
+    sqlx::query(
+        r#"
+        INSERT INTO clients (
+            id, display_name, public_key, status,
+            internal_build_number, capabilities
+        )
+        SELECT $1 || lpad(client_no::TEXT, 3, '0'),
+               $1 || lpad(client_no::TEXT, 3, '0'),
+               decode(
+                   md5($1 || client_no::TEXT)
+                       || md5($1 || client_no::TEXT || '-key'),
+                   'hex'
+               ),
+               'online', 1, '{}'::JSONB
+        FROM generate_series(1, 120) client_no
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_streams (client_id, source_kind, interface)
+        SELECT client.id, 'host', 'eth' || interface_no::TEXT
+        FROM clients client
+        CROSS JOIN generate_series(0, 7) interface_no
+        WHERE client.id LIKE $1 || '%'
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH selected AS MATERIALIZED (
+            SELECT head.client_id,
+                   nextval('telemetry_dashboard_generation_seq') AS generation
+            FROM telemetry_dashboard_network_projection_heads head
+            WHERE head.client_id LIKE $1 || '%'
+        ), installed AS (
+            INSERT INTO telemetry_dashboard_network_generations (
+                client_id, generation, select_all,
+                interfaces, interface_width
+            )
+            SELECT selected.client_id, selected.generation, TRUE,
+                   ARRAY[
+                       'eth0','eth1','eth2','eth3',
+                       'eth4','eth5','eth6','eth7'
+                   ]::TEXT[],
+                   8
+            FROM selected
+            RETURNING client_id, generation
+        )
+        UPDATE telemetry_dashboard_network_projection_heads head
+        SET network_generation = installed.generation,
+            network_select_all = TRUE,
+            network_generation_interfaces = ARRAY[
+                'eth0','eth1','eth2','eth3','eth4','eth5','eth6','eth7'
+            ]::TEXT[],
+            network_interface_width = 8
+        FROM installed
+        WHERE head.client_id = installed.client_id
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let first = (crate::unix_now() as i64 / 60) * 60 - 15 * 60;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_network_rates_minute (
+            client_id, interface, bucket_start, bucket_secs,
+            sample_count, rx_bytes_sum, tx_bytes_sum,
+            rx_bytes_avg, tx_bytes_avg, rx_bytes_last, tx_bytes_last,
+            rx_counter_epoch, tx_counter_epoch, latest_observed_at
+        )
+        SELECT $1 || lpad(client_no::TEXT, 3, '0'),
+               'eth' || interface_no::TEXT,
+               to_timestamp($2 + minute_no * 60),
+               60, 1,
+               client_no * 100000 + interface_no * 1000 + minute_no,
+               client_no * 200000 + interface_no * 1000 + minute_no,
+               client_no * 100000 + interface_no * 1000 + minute_no,
+               client_no * 200000 + interface_no * 1000 + minute_no,
+               client_no * 100000 + interface_no * 1000 + minute_no,
+               client_no * 200000 + interface_no * 1000 + minute_no,
+               0, 0, to_timestamp($2 + minute_no * 60 + 30)
+        FROM generate_series(1, 120) client_no
+        CROSS JOIN generate_series(0, 7) interface_no
+        CROSS JOIN generate_series(-1, 15) minute_no
+        "#,
+    )
+    .bind(prefix)
+    .bind(first)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE telemetry_network_rates_minute")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let client_ids = (1..=120)
+        .map(|client_no| format!("{prefix}{client_no:03}"))
+        .collect::<Vec<_>>();
+    let selection = NetworkRateInterfaceSelection::all(&client_ids);
+    let started = Instant::now();
+    let rows = db
+        .repo
+        .list_monitoring_card_raw_network_history_selected(
+            16,
+            first as u64,
+            (first + 15 * 60) as u64,
+            60,
+            &selection,
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(rows.len(), 120 * 16);
+    assert!(rows.iter().all(|row| row.interface.is_empty()));
+    eprintln!(
+        "selected Cards network history: 120 clients x 8 interfaces x 17 physical minutes -> {} rows in {elapsed:?}",
+        rows.len()
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_latest_network_rate_handles_the_largest_legal_counter_delta() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -28693,6 +28830,552 @@ async fn postgres_dashboard_schema_has_closed_blocks_without_active_mirrors() {
     db.cleanup().await;
 }
 
+#[tokio::test]
+async fn postgres_dashboard_setwise_coordinate_preparation_matches_exact_owner_publication() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let legacy_client = "dashboard-coordinate-legacy";
+    let prepared_client = "dashboard-coordinate-prepared";
+    for client_id in [legacy_client, prepared_client] {
+        insert_client(&db.pool, client_id, None).await;
+        sqlx::query(
+            r#"
+            INSERT INTO vps_rule_values (client_id,key,value_raw,value_json)
+            VALUES (
+                $1, 'network.rate.interfaces', 'eth0',
+                '{"mode":"exact","selectors":[{"source":"host","interface":"eth0","direction":"total","canonical":"eth0"}]}'::jsonb
+            ), (
+                $1, 'traffic.selectors', 'eth1',
+                '{"mode":"exact","selectors":[{"source":"host","interface":"eth1","direction":"total","canonical":"eth1"}]}'::jsonb
+            )
+            "#,
+        )
+        .bind(client_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        insert_dashboard_projection_resource_rollup(&db.pool, client_id, 0, 1).await;
+        insert_dashboard_projection_network_rate(&db.pool, client_id, "eth0", 60, 0, 100).await;
+        insert_dashboard_projection_traffic_sample(&db.pool, client_id, 0, 100).await;
+    }
+    while publish_one_dashboard_projection_for_test(&db.pool)
+        .await
+        .is_some()
+    {}
+    let (events, _) = crate::state::WsEventBus::new(16);
+    let (resident, resident_task) =
+        crate::dashboard_telemetry_resident::DashboardTelemetryResident::initialize(
+            &db.repo, events,
+        )
+        .await
+        .unwrap();
+
+    insert_dashboard_projection_resource_rollup(&db.pool, legacy_client, 1, 2).await;
+    insert_dashboard_projection_network_rate(&db.pool, legacy_client, "eth0", 60, 1, 175).await;
+    insert_dashboard_projection_traffic_sample(&db.pool, legacy_client, 1, 175).await;
+    assert_eq!(
+        sqlx::query_as::<_, (Vec<String>, i64, i64)>(
+            r#"
+            SELECT head.network_generation_interfaces,
+                   (SELECT count(*) FROM telemetry_dashboard_block_events event
+                    WHERE event.client_id = head.client_id AND event.domain = 'network'),
+                   (SELECT count(*) FROM telemetry_dashboard_generation_events event
+                    WHERE event.client_id = head.client_id AND event.domain = 'network')
+            FROM telemetry_dashboard_network_projection_heads head
+            WHERE head.client_id = $1
+            "#,
+        )
+        .bind(legacy_client)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (vec!["eth0".to_string()], 1, 0)
+    );
+    let mut legacy_domains = BTreeSet::new();
+    while let Some(legacy) = publish_one_dashboard_projection_for_test(&db.pool).await {
+        assert_eq!(legacy.client_id, legacy_client);
+        assert_eq!(legacy.change, "block");
+        legacy_domains.insert(legacy.domain);
+    }
+    assert_eq!(
+        legacy_domains,
+        ["network", "resource", "traffic"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+
+    insert_dashboard_projection_resource_rollup(&db.pool, prepared_client, 1, 2).await;
+    insert_dashboard_projection_network_rate(&db.pool, prepared_client, "eth0", 60, 1, 175).await;
+    insert_dashboard_projection_traffic_sample(&db.pool, prepared_client, 1, 175).await;
+    assert_eq!(
+        crate::dashboard_projection_maintenance::publish_coordinate_cohort_for_test(&db.pool)
+            .await
+            .unwrap(),
+        3
+    );
+
+    let block_rows_sql = r#"
+        SELECT block.source_bucket_secs, block.block_start_unix,
+               block.sample_counts, block.latest_observed_unix,
+               block.rx_bytes_last, block.tx_bytes_last,
+               block.rx_counter_epoch, block.tx_counter_epoch
+        FROM telemetry_dashboard_network_projection_heads head
+        JOIN telemetry_dashboard_network_blocks block
+          ON block.client_id = head.client_id
+         AND block.generation = head.network_generation
+        WHERE head.client_id = $1
+        ORDER BY block.source_bucket_secs, block.block_start_unix
+        "#;
+    type NetworkBlockColumns = (
+        i32,
+        i64,
+        Vec<i64>,
+        Vec<Option<i64>>,
+        Vec<Option<i64>>,
+        Vec<Option<i64>>,
+        Vec<Option<i64>>,
+        Vec<Option<i64>>,
+    );
+    let legacy_blocks = sqlx::query_as::<_, NetworkBlockColumns>(block_rows_sql)
+        .bind(legacy_client)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    let prepared_blocks = sqlx::query_as::<_, NetworkBlockColumns>(block_rows_sql)
+        .bind(prepared_client)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(prepared_blocks, legacy_blocks);
+
+    for (head_table, block_table, generation_column) in [
+        (
+            "telemetry_dashboard_resource_projection_heads",
+            "telemetry_dashboard_resource_blocks",
+            "resource_generation",
+        ),
+        (
+            "telemetry_dashboard_traffic_projection_heads",
+            "telemetry_dashboard_traffic_blocks",
+            "traffic_generation",
+        ),
+    ] {
+        let sql = format!(
+            r#"
+            SELECT COALESCE(
+                jsonb_agg(
+                    to_jsonb(block)
+                        - 'client_id' - 'generation' - 'published_revision'
+                    ORDER BY block.source_bucket_secs, block.block_start_unix
+                ),
+                '[]'::jsonb
+            )
+            FROM {head_table} head
+            LEFT JOIN {block_table} block
+              ON block.client_id = head.client_id
+             AND block.generation = head.{generation_column}
+            WHERE head.client_id = $1
+            "#,
+        );
+        let legacy_rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+            .bind(legacy_client)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let prepared_rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+            .bind(prepared_client)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(prepared_rows, legacy_rows, "{block_table} changed");
+    }
+
+    let owner_state_sql = r#"
+        SELECT head.network_revision,
+               head.network_change_source_bucket_secs,
+               head.network_change_block_start_unix,
+               extract(epoch FROM head.network_first_at)::BIGINT,
+               extract(epoch FROM head.network_through_at)::BIGINT,
+               (SELECT count(*) FROM telemetry_dashboard_block_events event
+                WHERE event.client_id = head.client_id AND event.domain = 'network'),
+               (SELECT count(*) FROM telemetry_dashboard_ready_owners ready
+                JOIN telemetry_dashboard_projection_fences fence USING (owner_id)
+                WHERE fence.client_id = head.client_id AND fence.domain = 'network')
+        FROM telemetry_dashboard_network_projection_heads head
+        WHERE head.client_id = $1
+        "#;
+    type NetworkOwnerState = (i64, Vec<i32>, Vec<i64>, Option<i64>, Option<i64>, i64, i64);
+    let prepared_state = sqlx::query_as::<_, NetworkOwnerState>(owner_state_sql)
+        .bind(prepared_client)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let legacy_state = sqlx::query_as::<_, NetworkOwnerState>(owner_state_sql)
+        .bind(legacy_client)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(prepared_state, legacy_state);
+    let all_head_state_sql = r#"
+        SELECT jsonb_build_object(
+            'resource', jsonb_build_array(
+                resource.resource_revision, resource.resource_change,
+                resource.resource_change_source_bucket_secs,
+                resource.resource_change_block_start_unix,
+                extract(epoch FROM resource.resource_first_at)::BIGINT,
+                extract(epoch FROM resource.resource_through_at)::BIGINT
+            ),
+            'network', jsonb_build_array(
+                network.network_revision, network.network_change,
+                network.network_change_source_bucket_secs,
+                network.network_change_block_start_unix,
+                network.network_generation_interfaces,
+                extract(epoch FROM network.network_first_at)::BIGINT,
+                extract(epoch FROM network.network_through_at)::BIGINT
+            ),
+            'traffic', jsonb_build_array(
+                traffic.traffic_revision, traffic.traffic_change,
+                traffic.traffic_change_source_bucket_secs,
+                traffic.traffic_change_block_start_unix,
+                traffic.traffic_generation_source_kinds,
+                traffic.traffic_generation_interfaces,
+                extract(epoch FROM traffic.traffic_first_at)::BIGINT,
+                extract(epoch FROM traffic.traffic_through_at)::BIGINT
+            ),
+            'block_events', (
+                SELECT count(*) FROM telemetry_dashboard_block_events event
+                WHERE event.client_id = resource.client_id
+            ),
+            'ready_owners', (
+                SELECT count(*) FROM telemetry_dashboard_ready_owners ready
+                JOIN telemetry_dashboard_projection_fences fence USING (owner_id)
+                WHERE fence.client_id = resource.client_id
+            )
+        )
+        FROM telemetry_dashboard_resource_projection_heads resource
+        JOIN telemetry_dashboard_network_projection_heads network USING (client_id)
+        JOIN telemetry_dashboard_traffic_projection_heads traffic USING (client_id)
+        WHERE resource.client_id = $1
+        "#;
+    let legacy_all_state = sqlx::query_scalar::<_, serde_json::Value>(all_head_state_sql)
+        .bind(legacy_client)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let prepared_all_state = sqlx::query_scalar::<_, serde_json::Value>(all_head_state_sql)
+        .bind(prepared_client)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(prepared_all_state, legacy_all_state);
+    for client_id in [legacy_client, prepared_client] {
+        let expected: (i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT resource_revision, network_revision, traffic_revision
+            FROM telemetry_dashboard_resource_projection_heads resource
+            JOIN telemetry_dashboard_network_projection_heads network USING (client_id)
+            JOIN telemetry_dashboard_traffic_projection_heads traffic USING (client_id)
+            WHERE client_id = $1
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if resident.revisions_for_test(client_id) == Some(expected) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "setwise resident notice cohort did not install {client_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(2), resident_task.shutdown())
+        .await
+        .expect("dashboard resident did not stop after exact cohort proof")
+        .unwrap();
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_dashboard_coordinate_cohort_drains_120_clients_without_source_n_plus_one() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let prefix = "dashboard-cohort-";
+    sqlx::query(
+        r#"
+        INSERT INTO clients (
+            id, display_name, public_key, status,
+            internal_build_number, capabilities
+        )
+        SELECT $1 || lpad(client_no::TEXT, 3, '0'),
+               $1 || lpad(client_no::TEXT, 3, '0'),
+               decode(
+                   md5($1 || client_no::TEXT)
+                       || md5($1 || client_no::TEXT || '-key'),
+                   'hex'
+               ),
+               'online', 1, '{}'::JSONB
+        FROM generate_series(1, 120) client_no
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        SELECT client.id, rule.key, '*', '{"mode":"all"}'::JSONB
+        FROM clients client
+        CROSS JOIN (VALUES
+            ('network.rate.interfaces'::TEXT),
+            ('traffic.selectors'::TEXT)
+        ) rule(key)
+        WHERE client.id LIKE $1 || '%'
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_streams (client_id, source_kind, interface)
+        SELECT client.id, 'host', 'eth' || interface_no::TEXT
+        FROM clients client
+        CROSS JOIN generate_series(0, 7) interface_no
+        WHERE client.id LIKE $1 || '%'
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH selected AS MATERIALIZED (
+            SELECT network.client_id,
+                   nextval('telemetry_dashboard_generation_seq')
+                       AS network_generation,
+                   nextval('telemetry_dashboard_generation_seq')
+                       AS traffic_generation
+            FROM telemetry_dashboard_network_projection_heads network
+            WHERE network.client_id LIKE $1 || '%'
+        ), network_generation AS (
+            INSERT INTO telemetry_dashboard_network_generations (
+                client_id, generation, select_all,
+                interfaces, interface_width
+            )
+            SELECT selected.client_id, selected.network_generation, FALSE,
+                   ARRAY[
+                       'eth0','eth1','eth2','eth3',
+                       'eth4','eth5','eth6','eth7'
+                   ]::TEXT[], 8
+            FROM selected
+            RETURNING client_id, generation
+        ), traffic_generation AS (
+            INSERT INTO telemetry_dashboard_traffic_generations (
+                client_id, generation, source_kinds,
+                interfaces, stream_width
+            )
+            SELECT selected.client_id, selected.traffic_generation,
+                   array_fill('host'::TEXT, ARRAY[8]),
+                   ARRAY[
+                       'eth0','eth1','eth2','eth3',
+                       'eth4','eth5','eth6','eth7'
+                   ]::TEXT[], 8
+            FROM selected
+            RETURNING client_id, generation
+        ), network_head AS (
+            UPDATE telemetry_dashboard_network_projection_heads head
+            SET network_generation = generation.generation,
+                network_select_all = FALSE,
+                network_generation_interfaces = ARRAY[
+                    'eth0','eth1','eth2','eth3',
+                    'eth4','eth5','eth6','eth7'
+                ]::TEXT[],
+                network_interface_width = 8
+            FROM network_generation generation
+            WHERE head.client_id = generation.client_id
+            RETURNING head.client_id
+        )
+        UPDATE telemetry_dashboard_traffic_projection_heads head
+        SET traffic_generation = generation.generation,
+            traffic_generation_source_kinds =
+                array_fill('host'::TEXT, ARRAY[8]),
+            traffic_generation_interfaces = ARRAY[
+                'eth0','eth1','eth2','eth3',
+                'eth4','eth5','eth6','eth7'
+            ]::TEXT[],
+            traffic_stream_width = 8
+        FROM traffic_generation generation
+        WHERE head.client_id = generation.client_id
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH generation_events AS (
+            DELETE FROM telemetry_dashboard_generation_events
+            WHERE client_id LIKE $1 || '%'
+        ), block_events AS (
+            DELETE FROM telemetry_dashboard_block_events
+            WHERE client_id LIKE $1 || '%'
+        )
+        DELETE FROM telemetry_dashboard_ready_owners ready
+        USING telemetry_dashboard_projection_fences fence
+        WHERE ready.owner_id = fence.owner_id
+          AND fence.client_id LIKE $1 || '%'
+        "#,
+    )
+    .bind(prefix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let (events, _) = crate::state::WsEventBus::new(16);
+    let (resident, resident_task) =
+        crate::dashboard_telemetry_resident::DashboardTelemetryResident::initialize(
+            &db.repo, events,
+        )
+        .await
+        .unwrap();
+    let minute = (crate::unix_now() as i64 / 60) * 60 - 60;
+    sqlx::query(
+        r#"
+        WITH resource AS (
+            INSERT INTO telemetry_rollups (
+                client_id, bucket_start, bucket_secs, sample_count,
+                cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+                memory_total_bytes_max, memory_available_bytes_avg,
+                memory_available_bytes_sum, memory_available_bytes_min,
+                memory_used_ratio_avg, memory_used_ratio_sum,
+                memory_used_ratio_max, latest_observed_at
+            )
+            SELECT $1 || lpad(client_no::TEXT, 3, '0'),
+                   to_timestamp($2), 60, 1,
+                   1, 1, 1, 1000, 500, 500, 500, 0.5, 0.5, 0.5,
+                   to_timestamp($2 + 30)
+            FROM generate_series(1, 120) client_no
+        )
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        )
+        SELECT $1 || lpad(client_no::TEXT, 3, '0'),
+               'host', 'eth' || interface_no::TEXT,
+               to_timestamp($2),
+               client_no * 100000 + interface_no * 1000,
+               client_no * 200000 + interface_no * 1000,
+               0, 0, 'interface_counters'
+        FROM generate_series(1, 120) client_no
+        CROSS JOIN generate_series(0, 7) interface_no
+        "#,
+    )
+    .bind(prefix)
+    .bind(minute)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let queued: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(DISTINCT (client_id, domain))
+             FROM telemetry_dashboard_block_events
+             WHERE client_id LIKE $1 || '%'),
+            (SELECT count(*) FROM telemetry_dashboard_generation_events
+             WHERE client_id LIKE $1 || '%'),
+            (SELECT count(*) FROM telemetry_dashboard_ready_owners ready
+             JOIN telemetry_dashboard_projection_fences fence USING (owner_id)
+             WHERE fence.client_id LIKE $1 || '%')
+        "#,
+    )
+    .bind(prefix)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let generation_domains: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT domain, count(*)
+        FROM telemetry_dashboard_generation_events
+        WHERE client_id LIKE $1 || '%'
+        GROUP BY domain
+        ORDER BY domain
+        "#,
+    )
+    .bind(prefix)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        queued,
+        (360, 0, 360),
+        "unexpected generation work: {generation_domains:?}"
+    );
+
+    let started = Instant::now();
+    let published =
+        crate::dashboard_projection_maintenance::publish_coordinate_cohort_for_test(&db.pool)
+            .await
+            .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(published, 360);
+    let remaining: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM telemetry_dashboard_block_events
+             WHERE client_id LIKE $1 || '%'),
+            (SELECT count(*) FROM telemetry_dashboard_ready_owners ready
+             JOIN telemetry_dashboard_projection_fences fence USING (owner_id)
+             WHERE fence.client_id LIKE $1 || '%')
+        "#,
+    )
+    .bind(prefix)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, (0, 0));
+    let resident_started = Instant::now();
+    let resident_deadline = resident_started + Duration::from_secs(10);
+    loop {
+        let current = (1..=120)
+            .filter(|client_no| {
+                let client_id = format!("{prefix}{client_no:03}");
+                resident.revisions_for_test(&client_id) == Some((1, 1, 1))
+            })
+            .count();
+        if current == 120 {
+            break;
+        }
+        assert!(
+            Instant::now() < resident_deadline,
+            "setwise resident cohort stalled with {current}/120 clients current"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let resident_elapsed = resident_started.elapsed();
+    eprintln!(
+        "dashboard coordinate cohort: 120 clients x 3 domains x 8 network/traffic streams -> {published} independent commits in {elapsed:?}; resident convergence after publication in {resident_elapsed:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(2), resident_task.shutdown())
+        .await
+        .expect("dashboard resident did not stop after scale proof")
+        .unwrap();
+    db.cleanup().await;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DashboardProjectionTestOwner {
     owner_id: i64,
@@ -29005,6 +29688,68 @@ async fn insert_dashboard_projection_network_rate(
     .bind(interface)
     .bind(minute_offset)
     .bind(bucket_secs)
+    .bind(bytes)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_dashboard_projection_resource_rollup(
+    pool: &PgPool,
+    client_id: &str,
+    minute_offset: i32,
+    value: i64,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum,
+            memory_used_ratio_max, latest_observed_at
+        ) VALUES (
+            $1,
+            TIMESTAMPTZ '2024-01-01 00:00:00+00'
+                + make_interval(mins => $2),
+            60, 1, $3, $3, $3,
+            1000, 500, 500, 500, 0.5, 0.5, 0.5,
+            TIMESTAMPTZ '2024-01-01 00:00:30+00'
+                + make_interval(mins => $2)
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(minute_offset)
+    .bind(value as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_dashboard_projection_traffic_sample(
+    pool: &PgPool,
+    client_id: &str,
+    minute_offset: i32,
+    bytes: i64,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source
+        ) VALUES (
+            $1, 'host', 'eth1',
+            TIMESTAMPTZ '2024-01-01 00:00:00+00'
+                + make_interval(mins => $2),
+            $3, $3, 0, 0, 'interface_counters'
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(minute_offset)
     .bind(bytes)
     .execute(pool)
     .await
@@ -33870,7 +34615,7 @@ async fn postgres_sqlx_metadata_is_private_and_application_connections_are_publi
         .await
         .unwrap();
     assert_eq!(application_schema, "public");
-    assert_eq!(private_ledger_rows, 14);
+    assert_eq!(private_ledger_rows, 15);
     assert_eq!(public_internal_relations, 0);
 
     db.cleanup().await;

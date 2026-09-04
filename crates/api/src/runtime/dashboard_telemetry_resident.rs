@@ -420,6 +420,117 @@ FROM telemetry_dashboard_traffic_overlay_source(
 ORDER BY overlay.client_id, source_bucket_secs, bucket_start_unix
 "#;
 
+// A ready dashboard-notice cohort names exact (client, F16 block) owners.
+// Keep the client coordinate paired through the setwise overlay read: the
+// underlying source accepts a shared coordinate relation, while this join
+// prevents one client's requested block from admitting another client's row.
+const NOTICE_RESOURCE_OVERLAY_SQL: &str = r#"
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT coordinate.client_id,
+           coordinate.source_bucket_secs,
+           coordinate.block_start_unix
+    FROM unnest($1::TEXT[], $2::INTEGER[], $3::BIGINT[])
+        coordinate(client_id, source_bucket_secs, block_start_unix)
+), source AS MATERIALIZED (
+    SELECT overlay.client_id AS overlay_client_id,
+           overlay.bucket_secs AS source_bucket_secs,
+           telemetry_dashboard_block_start(
+               extract(epoch FROM overlay.bucket_start)::BIGINT,
+               overlay.bucket_secs
+           ) AS block_start_unix,
+           extract(epoch FROM overlay.bucket_start)::BIGINT
+               AS bucket_start_unix,
+           overlay.sample_count::BIGINT AS sample_count,
+           overlay.cpu_load_1_sum,
+           overlay.cpu_load_1_max::DOUBLE PRECISION AS cpu_load_1_max,
+           overlay.memory_total_bytes_max,
+           overlay.memory_used_ratio_sum,
+           overlay.memory_used_ratio_max::DOUBLE PRECISION
+               AS memory_used_ratio_max,
+           overlay.disk_sample_count::BIGINT AS disk_sample_count,
+           overlay.disk_total_bytes_max,
+           overlay.disk_used_ratio_sum,
+           overlay.disk_used_ratio_max::DOUBLE PRECISION
+               AS disk_used_ratio_max,
+           extract(epoch FROM overlay.latest_observed_at)::BIGINT
+               AS latest_observed_unix
+    FROM telemetry_dashboard_resource_overlay_source($1, $2, $3) overlay
+)
+SELECT source.*
+FROM source
+JOIN requested
+  ON requested.client_id = source.overlay_client_id
+ AND requested.source_bucket_secs = source.source_bucket_secs
+ AND requested.block_start_unix = source.block_start_unix
+ORDER BY overlay_client_id, source_bucket_secs,
+         block_start_unix, bucket_start_unix
+"#;
+
+const NOTICE_NETWORK_OVERLAY_SQL: &str = r#"
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT coordinate.client_id,
+           coordinate.source_bucket_secs,
+           coordinate.block_start_unix
+    FROM unnest($1::TEXT[], $2::INTEGER[], $3::BIGINT[])
+        coordinate(client_id, source_bucket_secs, block_start_unix)
+), selected_interfaces AS MATERIALIZED (
+    SELECT DISTINCT selected.client_id, selected.interface
+    FROM unnest($4::TEXT[], $5::TEXT[])
+        selected(client_id, interface)
+), source AS MATERIALIZED (
+    SELECT overlay.client_id, overlay.interface,
+           overlay.bucket_secs AS source_bucket_secs,
+           telemetry_dashboard_block_start(
+               extract(epoch FROM overlay.bucket_start)::BIGINT,
+               overlay.bucket_secs
+           ) AS block_start_unix,
+           extract(epoch FROM overlay.bucket_start)::BIGINT
+               AS bucket_start_unix,
+           overlay.sample_count::BIGINT AS sample_count,
+           extract(epoch FROM overlay.latest_observed_at)::BIGINT
+               AS latest_observed_unix,
+           overlay.rx_bytes_last, overlay.tx_bytes_last,
+           overlay.rx_counter_epoch, overlay.tx_counter_epoch
+    FROM telemetry_dashboard_network_overlay_source($1, $2, $3) overlay
+)
+SELECT source.*
+FROM source
+JOIN requested USING (client_id, source_bucket_secs, block_start_unix)
+JOIN selected_interfaces USING (client_id, interface)
+ORDER BY client_id, source_bucket_secs,
+         block_start_unix, bucket_start_unix, interface
+"#;
+
+const NOTICE_TRAFFIC_OVERLAY_SQL: &str = r#"
+WITH requested AS MATERIALIZED (
+    SELECT DISTINCT coordinate.client_id,
+           coordinate.source_bucket_secs,
+           coordinate.block_start_unix
+    FROM unnest($1::TEXT[], $2::INTEGER[], $3::BIGINT[])
+        coordinate(client_id, source_bucket_secs, block_start_unix)
+), source AS MATERIALIZED (
+    SELECT overlay.client_id AS overlay_client_id,
+           overlay.bucket_secs AS source_bucket_secs,
+           telemetry_dashboard_block_start(
+               extract(epoch FROM overlay.bucket_start)::BIGINT,
+               overlay.bucket_secs
+           ) AS block_start_unix,
+           extract(epoch FROM overlay.bucket_start)::BIGINT
+               AS bucket_start_unix,
+           overlay.rx_valid_count::BIGINT, overlay.tx_valid_count::BIGINT,
+           overlay.rx_bytes, overlay.tx_bytes
+    FROM telemetry_dashboard_traffic_overlay_source($1, $2, $3) overlay
+)
+SELECT source.*
+FROM source
+JOIN requested
+  ON requested.client_id = source.overlay_client_id
+ AND requested.source_bucket_secs = source.source_bucket_secs
+ AND requested.block_start_unix = source.block_start_unix
+ORDER BY overlay_client_id, source_bucket_secs,
+         block_start_unix, bucket_start_unix
+"#;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BlockKey {
     source_bucket_secs: i32,
@@ -637,6 +748,23 @@ fn parse_head(row: &PgRow) -> Result<(String, ClientHeads)> {
 
 async fn load_heads(listener: &mut PgListener) -> Result<BTreeMap<String, ClientHeads>> {
     parse_heads(sqlx::query(HEADS_SQL).fetch_all(&mut *listener).await?)
+}
+
+async fn load_selected_heads(
+    listener: &mut PgListener,
+    client_ids: &[String],
+) -> Result<BTreeMap<String, ClientHeads>> {
+    if client_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    parse_heads(
+        sqlx::query(&format!(
+            "SELECT * FROM ({HEADS_SQL}) heads WHERE client_id = ANY($1::TEXT[]) ORDER BY client_id"
+        ))
+        .bind(client_ids)
+        .fetch_all(&mut *listener)
+        .await?,
+    )
 }
 
 fn parse_heads(rows: Vec<PgRow>) -> Result<BTreeMap<String, ClientHeads>> {
@@ -3188,6 +3316,27 @@ impl DashboardTelemetryResident {
             snapshot: Arc::new(RwLock::new(Arc::new(ResidentFleet::default()))),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn revisions_for_test(&self, client_id: &str) -> Option<(i64, i64, i64)> {
+        let snapshot = self.snapshot();
+        let resource = snapshot.resources.get(client_id)?;
+        let network = snapshot.networks.get(client_id)?;
+        let traffic = snapshot.traffics.get(client_id)?;
+        let resource_revision = resource
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revision;
+        let network_revision = network
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revision;
+        let traffic_revision = traffic
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revision;
+        Some((resource_revision, network_revision, traffic_revision))
+    }
 }
 
 fn normalized_step(step_secs: i32) -> i32 {
@@ -3692,6 +3841,422 @@ async fn load_traffic_blocks(
             .collect(),
         overlay_blocks,
     ))
+}
+
+struct ResourceNoticeTarget {
+    ordinal: usize,
+    notice: DashboardNotice,
+    owner: Arc<RwLock<ResourceOwner>>,
+    head: ResourceHead,
+    blocks: Arc<[BlockKey]>,
+}
+
+struct NetworkNoticeTarget {
+    ordinal: usize,
+    notice: DashboardNotice,
+    owner: Arc<RwLock<NetworkOwner>>,
+    head: NetworkHead,
+    blocks: Arc<[BlockKey]>,
+}
+
+struct TrafficNoticeTarget {
+    ordinal: usize,
+    notice: DashboardNotice,
+    owner: Arc<RwLock<TrafficOwner>>,
+    head: TrafficHead,
+    blocks: Arc<[BlockKey]>,
+}
+
+struct ResourceNoticeChange {
+    blocks: Vec<(i32, i64, Option<ResourceBlock>)>,
+    overlay_blocks: BTreeSet<(i32, i64)>,
+}
+
+struct NetworkNoticeChange {
+    blocks: Vec<(i32, i64, Option<NetworkBlock>)>,
+    overlay_blocks: BTreeSet<(i32, i64)>,
+}
+
+struct TrafficNoticeChange {
+    blocks: Vec<(i32, i64, Option<TrafficBlock>)>,
+    overlay_blocks: BTreeSet<(i32, i64)>,
+}
+
+async fn load_resource_notice_changes(
+    listener: &mut PgListener,
+    targets: &BTreeMap<String, ResourceNoticeTarget>,
+) -> Result<HashMap<String, ResourceNoticeChange>> {
+    let mut clients = Vec::new();
+    let mut generations = Vec::new();
+    let mut revisions = Vec::new();
+    let mut tiers = Vec::new();
+    let mut starts = Vec::new();
+    for (client_id, target) in targets {
+        for key in target.blocks.iter() {
+            clients.push(client_id.clone());
+            generations.push(target.head.generation);
+            revisions.push(target.head.revision);
+            tiers.push(key.source_bucket_secs);
+            starts.push(key.block_start_unix);
+        }
+    }
+    if clients.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut blocks = HashMap::<String, BTreeMap<(i32, i64), ResourceBlock>>::new();
+    for row in sqlx::query(OVERLAY_RESOURCE_BLOCKS_SQL)
+        .bind(&clients)
+        .bind(&generations)
+        .bind(&revisions)
+        .bind(&tiers)
+        .bind(&starts)
+        .fetch_all(&mut *listener)
+        .await?
+    {
+        let client_id: String = row.try_get("overlay_client_id")?;
+        let target = targets
+            .get(&client_id)
+            .context("dashboard resource notice target disappeared")?;
+        let (tier, block) = ResourceBlockRow::from_row(&row)?.into_block(&target.head)?;
+        anyhow::ensure!(
+            blocks
+                .entry(client_id)
+                .or_default()
+                .insert((tier, block.start), block)
+                .is_none(),
+            "dashboard resource notice block key is duplicated"
+        );
+    }
+
+    let mut overlay_blocks = HashMap::<String, BTreeSet<(i32, i64)>>::new();
+    for row in sqlx::query(NOTICE_RESOURCE_OVERLAY_SQL)
+        .bind(&clients)
+        .bind(&tiers)
+        .bind(&starts)
+        .fetch_all(&mut *listener)
+        .await?
+    {
+        let client_id: String = row.try_get("overlay_client_id")?;
+        let target = targets
+            .get(&client_id)
+            .context("dashboard resource notice target disappeared")?;
+        let overlay = ResourceOverlayRow::from_row(&row)?;
+        overlay_blocks
+            .entry(client_id.clone())
+            .or_default()
+            .insert((overlay.tier, overlay.block_start));
+        overlay.apply(blocks.entry(client_id).or_default(), &target.head)?;
+    }
+
+    let mut changes = HashMap::new();
+    for (client_id, target) in targets {
+        let mut client_blocks = blocks.remove(client_id).unwrap_or_default();
+        let replacement = target
+            .blocks
+            .iter()
+            .map(|key| {
+                (
+                    key.source_bucket_secs,
+                    key.block_start_unix,
+                    client_blocks.remove(&(key.source_bucket_secs, key.block_start_unix)),
+                )
+            })
+            .collect();
+        anyhow::ensure!(
+            client_blocks.is_empty(),
+            "dashboard resource notice returned an unrequested block"
+        );
+        changes.insert(
+            client_id.clone(),
+            ResourceNoticeChange {
+                blocks: replacement,
+                overlay_blocks: overlay_blocks.remove(client_id).unwrap_or_default(),
+            },
+        );
+    }
+    anyhow::ensure!(
+        blocks.is_empty() && overlay_blocks.is_empty(),
+        "dashboard resource notice rows escaped their exact owner"
+    );
+    Ok(changes)
+}
+
+async fn load_network_notice_changes(
+    listener: &mut PgListener,
+    targets: &BTreeMap<String, NetworkNoticeTarget>,
+) -> Result<HashMap<String, NetworkNoticeChange>> {
+    let mut clients = Vec::new();
+    let mut generations = Vec::new();
+    let mut revisions = Vec::new();
+    let mut tiers = Vec::new();
+    let mut starts = Vec::new();
+    let mut interface_clients = Vec::new();
+    let mut interfaces = Vec::new();
+    for (client_id, target) in targets {
+        for key in target.blocks.iter() {
+            clients.push(client_id.clone());
+            generations.push(target.head.generation);
+            revisions.push(target.head.revision);
+            tiers.push(key.source_bucket_secs);
+            starts.push(key.block_start_unix);
+        }
+        for interface in target.head.interfaces.iter() {
+            interface_clients.push(client_id.clone());
+            interfaces.push(interface.clone());
+        }
+    }
+    if clients.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut blocks = HashMap::<String, BTreeMap<(i32, i64), NetworkBlock>>::new();
+    for row in sqlx::query(OVERLAY_NETWORK_BLOCKS_SQL)
+        .bind(&clients)
+        .bind(&generations)
+        .bind(&revisions)
+        .bind(&tiers)
+        .bind(&starts)
+        .fetch_all(&mut *listener)
+        .await?
+    {
+        let client_id: String = row.try_get("overlay_client_id")?;
+        let target = targets
+            .get(&client_id)
+            .context("dashboard network notice target disappeared")?;
+        let (tier, block) = NetworkBlockRow::from_row(&row)?.into_block(&target.head)?;
+        anyhow::ensure!(
+            blocks
+                .entry(client_id)
+                .or_default()
+                .insert((tier, block.start), block)
+                .is_none(),
+            "dashboard network notice block key is duplicated"
+        );
+    }
+
+    let mut states = BTreeMap::<(String, i32, i64, i64), Vec<NetworkState>>::new();
+    for row in sqlx::query_as::<_, NetworkOverlaySourceRow>(NOTICE_NETWORK_OVERLAY_SQL)
+        .bind(&clients)
+        .bind(&tiers)
+        .bind(&starts)
+        .bind(&interface_clients)
+        .bind(&interfaces)
+        .fetch_all(&mut *listener)
+        .await?
+    {
+        let target = targets
+            .get(&row.client_id)
+            .context("dashboard network notice target disappeared")?;
+        let interface = target
+            .head
+            .interfaces
+            .iter()
+            .position(|candidate| candidate == &row.interface)
+            .context("dashboard network notice returned an unselected interface")?;
+        let span = i64::from(row.source_bucket_secs) * BLOCK_SLOTS as i64;
+        anyhow::ensure!(
+            valid_tier(row.source_bucket_secs)
+                && row.block_start_unix.rem_euclid(span) == 0
+                && row.bucket_start_unix >= row.block_start_unix
+                && row.bucket_start_unix < row.block_start_unix + span
+                && (row.bucket_start_unix - row.block_start_unix)
+                    .rem_euclid(i64::from(row.source_bucket_secs))
+                    == 0,
+            "dashboard network notice overlay key is invalid"
+        );
+        let values = states
+            .entry((
+                row.client_id,
+                row.source_bucket_secs,
+                row.block_start_unix,
+                row.bucket_start_unix,
+            ))
+            .or_insert_with(|| vec![NetworkState::default(); target.head.interfaces.len()]);
+        anyhow::ensure!(
+            !values[interface].present(),
+            "dashboard network notice overlay owner is duplicated"
+        );
+        values[interface] = NetworkState {
+            count: row.sample_count,
+            latest: row.latest_observed_unix,
+            rx: row.rx_bytes_last,
+            tx: row.tx_bytes_last,
+            rx_epoch: row.rx_counter_epoch,
+            tx_epoch: row.tx_counter_epoch,
+        }
+        .valid()?;
+    }
+    let mut overlay_blocks = HashMap::<String, BTreeSet<(i32, i64)>>::new();
+    for ((client_id, tier, block_start, bucket_start), values) in states {
+        let target = targets
+            .get(&client_id)
+            .context("dashboard network notice target disappeared")?;
+        overlay_blocks
+            .entry(client_id.clone())
+            .or_default()
+            .insert((tier, block_start));
+        NetworkOverlayRow {
+            tier,
+            block_start,
+            bucket_start,
+            counts: values.iter().map(|state| state.count).collect(),
+            latest: values
+                .iter()
+                .map(|state| state.present().then_some(state.latest))
+                .collect(),
+            rx: values
+                .iter()
+                .map(|state| state.present().then_some(state.rx))
+                .collect(),
+            tx: values
+                .iter()
+                .map(|state| state.present().then_some(state.tx))
+                .collect(),
+            rx_epoch: values
+                .iter()
+                .map(|state| state.present().then_some(state.rx_epoch))
+                .collect(),
+            tx_epoch: values
+                .iter()
+                .map(|state| state.present().then_some(state.tx_epoch))
+                .collect(),
+        }
+        .apply(blocks.entry(client_id).or_default(), &target.head)?;
+    }
+
+    let mut changes = HashMap::new();
+    for (client_id, target) in targets {
+        let mut client_blocks = blocks.remove(client_id).unwrap_or_default();
+        let replacement = target
+            .blocks
+            .iter()
+            .map(|key| {
+                (
+                    key.source_bucket_secs,
+                    key.block_start_unix,
+                    client_blocks.remove(&(key.source_bucket_secs, key.block_start_unix)),
+                )
+            })
+            .collect();
+        anyhow::ensure!(
+            client_blocks.is_empty(),
+            "dashboard network notice returned an unrequested block"
+        );
+        changes.insert(
+            client_id.clone(),
+            NetworkNoticeChange {
+                blocks: replacement,
+                overlay_blocks: overlay_blocks.remove(client_id).unwrap_or_default(),
+            },
+        );
+    }
+    anyhow::ensure!(
+        blocks.is_empty() && overlay_blocks.is_empty(),
+        "dashboard network notice rows escaped their exact owner"
+    );
+    Ok(changes)
+}
+
+async fn load_traffic_notice_changes(
+    listener: &mut PgListener,
+    targets: &BTreeMap<String, TrafficNoticeTarget>,
+) -> Result<HashMap<String, TrafficNoticeChange>> {
+    let mut clients = Vec::new();
+    let mut generations = Vec::new();
+    let mut revisions = Vec::new();
+    let mut tiers = Vec::new();
+    let mut starts = Vec::new();
+    for (client_id, target) in targets {
+        for key in target.blocks.iter() {
+            clients.push(client_id.clone());
+            generations.push(target.head.generation);
+            revisions.push(target.head.revision);
+            tiers.push(key.source_bucket_secs);
+            starts.push(key.block_start_unix);
+        }
+    }
+    if clients.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut blocks = HashMap::<String, BTreeMap<(i32, i64), TrafficBlock>>::new();
+    for row in sqlx::query(OVERLAY_TRAFFIC_BLOCKS_SQL)
+        .bind(&clients)
+        .bind(&generations)
+        .bind(&revisions)
+        .bind(&tiers)
+        .bind(&starts)
+        .fetch_all(&mut *listener)
+        .await?
+    {
+        let client_id: String = row.try_get("overlay_client_id")?;
+        let target = targets
+            .get(&client_id)
+            .context("dashboard traffic notice target disappeared")?;
+        let (tier, block) = TrafficBlockRow::from_row(&row)?.into_block(&target.head)?;
+        anyhow::ensure!(
+            blocks
+                .entry(client_id)
+                .or_default()
+                .insert((tier, block.start), block)
+                .is_none(),
+            "dashboard traffic notice block key is duplicated"
+        );
+    }
+
+    let mut overlay_blocks = HashMap::<String, BTreeSet<(i32, i64)>>::new();
+    for row in sqlx::query(NOTICE_TRAFFIC_OVERLAY_SQL)
+        .bind(&clients)
+        .bind(&tiers)
+        .bind(&starts)
+        .fetch_all(&mut *listener)
+        .await?
+    {
+        let client_id: String = row.try_get("overlay_client_id")?;
+        anyhow::ensure!(
+            targets.contains_key(&client_id),
+            "dashboard traffic notice target disappeared"
+        );
+        let overlay = TrafficOverlayRow::from_row(&row)?;
+        overlay_blocks
+            .entry(client_id.clone())
+            .or_default()
+            .insert((overlay.tier, overlay.block_start));
+        overlay.apply(blocks.entry(client_id).or_default())?;
+    }
+
+    let mut changes = HashMap::new();
+    for (client_id, target) in targets {
+        let mut client_blocks = blocks.remove(client_id).unwrap_or_default();
+        let replacement = target
+            .blocks
+            .iter()
+            .map(|key| {
+                (
+                    key.source_bucket_secs,
+                    key.block_start_unix,
+                    client_blocks.remove(&(key.source_bucket_secs, key.block_start_unix)),
+                )
+            })
+            .collect();
+        anyhow::ensure!(
+            client_blocks.is_empty(),
+            "dashboard traffic notice returned an unrequested block"
+        );
+        changes.insert(
+            client_id.clone(),
+            TrafficNoticeChange {
+                blocks: replacement,
+                overlay_blocks: overlay_blocks.remove(client_id).unwrap_or_default(),
+            },
+        );
+    }
+    anyhow::ensure!(
+        blocks.is_empty() && overlay_blocks.is_empty(),
+        "dashboard traffic notice rows escaped their exact owner"
+    );
+    Ok(changes)
 }
 
 async fn reconcile_live_overlays(
@@ -4467,7 +5032,7 @@ struct LiveOverlayBatch {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ResidentWork {
-    Notice(DashboardNotice),
+    Notices(Vec<DashboardNotice>),
     Overlay(LiveOverlayBatch),
     FleetFence,
 }
@@ -4618,7 +5183,11 @@ impl ResidentMailbox {
 
     fn requeue(&self, work: ResidentWork) {
         match work {
-            ResidentWork::Notice(notice) => self.enqueue(notice),
+            ResidentWork::Notices(notices) => {
+                for notice in notices {
+                    self.enqueue(notice);
+                }
+            }
             ResidentWork::Overlay(batch) => self.requeue_overlay(batch),
             ResidentWork::FleetFence => self.enqueue_fleet_fence(),
         }
@@ -4714,12 +5283,13 @@ impl ResidentMailbox {
                 fence_epoch: state.fence_epoch,
             }));
         }
+        let mut notices = Vec::new();
         while let Some(entry) = state.order.pop_front() {
             match entry {
                 ResidentMailboxEntry::Owner(key) => {
                     if state.ready_owners.remove(&key) {
                         if let Some(notice) = state.pending.remove(&key) {
-                            return Some(ResidentWork::Notice(notice));
+                            notices.push(notice);
                         }
                     }
                 }
@@ -4730,7 +5300,7 @@ impl ResidentMailbox {
                 }
             }
         }
-        None
+        (!notices.is_empty()).then_some(ResidentWork::Notices(notices))
     }
 
     fn next_overlay_deadline(&self) -> Option<time::Instant> {
@@ -5292,6 +5862,489 @@ async fn apply_dashboard_notice(
     Ok(DashboardNoticeApplication::OwnerReplacement)
 }
 
+async fn reconcile_collected_notices(
+    listener: &mut PgListener,
+    resident: &DashboardTelemetryResident,
+    events: &WsEventBus,
+    notices: Vec<DashboardNotice>,
+) -> Result<Vec<(DashboardNotice, DashboardNoticeApplication)>> {
+    let mut completed = Vec::with_capacity(notices.len());
+    let mut candidates = Vec::new();
+    for (ordinal, notice) in notices.into_iter().enumerate() {
+        if dashboard_notice_is_installed(resident, &notice) {
+            completed.push((ordinal, notice, DashboardNoticeApplication::AlreadyCurrent));
+        } else {
+            candidates.push((ordinal, notice));
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(completed
+            .into_iter()
+            .map(|(_, notice, application)| (notice, application))
+            .collect());
+    }
+
+    let client_ids = candidates
+        .iter()
+        .map(|(_, notice)| notice.client_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let heads = load_selected_heads(listener, &client_ids).await?;
+    let snapshot = resident.snapshot();
+    let mut resource_targets = BTreeMap::new();
+    let mut network_targets = BTreeMap::new();
+    let mut traffic_targets = BTreeMap::new();
+    let mut fallback = Vec::new();
+
+    for (ordinal, notice) in candidates {
+        let Some(client_heads) = heads.get(&notice.client_id) else {
+            fallback.push((ordinal, notice));
+            continue;
+        };
+        let (Some(generation), Some(previous_revision), Some(revision)) =
+            (notice.generation, notice.previous_revision, notice.revision)
+        else {
+            // Client lifecycle notices deliberately have no revision fence and
+            // retain their established current-owner reconciliation.
+            fallback.push((ordinal, notice));
+            continue;
+        };
+        match notice.domain.as_str() {
+            "resource" => {
+                let Some(owner) = snapshot.resources.get(&notice.client_id).cloned() else {
+                    fallback.push((ordinal, notice));
+                    continue;
+                };
+                let installed = owner
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if installed.generation == client_heads.resource.generation
+                    && installed.revision == client_heads.resource.revision
+                {
+                    drop(installed);
+                    completed.push((ordinal, notice, DashboardNoticeApplication::AlreadyCurrent));
+                } else if notice.change == "block"
+                    && block_notice_is_waiting_for_successor(
+                        installed.generation,
+                        installed.revision,
+                        client_heads.resource.generation,
+                        client_heads.resource.revision,
+                        &client_heads.resource.change,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+                {
+                    drop(installed);
+                    completed.push((
+                        ordinal,
+                        notice,
+                        DashboardNoticeApplication::AwaitingSuccessor,
+                    ));
+                } else if notice.change == "block"
+                    && resource_block_change_is_contiguous(
+                        &installed,
+                        &client_heads.resource,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+                {
+                    drop(installed);
+                    let blocks = notice.block_keys();
+                    let client_id = notice.client_id.clone();
+                    anyhow::ensure!(
+                        resource_targets
+                            .insert(
+                                client_id,
+                                ResourceNoticeTarget {
+                                    ordinal,
+                                    notice,
+                                    owner,
+                                    head: client_heads.resource.clone(),
+                                    blocks,
+                                },
+                            )
+                            .is_none(),
+                        "dashboard resource notice cohort duplicated an owner"
+                    );
+                } else {
+                    drop(installed);
+                    fallback.push((ordinal, notice));
+                }
+            }
+            "network" => {
+                let Some(owner) = snapshot.networks.get(&notice.client_id).cloned() else {
+                    fallback.push((ordinal, notice));
+                    continue;
+                };
+                let installed = owner
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if installed.generation == client_heads.network.generation
+                    && installed.revision == client_heads.network.revision
+                    && installed.index.interfaces.as_ref()
+                        == client_heads.network.interfaces.as_ref()
+                {
+                    drop(installed);
+                    completed.push((ordinal, notice, DashboardNoticeApplication::AlreadyCurrent));
+                } else if notice.change == "block"
+                    && installed.index.interfaces.as_ref()
+                        == client_heads.network.interfaces.as_ref()
+                    && block_notice_is_waiting_for_successor(
+                        installed.generation,
+                        installed.revision,
+                        client_heads.network.generation,
+                        client_heads.network.revision,
+                        &client_heads.network.change,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+                {
+                    drop(installed);
+                    completed.push((
+                        ordinal,
+                        notice,
+                        DashboardNoticeApplication::AwaitingSuccessor,
+                    ));
+                } else if notice.change == "block"
+                    && network_block_change_is_contiguous(
+                        &installed,
+                        &client_heads.network,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+                {
+                    drop(installed);
+                    let blocks = notice.block_keys();
+                    let client_id = notice.client_id.clone();
+                    anyhow::ensure!(
+                        network_targets
+                            .insert(
+                                client_id,
+                                NetworkNoticeTarget {
+                                    ordinal,
+                                    notice,
+                                    owner,
+                                    head: client_heads.network.clone(),
+                                    blocks,
+                                },
+                            )
+                            .is_none(),
+                        "dashboard network notice cohort duplicated an owner"
+                    );
+                } else {
+                    drop(installed);
+                    fallback.push((ordinal, notice));
+                }
+            }
+            "traffic" => {
+                let Some(owner) = snapshot.traffics.get(&notice.client_id).cloned() else {
+                    fallback.push((ordinal, notice));
+                    continue;
+                };
+                let installed = owner
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let selection_matches = installed.source_kinds.as_ref()
+                    == client_heads.traffic.source_kinds.as_ref()
+                    && installed.interfaces.as_ref() == client_heads.traffic.interfaces.as_ref();
+                if installed.generation == client_heads.traffic.generation
+                    && installed.revision == client_heads.traffic.revision
+                    && selection_matches
+                {
+                    drop(installed);
+                    completed.push((ordinal, notice, DashboardNoticeApplication::AlreadyCurrent));
+                } else if notice.change == "block"
+                    && selection_matches
+                    && block_notice_is_waiting_for_successor(
+                        installed.generation,
+                        installed.revision,
+                        client_heads.traffic.generation,
+                        client_heads.traffic.revision,
+                        &client_heads.traffic.change,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+                {
+                    drop(installed);
+                    completed.push((
+                        ordinal,
+                        notice,
+                        DashboardNoticeApplication::AwaitingSuccessor,
+                    ));
+                } else if notice.change == "block"
+                    && traffic_block_change_is_contiguous(
+                        &installed,
+                        &client_heads.traffic,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+                {
+                    drop(installed);
+                    let blocks = notice.block_keys();
+                    let client_id = notice.client_id.clone();
+                    anyhow::ensure!(
+                        traffic_targets
+                            .insert(
+                                client_id,
+                                TrafficNoticeTarget {
+                                    ordinal,
+                                    notice,
+                                    owner,
+                                    head: client_heads.traffic.clone(),
+                                    blocks,
+                                },
+                            )
+                            .is_none(),
+                        "dashboard traffic notice cohort duplicated an owner"
+                    );
+                } else {
+                    drop(installed);
+                    fallback.push((ordinal, notice));
+                }
+            }
+            "client" => fallback.push((ordinal, notice)),
+            _ => unreachable!("validated dashboard notice domain"),
+        }
+    }
+    drop(snapshot);
+
+    let mut resource_changes = load_resource_notice_changes(listener, &resource_targets).await?;
+    let mut network_changes = load_network_notice_changes(listener, &network_targets).await?;
+    let mut traffic_changes = load_traffic_notice_changes(listener, &traffic_targets).await?;
+    let exact_client_ids = resource_targets
+        .keys()
+        .chain(network_targets.keys())
+        .chain(traffic_targets.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let after = load_selected_heads(listener, &exact_client_ids).await?;
+
+    for (client_id, target) in resource_targets {
+        let Some(mut change) = resource_changes.remove(&client_id) else {
+            anyhow::bail!("dashboard resource notice change is missing");
+        };
+        let generation = target.notice.generation.expect("validated generation");
+        let previous_revision = target
+            .notice
+            .previous_revision
+            .expect("validated previous revision");
+        let revision = target.notice.revision.expect("validated revision");
+        let after_head = after.get(&client_id).map(|heads| &heads.resource);
+        let mut installed = target
+            .owner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if after_head != Some(&target.head) {
+            let waiting = after_head.is_some_and(|head| {
+                block_notice_is_waiting_for_successor(
+                    installed.generation,
+                    installed.revision,
+                    head.generation,
+                    head.revision,
+                    &head.change,
+                    generation,
+                    previous_revision,
+                    revision,
+                )
+            });
+            drop(installed);
+            if waiting {
+                completed.push((
+                    target.ordinal,
+                    target.notice,
+                    DashboardNoticeApplication::AwaitingSuccessor,
+                ));
+            } else {
+                fallback.push((target.ordinal, target.notice));
+            }
+        } else if resource_block_change_is_contiguous(
+            &installed,
+            &target.head,
+            generation,
+            previous_revision,
+            revision,
+        ) {
+            installed.index.apply_blocks(change.blocks);
+            for key in target.blocks.iter() {
+                installed
+                    .overlay_blocks
+                    .remove(&(key.source_bucket_secs, key.block_start_unix));
+            }
+            installed.overlay_blocks.append(&mut change.overlay_blocks);
+            installed.revision = target.head.revision;
+            drop(installed);
+            events.notify_fleet_telemetry();
+            completed.push((
+                target.ordinal,
+                target.notice,
+                DashboardNoticeApplication::ExactBlock,
+            ));
+        } else {
+            drop(installed);
+            fallback.push((target.ordinal, target.notice));
+        }
+    }
+    for (client_id, target) in network_targets {
+        let Some(mut change) = network_changes.remove(&client_id) else {
+            anyhow::bail!("dashboard network notice change is missing");
+        };
+        let generation = target.notice.generation.expect("validated generation");
+        let previous_revision = target
+            .notice
+            .previous_revision
+            .expect("validated previous revision");
+        let revision = target.notice.revision.expect("validated revision");
+        let after_head = after.get(&client_id).map(|heads| &heads.network);
+        let mut installed = target
+            .owner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if after_head != Some(&target.head) {
+            let waiting = after_head.is_some_and(|head| {
+                installed.index.interfaces.as_ref() == head.interfaces.as_ref()
+                    && block_notice_is_waiting_for_successor(
+                        installed.generation,
+                        installed.revision,
+                        head.generation,
+                        head.revision,
+                        &head.change,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+            });
+            drop(installed);
+            if waiting {
+                completed.push((
+                    target.ordinal,
+                    target.notice,
+                    DashboardNoticeApplication::AwaitingSuccessor,
+                ));
+            } else {
+                fallback.push((target.ordinal, target.notice));
+            }
+        } else if network_block_change_is_contiguous(
+            &installed,
+            &target.head,
+            generation,
+            previous_revision,
+            revision,
+        ) {
+            installed.index.apply_blocks(change.blocks);
+            for key in target.blocks.iter() {
+                installed
+                    .overlay_blocks
+                    .remove(&(key.source_bucket_secs, key.block_start_unix));
+            }
+            installed.overlay_blocks.append(&mut change.overlay_blocks);
+            installed.revision = target.head.revision;
+            drop(installed);
+            events.notify_fleet_telemetry();
+            completed.push((
+                target.ordinal,
+                target.notice,
+                DashboardNoticeApplication::ExactBlock,
+            ));
+        } else {
+            drop(installed);
+            fallback.push((target.ordinal, target.notice));
+        }
+    }
+    for (client_id, target) in traffic_targets {
+        let Some(mut change) = traffic_changes.remove(&client_id) else {
+            anyhow::bail!("dashboard traffic notice change is missing");
+        };
+        let generation = target.notice.generation.expect("validated generation");
+        let previous_revision = target
+            .notice
+            .previous_revision
+            .expect("validated previous revision");
+        let revision = target.notice.revision.expect("validated revision");
+        let after_head = after.get(&client_id).map(|heads| &heads.traffic);
+        let mut installed = target
+            .owner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if after_head != Some(&target.head) {
+            let waiting = after_head.is_some_and(|head| {
+                installed.source_kinds.as_ref() == head.source_kinds.as_ref()
+                    && installed.interfaces.as_ref() == head.interfaces.as_ref()
+                    && block_notice_is_waiting_for_successor(
+                        installed.generation,
+                        installed.revision,
+                        head.generation,
+                        head.revision,
+                        &head.change,
+                        generation,
+                        previous_revision,
+                        revision,
+                    )
+            });
+            drop(installed);
+            if waiting {
+                completed.push((
+                    target.ordinal,
+                    target.notice,
+                    DashboardNoticeApplication::AwaitingSuccessor,
+                ));
+            } else {
+                fallback.push((target.ordinal, target.notice));
+            }
+        } else if traffic_block_change_is_contiguous(
+            &installed,
+            &target.head,
+            generation,
+            previous_revision,
+            revision,
+        ) {
+            installed.index.apply_blocks(change.blocks);
+            for key in target.blocks.iter() {
+                installed
+                    .overlay_blocks
+                    .remove(&(key.source_bucket_secs, key.block_start_unix));
+            }
+            installed.overlay_blocks.append(&mut change.overlay_blocks);
+            installed.revision = target.head.revision;
+            drop(installed);
+            events.notify_fleet_telemetry();
+            completed.push((
+                target.ordinal,
+                target.notice,
+                DashboardNoticeApplication::ExactBlock,
+            ));
+        } else {
+            drop(installed);
+            fallback.push((target.ordinal, target.notice));
+        }
+    }
+    anyhow::ensure!(
+        resource_changes.is_empty() && network_changes.is_empty() && traffic_changes.is_empty(),
+        "dashboard notice change escaped its exact owner"
+    );
+
+    // Generation, lifecycle and raced owners are not ordinary coordinate
+    // work. Preserve their established authoritative reconciliation rather
+    // than broadening the setwise fast path into a different state machine.
+    for (ordinal, notice) in fallback {
+        let application = reconcile_collected_notice(listener, resident, events, &notice).await?;
+        completed.push((ordinal, notice, application));
+    }
+    completed.sort_unstable_by_key(|(ordinal, _, _)| *ordinal);
+    Ok(completed
+        .into_iter()
+        .map(|(_, notice, application)| (notice, application))
+        .collect())
+}
+
 pub(crate) struct DashboardTelemetryResidentTask {
     shutdown: watch::Sender<bool>,
     handles: Vec<JoinHandle<()>>,
@@ -5599,11 +6652,12 @@ async fn run_resident_reconciler(
     let mut connection = None;
     let mut retry_delay = RECONNECT_MIN_DELAY;
     loop {
-        let Some(work) = mailbox.claim(&mut shutdown).await else {
+        let Some(mut work) = mailbox.claim(&mut shutdown).await else {
             break;
         };
-        if let ResidentWork::Notice(notice) = &work {
-            if dashboard_notice_is_installed(&resident, notice) {
+        if let ResidentWork::Notices(notices) = &mut work {
+            notices.retain(|notice| !dashboard_notice_is_installed(&resident, notice));
+            if notices.is_empty() {
                 continue;
             }
         }
@@ -5640,9 +6694,9 @@ async fn run_resident_reconciler(
         let reconciler = connection
             .as_mut()
             .expect("connected dashboard resident reconciler");
-        let result = match &work {
-            ResidentWork::Notice(notice) => {
-                reconcile_collected_notice(reconciler, &resident, &events, notice).await
+        let result: Result<Vec<(DashboardNotice, DashboardNoticeApplication)>> = match &work {
+            ResidentWork::Notices(notices) => {
+                reconcile_collected_notices(reconciler, &resident, &events, notices.clone()).await
             }
             ResidentWork::Overlay(batch) => {
                 match reconcile_live_overlays(reconciler, &resident, &batch.client_ids).await {
@@ -5653,7 +6707,7 @@ async fn run_resident_reconciler(
                         if mailbox.overlay_epoch_is_current(batch.fence_epoch) {
                             events.notify_fleet_telemetry();
                         }
-                        Ok(DashboardNoticeApplication::AlreadyCurrent)
+                        Ok(Vec::new())
                     }
                     Err(error) => Err(error),
                 }
@@ -5666,37 +6720,29 @@ async fn run_resident_reconciler(
                         // their normal post-install coalesced notifications.
                         events.invalidate_fleet_telemetry_read_cache();
                         events.notify_fleet_telemetry();
-                        Ok(DashboardNoticeApplication::AlreadyCurrent)
+                        Ok(Vec::new())
                     }
                     Err(error) => Err(error),
                 }
             }
         };
         match result {
-            Ok(
-                application @ (DashboardNoticeApplication::AlreadyCurrent
-                | DashboardNoticeApplication::ExactBlock
-                | DashboardNoticeApplication::OwnerReplacement),
-            ) => {
-                if application.requires_live_overlay() {
-                    if let ResidentWork::Notice(notice) = &work {
+            Ok(applications) => {
+                for (notice, application) in applications {
+                    if application.requires_live_overlay() {
                         mailbox.enqueue_live_overlay(&notice.client_id);
+                    }
+                    if application == DashboardNoticeApplication::AwaitingSuccessor {
+                        mailbox.defer_until_successor(notice);
                     }
                 }
                 retry_delay = RECONNECT_MIN_DELAY;
             }
-            Ok(DashboardNoticeApplication::AwaitingSuccessor) => {
-                let ResidentWork::Notice(notice) = work else {
-                    unreachable!("non-dashboard work cannot await an owner successor");
-                };
-                mailbox.defer_until_successor(notice);
-                retry_delay = RECONNECT_MIN_DELAY;
-            }
             Err(error) => {
                 match &work {
-                    ResidentWork::Notice(notice) => {
-                        warn!(%error, client_id = %notice.client_id, domain = %notice.domain,
-                            "dashboard resident owner remains queued for reconciliation");
+                    ResidentWork::Notices(notices) => {
+                        warn!(%error, owners = notices.len(),
+                            "dashboard resident owner cohort remains queued for reconciliation");
                     }
                     ResidentWork::Overlay(batch) => {
                         warn!(%error, clients = batch.client_ids.len(),
@@ -6367,17 +7413,19 @@ mod tests {
         mailbox.enqueue(dashboard_block_notice("a", "resource", 3));
         mailbox.enqueue(dashboard_block_notice("a", "resource", 2));
 
-        let ResidentWork::Notice(first) = mailbox.claim_ready().expect("first owner") else {
-            panic!("owner notice expected");
+        let ResidentWork::Notices(notices) = mailbox.claim_ready().expect("ready cohort") else {
+            panic!("owner notice cohort expected");
         };
+        assert_eq!(notices.len(), 2);
+        let first = &notices[0];
         assert_eq!(
             (
                 first.client_id.as_str(),
                 first.domain.as_str(),
                 first.previous_revision,
                 first.revision,
-                first.source_bucket_secs,
-                first.block_start_unix,
+                first.source_bucket_secs.clone(),
+                first.block_start_unix.clone(),
             ),
             (
                 "a",
@@ -6388,9 +7436,7 @@ mod tests {
                 Some(vec![0, 960]),
             )
         );
-        let ResidentWork::Notice(second) = mailbox.claim_ready().expect("second owner") else {
-            panic!("owner notice expected");
-        };
+        let second = &notices[1];
         assert_eq!(
             (
                 second.client_id.as_str(),
@@ -6413,9 +7459,11 @@ mod tests {
         let mut final_fragment = dashboard_block_notice("a", "resource", 2);
         final_fragment.block_start_unix = Some(vec![960]);
         mailbox.enqueue(final_fragment);
-        let ResidentWork::Notice(complete) = mailbox.claim_ready().expect("complete owner") else {
-            panic!("owner notice expected");
+        let ResidentWork::Notices(complete) = mailbox.claim_ready().expect("complete owner") else {
+            panic!("owner notice cohort expected");
         };
+        assert_eq!(complete.len(), 1);
+        let complete = &complete[0];
         assert_eq!(complete.previous_revision, Some(1));
         assert_eq!(complete.revision, Some(2));
         assert_eq!(complete.source_bucket_secs, Some(vec![60, 60]));
@@ -6431,9 +7479,12 @@ mod tests {
         assert!(mailbox.claim_ready().is_none());
 
         mailbox.enqueue(dashboard_block_notice("a", "resource", 3));
-        let ResidentWork::Notice(complete) = mailbox.claim_ready().expect("successor owner") else {
-            panic!("owner notice expected");
+        let ResidentWork::Notices(complete) = mailbox.claim_ready().expect("successor owner")
+        else {
+            panic!("owner notice cohort expected");
         };
+        assert_eq!(complete.len(), 1);
+        let complete = &complete[0];
         assert_eq!(complete.previous_revision, Some(1));
         assert_eq!(complete.revision, Some(3));
         assert_eq!(complete.block_start_unix, Some(vec![0, 960]));
@@ -6507,8 +7558,10 @@ mod tests {
         assert_eq!(mailbox.claim_ready(), Some(ResidentWork::FleetFence));
         assert!(matches!(
             mailbox.claim_ready(),
-            Some(ResidentWork::Notice(notice))
-                if notice.client_id == "a" && notice.domain == "resource"
+            Some(ResidentWork::Notices(notices))
+                if notices.len() == 1
+                    && notices[0].client_id == "a"
+                    && notices[0].domain == "resource"
         ));
         assert!(mailbox.claim_ready().is_none());
     }
@@ -6831,7 +7884,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_coordinate_union_is_loaded_before_one_exclusive_owner_application() {
+    fn exact_coordinate_union_is_loaded_setwise_before_independent_owner_application() {
         let source = include_str!("dashboard_telemetry_resident.rs")
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -6867,6 +7920,62 @@ mod tests {
                     && apply_at < overlay_at
                     && overlay_at < revision_at
             );
+        }
+
+        let (_, cohort) = source
+            .split_once("async fn reconcile_collected_notices")
+            .expect("setwise dashboard notice cohort");
+        let (cohort, _) = cohort
+            .split_once("pub(crate) struct DashboardTelemetryResidentTask")
+            .expect("setwise dashboard notice boundary");
+        let first_head = cohort
+            .find("let heads = load_selected_heads(")
+            .expect("one setwise pre-read head fence");
+        let after_head = cohort
+            .rfind("let after = load_selected_heads(")
+            .expect("one setwise post-read head fence");
+        for domain in ["resource", "network", "traffic"] {
+            let load = cohort
+                .find(&format!("load_{domain}_notice_changes("))
+                .expect("setwise exact-coordinate load");
+            let owner_loop = cohort
+                .find(&format!("for (client_id, target) in {domain}_targets"))
+                .expect("independent owner application");
+            let owner = &cohort[owner_loop..];
+            let write = owner.find(".write()").expect("exclusive owner write") + owner_loop;
+            let apply = owner
+                .find("installed.index.apply_blocks(change.blocks);")
+                .expect("exact owner block application")
+                + owner_loop;
+            let overlay = owner
+                .find("installed.overlay_blocks.append(&mut change.overlay_blocks);")
+                .expect("exact owner overlay application")
+                + owner_loop;
+            let revision = owner
+                .find("installed.revision = target.head.revision;")
+                .expect("exact owner revision publication")
+                + owner_loop;
+            assert!(
+                first_head < load
+                    && load < after_head
+                    && after_head < write
+                    && write < apply
+                    && apply < overlay
+                    && overlay < revision
+            );
+        }
+        assert!(!cohort.contains("LIMIT "));
+        assert!(!cohort.contains("time::sleep"));
+        for sql in [
+            OVERLAY_RESOURCE_BLOCKS_SQL,
+            OVERLAY_NETWORK_BLOCKS_SQL,
+            OVERLAY_TRAFFIC_BLOCKS_SQL,
+            NOTICE_RESOURCE_OVERLAY_SQL,
+            NOTICE_NETWORK_OVERLAY_SQL,
+            NOTICE_TRAFFIC_OVERLAY_SQL,
+        ] {
+            assert!(sql.contains("unnest(") || sql.contains("UNNEST("));
+            assert!(!sql.contains("LIMIT "));
         }
     }
 }

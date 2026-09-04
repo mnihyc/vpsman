@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result};
 use sqlx::{
@@ -14,6 +14,24 @@ const DASHBOARD_PROJECTION_ACQUIRE_SQL: &str = r#"
 SELECT owner_id, client_id, domain, ready_revision
 FROM acquire_next_telemetry_dashboard_projection_owner()
 "#;
+const DASHBOARD_COORDINATE_ACQUIRE_SQL: &str = r#"
+SELECT owner_id, client_id, domain, ready_revision
+FROM acquire_telemetry_dashboard_coordinate_projection_owners()
+"#;
+const DASHBOARD_COORDINATE_CLAIMS_SQL: &str = r#"
+SELECT owner_id, client_id, domain, ready_revision,
+       event_kind, source_bucket_secs, block_start_unix,
+       bucket_start_unix, captured_block_event_ids,
+       expected_generation, expected_revision,
+       generation_interfaces, generation_source_kinds
+FROM telemetry_dashboard_coordinate_projection_claims($1)
+"#;
+const DASHBOARD_RESOURCE_PREPARE_SQL: &str =
+    "SELECT * FROM prepare_telemetry_dashboard_resource_coordinate_blocks($1)";
+const DASHBOARD_NETWORK_PREPARE_SQL: &str =
+    "SELECT * FROM prepare_telemetry_dashboard_network_coordinate_blocks($1)";
+const DASHBOARD_TRAFFIC_PREPARE_SQL: &str =
+    "SELECT * FROM prepare_telemetry_dashboard_traffic_coordinate_blocks($1)";
 const DASHBOARD_PROJECTION_CLAIM_SQL: &str = r#"
 SELECT client_id, domain, change, event_kind, source_bucket_secs,
        block_start_unix, bucket_start_unix,
@@ -27,6 +45,112 @@ const DASHBOARD_PROJECTION_RELEASE_SQL: &str = "SELECT pg_advisory_unlock($1)";
 const DASHBOARD_PROJECTION_ACKNOWLEDGE_SQL: &str = r#"
 DELETE FROM telemetry_dashboard_ready_owners
 WHERE owner_id = $1 AND wake_revision = $2
+"#;
+const DASHBOARD_PREPARED_BEGIN_SQL: &str = r#"
+DELETE FROM telemetry_dashboard_ready_owners
+WHERE owner_id = $1 AND wake_revision = $2
+RETURNING TRUE
+"#;
+const DASHBOARD_PREPARED_COMPLETE_SQL: &str = r#"
+SELECT complete_telemetry_dashboard_coordinate_projection(
+    $1,$2,$3,$4,$5,$6,$7,$8,$9
+)
+"#;
+const DASHBOARD_RESOURCE_BLOCK_APPLY_SQL: &str = r#"
+WITH removed AS (
+    DELETE FROM telemetry_dashboard_resource_blocks
+    WHERE client_id = $1
+      AND generation = $2
+      AND source_bucket_secs = $4
+      AND block_start_unix = $5
+      AND NOT $6
+), applied AS (
+    INSERT INTO telemetry_dashboard_resource_blocks (
+        client_id, generation, source_bucket_secs,
+        block_start_unix, published_revision,
+        sample_counts, cpu_load_1_sums, cpu_load_1_maxes,
+        memory_total_bytes_maxes, memory_used_ratio_sums,
+        memory_used_ratio_maxes, disk_sample_counts,
+        disk_total_bytes_maxes, disk_used_ratio_sums,
+        disk_used_ratio_maxes, latest_observed_unix
+    )
+    SELECT $1,$2,$4,$5,$3,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+    WHERE $6
+    ON CONFLICT (
+        client_id, generation, source_bucket_secs, block_start_unix
+    ) DO UPDATE SET
+        published_revision = EXCLUDED.published_revision,
+        sample_counts = EXCLUDED.sample_counts,
+        cpu_load_1_sums = EXCLUDED.cpu_load_1_sums,
+        cpu_load_1_maxes = EXCLUDED.cpu_load_1_maxes,
+        memory_total_bytes_maxes = EXCLUDED.memory_total_bytes_maxes,
+        memory_used_ratio_sums = EXCLUDED.memory_used_ratio_sums,
+        memory_used_ratio_maxes = EXCLUDED.memory_used_ratio_maxes,
+        disk_sample_counts = EXCLUDED.disk_sample_counts,
+        disk_total_bytes_maxes = EXCLUDED.disk_total_bytes_maxes,
+        disk_used_ratio_sums = EXCLUDED.disk_used_ratio_sums,
+        disk_used_ratio_maxes = EXCLUDED.disk_used_ratio_maxes,
+        latest_observed_unix = EXCLUDED.latest_observed_unix
+)
+SELECT TRUE
+"#;
+const DASHBOARD_NETWORK_BLOCK_APPLY_SQL: &str = r#"
+WITH removed AS (
+    DELETE FROM telemetry_dashboard_network_blocks
+    WHERE client_id = $1
+      AND generation = $2
+      AND source_bucket_secs = $4
+      AND block_start_unix = $5
+      AND NOT $7
+), applied AS (
+    INSERT INTO telemetry_dashboard_network_blocks (
+        client_id, generation, interface_width,
+        source_bucket_secs, block_start_unix, published_revision,
+        sample_counts, latest_observed_unix,
+        rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch
+    )
+    SELECT $1,$2,$6,$4,$5,$3,$8,$9,$10,$11,$12,$13
+    WHERE $7
+    ON CONFLICT (
+        client_id, generation, source_bucket_secs, block_start_unix
+    ) DO UPDATE SET
+        published_revision = EXCLUDED.published_revision,
+        interface_width = EXCLUDED.interface_width,
+        sample_counts = EXCLUDED.sample_counts,
+        latest_observed_unix = EXCLUDED.latest_observed_unix,
+        rx_bytes_last = EXCLUDED.rx_bytes_last,
+        tx_bytes_last = EXCLUDED.tx_bytes_last,
+        rx_counter_epoch = EXCLUDED.rx_counter_epoch,
+        tx_counter_epoch = EXCLUDED.tx_counter_epoch
+)
+SELECT TRUE
+"#;
+const DASHBOARD_TRAFFIC_BLOCK_APPLY_SQL: &str = r#"
+WITH removed AS (
+    DELETE FROM telemetry_dashboard_traffic_blocks
+    WHERE client_id = $1
+      AND generation = $2
+      AND source_bucket_secs = $4
+      AND block_start_unix = $5
+      AND NOT $6
+), applied AS (
+    INSERT INTO telemetry_dashboard_traffic_blocks (
+        client_id, generation, source_bucket_secs,
+        block_start_unix, published_revision,
+        rx_valid_counts, tx_valid_counts, rx_bytes, tx_bytes
+    )
+    SELECT $1,$2,$4,$5,$3,$7,$8,$9,$10
+    WHERE $6
+    ON CONFLICT (
+        client_id, generation, source_bucket_secs, block_start_unix
+    ) DO UPDATE SET
+        published_revision = EXCLUDED.published_revision,
+        rx_valid_counts = EXCLUDED.rx_valid_counts,
+        tx_valid_counts = EXCLUDED.tx_valid_counts,
+        rx_bytes = EXCLUDED.rx_bytes,
+        tx_bytes = EXCLUDED.tx_bytes
+)
+SELECT TRUE
 "#;
 const DASHBOARD_PROJECTION_DEFER_FAILED_SQL: &str = r#"
 UPDATE telemetry_dashboard_ready_owners
@@ -161,7 +285,7 @@ fn dashboard_source_tier_is_valid(domain: &str, tier: i32) -> bool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DashboardOwner {
     owner_id: i64,
     client_id: String,
@@ -188,7 +312,7 @@ impl DashboardOwner {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DashboardClaim {
     client_id: String,
     domain: String,
@@ -201,6 +325,264 @@ struct DashboardClaim {
     captured_generation_event_ids: Vec<i64>,
     expected_generation: i64,
     expected_revision: i64,
+}
+
+#[derive(Debug)]
+struct PreparedResourceBlock {
+    owner_id: i64,
+    source_bucket_secs: i32,
+    block_start_unix: i64,
+    has_samples: bool,
+    sample_counts: Vec<i64>,
+    cpu_load_1_sums: Vec<Option<f64>>,
+    cpu_load_1_maxes: Vec<Option<f32>>,
+    memory_total_bytes_maxes: Vec<Option<i64>>,
+    memory_used_ratio_sums: Vec<Option<f64>>,
+    memory_used_ratio_maxes: Vec<Option<f32>>,
+    disk_sample_counts: Vec<i64>,
+    disk_total_bytes_maxes: Vec<Option<i64>>,
+    disk_used_ratio_sums: Vec<Option<f64>>,
+    disk_used_ratio_maxes: Vec<Option<f32>>,
+    latest_observed_unix: Vec<Option<i64>>,
+}
+
+impl PreparedResourceBlock {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self> {
+        let block = Self {
+            owner_id: row.try_get("owner_id")?,
+            source_bucket_secs: row.try_get("source_bucket_secs")?,
+            block_start_unix: row.try_get("block_start_unix")?,
+            has_samples: row.try_get("has_samples")?,
+            sample_counts: row.try_get("sample_counts")?,
+            cpu_load_1_sums: row.try_get("cpu_load_1_sums")?,
+            cpu_load_1_maxes: row.try_get("cpu_load_1_maxes")?,
+            memory_total_bytes_maxes: row.try_get("memory_total_bytes_maxes")?,
+            memory_used_ratio_sums: row.try_get("memory_used_ratio_sums")?,
+            memory_used_ratio_maxes: row.try_get("memory_used_ratio_maxes")?,
+            disk_sample_counts: row.try_get("disk_sample_counts")?,
+            disk_total_bytes_maxes: row.try_get("disk_total_bytes_maxes")?,
+            disk_used_ratio_sums: row.try_get("disk_used_ratio_sums")?,
+            disk_used_ratio_maxes: row.try_get("disk_used_ratio_maxes")?,
+            latest_observed_unix: row.try_get("latest_observed_unix")?,
+        };
+        let lengths = [
+            block.sample_counts.len(),
+            block.cpu_load_1_sums.len(),
+            block.cpu_load_1_maxes.len(),
+            block.memory_total_bytes_maxes.len(),
+            block.memory_used_ratio_sums.len(),
+            block.memory_used_ratio_maxes.len(),
+            block.disk_sample_counts.len(),
+            block.disk_total_bytes_maxes.len(),
+            block.disk_used_ratio_sums.len(),
+            block.disk_used_ratio_maxes.len(),
+            block.latest_observed_unix.len(),
+        ];
+        anyhow::ensure!(
+            block.owner_id > 0
+                && dashboard_source_tier_is_valid("resource", block.source_bucket_secs)
+                && block
+                    .block_start_unix
+                    .rem_euclid(i64::from(block.source_bucket_secs) * 16)
+                    == 0
+                && lengths.iter().all(|length| *length == 16)
+                && block.has_samples == block.sample_counts.iter().any(|count| *count > 0),
+            "prepared resource dashboard block is invalid"
+        );
+        Ok(block)
+    }
+}
+
+#[derive(Debug)]
+struct PreparedNetworkBlock {
+    owner_id: i64,
+    source_bucket_secs: i32,
+    block_start_unix: i64,
+    interface_width: i32,
+    has_samples: bool,
+    sample_counts: Vec<i64>,
+    latest_observed_unix: Vec<Option<i64>>,
+    rx_bytes_last: Vec<Option<i64>>,
+    tx_bytes_last: Vec<Option<i64>>,
+    rx_counter_epoch: Vec<Option<i64>>,
+    tx_counter_epoch: Vec<Option<i64>>,
+}
+
+impl PreparedNetworkBlock {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self> {
+        let block = Self {
+            owner_id: row.try_get("owner_id")?,
+            source_bucket_secs: row.try_get("source_bucket_secs")?,
+            block_start_unix: row.try_get("block_start_unix")?,
+            interface_width: row.try_get("interface_width")?,
+            has_samples: row.try_get("has_samples")?,
+            sample_counts: row.try_get("sample_counts")?,
+            latest_observed_unix: row.try_get("latest_observed_unix")?,
+            rx_bytes_last: row.try_get("rx_bytes_last")?,
+            tx_bytes_last: row.try_get("tx_bytes_last")?,
+            rx_counter_epoch: row.try_get("rx_counter_epoch")?,
+            tx_counter_epoch: row.try_get("tx_counter_epoch")?,
+        };
+        let expected_len = usize::try_from(block.interface_width)
+            .ok()
+            .and_then(|width| width.checked_mul(16));
+        let lengths = [
+            block.sample_counts.len(),
+            block.latest_observed_unix.len(),
+            block.rx_bytes_last.len(),
+            block.tx_bytes_last.len(),
+            block.rx_counter_epoch.len(),
+            block.tx_counter_epoch.len(),
+        ];
+        anyhow::ensure!(
+            block.owner_id > 0
+                && dashboard_source_tier_is_valid("network", block.source_bucket_secs)
+                && block
+                    .block_start_unix
+                    .rem_euclid(i64::from(block.source_bucket_secs) * 16)
+                    == 0
+                && expected_len.is_some_and(|length| {
+                    length > 0 && lengths.iter().all(|actual| *actual == length)
+                })
+                && block.has_samples == block.sample_counts.iter().any(|count| *count > 0),
+            "prepared network dashboard block is invalid"
+        );
+        Ok(block)
+    }
+}
+
+#[derive(Debug)]
+struct PreparedTrafficBlock {
+    owner_id: i64,
+    source_bucket_secs: i32,
+    block_start_unix: i64,
+    has_samples: bool,
+    rx_valid_counts: Vec<Option<i64>>,
+    tx_valid_counts: Vec<Option<i64>>,
+    rx_bytes: Vec<Option<i64>>,
+    tx_bytes: Vec<Option<i64>>,
+}
+
+impl PreparedTrafficBlock {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self> {
+        let block = Self {
+            owner_id: row.try_get("owner_id")?,
+            source_bucket_secs: row.try_get("source_bucket_secs")?,
+            block_start_unix: row.try_get("block_start_unix")?,
+            has_samples: row.try_get("has_samples")?,
+            rx_valid_counts: row.try_get("rx_valid_counts")?,
+            tx_valid_counts: row.try_get("tx_valid_counts")?,
+            rx_bytes: row.try_get("rx_bytes")?,
+            tx_bytes: row.try_get("tx_bytes")?,
+        };
+        let lengths = [
+            block.rx_valid_counts.len(),
+            block.tx_valid_counts.len(),
+            block.rx_bytes.len(),
+            block.tx_bytes.len(),
+        ];
+        anyhow::ensure!(
+            block.owner_id > 0
+                && dashboard_source_tier_is_valid("traffic", block.source_bucket_secs)
+                && block
+                    .block_start_unix
+                    .rem_euclid(i64::from(block.source_bucket_secs) * 16)
+                    == 0
+                && lengths.iter().all(|length| *length == 16)
+                && block.has_samples == block.rx_valid_counts.iter().any(Option::is_some),
+            "prepared traffic dashboard block is invalid"
+        );
+        Ok(block)
+    }
+}
+
+#[derive(Debug)]
+enum PreparedBlocks {
+    Resource(Vec<PreparedResourceBlock>),
+    Network(Vec<PreparedNetworkBlock>),
+    Traffic(Vec<PreparedTrafficBlock>),
+}
+
+#[derive(Debug)]
+struct PreparedDashboardPublication {
+    owner: DashboardOwner,
+    claim: DashboardClaim,
+    generation_interfaces: Vec<String>,
+    generation_source_kinds: Vec<String>,
+    blocks: PreparedBlocks,
+}
+
+impl PreparedDashboardPublication {
+    fn expected_block_keys(&self) -> Vec<(i32, i64)> {
+        let mut keys = self
+            .claim
+            .source_bucket_secs
+            .iter()
+            .copied()
+            .zip(self.claim.block_start_unix.iter().copied())
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.claim.validate()?;
+        anyhow::ensure!(
+            self.owner.client_id == self.claim.client_id
+                && self.owner.domain == self.claim.domain
+                && self.claim.change == "block"
+                && self
+                    .claim
+                    .event_kind
+                    .iter()
+                    .all(|kind| kind == "coordinate"),
+            "prepared dashboard publication changed its exact owner"
+        );
+        anyhow::ensure!(
+            self.generation_source_kinds.len() == self.generation_interfaces.len()
+                || self.owner.domain != "traffic",
+            "prepared traffic dashboard selection is misaligned"
+        );
+        let expected = self.expected_block_keys();
+        let actual = match &self.blocks {
+            PreparedBlocks::Resource(blocks) => {
+                anyhow::ensure!(self.owner.domain == "resource");
+                blocks
+                    .iter()
+                    .map(|block| (block.source_bucket_secs, block.block_start_unix))
+                    .collect::<Vec<_>>()
+            }
+            PreparedBlocks::Network(blocks) => {
+                anyhow::ensure!(self.owner.domain == "network");
+                anyhow::ensure!(blocks.iter().all(|block| {
+                    usize::try_from(block.interface_width).ok()
+                        == Some(self.generation_interfaces.len())
+                }));
+                blocks
+                    .iter()
+                    .map(|block| (block.source_bucket_secs, block.block_start_unix))
+                    .collect::<Vec<_>>()
+            }
+            PreparedBlocks::Traffic(blocks) => {
+                anyhow::ensure!(self.owner.domain == "traffic");
+                blocks
+                    .iter()
+                    .map(|block| (block.source_bucket_secs, block.block_start_unix))
+                    .collect::<Vec<_>>()
+            }
+        };
+        let expected = if self.owner.domain == "network" && self.generation_interfaces.is_empty() {
+            Vec::new()
+        } else {
+            expected
+        };
+        anyhow::ensure!(
+            actual == expected,
+            "prepared dashboard blocks do not cover the exact claimed coordinates"
+        );
+        Ok(())
+    }
 }
 
 impl DashboardClaim {
@@ -321,6 +703,145 @@ async fn acquire_owner(connection: &mut PgConnection) -> Result<Option<Dashboard
     row.as_ref().map(DashboardOwner::from_row).transpose()
 }
 
+async fn acquire_coordinate_owners(connection: &mut PgConnection) -> Result<Vec<DashboardOwner>> {
+    sqlx::query(DASHBOARD_COORDINATE_ACQUIRE_SQL)
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(DashboardOwner::from_row)
+        .collect()
+}
+
+fn prepared_claim_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<(DashboardOwner, DashboardClaim, Vec<String>, Vec<String>)> {
+    let owner = DashboardOwner::from_row(row)?;
+    let claim = DashboardClaim {
+        client_id: row.try_get("client_id")?,
+        domain: row.try_get("domain")?,
+        change: "block".to_string(),
+        event_kind: row.try_get("event_kind")?,
+        source_bucket_secs: row.try_get("source_bucket_secs")?,
+        block_start_unix: row.try_get("block_start_unix")?,
+        bucket_start_unix: row.try_get("bucket_start_unix")?,
+        captured_block_event_ids: row.try_get("captured_block_event_ids")?,
+        captured_generation_event_ids: Vec::new(),
+        expected_generation: row.try_get("expected_generation")?,
+        expected_revision: row.try_get("expected_revision")?,
+    };
+    claim.validate()?;
+    let generation_interfaces = row.try_get("generation_interfaces")?;
+    let generation_source_kinds = row.try_get("generation_source_kinds")?;
+    Ok((owner, claim, generation_interfaces, generation_source_kinds))
+}
+
+async fn prepare_coordinate_publications(
+    connection: &mut PgConnection,
+    acquired: &[DashboardOwner],
+) -> Result<HashMap<i64, PreparedDashboardPublication>> {
+    if acquired.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let owner_ids = acquired
+        .iter()
+        .map(|owner| owner.owner_id)
+        .collect::<Vec<_>>();
+    let mut transaction = connection.begin().await?;
+    set_repeatable_read(&mut transaction).await?;
+    let claim_rows = sqlx::query(DASHBOARD_COORDINATE_CLAIMS_SQL)
+        .bind(&owner_ids)
+        .fetch_all(&mut *transaction)
+        .await?;
+    let resource_rows = sqlx::query(DASHBOARD_RESOURCE_PREPARE_SQL)
+        .bind(&owner_ids)
+        .fetch_all(&mut *transaction)
+        .await?;
+    let network_rows = sqlx::query(DASHBOARD_NETWORK_PREPARE_SQL)
+        .bind(&owner_ids)
+        .fetch_all(&mut *transaction)
+        .await?;
+    let traffic_rows = sqlx::query(DASHBOARD_TRAFFIC_PREPARE_SQL)
+        .bind(&owner_ids)
+        .fetch_all(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+
+    let mut resource_blocks: HashMap<i64, Vec<PreparedResourceBlock>> = HashMap::new();
+    for row in &resource_rows {
+        let block = PreparedResourceBlock::from_row(row)?;
+        resource_blocks
+            .entry(block.owner_id)
+            .or_default()
+            .push(block);
+    }
+    let mut network_blocks: HashMap<i64, Vec<PreparedNetworkBlock>> = HashMap::new();
+    for row in &network_rows {
+        let block = PreparedNetworkBlock::from_row(row)?;
+        network_blocks
+            .entry(block.owner_id)
+            .or_default()
+            .push(block);
+    }
+    let mut traffic_blocks: HashMap<i64, Vec<PreparedTrafficBlock>> = HashMap::new();
+    for row in &traffic_rows {
+        let block = PreparedTrafficBlock::from_row(row)?;
+        traffic_blocks
+            .entry(block.owner_id)
+            .or_default()
+            .push(block);
+    }
+
+    let acquired_by_id = acquired
+        .iter()
+        .map(|owner| (owner.owner_id, owner))
+        .collect::<HashMap<_, _>>();
+    let mut prepared = HashMap::new();
+    for row in &claim_rows {
+        let (owner, claim, generation_interfaces, generation_source_kinds) =
+            prepared_claim_from_row(row)?;
+        let acquired_owner = acquired_by_id
+            .get(&owner.owner_id)
+            .context("prepared an owner outside the acquired coordinate cohort")?;
+        anyhow::ensure!(
+            acquired_owner.client_id == owner.client_id
+                && acquired_owner.domain == owner.domain
+                && owner.ready_revision >= acquired_owner.ready_revision,
+            "prepared dashboard owner changed its acquired identity"
+        );
+        let blocks = match owner.domain.as_str() {
+            "resource" => PreparedBlocks::Resource(
+                resource_blocks.remove(&owner.owner_id).unwrap_or_default(),
+            ),
+            "network" => {
+                PreparedBlocks::Network(network_blocks.remove(&owner.owner_id).unwrap_or_default())
+            }
+            "traffic" => {
+                PreparedBlocks::Traffic(traffic_blocks.remove(&owner.owner_id).unwrap_or_default())
+            }
+            _ => unreachable!(),
+        };
+        let publication = PreparedDashboardPublication {
+            owner,
+            claim,
+            generation_interfaces,
+            generation_source_kinds,
+            blocks,
+        };
+        publication.validate()?;
+        anyhow::ensure!(
+            prepared
+                .insert(publication.owner.owner_id, publication)
+                .is_none(),
+            "dashboard coordinate cohort returned a duplicate owner"
+        );
+    }
+    anyhow::ensure!(
+        resource_blocks.is_empty() && network_blocks.is_empty() && traffic_blocks.is_empty(),
+        "prepared dashboard blocks have no matching exact owner claim"
+    );
+    Ok(prepared)
+}
+
 async fn release_owner(connection: &mut PgConnection, owner_id: i64) -> Result<()> {
     let released = sqlx::query_scalar::<_, bool>(DASHBOARD_PROJECTION_RELEASE_SQL)
         .bind(owner_id)
@@ -357,6 +878,144 @@ async fn defer_failed_owner(connection: &mut PgConnection, owner: &DashboardOwne
         .execute(connection)
         .await?;
     Ok(())
+}
+
+async fn apply_prepared_blocks(
+    transaction: &mut Transaction<'_, Postgres>,
+    publication: &PreparedDashboardPublication,
+) -> Result<()> {
+    let client_id = &publication.claim.client_id;
+    let generation = publication.claim.expected_generation;
+    let revision = publication.claim.expected_revision + 1;
+    match &publication.blocks {
+        PreparedBlocks::Resource(blocks) => {
+            for block in blocks {
+                sqlx::query(DASHBOARD_RESOURCE_BLOCK_APPLY_SQL)
+                    .bind(client_id)
+                    .bind(generation)
+                    .bind(revision)
+                    .bind(block.source_bucket_secs)
+                    .bind(block.block_start_unix)
+                    .bind(block.has_samples)
+                    .bind(&block.sample_counts)
+                    .bind(&block.cpu_load_1_sums)
+                    .bind(&block.cpu_load_1_maxes)
+                    .bind(&block.memory_total_bytes_maxes)
+                    .bind(&block.memory_used_ratio_sums)
+                    .bind(&block.memory_used_ratio_maxes)
+                    .bind(&block.disk_sample_counts)
+                    .bind(&block.disk_total_bytes_maxes)
+                    .bind(&block.disk_used_ratio_sums)
+                    .bind(&block.disk_used_ratio_maxes)
+                    .bind(&block.latest_observed_unix)
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        PreparedBlocks::Network(blocks) => {
+            for block in blocks {
+                sqlx::query(DASHBOARD_NETWORK_BLOCK_APPLY_SQL)
+                    .bind(client_id)
+                    .bind(generation)
+                    .bind(revision)
+                    .bind(block.source_bucket_secs)
+                    .bind(block.block_start_unix)
+                    .bind(block.interface_width)
+                    .bind(block.has_samples)
+                    .bind(&block.sample_counts)
+                    .bind(&block.latest_observed_unix)
+                    .bind(&block.rx_bytes_last)
+                    .bind(&block.tx_bytes_last)
+                    .bind(&block.rx_counter_epoch)
+                    .bind(&block.tx_counter_epoch)
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        PreparedBlocks::Traffic(blocks) => {
+            for block in blocks {
+                sqlx::query(DASHBOARD_TRAFFIC_BLOCK_APPLY_SQL)
+                    .bind(client_id)
+                    .bind(generation)
+                    .bind(revision)
+                    .bind(block.source_bucket_secs)
+                    .bind(block.block_start_unix)
+                    .bind(block.has_samples)
+                    .bind(&block.rx_valid_counts)
+                    .bind(&block.tx_valid_counts)
+                    .bind(&block.rx_bytes)
+                    .bind(&block.tx_bytes)
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn publish_prepared_owned(
+    connection: &mut PgConnection,
+    publication: PreparedDashboardPublication,
+) -> Result<DashboardPublishOutcome> {
+    let mut transaction = connection.begin().await?;
+    // Consume the exact ready revision before installing a prepared block. A
+    // producer that already committed makes this a no-op; a producer arriving
+    // later waits here and recreates the ready owner after this commit.
+    let began = sqlx::query_scalar::<_, bool>(DASHBOARD_PREPARED_BEGIN_SQL)
+        .bind(publication.owner.owner_id)
+        .bind(publication.owner.ready_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    if began.is_none() {
+        transaction.rollback().await?;
+        return Ok(DashboardPublishOutcome::Contended);
+    }
+
+    sqlx::query("SET LOCAL synchronous_commit = OFF")
+        .execute(&mut *transaction)
+        .await?;
+    let applied = apply_prepared_blocks(&mut transaction, &publication).await;
+    if let Err(error) = applied {
+        transaction.rollback().await?;
+        return Ok(DashboardPublishOutcome::Failed {
+            claim: publication.claim,
+            error: error.context("prepared dashboard blocks failed before commit"),
+        });
+    }
+
+    let completed = sqlx::query_scalar::<_, bool>(DASHBOARD_PREPARED_COMPLETE_SQL)
+        .bind(&publication.claim.client_id)
+        .bind(&publication.claim.domain)
+        .bind(&publication.claim.event_kind)
+        .bind(&publication.claim.source_bucket_secs)
+        .bind(&publication.claim.block_start_unix)
+        .bind(&publication.claim.bucket_start_unix)
+        .bind(&publication.claim.captured_block_event_ids)
+        .bind(publication.claim.expected_generation)
+        .bind(publication.claim.expected_revision)
+        .fetch_one(&mut *transaction)
+        .await;
+    match completed {
+        Ok(true) => {
+            transaction.commit().await?;
+            Ok(DashboardPublishOutcome::Published(publication.claim))
+        }
+        Ok(false) => {
+            transaction.rollback().await?;
+            Ok(DashboardPublishOutcome::Failed {
+                claim: publication.claim,
+                error: anyhow::anyhow!("prepared dashboard publication was not completed"),
+            })
+        }
+        Err(error) => {
+            transaction.rollback().await?;
+            Ok(DashboardPublishOutcome::Failed {
+                claim: publication.claim,
+                error: anyhow::Error::from(error)
+                    .context("prepared dashboard publication failed before commit"),
+            })
+        }
+    }
 }
 
 fn is_serialization_failure(error: &sqlx::Error) -> bool {
@@ -487,6 +1146,70 @@ async fn publish_one(connection: &mut PgConnection) -> Result<DashboardPublishOu
     publication
 }
 
+#[derive(Debug)]
+struct CoordinateCohortOutcome {
+    acquired: bool,
+    publications: Vec<DashboardPublishOutcome>,
+}
+
+async fn publish_coordinate_cohort(
+    connection: &mut PgConnection,
+) -> Result<CoordinateCohortOutcome> {
+    let acquired = acquire_coordinate_owners(connection).await?;
+    if acquired.is_empty() {
+        return Ok(CoordinateCohortOutcome {
+            acquired: false,
+            publications: Vec::new(),
+        });
+    }
+    let mut prepared = prepare_coordinate_publications(connection, &acquired).await?;
+    let mut publications = Vec::with_capacity(prepared.len());
+    for acquired_owner in acquired {
+        let Some(publication) = prepared.remove(&acquired_owner.owner_id) else {
+            // Work that changed to a generation/full-block shape after
+            // acquisition is intentionally left for the established path.
+            release_owner(connection, acquired_owner.owner_id).await?;
+            continue;
+        };
+        let exact_owner = publication.owner.clone();
+        let result = publish_prepared_owned(connection, publication).await;
+        let deferral = if matches!(&result, Ok(DashboardPublishOutcome::Failed { .. })) {
+            defer_failed_owner(connection, &exact_owner).await
+        } else {
+            Ok(())
+        };
+        let release = release_owner(connection, exact_owner.owner_id).await;
+        if let Err(release_error) = release {
+            return match result {
+                Err(publication_error) => Err(release_error).with_context(|| {
+                    format!(
+                        "failed to release prepared dashboard owner after publication error: {publication_error:#}"
+                    )
+                }),
+                Ok(_) => Err(release_error)
+                    .context("failed to release prepared dashboard owner; connection must close"),
+            };
+        }
+        deferral.context("failed to defer failed prepared dashboard publication owner")?;
+        publications.push(result?);
+    }
+    anyhow::ensure!(
+        prepared.is_empty(),
+        "prepared dashboard publication escaped its acquired owner cohort"
+    );
+    Ok(CoordinateCohortOutcome {
+        acquired: true,
+        publications,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn publish_coordinate_cohort_for_test(pool: &PgPool) -> Result<usize> {
+    let mut connection = pool.acquire().await?;
+    let outcome = publish_coordinate_cohort(&mut connection).await?;
+    Ok(outcome.publications.len())
+}
+
 #[cfg(test)]
 mod commit_scope_tests {
     #[test]
@@ -499,9 +1222,29 @@ mod commit_scope_tests {
             production
                 .matches("SET LOCAL synchronous_commit = OFF")
                 .count(),
-            1,
-            "owner acquisition and empty claims must remain synchronous"
+            2,
+            "only the legacy and prepared nonempty publication commits may be asynchronous"
         );
+        let (_, prepared) = production
+            .split_once("async fn publish_prepared_owned")
+            .expect("prepared dashboard publication function");
+        let (prepared, _) = prepared
+            .split_once("fn is_serialization_failure")
+            .expect("prepared dashboard publication boundary");
+        let ready_fence = prepared
+            .find("DASHBOARD_PREPARED_BEGIN_SQL")
+            .expect("prepared exact ready fence");
+        let asynchronous_commit = prepared
+            .find("SET LOCAL synchronous_commit = OFF")
+            .expect("prepared derived publication commit mode");
+        let block_apply = prepared
+            .find("apply_prepared_blocks")
+            .expect("prepared F16 apply");
+        let completion = prepared
+            .find("DASHBOARD_PREPARED_COMPLETE_SQL")
+            .expect("prepared owner completion");
+        assert!(ready_fence < asynchronous_commit);
+        assert!(asynchronous_commit < block_apply && block_apply < completion);
         let (_, publish) = source
             .split_once("async fn publish_owned")
             .expect("dashboard publication function");
@@ -603,6 +1346,26 @@ async fn run_connection(
         if shutdown_requested(shutdown) {
             return Ok(());
         }
+        let coordinate = publish_coordinate_cohort(connection).await?;
+        for publication in coordinate.publications {
+            match publication {
+                DashboardPublishOutcome::Published(claim) => {
+                    debug!(client_id = %claim.client_id, domain = %claim.domain,
+                        change = %claim.change, "published prepared dashboard telemetry mutation");
+                }
+                DashboardPublishOutcome::Contended => {}
+                DashboardPublishOutcome::Failed { claim, error } => {
+                    warn!(%error, client_id = %claim.client_id, domain = %claim.domain,
+                        change = %claim.change, "failed prepared dashboard mutation remains queued");
+                }
+                DashboardPublishOutcome::Idle => {
+                    anyhow::bail!("prepared dashboard publication returned an idle outcome")
+                }
+            }
+        }
+        if shutdown_requested(shutdown) {
+            return Ok(());
+        }
         match publish_one(connection).await {
             Ok(DashboardPublishOutcome::Published(claim)) => {
                 debug!(client_id = %claim.client_id, domain = %claim.domain,
@@ -610,7 +1373,9 @@ async fn run_connection(
                 tokio::task::yield_now().await;
             }
             Ok(DashboardPublishOutcome::Idle) => {
-                if wait_or_shutdown(shutdown, DASHBOARD_IDLE_POLL_INTERVAL).await {
+                if coordinate.acquired {
+                    tokio::task::yield_now().await;
+                } else if wait_or_shutdown(shutdown, DASHBOARD_IDLE_POLL_INTERVAL).await {
                     return Ok(());
                 }
             }
