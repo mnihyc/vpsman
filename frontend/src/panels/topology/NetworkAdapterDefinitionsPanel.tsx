@@ -25,20 +25,26 @@ type EditorState =
 
 export function NetworkAdapterDefinitionsPanel({
   definitions,
+  editorRequest,
+  editorOnly = false,
   initialKind,
   onCreate,
   onDelete,
   onInitialKindConsumed,
+  onEditorClosed,
   onUpdate,
   tunnelPlans,
 }: {
   definitions: NetworkAdapterDefinitionRecord[];
+  editorRequest?: Exclude<EditorState, null>;
+  editorOnly?: boolean;
   initialKind: NetworkAdapterKind | null;
   onCreate: (
     request: UpsertNetworkAdapterDefinitionRequest,
   ) => Promise<NetworkAdapterDefinitionRecord>;
   onDelete: (definitionId: string) => Promise<void>;
   onInitialKindConsumed: () => void;
+  onEditorClosed?: () => void;
   onUpdate: (
     definitionId: string,
     request: UpsertNetworkAdapterDefinitionRequest,
@@ -96,6 +102,12 @@ export function NetworkAdapterDefinitionsPanel({
     onInitialKindConsumed();
   }, [initialKind, onInitialKindConsumed]);
 
+  useEffect(() => {
+    if (!editorRequest) return;
+    if (editorRequest.mode === "edit") openEdit(editorRequest.definition);
+    else openCreate(editorRequest.kind);
+  }, [editorRequest]);
+
   function openCreate(adapterKind: NetworkAdapterKind) {
     setKind(adapterKind);
     setName("");
@@ -137,6 +149,7 @@ export function NetworkAdapterDefinitionsPanel({
         setFeedback(`Created ${name.trim()}`);
       }
       setEditor(null);
+      onEditorClosed?.();
     });
   }
 
@@ -175,10 +188,10 @@ export function NetworkAdapterDefinitionsPanel({
       },
       {
         id: "use",
-        header: "Plan use",
-        cell: (record) => adapterUseCount(record.id, tunnelPlans),
-        searchValue: (record) => adapterUseCount(record.id, tunnelPlans),
-        sortValue: (record) => adapterUseCount(record.id, tunnelPlans),
+        header: "Bindings",
+        cell: (record) => adapterUseCount(record, tunnelPlans),
+        searchValue: (record) => adapterUseCount(record, tunnelPlans),
+        sortValue: (record) => adapterUseCount(record, tunnelPlans),
       },
       {
         id: "updated",
@@ -199,10 +212,10 @@ export function NetworkAdapterDefinitionsPanel({
         icon: <Pencil size={14} />,
         onSelect: (rows) => openEdit(rows[0]),
         disabled: (rows) =>
-          rows.length !== 1 || adapterUseCount(rows[0].id, tunnelPlans) > 0,
+          rows.length !== 1 || adapterUseCount(rows[0], tunnelPlans) > 0,
         description: (rows) =>
-          rows.length === 1 && adapterUseCount(rows[0].id, tunnelPlans) > 0
-            ? `Used by ${adapterUseCount(rows[0].id, tunnelPlans)} tunnel plans; create a replacement and change each plan explicitly.`
+          rows.length === 1 && adapterUseCount(rows[0], tunnelPlans) > 0
+            ? `Used by ${adapterUseCount(rows[0], tunnelPlans)} bindings; create a replacement and change each binding explicitly.`
             : "Edit this unreferenced adapter definition.",
       },
       {
@@ -215,10 +228,10 @@ export function NetworkAdapterDefinitionsPanel({
           setDeleteTarget(rows[0]);
         },
         disabled: (rows) =>
-          rows.length !== 1 || adapterUseCount(rows[0].id, tunnelPlans) > 0,
+          rows.length !== 1 || adapterUseCount(rows[0], tunnelPlans) > 0,
         description: (rows) =>
-          rows.length === 1 && adapterUseCount(rows[0].id, tunnelPlans) > 0
-            ? `Used by ${adapterUseCount(rows[0].id, tunnelPlans)} tunnel plans; unbind it from every plan first.`
+          rows.length === 1 && adapterUseCount(rows[0], tunnelPlans) > 0
+            ? `Used by ${adapterUseCount(rows[0], tunnelPlans)} bindings; unbind it and finish pending cleanup first.`
             : "Delete this unreferenced adapter definition.",
       },
     ],
@@ -230,108 +243,123 @@ export function NetworkAdapterDefinitionsPanel({
       aria-label="Network adapter definitions"
       className="tunnelPlansRegistryPanel"
     >
-      <div className="sectionHeader compact">
-        <div>
-          <h3>Adapter definitions</h3>
-          <span>
-            Operator-owned commands bound only from explicit tunnel-plan
-            endpoints.
-          </span>
-        </div>
-      </div>
-      <ActionFeedback
-        className="localActionFeedback"
-        message={registryFeedbackMessage}
-        ref={registryFeedbackRef}
-        tone={error ? "danger" : "success"}
-      />
-      <ConsoleDataGrid
-        actions={actions}
-        columns={columns}
-        empty={
-          <div className="emptyState">
-            <strong>No adapter definitions</strong>
-            <span>
-              Agent builtin tunnels need no runtime adapter. Create one only for
-              custom tunnel or routing commands.
-            </span>
+      {!editorOnly && (
+        <>
+          <div className="sectionHeader compact">
+            <div>
+              <h3>Adapter definitions</h3>
+              <span>
+                Operator-owned commands bound to tunnel plans and port-forward
+                rules.
+              </span>
+            </div>
           </div>
-        }
-        getRowId={(record) => record.id}
-        itemLabel="adapter definitions"
-        renderExpandedRow={(record) => (
-          <div className="consoleInlineDetailGrid">
-            <span>Purpose</span>
-            <strong>{adapterKindLabel(record.adapter_kind)}</strong>
-            <span>Used by plans</span>
-            <strong>
-              {adapterPlanNames(record.id, tunnelPlans) || "None"}
-            </strong>
-            <span>Contract</span>
-            <strong>
-              <pre>{JSON.stringify(record.definition, null, 2)}</pre>
-            </strong>
-          </div>
-        )}
-        rows={definitions}
-        searchPlaceholder="Search adapter definitions"
-        storageKey="vpsman.network.adapterDefinitions"
-        title="Adapter definitions"
-        toolbarActions={
-          <div className="previewMeta">
-            <button
-              className="secondaryAction compactAction"
-              onClick={() => openCreate("routing_cost")}
-              title="Create an adapter contract for reading and updating routing cost"
-              type="button"
-            >
-              <Plus size={14} />
-              Routing cost adapter
-            </button>
-            <button
-              className="primaryAction compactAction"
-              onClick={() => openCreate("runtime_tunnel")}
-              title="Create an adapter contract for custom tunnel runtime commands"
-              type="button"
-            >
-              <Plus size={14} />
-              Tunnel runtime adapter
-            </button>
-          </div>
-        }
-      />
+          <ActionFeedback
+            className="localActionFeedback"
+            message={registryFeedbackMessage}
+            ref={registryFeedbackRef}
+            tone={error ? "danger" : "success"}
+          />
+          <ConsoleDataGrid
+            actions={actions}
+            columns={columns}
+            empty={
+              <div className="emptyState">
+                <strong>No adapter definitions</strong>
+                <span>
+                  Agent builtin tunnels need no runtime adapter. Create one only
+                  for custom tunnel, routing, or port-forward commands.
+                </span>
+              </div>
+            }
+            getRowId={(record) => record.id}
+            itemLabel="adapter definitions"
+            renderExpandedRow={(record) => (
+              <div className="consoleInlineDetailGrid">
+                <span>Purpose</span>
+                <strong>{adapterKindLabel(record.adapter_kind)}</strong>
+                <span>Used by plans</span>
+                <strong>
+                  {adapterPlanNames(record.id, tunnelPlans) || "None"}
+                </strong>
+                <span>Port-forward bindings</span>
+                <strong>{record.port_forward_rule_count ?? 0}</strong>
+                <span>Contract</span>
+                <strong>
+                  <pre>{JSON.stringify(record.definition, null, 2)}</pre>
+                </strong>
+              </div>
+            )}
+            rows={definitions}
+            searchPlaceholder="Search adapter definitions"
+            storageKey="vpsman.network.adapterDefinitions"
+            title="Adapter definitions"
+            toolbarActions={
+              <div className="previewMeta">
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => openCreate("port_forward")}
+                  title="Create a reusable adapter for custom port-forward services"
+                  type="button"
+                >
+                  <Plus size={14} /> Port forwarding adapter
+                </button>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => openCreate("routing_cost")}
+                  title="Create an adapter contract for reading and updating routing cost"
+                  type="button"
+                >
+                  <Plus size={14} />
+                  Routing cost adapter
+                </button>
+                <button
+                  className="primaryAction compactAction"
+                  onClick={() => openCreate("runtime_tunnel")}
+                  title="Create an adapter contract for custom tunnel runtime commands"
+                  type="button"
+                >
+                  <Plus size={14} />
+                  Tunnel runtime adapter
+                </button>
+              </div>
+            }
+          />
 
-      <ConfirmationPrompt
-        confirmLabel="Delete adapter definition"
-        detail="Delete this unused definition. Definitions bound to any tunnel plan must be unbound first."
-        error={error}
-        items={
-          deleteTarget
-            ? [
-                { label: "Definition", value: deleteTarget.name },
-                {
-                  label: "Purpose",
-                  value: adapterKindLabel(deleteTarget.adapter_kind),
-                },
-              ]
-            : []
-        }
-        onCancel={() => {
-          setError(null);
-          setDeleteTarget(null);
-        }}
-        onConfirm={() => void confirmDelete()}
-        open={deleteTarget !== null}
-        pending={pending}
-        title="Delete adapter definition"
-        tone="danger"
-      />
+          <ConfirmationPrompt
+            confirmLabel="Delete adapter definition"
+            detail="Delete this unused definition. Unbind tunnel plans and port-forward rules and finish pending cleanup first."
+            error={error}
+            items={
+              deleteTarget
+                ? [
+                    { label: "Definition", value: deleteTarget.name },
+                    {
+                      label: "Purpose",
+                      value: adapterKindLabel(deleteTarget.adapter_kind),
+                    },
+                  ]
+                : []
+            }
+            onCancel={() => {
+              setError(null);
+              setDeleteTarget(null);
+            }}
+            onConfirm={() => void confirmDelete()}
+            open={deleteTarget !== null}
+            pending={pending}
+            title="Delete adapter definition"
+            tone="danger"
+          />
+        </>
+      )}
 
       <ConsoleActionDrawer
         description="The agent invokes these exact absolute commands; vpsman does not install or modify them."
         onClose={() => {
           setError(null);
           setEditor(null);
+          onEditorClosed?.();
         }}
         open={editor !== null}
         title={
@@ -351,14 +379,14 @@ export function NetworkAdapterDefinitionsPanel({
               title={
                 editor?.mode === "edit"
                   ? "Adapter purpose is immutable after creation; create another definition for a different purpose"
-                  : "Choose whether this adapter manages a tunnel runtime or routing cost"
+                  : "Choose whether this adapter manages a tunnel runtime, routing cost, or port forwarding"
               }
             >
               <span>Purpose</span>
               <select
                 aria-label="Adapter purpose"
                 data-tooltip-disabled-reason="Adapter purpose is immutable after creation; create another definition for a different purpose."
-                disabled={editor?.mode === "edit"}
+                disabled={editor?.mode === "edit" || editorOnly}
                 onChange={(event) => {
                   const nextKind = event.target.value as NetworkAdapterKind;
                   changeEditorDraft(() => {
@@ -370,6 +398,7 @@ export function NetworkAdapterDefinitionsPanel({
               >
                 <option value="runtime_tunnel">Tunnel runtime</option>
                 <option value="routing_cost">Routing cost</option>
+                <option value="port_forward">Port forwarding</option>
               </select>
             </label>
             <label>
@@ -477,20 +506,41 @@ function AdapterCommandFields({
             required: false,
           },
         ]
-      : [
-          {
-            field: "status_command",
-            label: "Read cost",
-            hint: "required",
-            required: true,
-          },
-          {
-            field: "update_command",
-            label: "Update cost",
-            hint: "required",
-            required: true,
-          },
-        ];
+      : kind === "port_forward"
+        ? [
+            {
+              field: "apply_command",
+              label: "Apply",
+              hint: "required",
+              required: true,
+            },
+            {
+              field: "remove_command",
+              label: "Remove",
+              hint: "required",
+              required: true,
+            },
+            {
+              field: "status_command",
+              label: "Status",
+              hint: "required",
+              required: true,
+            },
+          ]
+        : [
+            {
+              field: "status_command",
+              label: "Read cost",
+              hint: "required",
+              required: true,
+            },
+            {
+              field: "update_command",
+              label: "Update cost",
+              hint: "required",
+              required: true,
+            },
+          ];
   return (
     <div className="compactForm">
       <strong>Commands</strong>
@@ -500,12 +550,16 @@ function AdapterCommandFields({
         absolute executable path.
         {kind === "runtime_tunnel"
           ? " Tunnel runtimes require Status, one of Start or Restart, and one of Stop or Cleanup."
-          : " Routing cost adapters require both Read cost and Update cost."}
+          : kind === "port_forward"
+            ? " Port forwarding requires idempotent Apply, Remove, and Status commands. Commands manage services and return; they do not run as the listener."
+            : " Routing cost adapters require both Read cost and Update cost."}
       </span>
       <span className="formHint">
         {kind === "runtime_tunnel"
           ? "New definitions contain editable examples. Replace the executable and argument layout for your adapter; values such as {interface}, {remote_underlay}, and {local_address} are replaced from each endpoint's tunnel plan."
-          : "New definitions contain editable examples. vpsman replaces {plan_id}, {interface}, {endpoint_side}, and {desired_cost} in direct argv and sends no stdin. Read cost must print one number from 1 to 65535. Update reports failure by exit code; its output is retained as the message, then vpsman reads the cost again to verify it."}
+          : kind === "port_forward"
+            ? 'Available placeholders: {rule_id}, {client_id}, {revision}, {protocol}, {incoming_ports}, {target_ports}, {target_ip}. An omitted target supplies an empty argument. Status prints JSON: {"state":"applied|absent|drifted","message":"optional"}. Applied confirms the supplied configuration; absent confirms cleanup. The adapter owns address family, binding, source handling, and port collisions.'
+            : "New definitions contain editable examples. vpsman replaces {plan_id}, {interface}, {endpoint_side}, and {desired_cost} in direct argv and sends no stdin. Read cost must print one number from 1 to 65535. Update reports failure by exit code; its output is retained as the message, then vpsman reads the cost again to verify it."}
       </span>
       {fields.map(({ field, hint, label, required }) => {
         const command = asObject(definition[field]);
@@ -606,6 +660,33 @@ function defaultAdapterDefinition(
     max_timeout_secs: 30,
     max_output_bytes: 16384,
   });
+  if (kind === "port_forward") {
+    const operation = (action: string) =>
+      command(
+        "/opt/operator/port-forward-adapter",
+        action,
+        "--rule-id",
+        "{rule_id}",
+        "--client-id",
+        "{client_id}",
+        "--revision",
+        "{revision}",
+        "--protocol",
+        "{protocol}",
+        "--incoming-ports",
+        "{incoming_ports}",
+        "--target-ports",
+        "{target_ports}",
+        "--target-ip",
+        "{target_ip}",
+      );
+    return {
+      contract_version: 1,
+      apply_command: operation("apply"),
+      remove_command: operation("remove"),
+      status_command: operation("status"),
+    };
+  }
   if (kind === "routing_cost") {
     return {
       contract_version: 2,
@@ -668,11 +749,19 @@ function defaultAdapterDefinition(
 function adapterKindLabel(kind: NetworkAdapterKind): string {
   return kind === "runtime_tunnel"
     ? "Tunnel runtime adapter"
-    : "Routing cost adapter";
+    : kind === "port_forward"
+      ? "Port forwarding adapter"
+      : "Routing cost adapter";
 }
 
-function adapterUseCount(id: string, plans: TunnelPlanRecord[]): number {
-  return plans.filter((plan) => planUsesAdapter(plan, id)).length;
+function adapterUseCount(
+  record: NetworkAdapterDefinitionRecord,
+  plans: TunnelPlanRecord[],
+): number {
+  return (
+    plans.filter((plan) => planUsesAdapter(plan, record.id)).length +
+    (record.port_forward_rule_count ?? 0)
+  );
 }
 
 function adapterPlanNames(id: string, plans: TunnelPlanRecord[]): string {
@@ -719,10 +808,16 @@ function validateAdapterDefinition(
   const commands =
     kind === "runtime_tunnel"
       ? [["status_command", "Status"]]
-      : [
-          ["status_command", "Read cost"],
-          ["update_command", "Update cost"],
-        ];
+      : kind === "port_forward"
+        ? [
+            ["apply_command", "Apply"],
+            ["remove_command", "Remove"],
+            ["status_command", "Status"],
+          ]
+        : [
+            ["status_command", "Read cost"],
+            ["update_command", "Update cost"],
+          ];
   for (const [field, label] of commands) {
     const error = validateAdapterCommand(definition[field], label);
     if (error) return error;

@@ -99,7 +99,8 @@ pub(crate) async fn run_agent(
     };
     let (update_execution, update_consumer) = AgentUpdateConsumer::channel();
     let update_shutdown = update_execution.clone();
-    let (port_forwarding_handle, port_forwarding_consumer) = PortForwardingConsumer::channel();
+    let (port_forwarding_handle, port_forwarding_consumer) =
+        PortForwardingConsumer::channel(config.client_id.clone());
     let cleanup_ledger = command_ledger.clone();
     let mut cleanup_consumer =
         tokio::spawn(async move { cleanup_ledger.run_cleanup_consumer().await });
@@ -218,12 +219,36 @@ async fn run_agent_with_ledger(
         match port_forwarding
             .reconcile(
                 &config.network.port_forwarding,
-                !config.network.port_forwarding.rules.is_empty(),
+                config
+                    .network
+                    .port_forwarding
+                    .rules
+                    .iter()
+                    .any(|rule| rule.mode != vpsman_common::PortForwardMode::CustomAdapter),
+                config
+                    .network
+                    .port_forwarding
+                    .rules
+                    .iter()
+                    .filter(|rule| rule.mode != vpsman_common::PortForwardMode::CustomAdapter)
+                    .map(|rule| rule.id)
+                    .collect(),
                 CommandCancelToken::default(),
             )
             .await
         {
-            Ok(snapshot) => info!(?snapshot.status, "startup port-forwarding reconcile completed"),
+            Ok(snapshot)
+                if matches!(
+                    snapshot.status,
+                    PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Absent
+                ) =>
+            {
+                info!(?snapshot.status, "startup port-forwarding reconcile completed")
+            }
+            Ok(snapshot) => {
+                startup_reconcile_resources.insert(RuntimeConfigReconcileResource::PortForwarding);
+                warn!(?snapshot.status, error_code = snapshot.error_code.as_deref(), "startup port-forwarding reconcile requires an authoritative retry")
+            }
             Err(error) => {
                 startup_reconcile_resources.insert(RuntimeConfigReconcileResource::PortForwarding);
                 warn!(%error, "startup port-forwarding reconcile failed; last accepted desired state remains cached")
@@ -1460,14 +1485,38 @@ async fn apply_runtime_config_sync_owned(
     let tunnel_reapply = reconcile_scope.includes(RuntimeConfigReconcileResource::RuntimeTunnels);
     let port_forwarding = if port_forwarding_changed || port_forwarding_reapply {
         let require_table_access = port_forwarding_table_access_required(
-            !previous_port_forwarding.rules.is_empty(),
-            !candidate_config.network.port_forwarding.rules.is_empty(),
+            previous_port_forwarding
+                .rules
+                .iter()
+                .any(|rule| rule.mode != vpsman_common::PortForwardMode::CustomAdapter),
+            candidate_config
+                .network
+                .port_forwarding
+                .rules
+                .iter()
+                .any(|rule| rule.mode != vpsman_common::PortForwardMode::CustomAdapter),
             reason,
+            !candidate_config
+                .network
+                .port_forwarding
+                .cleanup_rules
+                .is_empty()
+                || previous_port_forwarding
+                    .rules
+                    .iter()
+                    .chain(&candidate_config.network.port_forwarding.rules)
+                    .any(|rule| rule.mode == vpsman_common::PortForwardMode::CustomAdapter),
         );
         match port_forwarding_consumer
             .reconcile(
                 &candidate_config.network.port_forwarding,
                 require_table_access,
+                previous_port_forwarding
+                    .rules
+                    .iter()
+                    .filter(|rule| rule.mode != vpsman_common::PortForwardMode::CustomAdapter)
+                    .map(|rule| rule.id)
+                    .collect(),
                 cancel_token.clone(),
             )
             .await
@@ -1622,7 +1671,7 @@ async fn apply_runtime_config_sync(
     reason: &str,
     cancel_token: CommandCancelToken,
 ) -> Result<RuntimeConfigSyncResult> {
-    let (port_forwarding, consumer) = PortForwardingConsumer::channel();
+    let (port_forwarding, consumer) = PortForwardingConsumer::channel(config.client_id.clone());
     let consumer = tokio::spawn(consumer.run());
     let result = apply_runtime_config_sync_owned(
         job_id,
@@ -1660,10 +1709,12 @@ fn port_forwarding_table_access_required(
     previous_rules_present: bool,
     desired_rules_present: bool,
     reason: &str,
+    custom_ownership_present: bool,
 ) -> bool {
     previous_rules_present
         || desired_rules_present
-        || runtime_config_reason_requires_port_forwarding_table_access(reason)
+        || (!custom_ownership_present
+            && runtime_config_reason_requires_port_forwarding_table_access(reason))
 }
 
 fn port_forwarding_snapshot_requires_reconnect_sync(snapshot: &PortForwardRuntimeSnapshot) -> bool {

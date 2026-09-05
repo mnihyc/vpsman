@@ -220,7 +220,7 @@ pub(crate) struct EffectiveAgentConfigView {
     pub(crate) generated_at: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct NetworkAdapterDefinitionView {
     pub(crate) id: Uuid,
     pub(crate) adapter_kind: String,
@@ -229,6 +229,8 @@ pub(crate) struct NetworkAdapterDefinitionView {
     pub(crate) definition: serde_json::Value,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+    #[serde(default)]
+    pub(crate) port_forward_rule_count: i64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -33986,7 +33986,10 @@ async fn postgres_port_forward_runtime_rejects_stale_state_and_confirmation() {
                 client_id: client_id.to_string(),
                 name: "stale-runtime-rule".to_string(),
                 protocol: PortForwardProtocol::Tcp,
-                target_ip: "192.0.2.213".parse().unwrap(),
+                mode: vpsman_common::PortForwardMode::Dnat,
+                address_family: None,
+                adapter_definition_id: None,
+                target_ip: Some("192.0.2.213".parse().unwrap()),
                 target_hostname: None,
                 mappings: pair_port_expressions("18080", "8080").unwrap(),
                 masquerade: true,
@@ -34520,6 +34523,805 @@ async fn postgres_unrepresentable_reachability_is_rejected_before_cursor_accepta
 }
 
 #[tokio::test]
+async fn postgres_port_forward_modes_preserve_native_and_adapter_ownership() {
+    use vpsman_common::{PortForwardAddressFamily, PortForwardMode, PortForwardRuleRuntimeStat};
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "forward-modes";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let adapter_request = crate::model::UpsertNetworkAdapterDefinitionRequest {
+        adapter_kind: "port_forward".into(),
+        name: "service-forward".into(),
+        description: None,
+        definition: json!({"contract_version":1,
+            "apply_command":{"argv":["/usr/bin/true","{rule_id}","{target_ip}"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "remove_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "status_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384}}),
+    };
+    let adapter = db
+        .repo
+        .create_network_adapter_definition(&adapter_request, &operator)
+        .await
+        .unwrap();
+    let request = |name: &str, mode: &str, enabled: bool| -> CreatePortForwardRuleRequest {
+        serde_json::from_value(json!({"client_id":client_id,"name":name,"mode":mode,"protocol":"tcp",
+            "target_ip":if mode == "redirect" { Value::Null } else { json!("127.0.0.1") },
+            "address_family":if mode == "redirect" {json!("both")} else {Value::Null},
+            "adapter_definition_id":if mode == "custom_adapter" {json!(adapter.id)} else {Value::Null},
+            "mappings":pair_port_expressions("18080", "8080").unwrap(),"enabled":enabled,"confirmed":true})).unwrap()
+    };
+    let redirect = db
+        .repo
+        .create_port_forward_rule(&request("redirect", "redirect", true), &operator)
+        .await
+        .unwrap();
+    assert_eq!(redirect.mode, PortForwardMode::Redirect);
+    assert_eq!(
+        redirect.address_family,
+        Some(PortForwardAddressFamily::Both)
+    );
+    assert_eq!(redirect.target_ip, None);
+    assert!(!redirect.masquerade);
+    let mut conflicting = request("native-conflict", "dnat", true);
+    conflicting.target_ip = Some("192.0.2.12".parse().unwrap());
+    assert!(db
+        .repo
+        .create_port_forward_rule(&conflicting, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("overlap"));
+
+    // Custom listeners own their collision checks and may use loopback.
+    let custom = db
+        .repo
+        .create_port_forward_rule(&request("custom", "custom_adapter", true), &operator)
+        .await
+        .unwrap();
+    let draft = db
+        .repo
+        .create_port_forward_rule(&request("draft", "custom_adapter", false), &operator)
+        .await
+        .unwrap();
+    assert_eq!(draft.runtime_status, "disabled");
+    assert_eq!(custom.target_ip, Some("127.0.0.1".parse().unwrap()));
+    assert_eq!(custom.nat_matches, None);
+    assert_eq!(custom.nft_version, None);
+    let definitions = db
+        .repo
+        .list_network_adapter_definitions(Some("port_forward"))
+        .await
+        .unwrap();
+    assert_eq!(definitions[0].port_forward_rule_count, 2);
+    assert!(db
+        .repo
+        .update_network_adapter_definition(adapter.id, &adapter_request, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("in_use"));
+    assert!(db
+        .repo
+        .delete_network_adapter_definition(adapter.id, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("in_use"));
+    let config = db
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await
+        .unwrap();
+    assert_eq!(config.schema_version, 2);
+    assert_eq!(config.rules.len(), 2);
+    let custom_runtime = config
+        .rules
+        .iter()
+        .find(|rule| rule.id == custom.id)
+        .unwrap();
+    assert_eq!(
+        custom_runtime.adapter.as_ref().unwrap().definition_id,
+        adapter.id
+    );
+
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                desired_hash: Some(config.desired_hash),
+                status: PortForwardRuntimeStatus::Failed,
+                error_message: Some("unrelated native failure".into()),
+                observed_unix: 100,
+                rules: vec![PortForwardRuleRuntimeStat {
+                    rule_id: custom.id,
+                    revision: custom.revision,
+                    mode: PortForwardMode::CustomAdapter,
+                    status: Some(PortForwardRuntimeStatus::Applied),
+                    observed_unix: Some(99),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let custom_view = db
+        .repo
+        .get_port_forward_rule(custom.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(custom_view.runtime_status, "applied");
+    assert_eq!(custom_view.runtime_error, None);
+    assert_eq!(custom_view.runtime_observed_unix, Some(99));
+
+    let disabled = db
+        .repo
+        .set_port_forward_rule_enabled(custom.id, custom.revision, false, &operator)
+        .await
+        .unwrap();
+    let queued_revision: i64 = sqlx::query_scalar(
+        "SELECT desired_revision FROM client_runtime_config_reconcile_work WHERE client_id=$1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let disabled_edit:UpdatePortForwardRuleRequest=serde_json::from_value(json!({"expected_revision":disabled.revision,"name":"disabled renamed","mode":"custom_adapter","protocol":"tcp","target_ip":"127.0.0.1","adapter_definition_id":adapter.id,"mappings":disabled.mappings,"enabled":false})).unwrap();
+    let disabled = db
+        .repo
+        .update_port_forward_rule(custom.id, &disabled_edit, &operator)
+        .await
+        .unwrap();
+    let requeued_revision: i64 = sqlx::query_scalar(
+        "SELECT desired_revision FROM client_runtime_config_reconcile_work WHERE client_id=$1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        requeued_revision > queued_revision,
+        "editing disabled owned resources must publish the new cleanup revision"
+    );
+    let config = db
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        config.cleanup_rules,
+        vec![vpsman_common::PortForwardCleanupRule {
+            rule_id: custom.id,
+            revision: disabled.revision
+        }]
+    );
+    let native_hash = vpsman_common::port_forwarding_desired_hash(&config.rules);
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                desired_hash: Some(config.desired_hash.clone()),
+                native_desired_hash: Some(native_hash.clone()),
+                status: PortForwardRuntimeStatus::Applied,
+                observed_unix: 101,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        db.repo
+            .port_forwarding_config_for_client(client_id)
+            .await
+            .unwrap()
+            .cleanup_rules,
+        config.cleanup_rules
+    );
+    let deleted = db
+        .repo
+        .delete_port_forward_rule(custom.id, disabled.revision, None, &operator)
+        .await
+        .unwrap();
+    assert!(deleted.removal_confirmed_at.is_none());
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                desired_hash: Some(config.desired_hash),
+                native_desired_hash: Some(native_hash),
+                status: PortForwardRuntimeStatus::Applied,
+                observed_unix: 102,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let confirmed: bool = sqlx::query_scalar(
+        "SELECT removal_confirmed_at IS NOT NULL FROM port_forward_rules WHERE id=$1",
+    )
+    .bind(custom.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        !confirmed,
+        "native success cannot acknowledge custom cleanup"
+    );
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                removed_rules: vec![vpsman_common::PortForwardCleanupRule {
+                    rule_id: custom.id,
+                    revision: disabled.revision,
+                }],
+                status: PortForwardRuntimeStatus::Failed,
+                observed_unix: 103,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stale_confirmed: bool = sqlx::query_scalar(
+        "SELECT removal_confirmed_at IS NOT NULL FROM port_forward_rules WHERE id=$1",
+    )
+    .bind(custom.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        !stale_confirmed,
+        "an older cleanup revision cannot confirm a newer deletion"
+    );
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                removed_rules: vec![vpsman_common::PortForwardCleanupRule {
+                    rule_id: custom.id,
+                    revision: deleted.revision,
+                }],
+                status: PortForwardRuntimeStatus::Failed,
+                observed_unix: 104,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (pending, confirmed):(bool,bool) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id), removal_confirmed_at IS NOT NULL FROM port_forward_rules WHERE id=$1").bind(custom.id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!((pending, confirmed), (false, true));
+    assert!(db
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await
+        .unwrap()
+        .cleanup_rules
+        .is_empty());
+    db.repo
+        .delete_port_forward_rule(draft.id, draft.revision, None, &operator)
+        .await
+        .unwrap();
+    db.repo
+        .delete_network_adapter_definition(adapter.id, &operator)
+        .await
+        .unwrap();
+    let old_reference: Option<Uuid> =
+        sqlx::query_scalar("SELECT adapter_definition_id FROM port_forward_rules WHERE id=$1")
+            .bind(custom.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(old_reference, None);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_port_forward_modes_gate_capabilities_and_preserve_cleanup_across_mode_changes() {
+    use vpsman_common::{PortForwardCleanupRule, PortForwardMode};
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "forward-legacy-agent";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query("UPDATE clients SET capabilities=$2 WHERE id=$1")
+        .bind(client_id)
+        .bind(SqlJson(json!({"port_forwarding":{"status":"supported"}})))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (operator, headers) = postgres_operator_session(&db.repo, "forward-mode-admin").await;
+    let definition_request:crate::model::UpsertNetworkAdapterDefinitionRequest = serde_json::from_value(json!({
+        "adapter_kind":"port_forward","name":"local-proxy","definition":{"contract_version":1,
+            "apply_command":{"argv":["/usr/bin/true"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "remove_command":{"argv":["/usr/bin/true"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "status_command":{"argv":["/usr/bin/true"],"max_timeout_secs":30,"max_output_bytes":16384}}})).unwrap();
+    let definition = db
+        .repo
+        .create_network_adapter_definition(&definition_request, &operator)
+        .await
+        .unwrap();
+    let router = crate::routes::build_router(postgres_app_state(&db));
+    let body = json!({"client_id":client_id,"name":"draft","mode":"custom_adapter","protocol":"tcp",
+        "target_ip":"127.0.0.1","target_hostname":"localhost","adapter_definition_id":definition.id,
+        "mappings":pair_port_expressions("18080","8080").unwrap(),"enabled":true,"confirmed":true});
+    let send = |payload: Value| {
+        let mut request = Request::post("/api/v1/port-forward-rules")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        *request.headers_mut() = headers.clone();
+        request
+            .headers_mut()
+            .insert(CONTENT_TYPE, "application/json".parse().unwrap());
+        request
+    };
+    let unsupported = router.clone().oneshot(send(body.clone())).await.unwrap();
+    assert_eq!(unsupported.status(), StatusCode::CONFLICT);
+    let mut draft_body = body.clone();
+    draft_body["enabled"] = json!(false);
+    let draft_request: CreatePortForwardRuleRequest = serde_json::from_value(draft_body).unwrap();
+    let draft = db
+        .repo
+        .create_port_forward_rule(&draft_request, &operator)
+        .await
+        .unwrap();
+    let edit:UpdatePortForwardRuleRequest = serde_json::from_value(json!({"expected_revision":draft.revision,"name":"edited draft","mode":"custom_adapter","protocol":"tcp",
+        "target_ip":null,"adapter_definition_id":definition.id,"mappings":draft.mappings,"enabled":false})).unwrap();
+    let edited = db
+        .repo
+        .update_port_forward_rule(draft.id, &edit, &operator)
+        .await
+        .unwrap();
+    assert_eq!(edited.target_hostname, None);
+    assert_eq!(edited.runtime_status, "disabled");
+    let draft_config = db
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await
+        .unwrap();
+    assert_eq!(draft_config.schema_version, 1);
+    assert!(draft_config.cleanup_rules.is_empty());
+    assert!(draft_config.rules.is_empty());
+
+    // External adapters are advertised independently of native nft support.
+    sqlx::query("UPDATE clients SET capabilities=$2 WHERE id=$1").bind(client_id)
+        .bind(SqlJson(json!({"port_forwarding":{"status":"nft_missing","schema_version":2,"supported_modes":["custom_adapter"]}}))).execute(&db.pool).await.unwrap();
+    let mut active_body = body;
+    active_body["name"] = json!("external proxy");
+    let owned_request = crate::model::UpsertNetworkAdapterDefinitionRequest {
+        name: "owned proxy".into(),
+        ..definition_request.clone()
+    };
+    let owned_definition = db
+        .repo
+        .create_network_adapter_definition(&owned_request, &operator)
+        .await
+        .unwrap();
+    active_body["adapter_definition_id"] = json!(owned_definition.id);
+    let supported = router.oneshot(send(active_body)).await.unwrap();
+    let supported_status = supported.status();
+    let response: Value =
+        serde_json::from_slice(&to_bytes(supported.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(supported_status, StatusCode::CREATED, "{response}");
+    let rule_id = Uuid::parse_str(response["rule"]["id"].as_str().unwrap()).unwrap();
+    let current = db
+        .repo
+        .get_port_forward_rule(rule_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let native_request:UpdatePortForwardRuleRequest=serde_json::from_value(json!({"expected_revision":current.revision,"name":current.name,"mode":"dnat","protocol":"tcp",
+        "target_ip":"192.0.2.90","mappings":current.mappings,"enabled":true,"confirmed":true})).unwrap();
+    let native = db
+        .repo
+        .update_port_forward_rule(rule_id, &native_request, &operator)
+        .await
+        .unwrap();
+    let config = db
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await
+        .unwrap();
+    assert_eq!(config.rules[0].mode, PortForwardMode::Dnat);
+    assert!(
+        db.repo
+            .update_network_adapter_definition(owned_definition.id, &owned_request, &operator)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("in_use"),
+        "an unresolved previous adapter remains immutable after a mode switch"
+    );
+    assert_eq!(
+        config.schema_version, 2,
+        "old custom ownership survives switching to native"
+    );
+    assert_eq!(
+        config.cleanup_rules,
+        vec![PortForwardCleanupRule {
+            rule_id,
+            revision: native.revision
+        }]
+    );
+    let deleted = db
+        .repo
+        .delete_port_forward_rule(rule_id, native.revision, None, &operator)
+        .await
+        .unwrap();
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                native_desired_hash: Some(String::new()),
+                status: PortForwardRuntimeStatus::Absent,
+                observed_unix: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pending: bool = sqlx::query_scalar(
+        "SELECT removal_confirmed_at IS NULL FROM port_forward_rules WHERE id=$1",
+    )
+    .bind(rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        pending,
+        "native absence cannot acknowledge the previous custom owner"
+    );
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                native_desired_hash: Some(String::new()),
+                removed_rules: vec![PortForwardCleanupRule {
+                    rule_id,
+                    revision: deleted.revision,
+                }],
+                status: PortForwardRuntimeStatus::Absent,
+                observed_unix: 101,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let confirmed:bool=sqlx::query_scalar("SELECT removal_confirmed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) FROM port_forward_rules WHERE id=$1").bind(rule_id).fetch_one(&db.pool).await.unwrap();
+    assert!(confirmed);
+    db.repo
+        .delete_network_adapter_definition(owned_definition.id, &operator)
+        .await
+        .unwrap();
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_port_forward_modes_keep_corrupt_retirement_and_large_cleanup_evidence_working() {
+    use vpsman_common::{PortForwardMode, PortForwardRuleRuntimeStat, MAX_PORT_FORWARD_RULES};
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "forward-retired-evidence";
+    let incarnation = Uuid::new_v4();
+    let session = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(incarnation)).await;
+    start_test_gateway_session(&db.repo, "forward-evidence-gateway", client_id, session).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let request:CreatePortForwardRuleRequest=serde_json::from_value(json!({"client_id":client_id,"name":"damaged-native","protocol":"tcp","target_ip":"192.0.2.40","mappings":pair_port_expressions("18080","8080").unwrap(),"enabled":true,"confirmed":true})).unwrap();
+    let rule = db
+        .repo
+        .create_port_forward_rule(&request, &operator)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE port_forward_rules SET mappings='[{\"broken\":true}]'::jsonb WHERE id=$1")
+        .bind(rule.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let corruption = db
+        .repo
+        .port_forward_rule_configuration_error(rule.id)
+        .await
+        .unwrap()
+        .unwrap();
+    db.repo
+        .delete_corrupt_port_forward_rule(rule.id, rule.revision, None, &corruption, &operator)
+        .await
+        .unwrap();
+    let config = db
+        .repo
+        .port_forwarding_config_for_client(client_id)
+        .await
+        .unwrap();
+    assert!(
+        config.rules.is_empty(),
+        "retired execution payload must not be decoded while generating cleanup"
+    );
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Absent,
+                owned_table_present: Some(false),
+                observed_unix: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // Reset only this test's acknowledgement to exercise carried native evidence.
+    sqlx::query("UPDATE port_forward_rules SET removal_confirmed_at=NULL WHERE id=$1")
+        .bind(rule.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    db.repo
+        .record_port_forward_runtime_snapshot(
+            client_id,
+            &PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Absent,
+                observed_unix: 11,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pending: bool = sqlx::query_scalar(
+        "SELECT removal_confirmed_at IS NULL FROM port_forward_rules WHERE id=$1",
+    )
+    .bind(rule.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        pending,
+        "custom-only absence without a new native observation cannot reuse carried native proof"
+    );
+    let mut stats = (0..MAX_PORT_FORWARD_RULES)
+        .map(|_| PortForwardRuleRuntimeStat {
+            rule_id: Uuid::new_v4(),
+            revision: 1,
+            mode: PortForwardMode::CustomAdapter,
+            status: Some(PortForwardRuntimeStatus::Applied),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    stats.push(PortForwardRuleRuntimeStat {
+        rule_id: Uuid::new_v4(),
+        revision: 2,
+        mode: PortForwardMode::CustomAdapter,
+        status: Some(PortForwardRuntimeStatus::Failed),
+        error_message: Some("retired listener removal failed".into()),
+        ..Default::default()
+    });
+    let event = GatewayTelemetryIngest {
+        gateway_id: "forward-evidence-gateway".into(),
+        gateway_session_id: session,
+        process_incarnation_id: incarnation,
+        telemetry_seq: 1,
+        remote_ip: None,
+        telemetry: TelemetryEnvelope {
+            client_id: client_id.into(),
+            metrics: AgentMetrics {
+                observed_unix: 20,
+                hostname: client_id.into(),
+                port_forwarding: Some(PortForwardRuntimeSnapshot {
+                    status: PortForwardRuntimeStatus::Failed,
+                    native_desired_hash: Some(String::new()),
+                    observed_unix: 20,
+                    rules: stats,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        },
+    };
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+    let evidence_count:i64=sqlx::query_scalar("SELECT jsonb_array_length(snapshot->'rules')::bigint FROM port_forward_runtime_state WHERE client_id=$1").bind(client_id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(evidence_count, (MAX_PORT_FORWARD_RULES + 1) as i64);
+    let confirmed: bool = sqlx::query_scalar(
+        "SELECT removal_confirmed_at IS NOT NULL FROM port_forward_rules WHERE id=$1",
+    )
+    .bind(rule.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(confirmed,"fresh native proof can acknowledge retired native configuration despite unrelated custom cleanup failure");
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_port_forward_disabling_last_native_rule_reports_disabled_after_absence() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    for (client_id, mode) in [
+        ("last-native-dnat", "dnat"),
+        ("last-native-redirect", "redirect"),
+    ] {
+        insert_client(&db.pool, client_id, None).await;
+        let request: CreatePortForwardRuleRequest = serde_json::from_value(json!({
+            "client_id": client_id,
+            "name": "last native rule",
+            "mode": mode,
+            "protocol": "both",
+            "target_ip": if mode == "dnat" { json!("192.0.2.80") } else { Value::Null },
+            "address_family": if mode == "redirect" { json!("both") } else { Value::Null },
+            "mappings": pair_port_expressions("18080", "8080").unwrap(),
+            "enabled": true,
+            "confirmed": true
+        }))
+        .unwrap();
+        let rule = db
+            .repo
+            .create_port_forward_rule(&request, &operator)
+            .await
+            .unwrap();
+        let active = db
+            .repo
+            .port_forwarding_config_for_client(client_id)
+            .await
+            .unwrap();
+        db.repo
+            .record_port_forward_runtime_snapshot(
+                client_id,
+                &PortForwardRuntimeSnapshot {
+                    status: PortForwardRuntimeStatus::Applied,
+                    desired_hash: Some(active.desired_hash.clone()),
+                    native_desired_hash: Some(active.desired_hash),
+                    owned_table_present: Some(true),
+                    observed_unix: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let disabled = db
+            .repo
+            .set_port_forward_rule_enabled(rule.id, rule.revision, false, &operator)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.repo
+                .get_port_forward_rule(rule.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .runtime_status,
+            "pending"
+        );
+        let empty = db
+            .repo
+            .port_forwarding_config_for_client(client_id)
+            .await
+            .unwrap();
+        assert!(empty.rules.is_empty());
+        assert!(empty.desired_hash.is_empty());
+        // Matches the merged agent snapshot after removing the final native
+        // table: legacy overall hash is absent, native cleanup proof is present.
+        db.repo
+            .record_port_forward_runtime_snapshot(
+                client_id,
+                &PortForwardRuntimeSnapshot {
+                    status: PortForwardRuntimeStatus::Absent,
+                    desired_hash: None,
+                    native_desired_hash: Some(empty.desired_hash),
+                    owned_table_present: Some(false),
+                    observed_unix: 2,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let observed = db
+            .repo
+            .get_port_forward_rule(rule.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.revision, disabled.revision);
+        assert_eq!(observed.desired_status, "disabled");
+        assert_eq!(observed.runtime_status, "disabled");
+        assert_eq!(observed.desired_hash, None);
+        assert_eq!(observed.agent_desired_hash, None);
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_port_forward_modes_migration_preserves_existing_dnat_rows() {
+    let Ok(base_url) = std::env::var("VPSMAN_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let options = PgConnectOptions::from_str(&base_url).unwrap();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    let db_name = format!("vpsman_reliability_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {}", quote_ident(&db_name)))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let database_options = options.database(&db_name);
+    let mut connection = sqlx::PgConnection::connect_with(&database_options)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE SCHEMA vpsman_internal; SET search_path=vpsman_internal,public;")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let mut migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir())
+        .await
+        .unwrap();
+    migrator.migrations = std::borrow::Cow::Owned(
+        migrator
+            .iter()
+            .filter(|migration| migration.version < 17)
+            .cloned()
+            .collect(),
+    );
+    migrator.run(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(database_options.clone())
+        .await
+        .unwrap();
+    let db = PgReliabilityTestDb {
+        repo: Repository::Postgres(pool.clone()),
+        pool,
+        admin_pool,
+        db_name,
+    };
+    insert_client(&db.pool, "legacy-forward", None).await;
+    for (ip, enabled) in [("192.0.2.80", true), ("2001:db8::80", false)] {
+        sqlx::query("INSERT INTO port_forward_rules(id,client_id,name,protocol,target_ip,mappings,enabled,revision) VALUES($1,'legacy-forward',$2,'tcp',$2::inet,$3,$4,7)")
+            .bind(Uuid::new_v4()).bind(ip).bind(SqlJson(pair_port_expressions("18080","8080").unwrap())).bind(enabled).execute(&db.pool).await.unwrap();
+    }
+    let before: Vec<Value> = sqlx::query_scalar::<_, SqlJson<Value>>(
+        "SELECT to_jsonb(rule) FROM port_forward_rules rule ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| row.0)
+    .collect();
+    crate::repository::migrate_postgres_database(&database_options, &workspace_migrations_dir())
+        .await
+        .unwrap();
+    let after:Vec<Value> = sqlx::query_scalar::<_,SqlJson<Value>>("SELECT to_jsonb(rule)-ARRAY['mode','address_family','adapter_definition_id'] FROM port_forward_rules rule ORDER BY id").fetch_all(&db.pool).await.unwrap().into_iter().map(|row|row.0).collect();
+    assert_eq!(before, after);
+    let config = db
+        .repo
+        .port_forwarding_config_for_client("legacy-forward")
+        .await
+        .unwrap();
+    assert_eq!(config.schema_version, 1);
+    let serialized = serde_json::to_value(&config).unwrap();
+    assert!(serialized.get("cleanup_rules").is_none());
+    assert!(serialized["rules"][0].get("mode").is_none());
+    assert!(serialized["rules"][0].get("address_family").is_none());
+    let families:Vec<(String,String,bool)> = sqlx::query_as("SELECT mode,address_family,EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) FROM port_forward_rules ORDER BY family(target_ip)").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        families,
+        vec![
+            ("dnat".into(), "ipv4".into(), false),
+            ("dnat".into(), "ipv6".into(), false)
+        ]
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_sqlx_metadata_is_private_and_application_connections_are_public() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -34554,7 +35356,7 @@ async fn postgres_sqlx_metadata_is_private_and_application_connections_are_publi
         .await
         .unwrap();
     assert_eq!(application_schema, "public");
-    assert_eq!(private_ledger_rows, 16);
+    assert_eq!(private_ledger_rows, 17);
     assert_eq!(public_internal_relations, 0);
 
     db.cleanup().await;
@@ -36487,7 +37289,10 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
         client_id: client_id.to_string(),
         name: name.to_string(),
         protocol: PortForwardProtocol::Tcp,
-        target_ip: "192.0.2.40".parse().unwrap(),
+        mode: vpsman_common::PortForwardMode::Dnat,
+        address_family: None,
+        adapter_definition_id: None,
+        target_ip: Some("192.0.2.40".parse().unwrap()),
         target_hostname: None,
         mappings: pair_port_expressions(listen, target).unwrap(),
         masquerade: true,
@@ -36568,7 +37373,10 @@ async fn postgres_port_forward_hostname_context_round_trips_with_literal_target(
                 client_id: "edge-domain".to_string(),
                 name: "resolved-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
-                target_ip: "192.0.2.40".parse().unwrap(),
+                mode: vpsman_common::PortForwardMode::Dnat,
+                address_family: None,
+                adapter_definition_id: None,
+                target_ip: Some("192.0.2.40".parse().unwrap()),
                 target_hostname: Some(" App.Internal. ".to_string()),
                 mappings: pair_port_expressions("18443", "8443").unwrap(),
                 masquerade: true,
@@ -36632,6 +37440,9 @@ async fn postgres_port_forward_hostname_context_round_trips_with_literal_target(
                 expected_revision: disabled.revision,
                 name: disabled.name.clone(),
                 protocol: disabled.protocol,
+                mode: vpsman_common::PortForwardMode::Dnat,
+                address_family: None,
+                adapter_definition_id: None,
                 target_ip: disabled.target_ip,
                 target_hostname: UpdateTargetHostname::Clear,
                 mappings: disabled.mappings.clone(),
@@ -36735,7 +37546,10 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
                 client_id: "edge-a".to_string(),
                 name: "healthy-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
-                target_ip: "192.0.2.10".parse().unwrap(),
+                mode: vpsman_common::PortForwardMode::Dnat,
+                address_family: None,
+                adapter_definition_id: None,
+                target_ip: Some("192.0.2.10".parse().unwrap()),
                 target_hostname: None,
                 mappings: mappings_a,
                 masquerade: true,
@@ -36753,7 +37567,10 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
                 client_id: "edge-a".to_string(),
                 name: "repair-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
-                target_ip: "192.0.2.11".parse().unwrap(),
+                mode: vpsman_common::PortForwardMode::Dnat,
+                address_family: None,
+                adapter_definition_id: None,
+                target_ip: Some("192.0.2.11".parse().unwrap()),
                 target_hostname: None,
                 mappings: mappings_b.clone(),
                 masquerade: true,
@@ -36795,7 +37612,10 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
                 expected_revision: corrupt_rule.revision,
                 name: "repair-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
-                target_ip: "192.0.2.11".parse().unwrap(),
+                mode: vpsman_common::PortForwardMode::Dnat,
+                address_family: None,
+                adapter_definition_id: None,
+                target_ip: Some("192.0.2.11".parse().unwrap()),
                 target_hostname: UpdateTargetHostname::Preserve,
                 mappings: mappings_b,
                 masquerade: true,

@@ -423,11 +423,10 @@ pub(crate) async fn collect_metrics_for_config(
         .truncate(MAX_TELEMETRY_TUNNELS - reserved_runtime_tunnels);
     collect_runtime_status_telemetry(config, &mut metrics, runtime_state).await;
     collect_ping_target_telemetry(config, &mut metrics, runtime_state).await;
-    metrics.port_forwarding = Some(
-        port_forwarding
-            .inspect(&config.network.port_forwarding)
-            .await?,
-    );
+    metrics.port_forwarding = Some(port_forwarding.snapshot(
+        &config.network.port_forwarding,
+        config.network.runtime_status_telemetry_interval_secs,
+    ));
     metrics.disks.truncate(MAX_TELEMETRY_DISKS);
     metrics.networks.truncate(MAX_TELEMETRY_NETWORKS);
     metrics.tunnels.truncate(MAX_TELEMETRY_TUNNELS);

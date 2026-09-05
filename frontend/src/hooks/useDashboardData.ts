@@ -261,6 +261,7 @@ function topologyProjectionSourcesForRoute(
     return ["tunnelPlans", "topologyGraph", "ospfUpdatePlans"];
   }
   if (subpage === "graph") return ["topologyGraph"];
+  if (subpage === "port_forwards") return ["networkAdapterDefinitions"];
   if (subpage === "tests") return ["tunnelPlans", "networkTrends"];
   if (subpage === "ospf") return ["tunnelPlans", "ospfUpdatePlans"];
   if (subpage === "evidence") {
@@ -508,6 +509,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     apiToken,
     requireAuth,
     audit.loadAuditLogs,
+    topology.loadNetworkAdapterDefinitions,
   );
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAuditLogs);
   const activeBackupProjectionSources = backupProjectionSourcesForRoute(

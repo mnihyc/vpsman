@@ -9,7 +9,10 @@ fn config() -> AgentPortForwardingConfig {
         revision: 3,
         name: "web".to_string(),
         protocol: PortForwardProtocol::Both,
-        target_ip: "192.0.2.8".parse().unwrap(),
+        target_ip: Some("192.0.2.8".parse().unwrap()),
+        mode: PortForwardMode::Dnat,
+        address_family: None,
+        adapter: None,
         mappings: pair_port_expressions("80,1000-1002", "8080,2000-2002").unwrap(),
         masquerade: true,
     }];
@@ -53,7 +56,10 @@ fn unchanged_large_port_range_stays_compact() {
         revision: 1,
         name: "identity-range".to_string(),
         protocol: PortForwardProtocol::Tcp,
-        target_ip: "192.0.2.9".parse().unwrap(),
+        target_ip: Some("192.0.2.9".parse().unwrap()),
+        mode: PortForwardMode::Dnat,
+        address_family: None,
+        adapter: None,
         mappings: pair_port_expressions("10000-30000", "10000-30000").unwrap(),
         masquerade: true,
     }];
@@ -248,3 +254,100 @@ fn nft_monitor_start_owner_is_released_when_spawn_fails() {
         start_nft_monitor(Path::new("/definitely-missing-vpsman-nft-monitor-binary")).is_none()
     );
 }
+
+#[test]
+fn custom_changes_do_not_change_native_program_or_native_identity() {
+    let native = config();
+    let mut mixed = native.clone();
+    mixed.schema_version = 2;
+    let mut custom = native.rules[0].clone();
+    custom.id = uuid::Uuid::new_v4();
+    custom.mode = PortForwardMode::CustomAdapter;
+    custom.target_ip = None;
+    custom.masquerade = false;
+    let command = vpsman_common::RuntimeTunnelCommand {
+        argv: vec!["/bin/true".to_string()],
+        max_timeout_secs: 30,
+        max_output_bytes: 16 * 1024,
+    };
+    custom.adapter = Some(vpsman_common::PortForwardAdapterCommands {
+        definition_id: uuid::Uuid::new_v4(),
+        definition_name: "service".to_string(),
+        definition_hash: "fixture".to_string(),
+        apply: command.clone(),
+        remove: command.clone(),
+        status: command,
+    });
+    mixed.rules.push(custom);
+    mixed.desired_hash = port_forwarding_desired_hash(&mixed.rules);
+    assert_eq!(native_config(&native), native_config(&mixed));
+    assert_eq!(
+        render_apply_script(&native, true).unwrap(),
+        render_apply_script(&mixed, true).unwrap()
+    );
+}
+
+#[test]
+fn redirect_both_dispatches_both_families_without_a_return_path_rule() {
+    let mut config = config();
+    config.schema_version = 2;
+    config.rules[0].mode = PortForwardMode::Redirect;
+    config.rules[0].target_ip = None;
+    config.rules[0].address_family = Some(PortForwardAddressFamily::Both);
+    config.rules[0].masquerade = false;
+    config.desired_hash = port_forwarding_desired_hash(&config.rules);
+    let script = render_apply_script(&config, false).unwrap();
+    assert_eq!(
+        populated_dispatches(&config.rules),
+        vec![
+            ("ipv4", "tcp"),
+            ("ipv4", "udp"),
+            ("ipv6", "tcp"),
+            ("ipv6", "udp")
+        ]
+    );
+    assert!(script.contains("redirect to : tcp dport map @pf_0_tcp_fixed"));
+    assert!(!script.contains("masquerade"));
+    assert!(!script.contains("dnat"));
+}
+
+#[test]
+fn empty_desired_snapshot_preserves_legacy_hash_and_native_cleanup_proof() {
+    let desired = AgentPortForwardingConfig::default();
+    let observed = PortForwardRuntimeSnapshot {
+        status: PortForwardRuntimeStatus::Absent,
+        owned_table_present: Some(false),
+        ..PortForwardRuntimeSnapshot::default()
+    };
+    let merged = merge_snapshot(&desired, &native_config(&desired), observed, Vec::new());
+    assert_eq!(merged.status, PortForwardRuntimeStatus::Absent);
+    assert_eq!(merged.desired_hash, None);
+    assert_eq!(merged.native_desired_hash.as_deref(), Some(""));
+    assert_eq!(merged.owned_table_present, Some(false));
+    assert!(merged.rules.is_empty());
+}
+
+#[test]
+fn successful_custom_rule_does_not_hide_failed_native_cleanup() {
+    let mut desired = config();
+    desired.rules[0].mode = PortForwardMode::CustomAdapter;
+    let custom = adapters::runtime_stat(&desired.rules[0], PortForwardRuntimeStatus::Applied);
+    let native = native_config(&desired);
+    let failed = failed_snapshot(
+        &native,
+        &PortForwardCapability::default(),
+        "native_reconcile_failed",
+        "missing nft",
+    );
+    let merged = merge_snapshot(&desired, &native, failed, vec![custom]);
+    assert_eq!(merged.status, PortForwardRuntimeStatus::Failed);
+    assert_eq!(
+        merged.rules[0].status,
+        Some(PortForwardRuntimeStatus::Applied)
+    );
+    assert_eq!(merged.native_desired_hash, None);
+}
+
+#[cfg(target_os = "linux")]
+#[path = "tests_port_forwarding_packets.rs"]
+mod packets;

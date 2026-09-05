@@ -12,6 +12,7 @@ import type {
   PortForwardBulkResponse,
   PortForwardMutationRequest,
   PortForwardMutationResponse,
+  PortForwardMode,
   PortForwardRuleListItem,
   ResolveHostnameResponse,
   UpdatePortForwardRuleRequest,
@@ -21,6 +22,7 @@ export function usePortForwardingData(
   apiToken: string,
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
+  onAdapterBindingsChanged: () => Promise<void>,
 ) {
   const [portForwardRules, setPortForwardRules] = useState<
     PortForwardRuleListItem[]
@@ -89,8 +91,8 @@ export function usePortForwardingData(
   }, [apiToken, onUnauthorized]);
 
   const refreshAfterMutation = useCallback(async () => {
-    await Promise.allSettled([loadPortForwardRules(), onAuditChanged()]);
-  }, [loadPortForwardRules, onAuditChanged]);
+    await Promise.allSettled([loadPortForwardRules(), onAuditChanged(), onAdapterBindingsChanged()]);
+  }, [loadPortForwardRules, onAuditChanged, onAdapterBindingsChanged]);
 
   const createPortForwardRule = useCallback(
     async (request: CreatePortForwardRuleRequest) => {
@@ -165,11 +167,11 @@ export function usePortForwardingData(
   );
 
   const resolvePortForwardHostname = useCallback(
-    (hostname: string) =>
+    (hostname: string, mode: PortForwardMode = "dnat") =>
       apiPost<ResolveHostnameResponse>(
         "/api/v1/network/resolve-hostname",
         apiToken,
-        { hostname },
+        { hostname, mode },
       ),
     [apiToken],
   );

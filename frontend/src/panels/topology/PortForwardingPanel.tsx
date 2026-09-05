@@ -31,6 +31,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
+import { NetworkAdapterDefinitionsPanel } from "./NetworkAdapterDefinitionsPanel";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
   formatPortMappings,
@@ -40,6 +41,10 @@ import {
 } from "../../portForwarding";
 import type {
   AgentView,
+  NetworkAdapterDefinitionRecord,
+  UpsertNetworkAdapterDefinitionRequest,
+  PortForwardAddressFamily,
+  PortForwardMode,
   CreatePortForwardRuleRequest,
   PortForwardBulkAction,
   PortForwardBulkResponse,
@@ -54,6 +59,7 @@ import type {
 import { dispatchFailureReason, formatCompactTime, shortId } from "../../utils";
 
 type PortForwardingPanelProps = {
+  adapterDefinitions: NetworkAdapterDefinitionRecord[];
   agents: AgentView[];
   canForget: boolean;
   canWrite: boolean;
@@ -67,7 +73,16 @@ type PortForwardingPanelProps = {
   onCreate: (
     request: CreatePortForwardRuleRequest,
   ) => Promise<PortForwardMutationResponse>;
+  onCreateAdapter: (
+    request: UpsertNetworkAdapterDefinitionRequest,
+  ) => Promise<NetworkAdapterDefinitionRecord>;
+  onUpdateAdapter: (
+    id: string,
+    request: UpsertNetworkAdapterDefinitionRequest,
+  ) => Promise<NetworkAdapterDefinitionRecord>;
+  onDeleteAdapter: (id: string) => Promise<void>;
   onLoad: () => Promise<string | null>;
+  onLoadAdapters: () => Promise<void>;
   onMutate: (
     ruleId: string,
     operation: "enable" | "disable" | "delete" | "forget" | "reapply",
@@ -77,7 +92,10 @@ type PortForwardingPanelProps = {
       reason?: string | null;
     },
   ) => Promise<PortForwardMutationResponse>;
-  onResolveHostname: (hostname: string) => Promise<ResolveHostnameResponse>;
+  onResolveHostname: (
+    hostname: string,
+    mode?: PortForwardMode,
+  ) => Promise<ResolveHostnameResponse>;
   onUpdate: (
     ruleId: string,
     request: UpdatePortForwardRuleRequest,
@@ -86,6 +104,9 @@ type PortForwardingPanelProps = {
 };
 
 type EditorDraft = {
+  mode: PortForwardMode;
+  addressFamily: PortForwardAddressFamily;
+  adapterDefinitionId: string;
   enabled: boolean;
   incoming: string;
   masquerade: boolean;
@@ -123,6 +144,9 @@ type Feedback = FeedbackContent & {
 };
 
 const EMPTY_DRAFT: EditorDraft = {
+  mode: "dnat",
+  addressFamily: "ipv4",
+  adapterDefinitionId: "",
   clientId: "",
   enabled: false,
   incoming: "",
@@ -137,6 +161,7 @@ const EMPTY_DRAFT: EditorDraft = {
 const MAX_RULE_NAME_BYTES = 128;
 
 export function PortForwardingPanel({
+  adapterDefinitions,
   agents,
   canForget,
   canWrite,
@@ -144,7 +169,11 @@ export function PortForwardingPanel({
   loading,
   onBulkMutate,
   onCreate,
+  onCreateAdapter,
+  onUpdateAdapter,
+  onDeleteAdapter,
   onLoad,
+  onLoadAdapters,
   onMutate,
   onResolveHostname,
   onUpdate,
@@ -157,6 +186,11 @@ export function PortForwardingPanel({
   const [confirmation, setConfirmation] = useState<ConfirmationState | null>(
     null,
   );
+  const [adapterEditor, setAdapterEditor] = useState<
+    | { mode: "create"; kind: "port_forward" }
+    | { mode: "edit"; definition: NetworkAdapterDefinitionRecord }
+    | null
+  >(null);
   const [pending, setPending] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [forgetReason, setForgetReason] = useState("");
@@ -192,8 +226,10 @@ export function PortForwardingPanel({
       "unknown",
     ].includes(rule.runtime_status),
   ).length;
-  const supportedAgents = agents.filter(
-    (agent) => agent.capabilities.port_forwarding?.status === "supported",
+  const supportedAgents = agents.filter((agent) =>
+    ["dnat", "redirect", "custom_adapter"].some((mode) =>
+      supportsMode(agent, mode as PortForwardMode),
+    ),
   ).length;
 
   async function executeCorruptDelete(rule: PortForwardRuleCorruptRecord) {
@@ -264,6 +300,9 @@ export function PortForwardingPanel({
     setEditor({
       editing: rule,
       draft: {
+        mode: rule.mode,
+        addressFamily: rule.address_family ?? "ipv4",
+        adapterDefinitionId: rule.adapter_definition_id ?? "",
         clientId: rule.client_id,
         enabled: rule.enabled,
         incoming: expressions.incoming,
@@ -272,8 +311,8 @@ export function PortForwardingPanel({
         protocol: rule.protocol,
         target: expressions.target,
         targetHostname: rule.target_hostname ?? null,
-        targetInput: rule.target_hostname ?? rule.target_ip,
-        targetIp: rule.target_ip,
+        targetInput: rule.target_hostname ?? rule.target_ip ?? "",
+        targetIp: rule.target_ip ?? "",
       },
     });
   }
@@ -285,6 +324,9 @@ export function PortForwardingPanel({
     setEditor({
       editing: null,
       draft: {
+        mode: rule.mode,
+        addressFamily: rule.address_family ?? "ipv4",
+        adapterDefinitionId: rule.adapter_definition_id ?? "",
         clientId: rule.client_id,
         enabled: false,
         incoming: expressions.incoming,
@@ -293,8 +335,8 @@ export function PortForwardingPanel({
         protocol: rule.protocol,
         target: expressions.target,
         targetHostname: rule.target_hostname ?? null,
-        targetInput: rule.target_hostname ?? rule.target_ip,
-        targetIp: rule.target_ip,
+        targetInput: rule.target_hostname ?? rule.target_ip ?? "",
+        targetIp: rule.target_ip ?? "",
       },
     });
   }
@@ -393,17 +435,21 @@ export function PortForwardingPanel({
     confirmed: boolean,
   ) {
     const mappings = pairPortExpressions(draft.incoming, draft.target);
-    if (!draft.targetIp)
+    if (draft.mode === "dnat" && !draft.targetIp)
       throw new Error("Resolve and select a literal target IP");
     const base = {
+      mode: draft.mode,
+      address_family: draft.mode === "redirect" ? draft.addressFamily : null,
+      adapter_definition_id:
+        draft.mode === "custom_adapter" ? draft.adapterDefinitionId : null,
       confirmed,
       enabled: draft.enabled,
       mappings,
-      masquerade: draft.masquerade,
+      masquerade: draft.mode === "dnat" && draft.masquerade,
       name: draft.name.trim(),
       protocol: draft.protocol,
-      target_hostname: draft.targetHostname,
-      target_ip: draft.targetIp,
+      target_hostname: draft.mode === "redirect" ? null : draft.targetHostname,
+      target_ip: draft.mode === "redirect" ? null : draft.targetIp || null,
     };
     return editing
       ? onUpdate(editing.id, {
@@ -460,7 +506,7 @@ export function PortForwardingPanel({
       message: "Reloading stored forwarding state",
       tone: "progress",
     });
-    const refreshError = await onLoad();
+    const [refreshError] = await Promise.all([onLoad(), onLoadAdapters()]);
     if (refreshError) {
       setFeedback({
         anchor: "registry",
@@ -499,6 +545,14 @@ export function PortForwardingPanel({
         size: 220,
       },
       {
+        id: "mode",
+        header: "Mode",
+        cell: (rule) => modeLabel(rule.mode),
+        searchValue: (rule) => modeLabel(rule.mode),
+        sortValue: (rule) => rule.mode,
+        size: 150,
+      },
+      {
         id: "domain",
         header: "Domain",
         headerTitle:
@@ -526,7 +580,7 @@ export function PortForwardingPanel({
           </span>
         ),
         searchValue: (rule) =>
-          `${portForwardMappingLabel(rule)} ${rule.target_ip.includes(":") ? "IPv6" : "IPv4"}`,
+          `${portForwardMappingLabel(rule)} ${familyLabel(rule.address_family)}`,
         sortValue: (rule) => portForwardMappingLabel(rule),
         minSize: 220,
         size: 300,
@@ -537,17 +591,18 @@ export function PortForwardingPanel({
         cell: (rule) => (
           <span
             title={
-              rule.masquerade
-                ? "Masquerade only connections DNATed by this rule"
-                : "Preserve the original source address"
+              rule.mode === "custom_adapter"
+                ? "Source handling is controlled by the adapter"
+                : rule.masquerade
+                  ? "Masquerade only connections DNATed by this rule"
+                  : "Preserve the original source address"
             }
           >
-            {rule.masquerade ? "Masquerade" : "Preserve source"}
+            {returnPathLabel(rule.mode, rule.masquerade)}
           </span>
         ),
-        searchValue: (rule) =>
-          rule.masquerade ? "masquerade" : "preserve source",
-        sortValue: (rule) => (rule.masquerade ? "masquerade" : "preserve"),
+        searchValue: (rule) => returnPathLabel(rule.mode, rule.masquerade),
+        sortValue: (rule) => returnPathLabel(rule.mode, rule.masquerade),
         size: 150,
       },
       {
@@ -578,12 +633,18 @@ export function PortForwardingPanel({
         id: "matches",
         header: "NAT matches",
         cell: (rule) => (
-          <span title="First-packet NAT matches since the latest table apply; this is not throughput">
-            {rule.nat_matches.toLocaleString()}
+          <span
+            title={
+              rule.mode === "custom_adapter"
+                ? "Traffic evidence is controlled by the adapter"
+                : "First-packet NAT matches since the latest table apply; this is not throughput"
+            }
+          >
+            {rule.nat_matches?.toLocaleString() ?? "—"}
           </span>
         ),
-        searchValue: (rule) => rule.nat_matches,
-        sortValue: (rule) => rule.nat_matches,
+        searchValue: (rule) => rule.nat_matches ?? "",
+        sortValue: (rule) => rule.nat_matches ?? -1,
         align: "end",
         size: 120,
       },
@@ -598,9 +659,7 @@ export function PortForwardingPanel({
   function enableRows(rows: PortForwardRuleRecord[]) {
     return activeRows(rows).filter(
       (rule) =>
-        !rule.enabled &&
-        agentById.get(rule.client_id)?.capabilities.port_forwarding?.status ===
-          "supported",
+        !rule.enabled && supportsMode(agentById.get(rule.client_id), rule.mode),
     );
   }
 
@@ -609,10 +668,8 @@ export function PortForwardingPanel({
   }
 
   function reapplyRows(rows: PortForwardRuleRecord[]) {
-    return activeRows(rows).filter(
-      (rule) =>
-        agentById.get(rule.client_id)?.capabilities.port_forwarding?.status ===
-        "supported",
+    return activeRows(rows).filter((rule) =>
+      supportsMode(agentById.get(rule.client_id), rule.mode),
     );
   }
 
@@ -725,7 +782,7 @@ export function PortForwardingPanel({
       description: (rows) => {
         const eligible = reapplyRows(rows);
         return eligible.length > 0
-          ? `Review reapplying the complete forwarding table on ${eligible.length} eligible VPS${eligible.length === 1 ? "" : "s"}.`
+          ? `Review reconciling forwarding on the VPSs of ${eligible.length} eligible rule${eligible.length === 1 ? "" : "s"}.`
           : "No selected active rule is on a VPS with supported forwarding control.";
       },
       disabled: (rows) =>
@@ -778,20 +835,38 @@ export function PortForwardingPanel({
             value={`${agentById.get(rule.client_id)?.display_name || rule.client_id} (${rule.client_id})`}
           />
           <Detail label="Protocol" value={rule.protocol.toUpperCase()} />
+          <Detail label="Mode" value={modeLabel(rule.mode)} />
           <Detail
             label="Desired"
             value={rule.desired_status.replace(/_/g, " ")}
           />
           <Detail
             label="Listener scope"
-            value={`All current local ${rule.target_ip.includes(":") ? "IPv6" : "IPv4"} addresses`}
+            value={listenerScope(rule.mode, rule.address_family)}
           />
           <Detail label="Domain" value={rule.target_hostname ?? "-"} />
-          <Detail label="Target" value={rule.target_ip} />
+          <Detail
+            label="Target"
+            value={
+              rule.mode === "redirect"
+                ? "This VPS"
+                : (rule.target_ip ?? "Controlled by adapter")
+            }
+          />
+          {rule.mode === "custom_adapter" && (
+            <Detail
+              label="Adapter"
+              value={
+                rule.adapter_definition_name ??
+                rule.adapter_definition_id ??
+                "Removed definition"
+              }
+            />
+          )}
           <Detail label="Mappings" value={formatPortMappings(rule.mappings)} />
           <Detail
             label="Return path"
-            value={rule.masquerade ? "Targeted masquerade" : "Preserve source"}
+            value={returnPathLabel(rule.mode, rule.masquerade)}
           />
           <Detail
             label="Runtime"
@@ -807,15 +882,23 @@ export function PortForwardingPanel({
               agentById.get(rule.client_id)?.capabilities.port_forwarding
                 ?.reason ?? undefined
             }
-            value={capabilitySummary(
-              agentById.get(rule.client_id)?.capabilities.port_forwarding,
-            )}
+            value={
+              rule.mode === "custom_adapter"
+                ? supportsMode(agentById.get(rule.client_id), rule.mode)
+                  ? "Custom adapters supported"
+                  : "Custom adapter support not reported"
+                : capabilitySummary(
+                    agentById.get(rule.client_id)?.capabilities.port_forwarding,
+                  )
+            }
           />
-          <Detail
-            label={`${rule.target_ip.includes(":") ? "IPv6" : "IPv4"} forwarding`}
-            tone={rule.forwarding_enabled === false ? "warning" : "normal"}
-            value={forwardingSummary(rule.forwarding_enabled)}
-          />
+          {rule.mode === "dnat" && (
+            <Detail
+              label={`${familyLabel(rule.address_family)} forwarding`}
+              tone={rule.forwarding_enabled === false ? "warning" : "normal"}
+              value={forwardingSummary(rule.forwarding_enabled)}
+            />
+          )}
           <Detail
             label="Observed"
             value={
@@ -826,10 +909,12 @@ export function PortForwardingPanel({
                 : "No agent evidence"
             }
           />
-          <Detail
-            label="NAT matches"
-            value={rule.nat_matches.toLocaleString()}
-          />
+          {rule.mode !== "custom_adapter" && (
+            <Detail
+              label="NAT matches"
+              value={rule.nat_matches?.toLocaleString() ?? "Not reported"}
+            />
+          )}
           <Detail label="Updated" value={formatCompactTime(rule.updated_at)} />
           <Detail
             display={shortId(rule.desired_hash)}
@@ -843,12 +928,14 @@ export function PortForwardingPanel({
             title={`Latest desired config hash reported by the agent: ${rule.agent_desired_hash ?? "not reported"}`}
             value={rule.agent_desired_hash ?? "Not reported"}
           />
-          <Detail
-            display={shortId(rule.observed_hash)}
-            label="Observed table"
-            title={`Latest normalized owned-table hash reported by the agent: ${rule.observed_hash ?? "no owned table hash"}`}
-            value={rule.observed_hash ?? "No owned table hash"}
-          />
+          {rule.mode !== "custom_adapter" && (
+            <Detail
+              display={shortId(rule.observed_hash)}
+              label="Observed table"
+              title={`Latest normalized owned-table hash reported by the agent: ${rule.observed_hash ?? "no owned table hash"}`}
+              value={rule.observed_hash ?? "No owned table hash"}
+            />
+          )}
         </dl>
         <ActionFeedback
           className="localActionFeedback portForwardDetailFeedback"
@@ -859,8 +946,9 @@ export function PortForwardingPanel({
           <div className="portForwardRemovalNotice">
             <ShieldAlert size={17} />
             <span>
-              Removal pending until the agent confirms the owned table no longer
-              contains this rule.
+              {rule.mode === "custom_adapter"
+                ? "Removal pending until the adapter confirms this rule's resources are absent."
+                : "Removal pending until the agent confirms the owned table no longer contains this rule."}
             </span>
             <label
               className="forgetReasonField"
@@ -961,7 +1049,7 @@ export function PortForwardingPanel({
             value={attentionCount}
           />
           <Metric
-            label="NFT-capable"
+            label="Forward-capable"
             tone={supportedAgents < agents.length ? "warning" : "normal"}
             value={`${supportedAgents}/${agents.length}`}
           />
@@ -972,7 +1060,7 @@ export function PortForwardingPanel({
         <div className="sectionHeader compactSectionHeader">
           <div>
             <h2>Rules</h2>
-            <span>Desired state and latest owned-table evidence</span>
+            <span>Desired state and latest agent evidence</span>
           </div>
         </div>
         {corruptRules.length > 0 && (
@@ -1043,7 +1131,7 @@ export function PortForwardingPanel({
               <span>
                 {loading
                   ? "Reading desired state and the latest agent evidence."
-                  : "Create a disabled draft, or enable a rule on a VPS that reports nftables support."}
+                  : "Create a disabled draft, or enable a rule on a VPS that supports its forwarding mode."}
               </span>
             </div>
           }
@@ -1097,18 +1185,60 @@ export function PortForwardingPanel({
 
       {editor && (
         <PortForwardEditor
+          adapterDefinitions={adapterDefinitions.filter(
+            (definition) => definition.adapter_kind === "port_forward",
+          )}
           agents={agents}
           draft={editor.draft}
           editing={editor.editing}
           feedback={feedback?.anchor === "editor" ? feedback : null}
-          onChange={(draft) =>
-            setEditor((current) => (current ? { ...current, draft } : current))
+          onChange={(changes) =>
+            setEditor((current) =>
+              current
+                ? { ...current, draft: { ...current.draft, ...changes } }
+                : current,
+            )
           }
           onClose={() => setEditor(null)}
+          onCreateAdapter={() =>
+            setAdapterEditor({ mode: "create", kind: "port_forward" })
+          }
+          onEditAdapter={(definition) =>
+            setAdapterEditor({ mode: "edit", definition })
+          }
           onResolveHostname={onResolveHostname}
           onSubmit={submitEditor}
           pending={pending || confirmation?.kind === "save"}
           ref={editorRef}
+        />
+      )}
+
+      {adapterEditor && (
+        <NetworkAdapterDefinitionsPanel
+          definitions={adapterDefinitions}
+          editorOnly
+          editorRequest={adapterEditor}
+          initialKind={null}
+          onInitialKindConsumed={consumeAdapterKind}
+          onEditorClosed={() => setAdapterEditor(null)}
+          onCreate={async (request) => {
+            const definition = await onCreateAdapter(request);
+            setEditor((current) =>
+              current
+                ? {
+                    ...current,
+                    draft: {
+                      ...current.draft,
+                      adapterDefinitionId: definition.id,
+                    },
+                  }
+                : current,
+            );
+            return definition;
+          }}
+          onUpdate={onUpdateAdapter}
+          onDelete={onDeleteAdapter}
+          tunnelPlans={[]}
         />
       )}
 
@@ -1127,7 +1257,7 @@ export function PortForwardingPanel({
             ? feedback.message
             : null
         }
-        items={confirmationItems(confirmation, agentById)}
+        items={confirmationItems(confirmation, agentById, adapterDefinitions)}
         onCancel={() => setConfirmation(null)}
         onConfirm={() => confirmation && void executeConfirmation(confirmation)}
         open={Boolean(confirmation)}
@@ -1185,24 +1315,33 @@ export function PortForwardingPanel({
 const PortForwardEditor = forwardRef<
   HTMLElement,
   {
+    adapterDefinitions: NetworkAdapterDefinitionRecord[];
     agents: AgentView[];
     draft: EditorDraft;
     editing: PortForwardRuleRecord | null;
     feedback: Feedback | null;
-    onChange: (draft: EditorDraft) => void;
+    onChange: (changes: Partial<EditorDraft>) => void;
     onClose: () => void;
-    onResolveHostname: (hostname: string) => Promise<ResolveHostnameResponse>;
+    onCreateAdapter: () => void;
+    onEditAdapter: (definition: NetworkAdapterDefinitionRecord) => void;
+    onResolveHostname: (
+      hostname: string,
+      mode?: PortForwardMode,
+    ) => Promise<ResolveHostnameResponse>;
     onSubmit: (event: FormEvent) => void;
     pending: boolean;
   }
 >(function PortForwardEditor(
   {
+    adapterDefinitions,
     agents,
     draft,
     editing,
     feedback,
     onChange,
     onClose,
+    onCreateAdapter,
+    onEditAdapter,
     onResolveHostname,
     onSubmit,
     pending,
@@ -1237,6 +1376,9 @@ const PortForwardEditor = forwardRef<
   }, [draft.incoming, draft.target]);
   const selectedAgent = agents.find((agent) => agent.id === draft.clientId);
   const capability = selectedAgent?.capabilities.port_forwarding;
+  const selectedAdapter = adapterDefinitions.find(
+    (definition) => definition.id === draft.adapterDefinitionId,
+  );
   const targetIsLiteral = literalIpFamily(draft.targetInput) !== null;
   const saveDisabledReason = pending
     ? "Another port-forwarding action is in progress"
@@ -1248,13 +1390,15 @@ const PortForwardEditor = forwardRef<
           ? `Rule name must not exceed ${MAX_RULE_NAME_BYTES} UTF-8 bytes`
           : !draft.clientId
             ? "Select a VPS"
-            : !draft.targetIp
-              ? "Enter a literal target IP, or resolve and select a hostname result"
-              : mappingPreview.error
-                ? mappingPreview.error
-                : draft.enabled && capability?.status !== "supported"
-                  ? capabilityLabel(capability?.status, capability?.reason)
-                  : null;
+            : destinationError(draft)
+              ? destinationError(draft)
+              : draft.mode === "custom_adapter" && !selectedAdapter
+                ? "Select a port-forward adapter definition"
+                : mappingPreview.error
+                  ? mappingPreview.error
+                  : draft.enabled && !supportsMode(selectedAgent, draft.mode)
+                    ? modeCapabilityLabel(selectedAgent, draft.mode)
+                    : null;
   const saveDisabled = saveDisabledReason !== null;
 
   useEffect(() => {
@@ -1277,20 +1421,21 @@ const PortForwardEditor = forwardRef<
 
   async function resolveHostname() {
     const requestedHostname = targetInputRef.current.trim();
+    const requestedMode = draftRef.current.mode;
     const requestGeneration = ++resolveRequestGenerationRef.current;
     const requestIsCurrent = () =>
       mountedRef.current &&
       resolveRequestGenerationRef.current === requestGeneration &&
+      draftRef.current.mode === requestedMode &&
       targetInputRef.current.trim() === requestedHostname;
     setResolving(true);
     setResolveError(null);
     setResolution(null);
     try {
-      const result = await onResolveHostname(requestedHostname);
+      const result = await onResolveHostname(requestedHostname, requestedMode);
       if (!requestIsCurrent()) return;
       setResolution(result);
       onChange({
-        ...draftRef.current,
         targetHostname: result.hostname,
         targetInput: result.hostname,
         targetIp: "",
@@ -1355,7 +1500,7 @@ const PortForwardEditor = forwardRef<
               ? "VPS selection is disabled while a port-forward operation is pending"
               : editing
                 ? "The VPS is immutable after rule creation; clone or create a rule for another VPS"
-                : "VPS whose vpsman-owned nftables table receives this rule"
+                : "VPS whose forwarding runtime receives this rule"
           }
         >
           <span>VPS</span>
@@ -1363,7 +1508,7 @@ const PortForwardEditor = forwardRef<
             agents={agents}
             ariaLabel="Port-forward rule VPS"
             disabled={Boolean(editing) || pending}
-            onChange={(clientId) => onChange({ ...draft, clientId })}
+            onChange={(clientId) => onChange({ clientId })}
             placeholder="Search VPS name or ID"
             value={draft.clientId}
           />
@@ -1374,14 +1519,39 @@ const PortForwardEditor = forwardRef<
             data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing the rule name."
             disabled={pending}
             maxLength={128}
-            onChange={(event) =>
-              onChange({ ...draft, name: event.target.value })
-            }
+            onChange={(event) => onChange({ name: event.target.value })}
             placeholder="Public web"
             required
             value={draft.name}
           />
         </label>
+        <fieldset className="compactFieldset portForwardModeField">
+          <legend>Mode</legend>
+          <div
+            className="segmentedControl"
+            role="group"
+            aria-label="Forwarding mode"
+          >
+            {(["dnat", "redirect", "custom_adapter"] as const).map((mode) => (
+              <button
+                aria-pressed={draft.mode === mode}
+                className={draft.mode === mode ? "active" : ""}
+                disabled={pending}
+                key={mode}
+                onClick={() => {
+                  resolveRequestGenerationRef.current += 1;
+                  setResolving(false);
+                  setResolution(null);
+                  setResolveError(null);
+                  onChange({ mode });
+                }}
+                type="button"
+              >
+                {modeLabel(mode)}
+              </button>
+            ))}
+          </div>
+        </fieldset>
         <fieldset className="compactFieldset">
           <legend>Protocol</legend>
           <div className="segmentedControl" role="group" aria-label="Protocol">
@@ -1391,7 +1561,7 @@ const PortForwardEditor = forwardRef<
                 className={draft.protocol === protocol ? "active" : ""}
                 disabled={pending}
                 key={protocol}
-                onClick={() => onChange({ ...draft, protocol })}
+                onClick={() => onChange({ protocol })}
                 title={
                   pending
                     ? "Wait for the current port-forward operation to finish before changing protocol"
@@ -1404,14 +1574,54 @@ const PortForwardEditor = forwardRef<
             ))}
           </div>
         </fieldset>
+        {draft.mode === "redirect" ? (
+          <fieldset className="compactFieldset">
+            <legend>Address family</legend>
+            <div
+              className="segmentedControl"
+              role="group"
+              aria-label="Address family"
+            >
+              {(["ipv4", "ipv6", "both"] as const).map((addressFamily) => (
+                <button
+                  aria-pressed={draft.addressFamily === addressFamily}
+                  className={
+                    draft.addressFamily === addressFamily ? "active" : ""
+                  }
+                  disabled={pending}
+                  key={addressFamily}
+                  onClick={() => onChange({ addressFamily })}
+                  type="button"
+                >
+                  {addressFamily === "both"
+                    ? "Both"
+                    : familyLabel(addressFamily)}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+        ) : (
+          <label>
+            <span>Address family</span>
+            <input
+              aria-label="Address family"
+              disabled
+              value={
+                draft.mode === "custom_adapter"
+                  ? "Controlled by adapter"
+                  : draft.targetIp
+                    ? familyLabel(literalIpFamily(draft.targetIp))
+                    : "Derived from destination"
+              }
+            />
+          </label>
+        )}
         <label title="Local listener ports matched by this rule; enter a port, range, or comma-separated mappings.">
           <span>Incoming ports</span>
           <input
             data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing incoming ports."
             disabled={pending}
-            onChange={(event) =>
-              onChange({ ...draft, incoming: event.target.value })
-            }
+            onChange={(event) => onChange({ incoming: event.target.value })}
             placeholder="80,443,10000-10010"
             required
             value={draft.incoming}
@@ -1419,64 +1629,79 @@ const PortForwardEditor = forwardRef<
           <small>PORT or START-END, comma separated</small>
         </label>
         <label title="Destination ports paired with the incoming mappings; one port may serve every incoming port.">
-          <span>Target ports</span>
+          <span>
+            {draft.mode === "redirect" ? "Local ports" : "Target ports"}
+          </span>
           <input
             data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing target ports."
             disabled={pending}
-            onChange={(event) =>
-              onChange({ ...draft, target: event.target.value })
-            }
+            onChange={(event) => onChange({ target: event.target.value })}
             placeholder="8080 or 8080,20000-20010"
             required
             value={draft.target}
           />
           <small>One port for all, or corresponding items</small>
         </label>
-        <div className="targetAddressField">
-          <label title="Literal destination address, or a hostname resolved to one address during review.">
-            <span>Target IP or hostname</span>
-            <input
-              data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing the target address."
-              disabled={pending}
-              onChange={(event) => {
-                const value = event.target.value;
-                const literal = literalIpFamily(value);
-                resolveRequestGenerationRef.current += 1;
-                setResolving(false);
-                setResolution(null);
-                setResolveError(null);
-                onChange({
-                  ...draft,
-                  targetHostname: null,
-                  targetInput: value,
-                  targetIp: literal ? value.trim() : "",
-                });
-              }}
-              placeholder="192.0.2.40 or app.internal"
-              required
-              value={draft.targetInput}
-            />
-          </label>
-          {!targetIsLiteral && draft.targetInput.trim() && (
-            <button
-              className="secondaryAction compactAction"
-              disabled={pending || resolving}
-              onClick={() => void resolveHostname()}
-              title={
-                pending
-                  ? "Wait for the current port-forward operation to finish"
-                  : resolving
-                    ? "The target hostname is already resolving"
-                    : "Resolve on the control plane and select one literal address"
-              }
-              type="button"
-            >
-              <RefreshCcw size={14} /> {resolving ? "Resolving" : "Resolve"}
-            </button>
-          )}
-        </div>
+        {draft.mode === "redirect" ? (
+          <div className="portForwardLocalHint fieldFull">
+            <strong>Destination: This VPS</strong>
+            <p>
+              REDIRECT delivers incoming traffic to a local-interface listener
+              and retains the original source. A service bound exclusively to
+              127.0.0.1 or ::1 may not receive it; use a custom adapter for
+              loopback-only services.
+            </p>
+          </div>
+        ) : (
+          <div className="targetAddressField">
+            <label title="Literal destination address, or a hostname resolved to one address during review.">
+              <span>Target IP or hostname</span>
+              <input
+                data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing the target address."
+                disabled={pending}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  const literal = literalIpFamily(value);
+                  resolveRequestGenerationRef.current += 1;
+                  setResolving(false);
+                  setResolution(null);
+                  setResolveError(null);
+                  onChange({
+                    targetHostname: null,
+                    targetInput: value,
+                    targetIp: literal ? value.trim() : "",
+                  });
+                }}
+                placeholder={
+                  draft.mode === "custom_adapter"
+                    ? "Optional, including 127.0.0.1 or localhost"
+                    : "192.0.2.40 or app.internal"
+                }
+                required={draft.mode === "dnat"}
+                value={draft.targetInput}
+              />
+            </label>
+            {!targetIsLiteral && draft.targetInput.trim() && (
+              <button
+                className="secondaryAction compactAction"
+                disabled={pending || resolving}
+                onClick={() => void resolveHostname()}
+                title={
+                  pending
+                    ? "Wait for the current port-forward operation to finish"
+                    : resolving
+                      ? "The target hostname is already resolving"
+                      : "Resolve on the control plane and select one literal address"
+                }
+                type="button"
+              >
+                <RefreshCcw size={14} /> {resolving ? "Resolving" : "Resolve"}
+              </button>
+            )}
+          </div>
+        )}
         <ActionFeedback message={resolveError} tone="danger" />
-        {resolution && (
+        {draft.mode !== "redirect" && resolution && (
           <fieldset
             className="dnsCandidateList"
             disabled={pending}
@@ -1495,9 +1720,7 @@ const PortForwardEditor = forwardRef<
                 <input
                   checked={draft.targetIp === candidate.address}
                   name="resolved-target"
-                  onChange={() =>
-                    onChange({ ...draft, targetIp: candidate.address })
-                  }
+                  onChange={() => onChange({ targetIp: candidate.address })}
                   type="radio"
                 />
                 <span>{candidate.address}</span>
@@ -1506,43 +1729,104 @@ const PortForwardEditor = forwardRef<
             ))}
           </fieldset>
         )}
-        <fieldset className="compactFieldset returnPathField">
-          <legend>Return path</legend>
-          <div
-            className="segmentedControl"
-            role="group"
-            aria-label="Return path"
-          >
-            <button
-              aria-pressed={draft.masquerade}
-              className={draft.masquerade ? "active" : ""}
-              disabled={pending}
-              onClick={() => onChange({ ...draft, masquerade: true })}
-              title={
-                pending
-                  ? "Wait for the current port-forward operation to finish before changing return-path behavior"
-                  : "Masquerade only connections DNATed by this rule"
-              }
-              type="button"
-            >
-              Masquerade
-            </button>
-            <button
-              aria-pressed={!draft.masquerade}
-              className={!draft.masquerade ? "active" : ""}
-              disabled={pending}
-              onClick={() => onChange({ ...draft, masquerade: false })}
-              title={
-                pending
-                  ? "Wait for the current port-forward operation to finish before changing return-path behavior"
-                  : "Keep source addresses; the target must have a valid return route"
-              }
-              type="button"
-            >
-              Preserve source
-            </button>
+        {draft.mode === "custom_adapter" && (
+          <div className="portForwardAdapterField fieldFull">
+            <label>
+              <span>Adapter definition</span>
+              <select
+                aria-label="Port-forward adapter definition"
+                disabled={pending}
+                onChange={(event) =>
+                  onChange({
+                    adapterDefinitionId: event.target.value,
+                  })
+                }
+                required
+                value={draft.adapterDefinitionId}
+              >
+                <option value="">Select adapter…</option>
+                {adapterDefinitions.map((definition) => (
+                  <option key={definition.id} value={definition.id}>
+                    {definition.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="previewMeta">
+              <button
+                className="secondaryAction compactAction"
+                disabled={pending}
+                onClick={onCreateAdapter}
+                type="button"
+              >
+                <CirclePlus size={14} /> Create adapter
+              </button>
+              <button
+                className="secondaryAction compactAction"
+                disabled={
+                  pending ||
+                  !selectedAdapter ||
+                  (selectedAdapter.port_forward_rule_count ?? 0) > 0
+                }
+                onClick={() =>
+                  selectedAdapter && onEditAdapter(selectedAdapter)
+                }
+                title={
+                  (selectedAdapter?.port_forward_rule_count ?? 0) > 0
+                    ? "This adapter is bound to forwarding rules; create a replacement and change each binding explicitly."
+                    : "Edit the selected reusable adapter definition"
+                }
+                type="button"
+              >
+                <Pencil size={14} /> Edit adapter
+              </button>
+            </div>
+            <small>
+              The adapter manages its listener, address family, source handling,
+              and port collisions. Apply and Remove must finish before Status
+              confirms the requested state.
+            </small>
           </div>
-        </fieldset>
+        )}
+        {draft.mode === "dnat" && (
+          <fieldset className="compactFieldset returnPathField">
+            <legend>Return path</legend>
+            <div
+              className="segmentedControl"
+              role="group"
+              aria-label="Return path"
+            >
+              <button
+                aria-pressed={draft.masquerade}
+                className={draft.masquerade ? "active" : ""}
+                disabled={pending}
+                onClick={() => onChange({ masquerade: true })}
+                title={
+                  pending
+                    ? "Wait for the current port-forward operation to finish before changing return-path behavior"
+                    : "Masquerade only connections DNATed by this rule"
+                }
+                type="button"
+              >
+                Masquerade
+              </button>
+              <button
+                aria-pressed={!draft.masquerade}
+                className={!draft.masquerade ? "active" : ""}
+                disabled={pending}
+                onClick={() => onChange({ masquerade: false })}
+                title={
+                  pending
+                    ? "Wait for the current port-forward operation to finish before changing return-path behavior"
+                    : "Keep source addresses; the target must have a valid return route"
+                }
+                type="button"
+              >
+                Preserve source
+              </button>
+            </div>
+          </fieldset>
+        )}
         <label
           className="compactCheckbox portForwardEnabled"
           title={
@@ -1559,9 +1843,7 @@ const PortForwardEditor = forwardRef<
                 : undefined
             }
             disabled={pending}
-            onChange={(event) =>
-              onChange({ ...draft, enabled: event.target.checked })
-            }
+            onChange={(event) => onChange({ enabled: event.target.checked })}
             type="checkbox"
           />
           <span>Enabled</span>
@@ -1586,16 +1868,21 @@ const PortForwardEditor = forwardRef<
               <CheckCircle2 size={16} />
               <span title={formatPortMappings(mappingPreview.mappings)}>
                 {formatPortMappings(mappingPreview.mappings)} ·{" "}
-                {draft.targetIp || "select target IP"}
+                {draft.mode === "redirect"
+                  ? `This VPS (${familyLabel(draft.addressFamily)})`
+                  : draft.targetIp ||
+                    (draft.mode === "custom_adapter"
+                      ? "adapter destination"
+                      : "select target IP")}
               </span>
             </>
           )}
         </div>
-        {selectedAgent && capability?.status !== "supported" && (
+        {selectedAgent && !supportsMode(selectedAgent, draft.mode) && (
           <div className="portForwardCapabilityNotice">
             <ShieldAlert size={16} />
             <span title={capability?.reason ?? capability?.status ?? "unknown"}>
-              {capabilityLabel(capability?.status, capability?.reason)}
+              {modeCapabilityLabel(selectedAgent, draft.mode)}
             </span>
           </div>
         )}
@@ -1676,9 +1963,12 @@ function Detail({
 }
 
 function portForwardMappingLabel(rule: PortForwardRuleRecord) {
-  const targetAddress = rule.target_ip.includes(":")
-    ? `[${rule.target_ip}]`
-    : rule.target_ip;
+  const targetAddress =
+    rule.mode === "redirect"
+      ? "This VPS"
+      : rule.target_ip?.includes(":")
+        ? `[${rule.target_ip}]`
+        : (rule.target_ip ?? "adapter");
   const incoming = rule.mappings
     .map((item) => formatPortRange(item.incoming))
     .join(",");
@@ -1705,8 +1995,30 @@ function StatusBadge({ status, title }: { status: string; title?: string }) {
 
 function runtimeStatusTitle(rule: PortForwardRuleRecord) {
   if (rule.runtime_error) return rule.runtime_error;
+  if (rule.mode === "custom_adapter") {
+    switch (rule.runtime_status) {
+      case "applied":
+        return "The adapter confirms this rule's supplied configuration is effective";
+      case "absent":
+        return "The adapter confirms this rule's resources are absent";
+      case "disabled":
+        return "Rule is stored and disabled";
+      case "drifted":
+        return "The adapter reports that the running configuration differs from this rule";
+      case "failed":
+        return "The adapter could not apply, remove, or verify this rule";
+      case "unsupported":
+        return "This agent has not reported support for custom port-forward adapters";
+      case "removal_pending":
+        return "Deletion is saved; adapter-specific cleanup evidence is pending";
+      case "pending":
+        return "Desired state is queued; the adapter has not confirmed it yet";
+      default:
+        return "No current adapter evidence is available";
+    }
+  }
   if (rule.runtime_status === "applied_warning") {
-    return `${rule.target_ip.includes(":") ? "IPv6" : "IPv4"} forwarding is disabled outside vpsman`;
+    return `${familyLabel(rule.address_family)} forwarding is disabled outside vpsman`;
   }
   switch (rule.runtime_status) {
     case "applied":
@@ -1772,18 +2084,12 @@ function validateEditor(draft: EditorDraft, agent: AgentView | undefined) {
       `Rule name must not exceed ${MAX_RULE_NAME_BYTES} UTF-8 bytes`,
     );
   if (!agent) throw new Error("Select a VPS");
-  if (!draft.targetIp)
-    throw new Error("Resolve and select one literal target IP");
-  if (
-    draft.enabled &&
-    agent.capabilities.port_forwarding?.status !== "supported"
-  )
-    throw new Error(
-      capabilityLabel(
-        agent.capabilities.port_forwarding?.status,
-        agent.capabilities.port_forwarding?.reason,
-      ),
-    );
+  const targetError = destinationError(draft);
+  if (targetError) throw new Error(targetError);
+  if (draft.mode === "custom_adapter" && !draft.adapterDefinitionId)
+    throw new Error("Select a port-forward adapter definition");
+  if (draft.enabled && !supportsMode(agent, draft.mode))
+    throw new Error(modeCapabilityLabel(agent, draft.mode));
 }
 
 function capabilityLabel(status?: string, reason?: string | null) {
@@ -1802,17 +2108,72 @@ function capabilityLabel(status?: string, reason?: string | null) {
   }
 }
 
-function capabilityActionTitle(
-  agent: AgentView | undefined,
-  supportedTitle: string,
-) {
-  return agent?.capabilities.port_forwarding?.status === "supported"
-    ? supportedTitle
-    : capabilityLabel(
-        agent?.capabilities.port_forwarding?.status,
-        agent?.capabilities.port_forwarding?.reason,
-      );
+function modeLabel(mode: PortForwardMode) {
+  return mode === "custom_adapter" ? "Custom adapter" : mode.toUpperCase();
 }
+
+function familyLabel(family: PortForwardAddressFamily | null) {
+  return family === "both"
+    ? "IPv4 + IPv6"
+    : family === "ipv4"
+      ? "IPv4"
+      : family === "ipv6"
+        ? "IPv6"
+        : "Controlled by adapter";
+}
+
+function listenerScope(
+  mode: PortForwardMode,
+  family: PortForwardAddressFamily | null,
+) {
+  return mode === "custom_adapter"
+    ? "Controlled by adapter"
+    : `All current local ${familyLabel(family)} addresses`;
+}
+
+function returnPathLabel(mode: PortForwardMode, masquerade: boolean) {
+  return mode === "custom_adapter"
+    ? "Controlled by adapter"
+    : mode === "dnat" && masquerade
+      ? "Masquerade"
+      : "Preserve source";
+}
+
+function supportsMode(agent: AgentView | undefined, mode: PortForwardMode) {
+  const capability = agent?.capabilities.port_forwarding;
+  if (!capability) return false;
+  if (mode === "dnat") return capability.status === "supported";
+  return (
+    (capability.schema_version ?? 1) >= 2 &&
+    capability.supported_modes?.includes(mode) === true &&
+    (mode === "custom_adapter" || capability.status === "supported")
+  );
+}
+
+function modeCapabilityLabel(
+  agent: AgentView | undefined,
+  mode: PortForwardMode,
+) {
+  const capability = agent?.capabilities.port_forwarding;
+  if (
+    mode !== "dnat" &&
+    (!capability?.schema_version || capability.schema_version < 2)
+  )
+    return `Upgrade this agent to use ${modeLabel(mode)}`;
+  return mode === "custom_adapter"
+    ? "This agent has not reported support for custom port-forward adapters"
+    : capabilityLabel(capability?.status, capability?.reason);
+}
+
+function destinationError(draft: EditorDraft): string | null {
+  if (draft.mode === "redirect") return null;
+  if (draft.mode === "custom_adapter" && !draft.targetInput.trim()) return null;
+  if (!draft.targetIp)
+    return "Enter a literal target IP, or resolve and select a hostname result";
+  return null;
+}
+
+function consumeAdapterKind() {}
 
 function nextCloneName(
   name: string,
@@ -1944,17 +2305,23 @@ function confirmationLabel(state: ConfirmationState | null) {
 
 function confirmationDetail(state: ConfirmationState | null) {
   if (!state) return "Review the current action.";
-  if (state.kind === "save")
-    return "This saves desired state and replaces the VPS's complete vpsman-owned nftables table atomically. Claimed ports take precedence over conventional Docker or system DNAT for new connections.";
+  if (state.kind === "save") {
+    if (
+      state.draft.mode === "custom_adapter" ||
+      state.editing?.mode === "custom_adapter"
+    )
+      return "This saves desired state and reconciles the VPS. Adapter changes run sequentially and are verified by Status. A mode or adapter change removes the previous rule owner before activating its replacement.";
+    return "This saves desired state and replaces the VPS's vpsman-owned native forwarding table atomically. Claimed ports take precedence over conventional Docker or system DNAT for new connections.";
+  }
   if (state.kind === "single" && state.operation === "delete") {
     return isNeverAppliedDisabledDraft(state.rule)
       ? "This disabled draft has never been applied. It is removed immediately; no agent cleanup or apply job is required."
       : "The rule is omitted from desired state immediately and remains visible as Removal pending until the agent confirms cleanup. Existing conntrack entries may continue.";
   }
   if (state.kind === "single" && state.operation === "forget")
-    return "This removes the cleanup tombstone without confirming host state. Use it only for a permanently unreachable or decommissioned VPS; nftables state may remain on that host.";
+    return "This removes the cleanup tombstone without confirming host state. Use it only for a permanently unreachable or decommissioned VPS; forwarding resources may remain on that host.";
   if (state.kind === "single" && state.operation === "reapply")
-    return "Reapply replaces this VPS's complete vpsman-owned forwarding table. It does not change system, Docker, or unrelated nftables tables.";
+    return "Reapply reconciles this VPS's native forwarding table and custom adapters. Native changes are atomic; adapter operations run sequentially and are verified by Status.";
   if (state.kind === "bulk" && state.action === "delete") {
     const immediateDrafts = state.rules.filter(
       isNeverAppliedDisabledDraft,
@@ -1969,7 +2336,7 @@ function confirmationDetail(state: ConfirmationState | null) {
   }
   if (state.kind === "bulk")
     return `This applies one ${state.action} decision to ${state.rules.length} exact rule revisions and reconciles each affected VPS once.`;
-  return "This updates desired state and queues an atomic apply for the affected VPS.";
+  return "This updates desired state and queues reconciliation for the affected VPS. Native changes are atomic; custom adapter operations are verified separately.";
 }
 
 function isNeverAppliedDisabledDraft(rule: PortForwardRuleRecord) {
@@ -1991,6 +2358,7 @@ function isHealthyPortForwardRule(
 function confirmationItems(
   state: ConfirmationState | null,
   agents: Map<string, AgentView>,
+  adapterDefinitions: NetworkAdapterDefinitionRecord[],
 ) {
   if (!state) return [];
   if (state.kind === "save") {
@@ -2004,6 +2372,7 @@ function confirmationItems(
       }
     })();
     return [
+      { label: "Mode", value: modeLabel(state.draft.mode) },
       {
         label: "VPS",
         value:
@@ -2012,23 +2381,44 @@ function confirmationItems(
       },
       {
         label: "Listener scope",
-        value: `All current local ${state.draft.targetIp.includes(":") ? "IPv6" : "IPv4"} addresses`,
+        value: listenerScope(
+          state.draft.mode,
+          state.draft.mode === "dnat"
+            ? literalIpFamily(state.draft.targetIp)
+            : state.draft.addressFamily,
+        ),
       },
       {
         label: "Claimed ports",
         title: state.draft.incoming,
         value: `${state.draft.protocol.toUpperCase()} ${state.draft.incoming}`,
       },
-      ...(state.draft.targetHostname
+      ...(state.draft.mode !== "redirect" && state.draft.targetHostname
         ? [{ label: "Domain", value: state.draft.targetHostname }]
         : []),
-      { label: "Target", value: state.draft.targetIp },
+      {
+        label: "Target",
+        value:
+          state.draft.mode === "redirect"
+            ? "This VPS"
+            : state.draft.targetIp || "Controlled by adapter",
+      },
+      ...(state.draft.mode === "custom_adapter"
+        ? [
+            {
+              label: "Adapter",
+              value:
+                adapterDefinitions.find(
+                  (definition) =>
+                    definition.id === state.draft.adapterDefinitionId,
+                )?.name ?? state.draft.adapterDefinitionId,
+            },
+          ]
+        : []),
       { label: "Mapping", title: mappings, value: mappings },
       {
         label: "Return",
-        value: state.draft.masquerade
-          ? "Targeted masquerade"
-          : "Preserve source",
+        value: returnPathLabel(state.draft.mode, state.draft.masquerade),
       },
     ];
   }

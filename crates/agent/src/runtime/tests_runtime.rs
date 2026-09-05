@@ -208,7 +208,8 @@ async fn telemetry_consumer_config_handoff_coalesces_to_latest_state() {
         client_id: "initial".to_string(),
         ..AgentConfig::default()
     };
-    let (port_forwarding, _port_forwarding_consumer) = PortForwardingConsumer::channel();
+    let (port_forwarding, _port_forwarding_consumer) =
+        PortForwardingConsumer::channel("client-a".to_string());
     let (config_tx, _sample_rx, mut consumer) = TelemetryCollectionConsumer::channel(
         initial,
         60,
@@ -1000,17 +1001,42 @@ fn authoritative_reconnect_is_the_only_full_reconcile_reason() {
     assert!(!port_forwarding_table_access_required(
         false,
         false,
-        "agent_reconnect_authoritative_sync"
+        "agent_reconnect_authoritative_sync",
+        false,
     ));
     assert!(port_forwarding_table_access_required(
         false,
         false,
-        "agent_reconnect_authoritative_port_forwarding_sync"
+        "agent_reconnect_authoritative_port_forwarding_sync",
+        false,
     ));
     assert!(port_forwarding_table_access_required(
         true,
         false,
-        "unrelated_config_update"
+        "unrelated_config_update",
+        false,
+    ));
+}
+
+#[test]
+fn custom_cleanup_has_no_nft_prerequisite_but_native_cleanup_still_requires_table_access() {
+    assert!(!port_forwarding_table_access_required(
+        false,
+        false,
+        "agent_reconnect_authoritative_port_forwarding_sync",
+        true
+    ));
+    assert!(port_forwarding_table_access_required(
+        true,
+        false,
+        "agent_reconnect_authoritative_port_forwarding_sync",
+        true
+    ));
+    assert!(port_forwarding_table_access_required(
+        false,
+        true,
+        "agent_reconnect_authoritative_port_forwarding_sync",
+        true
     ));
 }
 

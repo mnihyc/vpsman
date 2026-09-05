@@ -980,11 +980,15 @@ export type PortForwardCapabilityStatus =
 
 export type PortForwardCapability = {
   status: PortForwardCapabilityStatus;
+  schema_version?: number;
+  supported_modes?: PortForwardMode[];
   nft_version?: string | null;
   reason?: string | null;
 };
 
 export type PortForwardProtocol = "tcp" | "udp" | "both";
+export type PortForwardMode = "dnat" | "redirect" | "custom_adapter";
+export type PortForwardAddressFamily = "ipv4" | "ipv6" | "both";
 
 export type PortRange = {
   start: number;
@@ -1001,8 +1005,12 @@ export type PortForwardRuleRecord = {
   client_id: string;
   name: string;
   protocol: PortForwardProtocol;
+  mode: PortForwardMode;
+  address_family: PortForwardAddressFamily | null;
+  adapter_definition_id: string | null;
+  adapter_definition_name?: string | null;
   target_hostname: string | null;
-  target_ip: string;
+  target_ip: string | null;
   mappings: PortForwardMapping[];
   masquerade: boolean;
   enabled: boolean;
@@ -1019,7 +1027,7 @@ export type PortForwardRuleRecord = {
     | "unknown"
     | "disabled"
     | "removal_pending";
-  nat_matches: number;
+  nat_matches: number | null;
   desired_hash?: string | null;
   agent_desired_hash?: string | null;
   observed_hash?: string | null;
@@ -1056,8 +1064,11 @@ export type PortForwardRuleListItem =
 export type PortForwardRuleInput = {
   name: string;
   protocol: PortForwardProtocol;
+  mode?: PortForwardMode;
+  address_family?: PortForwardAddressFamily | null;
+  adapter_definition_id?: string | null;
   target_hostname: string | null;
-  target_ip: string;
+  target_ip: string | null;
   mappings: PortForwardMapping[];
   masquerade: boolean;
   enabled: boolean;
@@ -3929,7 +3940,7 @@ export type ConfigurationBehavior =
   | "user_sessions"
   | "command_execution";
 
-export type NetworkAdapterKind = "runtime_tunnel" | "routing_cost";
+export type NetworkAdapterKind = "runtime_tunnel" | "routing_cost" | "port_forward";
 
 export type NetworkAdapterDefinitionRecord = {
   id: string;
@@ -3937,6 +3948,7 @@ export type NetworkAdapterDefinitionRecord = {
   name: string;
   description: string | null;
   definition: JsonValue;
+  port_forward_rule_count?: number;
   created_at: string;
   updated_at: string;
 };

@@ -723,7 +723,9 @@ fn validate_client_id(client_id: &str) -> Result<(), ApiError> {
 }
 
 fn validate_adapter_kind(adapter_kind: Option<&str>) -> Result<(), ApiError> {
-    if adapter_kind.is_some_and(|value| !matches!(value, "runtime_tunnel" | "routing_cost")) {
+    if adapter_kind
+        .is_some_and(|value| !matches!(value, "runtime_tunnel" | "routing_cost" | "port_forward"))
+    {
         return Err(ApiError::bad_request("network_adapter_kind_invalid"));
     }
     Ok(())

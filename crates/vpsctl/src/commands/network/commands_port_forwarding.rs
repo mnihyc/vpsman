@@ -3,7 +3,9 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use uuid::Uuid;
-use vpsman_common::{pair_port_expressions, PortForwardProtocol};
+use vpsman_common::{
+    pair_port_expressions, PortForwardAddressFamily, PortForwardMode, PortForwardProtocol,
+};
 
 use crate::http::{http_get, http_post_json, http_put_json};
 
@@ -23,6 +25,60 @@ impl From<PortForwardProtocolArg> for PortForwardProtocol {
             PortForwardProtocolArg::Both => Self::Both,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum PortForwardModeArg {
+    #[default]
+    Dnat,
+    Redirect,
+    CustomAdapter,
+}
+
+impl From<PortForwardModeArg> for PortForwardMode {
+    fn from(value: PortForwardModeArg) -> Self {
+        match value {
+            PortForwardModeArg::Dnat => Self::Dnat,
+            PortForwardModeArg::Redirect => Self::Redirect,
+            PortForwardModeArg::CustomAdapter => Self::CustomAdapter,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum PortForwardFamilyArg {
+    Ipv4,
+    Ipv6,
+    Both,
+}
+
+impl From<PortForwardFamilyArg> for PortForwardAddressFamily {
+    fn from(value: PortForwardFamilyArg) -> Self {
+        match value {
+            PortForwardFamilyArg::Ipv4 => Self::Ipv4,
+            PortForwardFamilyArg::Ipv6 => Self::Ipv6,
+            PortForwardFamilyArg::Both => Self::Both,
+        }
+    }
+}
+
+#[derive(Debug, Default, Args)]
+pub(crate) struct PortForwardModeArgs {
+    #[arg(long, value_enum, default_value = "dnat")]
+    pub(crate) mode: PortForwardModeArg,
+    #[arg(
+        long,
+        value_enum,
+        help = "REDIRECT family (default ipv4); custom adapters own family selection"
+    )]
+    pub(crate) address_family: Option<PortForwardFamilyArg>,
+    #[arg(
+        long,
+        help = "Reusable port-forward adapter definition UUID; required for custom_adapter"
+    )]
+    pub(crate) adapter_definition_id: Option<Uuid>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -47,6 +103,8 @@ impl PortForwardBulkActionArg {
 
 #[derive(Debug, Args)]
 pub(crate) struct PortForwardCreateCommand {
+    #[command(flatten)]
+    pub(crate) forwarding: PortForwardModeArgs,
     #[arg(long)]
     pub(crate) client_id: String,
     #[arg(long)]
@@ -54,7 +112,7 @@ pub(crate) struct PortForwardCreateCommand {
     #[arg(long, value_enum, default_value = "tcp")]
     pub(crate) protocol: PortForwardProtocolArg,
     #[arg(long, value_name = "IP")]
-    pub(crate) target_ip: IpAddr,
+    pub(crate) target_ip: Option<IpAddr>,
     #[arg(
         long,
         value_name = "HOSTNAME",
@@ -91,6 +149,8 @@ pub(crate) struct PortForwardCreateCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct PortForwardUpdateCommand {
+    #[command(flatten)]
+    pub(crate) forwarding: PortForwardModeArgs,
     #[arg(long)]
     pub(crate) rule_id: Uuid,
     #[arg(long)]
@@ -100,7 +160,7 @@ pub(crate) struct PortForwardUpdateCommand {
     #[arg(long, value_enum)]
     pub(crate) protocol: PortForwardProtocolArg,
     #[arg(long, value_name = "IP")]
-    pub(crate) target_ip: IpAddr,
+    pub(crate) target_ip: Option<IpAddr>,
     #[arg(
         long,
         value_name = "HOSTNAME",
@@ -143,6 +203,8 @@ pub(crate) struct PortForwardMutationCommand {
 pub(crate) struct PortForwardResolveCommand {
     #[arg(long)]
     pub(crate) hostname: String,
+    #[arg(long, value_enum, default_value = "dnat")]
+    pub(crate) mode: PortForwardModeArg,
 }
 
 #[derive(Debug, Args)]
@@ -189,6 +251,13 @@ pub(crate) fn create(
         "confirmed": request.confirmed,
     });
     insert_target_hostname(&mut payload, request.target_hostname.as_deref(), false);
+    insert_mode_fields(
+        &mut payload,
+        &request.forwarding,
+        request.target_ip,
+        request.target_hostname.as_deref(),
+        request.preserve_source,
+    )?;
     println!(
         "{}",
         http_post_json(api_url, "/api/v1/port-forward-rules", token, &payload,)?
@@ -228,6 +297,13 @@ pub(crate) fn update(
         request.target_hostname.as_deref(),
         request.clear_target_hostname,
     );
+    insert_mode_fields(
+        &mut payload,
+        &request.forwarding,
+        request.target_ip,
+        request.target_hostname.as_deref(),
+        request.preserve_source,
+    )?;
     println!(
         "{}",
         http_put_json(
@@ -278,15 +354,77 @@ pub(crate) fn resolve(
     token: Option<&str>,
     request: PortForwardResolveCommand,
 ) -> Result<()> {
+    anyhow::ensure!(
+        !matches!(request.mode, PortForwardModeArg::Redirect),
+        "REDIRECT has no target hostname"
+    );
     println!(
         "{}",
         http_post_json(
             api_url,
             "/api/v1/network/resolve-hostname",
             token,
-            &serde_json::json!({ "hostname": request.hostname })
+            &serde_json::json!({ "hostname": request.hostname, "mode": PortForwardMode::from(request.mode) })
         )?
     );
+    Ok(())
+}
+
+fn insert_mode_fields(
+    payload: &mut serde_json::Value,
+    options: &PortForwardModeArgs,
+    target_ip: Option<IpAddr>,
+    target_hostname: Option<&str>,
+    preserve_source: bool,
+) -> Result<()> {
+    let mode = PortForwardMode::from(options.mode);
+    match mode {
+        PortForwardMode::Dnat => {
+            anyhow::ensure!(target_ip.is_some(), "DNAT requires --target-ip");
+            anyhow::ensure!(
+                options.address_family.is_none() && options.adapter_definition_id.is_none(),
+                "DNAT derives family from --target-ip and does not use an adapter"
+            );
+        }
+        PortForwardMode::Redirect => {
+            anyhow::ensure!(
+                target_ip.is_none()
+                    && target_hostname.is_none()
+                    && options.adapter_definition_id.is_none()
+                    && !preserve_source,
+                "REDIRECT does not accept a target IP/hostname, adapter, or source-NAT option"
+            );
+        }
+        PortForwardMode::CustomAdapter => {
+            anyhow::ensure!(
+                options.adapter_definition_id.is_some(),
+                "custom_adapter requires --adapter-definition-id"
+            );
+            anyhow::ensure!(
+                options.address_family.is_none() && !preserve_source,
+                "custom adapters own address family and source behavior"
+            );
+            anyhow::ensure!(
+                target_hostname.is_none() || target_ip.is_some(),
+                "resolve the hostname and select --target-ip before saving it"
+            );
+        }
+    }
+    payload["mode"] = serde_json::to_value(mode)?;
+    payload["address_family"] = if mode == PortForwardMode::Redirect {
+        serde_json::to_value(PortForwardAddressFamily::from(
+            options.address_family.unwrap_or(PortForwardFamilyArg::Ipv4),
+        ))?
+    } else {
+        serde_json::Value::Null
+    };
+    payload["adapter_definition_id"] = serde_json::to_value(options.adapter_definition_id)?;
+    payload["masquerade"] = serde_json::json!(mode == PortForwardMode::Dnat && !preserve_source);
+    if mode == PortForwardMode::Redirect
+        || (mode == PortForwardMode::CustomAdapter && target_ip.is_none())
+    {
+        payload["target_hostname"] = serde_json::Value::Null;
+    }
     Ok(())
 }
 

@@ -5,10 +5,48 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const PORT_FORWARDING_SCHEMA_VERSION: u16 = 1;
+pub const PORT_FORWARDING_MODES_SCHEMA_VERSION: u16 = 2;
 pub const MAX_PORT_FORWARD_RULES: usize = 512;
 pub const MAX_PORT_FORWARD_MAPPINGS: usize = 256;
 pub const MAX_PORT_FORWARD_NAME_BYTES: usize = 128;
 pub const MAX_PORT_FORWARD_NFT_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardMode {
+    #[default]
+    Dnat,
+    Redirect,
+    CustomAdapter,
+}
+
+impl PortForwardMode {
+    fn is_dnat(&self) -> bool {
+        *self == Self::Dnat
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardAddressFamily {
+    Ipv4,
+    Ipv6,
+    Both,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PortForwardAdapterCommands {
+    #[serde(rename = "template_id")]
+    pub definition_id: Uuid,
+    #[serde(rename = "template_name")]
+    pub definition_name: String,
+    pub definition_hash: String,
+    pub apply: crate::RuntimeTunnelCommand,
+    pub remove: crate::RuntimeTunnelCommand,
+    pub status: crate::RuntimeTunnelCommand,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,10 +114,44 @@ pub struct PortForwardRule {
     pub revision: i64,
     pub name: String,
     pub protocol: PortForwardProtocol,
-    pub target_ip: IpAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ip: Option<IpAddr>,
     pub mappings: Vec<PortForwardMapping>,
     #[serde(default = "default_true")]
     pub masquerade: bool,
+    #[serde(default, skip_serializing_if = "PortForwardMode::is_dnat")]
+    pub mode: PortForwardMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_family: Option<PortForwardAddressFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<PortForwardAdapterCommands>,
+}
+
+impl PortForwardRule {
+    /// Built-in dispatch claims only; custom adapters own their own listeners.
+    pub fn native_families(&self) -> &'static [PortForwardAddressFamily] {
+        use PortForwardAddressFamily::{Both, Ipv4, Ipv6};
+        match self.mode {
+            PortForwardMode::Dnat => match self.target_ip {
+                Some(IpAddr::V4(_)) => &[Ipv4],
+                Some(IpAddr::V6(_)) => &[Ipv6],
+                None => &[],
+            },
+            PortForwardMode::Redirect => match self.address_family {
+                Some(Ipv4) => &[Ipv4],
+                Some(Ipv6) => &[Ipv6],
+                Some(Both) => &[Ipv4, Ipv6],
+                None => &[],
+            },
+            PortForwardMode::CustomAdapter => &[],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PortForwardCleanupRule {
+    pub rule_id: Uuid,
+    pub revision: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -90,6 +162,9 @@ pub struct AgentPortForwardingConfig {
     pub desired_hash: String,
     #[serde(default)]
     pub rules: Vec<PortForwardRule>,
+    /// Custom owners whose absence must be acknowledged independently of nftables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup_rules: Vec<PortForwardCleanupRule>,
 }
 
 impl Default for AgentPortForwardingConfig {
@@ -98,6 +173,7 @@ impl Default for AgentPortForwardingConfig {
             schema_version: PORT_FORWARDING_SCHEMA_VERSION,
             desired_hash: String::new(),
             rules: Vec::new(),
+            cleanup_rules: Vec::new(),
         }
     }
 }
@@ -114,7 +190,7 @@ pub enum PortForwardCapabilityStatus {
     Unknown,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PortForwardCapability {
     #[serde(default)]
     pub status: PortForwardCapabilityStatus,
@@ -122,11 +198,42 @@ pub struct PortForwardCapability {
     pub nft_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default = "default_port_forwarding_schema_version")]
+    pub schema_version: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_modes: Vec<PortForwardMode>,
+}
+
+impl Default for PortForwardCapability {
+    fn default() -> Self {
+        Self {
+            status: PortForwardCapabilityStatus::Unknown,
+            nft_version: None,
+            reason: None,
+            schema_version: PORT_FORWARDING_SCHEMA_VERSION,
+            supported_modes: Vec::new(),
+        }
+    }
 }
 
 impl PortForwardCapability {
     pub fn supported(&self) -> bool {
         self.status == PortForwardCapabilityStatus::Supported
+    }
+
+    pub fn supports_mode(&self, mode: PortForwardMode) -> bool {
+        match mode {
+            PortForwardMode::Dnat => self.supported(),
+            PortForwardMode::Redirect => {
+                self.supported()
+                    && self.schema_version >= PORT_FORWARDING_MODES_SCHEMA_VERSION
+                    && self.supported_modes.contains(&mode)
+            }
+            PortForwardMode::CustomAdapter => {
+                self.schema_version >= PORT_FORWARDING_MODES_SCHEMA_VERSION
+                    && self.supported_modes.contains(&mode)
+            }
+        }
     }
 }
 
@@ -147,7 +254,17 @@ pub struct PortForwardRuleRuntimeStat {
     pub rule_id: Uuid,
     pub revision: i64,
     #[serde(default)]
-    pub nat_matches: u64,
+    pub nat_matches: Option<u64>,
+    #[serde(default, skip_serializing_if = "PortForwardMode::is_dnat")]
+    pub mode: PortForwardMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PortForwardRuntimeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,6 +277,10 @@ pub struct PortForwardRuntimeSnapshot {
     pub desired_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_desired_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_rules: Vec<PortForwardCleanupRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nft_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +323,10 @@ pub enum PortForwardValidationError {
     NameTooLong,
     #[error("target IP is not a usable unicast address")]
     TargetIpInvalid,
+    #[error("fields do not match the selected port-forward mode")]
+    ModeFieldsInvalid,
+    #[error("custom port-forward adapter command is invalid")]
+    AdapterCommandInvalid,
     #[error("port-forwarding schema version is unsupported")]
     SchemaUnsupported,
     #[error("port-forwarding desired hash is required when rules are present")]
@@ -216,6 +341,10 @@ pub enum PortForwardValidationError {
     ProgramTooLarge,
     #[error("rule IDs must be unique")]
     DuplicateRuleId,
+    #[error(
+        "cleanup rules require positive revisions and unique IDs not naming enabled custom rules"
+    )]
+    CleanupRuleIdInvalid,
     #[error("enabled rules claim overlapping ports for the same family and protocol")]
     CrossRuleOverlap,
 }
@@ -292,14 +421,66 @@ pub fn validate_port_forward_rule(
     if name.len() > MAX_PORT_FORWARD_NAME_BYTES {
         return Err(PortForwardValidationError::NameTooLong);
     }
-    validate_target_ip(rule.target_ip)?;
+    match rule.mode {
+        PortForwardMode::Dnat => {
+            validate_target_ip(
+                rule.target_ip
+                    .ok_or(PortForwardValidationError::TargetIpInvalid)?,
+            )?;
+            if rule.adapter.is_some() || rule.address_family.is_some() {
+                return Err(PortForwardValidationError::ModeFieldsInvalid);
+            }
+        }
+        PortForwardMode::Redirect => {
+            if rule.target_ip.is_some()
+                || rule.adapter.is_some()
+                || rule.address_family.is_none()
+                || rule.masquerade
+            {
+                return Err(PortForwardValidationError::ModeFieldsInvalid);
+            }
+        }
+        PortForwardMode::CustomAdapter => {
+            if rule.address_family.is_some() || rule.masquerade {
+                return Err(PortForwardValidationError::ModeFieldsInvalid);
+            }
+            let adapter = rule
+                .adapter
+                .as_ref()
+                .ok_or(PortForwardValidationError::ModeFieldsInvalid)?;
+            // Share the existing adapter command budget and direct-argv contract.
+            for command in [&adapter.apply, &adapter.remove, &adapter.status] {
+                if command.argv.is_empty()
+                    || command.argv.len() > 32
+                    || !std::path::Path::new(&command.argv[0]).is_absolute()
+                    || command
+                        .argv
+                        .iter()
+                        .any(|arg| arg.is_empty() || arg.len() > 4096 || arg.contains('\0'))
+                    || !(1..=120).contains(&command.max_timeout_secs)
+                    || !(1024..=65536).contains(&command.max_output_bytes)
+                {
+                    return Err(PortForwardValidationError::AdapterCommandInvalid);
+                }
+            }
+        }
+    }
     validate_mappings(&rule.mappings)
 }
 
 pub fn validate_port_forwarding_config(
     config: &AgentPortForwardingConfig,
 ) -> Result<(), PortForwardValidationError> {
-    if config.schema_version != PORT_FORWARDING_SCHEMA_VERSION {
+    if !matches!(
+        config.schema_version,
+        PORT_FORWARDING_SCHEMA_VERSION | PORT_FORWARDING_MODES_SCHEMA_VERSION
+    ) || (config.schema_version == PORT_FORWARDING_SCHEMA_VERSION
+        && (!config.cleanup_rules.is_empty()
+            || config
+                .rules
+                .iter()
+                .any(|rule| rule.mode != PortForwardMode::Dnat)))
+    {
         return Err(PortForwardValidationError::SchemaUnsupported);
     }
     if config.rules.len() > MAX_PORT_FORWARD_RULES {
@@ -328,6 +509,17 @@ pub fn validate_port_forwarding_config(
             return Err(PortForwardValidationError::DuplicateRuleId);
         }
         validate_port_forward_rule(rule)?;
+    }
+    let mut cleanup_ids = BTreeSet::new();
+    for cleanup in &config.cleanup_rules {
+        if cleanup.revision <= 0
+            || !cleanup_ids.insert(cleanup.rule_id)
+            || config.rules.iter().any(|rule| {
+                rule.id == cleanup.rule_id && rule.mode == PortForwardMode::CustomAdapter
+            })
+        {
+            return Err(PortForwardValidationError::CleanupRuleIdInvalid);
+        }
     }
     if estimated_nft_program_bytes(&config.rules) > MAX_PORT_FORWARD_NFT_SCRIPT_BYTES {
         return Err(PortForwardValidationError::ProgramTooLarge);
@@ -400,15 +592,20 @@ fn validate_cross_rule_overlaps(
     let mut claims = rules
         .iter()
         .flat_map(|rule| {
-            let ipv6 = rule.target_ip.is_ipv6();
-            rule.protocol
-                .transports()
-                .iter()
-                .flat_map(move |transport| {
-                    rule.mappings
-                        .iter()
-                        .map(move |mapping| (ipv6, *transport, mapping.incoming))
-                })
+            rule.native_families().iter().flat_map(move |family| {
+                rule.protocol
+                    .transports()
+                    .iter()
+                    .flat_map(move |transport| {
+                        rule.mappings.iter().map(move |mapping| {
+                            (
+                                *family == PortForwardAddressFamily::Ipv6,
+                                *transport,
+                                mapping.incoming,
+                            )
+                        })
+                    })
+            })
         })
         .collect::<Vec<_>>();
     claims.sort_unstable_by_key(|(ipv6, transport, range)| {
@@ -429,31 +626,34 @@ fn estimated_nft_program_bytes(rules: &[PortForwardRule]) -> usize {
     const COMPACT_MAP_ELEMENT_BYTES: usize = 48;
     const MAP_ELEMENT_BYTES: usize = 20;
 
-    rules.iter().fold(BASE_BYTES, |total, rule| {
-        let transports = rule.protocol.transports().len();
-        let compact_elements = rule
-            .mappings
-            .iter()
-            .filter(|mapping| mapping.target.is_single() && mapping.incoming != mapping.target)
-            .count()
-            .saturating_mul(COMPACT_MAP_ELEMENT_BYTES);
-        let shifted_elements = rule
-            .mappings
-            .iter()
-            .filter(|mapping| !mapping.target.is_single() && mapping.incoming != mapping.target)
-            .fold(0_usize, |bytes, mapping| {
-                bytes.saturating_add(
-                    usize::try_from(mapping.incoming.cardinality())
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(MAP_ELEMENT_BYTES),
-                )
-            });
-        let per_transport = RULE_PROGRAM_BYTES
-            .saturating_add(rule.mappings.len().saturating_mul(DISPATCH_ELEMENT_BYTES))
-            .saturating_add(compact_elements)
-            .saturating_add(shifted_elements);
-        total.saturating_add(per_transport.saturating_mul(transports))
-    })
+    rules
+        .iter()
+        .filter(|rule| rule.mode != PortForwardMode::CustomAdapter)
+        .fold(BASE_BYTES, |total, rule| {
+            let transports = rule.protocol.transports().len() * rule.native_families().len();
+            let compact_elements = rule
+                .mappings
+                .iter()
+                .filter(|mapping| mapping.target.is_single() && mapping.incoming != mapping.target)
+                .count()
+                .saturating_mul(COMPACT_MAP_ELEMENT_BYTES);
+            let shifted_elements = rule
+                .mappings
+                .iter()
+                .filter(|mapping| !mapping.target.is_single() && mapping.incoming != mapping.target)
+                .fold(0_usize, |bytes, mapping| {
+                    bytes.saturating_add(
+                        usize::try_from(mapping.incoming.cardinality())
+                            .unwrap_or(usize::MAX)
+                            .saturating_mul(MAP_ELEMENT_BYTES),
+                    )
+                });
+            let per_transport = RULE_PROGRAM_BYTES
+                .saturating_add(rule.mappings.len().saturating_mul(DISPATCH_ELEMENT_BYTES))
+                .saturating_add(compact_elements)
+                .saturating_add(shifted_elements);
+            total.saturating_add(per_transport.saturating_mul(transports))
+        })
 }
 
 fn parse_port(value: &str, item: &str) -> Result<u16, PortForwardValidationError> {

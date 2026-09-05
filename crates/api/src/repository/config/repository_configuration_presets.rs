@@ -1243,7 +1243,14 @@ impl Repository {
             Self::Postgres(pool) => Ok(sqlx::query(
                 r#"
                 SELECT id, adapter_kind, name, description, definition,
-                       created_at::text AS created_at, updated_at::text AS updated_at
+                       created_at::text AS created_at, updated_at::text AS updated_at,
+                       (SELECT count(*) FROM (
+                            SELECT rule.id FROM port_forward_rules rule
+                            WHERE rule.adapter_definition_id = network_adapter_definitions.id
+                              AND (rule.deleted_at IS NULL OR (rule.removal_confirmed_at IS NULL AND rule.forgotten_at IS NULL))
+                            UNION SELECT owner.rule_id FROM port_forward_adapter_owners owner
+                            WHERE owner.adapter_definition_id = network_adapter_definitions.id
+                        ) refs) AS port_forward_rule_count
                 FROM network_adapter_definitions
                 WHERE $1::text IS NULL OR adapter_kind = $1
                 ORDER BY adapter_kind, name
@@ -1299,7 +1306,8 @@ impl Repository {
                     )
                     VALUES ($1, $2, $3, $4, $5)
                     RETURNING id, adapter_kind, name, description, definition,
-                              created_at::text AS created_at, updated_at::text AS updated_at
+                              created_at::text AS created_at, updated_at::text AS updated_at,
+                              0::bigint AS port_forward_rule_count
                     "#,
                 )
                 .bind(definition_id)
@@ -1363,7 +1371,7 @@ impl Repository {
                     current_kind == request.adapter_kind,
                     "network_adapter_definition_kind_immutable"
                 );
-                let in_use = postgres_tunnel_plan_references_adapter(&mut tx, id).await?;
+                let in_use = postgres_network_references_adapter(&mut tx, id).await?;
                 anyhow::ensure!(!in_use, "network_adapter_definition_in_use");
                 let row = sqlx::query(
                     r#"
@@ -1372,7 +1380,8 @@ impl Repository {
                         definition = $4, updated_at = now()
                     WHERE id = $1
                     RETURNING id, adapter_kind, name, description, definition,
-                              created_at::text AS created_at, updated_at::text AS updated_at
+                              created_at::text AS created_at, updated_at::text AS updated_at,
+                              0::bigint AS port_forward_rule_count
                     "#,
                 )
                 .bind(id)
@@ -1411,7 +1420,7 @@ impl Repository {
                     &[format!("network-adapter:{id}")],
                 )
                 .await?;
-                // Tunnel writers hold FOR SHARE on every referenced adapter
+                // Tunnel and forwarding writers hold FOR SHARE on each referenced adapter
                 // row through commit. Locking this exact definition first
                 // therefore makes the following reference scan race-free.
                 sqlx::query("SELECT id FROM network_adapter_definitions WHERE id = $1 FOR UPDATE")
@@ -1419,14 +1428,15 @@ impl Repository {
                     .fetch_optional(&mut *tx)
                     .await?
                     .context("network_adapter_definition_not_found")?;
-                let in_use = postgres_tunnel_plan_references_adapter(&mut tx, id).await?;
+                let in_use = postgres_network_references_adapter(&mut tx, id).await?;
                 anyhow::ensure!(!in_use, "network_adapter_definition_in_use");
                 let row = sqlx::query(
                     r#"
                     DELETE FROM network_adapter_definitions
                     WHERE id = $1
                     RETURNING id, adapter_kind, name, description, definition,
-                              created_at::text AS created_at, updated_at::text AS updated_at
+                              created_at::text AS created_at, updated_at::text AS updated_at,
+                              0::bigint AS port_forward_rule_count
                     "#,
                 )
                 .bind(id)
@@ -1966,7 +1976,7 @@ pub(crate) fn validate_network_adapter_definition(
     anyhow::ensure!(
         matches!(
             request.adapter_kind.as_str(),
-            "runtime_tunnel" | "routing_cost"
+            "runtime_tunnel" | "routing_cost" | "port_forward"
         ),
         "network_adapter_kind_invalid"
     );
@@ -1994,6 +2004,12 @@ pub(crate) fn validate_network_adapter_definition(
             "traffic_limit_command",
         ][..],
         "routing_cost" => &["contract_version", "status_command", "update_command"][..],
+        "port_forward" => &[
+            "contract_version",
+            "apply_command",
+            "remove_command",
+            "status_command",
+        ][..],
         _ => unreachable!("validated adapter kind"),
     };
     anyhow::ensure!(
@@ -2038,6 +2054,10 @@ pub(crate) fn validate_network_adapter_definition(
             stop.is_some() || cleanup.is_some(),
             "network_adapter_remove_command_required"
         );
+    } else if request.adapter_kind == "port_forward" {
+        command("apply_command", true)?;
+        command("remove_command", true)?;
+        command("status_command", true)?;
     } else {
         command("status_command", true)?;
         command("update_command", true)?;
@@ -2123,7 +2143,7 @@ fn configuration_audit_metadata(mut metadata: Value, operator: &AuthContext) -> 
     metadata
 }
 
-async fn postgres_tunnel_plan_references_adapter(
+async fn postgres_network_references_adapter(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
 ) -> Result<bool> {
@@ -2140,6 +2160,12 @@ async fn postgres_tunnel_plan_references_adapter(
                 OR plan->'ospf'->>'left_adapter_template_id' = $1
                 OR plan->'ospf'->>'right_adapter_template_id' = $1
               )
+        ) OR EXISTS (
+            SELECT 1 FROM port_forward_rules
+            WHERE adapter_definition_id = $1::uuid
+              AND (deleted_at IS NULL OR (removal_confirmed_at IS NULL AND forgotten_at IS NULL))
+        ) OR EXISTS (
+            SELECT 1 FROM port_forward_adapter_owners WHERE adapter_definition_id = $1::uuid
         )
         "#,
     )
@@ -2239,6 +2265,7 @@ fn network_adapter_definition_from_row(
         definition: row.try_get::<sqlx::types::Json<Value>, _>("definition")?.0,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        port_forward_rule_count: row.try_get("port_forward_rule_count")?,
     })
 }
 

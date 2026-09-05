@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use uuid::Uuid;
+use vpsman_common::PortForwardMode;
 
 use crate::{
     error::ApiError,
@@ -52,7 +53,7 @@ pub(crate) async fn create_port_forward_rule(
 ) -> Result<(StatusCode, Json<PortForwardMutationResponse>), ApiError> {
     let operator = network_writer(&state, &headers).await?;
     validate_confirmation(request.enabled, request.confirmed)?;
-    require_agent(&state, &request.client_id, request.enabled).await?;
+    require_agent(&state, &request.client_id, request.enabled, request.mode).await?;
     let client_id = request.client_id.clone();
     let created = state
         .repo
@@ -103,13 +104,13 @@ pub(crate) async fn update_port_forward_rule(
         return Err(ApiError::conflict("port_forward_rule_snapshot_stale"));
     }
     validate_confirmation(existing.enabled || request.enabled, request.confirmed)?;
-    require_agent(&state, &existing.client_id, request.enabled).await?;
+    require_agent(&state, &existing.client_id, request.enabled, request.mode).await?;
     let changed = state
         .repo
         .update_port_forward_rule(rule_id, &request, &operator)
         .await
         .map_err(port_forward_repository_error)?;
-    let sync = if existing.enabled || changed.enabled {
+    let sync = if existing.enabled || changed.enabled || existing.adapter_cleanup_pending {
         sync_client(
             &state,
             &operator,
@@ -295,7 +296,7 @@ pub(crate) async fn reapply_port_forward_rule(
     if rule.revision != request.expected_revision {
         return Err(ApiError::conflict("port_forward_rule_snapshot_stale"));
     }
-    require_agent(&state, &rule.client_id, true).await?;
+    require_agent(&state, &rule.client_id, true, rule.mode).await?;
     let sync = sync_client(
         &state,
         &operator,
@@ -344,11 +345,11 @@ pub(crate) async fn bulk_mutate_port_forward_rules(
         request.action,
         PortForwardBulkAction::Enable | PortForwardBulkAction::Reapply
     ) {
-        let client_ids = selected
+        let modes = selected
             .iter()
-            .map(|rule| rule.client_id.clone())
-            .collect::<BTreeSet<_>>();
-        require_agents(&state, &client_ids, true).await?;
+            .map(|rule| (rule.client_id.clone(), rule.mode))
+            .collect::<Vec<_>>();
+        require_agents(&state, &modes, true).await?;
     }
     let rules = state
         .repo
@@ -434,7 +435,10 @@ pub(crate) async fn resolve_network_hostname(
     let mut seen = BTreeSet::<IpAddr>::new();
     let candidates = resolved
         .map(|address| address.ip())
-        .filter(|address| vpsman_common::validate_target_ip(*address).is_ok())
+        .filter(|address| {
+            request.mode == PortForwardMode::CustomAdapter
+                || vpsman_common::validate_target_ip(*address).is_ok()
+        })
         .filter(|address| seen.insert(*address))
         .take(32)
         .map(|address| ResolvedAddressView {
@@ -468,7 +472,7 @@ async fn mutate_enabled(
         return Err(ApiError::not_found("port_forward_rule_not_found"));
     }
     if enabled {
-        require_agent(&state, &existing.client_id, true).await?;
+        require_agent(&state, &existing.client_id, true, existing.mode).await?;
     }
     if existing.enabled == enabled {
         return Ok(Json(PortForwardMutationResponse {
@@ -538,21 +542,22 @@ async fn require_agent(
     state: &AppState,
     client_id: &str,
     require_capability: bool,
+    mode: PortForwardMode,
 ) -> Result<(), ApiError> {
-    require_agents(
-        state,
-        &BTreeSet::from([client_id.to_string()]),
-        require_capability,
-    )
-    .await
+    require_agents(state, &[(client_id.to_string(), mode)], require_capability).await
 }
 
 async fn require_agents(
     state: &AppState,
-    client_ids: &BTreeSet<String>,
+    modes: &[(String, PortForwardMode)],
     require_capability: bool,
 ) -> Result<(), ApiError> {
-    let requested = client_ids.iter().cloned().collect::<Vec<_>>();
+    let requested = modes
+        .iter()
+        .map(|(client_id, _)| client_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let agents = state
         .repo
         .list_agents_for_client_ids(&requested)
@@ -564,20 +569,21 @@ async fn require_agents(
         .into_iter()
         .map(|agent| (agent.id.clone(), agent))
         .collect::<BTreeMap<_, _>>();
-    for client_id in client_ids {
+    for (client_id, mode) in modes {
         let agent = agents
             .get(client_id)
             .ok_or_else(|| ApiError::bad_request("port_forward_agent_not_found"))?;
-        if !require_capability || agent.capabilities.port_forwarding.supported() {
+        if !require_capability || agent.capabilities.port_forwarding.supports_mode(*mode) {
             continue;
         }
         let capability = &agent.capabilities.port_forwarding;
-        let reason = capability.reason.clone().unwrap_or_else(|| {
-            format!(
-                "VPS {client_id} reports port-forwarding capability as {:?}",
-                capability.status
-            )
-        });
+        let reason = capability
+            .reason
+            .clone()
+            .filter(|_| *mode != PortForwardMode::CustomAdapter)
+            .unwrap_or_else(|| {
+                format!("VPS {client_id} does not advertise support for {mode:?} port forwarding")
+            });
         return Err(ApiError::conflict_with_message(
             "port_forward_agent_capability_required",
             reason,
@@ -652,6 +658,8 @@ fn port_forward_repository_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("port_forward_client_inactive") {
         ApiError::conflict("port_forward_agent_unavailable")
+    } else if message.contains("port_forward_adapter") {
+        ApiError::bad_request_with_message("port_forward_adapter_invalid", message)
     } else if message.contains("not_found") || message.contains("not_active") {
         ApiError::not_found("port_forward_rule_not_found")
     } else if message.contains("snapshot_stale") {
@@ -668,7 +676,10 @@ fn port_forward_repository_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("port_forward_rule_not_removal_pending")
     } else if message.contains("reason_required") {
         ApiError::bad_request("port_forward_forget_reason_required")
-    } else if message.contains("invalid") || message.contains("limit") || message.contains("empty")
+    } else if message.contains("invalid")
+        || message.contains("limit")
+        || message.contains("empty")
+        || message.contains("not_applicable")
     {
         ApiError::bad_request_with_message("port_forward_rule_invalid", message)
     } else {

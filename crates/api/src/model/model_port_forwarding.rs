@@ -2,7 +2,10 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vpsman_common::{PortForwardMapping, PortForwardProtocol, PortForwardRuntimeSnapshot};
+use vpsman_common::{
+    PortForwardAdapterCommands, PortForwardAddressFamily, PortForwardMapping, PortForwardMode,
+    PortForwardProtocol, PortForwardRuntimeSnapshot,
+};
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PortForwardRuleView {
@@ -10,7 +13,11 @@ pub(crate) struct PortForwardRuleView {
     pub(crate) client_id: String,
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
-    pub(crate) target_ip: IpAddr,
+    pub(crate) mode: PortForwardMode,
+    pub(crate) address_family: Option<PortForwardAddressFamily>,
+    pub(crate) adapter_definition_id: Option<Uuid>,
+    pub(crate) adapter_definition_name: Option<String>,
+    pub(crate) target_ip: Option<IpAddr>,
     pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
     pub(crate) masquerade: bool,
@@ -18,7 +25,7 @@ pub(crate) struct PortForwardRuleView {
     pub(crate) revision: i64,
     pub(crate) desired_status: String,
     pub(crate) runtime_status: String,
-    pub(crate) nat_matches: u64,
+    pub(crate) nat_matches: Option<u64>,
     pub(crate) desired_hash: Option<String>,
     pub(crate) agent_desired_hash: Option<String>,
     pub(crate) observed_hash: Option<String>,
@@ -69,7 +76,12 @@ pub(crate) struct PortForwardRuleRecord {
     pub(crate) client_id: String,
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
-    pub(crate) target_ip: IpAddr,
+    pub(crate) mode: PortForwardMode,
+    pub(crate) address_family: Option<PortForwardAddressFamily>,
+    pub(crate) adapter_definition_id: Option<Uuid>,
+    pub(crate) adapter: Option<PortForwardAdapterCommands>,
+    pub(crate) adapter_cleanup_pending: bool,
+    pub(crate) target_ip: Option<IpAddr>,
     pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
     pub(crate) masquerade: bool,
@@ -91,7 +103,14 @@ pub(crate) struct CreatePortForwardRuleRequest {
     pub(crate) client_id: String,
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
-    pub(crate) target_ip: IpAddr,
+    #[serde(default)]
+    pub(crate) mode: PortForwardMode,
+    #[serde(default)]
+    pub(crate) address_family: Option<PortForwardAddressFamily>,
+    #[serde(default)]
+    pub(crate) adapter_definition_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) target_ip: Option<IpAddr>,
     #[serde(default)]
     pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
@@ -109,7 +128,14 @@ pub(crate) struct UpdatePortForwardRuleRequest {
     pub(crate) expected_revision: i64,
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
-    pub(crate) target_ip: IpAddr,
+    #[serde(default)]
+    pub(crate) mode: PortForwardMode,
+    #[serde(default)]
+    pub(crate) address_family: Option<PortForwardAddressFamily>,
+    #[serde(default)]
+    pub(crate) adapter_definition_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) target_ip: Option<IpAddr>,
     #[serde(default)]
     pub(crate) target_hostname: UpdateTargetHostname,
     pub(crate) mappings: Vec<PortForwardMapping>,
@@ -204,6 +230,8 @@ pub(crate) struct PortForwardClientSyncView {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolveHostnameRequest {
     pub(crate) hostname: String,
+    #[serde(default)]
+    pub(crate) mode: PortForwardMode,
 }
 
 #[derive(Clone, Debug, Serialize)]

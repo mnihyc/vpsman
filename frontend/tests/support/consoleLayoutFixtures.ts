@@ -1034,6 +1034,8 @@ const rootCapabilities = {
   effective_uid: 0,
   privilege_mode: "root",
   port_forwarding: {
+    schema_version: 2,
+    supported_modes: ["dnat", "redirect", "custom_adapter"],
     nft_version: "nftables v1.1.3",
     reason: null,
     status: "supported",
@@ -1048,6 +1050,8 @@ const unprivilegedCapabilities = {
   effective_uid: 1000,
   privilege_mode: "unprivileged",
   port_forwarding: {
+    schema_version: 2,
+    supported_modes: ["custom_adapter"],
     nft_version: "nftables v1.0.9",
     reason: "Agent lacks CAP_NET_ADMIN in the host network namespace",
     status: "insufficient_privilege",
@@ -1088,6 +1092,10 @@ const agents = [
 
 const portForwardRules = [
   {
+    mode: "dnat",
+    address_family: "ipv4",
+    adapter_definition_id: null,
+    adapter_definition_name: null,
     agent_desired_hash: "a".repeat(64),
     client_id: "agent-sfo-01",
     created_at: "2026-06-02T09:00:00Z",
@@ -1140,6 +1148,10 @@ const portForwardRules = [
     ],
     masquerade: false,
     name: "IPv6 service range",
+    mode: "dnat",
+    address_family: "ipv6",
+    adapter_definition_id: null,
+    adapter_definition_name: null,
     nat_matches: 392,
     nft_version: "nftables v1.1.3",
     observed_hash: "c".repeat(64),
@@ -1170,6 +1182,10 @@ const portForwardRules = [
     ],
     masquerade: true,
     name: "Staged SSH alternate",
+    mode: "dnat",
+    address_family: "ipv4",
+    adapter_definition_id: null,
+    adapter_definition_name: null,
     nat_matches: 0,
     nft_version: "nftables v1.0.9",
     observed_hash: null,
@@ -1200,6 +1216,10 @@ const portForwardRules = [
     ],
     masquerade: true,
     name: "Retired DNS relay",
+    mode: "dnat",
+    address_family: "ipv4",
+    adapter_definition_id: null,
+    adapter_definition_name: null,
     nat_matches: 81,
     nft_version: "nftables v1.1.3",
     observed_hash: "e".repeat(64),
@@ -9523,11 +9543,15 @@ export async function installConsoleApiMock(
             "adapter_kind",
           );
           return jsonResponse(
-            kind
-              ? mutableNetworkAdapterDefinitions.filter(
-                  (record) => record.adapter_kind === kind,
-                )
-              : mutableNetworkAdapterDefinitions,
+            mutableNetworkAdapterDefinitions
+              .filter((record) => !kind || record.adapter_kind === kind)
+              .map((record) => ({
+                ...record,
+                port_forward_rule_count: mutablePortForwardRules.filter((rule) =>
+                  rule.adapter_definition_id === record.id &&
+                  (!rule.deleted_at || (!rule.removal_confirmed_at && !rule.forgotten_at))
+                ).length,
+              })),
           );
         }
         if (
@@ -11002,7 +11026,10 @@ export async function installConsoleApiMock(
         ) {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
           return jsonResponse({
-            candidates: [
+            candidates: body.mode === "custom_adapter" && body.hostname === "localhost" ? [
+              { address: "127.0.0.1", family: "ipv4" },
+              { address: "::1", family: "ipv6" },
+            ] : [
               { address: "10.20.0.21", family: "ipv4" },
               { address: "2001:db8:20::21", family: "ipv6" },
             ],
@@ -11022,6 +11049,9 @@ export async function installConsoleApiMock(
           const enabled = body.enabled !== false;
           const rule = {
             ...body,
+            mode: body.mode ?? "dnat",
+            address_family: body.mode === "custom_adapter" ? null : body.mode === "redirect" ? body.address_family ?? "ipv4" : String(body.target_ip).includes(":") ? "ipv6" : "ipv4",
+            adapter_definition_name: mutableNetworkAdapterDefinitions.find((definition) => definition.id === body.adapter_definition_id)?.name ?? null,
             agent_desired_hash: null,
             created_at: "2026-06-02T10:10:00Z",
             deleted_at: null,
@@ -11031,7 +11061,7 @@ export async function installConsoleApiMock(
             forgotten_at: null,
             forwarding_enabled: null,
             id: `4f000000-0000-4000-8000-${String(mutablePortForwardRules.length + 10).padStart(12, "0")}`,
-            nat_matches: 0,
+            nat_matches: body.mode === "custom_adapter" ? null : 0,
             nft_version: null,
             observed_hash: null,
             removal_confirmed_at: null,

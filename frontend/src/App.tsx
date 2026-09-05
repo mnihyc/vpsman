@@ -884,7 +884,7 @@ export function App() {
   const [accessIdentityWorkflowIntent, setAccessIdentityWorkflowIntent] =
     useState<"register" | null>(null);
   const [networkAdapterWorkflowIntent, setNetworkAdapterWorkflowIntent] =
-    useState<"runtime_tunnel" | "routing_cost" | null>(null);
+    useState<import("./types").NetworkAdapterKind | null>(null);
   const [sharedViewSeed, setSharedViewSeed] = useState<string | null>(null);
   const [privilegeGrant, setPrivilegeGrant] = useState<PrivilegeGrant | null>(
     null,

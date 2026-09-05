@@ -292,7 +292,10 @@ export function TopologyPanel({
     if (activeSubpage === "ospf") {
       void Promise.all([onRefresh(), onLoadOspfUpdatePlans()]);
     }
-    if (activeSubpage === "port_forwards") void onLoadPortForwardRules();
+    if (activeSubpage === "port_forwards") {
+      void onLoadPortForwardRules();
+      void onLoadNetworkAdapterDefinitions();
+    }
     if (activeSubpage === "tunnel_plans") {
       void onRefresh();
       void onLoadTopologyGraph();
@@ -322,20 +325,25 @@ export function TopologyPanel({
     );
     return (
       <PortForwardingPanel
+        adapterDefinitions={networkAdapterDefinitions}
         agents={agents}
         canForget={operator?.role === "admin" && hasNetworkWriteScope}
         canWrite={
           (operator?.role === "operator" || operator?.role === "admin") &&
           hasNetworkWriteScope
         }
-        error={portForwardError}
-        loading={portForwardLoading}
+        error={portForwardError ?? error}
+        loading={portForwardLoading || loading}
         onBulkMutate={onBulkMutatePortForwardRules}
         onCreate={onCreatePortForwardRule}
+        onCreateAdapter={onCreateNetworkAdapterDefinition}
+        onDeleteAdapter={onDeleteNetworkAdapterDefinition}
         onLoad={onLoadPortForwardRules}
+        onLoadAdapters={onLoadNetworkAdapterDefinitions}
         onMutate={onMutatePortForwardRule}
         onResolveHostname={onResolvePortForwardHostname}
         onUpdate={onUpdatePortForwardRule}
+        onUpdateAdapter={onUpdateNetworkAdapterDefinition}
         rules={portForwardRules}
       />
     );
@@ -6388,6 +6396,7 @@ type TopologyPanelProps = {
   ) => Promise<import("../types").PortForwardMutationResponse>;
   onResolvePortForwardHostname: (
     hostname: string,
+    mode?: import("../types").PortForwardMode,
   ) => Promise<import("../types").ResolveHostnameResponse>;
   onUpdatePortForwardRule: (
     ruleId: string,

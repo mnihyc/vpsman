@@ -1,11 +1,15 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fmt::Write as _,
     net::IpAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use anyhow::{Context, Result};
@@ -13,13 +17,13 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::{
     process::{Child, ChildStdout, Command},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 use vpsman_common::{
-    payload_hash, validate_port_forwarding_config, AgentPortForwardingConfig,
-    PortForwardCapability, PortForwardCapabilityStatus, PortForwardRule,
-    PortForwardRuleRuntimeStat, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
-    MAX_PORT_FORWARD_NFT_SCRIPT_BYTES,
+    payload_hash, port_forwarding_desired_hash, validate_port_forwarding_config,
+    AgentPortForwardingConfig, PortForwardAddressFamily, PortForwardCapability,
+    PortForwardCapabilityStatus, PortForwardMode, PortForwardRule, PortForwardRuleRuntimeStat,
+    PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, MAX_PORT_FORWARD_NFT_SCRIPT_BYTES,
 };
 
 use crate::{
@@ -39,6 +43,10 @@ const OWNERSHIP_MARK: u64 = 0x5650_534d;
 const OWNED_FLOW_SET_NAME: &str = "owned_flows";
 const NFT_OUTPUT_LIMIT: usize = MAX_PORT_FORWARD_NFT_SCRIPT_BYTES * 4;
 const NFT_TIMEOUT_SECS: u64 = 15;
+
+#[path = "port_forwarding_adapters.rs"]
+mod adapters;
+use adapters::AdapterInventory;
 
 #[derive(Clone, Debug)]
 struct AppliedBaseline {
@@ -63,6 +71,7 @@ enum PortForwardingWork {
     Reconcile {
         config: AgentPortForwardingConfig,
         require_table_access: bool,
+        previous_native_ids: Vec<uuid::Uuid>,
         cancel_token: CommandCancelToken,
         reply: oneshot::Sender<Result<PortForwardRuntimeSnapshot>>,
     },
@@ -70,15 +79,51 @@ enum PortForwardingWork {
         config: AgentPortForwardingConfig,
         reply: oneshot::Sender<PortForwardRuntimeSnapshot>,
     },
+    Observe {
+        config: AgentPortForwardingConfig,
+        custom_interval_secs: u64,
+        cancel_token: CommandCancelToken,
+    },
 }
 
 #[derive(Clone)]
 pub(crate) struct PortForwardingConsumerHandle {
     work_tx: mpsc::UnboundedSender<PortForwardingWork>,
+    published: watch::Receiver<PortForwardRuntimeSnapshot>,
+    observation_queued: Arc<AtomicBool>,
+    observation_cancel: Arc<Mutex<CommandCancelToken>>,
 }
 
 impl PortForwardingConsumerHandle {
+    /// Reading telemetry never waits behind an external management command.
+    pub(crate) fn snapshot(
+        &self,
+        config: &AgentPortForwardingConfig,
+        interval_secs: u64,
+    ) -> PortForwardRuntimeSnapshot {
+        let snapshot = self.published.borrow().clone();
+        if !self.observation_queued.swap(true, Ordering::AcqRel) {
+            let token = CommandCancelToken::default();
+            *self
+                .observation_cancel
+                .lock()
+                .expect("observation token lock") = token.clone();
+            if self
+                .work_tx
+                .send(PortForwardingWork::Observe {
+                    config: config.clone(),
+                    custom_interval_secs: interval_secs,
+                    cancel_token: token,
+                })
+                .is_err()
+            {
+                self.observation_queued.store(false, Ordering::Release);
+            }
+        }
+        snapshot
+    }
     pub(crate) async fn probe(&self) -> Result<PortForwardCapability> {
+        self.cancel_background_observation();
         let (reply, response) = oneshot::channel();
         self.work_tx
             .send(PortForwardingWork::Probe { reply })
@@ -92,13 +137,16 @@ impl PortForwardingConsumerHandle {
         &self,
         config: &AgentPortForwardingConfig,
         require_table_access: bool,
+        previous_native_ids: Vec<uuid::Uuid>,
         cancel_token: CommandCancelToken,
     ) -> Result<PortForwardRuntimeSnapshot> {
+        self.cancel_background_observation();
         let (reply, response) = oneshot::channel();
         self.work_tx
             .send(PortForwardingWork::Reconcile {
                 config: config.clone(),
                 require_table_access,
+                previous_native_ids,
                 cancel_token,
                 reply,
             })
@@ -112,6 +160,7 @@ impl PortForwardingConsumerHandle {
         &self,
         config: &AgentPortForwardingConfig,
     ) -> Result<PortForwardRuntimeSnapshot> {
+        self.cancel_background_observation();
         let (reply, response) = oneshot::channel();
         self.work_tx
             .send(PortForwardingWork::Inspect {
@@ -123,6 +172,13 @@ impl PortForwardingConsumerHandle {
             .await
             .context("port-forwarding consumer stopped before inspection response")
     }
+
+    fn cancel_background_observation(&self) {
+        self.observation_cancel
+            .lock()
+            .expect("observation token lock")
+            .cancel("superseded by requested port-forwarding work".to_string());
+    }
 }
 
 pub(crate) struct PortForwardingConsumer {
@@ -131,19 +187,36 @@ pub(crate) struct PortForwardingConsumer {
     baseline: Option<AppliedBaseline>,
     owned_table_event_generation: u64,
     monitor: Option<NftMonitorConsumer>,
+    published: watch::Sender<PortForwardRuntimeSnapshot>,
+    observation_queued: Arc<AtomicBool>,
+    inventory: AdapterInventory,
+    native_owners: BTreeSet<uuid::Uuid>,
+    active_config: Option<AgentPortForwardingConfig>,
 }
 
 impl PortForwardingConsumer {
-    pub(crate) fn channel() -> (PortForwardingConsumerHandle, Self) {
+    pub(crate) fn channel(client_id: String) -> (PortForwardingConsumerHandle, Self) {
         let (work_tx, work_rx) = mpsc::unbounded_channel();
+        let (published, snapshots) = watch::channel(PortForwardRuntimeSnapshot::default());
+        let observation_queued = Arc::new(AtomicBool::new(false));
         (
-            PortForwardingConsumerHandle { work_tx },
+            PortForwardingConsumerHandle {
+                work_tx,
+                published: snapshots,
+                observation_queued: observation_queued.clone(),
+                observation_cancel: Arc::new(Mutex::new(CommandCancelToken::default())),
+            },
             Self {
                 work_rx,
                 capability: PortForwardCapability::default(),
                 baseline: None,
                 owned_table_event_generation: 0,
                 monitor: None,
+                published,
+                observation_queued,
+                inventory: AdapterInventory::new(client_id),
+                native_owners: BTreeSet::new(),
+                active_config: None,
             },
         )
     }
@@ -183,23 +256,55 @@ impl PortForwardingConsumer {
             PortForwardingWork::Reconcile {
                 config,
                 require_table_access,
+                previous_native_ids,
                 cancel_token,
                 reply,
             } => {
+                self.native_owners.extend(previous_native_ids);
                 let result = self
                     .reconcile(&config, require_table_access, cancel_token)
                     .await;
+                if let Ok(snapshot) = &result {
+                    self.published.send_replace(snapshot.clone());
+                }
                 let _ = reply.send(result);
             }
             PortForwardingWork::Inspect { config, reply } => {
-                let snapshot = self.inspect(&config).await;
+                let config = self.active_config.clone().unwrap_or(config);
+                let snapshot = self
+                    .inspect(&config, 0, CommandCancelToken::default())
+                    .await;
+                self.published.send_replace(snapshot.clone());
                 let _ = reply.send(snapshot);
+            }
+            PortForwardingWork::Observe {
+                config,
+                custom_interval_secs,
+                cancel_token,
+            } => {
+                let config = self.active_config.clone().unwrap_or(config);
+                if !cancel_token.is_canceled() {
+                    let snapshot = self
+                        .inspect(&config, custom_interval_secs, cancel_token.clone())
+                        .await;
+                    if !cancel_token.is_canceled() {
+                        self.published.send_replace(snapshot);
+                    }
+                }
+                self.observation_queued.store(false, Ordering::Release);
             }
         }
     }
 
     async fn probe(&mut self) -> PortForwardCapability {
-        let capability = probe_port_forwarding_capability_inner().await;
+        let mut capability = probe_port_forwarding_capability_inner().await;
+        capability.schema_version = 2;
+        capability.supported_modes = vec![PortForwardMode::CustomAdapter];
+        if capability.supported() {
+            capability
+                .supported_modes
+                .extend([PortForwardMode::Dnat, PortForwardMode::Redirect]);
+        }
         if capability.supported() && self.monitor.is_none() {
             if let Some(nft) = resolve_nft_binary() {
                 self.monitor = start_nft_monitor(&nft);
@@ -217,11 +322,151 @@ impl PortForwardingConsumer {
     ) -> Result<PortForwardRuntimeSnapshot> {
         validate_port_forwarding_config(config)
             .map_err(|error| anyhow::anyhow!("invalid port-forwarding desired state: {error}"))?;
+        cancel_token.check("port_forwarding")?;
+        self.inventory.load().await?;
+        self.active_config = Some(config.clone());
+        self.inventory
+            .synchronize_cleanup_requests(&config.cleanup_rules)
+            .await?;
+        let (_, mut custom_stats) = self
+            .inventory
+            .remove_replaced(config, cancel_token.clone())
+            .await;
+        cancel_token.check("port_forwarding")?;
+        let blocked = custom_stats
+            .iter()
+            .map(|stat| stat.rule_id)
+            .collect::<BTreeSet<_>>();
+        let mut native = native_config(config);
+        native.rules.retain(|rule| !blocked.contains(&rule.id));
+        native.desired_hash = native_hash(&native.rules);
+        let native_result = if custom_ownership_context(config)
+            && !require_table_access
+            && !self.has_native_ownership(&native)
+        {
+            Ok(PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Absent,
+                ..PortForwardRuntimeSnapshot::default()
+            })
+        } else {
+            self.reconcile_native(&native, require_table_access, cancel_token.clone())
+                .await
+        };
+        let native_failed = native_result.is_err();
+        let mut snapshot = match native_result {
+            Ok(snapshot) => snapshot,
+            Err(error) => failed_snapshot(
+                &native,
+                &self.capability,
+                "native_reconcile_failed",
+                &error.to_string(),
+            ),
+        };
+        for rule in config
+            .rules
+            .iter()
+            .filter(|rule| rule.mode == PortForwardMode::CustomAdapter)
+        {
+            cancel_token.check("port_forwarding")?;
+            if blocked.contains(&rule.id) {
+                continue;
+            }
+            if native_failed && self.native_owners.contains(&rule.id) {
+                custom_stats.push(adapters::error_stat(
+                    rule,
+                    "previous_native_cleanup_failed",
+                    "the previous native forwarding rule could not be removed",
+                ));
+            } else {
+                custom_stats.push(self.inventory.apply(rule, cancel_token.clone()).await);
+            }
+        }
+        attach_native_stats(&native, &mut snapshot);
+        snapshot.removed_rules = self.inventory.removed_rules();
+        Ok(merge_snapshot(config, &native, snapshot, custom_stats))
+    }
+
+    async fn inspect(
+        &mut self,
+        config: &AgentPortForwardingConfig,
+        custom_interval_secs: u64,
+        cancel_token: CommandCancelToken,
+    ) -> PortForwardRuntimeSnapshot {
+        if let Err(error) = self.inventory.load().await {
+            return failed_snapshot(
+                config,
+                &self.capability,
+                "adapter_inventory_failed",
+                &error.to_string(),
+            );
+        }
+        let mut native = native_config(config);
+        native
+            .rules
+            .retain(|rule| !self.inventory.retains_owner(rule.id));
+        native.desired_hash = native_hash(&native.rules);
+        let mut snapshot =
+            if self.has_native_ownership(&native) || !custom_ownership_context(config) {
+                self.inspect_native(&native, cancel_token.clone()).await
+            } else {
+                PortForwardRuntimeSnapshot {
+                    status: PortForwardRuntimeStatus::Absent,
+                    ..PortForwardRuntimeSnapshot::default()
+                }
+            };
+        attach_native_stats(&native, &mut snapshot);
+        snapshot.removed_rules = self.inventory.removed_rules();
+        let previous = self.published.borrow().clone();
+        let mut custom_stats = if previous.desired_hash.as_deref()
+            == (!config.desired_hash.is_empty()).then_some(config.desired_hash.as_str())
+            && config
+                .rules
+                .iter()
+                .filter(|rule| rule.mode == PortForwardMode::CustomAdapter)
+                .all(|rule| {
+                    previous
+                        .rules
+                        .iter()
+                        .find(|stat| stat.rule_id == rule.id && stat.revision == rule.revision)
+                        .and_then(|stat| stat.observed_unix)
+                        .is_some_and(|observed| {
+                            unix_now().saturating_sub(observed) < custom_interval_secs
+                        })
+                }) {
+            previous
+                .rules
+                .into_iter()
+                .filter(|stat| {
+                    stat.mode == PortForwardMode::CustomAdapter
+                        && config.rules.iter().any(|rule| {
+                            rule.id == stat.rule_id && rule.mode == PortForwardMode::CustomAdapter
+                        })
+                })
+                .collect()
+        } else {
+            self.inventory.inspect(config, cancel_token).await
+        };
+        custom_stats.extend(self.inventory.cleanup_failures(config));
+        merge_snapshot(config, &native, snapshot, custom_stats)
+    }
+
+    async fn reconcile_native(
+        &mut self,
+        config: &AgentPortForwardingConfig,
+        require_table_access: bool,
+        cancel_token: CommandCancelToken,
+    ) -> Result<PortForwardRuntimeSnapshot> {
+        validate_port_forwarding_config(config)
+            .map_err(|error| anyhow::anyhow!("invalid port-forwarding desired state: {error}"))?;
 
         let capability = self.probe().await;
         if !capability.supported() {
             if !require_table_access && config.rules.is_empty() {
-                return Ok(unsupported_snapshot(config, &capability));
+                return Ok(PortForwardRuntimeSnapshot {
+                    status: PortForwardRuntimeStatus::Absent,
+                    nft_version: capability.nft_version.clone(),
+                    ..PortForwardRuntimeSnapshot::default()
+                });
             }
             anyhow::bail!(
                 "port forwarding unavailable ({:?}): {}",
@@ -239,6 +484,14 @@ impl PortForwardingConsumer {
                 "port_forward_table_ownership_conflict: table {OWNED_TABLE_FAMILY} {OWNED_TABLE_NAME} exists without the vpsman ownership marker"
             );
         }
+        if let Some(table) = before.as_ref() {
+            self.native_owners = extract_rule_counters(table)
+                .into_iter()
+                .map(|rule| rule.rule_id)
+                .collect();
+        } else {
+            self.native_owners.clear();
+        }
         if config.rules.is_empty() && before.is_none() {
             self.baseline = None;
             return Ok(runtime_snapshot_from_table(
@@ -247,6 +500,18 @@ impl PortForwardingConsumer {
                 None,
                 self.baseline.as_ref(),
             ));
+        }
+
+        if let Some(table) = before.as_ref() {
+            let observed = runtime_snapshot_from_table(
+                config,
+                &capability,
+                Some(table),
+                self.baseline.as_ref(),
+            );
+            if observed.status == PortForwardRuntimeStatus::Applied {
+                return Ok(observed);
+            }
         }
 
         let script = render_apply_script(config, before.is_some())?;
@@ -265,6 +530,7 @@ impl PortForwardingConsumer {
                 "owned nftables table still exists after removal"
             );
             self.baseline = None;
+            self.native_owners.clear();
         } else {
             let observed = after
                 .as_ref()
@@ -275,6 +541,7 @@ impl PortForwardingConsumer {
                 structure_hash: normalized_table_structure_hash(observed),
                 event_generation,
             });
+            self.native_owners = config.rules.iter().map(|rule| rule.id).collect();
         }
         Ok(runtime_snapshot_from_table(
             config,
@@ -284,7 +551,15 @@ impl PortForwardingConsumer {
         ))
     }
 
-    async fn inspect(&mut self, config: &AgentPortForwardingConfig) -> PortForwardRuntimeSnapshot {
+    fn has_native_ownership(&self, config: &AgentPortForwardingConfig) -> bool {
+        !config.rules.is_empty() || !self.native_owners.is_empty() || self.baseline.is_some()
+    }
+
+    async fn inspect_native(
+        &mut self,
+        config: &AgentPortForwardingConfig,
+        cancel_token: CommandCancelToken,
+    ) -> PortForwardRuntimeSnapshot {
         let capability = self.capability.clone();
         if !capability.supported() {
             return unsupported_snapshot(config, &capability);
@@ -307,7 +582,7 @@ impl PortForwardingConsumer {
         } else {
             TableListMode::Full
         };
-        match list_owned_table(&nft, CommandCancelToken::default(), mode).await {
+        match list_owned_table(&nft, cancel_token, mode).await {
             Ok(Some(table))
                 if match mode {
                     TableListMode::Full => !table_is_owned(&table),
@@ -331,6 +606,7 @@ impl PortForwardingConsumer {
                         self.baseline.as_ref(),
                     ),
                 };
+                self.native_owners = snapshot.rules.iter().map(|rule| rule.rule_id).collect();
                 let event_generation_after = self.owned_table_event_generation;
                 if mode == TableListMode::Full
                     && snapshot.status == PortForwardRuntimeStatus::Applied
@@ -349,12 +625,130 @@ impl PortForwardingConsumer {
     }
 }
 
+fn native_config(config: &AgentPortForwardingConfig) -> AgentPortForwardingConfig {
+    let rules = config
+        .rules
+        .iter()
+        .filter(|rule| rule.mode != PortForwardMode::CustomAdapter)
+        .cloned()
+        .collect::<Vec<_>>();
+    AgentPortForwardingConfig {
+        schema_version: if rules.iter().all(|rule| rule.mode == PortForwardMode::Dnat) {
+            1
+        } else {
+            2
+        },
+        desired_hash: native_hash(&rules),
+        rules,
+        ..AgentPortForwardingConfig::default()
+    }
+}
+
+fn custom_ownership_context(config: &AgentPortForwardingConfig) -> bool {
+    !config.cleanup_rules.is_empty()
+        || config
+            .rules
+            .iter()
+            .any(|rule| rule.mode == PortForwardMode::CustomAdapter)
+}
+
+fn native_hash(rules: &[PortForwardRule]) -> String {
+    if rules.is_empty() {
+        String::new()
+    } else {
+        port_forwarding_desired_hash(rules)
+    }
+}
+
+fn attach_native_stats(
+    config: &AgentPortForwardingConfig,
+    snapshot: &mut PortForwardRuntimeSnapshot,
+) {
+    for rule in &config.rules {
+        let stat = if let Some(index) = snapshot
+            .rules
+            .iter()
+            .position(|stat| stat.rule_id == rule.id)
+        {
+            &mut snapshot.rules[index]
+        } else {
+            snapshot
+                .rules
+                .push(adapters::runtime_stat(rule, snapshot.status));
+            snapshot
+                .rules
+                .last_mut()
+                .expect("inserted native runtime stat")
+        };
+        stat.mode = rule.mode;
+        stat.status = Some(snapshot.status);
+        stat.observed_unix = Some(snapshot.observed_unix);
+        stat.error_code = snapshot.error_code.clone();
+        stat.error_message = snapshot.error_message.clone();
+    }
+}
+
+fn merge_snapshot(
+    config: &AgentPortForwardingConfig,
+    native: &AgentPortForwardingConfig,
+    mut snapshot: PortForwardRuntimeSnapshot,
+    custom: Vec<PortForwardRuleRuntimeStat>,
+) -> PortForwardRuntimeSnapshot {
+    if snapshot.owned_table_present.is_some()
+        && matches!(
+            snapshot.status,
+            PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Absent
+        )
+    {
+        snapshot.native_desired_hash = Some(native.desired_hash.clone());
+    }
+    // Empty desired state has always used None on the runtime wire. Keep the
+    // separate native hash present when observed absence proves cleanup.
+    snapshot.desired_hash = (!config.desired_hash.is_empty()).then(|| config.desired_hash.clone());
+    for stat in custom {
+        snapshot
+            .rules
+            .retain(|native| native.rule_id != stat.rule_id);
+        snapshot.rules.push(stat);
+    }
+    snapshot.rules.sort_by_key(|rule| rule.rule_id);
+    if snapshot.status == PortForwardRuntimeStatus::Failed
+        || snapshot
+            .rules
+            .iter()
+            .any(|rule| rule.status == Some(PortForwardRuntimeStatus::Failed))
+    {
+        snapshot.status = PortForwardRuntimeStatus::Failed;
+    } else if snapshot.status == PortForwardRuntimeStatus::Drifted
+        || snapshot
+            .rules
+            .iter()
+            .any(|rule| rule.status == Some(PortForwardRuntimeStatus::Drifted))
+    {
+        snapshot.status = PortForwardRuntimeStatus::Drifted;
+    } else if matches!(
+        snapshot.status,
+        PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Absent
+    ) && !config.rules.is_empty()
+        && snapshot
+            .rules
+            .iter()
+            .all(|rule| rule.status == Some(PortForwardRuntimeStatus::Applied))
+    {
+        snapshot.status = PortForwardRuntimeStatus::Applied;
+    }
+    snapshot.observed_unix = unix_now();
+    snapshot
+}
+
 pub(crate) fn render_apply_script(
     config: &AgentPortForwardingConfig,
     table_exists: bool,
 ) -> Result<String> {
     validate_port_forwarding_config(config)
         .map_err(|error| anyhow::anyhow!("invalid port-forwarding desired state: {error}"))?;
+    let native = native_config(config);
+    let config = &native;
     let mut script = String::new();
     if table_exists {
         script.push_str("delete table inet vpsman_port_forward\n");
@@ -409,7 +803,8 @@ fn render_dispatch_maps(script: &mut String, rules: &[PortForwardRule]) {
         );
         let mut first = true;
         for (rule_index, rule) in rules.iter().enumerate() {
-            if rule_nfproto(rule) != nfproto || !rule.protocol.transports().contains(&transport) {
+            if !rule_has_nfproto(rule, nfproto) || !rule.protocol.transports().contains(&transport)
+            {
                 continue;
             }
             for mapping in &rule.mappings {
@@ -499,7 +894,17 @@ fn render_rule_chains(script: &mut String, rules: &[PortForwardRule]) {
                 "  chain {chain_name} {{\n    counter{track} comment \"vpsman-rule:{}:{}\"",
                 rule.id, rule.revision
             );
-            let (family, ip) = render_target_ip(rule.target_ip);
+            let (translation, destination) = match rule.mode {
+                PortForwardMode::Dnat => {
+                    let (family, ip) =
+                        render_target_ip(rule.target_ip.expect("validated DNAT destination"));
+                    (format!("dnat {family} to {ip}"), " :")
+                }
+                PortForwardMode::Redirect => ("redirect".to_string(), " to :"),
+                PortForwardMode::CustomAdapter => {
+                    unreachable!("custom rules are excluded from native rendering")
+                }
+            };
 
             let identity = rule
                 .mappings
@@ -519,20 +924,22 @@ fn render_rule_chains(script: &mut String, rules: &[PortForwardRule]) {
                         mapping.incoming.end,
                     ));
                 }
-                let _ = writeln!(script, " }} dnat {family} to {ip}");
+                let _ = writeln!(script, " }} {translation}");
             }
+            // Older nft userspace needs the transport match in the NAT
+            // statement itself; it does not infer it from the dispatch jump.
             if rule.mappings.iter().any(mapping_is_fixed) {
                 let name = fixed_map_name(rule_index, transport);
                 let _ = writeln!(
                     script,
-                    "    dnat {family} to {ip} : {transport} dport map @{name}"
+                    "    meta l4proto {transport} {translation}{destination} {transport} dport map @{name}"
                 );
             }
             if rule.mappings.iter().any(mapping_is_shifted) {
                 let name = shifted_map_name(rule_index, transport);
                 let _ = writeln!(
                     script,
-                    "    dnat {family} to {ip} : {transport} dport map @{name}"
+                    "    meta l4proto {transport} {translation}{destination} {transport} dport map @{name}"
                 );
             }
             script.push_str("  }\n");
@@ -545,7 +952,7 @@ fn populated_dispatches(rules: &[PortForwardRule]) -> Vec<(&'static str, &'stati
     for nfproto in ["ipv4", "ipv6"] {
         for transport in ["tcp", "udp"] {
             if rules.iter().any(|rule| {
-                rule_nfproto(rule) == nfproto && rule.protocol.transports().contains(&transport)
+                rule_has_nfproto(rule, nfproto) && rule.protocol.transports().contains(&transport)
             }) {
                 dispatches.push((nfproto, transport));
             }
@@ -568,12 +975,12 @@ fn mapping_is_shifted(mapping: &vpsman_common::PortForwardMapping) -> bool {
     !mapping.target.is_single() && !mapping_is_identity(mapping)
 }
 
-fn rule_nfproto(rule: &PortForwardRule) -> &'static str {
-    if rule.target_ip.is_ipv4() {
-        "ipv4"
+fn rule_has_nfproto(rule: &PortForwardRule, nfproto: &str) -> bool {
+    rule.native_families().contains(&if nfproto == "ipv4" {
+        PortForwardAddressFamily::Ipv4
     } else {
-        "ipv6"
-    }
+        PortForwardAddressFamily::Ipv6
+    })
 }
 
 fn render_target_ip(ip: IpAddr) -> (&'static str, String) {
@@ -614,6 +1021,51 @@ fn shifted_map_name(rule_index: usize, transport: &str) -> String {
     format!("pf_{rule_index}_{transport}_shift")
 }
 
+fn render_capability_probe_script() -> Result<String> {
+    use vpsman_common::{pair_port_expressions, PortForwardProtocol};
+
+    // Exercise the production grammar, including every mapping shape and both
+    // families/transports. This is passed only to nft --check, never installed.
+    let modes = [
+        (PortForwardMode::Dnat, Some("192.0.2.1"), None),
+        (PortForwardMode::Dnat, Some("2001:db8::1"), None),
+        (
+            PortForwardMode::Redirect,
+            None,
+            Some(PortForwardAddressFamily::Both),
+        ),
+    ];
+    let mut rules = Vec::new();
+    for (index, (mode, target, address_family)) in modes.into_iter().enumerate() {
+        let port = 65000 + index * 10;
+        rules.push(PortForwardRule {
+            id: uuid::Uuid::from_u128(index as u128 + 1),
+            revision: 1,
+            name: format!("capability-{index}"),
+            protocol: PortForwardProtocol::Both,
+            target_ip: target.map(str::parse).transpose()?,
+            mode,
+            address_family,
+            adapter: None,
+            mappings: pair_port_expressions(
+                &format!("{port},{},{}-{}", port + 2, port + 3, port + 4),
+                &format!("{},{},{}-{}", port + 1, port + 2, port + 5, port + 6),
+            )?,
+            masquerade: mode == PortForwardMode::Dnat,
+        });
+    }
+    let config = AgentPortForwardingConfig {
+        schema_version: vpsman_common::PORT_FORWARDING_MODES_SCHEMA_VERSION,
+        desired_hash: port_forwarding_desired_hash(&rules),
+        rules,
+        ..AgentPortForwardingConfig::default()
+    };
+    Ok(render_apply_script(&config, false)?.replace(
+        OWNED_TABLE_NAME,
+        &format!("vpsman_pf_probe_{}", std::process::id()),
+    ))
+}
+
 async fn probe_port_forwarding_capability_inner() -> PortForwardCapability {
     let Some(nft) = resolve_nft_binary() else {
         return capability(
@@ -630,28 +1082,16 @@ async fn probe_port_forwarding_capability_inner() -> PortForwardCapability {
             "agent requires root or CAP_NET_ADMIN in the host network namespace",
         );
     }
-    let probe_table = format!("vpsman_pf_probe_{}", std::process::id());
-    let probe_script = r#"table inet vpsman_pf_probe {
-  set vpsman_ownership_v1 { type mark; elements = { 0x5650534d }; }
-  set owned_flows { typeof ct id; flags dynamic,timeout; timeout 1s; size 16; }
-  map dispatch4 { type inet_service : verdict; flags interval; elements = { 65000-65001 : jump translate4 }; }
-  map dispatch6 { type inet_service : verdict; flags interval; elements = { 65002 : jump translate6 }; }
-  map fixed4 { type inet_service : inet_service; flags interval; elements = { 65000-65001 : 65001 }; }
-  chain prerouting {
-    type nat hook prerouting priority -110; policy accept;
-    fib daddr type local jump dispatch
-  }
-  chain output { type nat hook output priority -110; policy accept; fib daddr type local jump dispatch; }
-  chain dispatch {
-    meta nfproto ipv4 tcp dport vmap @dispatch4
-    meta nfproto ipv6 udp dport vmap @dispatch6
-  }
-  chain translate4 { counter add @owned_flows { ct id timeout 1s }; dnat ip to 192.0.2.1 : tcp dport map @fixed4; }
-  chain translate6 { counter; udp dport 65002 dnat ip6 to 2001:db8::1; }
-  chain postrouting { type nat hook postrouting priority 90; policy accept; ct id @owned_flows masquerade; }
-}
-"#
-    .replace("vpsman_pf_probe", &probe_table);
+    let probe_script = match render_capability_probe_script() {
+        Ok(script) => script,
+        Err(error) => {
+            return capability(
+                PortForwardCapabilityStatus::ProbeFailed,
+                version,
+                &error.to_string(),
+            );
+        }
+    };
     match run_nft_script(
         &nft,
         true,
@@ -664,6 +1104,7 @@ async fn probe_port_forwarding_capability_inner() -> PortForwardCapability {
             status: PortForwardCapabilityStatus::Supported,
             nft_version: version,
             reason: None,
+            ..PortForwardCapability::default()
         },
         Err(error) => {
             let message = error.to_string();
@@ -877,6 +1318,7 @@ fn runtime_snapshot_from_table(
         error_code: None,
         error_message: None,
         observed_unix: unix_now(),
+        ..PortForwardRuntimeSnapshot::default()
     }
 }
 
@@ -925,6 +1367,7 @@ fn runtime_snapshot_from_terse_table(
         error_code: None,
         error_message: None,
         observed_unix: unix_now(),
+        ..PortForwardRuntimeSnapshot::default()
     }
 }
 
@@ -1133,7 +1576,12 @@ fn extract_rule_counters(value: &Value) -> Vec<PortForwardRuleRuntimeStat> {
             |((rule_id, revision), nat_matches)| PortForwardRuleRuntimeStat {
                 rule_id,
                 revision,
-                nat_matches,
+                nat_matches: Some(nat_matches),
+                mode: PortForwardMode::Dnat,
+                status: None,
+                observed_unix: None,
+                error_code: None,
+                error_message: None,
             },
         )
         .collect::<Vec<_>>();
@@ -1210,6 +1658,7 @@ fn capability(
         status,
         nft_version,
         reason: Some(reason.chars().take(1024).collect()),
+        ..PortForwardCapability::default()
     }
 }
 

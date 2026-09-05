@@ -92,9 +92,12 @@ fn bootstrap_config_rejects_server_managed_port_forwarding() {
         revision: 1,
         name: "web".to_string(),
         protocol: PortForwardProtocol::Tcp,
-        target_ip: "192.0.2.10".parse().unwrap(),
+        target_ip: Some("192.0.2.10".parse().unwrap()),
         mappings: pair_port_expressions("443", "8443").unwrap(),
         masquerade: true,
+        mode: crate::PortForwardMode::Dnat,
+        address_family: None,
+        adapter: None,
     }];
     let mut config = AgentConfig::default();
     config.network.port_forwarding = AgentPortForwardingConfig {

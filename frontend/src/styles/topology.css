@@ -274,6 +274,7 @@
 }
 
 .portForwardForm > label,
+.portForwardAdapterField label,
 .targetAddressField label {
   display: grid;
   gap: 6px;
@@ -404,10 +405,27 @@
 }
 
 .portMappingPreview,
+.portForwardModeField,
+.portForwardAdapterField,
+.portForwardLocalHint,
 .portForwardCapabilityNotice,
 .portForwardForm > .localActionFeedback,
 .portForwardForm > .consoleFormActions {
   grid-column: 1 / -1;
+}
+
+.portForwardAdapterField {
+  display: grid;
+  gap: 8px;
+}
+
+.portForwardLocalHint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.portForwardLocalHint p {
+  margin: 6px 0 0;
 }
 
 .portMappingPreview {

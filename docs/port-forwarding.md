@@ -3,17 +3,18 @@
 Port forwarding is an explicit per-VPS desired-state workflow under **Network >
 Port forwards**. It is intended for direct TCP/UDP requests addressed to the
 VPS itself. It does not discover, import, or manage Docker, system-firewall,
-iptables, or third-party nftables rules.
+iptables, or third-party nftables rules. Choose **DNAT**, **REDIRECT**, or a
+reusable **Custom adapter** in the rule editor.
 
 ## Host Contract
 
-An enabled rule requires all of the following on the selected VPS:
+An enabled built-in DNAT or REDIRECT rule requires the following on the VPS:
 
 - the `nft` executable is already installed;
 - the agent runs as root or has `CAP_NET_ADMIN` in the host network namespace;
 - nftables and the kernel accept the required `inet` NAT, local-destination,
   port-map, counter, connection-tracking, and masquerade expressions;
-- IP forwarding is enabled by the operator when the target is not local.
+- for DNAT, IP forwarding is enabled by the operator when the target is not local.
 
 The agent probes this exact capability and reports a reason when it is not
 available. `vpsman` does not install nftables, write firewall configuration,
@@ -21,7 +22,10 @@ change sysctls, or select a distribution-specific persistence service. A rule
 may be saved disabled on an unsupported VPS, but it cannot be enabled or
 reapplied until the capability is reported as supported.
 
-The agent owns one table only:
+Custom adapters do not require nftables. They require an agent advertising
+custom-adapter support and the programs named by the selected definition.
+
+For built-in modes, the agent owns one table only:
 
 ```text
 table inet vpsman_port_forward
@@ -32,7 +36,8 @@ structural `vpsman_ownership_v1` marker set. The structural marker is used for
 ownership checks because older supported nftables JSON output omits table
 comments. If a same-name table lacks the exact marker, the agent reports an
 ownership conflict and leaves it unchanged. Every apply atomically checks and
-replaces the complete marked table. The agent never flushes the ruleset and
+replaces the complete marked table when its native desired state changes or
+needs repair. Custom-only changes do not rebuild it. The agent never flushes the ruleset and
 never edits another table.
 Prerouting and output rules
 use `fib daddr type local`, so they claim requests to current local addresses
@@ -107,14 +112,15 @@ the control plane receives a fresh capability snapshot before enabling rules.
 ## Rule Workflow
 
 1. Select one VPS and enter a unique rule name.
-2. Select TCP, UDP, or Both.
+2. Select the mode, then TCP, UDP, or Both.
 3. Enter the incoming and target port expressions.
-4. Enter a literal target IP, or resolve a hostname and explicitly select one
-   returned literal address.
-5. Choose **Masquerade** or **Preserve source**.
+4. For DNAT, enter a target IP, or resolve a hostname and select a literal
+   address. REDIRECT selects IPv4, IPv6, or Both instead. Custom selects a
+   reusable adapter, with an optional target IP or resolved hostname.
+5. For DNAT, choose **Masquerade** or **Preserve source**.
 6. Review the frozen VPS, mapping, target, and return-path snapshot, then apply.
 
-Rules apply to every current local address in the target IP's family. IPv4
+DNAT rules apply to every current local address in the target IP's family. IPv4
 targets create IPv4 DNAT rules and IPv6 targets create IPv6 DNAT rules; NAT46
 and NAT64 are not inferred. The selected literal address is the desired state.
 When a hostname is resolved, its normalized name is retained alongside that
@@ -122,6 +128,37 @@ address as operator context so Edit can resolve it again; the hostname is not
 sent to the agent, included in forwarding desired state, or refreshed
 automatically. Use Resolve again, select the intended literal address, and save
 a new revision when DNS changes.
+
+### REDIRECT And Custom Adapters
+
+REDIRECT translates the destination port to a local listener in the selected
+family (IPv4 by default). Incoming traffic uses the receiving interface's local
+address; it does **not** make a listener bound only to `127.0.0.1` or `::1`
+externally reachable. It has no remote target or masquerade setting.
+
+Custom adapters can manage listeners such as nginx or socat, including relaying
+to a loopback destination. Define their required **Apply**, **Remove**, and
+**Status** argv commands in the existing adapter registry. Commands execute
+directly, without implicit shell parsing. An Apply command must start or reload
+its service and return; it must not remain attached to a foreground daemon.
+
+Available placeholders are `{rule_id}`, `{client_id}`, `{revision}`, `{protocol}`,
+`{incoming_ports}`, `{target_ports}`, and `{target_ip}`. Port expressions retain
+their corresponding ordering; `both` remains one protocol value. An omitted
+target IP expands to an empty argument. Family selection and listener conflicts
+belong to the adapter; built-in overlap validation does not claim custom ports.
+
+Apply must idempotently establish the exact supplied rule under its stable rule
+ID. Remove must remove all resources for that ID, including partial applies.
+Status must exit successfully and return JSON with `state` equal to `applied`,
+`absent`, or `drifted`, and an optional `message`. Apply is verified by `applied`;
+Remove by `absent`. Failed commands or invalid status output report failure.
+Each command uses its configured timeout/output budget from the adapter editor.
+
+Definitions cannot be changed or deleted while referenced by an active,
+disabled, or cleanup-pending rule. Switching adapters or modes removes the
+previous owner's resources first. The agent records custom ownership before
+Apply and retains it until removal is verified, including across restarts.
 
 ### Port Expressions
 
@@ -137,8 +174,8 @@ item or one corresponding item for each incoming item.
 | `80,443,10000-10010` | `8080,8443,20000-20010` | Corresponding ports and ranges |
 
 A corresponding target range must contain the same number of ports as its
-incoming range. Port 0, reversed ranges, overlapping claims for the same VPS,
-family, and protocol, and desired states that exceed the bounded nftables
+incoming range. Port 0, reversed ranges, overlapping built-in claims for the
+same VPS, family, and protocol, and native desired states that exceed the bounded nftables
 program limit are rejected before dispatch.
 
 ### Return Path
@@ -155,8 +192,9 @@ The UI reports IPv4/IPv6 forwarding state as evidence but never changes it.
 
 Create, update, enable, disable, delete, bulk mutation, agent startup, reconnect
 after owned-table drift, and explicit Reapply are reconciliation events.
-Telemetry only inspects the owned table; it never repairs drift in the
-background.
+Telemetry reports completed observations; it never repairs drift in the
+background or waits for a custom command. Custom Status runs at the configured
+network runtime-status interval and immediately after mutations.
 
 - **Pending**: the latest desired hash has not yet been observed from the agent.
 - **Applied**: the observed normalized owned table matches the exact desired
@@ -173,13 +211,17 @@ background.
 
 NAT matches count first-packet NAT rule matches since the latest complete table
 apply. They are not bytes, throughput, active connections, or health checks.
+Custom rules instead show their own status, observation time, and command error;
+they do not have a native NAT counter.
 
 Delete keeps a tombstone until the agent reports the exact current table (or no
-owned table when no rules remain). An admin may **Forget** a tombstone only for
+owned table when no rules remain). Custom deletion additionally requires
+per-rule verified removal; an absent nftables table is not custom-cleanup
+evidence. An admin may **Forget** a tombstone only for
 a permanently unreachable or decommissioned VPS and must provide a reason.
 Forgetting clears that VPS's cached forwarding snapshot, so any other active
 rules show Pending until fresh telemetry arrives. It does not remove any
-nftables state from that host. Agent deletion is
+nftables or custom-adapter state from that host. Agent deletion is
 blocked while desired, pending-removal, or observed owned-table state can remain.
 When no host state can remain, agent deletion archives clean disabled drafts
 with the agent record instead of leaving orphaned forwarding definitions.
@@ -219,3 +261,7 @@ Use `--preserve-source` only with a verified return route, or `--disabled` to
 save a draft without host mutation. Every mutation uses the rule's current
 `revision`; stale revisions are rejected rather than retargeted. CLI commands
 are also available unchanged in the interactive VTY.
+
+Use `--mode redirect --address-family both` without `--target-ip` for native
+local redirection. Use `--mode custom_adapter --adapter-definition-id UUID`
+for a reusable listener adapter; `--target-ip` is optional in that mode.

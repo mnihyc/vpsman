@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::{payload_hash, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand};
+use vpsman_common::{
+    payload_hash, PortForwardAdapterCommands, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
+};
 
 use crate::{
     model::NetworkAdapterDefinitionView, repository::Repository,
@@ -63,6 +65,25 @@ pub(crate) fn runtime_tunnel_adapter_from_definition(
         restart,
         status,
         traffic_limit_apply,
+    })
+}
+
+pub(crate) fn port_forward_adapter_from_definition(
+    definition: &NetworkAdapterDefinitionView,
+) -> Result<PortForwardAdapterCommands> {
+    anyhow::ensure!(
+        definition.adapter_kind == "port_forward",
+        "port_forward_adapter_kind_invalid"
+    );
+    validate_network_adapter_definition_view(definition)
+        .context("port_forward_adapter_definition_invalid")?;
+    Ok(PortForwardAdapterCommands {
+        definition_id: definition.id,
+        definition_name: definition.name.clone(),
+        definition_hash: payload_hash(&serde_json::to_vec(&definition.definition)?),
+        apply: required_command(&definition.definition, "apply_command")?,
+        remove: required_command(&definition.definition, "remove_command")?,
+        status: required_command(&definition.definition, "status_command")?,
     })
 }
 

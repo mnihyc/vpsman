@@ -3846,13 +3846,9 @@ fn validate_deferred_telemetry_constraints(metrics: &AgentMetrics) -> Result<()>
             .all(|tunnel| interfaces.insert(tunnel.interface.as_str())),
         "telemetry tunnels contain a duplicate projected interface"
     );
-    anyhow::ensure!(
-        metrics
-            .port_forwarding
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.rules.len() <= vpsman_common::MAX_PORT_FORWARD_RULES),
-        "port_forward_runtime_too_many_rules"
-    );
+    // Forwarding evidence includes retired custom owners awaiting cleanup as
+    // well as active rules. The active configuration count is not a telemetry
+    // bound; the existing transport/body byte budget bounds these snapshots.
     anyhow::ensure!(
         metrics.tunnel_reachability.iter().all(|observation| {
             observation.stale_after_secs <= i64::MAX as u64

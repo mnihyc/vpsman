@@ -9,7 +9,8 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     port_forwarding_desired_hash, validate_port_forward_rule, validate_port_forwarding_config,
-    AgentPortForwardingConfig, PortForwardMapping, PortForwardProtocol, PortForwardRule,
+    AgentPortForwardingConfig, PortForwardAddressFamily, PortForwardCleanupRule,
+    PortForwardMapping, PortForwardMode, PortForwardProtocol, PortForwardRule,
     PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, MAX_PORT_FORWARD_RULES,
 };
 
@@ -24,19 +25,21 @@ use crate::{
     },
     repository::Repository,
     repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx,
+    repository_network_adapters::port_forward_adapter_from_definition,
     unix_now,
 };
 
 const PORT_FORWARD_MANAGEMENT_READ_LIMIT: usize = 1_000;
 
 enum PortForwardRuleRead {
-    Rule(PortForwardRuleRecord),
-    Corrupt(PortForwardRuleCorruptView),
+    Rule(Box<PortForwardRuleRecord>),
+    Corrupt(Box<PortForwardRuleCorruptView>),
 }
 
 pub(crate) struct PortForwardRuleIdentity {
     pub(crate) client_id: String,
     pub(crate) enabled: bool,
+    pub(crate) adapter_cleanup_pending: bool,
     pub(crate) revision: i64,
     pub(crate) deleted_at: Option<String>,
 }
@@ -76,7 +79,7 @@ impl Repository {
         let records = reads
             .iter()
             .filter_map(|read| match read {
-                PortForwardRuleRead::Rule(rule) => Some(rule.clone()),
+                PortForwardRuleRead::Rule(rule) => Some((**rule).clone()),
                 PortForwardRuleRead::Corrupt(_) => None,
             })
             .collect::<Vec<_>>();
@@ -139,7 +142,7 @@ impl Repository {
                         error = %corrupt.configuration_error,
                         "exposing malformed persisted port-forward rule to management"
                     );
-                    PortForwardRuleListItem::Corrupt(Box::new(corrupt))
+                    PortForwardRuleListItem::Corrupt(corrupt)
                 }
             })
             .collect())
@@ -165,6 +168,7 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT id, client_id, enabled, revision,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         deleted_at::text AS deleted_at
                     FROM port_forward_rules
                     WHERE id = $1
@@ -177,6 +181,7 @@ impl Repository {
                     Ok(PortForwardRuleIdentity {
                         client_id: row.try_get("client_id")?,
                         enabled: row.try_get("enabled")?,
+                        adapter_cleanup_pending: row.try_get("adapter_cleanup_pending")?,
                         revision: row.try_get("revision")?,
                         deleted_at: row.try_get("deleted_at")?,
                     })
@@ -211,12 +216,19 @@ impl Repository {
         client_id: &str,
     ) -> Result<AgentPortForwardingConfig> {
         let records = self
-            .list_port_forward_rule_records_for_client(client_id, false)
-            .await?
-            .into_iter()
-            .filter(|record| record.enabled)
-            .collect::<Vec<_>>();
-        config_from_records(&records)
+            .list_port_forward_rule_records_for_client(client_id)
+            .await?;
+        let mut config = config_from_records(&records)?;
+        let Self::Postgres(pool) = self;
+        config.cleanup_rules = sqlx::query_as::<_, (Uuid,i64)>(
+            "SELECT id,revision FROM port_forward_rules WHERE client_id=$1 AND EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AND forgotten_at IS NULL AND removal_confirmed_at IS NULL AND NOT (mode='custom_adapter' AND enabled AND deleted_at IS NULL) ORDER BY id"
+        ).bind(client_id).fetch_all(pool).await?.into_iter().map(|(rule_id,revision)| PortForwardCleanupRule{rule_id,revision}).collect();
+        if !config.cleanup_rules.is_empty() {
+            config.schema_version = vpsman_common::PORT_FORWARDING_MODES_SCHEMA_VERSION;
+        }
+        validate_port_forwarding_config(&config)
+            .map_err(|error| anyhow::anyhow!("port_forward_desired_state_invalid:{error}"))?;
+        Ok(config)
     }
 
     pub(crate) async fn create_port_forward_rule(
@@ -224,18 +236,32 @@ impl Repository {
         request: &CreatePortForwardRuleRequest,
         operator: &AuthContext,
     ) -> Result<PortForwardRuleView> {
-        let target_hostname = normalized_target_hostname(request.target_hostname.as_deref())?;
+        let target_hostname = if request.target_ip.is_none() {
+            None
+        } else {
+            normalized_target_hostname(request.target_hostname.as_deref())?
+        };
         let now = unix_now().to_string();
-        let candidate = PortForwardRuleRecord {
+        let mut candidate = PortForwardRuleRecord {
             id: Uuid::new_v4(),
             actor_id: persisted_actor_id(operator),
             client_id: request.client_id.clone(),
             name: request.name.trim().to_string(),
             protocol: request.protocol,
+            mode: request.mode,
+            address_family: stored_address_family(
+                request.mode,
+                request.address_family,
+                request.target_ip,
+            ),
+            adapter_definition_id: request.adapter_definition_id,
+            adapter: None,
+            adapter_cleanup_pending: request.mode == PortForwardMode::CustomAdapter
+                && request.enabled,
             target_ip: request.target_ip,
             target_hostname,
             mappings: request.mappings.clone(),
-            masquerade: request.masquerade,
+            masquerade: request.mode == PortForwardMode::Dnat && request.masquerade,
             enabled: request.enabled,
             revision: 1,
             created_at: now.clone(),
@@ -247,13 +273,12 @@ impl Repository {
             forgotten_at: None,
             forget_reason: None,
         };
-        validate_record(&candidate)?;
-
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_port_forward_client(&mut tx, &candidate.client_id).await?;
                 ensure_postgres_port_forward_client_active(&mut tx, &candidate.client_id).await?;
+                resolve_postgres_port_forward_adapter(&mut tx, &mut candidate).await?;
                 let existing =
                     select_postgres_port_forward_rules_for_client(&mut tx, &candidate.client_id)
                         .await?;
@@ -262,9 +287,9 @@ impl Repository {
                     r#"
                     INSERT INTO port_forward_rules (
                         id, actor_id, client_id, name, protocol, target_ip, target_hostname,
-                        mappings, masquerade, enabled
+                        mappings, masquerade, enabled, mode, address_family, adapter_definition_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10, $11, $12, $13)
                     "#,
                 )
                 .bind(candidate.id)
@@ -272,13 +297,17 @@ impl Repository {
                 .bind(&candidate.client_id)
                 .bind(&candidate.name)
                 .bind(protocol_name(candidate.protocol))
-                .bind(candidate.target_ip.to_string())
+                .bind(candidate.target_ip.map(|ip| ip.to_string()))
                 .bind(&candidate.target_hostname)
                 .bind(SqlJson(&candidate.mappings))
                 .bind(candidate.masquerade)
                 .bind(candidate.enabled)
+                .bind(mode_name(candidate.mode))
+                .bind(candidate.address_family.map(family_name))
+                .bind(candidate.adapter_definition_id)
                 .execute(&mut *tx)
                 .await?;
+                record_requested_port_forward_adapter_owner(&mut tx, &candidate).await?;
                 insert_port_forward_audit(
                     &mut tx,
                     "network.port_forward_rule_created",
@@ -310,6 +339,7 @@ impl Repository {
                 let current = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, target_hostname, enabled, revision,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -336,18 +366,33 @@ impl Repository {
                     Some(id),
                 )
                 .await?;
-                let candidate = PortForwardRuleRecord {
+                let mut candidate = PortForwardRuleRecord {
                     id,
                     actor_id: persisted_actor_id(operator),
                     client_id,
                     name: request.name.trim().to_string(),
                     protocol: request.protocol,
+                    mode: request.mode,
+                    address_family: stored_address_family(
+                        request.mode,
+                        request.address_family,
+                        request.target_ip,
+                    ),
+                    adapter_definition_id: request.adapter_definition_id,
+                    adapter: None,
+                    adapter_cleanup_pending: current
+                        .try_get::<bool, _>("adapter_cleanup_pending")?
+                        || (request.mode == PortForwardMode::CustomAdapter && request.enabled),
                     target_ip: request.target_ip,
-                    target_hostname: target_hostname
-                        .clone()
-                        .unwrap_or(current.try_get("target_hostname")?),
+                    target_hostname: if request.target_ip.is_none() {
+                        None
+                    } else {
+                        target_hostname
+                            .clone()
+                            .unwrap_or(current.try_get("target_hostname")?)
+                    },
                     mappings: request.mappings.clone(),
-                    masquerade: request.masquerade,
+                    masquerade: request.mode == PortForwardMode::Dnat && request.masquerade,
                     enabled: request.enabled,
                     revision: revision + 1,
                     created_at: current.try_get("created_at")?,
@@ -359,6 +404,7 @@ impl Repository {
                     forgotten_at: current.try_get("forgotten_at")?,
                     forget_reason: current.try_get("forget_reason")?,
                 };
+                resolve_postgres_port_forward_adapter(&mut tx, &mut candidate).await?;
                 ensure_candidate_valid(&candidate, &existing, Some(id))?;
                 let result = sqlx::query(
                     r#"
@@ -371,6 +417,9 @@ impl Repository {
                         mappings = $8,
                         masquerade = $9,
                         enabled = $10,
+                        mode = $11,
+                        address_family = $12,
+                        adapter_definition_id = $13,
                         revision = revision + 1,
                         updated_at = now()
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
@@ -381,17 +430,21 @@ impl Repository {
                 .bind(persisted_actor_id(operator))
                 .bind(&candidate.name)
                 .bind(protocol_name(candidate.protocol))
-                .bind(candidate.target_ip.to_string())
+                .bind(candidate.target_ip.map(|ip| ip.to_string()))
                 .bind(&candidate.target_hostname)
                 .bind(SqlJson(&candidate.mappings))
                 .bind(candidate.masquerade)
                 .bind(candidate.enabled)
+                .bind(mode_name(candidate.mode))
+                .bind(candidate.address_family.map(family_name))
+                .bind(candidate.adapter_definition_id)
                 .execute(&mut *tx)
                 .await?;
                 anyhow::ensure!(
                     result.rows_affected() == 1,
                     "port_forward_rule_snapshot_stale"
                 );
+                record_requested_port_forward_adapter_owner(&mut tx, &candidate).await?;
                 insert_port_forward_audit(
                     &mut tx,
                     "network.port_forward_rule_updated",
@@ -421,6 +474,9 @@ impl Repository {
             expected_revision,
             name: current.name,
             protocol: current.protocol,
+            mode: current.mode,
+            address_family: current.address_family,
+            adapter_definition_id: current.adapter_definition_id,
             target_ip: current.target_ip,
             target_hostname: UpdateTargetHostname::Preserve,
             mappings: current.mappings,
@@ -468,6 +524,9 @@ impl Repository {
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
                         host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
                         masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -625,6 +684,9 @@ impl Repository {
                       AND forgotten_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
                         host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
                         masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -642,6 +704,10 @@ impl Repository {
                 let persisted = port_forward_record_from_row(&row)?;
                 sqlx::query("DELETE FROM port_forward_runtime_state WHERE client_id = $1")
                     .bind(&persisted.client_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM port_forward_adapter_owners WHERE rule_id = $1")
+                    .bind(id)
                     .execute(&mut *tx)
                     .await?;
                 insert_port_forward_audit(
@@ -713,6 +779,9 @@ impl Repository {
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
                         host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
                         masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -767,6 +836,9 @@ impl Repository {
                         WHERE id = $1 AND revision = $2
                         RETURNING id, actor_id, client_id, name, protocol,
                             host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
                             masquerade, enabled, revision,
                             created_at::text AS created_at, updated_at::text AS updated_at,
                             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -786,6 +858,7 @@ impl Repository {
                     .await?
                     .context("port_forward_rule_snapshot_stale")?;
                     let record = port_forward_record_from_row(&row)?;
+                    record_requested_port_forward_adapter_owner(&mut tx, candidate).await?;
                     insert_port_forward_audit(
                         &mut tx,
                         bulk_audit_action(action),
@@ -817,10 +890,6 @@ impl Repository {
         client_id: &str,
         snapshot: &PortForwardRuntimeSnapshot,
     ) -> Result<()> {
-        anyhow::ensure!(
-            snapshot.rules.len() <= MAX_PORT_FORWARD_RULES,
-            "port_forward_runtime_too_many_rules"
-        );
         match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -856,7 +925,7 @@ impl Repository {
         let mut records = Vec::with_capacity(reads.len());
         for read in reads {
             match read {
-                PortForwardRuleRead::Rule(record) => records.push(record),
+                PortForwardRuleRead::Rule(record) => records.push(*record),
                 PortForwardRuleRead::Corrupt(corrupt) => warn!(
                     event = "port_forward_rule_configuration_corrupt",
                     rule_id = %corrupt.id,
@@ -872,7 +941,6 @@ impl Repository {
     async fn list_port_forward_rule_records_for_client(
         &self,
         client_id: &str,
-        include_removal_pending: bool,
     ) -> Result<Vec<PortForwardRuleRecord>> {
         match self {
             Self::Postgres(pool) => {
@@ -880,6 +948,9 @@ impl Repository {
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
                         host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
                         masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -887,16 +958,12 @@ impl Repository {
                         forgotten_at::text AS forgotten_at, forget_reason
                     FROM port_forward_rules
                     WHERE client_id = $1
-                      AND (
-                            deleted_at IS NULL
-                         OR ($2 AND removal_confirmed_at IS NULL AND forgotten_at IS NULL)
-                      )
+                      AND deleted_at IS NULL AND enabled
                     ORDER BY updated_at DESC, id DESC
-                    LIMIT $3
+                    LIMIT $2
                     "#,
                 )
                 .bind(client_id)
-                .bind(include_removal_pending)
                 .bind((MAX_PORT_FORWARD_RULES + 1) as i64)
                 .fetch_all(pool)
                 .await?;
@@ -930,6 +997,9 @@ impl Repository {
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
                         host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
                         masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -948,10 +1018,10 @@ impl Repository {
                 .await?;
                 rows.iter()
                     .map(|row| match port_forward_record_from_row(row) {
-                        Ok(record) => Ok(PortForwardRuleRead::Rule(record)),
-                        Err(error) => Ok(PortForwardRuleRead::Corrupt(
+                        Ok(record) => Ok(PortForwardRuleRead::Rule(Box::new(record))),
+                        Err(error) => Ok(PortForwardRuleRead::Corrupt(Box::new(
                             port_forward_corrupt_from_row(row, &error)?,
-                        )),
+                        ))),
                     })
                     .collect()
             }
@@ -1025,10 +1095,6 @@ pub(crate) async fn record_postgres_port_forward_runtime_snapshot_in_tx(
     client_id: &str,
     snapshot: &PortForwardRuntimeSnapshot,
 ) -> Result<()> {
-    anyhow::ensure!(
-        snapshot.rules.len() <= MAX_PORT_FORWARD_RULES,
-        "port_forward_runtime_too_many_rules"
-    );
     lock_postgres_port_forward_client(tx, client_id).await?;
     if !postgres_port_forward_runtime_client_active(tx, client_id).await? {
         return Ok(());
@@ -1053,15 +1119,36 @@ pub(crate) async fn record_postgres_port_forward_runtime_snapshot_in_tx(
             }
         }
     });
+    let native_observed = snapshot.owned_table_present.is_some();
     let snapshot = carry_forward_owned_table_evidence(snapshot, previous.as_ref());
-    let expected = config_from_records(
-        &select_postgres_port_forward_rules_for_client(tx, client_id)
-            .await?
-            .into_iter()
-            .filter(|record| record.enabled)
-            .collect::<Vec<_>>(),
-    )?;
-    let confirms_desired = snapshot_confirms_desired(&snapshot, &expected);
+    let active_records = select_postgres_port_forward_rules_for_client(tx, client_id).await?;
+    let owned_rule_ids = active_records
+        .iter()
+        .filter(|rule| rule.adapter_cleanup_pending)
+        .map(|rule| rule.id)
+        .collect::<BTreeSet<_>>();
+    let expected = config_from_records(&active_records)?;
+    let confirms_desired = if let Some(native_hash) = snapshot.native_desired_hash.as_deref() {
+        let native_rules = expected
+            .rules
+            .iter()
+            .filter(|rule| rule.mode != PortForwardMode::CustomAdapter)
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected_native_hash = if native_rules.is_empty() {
+            String::new()
+        } else {
+            port_forwarding_desired_hash(&native_rules)
+        };
+        native_hash == expected_native_hash
+    } else {
+        native_observed
+            && expected
+                .rules
+                .iter()
+                .all(|rule| rule.mode == PortForwardMode::Dnat)
+            && snapshot_confirms_desired(&snapshot, &expected)
+    };
     let runtime_applied = sqlx::query(
         r#"
         INSERT INTO port_forward_runtime_state (client_id, snapshot, observed_at)
@@ -1080,8 +1167,41 @@ pub(crate) async fn record_postgres_port_forward_runtime_snapshot_in_tx(
     .await?
     .rows_affected()
         == 1;
-    if runtime_applied && confirms_desired {
-        sqlx::query(
+    if runtime_applied {
+        let removed_ids = snapshot
+            .removed_rules
+            .iter()
+            .map(|rule| rule.rule_id)
+            .collect::<Vec<_>>();
+        let removed_revisions = snapshot
+            .removed_rules
+            .iter()
+            .map(|rule| rule.revision)
+            .collect::<Vec<_>>();
+        if !removed_ids.is_empty() {
+            sqlx::query("DELETE FROM port_forward_adapter_owners owner USING port_forward_rules rule WHERE owner.rule_id=rule.id AND rule.client_id=$1 AND (rule.id,rule.revision) IN (SELECT * FROM unnest($2::uuid[],$3::bigint[])) AND NOT (rule.mode='custom_adapter' AND rule.enabled AND rule.deleted_at IS NULL)")
+            .bind(client_id).bind(&removed_ids).bind(&removed_revisions).execute(&mut **tx).await?;
+        }
+        let applied = snapshot
+            .rules
+            .iter()
+            .filter(|rule| {
+                owned_rule_ids.contains(&rule.rule_id)
+                    && rule.status == Some(PortForwardRuntimeStatus::Applied)
+            })
+            .collect::<Vec<_>>();
+        let applied_ids = applied.iter().map(|rule| rule.rule_id).collect::<Vec<_>>();
+        let applied_revisions = applied.iter().map(|rule| rule.revision).collect::<Vec<_>>();
+        let applied_modes = applied
+            .iter()
+            .map(|rule| mode_name(rule.mode))
+            .collect::<Vec<_>>();
+        if !applied_ids.is_empty() {
+            sqlx::query("DELETE FROM port_forward_adapter_owners owner USING port_forward_rules rule WHERE owner.rule_id=rule.id AND rule.client_id=$1 AND rule.enabled AND rule.deleted_at IS NULL AND (rule.id,rule.revision,rule.mode) IN (SELECT * FROM unnest($2::uuid[],$3::bigint[],$4::text[])) AND (rule.mode<>'custom_adapter' OR owner.adapter_definition_id<>rule.adapter_definition_id)")
+            .bind(client_id).bind(&applied_ids).bind(&applied_revisions).bind(&applied_modes).execute(&mut **tx).await?;
+        }
+        if confirms_desired || !removed_ids.is_empty() {
+            sqlx::query(
             r#"
             UPDATE port_forward_rules
             SET removal_confirmed_at = now(), updated_at = now()
@@ -1089,11 +1209,17 @@ pub(crate) async fn record_postgres_port_forward_runtime_snapshot_in_tx(
               AND deleted_at IS NOT NULL
               AND removal_confirmed_at IS NULL
               AND forgotten_at IS NULL
+              AND ((NOT EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AND $2)
+                   OR (mode = 'custom_adapter' AND (id,revision) IN (SELECT * FROM unnest($3::uuid[],$4::bigint[]))))
             "#,
         )
         .bind(client_id)
+        .bind(confirms_desired)
+        .bind(&removed_ids)
+        .bind(&removed_revisions)
         .execute(&mut **tx)
         .await?;
+        }
     }
     Ok(())
 }
@@ -1110,10 +1236,33 @@ fn config_from_records(records: &[PortForwardRuleRecord]) -> Result<AgentPortFor
     } else {
         port_forwarding_desired_hash(&rules)
     };
+    let mut cleanup_rules = records
+        .iter()
+        .filter(|record| {
+            record.adapter_cleanup_pending
+                && record.forgotten_at.is_none()
+                && record.removal_confirmed_at.is_none()
+                && !(record.mode == PortForwardMode::CustomAdapter
+                    && record.enabled
+                    && record.deleted_at.is_none())
+        })
+        .map(|record| PortForwardCleanupRule {
+            rule_id: record.id,
+            revision: record.revision,
+        })
+        .collect::<Vec<_>>();
+    cleanup_rules.sort_unstable_by_key(|rule| rule.rule_id);
     let config = AgentPortForwardingConfig {
+        schema_version: if !cleanup_rules.is_empty()
+            || rules.iter().any(|rule| rule.mode != PortForwardMode::Dnat)
+        {
+            2
+        } else {
+            1
+        },
+        cleanup_rules,
         desired_hash,
         rules,
-        ..AgentPortForwardingConfig::default()
     };
     validate_port_forwarding_config(&config)
         .map_err(|error| anyhow::anyhow!("port_forward_desired_state_invalid:{error}"))?;
@@ -1201,6 +1350,14 @@ fn validate_all_enabled_records(records: &[PortForwardRuleRecord]) -> Result<()>
 }
 
 fn validate_record(record: &PortForwardRuleRecord) -> Result<()> {
+    anyhow::ensure!(
+        record.mode != PortForwardMode::Redirect || record.target_hostname.is_none(),
+        "port_forward_redirect_hostname_not_applicable"
+    );
+    anyhow::ensure!(
+        record.mode == PortForwardMode::CustomAdapter || record.adapter_definition_id.is_none(),
+        "port_forward_adapter_not_applicable"
+    );
     validate_port_forward_rule(&runtime_rule_from_record(record))
         .map_err(|error| anyhow::anyhow!("port_forward_rule_invalid:{error}"))
 }
@@ -1211,6 +1368,11 @@ fn runtime_rule_from_record(record: &PortForwardRuleRecord) -> PortForwardRule {
         revision: record.revision,
         name: record.name.clone(),
         protocol: record.protocol,
+        mode: record.mode,
+        address_family: (record.mode == PortForwardMode::Redirect)
+            .then_some(record.address_family)
+            .flatten(),
+        adapter: record.adapter.clone(),
         target_ip: record.target_ip,
         mappings: record.mappings.clone(),
         masquerade: record.masquerade,
@@ -1230,7 +1392,10 @@ fn apply_bulk_action(
     record.revision += 1;
     record.updated_at = now.to_string();
     match action {
-        PortForwardBulkAction::Enable => record.enabled = true,
+        PortForwardBulkAction::Enable => {
+            record.enabled = true;
+            record.adapter_cleanup_pending |= record.mode == PortForwardMode::CustomAdapter;
+        }
         PortForwardBulkAction::Disable => record.enabled = false,
         PortForwardBulkAction::Delete => {
             record.enabled = false;
@@ -1290,31 +1455,54 @@ fn record_to_view(
     });
     let runtime_is_current =
         snapshot.is_some_and(|snapshot| snapshot.desired_hash.as_deref() == expected_hash);
-    let forwarding_enabled = snapshot.and_then(|snapshot| {
-        if record.target_ip.is_ipv4() {
-            snapshot.ipv4_forwarding_enabled
-        } else {
-            snapshot.ipv6_forwarding_enabled
-        }
-    });
+    let native_succeeded = snapshot.is_some_and(|snapshot| snapshot.native_desired_hash.is_some());
+    let has_rule_status = rule_runtime.is_some_and(|rule| rule.status.is_some());
+    let forwarding_enabled = snapshot
+        .filter(|_| record.mode == PortForwardMode::Dnat)
+        .and_then(|snapshot| {
+            if record.target_ip.is_some_and(|ip| ip.is_ipv4()) {
+                snapshot.ipv4_forwarding_enabled
+            } else {
+                snapshot.ipv6_forwarding_enabled
+            }
+        });
     let mut runtime_status = if record.deleted_at.is_some() {
         "removal_pending".to_string()
     } else if runtime_configuration_error.is_some() {
         "failed".to_string()
+    } else if record.mode == PortForwardMode::CustomAdapter
+        && !record.enabled
+        && !record.adapter_cleanup_pending
+    {
+        "disabled".to_string()
     } else if snapshot.is_none() || !runtime_is_current {
         "pending".to_string()
     } else if !record.enabled
+        && !record.adapter_cleanup_pending
         && snapshot.is_some_and(|snapshot| {
-            matches!(
-                snapshot.status,
-                PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Absent
-            )
+            if record.mode == PortForwardMode::CustomAdapter {
+                snapshot.removed_rules.iter().any(|removed| {
+                    removed.rule_id == record.id && removed.revision == record.revision
+                })
+            } else {
+                native_succeeded
+                    || matches!(
+                        snapshot.status,
+                        PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Absent
+                    )
+            }
         })
     {
         "disabled".to_string()
     } else {
-        snapshot
-            .map(|snapshot| runtime_status_name(snapshot.status).to_string())
+        rule_runtime
+            .and_then(|rule| rule.status)
+            .or_else(|| {
+                snapshot
+                    .filter(|_| record.mode != PortForwardMode::CustomAdapter)
+                    .map(|snapshot| snapshot.status)
+            })
+            .map(|status| runtime_status_name(status).to_string())
             .unwrap_or_else(|| "unknown".to_string())
     };
     if runtime_status == "applied" && forwarding_enabled == Some(false) {
@@ -1325,6 +1513,13 @@ fn record_to_view(
         client_id: record.client_id,
         name: record.name,
         protocol: record.protocol,
+        mode: record.mode,
+        address_family: record.address_family,
+        adapter_definition_id: record.adapter_definition_id,
+        adapter_definition_name: record
+            .adapter
+            .as_ref()
+            .map(|adapter| adapter.definition_name.clone()),
         target_ip: record.target_ip,
         target_hostname: record.target_hostname,
         mappings: record.mappings,
@@ -1333,31 +1528,64 @@ fn record_to_view(
         revision: record.revision,
         desired_status: desired_status.to_string(),
         runtime_status,
-        nat_matches: rule_runtime
-            .map(|stat| stat.nat_matches)
-            .unwrap_or_default(),
+        nat_matches: if record.mode == PortForwardMode::CustomAdapter {
+            None
+        } else {
+            Some(
+                rule_runtime
+                    .and_then(|stat| stat.nat_matches)
+                    .unwrap_or_default(),
+            )
+        },
         desired_hash: expected_hash
             .filter(|hash| !hash.is_empty())
             .map(str::to_string),
         agent_desired_hash: snapshot.and_then(|snapshot| snapshot.desired_hash.clone()),
-        observed_hash: snapshot.and_then(|snapshot| snapshot.observed_hash.clone()),
-        nft_version: snapshot.and_then(|snapshot| snapshot.nft_version.clone()),
+        observed_hash: snapshot
+            .filter(|_| record.mode != PortForwardMode::CustomAdapter)
+            .and_then(|snapshot| snapshot.observed_hash.clone()),
+        nft_version: snapshot
+            .filter(|_| record.mode != PortForwardMode::CustomAdapter)
+            .and_then(|snapshot| snapshot.nft_version.clone()),
         forwarding_enabled,
-        runtime_observed_unix: snapshot
-            .map(|snapshot| snapshot.observed_unix)
+        runtime_observed_unix: rule_runtime
+            .and_then(|rule| rule.observed_unix)
+            .or_else(|| snapshot.map(|snapshot| snapshot.observed_unix))
             .filter(|observed| *observed > 0),
         runtime_error_code: runtime_configuration_error
             .map(|_| "port_forward_runtime_snapshot_corrupt".to_string())
             .or_else(|| {
-                snapshot
+                rule_runtime
                     .filter(|_| runtime_is_current)
+                    .and_then(|rule| rule.error_code.clone())
+            })
+            .or_else(|| {
+                snapshot
+                    .filter(|_| {
+                        runtime_is_current
+                            && record.mode != PortForwardMode::CustomAdapter
+                            && !has_rule_status
+                            && !native_succeeded
+                    })
                     .and_then(|snapshot| snapshot.error_code.clone())
             }),
-        runtime_error: runtime_configuration_error.map(str::to_string).or_else(|| {
-            snapshot
-                .filter(|_| runtime_is_current)
-                .and_then(|snapshot| snapshot.error_message.clone())
-        }),
+        runtime_error: runtime_configuration_error
+            .map(str::to_string)
+            .or_else(|| {
+                rule_runtime
+                    .filter(|_| runtime_is_current)
+                    .and_then(|rule| rule.error_message.clone())
+            })
+            .or_else(|| {
+                snapshot
+                    .filter(|_| {
+                        runtime_is_current
+                            && record.mode != PortForwardMode::CustomAdapter
+                            && !has_rule_status
+                            && !native_succeeded
+                    })
+                    .and_then(|snapshot| snapshot.error_message.clone())
+            }),
         created_at: record.created_at,
         updated_at: record.updated_at,
         deleted_at: record.deleted_at,
@@ -1392,6 +1620,89 @@ fn parse_protocol(value: &str) -> Result<PortForwardProtocol> {
         "both" => Ok(PortForwardProtocol::Both),
         _ => anyhow::bail!("invalid persisted port-forward protocol"),
     }
+}
+
+fn mode_name(mode: PortForwardMode) -> &'static str {
+    match mode {
+        PortForwardMode::Dnat => "dnat",
+        PortForwardMode::Redirect => "redirect",
+        PortForwardMode::CustomAdapter => "custom_adapter",
+    }
+}
+
+fn parse_mode(value: &str) -> Result<PortForwardMode> {
+    match value {
+        "dnat" => Ok(PortForwardMode::Dnat),
+        "redirect" => Ok(PortForwardMode::Redirect),
+        "custom_adapter" => Ok(PortForwardMode::CustomAdapter),
+        _ => anyhow::bail!("invalid persisted port-forward mode"),
+    }
+}
+
+fn family_name(family: PortForwardAddressFamily) -> &'static str {
+    match family {
+        PortForwardAddressFamily::Ipv4 => "ipv4",
+        PortForwardAddressFamily::Ipv6 => "ipv6",
+        PortForwardAddressFamily::Both => "both",
+    }
+}
+
+fn parse_family(value: &str) -> Result<PortForwardAddressFamily> {
+    match value {
+        "ipv4" => Ok(PortForwardAddressFamily::Ipv4),
+        "ipv6" => Ok(PortForwardAddressFamily::Ipv6),
+        "both" => Ok(PortForwardAddressFamily::Both),
+        _ => anyhow::bail!("invalid persisted port-forward family"),
+    }
+}
+
+fn stored_address_family(
+    mode: PortForwardMode,
+    requested: Option<PortForwardAddressFamily>,
+    ip: Option<IpAddr>,
+) -> Option<PortForwardAddressFamily> {
+    match mode {
+        PortForwardMode::Dnat => ip.map(|ip| {
+            if ip.is_ipv4() {
+                PortForwardAddressFamily::Ipv4
+            } else {
+                PortForwardAddressFamily::Ipv6
+            }
+        }),
+        PortForwardMode::Redirect => Some(requested.unwrap_or(PortForwardAddressFamily::Ipv4)),
+        PortForwardMode::CustomAdapter => None,
+    }
+}
+
+async fn resolve_postgres_port_forward_adapter(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    record: &mut PortForwardRuleRecord,
+) -> Result<()> {
+    if let Some(id) = record.adapter_definition_id {
+        let definition = sqlx::query_scalar::<_, SqlJson<crate::model::NetworkAdapterDefinitionView>>(
+            "SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE id = $1 FOR SHARE"
+        ).bind(id).fetch_optional(&mut **tx).await?
+            .context("port_forward_adapter_definition_not_found")?;
+        record.adapter = Some(port_forward_adapter_from_definition(&definition.0)?);
+    }
+    Ok(())
+}
+
+async fn record_requested_port_forward_adapter_owner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    record: &PortForwardRuleRecord,
+) -> Result<()> {
+    if record.mode == PortForwardMode::CustomAdapter
+        && record.enabled
+        && record.deleted_at.is_none()
+    {
+        let definition_id = record
+            .adapter_definition_id
+            .context("port_forward_adapter_definition_required")?;
+        sqlx::query("INSERT INTO port_forward_adapter_owners(rule_id,adapter_definition_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
+            .bind(record.id).bind(definition_id).execute(&mut **tx).await?;
+    }
+    Ok(())
 }
 
 fn normalized_target_hostname(value: Option<&str>) -> Result<Option<String>> {
@@ -1441,6 +1752,9 @@ fn port_forward_audit_metadata(
             "client_id": &record.client_id,
             "name": &record.name,
             "protocol": protocol_name(record.protocol),
+            "mode": mode_name(record.mode),
+            "address_family": record.address_family.map(family_name),
+            "adapter_definition_id": record.adapter_definition_id,
             "target_ip": record.target_ip,
             "target_hostname": &record.target_hostname,
             "mappings": &record.mappings,
@@ -1522,7 +1836,10 @@ async fn insert_port_forward_audit(
 }
 
 fn port_forward_record_from_row(row: &sqlx::postgres::PgRow) -> Result<PortForwardRuleRecord> {
-    let target_ip: String = row.try_get("target_ip")?;
+    let target_ip: Option<String> = row.try_get("target_ip")?;
+    let definition: Option<SqlJson<crate::model::NetworkAdapterDefinitionView>> =
+        row.try_get("adapter_definition")?;
+    let address_family: Option<String> = row.try_get("address_family")?;
     let mappings: SqlJson<serde_json::Value> = row.try_get("mappings")?;
     let mappings = serde_json::from_value::<Vec<PortForwardMapping>>(mappings.0)
         .map_err(|error| anyhow::anyhow!("invalid persisted port-forward mappings: {error}"))?;
@@ -1532,9 +1849,16 @@ fn port_forward_record_from_row(row: &sqlx::postgres::PgRow) -> Result<PortForwa
         client_id: row.try_get("client_id")?,
         name: row.try_get("name")?,
         protocol: parse_protocol(row.try_get("protocol")?)?,
+        mode: parse_mode(row.try_get("mode")?)?,
+        address_family: address_family.as_deref().map(parse_family).transpose()?,
+        adapter_definition_id: row.try_get("adapter_definition_id")?,
+        adapter: definition
+            .map(|definition| port_forward_adapter_from_definition(&definition.0))
+            .transpose()?,
+        adapter_cleanup_pending: row.try_get("adapter_cleanup_pending")?,
         target_ip: target_ip
-            .parse::<IpAddr>()
-            .context("invalid persisted target IP")?,
+            .map(|ip| ip.parse::<IpAddr>().context("invalid persisted target IP"))
+            .transpose()?,
         target_hostname: row.try_get("target_hostname")?,
         mappings,
         masquerade: row.try_get("masquerade")?,
@@ -1617,6 +1941,7 @@ pub(crate) async fn postgres_port_forwarding_blocked_clients_for_agent_delete(
         WHERE client_id=ANY($1)
           AND (
                 (deleted_at IS NULL AND enabled)
+             OR EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id)
              OR (deleted_at IS NOT NULL AND removal_confirmed_at IS NULL AND forgotten_at IS NULL)
           )
         "#,
@@ -1657,7 +1982,10 @@ pub(crate) async fn postgres_port_forwarding_blocked_clients_for_agent_delete(
                 continue;
             }
         };
-        if snapshot.owned_table_present == Some(true)
+        if snapshot.rules.iter().any(|rule| {
+            rule.mode == PortForwardMode::CustomAdapter
+                && rule.status != Some(PortForwardRuntimeStatus::Absent)
+        }) || snapshot.owned_table_present == Some(true)
             || (snapshot.owned_table_present.is_none()
                 && matches!(
                     snapshot.status,
@@ -1772,6 +2100,9 @@ async fn select_postgres_port_forward_rules_for_client_excluding(
         r#"
         SELECT id, actor_id, client_id, name, protocol,
             host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
             masquerade, enabled, revision,
             created_at::text AS created_at, updated_at::text AS updated_at,
             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -1813,6 +2144,9 @@ async fn select_postgres_port_forward_rule(
         r#"
         SELECT id, actor_id, client_id, name, protocol,
             host(target_ip) AS target_ip, target_hostname, mappings,
+                        mode, address_family, adapter_definition_id,
+                        EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
+                        (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
             masquerade, enabled, revision,
             created_at::text AS created_at, updated_at::text AS updated_at,
             deleted_at::text AS deleted_at, deleted_by, deleted_reason,

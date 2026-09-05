@@ -120,9 +120,13 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Run { endpoint } => run_agent(config, args.config, endpoint).await,
         Command::Once => {
-            let (port_forwarding, consumer) = PortForwardingConsumer::channel();
+            let (port_forwarding, consumer) =
+                PortForwardingConsumer::channel(config.client_id.clone());
             let consumer = tokio::spawn(consumer.run());
             port_forwarding.probe().await?;
+            port_forwarding
+                .inspect(&config.network.port_forwarding)
+                .await?;
             let mut runtime_state = TelemetryRuntimeState::default();
             let metrics =
                 collect_metrics_for_config(&config, &mut runtime_state, &port_forwarding).await?;

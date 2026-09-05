@@ -77,6 +77,317 @@ test.beforeEach(async ({ page }, testInfo) => {
   await openConsoleSubpage(page, "Network", "Port forwards");
 });
 
+test("REDIRECT preserves the DNAT draft and submits local ports for the selected families", async ({
+  page,
+}, testInfo) => {
+  const record = portForwardRecord(
+    page,
+    testInfo,
+    portForwardRuleIds.publicWeb,
+    "Public web ingress",
+  );
+  await invokePortForwardAction(page, testInfo, record, "Edit");
+  const editor = page.locator(".portForwardEditor");
+  const mode = editor.getByRole("group", { name: "Forwarding mode" });
+  await mode.getByRole("button", { name: "REDIRECT", exact: true }).click();
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveCount(0);
+  await expect(editor.getByRole("group", { name: "Return path" })).toHaveCount(
+    0,
+  );
+  await expect(editor.getByLabel("Local ports")).toHaveValue("8080,8443");
+  await expect(editor).toContainText(
+    "A service bound exclusively to 127.0.0.1 or ::1 may not receive it",
+  );
+  await editor
+    .getByRole("group", { name: "Address family" })
+    .getByRole("button", { name: "Both", exact: true })
+    .click();
+  await mode.getByRole("button", { name: "DNAT", exact: true }).click();
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue(
+    "app.internal",
+  );
+  await expect(
+    editor.getByRole("button", { name: "Masquerade", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await mode.getByRole("button", { name: "REDIRECT", exact: true }).click();
+  await expect(
+    editor
+      .getByRole("group", { name: "Address family" })
+      .getByRole("button", { name: "Both", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await editor.getByRole("button", { name: "Save changes" }).click();
+  const confirmation = page.getByLabel("Confirm rule update");
+  await expect(confirmation).toContainText("REDIRECT");
+  await expect(confirmation).toContainText("IPv4 + IPv6");
+  await expect(confirmation).toContainText("This VPS");
+  await expect(confirmation).not.toContainText("app.internal");
+  await confirmation.getByRole("button", { name: "Save and apply" }).click();
+  await expect(editor).toBeHidden();
+  const requests = await portForwardRequests(page);
+  expect(requests.at(-1)).toMatchObject({
+    action: "update",
+    body: {
+      mode: "redirect",
+      address_family: "both",
+      target_ip: null,
+      target_hostname: null,
+      adapter_definition_id: null,
+      masquerade: false,
+      mappings: [
+        {
+          incoming: { start: 80, end: 80 },
+          target: { start: 8080, end: 8080 },
+        },
+        {
+          incoming: { start: 443, end: 443 },
+          target: { start: 8443, end: 8443 },
+        },
+      ],
+    },
+  });
+  const details = await openPortForwardDetails(
+    page,
+    testInfo,
+    portForwardRuleIds.publicWeb,
+    "Public web ingress",
+  );
+  await expect(details).toContainText("REDIRECT");
+  await expect(details).not.toContainText("IPv4 forwarding");
+});
+
+test("custom adapters are reusable in the forwarding drawer and work independently of nftables", async ({
+  page,
+}, testInfo) => {
+  await page.getByRole("button", { name: "Create rule", exact: true }).click();
+  const editor = page.locator(".portForwardEditor");
+  await editor.getByLabel("Port-forward rule VPS").fill("backup-nyc");
+  await page
+    .getByRole("listbox", { name: "Port-forward rule VPS options" })
+    .getByRole("option", { name: /backup-nyc-03/ })
+    .click();
+  await editor
+    .getByLabel("Name", { exact: true })
+    .fill("Local application adapter");
+  await editor.getByLabel("Incoming ports").fill("8090");
+  await editor.getByLabel("Target ports").fill("8080");
+  await editor
+    .getByRole("group", { name: "Forwarding mode" })
+    .getByRole("button", { name: "Custom adapter", exact: true })
+    .click();
+  await editor.getByLabel("Target IP or hostname").fill("127.0.0.1");
+  await expect(editor.getByLabel("Address family")).toHaveValue(
+    "Controlled by adapter",
+  );
+  await expect(editor.getByRole("group", { name: "Return path" })).toHaveCount(
+    0,
+  );
+  await editor
+    .getByRole("button", { name: "Create adapter", exact: true })
+    .click();
+  let drawer = page.getByLabel("New port forwarding adapter", { exact: true });
+  await expect(drawer.getByLabel("Adapter purpose")).toHaveValue(
+    "port_forward",
+  );
+  await expect(drawer.getByLabel("Apply adapter command")).toContainText(
+    "{rule_id}",
+  );
+  await expect(drawer.getByLabel("Remove adapter command")).toBeVisible();
+  await expect(drawer.getByLabel("Status adapter command")).toBeVisible();
+  await drawer
+    .getByRole("button", { name: "Close New port forwarding adapter" })
+    .click();
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue(
+    "Local application adapter",
+  );
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue(
+    "127.0.0.1",
+  );
+  await editor
+    .getByRole("button", { name: "Create adapter", exact: true })
+    .click();
+  drawer = page.getByLabel("New port forwarding adapter", { exact: true });
+  await drawer
+    .getByLabel("Adapter definition name")
+    .fill("Local service manager");
+  await drawer
+    .getByRole("button", { name: "Create adapter definition", exact: true })
+    .click();
+  await expect(drawer).toBeHidden();
+  await expect(
+    editor.getByLabel("Port-forward adapter definition"),
+  ).toHaveValue("36363636-3636-4636-8636-363636363636");
+  await editor
+    .getByRole("button", { name: "Edit adapter", exact: true })
+    .click();
+  const editDrawer = page.getByLabel("Edit Local service manager", {
+    exact: true,
+  });
+  await expect(editDrawer.getByLabel("Adapter definition name")).toHaveValue(
+    "Local service manager",
+  );
+  await editDrawer
+    .getByRole("button", { name: "Close Edit Local service manager" })
+    .click();
+  await editor.getByLabel("Target IP or hostname").fill("localhost");
+  await editor.getByRole("button", { name: "Resolve", exact: true }).click();
+  await editor
+    .getByRole("group", { name: "Resolved addresses" })
+    .getByRole("radio", { name: /127\.0\.0\.1/ })
+    .check();
+  await editor.getByLabel("Enabled").check();
+  await editor
+    .getByRole("button", { name: "Create rule", exact: true })
+    .click();
+  const confirmation = page.getByLabel("Confirm rule creation");
+  await expect(confirmation).toContainText("Local service manager");
+  await expect(confirmation).toContainText("sequentially");
+  await confirmation.getByRole("button", { name: "Create and apply" }).click();
+  await expect(editor).toBeHidden();
+  const requests = await portForwardRequests(page);
+  expect(requests.at(-1)).toMatchObject({
+    action: "create",
+    body: {
+      mode: "custom_adapter",
+      client_id: "agent-nyc-03",
+      address_family: null,
+      target_ip: "127.0.0.1",
+      target_hostname: "localhost",
+      masquerade: false,
+      adapter_definition_id: "36363636-3636-4636-8636-363636363636",
+      enabled: true,
+    },
+  });
+  const newId = "4f000000-0000-4000-8000-000000000014";
+  const details = await openPortForwardDetails(
+    page,
+    testInfo,
+    newId,
+    "Local application adapter",
+  );
+  await expect(details).toContainText("Custom adapters supported");
+  await expect(details).toContainText("Local service manager");
+  await expect(details).not.toContainText("nftables");
+  await expect(details).not.toContainText("NAT matches");
+  await expect(details).not.toContainText("Observed table");
+  await details
+    .getByRole("button", { name: "Close Port-forward rules row details" })
+    .click();
+  await invokePortForwardAction(
+    page,
+    testInfo,
+    portForwardRecord(page, testInfo, newId, "Local application adapter"),
+    "Clone",
+  );
+  await expect(
+    editor.getByRole("button", { name: "Custom adapter", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    editor.getByLabel("Port-forward adapter definition"),
+  ).toHaveValue("36363636-3636-4636-8636-363636363636");
+  await expect(
+    editor.getByRole("button", { name: "Edit adapter", exact: true }),
+  ).toBeDisabled();
+  await editor.getByLabel("Target IP or hostname").fill("");
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue("");
+  await expect(editor.locator(".portMappingPreview")).toContainText(
+    "adapter destination",
+  );
+  await editor
+    .getByRole("button", { name: "Create rule", exact: true })
+    .click();
+  await expect(editor).toBeHidden();
+  expect((await portForwardRequests(page)).at(-1)).toMatchObject({
+    action: "create",
+    body: {
+      mode: "custom_adapter",
+      target_ip: null,
+      enabled: false,
+      adapter_definition_id: "36363636-3636-4636-8636-363636363636",
+    },
+  });
+});
+
+test("changing forwarding mode discards an obsolete DNS response without losing the draft", async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    Object.assign(window, {
+      __releaseModeDns: release,
+      __modeDnsCompleted: false,
+    });
+    window.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (
+        new URL(url, window.location.href).pathname ===
+        "/api/v1/network/resolve-hostname"
+      ) {
+        await gate;
+        const result = await originalFetch(input, init);
+        Object.assign(window, { __modeDnsCompleted: true });
+        return result;
+      }
+      return originalFetch(input, init);
+    };
+  });
+  await page.getByRole("button", { name: "Create rule", exact: true }).click();
+  const editor = page.locator(".portForwardEditor");
+  await editor.getByLabel("Target IP or hostname").fill("app.internal");
+  await editor.getByRole("button", { name: "Resolve", exact: true }).click();
+  await expect(
+    editor.getByRole("button", { name: "Resolving hostname" }),
+  ).toBeDisabled();
+  await editor
+    .getByRole("group", { name: "Forwarding mode" })
+    .getByRole("button", { name: "REDIRECT", exact: true })
+    .click();
+  await page.evaluate(() =>
+    (window as unknown as { __releaseModeDns: () => void }).__releaseModeDns(),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __modeDnsCompleted: boolean })
+            .__modeDnsCompleted,
+      ),
+    )
+    .toBe(true);
+  await expect(
+    editor.getByRole("group", { name: "Resolved addresses" }),
+  ).toHaveCount(0);
+  await editor
+    .getByRole("group", { name: "Forwarding mode" })
+    .getByRole("button", { name: "DNAT", exact: true })
+    .click();
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue(
+    "app.internal",
+  );
+  await expect(
+    editor.getByRole("group", { name: "Resolved addresses" }),
+  ).toHaveCount(0);
+});
+
+async function portForwardRequests(page: Page) {
+  return page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            portForwardRules: Array<{
+              action: string;
+              body: Record<string, unknown>;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.portForwardRules,
+  );
+}
+
 test("port-forward registry, details, and reviewed create stay revision-bound", async ({
   page,
 }, testInfo) => {
