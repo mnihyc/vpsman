@@ -966,6 +966,115 @@ test("public monitoring reuses the Unicode country flag renderer", async ({
   ).toContainText("US · Virginia");
 });
 
+test("public monitoring detail range requests omit cards without losing the shared fleet", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page);
+  const queries: URLSearchParams[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      url.pathname === `/api/v1/public/monitoring-shares/${publicShareId}/data`
+    ) {
+      queries.push(url.searchParams);
+    }
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  await expect(card).toBeVisible();
+  expect(queries[0].get("client_key")).toBeNull();
+  expect(queries[0].get("include_cards")).toBeNull();
+
+  const detailResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname.endsWith(`/monitoring-shares/${publicShareId}/data`) &&
+      url.searchParams.get("client_key") === publicClientKey
+    );
+  });
+  await card.click();
+  const response = await detailResponse;
+  expect(new URL(response.url()).searchParams.get("include_cards")).toBe(
+    "false",
+  );
+  expect((await response.json()).cards).toEqual([]);
+  const detail = page.getByRole("region", {
+    name: "Read-only history for Shared edge",
+  });
+  await expect(
+    detail.getByRole("region", { name: "Traffic volume chart" }),
+  ).toBeVisible();
+  await expect(detail.getByLabel("Current shared VPS evidence")).toContainText(
+    "Customer gateway",
+  );
+  await detail.getByRole("button", { name: "Last hour", exact: true }).click();
+  await expect
+    .poll(() =>
+      queries
+        .filter((query) => query.has("client_key"))
+        .map((query) => ({
+          includeCards: query.get("include_cards"),
+          points: query.get("points"),
+          window: query.get("window"),
+        })),
+    )
+    .toEqual([
+      { includeCards: "false", points: "480", window: "1d" },
+      { includeCards: "false", points: "480", window: "1h" },
+    ]);
+  await expect(
+    detail.getByRole("region", { name: "Traffic volume chart" }),
+  ).toBeVisible();
+  await detail
+    .getByRole("button", { name: /Ping Targets · latency · loss/ })
+    .click();
+  await expect(
+    detail.getByRole("button", { name: "Hide Customer gateway Ping history" }),
+  ).toBeVisible();
+  await detail
+    .getByRole("button", { name: "Custom time range", exact: true })
+    .click();
+  await expect.poll(() => queries.at(-1)?.get("window")).toBe("custom");
+  const beforeCustomApply = queries.filter((query) =>
+    query.has("client_key"),
+  ).length;
+  const customStart = detail.getByLabel("Start", { exact: true });
+  const customEnd = detail.getByLabel("End", { exact: true });
+  await customStart.fill("2026-06-23T15:00");
+  await customEnd.fill("2026-06-23T16:00");
+  expect(queries.filter((query) => query.has("client_key"))).toHaveLength(
+    beforeCustomApply,
+  );
+  const startUnix = await customStart.evaluate((input: HTMLInputElement) =>
+    String(Math.floor(Date.parse(input.value) / 1_000)),
+  );
+  const endUnix = await customEnd.evaluate((input: HTMLInputElement) =>
+    String(Math.floor(Date.parse(input.value) / 1_000)),
+  );
+  await detail
+    .getByRole("button", { name: "Apply range", exact: true })
+    .click();
+  await expect
+    .poll(() => queries.filter((query) => query.has("client_key")).length)
+    .toBe(beforeCustomApply + 1);
+  expect(Object.fromEntries(queries.at(-1)!)).toMatchObject({
+    include_cards: "false",
+    start_unix: startUnix,
+    end_unix: endUnix,
+    window: "custom",
+  });
+  await expect(
+    detail.getByRole("button", { name: "Hide Customer gateway Ping history" }),
+  ).toBeVisible();
+  await detail
+    .getByRole("button", { name: "Back to shared fleet", exact: true })
+    .click();
+  await expect(card).toBeVisible();
+  expect(queries.filter((query) => !query.has("client_key"))).toHaveLength(1);
+});
+
 test("public monitoring keeps grid and detail history state without exposing hidden resource evidence", async ({
   page,
 }) => {
@@ -3042,7 +3151,7 @@ async function installPublicMonitoringApiMock(
         return;
       }
       const response: PublicMonitoringDataView = {
-        cards,
+        cards: url.searchParams.get("include_cards") === "false" ? [] : cards,
         detail:
           url.searchParams.get("client_key") === publicClientKey
             ? detail

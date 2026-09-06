@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
 use super::{
-    aligned_timeline_point_count, public_billing_plan, public_monitoring_cards_singleflight_key,
-    public_monitoring_detail_singleflight_key, public_network_metric, public_network_points,
-    public_traffic_metric, public_visibility_uses_projected_telemetry, retained_resolution_for_age,
+    aligned_timeline_point_count, client_monitoring_singleflight_key, public_billing_plan,
+    public_monitoring_cards_singleflight_key, public_monitoring_detail_singleflight_key,
+    public_network_metric, public_network_points, public_traffic_metric,
+    public_visibility_uses_projected_telemetry, retained_resolution_for_age,
     retained_traffic_resolution_for_age, tier_aligned_step_secs, traffic_uses_exact_source,
-    validate_bulk_ping_target_selection, validate_monitoring_share_targets, ClientMonitoringQuery,
-    MonitoringCardsHistoryMode,
+    validate_bulk_ping_target_selection, validate_monitoring_share_targets,
+    ClientMonitoringProjection, ClientMonitoringQuery, MonitoringCardsHistoryMode,
 };
 use uuid::Uuid;
 
@@ -37,6 +38,32 @@ fn monitoring_card_history_compaction_is_additive_and_opt_in() {
         MonitoringCardsHistoryMode::SelectedAggregate.as_str(),
         "selected_aggregate"
     );
+}
+
+#[test]
+fn client_monitoring_projection_defaults_to_full_and_fences_cached_domains() {
+    let mut query: ClientMonitoringQuery = serde_json::from_value(serde_json::json!({
+        "window": "1d", "points": 80
+    }))
+    .unwrap();
+    assert_eq!(query.projection, ClientMonitoringProjection::Full);
+    let full = client_monitoring_singleflight_key("operator", "vps", &query);
+    query.projection = ClientMonitoringProjection::Resources;
+    let resources = client_monitoring_singleflight_key("operator", "vps", &query);
+    query.projection = ClientMonitoringProjection::Ping;
+    let ping = client_monitoring_singleflight_key("operator", "vps", &query);
+    assert_ne!(full, resources);
+    assert_ne!(full, ping);
+    assert_ne!(resources, ping);
+    assert!(
+        serde_json::from_value::<ClientMonitoringQuery>(serde_json::json!({
+            "projection": "unknown"
+        }))
+        .is_err()
+    );
+    let default_public: super::PublicMonitoringDataQuery =
+        serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(default_public.include_cards.unwrap_or(true));
 }
 
 #[test]
@@ -168,6 +195,7 @@ fn public_read_cache_keys_are_fenced_by_the_monotonic_share_revision() {
         start_unix: None,
         end_unix: Some(90),
         points: Some(80),
+        projection: ClientMonitoringProjection::Full,
     };
     let cards_before =
         public_monitoring_cards_singleflight_key(&share, std::slice::from_ref(&client), 0, 100, 1);

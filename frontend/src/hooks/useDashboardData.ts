@@ -954,6 +954,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     const params = dashboardPreferencesToParams(
       dashboardOverview.dashboardPreferences,
     );
+    params.set("include_system_history", "false");
     void apiGet<HomeSnapshotRecord>(
       `/api/v1/home/snapshot?${params.toString()}`,
       apiToken,

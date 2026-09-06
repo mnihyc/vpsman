@@ -282,7 +282,7 @@ pub(crate) struct MonitoringCardView {
     pub(crate) network: Vec<TelemetryNetworkRateView>,
     pub(crate) network_history: Vec<TelemetryNetworkRateView>,
     pub(crate) network_rate_expected: bool,
-    pub(crate) traffic: TrafficAccountingRecord,
+    pub(crate) traffic: Option<TrafficAccountingRecord>,
     pub(crate) primary_ping: Option<CurrentPingView>,
     pub(crate) primary_ping_history: Vec<PingRollupView>,
 }
@@ -358,7 +358,7 @@ pub(crate) struct ClientMonitoringView {
     pub(crate) network: Vec<TelemetryNetworkRateView>,
     pub(crate) network_current_detail: Vec<TelemetryNetworkRateView>,
     pub(crate) tunnel_current_detail: Vec<TelemetryTunnelView>,
-    pub(crate) traffic: TrafficAccountingRecord,
+    pub(crate) traffic: Option<TrafficAccountingRecord>,
     pub(crate) traffic_history: Vec<TrafficHistoryPointView>,
     pub(crate) ping_targets: Vec<CurrentPingView>,
     pub(crate) ping: Vec<PingRollupView>,

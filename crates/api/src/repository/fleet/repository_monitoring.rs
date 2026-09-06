@@ -72,7 +72,7 @@ const MONITORING_SYSTEM_INFORMATION_SQL: &str = r#"
         client.kernel_release,
         client.virtualization,
         client.system_reported_at::text AS system_reported_at,
-        latest.payload AS latest_payload,
+        latest.payload -> 'uptime_secs' AS uptime_value,
         latest.observed_at::text AS uptime_observed_at
     FROM visible_clients client
     LEFT JOIN telemetry_projection_heads projection
@@ -136,12 +136,8 @@ impl Repository {
                 let mut views = HashMap::with_capacity(rows.len());
                 for row in rows {
                     let client_id: String = row.try_get("client_id")?;
-                    let latest_payload: Option<serde_json::Value> =
-                        row.try_get("latest_payload")?;
-                    let uptime_secs = latest_payload
-                        .as_ref()
-                        .and_then(|payload| payload.get("uptime_secs"))
-                        .and_then(serde_json::Value::as_u64);
+                    let uptime_value: Option<serde_json::Value> = row.try_get("uptime_value")?;
+                    let uptime_secs = uptime_value.as_ref().and_then(serde_json::Value::as_u64);
                     let uptime_observed_at: Option<String> = row.try_get("uptime_observed_at")?;
                     if let Some(view) = system_information_view(
                         row.try_get::<Option<String>, _>("os_release")?.as_deref(),

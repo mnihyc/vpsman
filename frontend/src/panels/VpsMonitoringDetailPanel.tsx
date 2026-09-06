@@ -72,7 +72,7 @@ type ClientMonitoringResponse = {
   network: TelemetryNetworkRateRecord[];
   network_current_detail: TelemetryNetworkRateRecord[];
   tunnel_current_detail: TelemetryTunnelRecord[];
-  traffic: TrafficAccountingRecord;
+  traffic: TrafficAccountingRecord | null;
   traffic_history: TrafficHistoryPointView[];
   ping_targets: CurrentPing[];
   ping: PingRollupView[];
@@ -134,18 +134,23 @@ export function VpsMonitoringDetailPanel({
   );
   const [customError, setCustomError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [data, setData] = useState<ClientMonitoringResponse | null>(null);
+  const [loadedData, setLoadedData] = useState<{
+    section: MonitoringSection;
+    response: ClientMonitoringResponse;
+  } | null>(null);
+  const data = loadedData?.section === section ? loadedData.response : null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const query = useMemo(
-    () => monitoringQuery(window, appliedCustomStart, appliedCustomEnd),
-    [appliedCustomEnd, appliedCustomStart, window],
+    () =>
+      monitoringQuery(window, appliedCustomStart, appliedCustomEnd, section),
+    [appliedCustomEnd, appliedCustomStart, section, window],
   );
 
   useEffect(() => {
     let active = true;
-    setData(null);
+    setLoadedData(null);
     setError(null);
     if (!clientId.trim() || !apiToken || !query.path) {
       setLoading(false);
@@ -165,7 +170,7 @@ export function VpsMonitoringDetailPanel({
           apiToken,
         );
         if (!active) return;
-        setData(response);
+        setLoadedData({ section, response });
         setError(null);
       } catch (cause) {
         if (!active) return;
@@ -189,7 +194,15 @@ export function VpsMonitoringDetailPanel({
       active = false;
       if (refreshTimer !== null) globalThis.clearInterval(refreshTimer);
     };
-  }, [apiToken, clientId, query.error, query.path, refreshKey, window]);
+  }, [
+    apiToken,
+    clientId,
+    query.error,
+    query.path,
+    refreshKey,
+    section,
+    window,
+  ]);
 
   function selectWindow(next: MonitoringWindow) {
     setWindow(next);
@@ -573,7 +586,7 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
               : "RX and TX shown by default; select Total volume to compare their sum · only interfaces selected by authoritative traffic-accounting rules"
           }
           emptyLabel={
-            trafficConfigured(data.traffic)
+            data.traffic && trafficConfigured(data.traffic)
               ? "Traffic volume history is unavailable for this range"
               : "Traffic unconfigured"
           }
@@ -581,7 +594,9 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
           title="Traffic volume"
           valueFormatter={formatBytesNullable}
         />
-        <TrafficCycle clientId={data.client.id} traffic={data.traffic} />
+        {data.traffic ? (
+          <TrafficCycle clientId={data.client.id} traffic={data.traffic} />
+        ) : null}
       </div>
     </section>
   );
@@ -1289,9 +1304,11 @@ function monitoringQuery(
   window: MonitoringWindow,
   customStart: string,
   customEnd: string,
+  section: MonitoringSection,
 ): { error: string | null; path: string | null } {
   const params = new URLSearchParams();
   params.set("points", String(CHART_POINTS));
+  params.set("projection", section);
   if (window !== "custom") {
     params.set("window", window);
     return { error: null, path: params.toString() };

@@ -1366,7 +1366,7 @@ WHERE ready.value
 ORDER BY output.chart_start_unix ASC NULLS FIRST, output.client_id
 "#;
 
-const TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL: &str = r#"
+pub(crate) const TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL: &str = r#"
 WITH requested AS MATERIALIZED (
     SELECT DISTINCT client_id
     FROM UNNEST($1::TEXT[]) requested(client_id)
@@ -1502,73 +1502,10 @@ WITH requested AS MATERIALIZED (
           )
       AND sample.observed_at <= to_timestamp($3)
 
-    UNION ALL
-
-    -- Preserve the canonical strict predecessor used to derive the first
-    -- visible counter delta.  This is one bounded index stop per selected
-    -- stream, rather than another range/function execution per stream.
-    SELECT predecessor.*
-    FROM selected_streams stream
-    JOIN LATERAL (
-        SELECT candidate.*
-        FROM (
-            (
-                SELECT minute.*
-                FROM telemetry_network_rates_minute minute
-                WHERE minute.bucket_secs = 60
-                  AND minute.client_id = stream.client_id
-                  AND minute.interface = stream.interface
-                  AND minute.bucket_start < date_trunc(
-                          'minute', to_timestamp($2)
-                      )
-                  AND minute.bucket_start >= to_timestamp($2)
-                        - make_interval(secs => 86400)
-                ORDER BY minute.bucket_start DESC
-                LIMIT 1
-            )
-
-            UNION ALL
-
-            (
-                SELECT sample.client_id,
-                       sample.interface,
-                       sample.observed_at AS bucket_start,
-                       60::INTEGER AS bucket_secs,
-                       sample.sample_count,
-                       sample.rx_bytes_sum,
-                       sample.tx_bytes_sum,
-                       round(
-                           sample.rx_bytes_sum
-                               / sample.sample_count::NUMERIC
-                       )::BIGINT AS rx_bytes_avg,
-                       round(
-                           sample.tx_bytes_sum
-                               / sample.sample_count::NUMERIC
-                       )::BIGINT AS tx_bytes_avg,
-                       sample.rx_bytes AS rx_bytes_last,
-                       sample.tx_bytes AS tx_bytes_last,
-                       sample.rx_counter_epoch,
-                       sample.tx_counter_epoch,
-                       sample.latest_observed_at,
-                       sample.updated_at
-                FROM traffic_counter_samples sample
-                WHERE sample.client_id = stream.client_id
-                  AND sample.source_kind = 'host'
-                  AND sample.interface = stream.interface
-                  AND NOT sample.inbound_promoted
-                  AND sample.observed_at < date_trunc(
-                          'minute', to_timestamp($2)
-                      )
-                  AND sample.observed_at >= to_timestamp($2)
-                        - make_interval(secs => 86400)
-                ORDER BY sample.observed_at DESC
-                LIMIT 1
-            )
-        ) candidate
-        ORDER BY candidate.bucket_start DESC,
-                 candidate.latest_observed_at DESC
-        LIMIT 1
-    ) predecessor ON $9::BOOLEAN AND $4::INTEGER = 60
+    -- A minute before this window cannot survive `source`'s overlap filter.
+    -- Its counter edge belongs to the canonical predecessor lookup below,
+    -- where raw shadowing, older retained tiers and the actual first returned
+    -- coordinate are all known.
 ), canonical_points AS MATERIALIZED (
     SELECT durable.*
     FROM bounded_durable durable
@@ -1585,7 +1522,7 @@ WITH requested AS MATERIALIZED (
 
     SELECT suffix.*
     FROM projected_suffix suffix
-), ranked_effective_points AS MATERIALIZED (
+), ranked_effective_points AS (
     SELECT candidate.*,
            row_number() OVER (
                PARTITION BY candidate.client_id, candidate.interface
@@ -1594,6 +1531,11 @@ WITH requested AS MATERIALIZED (
                         candidate.bucket_secs ASC
            ) AS physical_rank
     FROM canonical_points candidate
+    -- In the minute-only Cards branch, non-overlapping rows sort strictly
+    -- after every overlapping row, so removing them cannot change kept ranks.
+    -- Mixed retained tiers keep their original physical-cap ordering.
+    WHERE NOT $9::BOOLEAN OR $4::INTEGER <> 60
+       OR candidate.bucket_start + interval '60 seconds' > to_timestamp($2)
 ), effective_points AS MATERIALIZED (
     -- N chart points need at most N * ceil(step / 60) canonical
     -- physical rows. One additional chart-width allowance preserves the
@@ -1700,114 +1642,119 @@ WITH requested AS MATERIALIZED (
         WHERE dropped.client_id = oldest.client_id
           AND dropped.interface = oldest.interface
     )
-), retained_predecessors AS MATERIALIZED (
-    SELECT
-        oldest.client_id,
-        oldest.interface,
-        NULL::BIGINT AS chart_start_unix,
-        $4::INTEGER AS effective_step,
-        predecessor.sample_count::BIGINT AS sample_count,
-        predecessor.latest_observed_at,
-        predecessor.rx_bytes_avg,
-        predecessor.tx_bytes_avg,
-        predecessor.rx_bytes_last,
-        predecessor.tx_bytes_last,
-        predecessor.rx_counter_epoch,
-        predecessor.tx_counter_epoch,
-        predecessor.updated_at
-    FROM missing_predecessor_keys oldest
+), predecessor_sources AS MATERIALIZED (
+    -- Attach suffix points and shadow coordinates once per exact owner.
+    -- UNION markers avoid pairwise joins between materialized fleet inputs.
+    SELECT input.client_id, input.interface,
+           max(input.first_source_start) AS first_source_start,
+           array_agg((input.point).bucket_start)
+               FILTER (WHERE (input.point).client_id IS NOT NULL) AS suffix_bucket_starts,
+           array_agg(input.point)
+               FILTER (WHERE (input.point).client_id IS NOT NULL) AS suffix_points
+    FROM (
+        SELECT oldest.client_id, oldest.interface, oldest.first_source_start,
+               NULL::telemetry_network_rates AS point
+        FROM missing_predecessor_keys oldest
+        UNION ALL
+        SELECT suffix.client_id, suffix.interface, NULL::TIMESTAMPTZ,
+               ROW(suffix.*)::telemetry_network_rates
+        FROM projected_suffix suffix
+    ) input
+    GROUP BY input.client_id, input.interface
+), retained_predecessor_candidates AS (
+    SELECT owner.client_id, owner.interface, predecessor.*
+    FROM predecessor_sources owner
     CROSS JOIN LATERAL (
-        SELECT candidate.*
-        FROM (
-            (
-                SELECT retained.bucket_start, retained.bucket_secs,
-                       retained.sample_count, retained.latest_observed_at,
-                       retained.rx_bytes_avg, retained.tx_bytes_avg,
-                       retained.rx_bytes_last, retained.tx_bytes_last,
-                       retained.rx_counter_epoch, retained.tx_counter_epoch,
-                       retained.updated_at, 1::SMALLINT AS source_priority
-                FROM telemetry_network_rates retained
-                WHERE retained.client_id = oldest.client_id
-                  AND retained.interface = oldest.interface
-                  AND retained.latest_observed_at < oldest.first_source_start
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM projected_suffix shadow
-                      WHERE shadow.client_id = retained.client_id
-                        AND shadow.interface = retained.interface
-                        AND shadow.bucket_secs = retained.bucket_secs
-                        AND shadow.bucket_start = retained.bucket_start
-                  )
-                ORDER BY retained.latest_observed_at DESC,
-                         retained.bucket_start DESC,
-                         retained.bucket_secs DESC
-                LIMIT 1
-            )
-
-            UNION ALL
-
-            (
-                SELECT sample.observed_at AS bucket_start,
-                       60::INTEGER AS bucket_secs,
-                       sample.sample_count, sample.latest_observed_at,
-                       round(
-                           sample.rx_bytes_sum / sample.sample_count::NUMERIC
-                       )::BIGINT AS rx_bytes_avg,
-                       round(
-                           sample.tx_bytes_sum / sample.sample_count::NUMERIC
-                       )::BIGINT AS tx_bytes_avg,
-                       sample.rx_bytes AS rx_bytes_last,
-                       sample.tx_bytes AS tx_bytes_last,
-                       sample.rx_counter_epoch, sample.tx_counter_epoch,
-                       sample.updated_at, 2::SMALLINT AS source_priority
-                FROM traffic_counter_streams stream
-                JOIN traffic_counter_samples sample
-                  ON sample.client_id = stream.client_id
-                 AND sample.source_kind = stream.source_kind
-                 AND sample.interface = stream.interface
-                WHERE stream.client_id = oldest.client_id
-                  AND stream.source_kind = 'host'
-                  AND stream.interface = oldest.interface
-                  AND stream.first_unpromoted_observed_at IS NOT NULL
-                  AND sample.observed_at >=
-                      stream.first_unpromoted_observed_at
-                  AND NOT sample.inbound_promoted
-                  AND sample.latest_observed_at < oldest.first_source_start
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM projected_suffix shadow
-                      WHERE shadow.client_id = sample.client_id
-                        AND shadow.interface = sample.interface
-                        AND shadow.bucket_start = sample.observed_at
-                  )
-                ORDER BY sample.observed_at DESC
-                LIMIT 1
-            )
-
-            UNION ALL
-
-            (
-                SELECT suffix.bucket_start, suffix.bucket_secs,
-                       suffix.sample_count, suffix.latest_observed_at,
-                       suffix.rx_bytes_avg, suffix.tx_bytes_avg,
-                       suffix.rx_bytes_last, suffix.tx_bytes_last,
-                       suffix.rx_counter_epoch, suffix.tx_counter_epoch,
-                       suffix.updated_at, 3::SMALLINT AS source_priority
-                FROM projected_suffix suffix
-                WHERE suffix.client_id = oldest.client_id
-                  AND suffix.interface = oldest.interface
-                  AND suffix.latest_observed_at < oldest.first_source_start
-                ORDER BY suffix.latest_observed_at DESC,
-                         suffix.bucket_start DESC
-                LIMIT 1
-            )
-        ) candidate
-        ORDER BY candidate.latest_observed_at DESC,
-                 candidate.bucket_start DESC,
-                 candidate.bucket_secs DESC,
-                 candidate.source_priority ASC
+        SELECT retained.bucket_start, retained.bucket_secs,
+               retained.sample_count, retained.latest_observed_at,
+               retained.rx_bytes_avg, retained.tx_bytes_avg,
+               retained.rx_bytes_last, retained.tx_bytes_last,
+               retained.rx_counter_epoch, retained.tx_counter_epoch,
+               retained.updated_at, 1::SMALLINT AS source_priority
+        FROM telemetry_network_rates retained
+        WHERE retained.client_id = owner.client_id
+          AND retained.interface = owner.interface
+          AND retained.latest_observed_at < owner.first_source_start
+          -- Raw replacements are minute-only; coarse predecessors remain eligible.
+          AND (
+              retained.bucket_secs <> 60
+              OR NOT retained.bucket_start = ANY(COALESCE(
+                  owner.suffix_bucket_starts, ARRAY[]::TIMESTAMPTZ[]
+              ))
+          )
+        ORDER BY retained.latest_observed_at DESC,
+                 retained.bucket_start DESC, retained.bucket_secs DESC
         LIMIT 1
     ) predecessor
+    WHERE owner.first_source_start IS NOT NULL
+
+    UNION ALL
+
+    SELECT owner.client_id, owner.interface, predecessor.*
+    FROM predecessor_sources owner
+    CROSS JOIN LATERAL (
+        SELECT sample.observed_at AS bucket_start,
+               60::INTEGER AS bucket_secs,
+               sample.sample_count, sample.latest_observed_at,
+               round(
+                   sample.rx_bytes_sum / sample.sample_count::NUMERIC
+               )::BIGINT AS rx_bytes_avg,
+               round(
+                   sample.tx_bytes_sum / sample.sample_count::NUMERIC
+               )::BIGINT AS tx_bytes_avg,
+               sample.rx_bytes AS rx_bytes_last, sample.tx_bytes AS tx_bytes_last,
+               sample.rx_counter_epoch, sample.tx_counter_epoch,
+               sample.updated_at, 2::SMALLINT AS source_priority
+        FROM traffic_counter_streams stream
+        JOIN traffic_counter_samples sample
+          ON sample.client_id = stream.client_id
+         AND sample.source_kind = stream.source_kind
+         AND sample.interface = stream.interface
+        WHERE stream.client_id = owner.client_id
+          AND stream.source_kind = 'host'
+          AND stream.interface = owner.interface
+          AND stream.first_unpromoted_observed_at IS NOT NULL
+          AND sample.observed_at >= stream.first_unpromoted_observed_at
+          AND NOT sample.inbound_promoted
+          AND sample.latest_observed_at < owner.first_source_start
+          AND NOT sample.observed_at = ANY(COALESCE(
+              owner.suffix_bucket_starts, ARRAY[]::TIMESTAMPTZ[]
+          ))
+        ORDER BY sample.observed_at DESC
+        LIMIT 1
+    ) predecessor
+    WHERE owner.first_source_start IS NOT NULL
+
+    UNION ALL
+
+    SELECT owner.client_id, owner.interface,
+           point.bucket_start, point.bucket_secs,
+           point.sample_count, point.latest_observed_at,
+           point.rx_bytes_avg, point.tx_bytes_avg,
+           point.rx_bytes_last, point.tx_bytes_last,
+           point.rx_counter_epoch, point.tx_counter_epoch,
+           point.updated_at, 3::SMALLINT AS source_priority
+    FROM predecessor_sources owner
+    CROSS JOIN LATERAL unnest(owner.suffix_points) point
+    WHERE point.latest_observed_at < owner.first_source_start
+), retained_predecessors AS MATERIALIZED (
+    -- Preserve effective-time, coordinate and source-priority winner selection
+    -- before downstream reset/decrease filtering; do not refill rejected edges.
+    SELECT DISTINCT ON (candidate.client_id, candidate.interface)
+           candidate.client_id, candidate.interface,
+           NULL::BIGINT AS chart_start_unix,
+           $4::INTEGER AS effective_step,
+           candidate.sample_count::BIGINT AS sample_count,
+           candidate.latest_observed_at,
+           candidate.rx_bytes_avg, candidate.tx_bytes_avg,
+           candidate.rx_bytes_last, candidate.tx_bytes_last,
+           candidate.rx_counter_epoch, candidate.tx_counter_epoch,
+           candidate.updated_at
+    FROM retained_predecessor_candidates candidate
+    ORDER BY candidate.client_id, candidate.interface,
+             candidate.latest_observed_at DESC,
+             candidate.bucket_start DESC, candidate.bucket_secs DESC,
+             candidate.source_priority ASC
 ), predecessor_interfaces AS MATERIALIZED (
     SELECT predecessor.*
     FROM dropped_predecessors predecessor

@@ -1279,7 +1279,7 @@ export type ClientMonitoringView = {
   network: TelemetryNetworkRateRecord[];
   network_current_detail: TelemetryNetworkRateRecord[];
   tunnel_current_detail: TelemetryTunnelRecord[];
-  traffic: TrafficAccountingRecord;
+  traffic: TrafficAccountingRecord | null;
   traffic_history: TrafficHistoryPointView[];
   ping_targets: CurrentPingView[];
   ping: PingRollupView[];

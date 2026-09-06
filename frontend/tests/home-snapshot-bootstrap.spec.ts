@@ -38,7 +38,7 @@ async function clearTrackedRequests(page: Page): Promise<void> {
   });
 }
 
-test("initial Home hydrates from one request without changing explicit loaders", async ({
+test("initial Home hydrates from one request and navigation loads owned data", async ({
   page,
 }) => {
   await installConsoleApiMock(page, { storedAuthSession: true });
@@ -56,6 +56,21 @@ test("initial Home hydrates from one request without changing explicit loaders",
     .toEqual(["/api/v1/home/snapshot"]);
   await page.waitForTimeout(300);
   expect(await trackedGetPaths(page)).toEqual(["/api/v1/home/snapshot"]);
+  expect(
+    await page.evaluate(() => {
+      const trackedWindow = window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      };
+      const home = trackedWindow.__vpsmanFetchRequests?.find((request) =>
+        request.url.includes("/api/v1/home/snapshot"),
+      );
+      return home
+        ? new URL(home.url, window.location.href).searchParams.get(
+            "include_system_history",
+          )
+        : null;
+    }),
+  ).toBe("false");
 
   await clearTrackedRequests(page);
   await page.locator('button[title="Refresh dashboard telemetry"]').click();
@@ -78,13 +93,23 @@ test("initial Home hydrates from one request without changing explicit loaders",
     "/api/v1/command-templates",
   ];
   await expect
-    .poll(async () => {
-      const paths = await trackedGetPaths(page);
-      return jobsLoaderPaths.map(
-        (expected) => paths.filter((path) => path === expected).length,
-      );
-    })
-    .toEqual(jobsLoaderPaths.map(() => 1));
+    .poll(async () =>
+      (await trackedGetPaths(page)).filter((path) =>
+        jobsLoaderPaths.includes(path),
+      ),
+    )
+    .toEqual(["/api/v1/jobs"]);
+
+  await clearTrackedRequests(page);
+  await openConsoleSubpage(page, "System", "Overview");
+  await expect
+    .poll(async () =>
+      (await trackedGetPaths(page)).filter(
+        (path) => path === "/api/v1/system/dashboard",
+      ).length,
+    )
+    .toBe(1);
+  await expect(page.getByText(/rollup series; latest sample/)).toBeVisible();
 });
 
 test("one failed Home source stays local without launching legacy fallbacks", async ({

@@ -4749,6 +4749,7 @@ use crate::{
     repository_telemetry_rollups::{
         aggregate_selected_network_history_oracle, raw_telemetry_network_rate_candidate_keys_sql,
         raw_telemetry_network_rate_payload_sql, LATEST_TELEMETRY_NETWORK_RATES_SQL,
+        TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL,
     },
     repository_terminal_sessions::upsert_postgres_terminal_session,
     runtime_config_workspace::{preview_runtime_config_override, runtime_config_override_revision},
@@ -13178,6 +13179,266 @@ async fn postgres_raw_network_readers_expand_only_projected_canonical_payloads()
 }
 
 #[tokio::test]
+async fn postgres_network_history_preserves_canonical_sparse_and_raw_predecessors() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "network-history-predecessors";
+    insert_client(&db.pool, client_id, None).await;
+    let interfaces = (0..8).map(|item| format!("eth{item}")).collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_streams (client_id, source_kind, interface)
+        SELECT $1, 'host', interface FROM unnest($2::text[]) interface
+        "#,
+    )
+    .bind(client_id)
+    .bind(&interfaces)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH installed AS (
+            INSERT INTO telemetry_dashboard_network_generations (
+                client_id, generation, select_all, interfaces, interface_width
+            ) VALUES (
+                $1, nextval('telemetry_dashboard_generation_seq'), TRUE, $2, 8
+            ) RETURNING client_id, generation
+        )
+        UPDATE telemetry_dashboard_network_projection_heads head
+        SET network_generation = installed.generation,
+            network_select_all = TRUE,
+            network_generation_interfaces = $2,
+            network_interface_width = 8
+        FROM installed WHERE head.client_id = installed.client_id
+        "#,
+    )
+    .bind(client_id)
+    .bind(&interfaces)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    // Three visible minutes exercise raw replacement, an unpromoted edge,
+    // aged coarse/minute predecessors, a gap, and independent reset/decrease
+    // rejection. Align to 300s so the aged coarse coordinate is also legal.
+    let first = (crate::unix_now() / 300) * 300 - 900;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_network_rates (
+            client_id, interface, bucket_start, bucket_secs, sample_count,
+            rx_bytes_sum, tx_bytes_sum, rx_bytes_avg, tx_bytes_avg,
+            rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch,
+            latest_observed_at
+        )
+        SELECT $1, 'eth' || interface_no,
+               to_timestamp($2 + minute_no * 60), 60, 1,
+               counter, counter * 2, counter, counter * 2,
+               counter, counter * 2,
+               CASE WHEN interface_no = 4 THEN 1 ELSE 0 END,
+               CASE WHEN interface_no = 4 THEN 1 ELSE 0 END,
+               to_timestamp($2 + minute_no * 60 + 30)
+        FROM generate_series(0, 7) interface_no
+        CROSS JOIN generate_series(0, 2) minute_no
+        CROSS JOIN LATERAL (
+            SELECT CASE WHEN interface_no = 5 THEN 50 ELSE 300 END
+                   + minute_no * 100 AS counter
+        ) value
+        WHERE NOT (interface_no = 3 AND minute_no = 0)
+        "#,
+    )
+    .bind(client_id)
+    .bind(first as i64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_network_rates (
+            client_id, interface, bucket_start, bucket_secs, sample_count,
+            rx_bytes_sum, tx_bytes_sum, rx_bytes_avg, tx_bytes_avg,
+            rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch,
+            latest_observed_at
+        )
+        SELECT $1, edge.interface, to_timestamp($2 + edge.offset_secs),
+               edge.bucket_secs, 1, counter, counter * 2, counter, counter * 2,
+               counter, counter * 2, 0, 0,
+               to_timestamp($2 + edge.offset_secs + edge.observed_offset)
+        FROM (VALUES
+            ('eth0', -60, 60, 200, 30),
+            ('eth7', -60, 60, 100, 30),
+            ('eth7', -300, 300, 125, 280),
+            ('eth2', -259200, 300, 50, 270),
+            ('eth3', -259200, 60, 75, 30)
+        ) edge(interface, offset_secs, bucket_secs, counter, observed_offset)
+        "#,
+    )
+    .bind(client_id)
+    .bind(first as i64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, sample_source, latest_observed_at
+        ) VALUES (
+            $1, 'host', 'eth1', to_timestamp($2 - 60),
+            150, 300, 'interface_counters', to_timestamp($2 - 20)
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(first as i64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for (sequence, observed, networks) in [
+        (
+            1,
+            first - 90,
+            vec![("eth0", 50), ("eth4", 50), ("eth5", 50)],
+        ),
+        (
+            2,
+            first - 30,
+            vec![("eth0", 100), ("eth4", 100), ("eth5", 100)],
+        ),
+        (3, first + 165, vec![("eth0", 550)]),
+    ] {
+        let mask = if networks.len() == 3 { 0x07 } else { 0x01 };
+        insert_projected_raw_telemetry_fixture(
+            &db.pool,
+            client_id,
+            observed,
+            &AgentMetrics {
+                observed_unix: observed,
+                networks: networks
+                    .into_iter()
+                    .map(|(interface, counter)| NetworkStat {
+                        interface: interface.to_string(),
+                        rx_bytes: counter,
+                        tx_bytes: counter * 2,
+                    })
+                    .collect(),
+                ..AgentMetrics::default()
+            },
+            sequence,
+            &[mask],
+            &[],
+        )
+        .await;
+    }
+    sqlx::query(
+        "UPDATE telemetry_projection_heads SET accepted_seq=3, projected_seq=3 WHERE client_id=$1",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let selection = NetworkRateInterfaceSelection::all(&[client_id.to_string()]);
+    let rows = db
+        .repo
+        .list_dashboard_raw_telemetry_network_rates_selected(16, first, first + 179, 60, &selection)
+        .await
+        .unwrap();
+    let actual = rows
+        .iter()
+        .map(|row| {
+            let minute =
+                (crate::util::parse_timestamp_unix(&row.bucket_start).unwrap() - first) / 60;
+            (
+                (row.interface.clone(), minute),
+                (row.rx_bytes_delta, row.tx_bytes_delta),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected = [
+        ("eth0", vec![(0, 200), (1, 100), (2, 150)]),
+        ("eth1", vec![(0, 150), (1, 100), (2, 100)]),
+        ("eth2", vec![(0, 250), (1, 100), (2, 100)]),
+        ("eth3", vec![(1, 325), (2, 100)]),
+        ("eth4", vec![(1, 100), (2, 100)]),
+        ("eth5", vec![(1, 100), (2, 100)]),
+        ("eth6", vec![(1, 100), (2, 100)]),
+        ("eth7", vec![(0, 175), (1, 100), (2, 100)]),
+    ]
+    .into_iter()
+    .flat_map(|(interface, points)| {
+        points
+            .into_iter()
+            .map(move |(minute, delta)| ((interface.to_string(), minute), (delta, delta * 2)))
+    })
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual, expected,
+        "canonical edge selection or no-refill semantics changed"
+    );
+    let traffic_first = rows.iter().find(|row| row.interface == "eth1").unwrap();
+    assert_eq!(traffic_first.rx_bps_avg, 150.0 * 8.0 / 50.0);
+    let coarse_first = rows.iter().find(|row| row.interface == "eth2").unwrap();
+    assert_eq!(coarse_first.rx_bps_avg, 250.0 * 8.0 / 258_960.0);
+
+    let mut exact = NetworkRateInterfaceSelection::default();
+    exact.select_exact(
+        client_id.to_string(),
+        ["eth0".to_string(), "eth4".to_string()]
+            .into_iter()
+            .collect(),
+    );
+    // Compare every returned field across output modes, including an
+    // unaligned request, N+1 chart capping and a wider generic chart step.
+    for selected in [&selection, &exact] {
+        for (points, start, step) in [
+            (16, first, 60),
+            (16, first + 17, 60),
+            (2, first, 60),
+            (16, first, 300),
+        ] {
+            let interfaces = db
+                .repo
+                .list_dashboard_raw_telemetry_network_rates_selected(
+                    points,
+                    start,
+                    first + 179,
+                    step,
+                    selected,
+                )
+                .await
+                .unwrap();
+            let expected = aggregate_selected_network_history_oracle(interfaces);
+            let aggregate = db
+                .repo
+                .list_monitoring_card_raw_network_history_selected(
+                    points,
+                    start,
+                    first + 179,
+                    step,
+                    selected,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&aggregate).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            assert_eq!(
+                aggregate
+                    .iter()
+                    .map(|row| &row.latest_observed_at)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|row| &row.latest_observed_at)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_fleet() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -13254,6 +13515,29 @@ async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_flee
     .await
     .unwrap();
     let first = (crate::unix_now() as i64 / 60) * 60 - 15 * 60;
+    // Establish ordinary ready stream edges before appending raw minutes.
+    // The route resolves '*' from current identities, which deliberately
+    // exclude a pre-created but never-populated stream registry.
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, sample_source, latest_observed_at
+        )
+        SELECT $1 || lpad(client_no::TEXT, 3, '0'), 'host',
+               'eth' || interface_no, to_timestamp($2 - 120),
+               client_no * 100000 + interface_no * 1000 - 2,
+               client_no * 200000 + interface_no * 1000 - 2,
+               'interface_counters', to_timestamp($2 - 90)
+        FROM generate_series(1, 120) client_no
+        CROSS JOIN generate_series(0, 7) interface_no
+        "#,
+    )
+    .bind(prefix)
+    .bind(first)
+    .execute(&db.pool)
+    .await
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO telemetry_network_rates_minute (
@@ -13291,7 +13575,33 @@ async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_flee
     let client_ids = (1..=120)
         .map(|client_no| format!("{prefix}{client_no:03}"))
         .collect::<Vec<_>>();
-    let selection = NetworkRateInterfaceSelection::all(&client_ids);
+    // Resolve the same persisted selectors/current inventory used by Cards.
+    // Both direct SQL plans and route timing must request these 960 streams.
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        SELECT client_id, 'network.rate.interfaces', '*', '{"mode":"all"}'::jsonb
+        FROM unnest($1::text[]) client_id
+        "#,
+    )
+    .bind(&client_ids)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let rules = db
+        .repo
+        .list_all_vps_rules_for_clients(&client_ids)
+        .await
+        .unwrap();
+    let selection = db
+        .repo
+        .network_rate_interface_selection_from_rules(&client_ids, &rules)
+        .await
+        .unwrap();
+    let (all_clients, selected_clients, selected_interfaces) = selection.query_parts();
+    assert!(all_clients.is_empty());
+    assert_eq!(selected_clients.len(), 960);
+    assert_eq!(selected_interfaces.len(), 960);
     let started = Instant::now();
     let rows = db
         .repo
@@ -13310,6 +13620,365 @@ async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_flee
     eprintln!(
         "selected Cards network history: 120 clients x 8 interfaces x 17 physical minutes -> {} rows in {elapsed:?}",
         rows.len()
+    );
+    let baseline = rows
+        .iter()
+        .map(|row| {
+            (
+                row.client_id.clone(),
+                row.bucket_start.clone(),
+                row.rx_bytes_avg,
+                row.tx_bytes_avg,
+                row.rx_bytes_delta,
+                row.tx_bytes_delta,
+                row.rx_bps_avg,
+                row.tx_bps_avg,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Add sparse two-day history without changing the visible window or its
+    // predecessor. This is deliberately not a full-day fixture or a deadline.
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_network_rates_minute (
+            client_id, interface, bucket_start, bucket_secs, sample_count,
+            rx_bytes_sum, tx_bytes_sum, rx_bytes_avg, tx_bytes_avg,
+            rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch,
+            latest_observed_at
+        )
+        SELECT $1 || lpad(client_no::TEXT, 3, '0'), 'eth' || interface_no,
+               to_timestamp($2 + minute_no * 60), 60, 1,
+               client_no * 100000 + interface_no * 1000 + minute_no,
+               client_no * 200000 + interface_no * 1000 + minute_no,
+               client_no * 100000 + interface_no * 1000 + minute_no,
+               client_no * 200000 + interface_no * 1000 + minute_no,
+               client_no * 100000 + interface_no * 1000 + minute_no,
+               client_no * 200000 + interface_no * 1000 + minute_no,
+               0, 0, to_timestamp($2 + minute_no * 60 + 30)
+        FROM generate_series(1, 120) client_no
+        CROSS JOIN generate_series(0, 7) interface_no
+        CROSS JOIN generate_series(-2880, -60, 60) minute_no
+        "#,
+    )
+    .bind(prefix)
+    .bind(first)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    // Both the strict predecessor and an open visible minute now have raw
+    // replacements. The suffix contains 1,920 rows, not an empty fast path.
+    for (index, client_id) in client_ids.iter().enumerate() {
+        let client_no = index as u64 + 1;
+        for (sequence, minute_no) in [(1, -1_i64), (2, 15_i64)] {
+            let observed = (first + minute_no * 60 + 30) as u64;
+            insert_projected_raw_telemetry_fixture(
+                &db.pool,
+                client_id,
+                observed,
+                &AgentMetrics {
+                    observed_unix: observed,
+                    networks: (0..8)
+                        .map(|interface_no| NetworkStat {
+                            interface: format!("eth{interface_no}"),
+                            rx_bytes: ((client_no * 100000 + interface_no * 1000) as i64
+                                + minute_no) as u64,
+                            tx_bytes: ((client_no * 200000 + interface_no * 1000) as i64
+                                + minute_no) as u64,
+                        })
+                        .collect(),
+                    ..AgentMetrics::default()
+                },
+                sequence,
+                &[0xff],
+                &[],
+            )
+            .await;
+        }
+    }
+    sqlx::query(
+        "UPDATE telemetry_projection_heads SET accepted_seq=2, projected_seq=2 WHERE client_id=ANY($1)",
+    ).bind(&client_ids).execute(&db.pool).await.unwrap();
+    for relation in ["telemetry_network_rates_minute", "telemetry_samples"] {
+        sqlx::query(&format!("ANALYZE {relation}"))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let populated = db
+        .repo
+        .list_monitoring_card_raw_network_history_selected(
+            16,
+            first as u64,
+            (first + 15 * 60) as u64,
+            60,
+            &selection,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        populated
+            .iter()
+            .map(|row| (
+                row.client_id.clone(),
+                row.bucket_start.clone(),
+                row.rx_bytes_avg,
+                row.tx_bytes_avg,
+                row.rx_bytes_delta,
+                row.tx_bytes_delta,
+                row.rx_bps_avg,
+                row.tx_bps_avg,
+            ))
+            .collect::<Vec<_>>(),
+        baseline,
+        "aged rows and equal raw replacements changed the visible counter history"
+    );
+
+    fn collect_nodes<'a>(plan: &'a Value, key: &str, name: &str, out: &mut Vec<&'a Value>) {
+        if plan.get(key).and_then(Value::as_str) == Some(name) {
+            out.push(plan);
+        }
+        if let Some(children) = plan.get("Plans").and_then(Value::as_array) {
+            for child in children {
+                collect_nodes(child, key, name, out);
+            }
+        }
+    }
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::query(&format!("SET LOCAL plan_cache_mode = '{mode}'"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {TELEMETRY_NETWORK_HISTORY_PROJECTION_SQL}",
+        ))
+        .bind(&client_ids)
+        .bind(first)
+        .bind(first + 15 * 60)
+        .bind(60_i32)
+        .bind(16_i64)
+        .bind(&all_clients)
+        .bind(&selected_clients)
+        .bind(&selected_interfaces)
+        .bind(true)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let root = &plan[0]["Plan"];
+        let mut owners = Vec::new();
+        collect_nodes(root, "Subplan Name", "CTE predecessor_sources", &mut owners);
+        assert_eq!(owners.len(), 1, "missing setwise predecessor owner: {plan}");
+        assert_eq!(owners[0]["Actual Rows"].as_f64(), Some(960.0));
+        assert_eq!(owners[0]["Actual Loops"].as_f64(), Some(1.0));
+        let mut suffix_scans = Vec::new();
+        collect_nodes(owners[0], "CTE Name", "projected_suffix", &mut suffix_scans);
+        assert_eq!(
+            suffix_scans.len(),
+            1,
+            "suffix predecessor reread its input: {plan}"
+        );
+        assert_eq!(suffix_scans[0]["Actual Loops"].as_f64(), Some(1.0));
+        assert_eq!(suffix_scans[0]["Actual Rows"].as_f64(), Some(1920.0));
+        let mut missing_scans = Vec::new();
+        collect_nodes(
+            owners[0],
+            "CTE Name",
+            "missing_predecessor_keys",
+            &mut missing_scans,
+        );
+        assert_eq!(missing_scans.len(), 1);
+        assert_eq!(missing_scans[0]["Actual Rows"].as_f64(), Some(960.0));
+        // Check both sides of every batch input, not just the suffix's own
+        // producer. A nested-loop join can scan that input once while
+        // rescanning the opposite owner relation for every suffix row.
+        for input in [
+            "projected_suffix",
+            "missing_predecessor_keys",
+            "predecessor_sources",
+        ] {
+            let mut scans = Vec::new();
+            collect_nodes(root, "CTE Name", input, &mut scans);
+            assert!(!scans.is_empty(), "missing exercised batch input {input}");
+            for scan in scans {
+                if scan["Actual Rows"].as_f64().unwrap_or_default() > 0.0 {
+                    assert_eq!(
+                        scan["Actual Loops"].as_f64(),
+                        Some(1.0),
+                        "predecessor batch input {input} was rescanned: {scan}"
+                    );
+                }
+            }
+        }
+        let mut durable = Vec::new();
+        collect_nodes(root, "Subplan Name", "CTE bounded_durable", &mut durable);
+        assert_eq!(durable.len(), 1);
+        assert_eq!(
+            durable[0]["Actual Rows"].as_f64(),
+            Some(15_360.0),
+            "cards fetched non-visible predecessors in addition to its 16 minutes: {plan}"
+        );
+        eprintln!(
+            "Cards SQL with 960 exact resolved bindings, sparse two-day history and 1,920 raw suffix rows ({mode}): planning={}ms execution={}ms shared_hits={} temp_written={}",
+            plan[0]["Planning Time"], plan[0]["Execution Time"],
+            root["Shared Hit Blocks"], root["Temp Written Blocks"]
+        );
+        tx.rollback().await.unwrap();
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum, memory_used_ratio_max,
+            latest_observed_at
+        )
+        SELECT client_id, to_timestamp($2 + minute_no * 60), 60, 1,
+               0.5, 0.5, 0.5, 1000, 500, 500, 500, 0.5, 0.5, 0.5,
+               to_timestamp($2 + minute_no * 60 + 30)
+        FROM unnest($1::text[]) client_id
+        CROSS JOIN generate_series(0, 15) minute_no
+        "#,
+    )
+    .bind(&client_ids)
+    .bind(first)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let target_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        WITH target AS (
+            INSERT INTO ping_targets (id, name, host, probe_kind, selector_expression)
+            VALUES ($1, 'Cards fixture Ping', '192.0.2.91', 'icmp', '*')
+            RETURNING id
+        )
+        INSERT INTO ping_target_assignments (target_id, client_id, is_primary)
+        SELECT target.id, client_id, TRUE FROM target CROSS JOIN unnest($2::text[]) client_id
+        "#,
+    )
+    .bind(target_id)
+    .bind(&client_ids)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH series AS (
+            INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+            SELECT client_id, $1, 1 FROM unnest($2::text[]) client_id
+            RETURNING id
+        )
+        INSERT INTO telemetry_ping_rollups (
+            series_id, bucket_start, bucket_secs, sample_count, success_count,
+            latency_sum_ms, latency_avg_ms, latency_min_ms, latency_max_ms,
+            loss_ratio_avg, loss_ratio_sum, loss_ratio_max,
+            latest_status, latest_checked_at
+        )
+        SELECT series.id, to_timestamp($3 + minute_no * 60), 60, 1, 1,
+               10, 10, 10, 10, 0, 0, 0, 'ok',
+               to_timestamp($3 + minute_no * 60 + 30)
+        FROM series CROSS JOIN generate_series(0, 15) minute_no
+        "#,
+    )
+    .bind(target_id)
+    .bind(&client_ids)
+    .bind(first)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let (_, headers) = postgres_operator_session(&db.repo, "cards-performance-operator").await;
+    // Auth setup and AppState creation are outside the clock. Each request has
+    // a fresh read-cache state, while the fixture's PostgreSQL pages are warm.
+    let current_state = postgres_app_state(&db);
+    let current_uri =
+        "/api/v1/monitoring/cards?include_history=false&history_mode=selected_aggregate"
+            .parse::<axum::http::Uri>()
+            .unwrap();
+    let current_query =
+        Query::<crate::routes_monitoring::MonitoringCardsQuery>::try_from_uri(&current_uri)
+            .unwrap();
+    let started = Instant::now();
+    let current = crate::routes_monitoring::list_monitoring_cards(
+        State(current_state),
+        headers.clone(),
+        current_query,
+    )
+    .await
+    .unwrap()
+    .0;
+    let current_json = serde_json::to_vec(&current).unwrap();
+    let current_elapsed = started.elapsed();
+    assert_eq!(current.items.len(), 120);
+    assert_eq!(current.total, 120);
+    assert!(current.items.iter().all(|card| {
+        card.resource_history.is_empty()
+            && card.network_history.is_empty()
+            && card.primary_ping_history.is_empty()
+    }));
+    eprintln!(
+        "Authenticated Cards route + JSON serialization, include_history=false: {current_elapsed:?}; {} bytes; fresh AppState, warm PostgreSQL; excludes network transport",
+        current_json.len()
+    );
+
+    let history_state = postgres_app_state(&db);
+    // Omitted include_history/limit/offset exercise the route's URL defaults;
+    // only selected_aggregate differs from the legacy default history mode.
+    let history_uri = "/api/v1/monitoring/cards?history_mode=selected_aggregate"
+        .parse::<axum::http::Uri>()
+        .unwrap();
+    let history_query =
+        Query::<crate::routes_monitoring::MonitoringCardsQuery>::try_from_uri(&history_uri)
+            .unwrap();
+    let started = Instant::now();
+    let page = crate::routes_monitoring::list_monitoring_cards(
+        State(history_state),
+        headers,
+        history_query,
+    )
+    .await
+    .unwrap()
+    .0;
+    let history_json = serde_json::to_vec(&page).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(page.items.len(), 120);
+    assert_eq!((page.offset, page.limit, page.total), (0, 1000, 120));
+    assert!(page.next_offset.is_none());
+    let cards = page.items;
+    let last_possible_window_start = (crate::unix_now() as i64 - 900) / 60 * 60;
+    let expected_min_points =
+        ((first + 900 - last_possible_window_start) / 60 + 1).clamp(1, 16) as usize;
+    assert!(
+        cards.iter().all(|card| {
+            card.network_history.len() >= expected_min_points
+                && card.network_history.len() <= 16
+                && card
+                    .network_history
+                    .iter()
+                    .all(|row| row.interface.is_empty())
+                && !card.resource_history.is_empty()
+                && !card.primary_ping_history.is_empty()
+        }),
+        "whole Cards timing skipped populated histories (minimum network points {expected_min_points}): {:?}",
+        cards
+            .iter()
+            .map(|card| (
+                &card.client.id,
+                card.network_history.len(),
+                card.resource_history.len(),
+                card.primary_ping_history.len(),
+                card.network_rate_expected,
+            ))
+            .collect::<Vec<_>>()
+    );
+    let network_points = cards
+        .iter()
+        .map(|card| card.network_history.len())
+        .sum::<usize>();
+    eprintln!(
+        "Authenticated Cards route + JSON serialization (all domains, selected aggregate, default history=true): {elapsed:?}; {network_points} network points, populated resource and primary Ping histories; {} bytes; fresh AppState, warm PostgreSQL; excludes network transport",
+        history_json.len()
     );
     db.cleanup().await;
 }
@@ -35396,7 +36065,7 @@ impl PgReliabilityTestDb {
         crate::repository::migrate_postgres_database(&database_options, migrations_dir).await?;
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect_with(database_options.options([("search_path", "public")]))
+            .connect_with(database_options.options(crate::repository::API_POSTGRES_SESSION_OPTIONS))
             .await?;
         let repo = Repository::Postgres(pool.clone());
         Ok(Self {
@@ -44478,5 +45147,748 @@ async fn postgres_terminal_late_open_and_control_cannot_revive_canceled_job() {
             0,
         )
     );
+    db.cleanup().await;
+}
+
+async fn wait_for_monitoring_history_reader(
+    lock: &mut sqlx::Transaction<'_, Postgres>,
+    relation: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation=to_regclass($1) AND NOT granted)",
+            )
+            .bind(relation)
+            .fetch_one(&mut **lock)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the requested history reader must actually reach the locked relation");
+}
+
+#[tokio::test]
+async fn postgres_monitoring_private_projections_skip_unrelated_domains_and_preserve_full() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "monitoring-projection-client";
+    insert_client(&db.pool, client_id, None).await;
+    let (_, headers) = postgres_operator_session(&db.repo, "monitoring-projection-operator").await;
+    let base = crate::unix_now() / 60 * 60 - 180;
+    for offset in [0, 60] {
+        insert_raw_telemetry_fixture(
+            &db.pool,
+            client_id,
+            base + offset,
+            &AgentMetrics {
+                observed_unix: base + offset,
+                hostname: client_id.to_string(),
+                cpu: CpuStat {
+                    utilization_ratio: Some(0.25),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    let query = |projection| crate::routes_monitoring::ClientMonitoringQuery {
+        window: Some("custom".to_string()),
+        start_unix: Some(base),
+        end_unix: Some(base + 60),
+        points: Some(8),
+        projection,
+    };
+    let mut ping_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE telemetry_ping_current IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *ping_lock)
+        .await
+        .unwrap();
+    let resources = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::routes_monitoring::get_client_monitoring(
+            State(postgres_app_state(&db)),
+            headers.clone(),
+            axum::extract::Path(client_id.to_string()),
+            Query(query(
+                crate::routes_monitoring::ClientMonitoringProjection::Resources,
+            )),
+        ),
+    )
+    .await
+    .expect("Resources must not read Ping")
+    .unwrap()
+    .0;
+    assert!(!resources.resources.is_empty());
+    assert!(resources.traffic.is_some());
+    assert!(resources.ping.is_empty());
+    assert!(resources.ping_targets.is_empty());
+    let full_query = query(crate::routes_monitoring::ClientMonitoringProjection::Full);
+    let full_state = postgres_app_state(&db);
+    let full_headers = headers.clone();
+    let full_request = tokio::spawn(async move {
+        crate::routes_monitoring::get_client_monitoring(
+            State(full_state),
+            full_headers,
+            axum::extract::Path(client_id.to_string()),
+            Query(full_query),
+        )
+        .await
+    });
+    wait_for_monitoring_history_reader(&mut ping_lock, "telemetry_ping_current").await;
+    ping_lock.rollback().await.unwrap();
+    let full = tokio::time::timeout(Duration::from_secs(10), full_request)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(
+        serde_json::to_value(&resources.resources).unwrap(),
+        serde_json::to_value(&full.resources).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&resources.network).unwrap(),
+        serde_json::to_value(&full.network).unwrap()
+    );
+    let mut resources_traffic = serde_json::to_value(&resources.traffic).unwrap();
+    let mut full_traffic = serde_json::to_value(&full.traffic).unwrap();
+    // The existing accounting response timestamps each read independently.
+    resources_traffic
+        .as_object_mut()
+        .unwrap()
+        .remove("updated_at");
+    full_traffic.as_object_mut().unwrap().remove("updated_at");
+    assert_eq!(resources_traffic, full_traffic);
+    assert_eq!(
+        serde_json::to_value(&resources.range).unwrap(),
+        serde_json::to_value(&full.range).unwrap()
+    );
+
+    let mut rules_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE vps_rule_values IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *rules_lock)
+        .await
+        .unwrap();
+    let ping = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::routes_monitoring::get_client_monitoring(
+            State(postgres_app_state(&db)),
+            headers,
+            axum::extract::Path(client_id.to_string()),
+            Query(query(
+                crate::routes_monitoring::ClientMonitoringProjection::Ping,
+            )),
+        ),
+    )
+    .await
+    .expect("Ping must not read network or billing rules")
+    .unwrap()
+    .0;
+    assert!(ping.resources.is_empty());
+    assert!(ping.network.is_empty());
+    assert!(ping.network_current_detail.is_empty());
+    assert!(ping.tunnel_current_detail.is_empty());
+    assert!(ping.traffic.is_none());
+    assert!(ping.traffic_history.is_empty());
+    assert_eq!(
+        serde_json::to_value(&ping.ping).unwrap(),
+        serde_json::to_value(&full.ping).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&ping.range).unwrap(),
+        serde_json::to_value(&full.range).unwrap()
+    );
+    rules_lock.rollback().await.unwrap();
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_monitoring_public_visibility_and_detail_own_only_requested_data() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "public-projection-client";
+    insert_client(&db.pool, client_id, None).await;
+    insert_client(&db.pool, "public-projection-other", None).await;
+    let (operator, _) = postgres_operator_session(&db.repo, "public-projection-operator").await;
+    let share = crate::model_monitoring::MonitoringShareRecord {
+        id: Uuid::new_v4(),
+        name: "Resource history".to_string(),
+        token_secret: "a".repeat(64),
+        selector_expression: "*".to_string(),
+        targets: [client_id, "public-projection-other"]
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, id)| crate::model_monitoring::MonitoringShareTargetRecord {
+                    client_id: id.to_string(),
+                    public_client_key: format!("{index:064x}"),
+                },
+            )
+            .collect(),
+        visibility: crate::model_monitoring::MonitoringShareVisibilityView {
+            identity_context: false,
+            billing: false,
+            system_information: false,
+            resources: true,
+            network: true,
+            traffic: false,
+            ping: false,
+            detail_history: true,
+        },
+        expires_at: crate::unix_now().saturating_add(3600).to_string(),
+        revoked_at: None,
+        created_at: crate::unix_now().to_string(),
+        updated_at: crate::unix_now().to_string(),
+    };
+    db.repo
+        .create_monitoring_share(share.clone(), &operator)
+        .await
+        .unwrap();
+    let (visitor_id, _) = db
+        .repo
+        .record_monitoring_share_visitor(&share, None, "192.0.2.1", None)
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-vpsman-share-token", share.token_secret.parse().unwrap());
+    headers.insert(
+        "x-vpsman-share-visitor",
+        visitor_id.to_string().parse().unwrap(),
+    );
+    sqlx::query("INSERT INTO vps_rule_values (client_id,key,value_raw,value_json) VALUES ($1,'billing.price','invalid fixture','{}')")
+        .bind("public-projection-other").execute(&db.pool).await.unwrap();
+    let query = |include_cards| crate::routes_monitoring::PublicMonitoringDataQuery {
+        client_key: Some("0".repeat(64)),
+        window: Some("15m".to_string()),
+        start_unix: None,
+        end_unix: None,
+        points: Some(16),
+        limit: Some(1),
+        offset: Some(1),
+        include_cards,
+    };
+    let mut ping_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE telemetry_ping_current IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *ping_lock)
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::routes_monitoring::public_monitoring_share_data(
+            State(postgres_app_state(&db)),
+            headers.clone(),
+            axum::extract::Path(share.id),
+            Query(query(None)),
+        ),
+    )
+    .await
+    .expect("resource-only public cards and detail must not read Ping or hidden billing")
+    .unwrap();
+    let combined: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(combined["cards"].as_array().unwrap().len(), 1);
+    assert!(combined["detail"]["resources"].is_array());
+    assert!(combined["cards"][0].get("billing").is_none());
+    assert!(combined["cards"][0].get("ping").is_none());
+    ping_lock.rollback().await.unwrap();
+    sqlx::query("UPDATE monitoring_share_links SET show_billing=true, updated_at=clock_timestamp() WHERE id=$1")
+        .bind(share.id).execute(&db.pool).await.unwrap();
+    let response = crate::routes_monitoring::public_monitoring_share_data(
+        State(postgres_app_state(&db)),
+        headers.clone(),
+        axum::extract::Path(share.id),
+        Query(query(Some(false))),
+    )
+    .await
+    .unwrap();
+    let detail_only: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(detail_only["cards"].as_array().unwrap().is_empty());
+    for field in ["offset", "total", "next_offset"] {
+        assert_eq!(
+            detail_only[field], combined[field],
+            "pagination retains its requested page"
+        );
+    }
+    assert_eq!(
+        detail_only["detail"]["client_key"],
+        combined["detail"]["client_key"]
+    );
+    let error = crate::routes_monitoring::public_monitoring_share_data(
+        State(postgres_app_state(&db)),
+        headers.clone(),
+        axum::extract::Path(share.id),
+        Query(query(None)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.code, "vps_rules_unavailable",
+        "default combined requests still load visible billing"
+    );
+    // Deliberately invalid fixture rows expose which domain is read; they do
+    // not represent a presumed deployment defect or change rule validation.
+    sqlx::query("UPDATE vps_rule_values SET value_raw='10 USD/m' WHERE client_id=$1 AND key='billing.price'")
+        .bind("public-projection-other").execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO vps_rule_values (client_id,key,value_raw,value_json) VALUES ($1,'network.rate.interfaces','invalid fixture','{}')")
+        .bind("public-projection-other").execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE monitoring_share_links SET show_network=false, updated_at=clock_timestamp() WHERE id=$1")
+        .bind(share.id).execute(&db.pool).await.unwrap();
+    let response = crate::routes_monitoring::public_monitoring_share_data(
+        State(postgres_app_state(&db)),
+        headers,
+        axum::extract::Path(share.id),
+        Query(query(None)),
+    )
+    .await
+    .expect("visible billing does not read hidden network rules");
+    let billing_only: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(billing_only["cards"][0]["billing"].is_object());
+    assert!(billing_only["cards"][0].get("network").is_none());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_monitoring_home_current_skips_system_history_without_changing_current() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    sqlx::query("INSERT INTO system_metric_rollups (metric,bucket_start,bucket_secs,sample_count,value_sum,avg_value,max_value,latest_value,latest_observed_at) VALUES ('test.home.history',date_trunc('minute',now())-interval '1 minute',60,1,3,3,3,3,date_trunc('minute',now())-interval '1 minute')")
+        .execute(&db.pool).await.unwrap();
+    let state = postgres_app_state(&db);
+    let query = || crate::routes_system::SystemDashboardQuery {
+        window: Some("1d".to_string()),
+        chart_points: Some(240),
+    };
+    let mut history_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE system_metric_rollups IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *history_lock)
+        .await
+        .unwrap();
+    let current = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::routes_system::load_system_dashboard(&state, &query(), false),
+    )
+    .await
+    .expect("Home current/capacity must not read system history")
+    .unwrap();
+    assert!(current.series.is_empty());
+    let full_state = state.clone();
+    let full = tokio::spawn(async move {
+        crate::routes_system::load_system_dashboard(&full_state, &query(), true).await
+    });
+    wait_for_monitoring_history_reader(&mut history_lock, "system_metric_rollups").await;
+    history_lock.rollback().await.unwrap();
+    let full = tokio::time::timeout(Duration::from_secs(10), full)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(full.series.len(), 1);
+    assert_eq!(full.series[0].metric, "test.home.history");
+    assert_eq!(full.series[0].points[0].avg_value, 3.0);
+    assert_eq!(
+        serde_json::to_value(&current.capacity).unwrap(),
+        serde_json::to_value(&full.capacity).unwrap()
+    );
+    let mut current_json = serde_json::to_value(&current.current).unwrap();
+    let mut full_json = serde_json::to_value(&full.current).unwrap();
+    // Pool occupancy is observational and differs while the test holds a connection.
+    current_json.as_object_mut().unwrap().remove("db_pool");
+    full_json.as_object_mut().unwrap().remove("db_pool");
+    assert_eq!(current_json, full_json);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_projected_network_shadow_membership_stays_with_exact_stream_owner() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let first_client = "raw-shadow-owner-a";
+    let second_client = "raw-shadow-owner-b";
+    for client_id in [first_client, second_client] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+
+    // Keep the previous canonical function as an independent all-field oracle.
+    // The normal test-database migration path has already installed 0018.
+    let baseline = include_str!("../../../../../migrations/0003_telemetry_core.sql");
+    let start = baseline
+        .find("CREATE FUNCTION public.telemetry_projected_raw_network_minutes_source(")
+        .unwrap();
+    let (definition, _) = baseline[start..].split_once("\n$$;").unwrap();
+    let reference = format!(
+        "{}\n$$;",
+        definition.replacen(
+            "telemetry_projected_raw_network_minutes_source(",
+            "telemetry_projected_raw_network_minutes_reference(",
+            1,
+        )
+    );
+    sqlx::raw_sql(&reference).execute(&db.pool).await.unwrap();
+
+    // Every edge is explicit. Suppress unrelated publisher triggers while
+    // seeding so they cannot close or replace the deliberately open minutes.
+    let mut seed = db.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL session_replication_role = 'replica'")
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        WITH owners(client_id, interface, minute, counter, epoch, source) AS (
+            VALUES
+                ($1, 'null0', NULL::INTEGER, NULL::BIGINT, NULL::BIGINT, NULL::TEXT),
+                ($1, 'shadow0', 1, 900, 5, 'vnstat_import:hourly'),
+                ($1, 'import0', 2, 1000, 5, 'vnstat_import:hourly'),
+                ($1, 'tie0', 2, 1000, 5, 'vnstat_import:hourly'),
+                ($1, 'untouched0', 1, 900, 5, 'vnstat_import:hourly'),
+                ($2, 'shadow0', 1, 900, 5, 'vnstat_import:hourly')
+        )
+        INSERT INTO traffic_counter_streams (
+            client_id, source_kind, interface,
+            source_revision, materialized_revision, sample_edge_revision,
+            latest_sample_observed_at, latest_sample_rx_bytes,
+            latest_sample_tx_bytes, latest_sample_rx_counter_epoch,
+            latest_sample_tx_counter_epoch, latest_sample_source,
+            latest_sample_effective_observed_at, latest_sample_count,
+            latest_sample_rx_bytes_avg, latest_sample_tx_bytes_avg,
+            latest_sample_updated_at
+        )
+        SELECT client_id, 'host', interface,
+               CASE WHEN minute IS NULL THEN 0 ELSE 1 END,
+               CASE WHEN minute IS NULL THEN 0 ELSE 1 END,
+               CASE WHEN minute IS NULL THEN 0 ELSE 1 END,
+               TIMESTAMPTZ '2026-01-01 00:00:00+00' + minute * interval '1 minute',
+               counter, counter * 2, epoch, epoch, source,
+               TIMESTAMPTZ '2026-01-01 00:00:50+00' + minute * interval '1 minute',
+               CASE WHEN minute IS NULL THEN NULL ELSE 1 END,
+               counter, counter * 2,
+               TIMESTAMPTZ '2026-01-01 00:00:51+00' + minute * interval '1 minute'
+        FROM owners
+        "#,
+    )
+    .bind(first_client)
+    .bind(second_client)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH points(client_id, interface, minute, counter, epoch, source) AS (
+            VALUES
+                ($1, 'shadow0', 0, 10::BIGINT, 0::BIGINT, 'agent_networks'),
+                ($1, 'shadow0', 1, 900, 5, 'vnstat_import:hourly'),
+                ($1, 'import0', 0, 10, 0, 'agent_networks'),
+                ($1, 'import0', 2, 1000, 5, 'vnstat_import:hourly'),
+                ($1, 'tie0', 2, 500, 2, 'agent_networks'),
+                ($1, 'untouched0', 1, 900, 5, 'vnstat_import:hourly'),
+                ($2, 'shadow0', 1, 900, 5, 'vnstat_import:hourly')
+        )
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
+            sample_source, inbound_promoted, sample_count,
+            rx_bytes_sum, tx_bytes_sum, latest_observed_at,
+            rx_usage_bytes, tx_usage_bytes, rx_reset_count, tx_reset_count,
+            usage_authoritative, updated_at
+        )
+        SELECT client_id, 'host', interface,
+               TIMESTAMPTZ '2026-01-01 00:00:00+00' + minute * interval '1 minute',
+               counter, counter * 2, epoch, epoch, source, FALSE, 1,
+               counter, counter * 2,
+               TIMESTAMPTZ '2026-01-01 00:00:50+00' + minute * interval '1 minute',
+               0, 0, 0, 0, TRUE,
+               TIMESTAMPTZ '2026-01-01 00:00:51+00' + minute * interval '1 minute'
+        FROM points
+        "#,
+    )
+    .bind(first_client)
+    .bind(second_client)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+
+    // The third accepted envelope arrives late in minute one. Epoch order must
+    // remain observation/acceptance/ordinal order, not arrival or wall adjacency.
+    let samples = [
+        (
+            first_client,
+            1_i64,
+            70_i64,
+            vec![("null0", 100), ("shadow0", 100), ("import0", 100)],
+            0x07_u8,
+        ),
+        (
+            first_client,
+            2,
+            190,
+            vec![
+                ("null0", 50),
+                ("shadow0", 50),
+                ("import0", 1100),
+                ("tie0", 1100),
+                ("untouched0", 950),
+                ("denied0", 999),
+            ],
+            0x1f,
+        ),
+        (
+            first_client,
+            3,
+            100,
+            vec![("null0", 120), ("shadow0", 120), ("import0", 120)],
+            0x07,
+        ),
+        (second_client, 1, 190, vec![("shadow0", 950)], 0x01),
+    ];
+    for (client_id, accepted_seq, observed_second, networks, admission_mask) in samples {
+        let networks = networks.into_iter().map(|(interface, counter)| {
+            json!({ "interface": interface, "rx_bytes": counter, "tx_bytes": counter * 2 })
+        }).collect::<Vec<_>>();
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_samples (
+                id, client_id, observed_at, cpu_cores,
+                cpu_load_1, cpu_load_5, cpu_load_15,
+                memory_total_bytes, memory_available_bytes,
+                tcp_sockets, udp_sockets, payload,
+                accepted_seq, accepted_at, source_gateway_id,
+                source_gateway_session_id, source_process_incarnation_id,
+                source_telemetry_seq, reported_observed_unix, network_admission_mask
+            ) VALUES (
+                $1, $2, to_timestamp($3::BIGINT), 1, 0, 0, 0, 1, 1, 0, 0, $4,
+                $5, TIMESTAMPTZ '2026-01-01 00:04:00+00' + $5 * interval '1 second',
+                'proof', $6, $7, $5, $3, $8
+            )
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(client_id)
+        .bind(1_767_225_600_i64 + observed_second)
+        .bind(json!({ "networks": networks }))
+        .bind(accepted_seq)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(vec![admission_mask])
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        r#"
+        UPDATE telemetry_projection_heads head
+        SET accepted_seq = latest.accepted_seq,
+            projected_seq = latest.accepted_seq,
+            latest_projected_sample_id = latest.id,
+            accepted_at = latest.accepted_at,
+            projected_at = latest.accepted_at
+        FROM (
+            SELECT DISTINCT ON (client_id) client_id, id, accepted_seq, accepted_at
+            FROM telemetry_samples
+            WHERE client_id = ANY($1::TEXT[])
+            ORDER BY client_id, accepted_seq DESC
+        ) latest
+        WHERE head.client_id = latest.client_id
+        "#,
+    )
+    .bind(vec![first_client, second_client])
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    seed.commit().await.unwrap();
+
+    for requested in [
+        None,
+        Some(Vec::<String>::new()),
+        Some(vec![first_client.to_string()]),
+        Some(vec![second_client.to_string()]),
+        Some(vec![
+            first_client.to_string(),
+            second_client.to_string(),
+            first_client.to_string(),
+        ]),
+    ] {
+        let difference: i64 = sqlx::query_scalar(
+            r#"
+            WITH expected AS MATERIALIZED (
+                SELECT * FROM telemetry_projected_raw_network_minutes_reference($1::TEXT[])
+            ), actual AS MATERIALIZED (
+                SELECT * FROM telemetry_projected_raw_network_minutes_source($1::TEXT[])
+            ), differences AS (
+                (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL
+                (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+            )
+            SELECT count(*) FROM differences
+            "#,
+        )
+        .bind(&requested)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(difference, 0, "raw helper changed fields for {requested:?}");
+    }
+    let rows = sqlx::query_as::<_, (String, String, String, i64, i64, i32)>(
+        r#"
+        SELECT client_id, interface, to_char(bucket_start, 'HH24:MI'),
+               rx_bytes_last, rx_counter_epoch, sample_count
+        FROM telemetry_projected_raw_network_minutes_source(NULL::TEXT[])
+        ORDER BY client_id, interface, bucket_start
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let expected = [
+        (first_client, "import0", "00:01", 120, 0, 2),
+        (first_client, "import0", "00:03", 1100, 6, 1),
+        (first_client, "null0", "00:01", 120, 0, 2),
+        (first_client, "null0", "00:03", 50, 1, 1),
+        (first_client, "shadow0", "00:01", 120, 0, 2),
+        (first_client, "shadow0", "00:03", 50, 1, 1),
+        (first_client, "tie0", "00:03", 1100, 6, 1),
+        (first_client, "untouched0", "00:03", 950, 6, 1),
+        (second_client, "shadow0", "00:03", 950, 6, 1),
+    ]
+    .into_iter()
+    .map(|(client, interface, minute, counter, epoch, count)| {
+        (
+            client.to_string(),
+            interface.to_string(),
+            minute.to_string(),
+            counter,
+            epoch,
+            count,
+        )
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(rows, expected,
+        "NULL edges, raw shadowing, exact owner identity, import/tie boundaries, gaps, late arrivals or admission changed");
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_monitoring_system_information_preserves_json_uptime_semantics() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "system-information-uptime";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query("UPDATE clients SET arch='x86_64' WHERE id=$1")
+        .bind(client_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let metrics = AgentMetrics {
+        observed_unix: crate::unix_now(),
+        ..Default::default()
+    };
+    let sample_id =
+        insert_raw_telemetry_fixture(&db.pool, client_id, metrics.observed_unix, &metrics).await;
+    let client_ids = vec![client_id.to_string()];
+    for uptime in [
+        None,
+        Some(Value::Null),
+        Some(json!(0)),
+        Some(json!(42)),
+        Some(json!(u64::MAX)),
+        Some(json!("42")),
+        Some(json!(-1)),
+        Some(json!(1.5)),
+    ] {
+        let expected = uptime.as_ref().and_then(Value::as_u64);
+        let mut payload = serde_json::to_value(&metrics).unwrap();
+        payload.as_object_mut().unwrap().remove("uptime_secs");
+        if let Some(value) = uptime {
+            payload["uptime_secs"] = value;
+        }
+        sqlx::query("UPDATE telemetry_samples SET payload=$2 WHERE id=$1")
+            .bind(sample_id)
+            .bind(SqlJson(payload))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let views = db
+            .repo
+            .monitoring_system_information_for_clients(&client_ids)
+            .await
+            .unwrap();
+        let view = views.get(client_id).unwrap();
+        assert_eq!(view.architecture.as_deref(), Some("x86_64"));
+        assert_eq!(view.uptime_secs, expected);
+        assert_eq!(view.uptime_observed_at.is_some(), expected.is_some());
+        let live = db
+            .repo
+            .list_latest_telemetry_uptimes_for_clients(&client_ids)
+            .await
+            .unwrap();
+        assert_eq!(live.first().map(|row| row.uptime_secs), expected);
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_monitoring_traffic_freshness_reads_only_selected_stream_owners() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-freshness-owner";
+    insert_client(&db.pool, client_id, None).await;
+    let original = db.repo.get_traffic_accounting(client_id).await.unwrap();
+    let mut evidence_lock = db.pool.begin().await.unwrap();
+    // Lock the physical freshness input, not its view: locking the view also
+    // locks tunnel_plans, which the earlier selector-inventory reader needs.
+    sqlx::query("LOCK TABLE telemetry_tunnels IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *evidence_lock)
+        .await
+        .unwrap();
+    let unconfigured = tokio::time::timeout(
+        Duration::from_secs(10),
+        db.repo.get_traffic_accounting(client_id),
+    )
+    .await
+    .expect("unconfigured traffic has no freshness evidence consumer")
+    .unwrap();
+    assert_eq!(unconfigured.selectors, original.selectors);
+    assert_eq!(unconfigured.state, original.state);
+    assert_eq!(unconfigured.incomplete_reasons, original.incomplete_reasons);
+    assert_eq!(unconfigured.total_bytes, original.total_bytes);
+    assert!(unconfigured.selectors.is_empty());
+    evidence_lock.rollback().await.unwrap();
+    let selector = vpsman_common::parse_vps_rule_value("traffic.selectors", "eth0").unwrap();
+    sqlx::query("INSERT INTO vps_rule_values (client_id,key,value_raw,value_json) VALUES ($1,'traffic.selectors',$2,$3)")
+        .bind(client_id).bind(selector.raw).bind(SqlJson(selector.json)).execute(&db.pool).await.unwrap();
+    let mut evidence_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE telemetry_tunnels IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *evidence_lock)
+        .await
+        .unwrap();
+    let repo = db.repo.clone();
+    let configured = tokio::spawn(async move { repo.get_traffic_accounting(client_id).await });
+    wait_for_monitoring_history_reader(&mut evidence_lock, "telemetry_tunnels").await;
+    evidence_lock.rollback().await.unwrap();
+    let configured = tokio::time::timeout(Duration::from_secs(10), configured)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(configured.selectors, vec!["eth0"]);
+    assert_eq!(configured.state, "incomplete");
+    assert!(configured
+        .incomplete_reasons
+        .iter()
+        .any(|reason| reason == "eth0 sample missing"));
     db.cleanup().await;
 }

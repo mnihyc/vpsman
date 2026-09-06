@@ -175,6 +175,10 @@ export function PublicMonitoringSharePage({
   );
   const [customError, setCustomError] = useState<string | null>(null);
   const [detailRevision, setDetailRevision] = useState(0);
+  // History-entry hydration can replace the bounds object without changing the
+  // requested range. Only custom queries consume these values.
+  const detailStartUnix = window === "custom" ? customBounds.startUnix : null;
+  const detailEndUnix = window === "custom" ? customBounds.endUnix : null;
 
   useEffect(() => {
     const applyLocation = () => {
@@ -385,15 +389,16 @@ export function PublicMonitoringSharePage({
     setDetailLoading(true);
     const params = new URLSearchParams({
       client_key: selectedClientKey,
+      include_cards: "false",
       limit: "1",
       offset: "0",
       // Public and private detail views share the bounded dense profile.
       points: "480",
       window,
     });
-    if (window === "custom") {
-      params.set("start_unix", String(customBounds.startUnix));
-      params.set("end_unix", String(customBounds.endUnix));
+    if (detailStartUnix !== null && detailEndUnix !== null) {
+      params.set("start_unix", String(detailStartUnix));
+      params.set("end_unix", String(detailEndUnix));
     }
     const loadDetail = async () => {
       if (inFlight) return;
@@ -434,8 +439,9 @@ export function PublicMonitoringSharePage({
       if (timer !== null) globalThis.clearInterval(timer);
     };
   }, [
-    customBounds,
+    detailEndUnix,
     detailRevision,
+    detailStartUnix,
     secret,
     selectedClientKey,
     share?.visibility.detail_history,

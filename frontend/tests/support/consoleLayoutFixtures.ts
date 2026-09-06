@@ -7048,7 +7048,13 @@ export async function installConsoleApiMock(
               ? unavailableSnapshotSource(
                   "home_snapshot_system_dashboard_unavailable",
                 )
-              : availableSnapshotSource(systemDashboardFixture);
+              : availableSnapshotSource(
+                  new URL(url, window.location.href).searchParams.get(
+                    "include_system_history",
+                  ) === "false"
+                    ? { ...systemDashboardFixture, series: [] }
+                    : systemDashboardFixture,
+                );
           return jsonResponse({
             generated_at: "2026-06-05T20:44:58Z",
             operator: operatorView(currentOperatorRecord),
@@ -7949,11 +7955,37 @@ export async function installConsoleApiMock(
           /^\/api\/v1\/clients\/([^/]+)\/monitoring$/,
         );
         if (clientMonitoringMatch && method === "GET") {
-          return jsonResponse(
-            monitoringDetailFixture(
-              decodeURIComponent(clientMonitoringMatch[1]),
-            ),
+          const detail = monitoringDetailFixture(
+            decodeURIComponent(clientMonitoringMatch[1]),
           );
+          const projection = new URL(
+            url,
+            window.location.href,
+          ).searchParams.get("projection");
+          if (projection === "resources") {
+            return jsonResponse({
+              ...detail,
+              ping: [],
+              ping_targets: [],
+              primary_ping: null,
+              product_name: null,
+              system_information: null,
+            });
+          }
+          if (projection === "ping") {
+            return jsonResponse({
+              ...detail,
+              resources: [],
+              network: [],
+              network_current_detail: [],
+              tunnel_current_detail: [],
+              traffic: null,
+              traffic_history: [],
+              product_name: null,
+              system_information: null,
+            });
+          }
+          return jsonResponse(detail);
         }
         const trafficAccountingMatch = pathname.match(
           /^\/api\/v1\/traffic-accounting\/([^/]+)$/,

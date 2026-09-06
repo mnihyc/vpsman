@@ -1469,10 +1469,17 @@ impl Repository {
             traffic_stream_requests_from_rules(&cycle_starts, rules, &interface_inventories)?
                 .into_iter()
                 .collect::<Vec<_>>();
-        // One indexed array lookup supplies every current-generation boundary
-        // for the requested client set.
+        // Freshness is consumed only by eligible selected streams. Clients
+        // without them still receive their ordinary incomplete accounting
+        // record, but need no current-generation payload read.
+        let freshness_client_ids = stream_requests
+            .iter()
+            .map(|request| request.client_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let projected_streams = self
-            .latest_projected_traffic_streams(&client_ids, rules)
+            .latest_projected_traffic_streams(&freshness_client_ids, rules)
             .await?;
         let traffic_usage = self
             .list_traffic_counter_usage_for_streams(&stream_requests, now.timestamp())

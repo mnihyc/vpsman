@@ -5,6 +5,7 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+use serde::Deserialize;
 
 use crate::{
     error::ApiError,
@@ -28,11 +29,18 @@ use crate::{
 
 const HISTORY_DETAIL_LIMIT: i64 = 1_000;
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct HomeSnapshotQuery {
+    include_system_history: Option<bool>,
+}
+
 pub(crate) async fn home_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(dashboard_query): Query<DashboardOverviewQuery>,
+    Query(home_query): Query<HomeSnapshotQuery>,
 ) -> Result<Json<HomeSnapshotResponse>, ApiError> {
+    let include_system_history = home_query.include_system_history.unwrap_or(true);
     let auth = state.require_operator(&headers).await?;
     let fleet_read = operator_has_scope(&auth.operator.scopes, SCOPE_FLEET_READ);
     let prepared_dashboard = if fleet_read {
@@ -44,6 +52,7 @@ pub(crate) async fn home_snapshot(
         &auth.operator,
         &dashboard_query,
         prepared_dashboard.as_ref(),
+        include_system_history,
     );
     let events = state.events.clone();
     let response = events
@@ -53,7 +62,13 @@ pub(crate) async fn home_snapshot(
             } else {
                 None
             };
-            build_home_snapshot(&state, auth.operator, prepared_dashboard).await
+            build_home_snapshot(
+                &state,
+                auth.operator,
+                prepared_dashboard,
+                include_system_history,
+            )
+            .await
         })
         .await?;
     Ok(Json(response))
@@ -63,6 +78,7 @@ fn home_snapshot_singleflight_key(
     operator: &crate::model::OperatorView,
     dashboard_query: &DashboardOverviewQuery,
     prepared_dashboard: Option<&PreparedDashboardOverview>,
+    include_system_history: bool,
 ) -> String {
     let dashboard = prepared_dashboard.map_or_else(
         || serde_json::json!({ "permitted": false }),
@@ -76,6 +92,7 @@ fn home_snapshot_singleflight_key(
         ),
         "operator": operator,
         "dashboard": dashboard,
+        "include_system_history": include_system_history,
     })
     .to_string()
 }
@@ -84,6 +101,7 @@ async fn build_home_snapshot(
     state: &AppState,
     operator: crate::model::OperatorView,
     prepared_dashboard: Option<PreparedDashboardOverview>,
+    include_system_history: bool,
 ) -> Result<HomeSnapshotResponse, ApiError> {
     let scopes = &operator.scopes;
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
@@ -153,7 +171,7 @@ async fn build_home_snapshot(
         load_source(
             "system_dashboard",
             fleet_read,
-            load_system_dashboard(state, &system_query),
+            load_system_dashboard(state, &system_query, include_system_history),
         ),
         load_home_dashboard_overview(state, fleet_read, prepared_dashboard, &operator.preferences,),
     );

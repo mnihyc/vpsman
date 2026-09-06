@@ -45,7 +45,7 @@ pub(crate) async fn system_dashboard(
     let events = state.events.clone();
     let response = events
         .singleflight_system_dashboard(key, move || async move {
-            load_prepared_system_dashboard(&state, window, chart_points).await
+            load_prepared_system_dashboard(&state, window, chart_points, true).await
         })
         .await?;
     Ok(Json(response))
@@ -54,9 +54,10 @@ pub(crate) async fn system_dashboard(
 pub(crate) async fn load_system_dashboard(
     state: &AppState,
     query: &SystemDashboardQuery,
+    include_history: bool,
 ) -> Result<SystemDashboardView, ApiError> {
     let (window, chart_points) = normalize_system_dashboard_query(query)?;
-    load_prepared_system_dashboard(state, window, chart_points).await
+    load_prepared_system_dashboard(state, window, chart_points, include_history).await
 }
 
 fn normalize_system_dashboard_query(
@@ -90,6 +91,7 @@ async fn load_prepared_system_dashboard(
     state: &AppState,
     window: &'static str,
     chart_points: i64,
+    include_history: bool,
 ) -> Result<SystemDashboardView, ApiError> {
     let now = unix_now();
     let earliest_system_bucket = if window == "all" {
@@ -119,12 +121,16 @@ async fn load_prepared_system_dashboard(
         .unwrap_or(0)
         .saturating_add(1)
         .min(MAX_CHART_POINTS as u64) as i64;
-    let (collected, rollups) = tokio::join!(
-        collect_system_dashboard_snapshot(state),
-        state
-            .repo
-            .list_system_metric_rollups_at_step(start, now, bucket_secs as u64,),
-    );
+    let (collected, rollups) = tokio::join!(collect_system_dashboard_snapshot(state), async {
+        if include_history {
+            state
+                .repo
+                .list_system_metric_rollups_at_step(start, now, bucket_secs as u64)
+                .await
+        } else {
+            Ok(Vec::new())
+        }
+    },);
     let collected = collected.map_err(ApiError::internal_mapper(
         "system_dashboard_unavailable",
         "The system dashboard could not be loaded.",

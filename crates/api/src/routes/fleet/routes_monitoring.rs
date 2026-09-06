@@ -41,8 +41,11 @@ use crate::{
     },
     model_alert_policies::TrafficAccountingRecord,
     model_alert_policies::{
-        VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
-        VPS_RULE_KEY_PRODUCT_NAME,
+        VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_INTERFACES,
+        VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        VPS_RULE_KEY_PRODUCT_NAME, VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
     repository::Repository,
     repository_monitoring::monitoring_share_status,
@@ -97,6 +100,113 @@ pub(crate) struct ClientMonitoringQuery {
     pub(crate) start_unix: Option<u64>,
     pub(crate) end_unix: Option<u64>,
     pub(crate) points: Option<i64>,
+    #[serde(default)]
+    pub(crate) projection: ClientMonitoringProjection,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClientMonitoringProjection {
+    #[default]
+    Full,
+    Resources,
+    Ping,
+}
+
+impl ClientMonitoringProjection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Resources => "resources",
+            Self::Ping => "ping",
+        }
+    }
+
+    fn domains(self) -> MonitoringDomains {
+        match self {
+            Self::Full => MonitoringDomains::ALL,
+            Self::Resources => MonitoringDomains {
+                resources: true,
+                network: true,
+                traffic: true,
+                ..MonitoringDomains::default()
+            },
+            Self::Ping => MonitoringDomains {
+                ping: true,
+                ..MonitoringDomains::default()
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MonitoringDomains {
+    identity_context: bool,
+    billing: bool,
+    system_information: bool,
+    resources: bool,
+    network: bool,
+    traffic: bool,
+    ping: bool,
+}
+
+impl MonitoringDomains {
+    const ALL: Self = Self {
+        identity_context: true,
+        billing: true,
+        system_information: true,
+        resources: true,
+        network: true,
+        traffic: true,
+        ping: true,
+    };
+
+    fn for_share(visibility: &MonitoringShareVisibilityView) -> Self {
+        Self {
+            identity_context: visibility.identity_context,
+            billing: visibility.billing,
+            system_information: visibility.system_information,
+            resources: visibility.resources,
+            network: visibility.network,
+            traffic: visibility.traffic,
+            ping: visibility.ping,
+        }
+    }
+
+    fn projected_telemetry(self) -> bool {
+        self.system_information || self.resources || self.network || self.traffic || self.ping
+    }
+
+    fn rule_keys(self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.identity_context {
+            keys.push(VPS_RULE_KEY_PRODUCT_NAME);
+        }
+        if self.billing {
+            keys.extend([VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_BILLING_CYCLE]);
+        }
+        if self.network || self.traffic {
+            // Network rates can inherit traffic selectors; both domains obey
+            // the same interface-admission rule even when traffic is hidden.
+            keys.extend([
+                VPS_RULE_KEY_NETWORK_INTERFACES,
+                VPS_RULE_KEY_TRAFFIC_SELECTORS,
+            ]);
+        }
+        if self.network {
+            keys.push(VPS_RULE_KEY_NETWORK_RATE_INTERFACES);
+        }
+        if self.traffic {
+            keys.extend([
+                VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+                VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+                VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
+                VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
+                VPS_RULE_KEY_NETWORK_PORT_SPEED,
+            ]);
+        }
+        keys
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +218,7 @@ pub(crate) struct PublicMonitoringDataQuery {
     pub(crate) points: Option<i64>,
     pub(crate) limit: Option<usize>,
     pub(crate) offset: Option<usize>,
+    pub(crate) include_cards: Option<bool>,
 }
 
 pub(crate) async fn list_monitoring_cards(
@@ -207,19 +318,9 @@ pub(crate) async fn get_client_monitoring(
     let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    let key = serde_json::json!({
-        "endpoint": "client_monitoring",
-        "auth": crate::state::read_singleflight_auth_key(
-            operator.operator.id,
-            &operator.operator.scopes,
-        ),
-        "client_id": &client_id,
-        "window": query.window.as_deref(),
-        "start_unix": query.start_unix,
-        "end_unix": query.end_unix,
-        "points": query.points,
-    })
-    .to_string();
+    let auth_key =
+        crate::state::read_singleflight_auth_key(operator.operator.id, &operator.operator.scopes);
+    let key = client_monitoring_singleflight_key(&auth_key, &client_id, &query);
     let events = state.events.clone();
     let response = events
         .singleflight_client_monitoring(key, move || async move {
@@ -227,12 +328,31 @@ pub(crate) async fn get_client_monitoring(
                 &state,
                 &client_id,
                 &query,
-                CurrentNetworkDetail::SingleVpsDetail,
+                CurrentMonitoringDetail::SingleVpsDetail,
+                query.projection.domains(),
             )
             .await
         })
         .await?;
     Ok(Json(response))
+}
+
+fn client_monitoring_singleflight_key(
+    auth_key: &str,
+    client_id: &str,
+    query: &ClientMonitoringQuery,
+) -> String {
+    serde_json::json!({
+        "endpoint": "client_monitoring",
+        "auth": auth_key,
+        "client_id": client_id,
+        "window": query.window.as_deref(),
+        "start_unix": query.start_unix,
+        "end_unix": query.end_unix,
+        "points": query.points,
+        "projection": query.projection.as_str(),
+    })
+    .to_string()
 }
 
 pub(crate) async fn list_ping_targets(
@@ -1240,30 +1360,8 @@ pub(crate) async fn public_monitoring_share_data(
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
-    let card_key =
-        public_monitoring_cards_singleflight_key(&share, &page_agents, offset, limit, total);
-    let events = state.events.clone();
-    let card_state = state.clone();
-    let card_page = events
-        .singleflight_monitoring_cards(card_key, move || async move {
-            let items = monitoring_cards_for_agents(&card_state, page_agents).await?;
-            let consumed = offset.saturating_add(items.len());
-            Ok(MonitoringCardsPageView {
-                items,
-                offset,
-                limit,
-                total,
-                next_offset: (consumed < total).then_some(consumed),
-            })
-        })
-        .await?;
-    let cards = card_page
-        .items
-        .into_iter()
-        .map(|card| public_monitoring_card(card, &share))
-        .collect::<Result<Vec<_>, _>>()?;
-    let consumed = offset.saturating_add(cards.len());
-    let detail = match query.client_key.as_deref() {
+    let consumed = offset.saturating_add(page_agents.len());
+    let detail_request = match query.client_key.as_deref() {
         None => None,
         Some(client_key) => {
             if !share.visibility.detail_history {
@@ -1280,6 +1378,7 @@ pub(crate) async fn public_monitoring_share_data(
                 start_unix: query.start_unix,
                 end_unix: query.end_unix,
                 points: query.points,
+                projection: ClientMonitoringProjection::Full,
             };
             let key = public_monitoring_detail_singleflight_key(
                 &share,
@@ -1287,21 +1386,75 @@ pub(crate) async fn public_monitoring_share_data(
                 client_key,
                 &range_query,
             );
+            Some((client_id, range_query, key))
+        }
+    };
+    let card_key =
+        public_monitoring_cards_singleflight_key(&share, &page_agents, offset, limit, total);
+    let domains = MonitoringDomains::for_share(&share.visibility);
+    // Cards and selected detail have the same visibility owner, but no data
+    // dependency. Detail-only readers need neither the card page nor its cache.
+    let (cards, detail) = tokio::join!(
+        async {
+            if !query.include_cards.unwrap_or(true) {
+                return Ok(Vec::new());
+            }
             let events = state.events.clone();
+            let card_state = state.clone();
+            let card_page = events
+                .singleflight_monitoring_cards(card_key, move || async move {
+                    let items = monitoring_cards_for_agents_domains(
+                        &card_state,
+                        page_agents,
+                        true,
+                        MonitoringCardsHistoryMode::SelectedAggregate,
+                        domains,
+                    )
+                    .await?;
+                    Ok(MonitoringCardsPageView {
+                        items,
+                        offset,
+                        limit,
+                        total,
+                        next_offset: (consumed < total).then_some(consumed),
+                    })
+                })
+                .await?;
+            card_page
+                .items
+                .into_iter()
+                .map(|card| public_monitoring_card(card, &share))
+                .collect::<Result<Vec<_>, ApiError>>()
+        },
+        async {
+            let Some((client_id, range_query, key)) = detail_request else {
+                return Ok(None);
+            };
+            let events = state.events.clone();
+            let detail_state = state.clone();
+            let detail_domains = MonitoringDomains {
+                identity_context: false,
+                billing: false,
+                system_information: false,
+                ..domains
+            };
             let detail_view = events
                 .singleflight_client_monitoring(key, move || async move {
                     client_monitoring_view(
-                        &state,
+                        &detail_state,
                         &client_id,
                         &range_query,
-                        CurrentNetworkDetail::Hidden,
+                        CurrentMonitoringDetail::Hidden,
+                        detail_domains,
                     )
                     .await
                 })
                 .await?;
-            Some(public_monitoring_detail(detail_view, &share)?)
-        }
-    };
+            public_monitoring_detail(detail_view, &share).map(Some)
+        },
+    );
+    let cards = cards?;
+    let detail = detail?;
     let mut response = Json(PublicMonitoringDataView {
         share: public_monitoring_share(&share, total),
         cards,
@@ -1404,22 +1557,6 @@ fn sort_monitoring_agents(agents: &mut [AgentView]) {
     });
 }
 
-pub(crate) async fn monitoring_cards_for_agents(
-    state: &AppState,
-    agents: Vec<AgentView>,
-) -> Result<Vec<MonitoringCardView>, ApiError> {
-    // Public cards expose one client-aggregate network series, so aggregate in
-    // PostgreSQL instead of transferring per-interface rows only to fold them
-    // immediately in `public_network_points`.
-    monitoring_cards_for_agents_projection_with_history_mode(
-        state,
-        agents,
-        true,
-        MonitoringCardsHistoryMode::SelectedAggregate,
-    )
-    .await
-}
-
 pub(crate) async fn monitoring_cards_for_agents_projection(
     state: &AppState,
     agents: Vec<AgentView>,
@@ -1434,11 +1571,28 @@ pub(crate) async fn monitoring_cards_for_agents_projection(
     .await
 }
 
-async fn monitoring_cards_for_agents_projection_with_history_mode(
+pub(crate) async fn monitoring_cards_for_agents_projection_with_history_mode(
+    state: &AppState,
+    agents: Vec<AgentView>,
+    include_history: bool,
+    history_mode: MonitoringCardsHistoryMode,
+) -> Result<Vec<MonitoringCardView>, ApiError> {
+    monitoring_cards_for_agents_domains(
+        state,
+        agents,
+        include_history,
+        history_mode,
+        MonitoringDomains::ALL,
+    )
+    .await
+}
+
+async fn monitoring_cards_for_agents_domains(
     state: &AppState,
     mut agents: Vec<AgentView>,
     include_history: bool,
     history_mode: MonitoringCardsHistoryMode,
+    domains: MonitoringDomains,
 ) -> Result<Vec<MonitoringCardView>, ApiError> {
     agents.retain(AgentView::is_monitoring_visible);
     if agents.is_empty() {
@@ -1448,22 +1602,30 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
         .iter()
         .map(|agent| agent.id.clone())
         .collect::<Vec<_>>();
-    let rules = state
-        .repo
-        .list_all_vps_rules_for_clients(&client_ids)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "vps_rules_unavailable",
-            "VPS display rules could not be loaded.",
-        ))?;
-    let network_rate_selection = state
-        .repo
-        .network_rate_interface_selection_from_rules(&client_ids, &rules)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "network_interface_selection_unavailable",
-            "Network-interface selection could not be loaded.",
-        ))?;
+    let rules = if domains == MonitoringDomains::ALL {
+        state.repo.list_all_vps_rules_for_clients(&client_ids).await
+    } else {
+        state
+            .repo
+            .list_vps_rules_for_clients(&client_ids, &domains.rule_keys())
+            .await
+    }
+    .map_err(ApiError::internal_mapper(
+        "vps_rules_unavailable",
+        "VPS display rules could not be loaded.",
+    ))?;
+    let network_rate_selection = if domains.network {
+        state
+            .repo
+            .network_rate_interface_selection_from_rules(&client_ids, &rules)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "network_interface_selection_unavailable",
+                "Network-interface selection could not be loaded.",
+            ))?
+    } else {
+        Default::default()
+    };
     let history_end = crate::unix_now();
     let history_start = history_end.saturating_sub(15 * 60);
     let (
@@ -1477,17 +1639,38 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
         primary_ping,
         primary_ping_history_rows,
     ) = tokio::join!(
-        state
-            .repo
-            .monitoring_system_information_for_clients(&client_ids),
-        state
-            .repo
-            .list_latest_telemetry_rollups_for_clients(&client_ids, None),
-        state
-            .repo
-            .telemetry_projection_pending_for_clients(&client_ids),
         async {
-            if include_history {
+            if domains.system_information {
+                state
+                    .repo
+                    .monitoring_system_information_for_clients(&client_ids)
+                    .await
+            } else {
+                Ok(HashMap::new())
+            }
+        },
+        async {
+            if domains.resources {
+                state
+                    .repo
+                    .list_latest_telemetry_rollups_for_clients(&client_ids, None)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.projected_telemetry() {
+                state
+                    .repo
+                    .telemetry_projection_pending_for_clients(&client_ids)
+                    .await
+            } else {
+                Ok(HashMap::new())
+            }
+        },
+        async {
+            if domains.resources && include_history {
                 state
                     .repo
                     .list_dashboard_raw_telemetry_rollups(
@@ -1502,11 +1685,18 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
                 Ok(Vec::new())
             }
         },
-        state
-            .repo
-            .list_latest_telemetry_network_rates_for_selection(&network_rate_selection),
         async {
-            if include_history {
+            if domains.network {
+                state
+                    .repo
+                    .list_latest_telemetry_network_rates_for_selection(&network_rate_selection)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.network && include_history {
                 match history_mode {
                     MonitoringCardsHistoryMode::PerInterface => {
                         state
@@ -1537,12 +1727,28 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
                 Ok(Vec::new())
             }
         },
-        state
-            .repo
-            .list_traffic_accounting_for_agents_with_rules(&agents, &rules),
-        state.repo.current_primary_ping_for_clients(&client_ids),
         async {
-            if include_history {
+            if domains.traffic {
+                state
+                    .repo
+                    .list_traffic_accounting_for_agents_with_rules(&agents, &rules)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.ping {
+                state
+                    .repo
+                    .current_primary_ping_for_clients(&client_ids)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.ping && include_history {
                 state
                     .repo
                     .list_raw_primary_ping_results_for_clients(
@@ -1621,9 +1827,9 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
                 | VPS_RULE_KEY_PRODUCT_NAME
         )
     }) {
-        if row.key == VPS_RULE_KEY_PRODUCT_NAME {
+        if row.key == VPS_RULE_KEY_PRODUCT_NAME && domains.identity_context {
             product_names.insert(row.client_id, row.value_raw);
-        } else if row.key == VPS_RULE_KEY_NETWORK_PORT_SPEED {
+        } else if row.key == VPS_RULE_KEY_NETWORK_PORT_SPEED && domains.traffic {
             port_speeds.insert(
                 row.client_id,
                 monitoring_port_speed(&row.value_json).map_err(|error| {
@@ -1634,7 +1840,12 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
                     )
                 })?,
             );
-        } else {
+        } else if domains.billing
+            && matches!(
+                row.key.as_str(),
+                VPS_RULE_KEY_BILLING_PRICE | VPS_RULE_KEY_BILLING_CYCLE
+            )
+        {
             billing_rules
                 .entry(row.client_id)
                 .or_default()
@@ -1675,13 +1886,17 @@ async fn monitoring_cards_for_agents_projection_with_history_mode(
         .into_iter()
         .map(|client| {
             let client_id = client.id.clone();
-            let traffic = traffic.get(&client_id).cloned().ok_or_else(|| {
-                ApiError::internal(
-                    "monitoring_card_projection_failed",
-                    "The VPS monitoring cards could not be prepared.",
-                    anyhow::anyhow!("traffic projection missing for {client_id}"),
-                )
-            })?;
+            let traffic = if domains.traffic {
+                Some(traffic.get(&client_id).cloned().ok_or_else(|| {
+                    ApiError::internal(
+                        "monitoring_card_projection_failed",
+                        "The VPS monitoring cards could not be prepared.",
+                        anyhow::anyhow!("traffic projection missing for {client_id}"),
+                    )
+                })?)
+            } else {
+                None
+            };
             let resources = resources.get(&client_id).cloned();
             let (projection_pending_since, projection_checked_at) = projection_pending
                 .get(&client_id)
@@ -1780,7 +1995,7 @@ fn monitoring_billing_plan(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CurrentNetworkDetail {
+enum CurrentMonitoringDetail {
     Hidden,
     SingleVpsDetail,
 }
@@ -1789,7 +2004,8 @@ async fn client_monitoring_view(
     state: &AppState,
     client_id: &str,
     query: &ClientMonitoringQuery,
-    current_network_detail: CurrentNetworkDetail,
+    current_detail: CurrentMonitoringDetail,
+    domains: MonitoringDomains,
 ) -> Result<ClientMonitoringView, ApiError> {
     let client_ids = vec![client_id.to_string()];
     let client = state
@@ -1810,15 +2026,36 @@ async fn client_monitoring_view(
     // established. Evaluate their errors in the historical order below so
     // public error codes remain stable if more than one source is unavailable.
     let (network_rate_selection, product_name, system_information, range) = tokio::join!(
-        state
-            .repo
-            .network_rate_interface_selection_for_clients(&client_ids),
-        state
-            .repo
-            .list_vps_rules_for_clients(&client_ids, &[VPS_RULE_KEY_PRODUCT_NAME]),
-        state
-            .repo
-            .monitoring_system_information_for_clients(&client_ids),
+        async {
+            if domains.network {
+                state
+                    .repo
+                    .network_rate_interface_selection_for_clients(&client_ids)
+                    .await
+            } else {
+                Ok(Default::default())
+            }
+        },
+        async {
+            if domains.identity_context {
+                state
+                    .repo
+                    .list_vps_rules_for_clients(&client_ids, &[VPS_RULE_KEY_PRODUCT_NAME])
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.system_information {
+                state
+                    .repo
+                    .monitoring_system_information_for_clients(&client_ids)
+                    .await
+            } else {
+                Ok(HashMap::new())
+            }
+        },
         monitoring_range(state, &client_ids, query),
     );
     let network_rate_selection = network_rate_selection.map_err(ApiError::internal_mapper(
@@ -1857,6 +2094,9 @@ async fn client_monitoring_view(
         primary_ping,
     ) = tokio::join!(
         async {
+            if !domains.resources {
+                return Ok(Vec::new());
+            }
             if range.source == "raw" {
                 state
                     .repo
@@ -1894,6 +2134,9 @@ async fn client_monitoring_view(
             }
         },
         async {
+            if !domains.network {
+                return Ok(Vec::new());
+            }
             if range.source == "raw" {
                 state
                     .repo
@@ -1931,9 +2174,12 @@ async fn client_monitoring_view(
             }
         },
         async {
-            match current_network_detail {
-                CurrentNetworkDetail::Hidden => Ok(Vec::new()),
-                CurrentNetworkDetail::SingleVpsDetail => {
+            if !domains.network {
+                return Ok(Vec::new());
+            }
+            match current_detail {
+                CurrentMonitoringDetail::Hidden => Ok(Vec::new()),
+                CurrentMonitoringDetail::SingleVpsDetail => {
                     state
                         .repo
                         .list_latest_telemetry_network_rates_for_vps_detail(client_id)
@@ -1942,9 +2188,12 @@ async fn client_monitoring_view(
             }
         },
         async {
-            match current_network_detail {
-                CurrentNetworkDetail::Hidden => Ok(Vec::new()),
-                CurrentNetworkDetail::SingleVpsDetail => {
+            if !domains.network {
+                return Ok(Vec::new());
+            }
+            match current_detail {
+                CurrentMonitoringDetail::Hidden => Ok(Vec::new()),
+                CurrentMonitoringDetail::SingleVpsDetail => {
                     state
                         .repo
                         .list_telemetry_tunnels_for_vps_detail(client_id)
@@ -1953,6 +2202,9 @@ async fn client_monitoring_view(
             }
         },
         async {
+            if !domains.ping {
+                return Ok(Vec::new());
+            }
             if range.source == "raw" {
                 state
                     .repo
@@ -1977,15 +2229,45 @@ async fn client_monitoring_view(
                     .await
             }
         },
-        state.repo.get_traffic_accounting(client_id),
-        state.repo.list_traffic_history(
-            client_id,
-            range.start_unix,
-            range.end_unix,
-            range.step_secs,
-        ),
-        state.repo.current_ping_targets_for_client(client_id),
-        state.repo.current_primary_ping_for_clients(&client_ids),
+        async {
+            if domains.traffic && current_detail == CurrentMonitoringDetail::SingleVpsDetail {
+                state.repo.get_traffic_accounting(client_id).await.map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+        async {
+            if domains.traffic {
+                state
+                    .repo
+                    .list_traffic_history(
+                        client_id,
+                        range.start_unix,
+                        range.end_unix,
+                        range.step_secs,
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.ping {
+                state.repo.current_ping_targets_for_client(client_id).await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if domains.ping && current_detail == CurrentMonitoringDetail::SingleVpsDetail {
+                state
+                    .repo
+                    .current_primary_ping_for_clients(&client_ids)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
     );
     let resources = resources?;
     let network = network?;
@@ -2309,7 +2591,11 @@ fn public_monitoring_card(
             .then(|| public_network_points(card.network_history)),
         traffic: visibility
             .traffic
-            .then(|| public_traffic_metric(card.traffic, card.port_speed)),
+            .then(|| {
+                card.traffic
+                    .map(|traffic| public_traffic_metric(traffic, card.port_speed))
+            })
+            .flatten(),
         primary_ping: visibility
             .ping
             .then(|| card.primary_ping.map(public_ping_metric))
