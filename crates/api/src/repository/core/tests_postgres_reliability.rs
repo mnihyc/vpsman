@@ -34146,6 +34146,8 @@ async fn postgres_deleted_ping_target_does_not_poison_deferred_projection() {
     let gateway_session_id = Uuid::new_v4();
     let deleted_target_id = Uuid::new_v4();
     let retained_target_id = Uuid::new_v4();
+    let chart_end_unix = 4_000_000_000_u64;
+    let accepted_unix = chart_end_unix / 60 * 60;
     insert_client(&db.pool, client_id, Some(process_incarnation_id)).await;
     start_test_gateway_session(&db.repo, gateway_id, client_id, gateway_session_id).await;
     sqlx::query(
@@ -34171,6 +34173,19 @@ async fn postgres_deleted_ping_target_does_not_poison_deferred_projection() {
     .bind(deleted_target_id)
     .bind(retained_target_id)
     .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // Check timestamps are rebased onto the server acceptance clock, not the
+    // fixture's 20_000/20_001 source timestamps. Pin its monotonic head inside
+    // the existing chart range so both checks share the asserted open minute,
+    // even when the real CI clock crosses a UTC minute between the two ingests.
+    sqlx::query(
+        "UPDATE telemetry_projection_heads SET accepted_at=to_timestamp($2) WHERE client_id=$1",
+    )
+    .bind(client_id)
+    .bind(accepted_unix as f64)
     .execute(&db.pool)
     .await
     .unwrap();
@@ -34333,6 +34348,10 @@ async fn postgres_deleted_ping_target_does_not_poison_deferred_projection() {
         .await
         .unwrap();
     assert_eq!(history.len(), 1);
+    assert_eq!(
+        crate::util::parse_timestamp_unix(&history[0].bucket_start),
+        Some(accepted_unix)
+    );
     assert_eq!(history[0].sample_count, 2);
     assert_eq!(history[0].latest_status, "degraded");
     assert!((history[0].loss_ratio_avg - 0.25).abs() < 1e-12);
@@ -34354,7 +34373,7 @@ async fn postgres_deleted_ping_target_does_not_poison_deferred_projection() {
         .list_raw_primary_ping_results_for_clients(
             &[client_id.to_string()],
             0,
-            4_000_000_000,
+            chart_end_unix,
             16,
             60,
         )

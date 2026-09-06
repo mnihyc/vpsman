@@ -681,6 +681,8 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         &ping,
         &[
             "checked_at",
+            "display_color",
+            "display_order",
             "latency_avg_ms",
             "loss_ratio",
             "state",
