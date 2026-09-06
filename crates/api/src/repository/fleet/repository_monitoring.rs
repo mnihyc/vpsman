@@ -930,7 +930,16 @@ impl Repository {
                             p.latest_status,
                             p.latest_reason,
                             p.latest_checked_at
-                        FROM telemetry_ping_points p
+                        FROM telemetry_ping_points_source(
+                            ARRAY(SELECT series_id FROM scoped_series),
+                            -- The schema's largest physical tier is 86,400s.
+                            -- Keep every overlapping coarse bucket, while
+                            -- exposing a lower bound to the retained index.
+                            to_timestamp($2::DOUBLE PRECISION)
+                                - make_interval(secs => 86400),
+                            to_timestamp($3::DOUBLE PRECISION),
+                            NULL::INTEGER
+                        ) p
                         JOIN scoped_series series ON series.series_id = p.series_id
                         WHERE
                             p.bucket_secs >= 60
@@ -1125,11 +1134,16 @@ impl Repository {
                         point.latest_reason,
                         point.latest_checked_at
                     FROM scoped_series series
-                    JOIN telemetry_ping_points point
+                    JOIN telemetry_ping_points_source(
+                        ARRAY(SELECT series_id FROM scoped_series),
+                        to_timestamp($2::DOUBLE PRECISION) - interval '1 minute',
+                        to_timestamp($3::DOUBLE PRECISION),
+                        60
+                    ) point
                       ON point.series_id = series.series_id
                     WHERE point.bucket_secs = 60
-                      AND point.bucket_start + interval '1 minute'
-                            > to_timestamp($2::DOUBLE PRECISION)
+                      AND point.bucket_start
+                            > to_timestamp($2::DOUBLE PRECISION) - interval '1 minute'
                       AND point.bucket_start
                             <= to_timestamp($3::DOUBLE PRECISION)
                 ), bucketed AS (
@@ -1252,13 +1266,18 @@ impl Repository {
                         point.latest_reason,
                         point.latest_checked_at
                     FROM scoped_series series
-                    JOIN telemetry_ping_points point
+                    JOIN telemetry_ping_points_source(
+                        ARRAY(SELECT series_id FROM scoped_series),
+                        to_timestamp($2::DOUBLE PRECISION) - interval '1 minute',
+                        to_timestamp($3::DOUBLE PRECISION),
+                        60
+                    ) point
                       ON point.series_id = series.series_id
                     WHERE point.bucket_secs = 60
-                      AND point.bucket_start + interval '1 minute' > COALESCE(
+                      AND point.bucket_start > COALESCE(
                             to_timestamp($2::DOUBLE PRECISION),
                             '-infinity'::TIMESTAMPTZ
-                          )
+                          ) - interval '1 minute'
                       AND point.bucket_start <= COALESCE(
                             to_timestamp($3::DOUBLE PRECISION),
                             'infinity'::TIMESTAMPTZ

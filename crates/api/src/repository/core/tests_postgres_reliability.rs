@@ -13934,7 +13934,7 @@ async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_flee
     let started = Instant::now();
     let page = crate::routes_monitoring::list_monitoring_cards(
         State(history_state),
-        headers,
+        headers.clone(),
         history_query,
     )
     .await
@@ -13980,6 +13980,41 @@ async fn postgres_monitoring_card_network_history_is_setwise_for_a_120_by_8_flee
         "Authenticated Cards route + JSON serialization (all domains, selected aggregate, default history=true): {elapsed:?}; {network_points} network points, populated resource and primary Ping histories; {} bytes; fresh AppState, warm PostgreSQL; excludes network transport",
         history_json.len()
     );
+    // Keep the existing four-connection fixture timing above for comparison,
+    // then measure the real repository connection configuration independently.
+    // Do not silently attribute a larger test pool's concurrency to a SQL fix.
+    let mut route_url =
+        reqwest::Url::parse(&std::env::var("VPSMAN_TEST_POSTGRES_URL").unwrap()).unwrap();
+    route_url.set_path(&db.db_name);
+    let route_repo = Repository::connect(Some(route_url.as_str()), &workspace_migrations_dir())
+        .await
+        .unwrap();
+    let mut route_state = postgres_app_state(&db);
+    route_state.repo = route_repo.clone();
+    let production_query =
+        Query::<crate::routes_monitoring::MonitoringCardsQuery>::try_from_uri(&history_uri)
+            .unwrap();
+    let started = Instant::now();
+    let production_page = crate::routes_monitoring::list_monitoring_cards(
+        State(route_state),
+        headers,
+        production_query,
+    )
+    .await
+    .unwrap()
+    .0;
+    let production_json = serde_json::to_vec(&production_page).unwrap();
+    let production_elapsed = started.elapsed();
+    assert_eq!(production_page.items.len(), 120);
+    assert!(production_page
+        .items
+        .iter()
+        .all(|card| !card.network_history.is_empty()
+            && !card.resource_history.is_empty()
+            && !card.primary_ping_history.is_empty()));
+    let Repository::Postgres(route_pool) = route_repo;
+    eprintln!("Authenticated history Cards + JSON using production Repository::connect (pool max={}): {production_elapsed:?}; {} bytes; fresh AppState, warm PostgreSQL; excludes network transport", route_pool.options().get_max_connections(), production_json.len());
+    route_pool.close().await;
     db.cleanup().await;
 }
 
@@ -35991,6 +36026,107 @@ async fn postgres_port_forward_modes_migration_preserves_existing_dnat_rows() {
 }
 
 #[tokio::test]
+async fn postgres_monitoring_read_upgrade_preserves_existing_v056_data() {
+    let Ok(base_url) = std::env::var("VPSMAN_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let options = PgConnectOptions::from_str(&base_url).unwrap();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    let db_name = format!("vpsman_reliability_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {}", quote_ident(&db_name)))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let database_options = options.database(&db_name);
+    let mut connection = sqlx::PgConnection::connect_with(&database_options)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE SCHEMA vpsman_internal; SET search_path=vpsman_internal,public;")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let mut baseline = sqlx::migrate::Migrator::new(workspace_migrations_dir())
+        .await
+        .unwrap();
+    // v0.5.6 ends at 0017. Install that actual schema, then exercise the
+    // production upgrade path with retained identities and projected evidence.
+    baseline.migrations = std::borrow::Cow::Owned(
+        baseline
+            .iter()
+            .filter(|migration| migration.version <= 17)
+            .cloned()
+            .collect(),
+    );
+    baseline.run(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            database_options
+                .clone()
+                .options(crate::repository::API_POSTGRES_SESSION_OPTIONS),
+        )
+        .await
+        .unwrap();
+    let db = PgReliabilityTestDb {
+        repo: Repository::Postgres(pool.clone()),
+        pool,
+        admin_pool,
+        db_name,
+    };
+    let client_id = "monitoring-upgrade-owner";
+    insert_client(&db.pool, client_id, None).await;
+    let metrics = AgentMetrics {
+        observed_unix: crate::unix_now(),
+        uptime_secs: 42,
+        ..Default::default()
+    };
+    insert_raw_telemetry_fixture(&db.pool, client_id, metrics.observed_unix, &metrics).await;
+    let snapshot_sql = r#"
+        SELECT jsonb_build_object(
+            'client', (SELECT to_jsonb(client) FROM clients client WHERE id=$1),
+            'samples', (SELECT jsonb_agg(to_jsonb(sample) ORDER BY accepted_seq) FROM telemetry_samples sample WHERE client_id=$1),
+            'heads', (SELECT to_jsonb(head) FROM telemetry_projection_heads head WHERE client_id=$1),
+            'resource_points', (SELECT jsonb_agg(to_jsonb(point) ORDER BY bucket_start,bucket_secs) FROM telemetry_resource_points_source(ARRAY[$1::TEXT]) point)
+        )
+    "#;
+    let before: Value = sqlx::query_scalar(snapshot_sql)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    crate::repository::migrate_postgres_database(&database_options, &workspace_migrations_dir())
+        .await
+        .unwrap();
+    let after: Value = sqlx::query_scalar(snapshot_sql)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "read-function upgrade must not rewrite existing data or resource results"
+    );
+    let empty_ping: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM telemetry_ping_points_source(ARRAY[]::BIGINT[])")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(empty_ping, 0);
+    let installed: bool =
+        sqlx::query_scalar("SELECT success FROM vpsman_internal._sqlx_migrations WHERE version=18")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(installed);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_sqlx_metadata_is_private_and_application_connections_are_public() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -36025,7 +36161,12 @@ async fn postgres_sqlx_metadata_is_private_and_application_connections_are_publi
         .await
         .unwrap();
     assert_eq!(application_schema, "public");
-    assert_eq!(private_ledger_rows, 17);
+    let expected_migration_rows = sqlx::migrate::Migrator::new(workspace_migrations_dir())
+        .await
+        .unwrap()
+        .iter()
+        .count() as i64;
+    assert_eq!(private_ledger_rows, expected_migration_rows);
     assert_eq!(public_internal_relations, 0);
 
     db.cleanup().await;
@@ -45892,3 +46033,9 @@ async fn postgres_monitoring_traffic_freshness_reads_only_selected_stream_owners
         .any(|reason| reason == "eth0 sample missing"));
     db.cleanup().await;
 }
+
+#[path = "tests_postgres_resource_history.rs"]
+mod resource_history;
+
+#[path = "tests_postgres_ping_history.rs"]
+mod ping_history;
