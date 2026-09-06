@@ -2476,6 +2476,98 @@
   border-top: 1px solid var(--border);
 }
 
+.pingDisplayList {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.pingDisplayRow {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 132px;
+  gap: 10px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.pingDisplayRow.dragging {
+  position: relative;
+  z-index: 1;
+  background: var(--primary-selected);
+}
+.pingDisplayHandle {
+  touch-action: none;
+  cursor: grab;
+}
+.pingDisplayHandle:active {
+  cursor: grabbing;
+}
+.pingDisplayIdentity {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.pingDisplayColor {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+}
+.pingDisplayColor .pingColorHex {
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  font-family: monospace;
+  font-size: 12px;
+}
+.pingColorSwatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.pingColorSwatch:focus-visible,
+.pingColorSwatch[data-highlighted] {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.pingColorError {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 11px;
+}
+.pingColorPalette {
+  z-index: 100;
+  width: 170px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 16%);
+  font-size: 12px;
+}
+.pingColorChoices {
+  display: grid;
+  grid-template-columns: repeat(4, 28px);
+  gap: 9px;
+  margin: 10px 0;
+}
+.pingColorDefault {
+  padding: 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.pingColorDefault[data-highlighted] {
+  background: var(--primary-selected);
+  outline: none;
+}
+
 .tagOrderPanelHeader,
 .tagOrderSaveBar {
   display: flex;

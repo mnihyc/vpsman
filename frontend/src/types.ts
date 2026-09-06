@@ -1187,6 +1187,8 @@ export type TelemetryNetworkRateRecord = {
 };
 
 export type CurrentPingView = {
+  display_order?: number | null;
+  display_color?: string;
   target_id: string;
   target_name: string;
   enabled: boolean;
@@ -1389,6 +1391,8 @@ export type PublicSystemInformationView = {
 };
 
 export type PublicPingMetricView = {
+  display_order?: number | null;
+  display_color?: string;
   target_name: string;
   state: string;
   status: string | null;
@@ -1470,6 +1474,8 @@ export type PublicMonitoringDataView = {
 };
 
 export type PingTargetView = {
+  display_order?: number | null;
+  display_color?: string;
   id: string;
   name: string;
   host: string;

@@ -106,7 +106,7 @@ use crate::{
         get_client_monitoring, get_monitoring_share_url, get_ping_target, list_monitoring_cards,
         list_monitoring_shares, list_ping_targets, make_primary_ping_target,
         public_monitoring_share_bootstrap, public_monitoring_share_data, revoke_monitoring_shares,
-        update_monitoring_share, update_ping_target,
+        update_monitoring_share, update_ping_target, update_ping_target_display,
     },
     routes_network::{
         allocate_tunnel_endpoints, bulk_tunnel_plan_lifecycle, clear_tunnel_plan_evidence,
@@ -390,6 +390,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/ping-targets",
             get(list_ping_targets).post(create_ping_target),
+        )
+        .route(
+            "/api/v1/ping-targets/display",
+            put(update_ping_target_display),
         )
         .route(
             "/api/v1/ping-targets/{target_id}",

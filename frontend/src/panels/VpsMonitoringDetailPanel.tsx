@@ -1,7 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "../api";
-import { consolePalette, dashboardChartColors } from "../colorPalette";
+import { consolePalette } from "../colorPalette";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { MONITORING_REFRESH_INTERVAL_MS } from "../constants";
 import {
@@ -15,6 +15,7 @@ import {
 } from "../components/TimeSeriesChart";
 import type {
   AgentView,
+  CurrentPingView,
   PingRollupView,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
@@ -30,6 +31,10 @@ import {
   type ByteCountFormatter,
 } from "../panelDisplay";
 import { formatMonthlyTrafficResetUtc } from "../vpsRules";
+import {
+  comparePingTargetDisplayOrder,
+  pingTargetColor,
+} from "../pingTargetDisplay";
 
 type MonitoringSection = "resources" | "ping";
 type PingMetric = "latency" | "loss";
@@ -52,18 +57,7 @@ type MonitoringRange = {
   };
 };
 
-type CurrentPing = {
-  target_id: string;
-  target_name: string;
-  enabled: boolean;
-  generation: number;
-  state: string;
-  status: string | null;
-  latency_avg_ms: number | null;
-  loss_ratio: number | null;
-  reason: string | null;
-  checked_at: string | null;
-};
+type CurrentPing = CurrentPingView;
 
 type ClientMonitoringResponse = {
   client: AgentView;
@@ -478,9 +472,9 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
           <div className="dashboardWidgetHeader">
             <strong>Current interface detail</strong>
             <small>
-              Interfaces excluded by network.interfaces are shown only here
-              and expire after 15 minutes; eligible evidence follows history
-              and traffic-accounting rules
+              Interfaces excluded by network.interfaces are shown only here and
+              expire after 15 minutes; eligible evidence follows history and
+              traffic-accounting rules
             </small>
           </div>
           <div
@@ -488,10 +482,7 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
             className="vpsMonitoringPingTargets"
           >
             {currentNetworkDetail.map((rate) => (
-              <div
-                className="vpsMonitoringPingTarget"
-                key={rate.interface}
-              >
+              <div className="vpsMonitoringPingTarget" key={rate.interface}>
                 <span>
                   <strong className="truncateValue">{rate.interface}</strong>
                   <em>Current rate</em>
@@ -636,8 +627,9 @@ function PingHistory({
     [currentGenerationRows, data.ping_targets, data.primary_ping],
   );
   const chart = useMemo(
-    () => pingChart(currentGenerationRows, data.range, metric),
-    [currentGenerationRows, data.range, metric],
+    () =>
+      pingChart(currentGenerationRows, data.ping_targets, data.range, metric),
+    [currentGenerationRows, data.ping_targets, data.range, metric],
   );
   const samples = currentGenerationRows.reduce(
     (sum, row) => sum + Math.max(0, row.sample_count),
@@ -1155,13 +1147,23 @@ function currentPingGenerationRows(
 
 function pingChart(
   rows: PingRollupView[],
+  currentTargets: CurrentPing[],
   range: MonitoringRange,
   metric: PingMetric,
 ): ChartData {
   const timeline = buildTimeline(range);
+  const targetMetadata = new Map(
+    currentTargets.map((target) => [target.target_id, target]),
+  );
   const targets = [
     ...new Map(rows.map((row) => [row.target_id, row])).values(),
-  ].sort((left, right) => left.target_name.localeCompare(right.target_name));
+  ].sort(
+    (left, right) =>
+      comparePingTargetDisplayOrder(
+        targetMetadata.get(left.target_id),
+        targetMetadata.get(right.target_id),
+      ) || left.target_name.localeCompare(right.target_name),
+  );
   const rowsByTarget = new Map<string, Map<number, PingRollupView>>();
   for (const row of rows) {
     const epoch = chartEpoch(row.bucket_start, range.step_secs);
@@ -1181,8 +1183,12 @@ function pingChart(
   return {
     times: timeline.times,
     lines: targets.map((target) => ({
-      color: colorForTarget(target.target_id),
+      color: pingTargetColor(
+        target.target_id,
+        targetMetadata.get(target.target_id),
+      ),
       label: target.target_name,
+      seriesKey: target.target_id,
       values: timeline.epochs.map((epoch) => {
         const row = rowsByTarget.get(target.target_id)?.get(epoch);
         if (!row) return null;
@@ -1215,7 +1221,8 @@ function pingTargetSummaries(
       const row = latest.get(target.target_id);
       const summary = row ? pingSummaryFromRow(row) : null;
       return {
-        color: colorForTarget(target.target_id),
+        color: pingTargetColor(target.target_id, target),
+        display_order: target.display_order,
         generation: target.generation,
         latency: target.latency_avg_ms ?? summary?.latency ?? null,
         loss:
@@ -1229,12 +1236,15 @@ function pingTargetSummaries(
         targetId: target.target_id,
       };
     })
-    .sort(comparePingSummaries);
+    .sort(
+      (left, right) =>
+        comparePingTargetDisplayOrder(left, right) ||
+        comparePingSummaries(left, right),
+    );
 }
 
 function pingSummaryFromRow(row: PingRollupView) {
   return {
-    color: colorForTarget(row.target_id),
     generation: row.generation,
     latency: row.latency_avg_ms,
     loss: row.loss_ratio_avg * 100,
@@ -1381,14 +1391,6 @@ function finiteNumber(value: number | null | undefined): number | null {
   return value === null || value === undefined || !Number.isFinite(value)
     ? null
     : value;
-}
-
-function colorForTarget(targetId: string): string {
-  let hash = 0;
-  for (let index = 0; index < targetId.length; index += 1) {
-    hash = (hash * 31 + targetId.charCodeAt(index)) >>> 0;
-  }
-  return dashboardChartColors[hash % dashboardChartColors.length];
 }
 
 function pingStatusTone(

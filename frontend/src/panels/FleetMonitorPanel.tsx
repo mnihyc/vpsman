@@ -1604,6 +1604,7 @@ export function VpsMonitorCard({
         {pingEvidenceInHeading ? null : (
           <span className="vpsMonitorPingVisual" aria-hidden="true">
             <MiniSparkline
+              color={primaryPing?.display_color}
               label="Primary Ping history"
               tone="ping"
               values={pingHistory}
@@ -1792,10 +1793,12 @@ export function MonitorFact({
 }
 
 export function MiniSparkline({
+  color,
   label,
   tone,
   values,
 }: {
+  color?: string;
   label: string;
   tone: "load" | "ping" | "rx" | "tx";
   values: Array<number | null>;
@@ -1832,6 +1835,7 @@ export function MiniSparkline({
       className={`vpsMonitorSparkline ${tone}`}
       preserveAspectRatio="none"
       role="img"
+      style={color ? { color } : undefined}
       viewBox={`0 0 ${width} ${height}`}
     >
       {segments.map((points, index) => (

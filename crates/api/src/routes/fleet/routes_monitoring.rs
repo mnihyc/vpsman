@@ -28,16 +28,17 @@ use crate::{
         MonitoringShareTargetReplacement, MonitoringShareUrlResponse, MonitoringShareView,
         MonitoringShareVisibilityRequest, MonitoringShareVisibilityView,
         MonitoringSharesMutationResponse, PingRollupView, PingTargetAssignmentChangeView,
-        PingTargetAssignmentReplacement, PingTargetDetailView, PingTargetMutationRequest,
-        PingTargetMutationResponse, PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView,
-        PortSpeedView, PublicBillingPlanView, PublicMonitoringCardView, PublicMonitoringDataView,
-        PublicMonitoringDetailView, PublicMonitoringRangeView, PublicMonitoringShareBootstrapView,
-        PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
-        PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
-        PublicSystemInformationView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
-        RevokeMonitoringSharesRequest, RuntimeConfigApplyStateRecord, SystemInformationView,
-        TelemetryNetworkRateView, TelemetryRollupView, UpdateMonitoringShareRequest,
-        UpdateMonitoringShareResponse,
+        PingTargetAssignmentReplacement, PingTargetDetailView, PingTargetDisplayView,
+        PingTargetMutationRequest, PingTargetMutationResponse, PingTargetRecord,
+        PingTargetRuntimeSyncView, PingTargetView, PortSpeedView, PublicBillingPlanView,
+        PublicMonitoringCardView, PublicMonitoringDataView, PublicMonitoringDetailView,
+        PublicMonitoringRangeView, PublicMonitoringShareBootstrapView, PublicMonitoringShareView,
+        PublicNetworkMetricView, PublicNetworkPointView, PublicPingMetricView, PublicPingPointView,
+        PublicPortSpeedView, PublicResourceMetricView, PublicSystemInformationView,
+        PublicTrafficHistoryPointView, PublicTrafficMetricView, RevokeMonitoringSharesRequest,
+        RuntimeConfigApplyStateRecord, SystemInformationView, TelemetryNetworkRateView,
+        TelemetryRollupView, UpdateMonitoringShareRequest, UpdateMonitoringShareResponse,
+        UpdatePingTargetDisplayRequest,
     },
     model_alert_policies::TrafficAccountingRecord,
     model_alert_policies::{
@@ -376,6 +377,37 @@ pub(crate) async fn list_ping_targets(
         operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
     )
     .await?;
+    Ok(Json(targets))
+}
+
+pub(crate) async fn update_ping_target_display(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdatePingTargetDisplayRequest>,
+) -> Result<Json<Vec<PingTargetDisplayView>>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    let targets = state
+        .repo
+        .update_ping_target_display(&request, &operator)
+        .await
+        .map_err(|error| match error.to_string().as_str() {
+            "ping_target_display_duplicate" => {
+                ApiError::bad_request("ping_target_display_duplicate")
+            }
+            "ping_target_display_unknown" => ApiError::bad_request("ping_target_display_unknown"),
+            "ping_target_display_color_invalid" => {
+                ApiError::bad_request("ping_target_display_color_invalid")
+            }
+            "ping_target_display_stale" => ApiError::conflict("ping_target_display_stale"),
+            _ => ApiError::internal(
+                "ping_target_display_failed",
+                "Ping display settings could not be saved.",
+                error,
+            ),
+        })?;
+    state.events.invalidate_ping_display_read_cache();
     Ok(Json(targets))
 }
 
@@ -2856,6 +2888,8 @@ pub(super) fn public_traffic_metric(
 fn public_ping_metric(row: CurrentPingView) -> PublicPingMetricView {
     PublicPingMetricView {
         target_name: row.target_name,
+        display_order: row.display_order,
+        display_color: row.display_color,
         state: row.state,
         status: row.status,
         latency_avg_ms: row.latency_avg_ms,

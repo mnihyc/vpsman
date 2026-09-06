@@ -112,6 +112,8 @@ pub(crate) struct PingTargetRuntimeSyncView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PingTargetView {
     pub(crate) id: Uuid,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) display_color: String,
     pub(crate) name: String,
     pub(crate) host: String,
     pub(crate) probe_kind: String,
@@ -141,6 +143,26 @@ pub(crate) struct PingTargetAssignmentView {
 pub(crate) struct PingTargetDetailView {
     pub(crate) target: PingTargetView,
     pub(crate) assignments: Vec<PingTargetAssignmentView>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdatePingTargetDisplayRequest {
+    pub(crate) targets: Vec<PingTargetDisplayInput>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PingTargetDisplayInput {
+    pub(crate) target_id: Uuid,
+    pub(crate) color: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PingTargetDisplayView {
+    pub(crate) target_id: Uuid,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) display_color: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -256,6 +278,8 @@ pub(crate) struct PingRollupView {
 pub(crate) struct CurrentPingView {
     pub(crate) target_id: Uuid,
     pub(crate) target_name: String,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) display_color: String,
     pub(crate) enabled: bool,
     pub(crate) generation: i64,
     pub(crate) state: String,
@@ -583,6 +607,8 @@ pub(crate) struct PublicPortSpeedView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PublicPingMetricView {
     pub(crate) target_name: String,
+    pub(crate) display_order: Option<i64>,
+    pub(crate) display_color: String,
     pub(crate) state: String,
     pub(crate) status: Option<String>,
     pub(crate) latency_avg_ms: Option<f64>,

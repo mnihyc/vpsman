@@ -46039,3 +46039,6 @@ mod resource_history;
 
 #[path = "tests_postgres_ping_history.rs"]
 mod ping_history;
+
+#[path = "tests_postgres_ping_display.rs"]
+mod ping_display;

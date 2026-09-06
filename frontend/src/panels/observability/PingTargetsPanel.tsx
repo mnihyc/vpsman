@@ -66,6 +66,11 @@ import {
   runPanelAction,
 } from "../../utils";
 import { LocalTargetPreview } from "../TargetImpactPreview";
+import { comparePingTargetDisplayOrder } from "../../pingTargetDisplay";
+import {
+  PingTargetDisplayManager,
+  type PingTargetDisplayDraft,
+} from "./PingTargetDisplayManager";
 
 type EditorState =
   | { mode: "create" }
@@ -759,6 +764,69 @@ export function PingTargetsPanel({
     return targetListReadCountRef.current > 0;
   }
 
+  async function saveDisplay(draft: PingTargetDisplayDraft[]): Promise<void> {
+    setPending(true);
+    try {
+      const response = await awaitTokenOwnedResponse(
+        apiPut<
+          { target_id: string; display_order: number; display_color: string }[]
+        >("/api/v1/ping-targets/display", apiToken, { targets: draft }),
+        reconcileTargetListAfterTokenRotation,
+      );
+      // The manager is keyed to the session. A completed old-session write must
+      // not publish into a different operator's draft or target list.
+      if (!response)
+        throw new Error("The operator session changed. Refresh Ping targets.");
+      const display = new Map(response.map((item) => [item.target_id, item]));
+      const needsRefresh = invalidateTargetListAfterMutation();
+      setTargets((current) =>
+        current
+          .map((target) => {
+            const item = display.get(target.id);
+            return item
+              ? {
+                  ...target,
+                  display_order: item.display_order,
+                  display_color: item.display_color,
+                }
+              : target;
+          })
+          .sort(
+            (a, b) =>
+              comparePingTargetDisplayOrder(a, b) ||
+              a.name.localeCompare(b.name),
+          ),
+      );
+      setDetails((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([id, detail]) => {
+            const item = display.get(id);
+            return [
+              id,
+              item
+                ? {
+                    ...detail,
+                    target: {
+                      ...detail.target,
+                      display_order: item.display_order,
+                      display_color: item.display_color,
+                    },
+                  }
+                : detail,
+            ];
+          }),
+        ),
+      );
+      if (needsRefresh)
+        void refreshTargets({
+          refreshExpandedDetail: false,
+          resetAuxiliaryState: false,
+        });
+    } finally {
+      setPending(false);
+    }
+  }
+
   const columns = useMemo<ConsoleDataGridColumn<PingTargetView>[]>(
     () => [
       {
@@ -1038,6 +1106,12 @@ export function PingTargetsPanel({
               </button>
             </div>
           }
+        />
+        <PingTargetDisplayManager
+          key={apiToken}
+          targets={targets}
+          disabled={loading || pending || reviewPending || !requestsEnabled}
+          onSave={saveDisplay}
         />
       </div>
 
@@ -1792,7 +1866,11 @@ function replaceTarget(
   const records = found
     ? current.map((target) => (target.id === next.id ? next : target))
     : [...current, next];
-  return records.sort((left, right) => left.name.localeCompare(right.name));
+  return records.sort(
+    (left, right) =>
+      comparePingTargetDisplayOrder(left, right) ||
+      left.name.localeCompare(right.name),
+  );
 }
 
 function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {

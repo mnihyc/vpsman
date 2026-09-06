@@ -245,6 +245,12 @@ impl WsEventBus {
         self.home_snapshot_singleflight.clear();
     }
 
+    pub(crate) fn invalidate_ping_display_read_cache(&self) {
+        self.monitoring_cards_singleflight.clear();
+        self.client_monitoring_singleflight.clear();
+        self.home_snapshot_singleflight.clear();
+    }
+
     pub(crate) fn notify_fleet_telemetry(&self) {
         let Some(pending) = self.invalidations.upgrade() else {
             return;

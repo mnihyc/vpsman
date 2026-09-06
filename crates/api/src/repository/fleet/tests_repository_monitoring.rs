@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn ping_display_colors_use_canonical_hex_and_existing_target_palette() {
+    for (input, expected) in [
+        (" #AbC ", "#aabbcc"),
+        ("#A1b2C3", "#a1b2c3"),
+        ("#000", "#000000"),
+    ] {
+        assert_eq!(normalize_ping_target_color(input).unwrap(), expected);
+    }
+    for invalid in [
+        "red",
+        "fff",
+        "#12",
+        "#1234",
+        "#12345678",
+        "#zzzzzz",
+        "#１２３",
+    ] {
+        assert!(normalize_ping_target_color(invalid).is_err(), "{invalid}");
+    }
+    let id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+    assert_eq!(resolved_ping_target_color(id, None), "#129eaf");
+    assert_eq!(
+        resolved_ping_target_color(id, Some("#ffffff".to_string())),
+        "#ffffff"
+    );
+}
+
+#[test]
 fn fleet_live_projected_uptime_keeps_existing_unsigned_integer_semantics() {
     let project = |value| {
         telemetry_uptime_from_projected_value(

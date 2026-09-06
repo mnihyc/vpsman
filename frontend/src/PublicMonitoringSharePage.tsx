@@ -7,6 +7,7 @@ import {
   LatestReadConsumer,
 } from "./api";
 import { dashboardChartColors, consolePalette } from "./colorPalette";
+import { comparePingTargetDisplayOrder } from "./pingTargetDisplay";
 import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
@@ -1528,6 +1529,7 @@ function PublicPingRow({
         </small>
       </span>
       <MiniSparkline
+        color={ping.display_color}
         label={`${ping.target_name} latency history`}
         tone="ping"
         values={historyValues(history, (point) => point.latency_avg_ms)}
@@ -1631,12 +1633,34 @@ function PublicMonitoringDetailPanel({
       ...(detail?.ping ?? []).map((point) => point.target_name),
     ]),
   ).sort((left, right) => left.localeCompare(right));
+  const pingTargetMetadata = new Map(
+    (detail?.ping_targets ?? []).map((target) => [target.target_name, target]),
+  );
+  // Keep legacy name-based fallback colors independent of saved display order.
+  const fallbackPingTargetColors = stableTargetColors(pingTargetNames);
+  const pingTargetColors = new Map(
+    pingTargetNames.map((name) => [
+      name,
+      pingTargetMetadata.get(name)?.display_color ??
+        fallbackPingTargetColors.get(name) ??
+        consolePalette.chart.neutral,
+    ]),
+  );
+  pingTargetNames.sort((left, right) =>
+    comparePingTargetDisplayOrder(
+      pingTargetMetadata.get(left),
+      pingTargetMetadata.get(right),
+    ),
+  );
   const hiddenPingTargetSet = new Set(hiddenPingTargets);
   const selectedPingTargetNames = pingTargetNames.filter(
     (targetName) => !hiddenPingTargetSet.has(targetName),
   );
-  const pingTargetColors = stableTargetColors(pingTargetNames);
-  const pingChart = pingChartData(detail?.ping ?? [], detail?.range);
+  const pingChart = pingChartData(
+    detail?.ping ?? [],
+    detail?.range,
+    detail?.ping_targets ?? [],
+  );
   const pingLines =
     pingMetric === "latency" ? pingChart.latencyLines : pingChart.lossLines;
   const visiblePingSeriesCount = pingLines.filter(
@@ -1655,10 +1679,10 @@ function PublicMonitoringDetailPanel({
     : "";
   const resourcesAvailable = Boolean(
     detail &&
-    (detail.resources !== undefined ||
-      detail.network !== undefined ||
-      (detail.traffic !== undefined &&
-        (currentTrafficConfigured || hasTrafficHistory))),
+      (detail.resources !== undefined ||
+        detail.network !== undefined ||
+        (detail.traffic !== undefined &&
+          (currentTrafficConfigured || hasTrafficHistory))),
   );
   const pingAvailable = Boolean(
     detail && (detail.ping_targets !== undefined || detail.ping !== undefined),
@@ -2823,6 +2847,7 @@ function SummaryFact({ label, value }: { label: string; value: number }) {
 function pingChartData(
   points: PublicPingPoint[],
   range: MonitoringRange | undefined,
+  targets: PublicPingMetric[],
 ): {
   latencyLines: TimeSeriesChartLine[];
   lossLines: TimeSeriesChartLine[];
@@ -2837,6 +2862,15 @@ function pingChartData(
     new Set(points.map((point) => point.target_name)),
   ).sort();
   const targetColors = stableTargetColors(targetNames);
+  const targetMetadata = new Map(
+    targets.map((target) => [target.target_name, target]),
+  );
+  targetNames.sort((left, right) =>
+    comparePingTargetDisplayOrder(
+      targetMetadata.get(left),
+      targetMetadata.get(right),
+    ),
+  );
   const targetValues = (
     targetName: string,
     value: (point: PublicPingPoint) => number | null,
@@ -2858,7 +2892,10 @@ function pingChartData(
   };
   const latencyLines = targetNames.map((targetName) => {
     return {
-      color: targetColors.get(targetName) ?? consolePalette.chart.neutral,
+      color:
+        targetMetadata.get(targetName)?.display_color ??
+        targetColors.get(targetName) ??
+        consolePalette.chart.neutral,
       label: targetName,
       seriesKey: targetName,
       values: targetValues(targetName, (point) => point.latency_avg_ms),
@@ -2866,7 +2903,10 @@ function pingChartData(
   });
   const lossLines = targetNames.map((targetName) => {
     return {
-      color: targetColors.get(targetName) ?? consolePalette.chart.neutral,
+      color:
+        targetMetadata.get(targetName)?.display_color ??
+        targetColors.get(targetName) ??
+        consolePalette.chart.neutral,
       label: targetName,
       seriesKey: targetName,
       values: targetValues(targetName, (point) => point.loss_ratio * 100),
@@ -3321,9 +3361,9 @@ function publicCardHasVisibleTelemetry(
 ): boolean {
   return Boolean(
     visibility?.resources ||
-    visibility?.network ||
-    visibility?.traffic ||
-    visibility?.ping,
+      visibility?.network ||
+      visibility?.traffic ||
+      visibility?.ping,
   );
 }
 

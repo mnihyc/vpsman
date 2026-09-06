@@ -486,6 +486,8 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
     };
     let ping = PublicPingMetricView {
         target_name: "Gateway".to_string(),
+        display_order: None,
+        display_color: "#1a73e8".to_string(),
         state: "ok".to_string(),
         status: Some("ok".to_string()),
         latency_avg_ms: Some(10.0),

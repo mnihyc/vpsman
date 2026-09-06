@@ -13,8 +13,9 @@ use crate::{
         MonitoringShareTargetRecord, MonitoringShareTargetReplacement,
         MonitoringShareTargetRevisionRecord, MonitoringShareView, MonitoringShareVisibilityView,
         PingRollupView, PingTargetAssignmentRecord, PingTargetAssignmentReplacement,
-        PingTargetAssignmentView, PingTargetDetailView, PingTargetRecord,
+        PingTargetAssignmentView, PingTargetDetailView, PingTargetDisplayView, PingTargetRecord,
         PingTargetRuntimeSyncView, PingTargetView, SystemInformationView, TelemetryUptimeView,
+        UpdatePingTargetDisplayRequest,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -160,7 +161,21 @@ impl Repository {
     }
 
     pub(crate) async fn list_ping_targets(&self) -> Result<Vec<PingTargetView>> {
-        let records = self.list_ping_target_records().await?;
+        let Self::Postgres(pool) = self;
+        let records = sqlx::query(
+            r#"
+            SELECT target.id, target.name, target.host, target.probe_kind, target.port,
+                target.enabled, target.selector_expression, target.generation,
+                target.created_by, target.created_at::text AS created_at,
+                target.updated_at::text AS updated_at,
+                display.display_order, display.display_color
+            FROM ping_targets target
+            LEFT JOIN ping_target_display display ON display.target_id = target.id
+            ORDER BY display.display_order NULLS LAST, lower(target.name), target.id
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
         let assignments = self.list_ping_target_assignment_records(None).await?;
         let mut assigned = HashMap::<Uuid, Vec<String>>::new();
         let mut primary = HashMap::<Uuid, usize>::new();
@@ -177,9 +192,118 @@ impl Repository {
             client_ids.sort();
             client_ids.dedup();
         }
-        Ok(records
+        records
             .into_iter()
-            .map(|record| ping_target_view(&record, &assigned, &primary))
+            .map(|row| {
+                let record = ping_target_record_from_row_ref(&row)?;
+                let mut view = ping_target_view(&record, &assigned, &primary);
+                view.display_order = row.try_get("display_order")?;
+                view.display_color =
+                    resolved_ping_target_color(record.id, row.try_get("display_color")?);
+                Ok(view)
+            })
+            .collect()
+    }
+
+    pub(crate) async fn update_ping_target_display(
+        &self,
+        request: &UpdatePingTargetDisplayRequest,
+        operator: &AuthContext,
+    ) -> Result<Vec<PingTargetDisplayView>> {
+        let mut requested = HashMap::new();
+        for target in &request.targets {
+            let color = normalize_ping_target_color(&target.color)?;
+            if requested.insert(target.target_id, color).is_some() {
+                bail!("ping_target_display_duplicate");
+            }
+        }
+        let Self::Postgres(pool) = self;
+        let mut tx = pool.begin().await?;
+        // Presentation writers share their own lock, independent of probe lifecycles.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("vpsman:ping-target-display")
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT target.id, display.display_color
+            FROM ping_targets target
+            LEFT JOIN ping_target_display display ON display.target_id = target.id
+            ORDER BY display.display_order NULLS LAST, lower(target.name), target.id
+            "#,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let current = rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<Uuid, _>("id")?,
+                    row.try_get::<Option<String>, _>("display_color")?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let current_ids: HashSet<Uuid> = current.iter().map(|(id, _)| *id).collect();
+        if requested.keys().any(|id| !current_ids.contains(id)) {
+            bail!("ping_target_display_unknown");
+        }
+        let mut ordered: Vec<(Uuid, Option<String>)> = request
+            .targets
+            .iter()
+            .map(|target| (target.target_id, Some(requested[&target.target_id].clone())))
+            .collect();
+        ordered.extend(
+            current
+                .into_iter()
+                .filter(|(id, _)| !requested.contains_key(id)),
+        );
+        let ids: Vec<Uuid> = ordered.iter().map(|(id, _)| *id).collect();
+        let orders: Vec<i64> = (0..ordered.len()).map(|index| index as i64).collect();
+        let colors: Vec<Option<String>> = ordered.iter().map(|(_, color)| color.clone()).collect();
+        let write = sqlx::query(
+            r#"
+            INSERT INTO ping_target_display (target_id, display_order, display_color)
+            SELECT input.target_id, input.display_order, input.display_color
+            FROM unnest($1::uuid[], $2::bigint[], $3::text[])
+                AS input(target_id, display_order, display_color)
+            ON CONFLICT (target_id) DO UPDATE SET
+                display_order = EXCLUDED.display_order,
+                display_color = EXCLUDED.display_color
+            WHERE (ping_target_display.display_order, ping_target_display.display_color)
+                IS DISTINCT FROM (EXCLUDED.display_order, EXCLUDED.display_color)
+            "#,
+        )
+        .bind(&ids)
+        .bind(&orders)
+        .bind(&colors)
+        .execute(&mut *tx)
+        .await;
+        if let Err(error) = write {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.code().as_deref() == Some("23503"))
+            {
+                bail!("ping_target_display_stale");
+            }
+            return Err(error.into());
+        }
+        insert_monitoring_audit(
+            &mut tx,
+            Some(operator.operator.id),
+            "ping_target.display_updated",
+            "ping_targets:display",
+            base_monitoring_audit_metadata(operator, serde_json::json!({"target_ids": ids})),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ordered
+            .into_iter()
+            .enumerate()
+            .map(|(index, (target_id, color))| PingTargetDisplayView {
+                target_id,
+                display_order: Some(index as i64),
+                display_color: resolved_ping_target_color(target_id, color),
+            })
             .collect())
     }
 
@@ -817,6 +941,8 @@ impl Repository {
                         a.client_id,
                         t.id AS target_id,
                         t.name AS target_name,
+                        display.display_order,
+                        display.display_color,
                         t.enabled,
                         t.generation,
                         current.latest_status,
@@ -827,6 +953,7 @@ impl Repository {
                         current.latest_checked_at::text AS latest_checked_at
                     FROM ping_target_assignments a
                     JOIN ping_targets t ON t.id = a.target_id
+                    LEFT JOIN ping_target_display display ON display.target_id = t.id
                     LEFT JOIN telemetry_ping_series series
                       ON series.client_id = a.client_id
                      AND series.target_id = a.target_id
@@ -834,7 +961,7 @@ impl Repository {
                     LEFT JOIN telemetry_ping_current current ON current.series_id = series.id
                     WHERE a.client_id = ANY($1::TEXT[])
                       AND (NOT $2::BOOLEAN OR a.is_primary)
-                    ORDER BY a.client_id, lower(t.name), t.id
+                    ORDER BY a.client_id, display.display_order NULLS LAST, lower(t.name), t.id
                     "#,
                 )
                 .bind(client_ids)
@@ -843,6 +970,7 @@ impl Repository {
                 .await?;
                 rows.into_iter()
                     .map(|row| {
+                        let target_id = row.try_get("target_id")?;
                         let enabled: bool = row.try_get("enabled")?;
                         let latest_status = row.try_get::<Option<String>, _>("latest_status")?;
                         let latest_loss_ratio = row.try_get::<Option<f64>, _>("loss_ratio_avg")?;
@@ -860,8 +988,13 @@ impl Repository {
                         Ok((
                             row.try_get("client_id")?,
                             CurrentPingView {
-                                target_id: row.try_get("target_id")?,
+                                target_id,
                                 target_name: row.try_get("target_name")?,
+                                display_order: row.try_get("display_order")?,
+                                display_color: resolved_ping_target_color(
+                                    target_id,
+                                    row.try_get("display_color")?,
+                                ),
                                 enabled,
                                 generation: row.try_get("generation")?,
                                 state,
@@ -2398,6 +2531,40 @@ pub(crate) async fn accepted_postgres_ping_results(
     Ok(deduplicated.into_values().unzip())
 }
 
+fn normalize_ping_target_color(value: &str) -> Result<String> {
+    let value = value.trim();
+    let Some(hex) = value.strip_prefix('#') else {
+        bail!("ping_target_display_color_invalid");
+    };
+    if !matches!(hex.len(), 3 | 6) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("ping_target_display_color_invalid");
+    }
+    let hex = hex.to_ascii_lowercase();
+    if hex.len() == 3 {
+        Ok(format!(
+            "#{}",
+            hex.chars()
+                .flat_map(|digit| [digit, digit])
+                .collect::<String>()
+        ))
+    } else {
+        Ok(format!("#{hex}"))
+    }
+}
+
+fn resolved_ping_target_color(target_id: Uuid, color: Option<String>) -> String {
+    color.unwrap_or_else(|| {
+        const COLORS: [&str; 8] = [
+            "#1a73e8", "#188038", "#f29900", "#9334e6", "#d93025", "#129eaf", "#5f6368", "#8a4d00",
+        ];
+        // UUIDs are ASCII: this is the existing console's unsigned 31x ID hash.
+        let hash = target_id.to_string().bytes().fold(0_u32, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+        });
+        COLORS[hash as usize % COLORS.len()].to_string()
+    })
+}
+
 fn ping_target_view(
     record: &PingTargetRecord,
     assigned: &HashMap<Uuid, Vec<String>>,
@@ -2406,6 +2573,8 @@ fn ping_target_view(
     let target_client_ids = assigned.get(&record.id).cloned().unwrap_or_default();
     PingTargetView {
         id: record.id,
+        display_order: None,
+        display_color: resolved_ping_target_color(record.id, None),
         name: record.name.clone(),
         host: record.host.clone(),
         probe_kind: record.probe_kind.clone(),
@@ -2465,6 +2634,8 @@ fn current_ping_view(
     CurrentPingView {
         target_id: target.id,
         target_name: target.name.clone(),
+        display_order: None,
+        display_color: resolved_ping_target_color(target.id, None),
         enabled: target.enabled,
         generation: target.generation,
         state: if !target.enabled {
@@ -2558,6 +2729,8 @@ async fn postgres_ping_target_detail(
             target.created_by,
             target.created_at::text AS created_at,
             target.updated_at::text AS updated_at,
+            display.display_order,
+            display.display_color,
             client.id AS client_id,
             assignment.is_primary,
             assignment.assigned_at::text AS assigned_at,
@@ -2580,6 +2753,7 @@ async fn postgres_ping_target_detail(
                 ARRAY[]::TEXT[]
             ) AS client_tags
         FROM ping_targets target
+        LEFT JOIN ping_target_display display ON display.target_id = target.id
         LEFT JOIN ping_target_assignments assignment
             ON assignment.target_id = target.id
         LEFT JOIN visible_clients client
@@ -2591,6 +2765,8 @@ async fn postgres_ping_target_detail(
         WHERE target.id = $1
         GROUP BY
             target.id,
+            display.display_order,
+            display.display_color,
             assignment.client_id,
             assignment.is_primary,
             assignment.assigned_at,
@@ -2616,6 +2792,8 @@ async fn postgres_ping_target_detail(
         return Ok(None);
     };
     let record = ping_target_record_from_row_ref(first)?;
+    let display_order = first.try_get("display_order")?;
+    let display_color = resolved_ping_target_color(record.id, first.try_get("display_color")?);
     let mut assignments = Vec::new();
     for row in rows {
         let Some(client_id) = row.try_get::<Option<String>, _>("client_id")? else {
@@ -2649,10 +2827,10 @@ async fn postgres_ping_target_detail(
             assigned_at: row.try_get("assigned_at")?,
         });
     }
-    Ok(Some(ping_target_detail_from_assignments(
-        &record,
-        assignments,
-    )))
+    let mut detail = ping_target_detail_from_assignments(&record, assignments);
+    detail.target.display_order = display_order;
+    detail.target.display_color = display_color;
+    Ok(Some(detail))
 }
 
 async fn replace_postgres_ping_assignments(
