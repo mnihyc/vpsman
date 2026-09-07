@@ -15,15 +15,15 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { GripVertical, RotateCcw, Save } from "lucide-react";
-import { dashboardChartColors } from "../../colorPalette";
+import * as Popover from "@radix-ui/react-popover";
+import { GripVertical, RotateCcw, Save, X } from "lucide-react";
 import {
   comparePingTargetDisplayOrder,
   defaultPingTargetColor,
   pingTargetColor,
 } from "../../pingTargetDisplay";
 import type { PingTargetView } from "../../types";
+import { PingColorWheel } from "./PingColorWheel";
 
 export type PingTargetDisplayDraft = { target_id: string; color: string };
 
@@ -284,22 +284,22 @@ function PingDisplayRow({
         {...listeners}
         ref={setActivatorNodeRef}
         type="button"
-        className="iconButton pingDisplayHandle"
+        className="tagOrderHandle"
         disabled={disabled}
         aria-label={`Move ${target.name}`}
         title="Drag to reorder, or press Space then use arrow keys"
       >
         <GripVertical size={18} aria-hidden="true" />
       </button>
-      <span className="historyPrimary pingDisplayIdentity">
+      <span className="pingDisplayIdentity">
         <strong>{target.name}</strong>
         <small>
           {target.probe_kind.toUpperCase()} · {target.host}
         </small>
       </span>
       <div className="pingDisplayColor">
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
+        <Popover.Root>
+          <Popover.Trigger asChild>
             <button
               className="pingColorSwatch"
               type="button"
@@ -310,38 +310,37 @@ function PingDisplayRow({
                   normalized ?? pingTargetColor(target.id, target),
               }}
             />
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
               className="pingColorPalette"
               align="end"
-              sideOffset={6}
+              sideOffset={8}
+              collisionPadding={12}
               aria-label={`Color palette for ${target.name}`}
             >
-              <DropdownMenu.Label>Target color</DropdownMenu.Label>
-              <div className="pingColorChoices">
-                {dashboardChartColors.map((preset) => (
-                  <DropdownMenu.Item
-                    key={preset}
-                    className="pingColorSwatch"
-                    aria-label={preset.toUpperCase()}
-                    title={preset.toUpperCase()}
-                    style={{ backgroundColor: preset }}
-                    onSelect={() => onColor(preset.toUpperCase())}
-                  />
-                ))}
+              <div className="pingColorPaletteHeader">
+                <strong>Target color</strong>
+                <Popover.Close className="pingColorClose" aria-label="Close color palette">
+                  <X size={16} aria-hidden="true" />
+                </Popover.Close>
               </div>
-              <DropdownMenu.Item
+              <PingColorWheel
+                color={normalized ?? pingTargetColor(target.id, target)}
+                onChange={onColor}
+              />
+              <button
+                type="button"
                 className="pingColorDefault"
-                onSelect={() =>
+                onClick={() =>
                   onColor(defaultPingTargetColor(target.id).toUpperCase())
                 }
               >
                 Default color
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+              </button>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
         <input
           className="pingColorHex"
           aria-label={`Color for ${target.name}`}

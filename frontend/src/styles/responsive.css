@@ -1162,6 +1162,16 @@
     padding: 12px;
   }
 
+  .pingDisplayRow {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+
+  .pingDisplayColor {
+    grid-column: 2;
+    width: 132px;
+    max-width: 100%;
+  }
+
   .tagOrderPanelHeader {
     align-items: flex-start;
   }

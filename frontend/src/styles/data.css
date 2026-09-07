@@ -2484,7 +2484,7 @@
 
 .pingDisplayRow {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 132px;
+  grid-template-columns: max-content minmax(0, 1fr) 132px;
   gap: 10px;
   align-items: center;
   padding: 9px;
@@ -2499,16 +2499,14 @@
   z-index: 1;
   background: var(--primary-selected);
 }
-.pingDisplayHandle {
-  touch-action: none;
-  cursor: grab;
-}
-.pingDisplayHandle:active {
-  cursor: grabbing;
-}
 .pingDisplayIdentity {
+  display: grid;
+  gap: 2px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.pingDisplayIdentity small {
+  color: var(--muted);
 }
 .pingDisplayColor {
   display: grid;
@@ -2528,11 +2526,11 @@
   height: 28px;
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 50%;
   cursor: pointer;
 }
 .pingColorSwatch:focus-visible,
-.pingColorSwatch[data-highlighted] {
+.pingColorWheel:focus-within {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
@@ -2543,8 +2541,10 @@
 }
 .pingColorPalette {
   z-index: 100;
-  width: 170px;
-  padding: 12px;
+  width: min(176px, var(--radix-popover-content-available-width));
+  max-height: var(--radix-popover-content-available-height);
+  overflow: auto;
+  padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -2552,20 +2552,81 @@
   box-shadow: 0 6px 24px rgb(0 0 0 / 16%);
   font-size: 12px;
 }
-.pingColorChoices {
-  display: grid;
-  grid-template-columns: repeat(4, 28px);
-  gap: 9px;
-  margin: 10px 0;
+.pingColorPaletteHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
 }
-.pingColorDefault {
-  padding: 6px;
-  border-radius: 4px;
+.pingColorClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 50%;
   cursor: pointer;
 }
-.pingColorDefault[data-highlighted] {
+.pingColorWheel {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(closest-side, #fff, #fff0),
+    conic-gradient(from 90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+  touch-action: none;
+  cursor: crosshair;
+}
+.pingColorWheelShade {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #000;
+  pointer-events: none;
+}
+.pingColorWheelThumb {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #333;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.pingColorBrightness {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+.pingColorBrightnessRange {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.pingColorHint {
+  display: block;
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.pingColorDefault {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  cursor: pointer;
+}
+.pingColorDefault:hover {
   background: var(--primary-selected);
-  outline: none;
 }
 
 .tagOrderPanelHeader,
