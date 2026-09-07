@@ -6470,6 +6470,13 @@ button.vpsDetailRecord:hover {
   color: var(--text);
 }
 
+.timeSeriesHover span.focused {
+  border-radius: 4px;
+  background: var(--primary-selected);
+  color: var(--text);
+  font-weight: 700;
+}
+
 .dashboardEmptyChart {
   display: grid;
   min-height: 220px;

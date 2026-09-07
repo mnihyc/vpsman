@@ -9,6 +9,11 @@ import {
 import { dashboardChartColors, consolePalette } from "./colorPalette";
 import { comparePingTargetDisplayOrder } from "./pingTargetDisplay";
 import {
+  pingLossWindowSecs,
+  smoothPingLoss,
+  summarizePingHistory,
+} from "./pingHistory";
+import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
 } from "./components/TimeSeriesChart";
@@ -1636,6 +1641,17 @@ function PublicMonitoringDetailPanel({
   const pingTargetMetadata = new Map(
     (detail?.ping_targets ?? []).map((target) => [target.target_name, target]),
   );
+  const pingRangeSummaries = useMemo(() => {
+    const rowsByTarget = new Map<string, PublicPingPoint[]>();
+    for (const point of detail?.ping ?? []) {
+      const rows = rowsByTarget.get(point.target_name) ?? [];
+      rows.push(point);
+      rowsByTarget.set(point.target_name, rows);
+    }
+    return new Map(
+      [...rowsByTarget].map(([name, rows]) => [name, summarizePingHistory(rows)]),
+    );
+  }, [detail?.ping]);
   // Keep legacy name-based fallback colors independent of saved display order.
   const fallbackPingTargetColors = stableTargetColors(pingTargetNames);
   const pingTargetColors = new Map(
@@ -2185,7 +2201,7 @@ function PublicMonitoringDetailPanel({
                 </div>
               </header>
               <div
-                aria-label="Selectable current Ping target evidence"
+                aria-label="Selectable Ping target range averages"
                 className="publicMonitoringPingTargets"
               >
                 {pingTargetNames.map((targetName) => {
@@ -2196,19 +2212,18 @@ function PublicMonitoringDetailPanel({
                     ? publicPingEffectiveStatus(target)
                     : "unavailable";
                   const selected = !hiddenPingTargetSet.has(targetName);
+                  const summary = pingRangeSummaries.get(targetName);
                   const latency =
-                    target?.latency_avg_ms === null || !target
+                    summary?.latency == null
                       ? "No latency"
-                      : `${formatNumber(target.latency_avg_ms)} ms`;
+                      : `${formatNumber(summary.latency)} ms`;
                   const loss =
-                    target?.loss_ratio === null || !target
+                    summary?.loss == null
                       ? "No loss evidence"
-                      : formatPercent(target.loss_ratio * 100);
-                  const samplePrefix =
-                    status === "disabled" ? "Last sample: " : "";
+                      : formatPercent(summary.loss * 100);
                   return (
                     <button
-                      aria-label={`${selected ? "Hide" : "Show"} ${targetName} Ping history. ${publicPingStatusLabel(status)}. ${samplePrefix}${latency}. ${loss}`}
+                      aria-label={`${selected ? "Hide" : "Show"} ${targetName} Ping history. ${publicPingStatusLabel(status)}. Range average: ${latency}. ${loss}`}
                       aria-pressed={selected}
                       className={`publicMonitoringPingTarget${selected ? " selected" : ""}`}
                       key={targetName}
@@ -2232,7 +2247,6 @@ function PublicMonitoringDetailPanel({
                         {publicPingStatusLabel(status)}
                       </ConsoleStatusBadge>
                       <small>
-                        {samplePrefix}
                         {latency}
                         {` · ${loss}`}
                       </small>
@@ -2265,7 +2279,7 @@ function PublicMonitoringDetailPanel({
                     ),
                   )
                 }
-                summary={`${visiblePingSeriesCount} series with data`}
+                summary={`${visiblePingSeriesCount} series with data${pingMetric === "loss" ? ` · ${pingLossWindowSecs(detail.range.step_secs) / 60}-minute weighted loss average` : ""}`}
                 times={pingChart.times}
                 valueFormatter={
                   pingMetric === "latency"
@@ -2871,11 +2885,8 @@ function pingChartData(
       targetMetadata.get(right),
     ),
   );
-  const targetValues = (
-    targetName: string,
-    value: (point: PublicPingPoint) => number | null,
-  ) => {
-    const values = times.map(() => null as number | null);
+  const targetSamples = (targetName: string) => {
+    const values = times.map(() => null as PublicPingPoint | null);
     const timestamps = times.map(() => Number.NEGATIVE_INFINITY);
     for (const point of points) {
       if (point.target_name !== targetName) continue;
@@ -2885,11 +2896,14 @@ function pingChartData(
       const index = Math.round((slot - firstSlot) / stepSecs);
       if (index < 0 || index >= values.length || timestamp < timestamps[index])
         continue;
-      values[index] = finiteNumber(value(point));
+      values[index] = point;
       timestamps[index] = timestamp;
     }
     return values;
   };
+  const samplesByTarget = new Map(
+    targetNames.map((name) => [name, targetSamples(name)]),
+  );
   const latencyLines = targetNames.map((targetName) => {
     return {
       color:
@@ -2898,7 +2912,9 @@ function pingChartData(
         consolePalette.chart.neutral,
       label: targetName,
       seriesKey: targetName,
-      values: targetValues(targetName, (point) => point.latency_avg_ms),
+      values: samplesByTarget.get(targetName)!.map((point) =>
+        finiteNumber(point?.latency_avg_ms),
+      ),
     };
   });
   const lossLines = targetNames.map((targetName) => {
@@ -2909,7 +2925,9 @@ function pingChartData(
         consolePalette.chart.neutral,
       label: targetName,
       seriesKey: targetName,
-      values: targetValues(targetName, (point) => point.loss_ratio * 100),
+      values: smoothPingLoss(samplesByTarget.get(targetName)!, stepSecs).map(
+        (loss) => loss === null ? null : loss * 100,
+      ),
     };
   });
   return { latencyLines, lossLines, times };

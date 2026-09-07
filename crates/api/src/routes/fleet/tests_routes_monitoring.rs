@@ -498,9 +498,10 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         target_name: "Gateway".to_string(),
         bucket_start: "1".to_string(),
         bucket_secs: 60,
-        sample_count: 1,
+        sample_count: 3,
+        success_count: 2,
         latency_avg_ms: Some(10.0),
-        loss_ratio: 0.0,
+        loss_ratio: 1.0 / 3.0,
         status: "ok".to_string(),
         checked_at: "1".to_string(),
     };
@@ -701,9 +702,13 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "loss_ratio",
             "sample_count",
             "status",
+            "success_count",
             "target_name",
         ],
     );
+    let serialized_ping_point = serde_json::to_value(&ping_point).unwrap();
+    assert_eq!(serialized_ping_point["sample_count"], 3);
+    assert_eq!(serialized_ping_point["success_count"], 2);
     assert_serialized_keys(
         "card",
         &card,

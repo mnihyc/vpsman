@@ -32,6 +32,11 @@ import {
 } from "../panelDisplay";
 import { formatMonthlyTrafficResetUtc } from "../vpsRules";
 import {
+  pingLossWindowSecs,
+  smoothPingLoss,
+  summarizePingHistory,
+} from "../pingHistory";
+import {
   comparePingTargetDisplayOrder,
   pingTargetColor,
 } from "../pingTargetDisplay";
@@ -679,7 +684,7 @@ function PingHistory({
       </div>
 
       <div
-        aria-label="Current Ping target evidence"
+        aria-label="Ping target range averages"
         className="vpsMonitoringPingTargets"
       >
         {targetSummaries.map((target) => (
@@ -715,7 +720,11 @@ function PingHistory({
         <MonitoringChart
           className="wideWidget"
           data={chart}
-          detail="Each target keeps a stable color; missing buckets remain visible gaps"
+          detail={
+            metric === "loss"
+              ? `${pingLossWindowSecs(data.range.step_secs) / 60}-minute weighted loss average; missing buckets remain gaps`
+              : "Each target keeps a stable color; missing buckets remain visible gaps"
+          }
           emptyLabel={`No Ping ${metric} evidence is available for this range`}
           exportFileName={`${safeFilePart(data.client.id)}-ping-${metric}-${data.range.window}`}
           title={metric === "latency" ? "Ping latency" : "Ping packet loss"}
@@ -1182,21 +1191,33 @@ function pingChart(
   }
   return {
     times: timeline.times,
-    lines: targets.map((target) => ({
-      color: pingTargetColor(
-        target.target_id,
-        targetMetadata.get(target.target_id),
-      ),
-      label: target.target_name,
-      seriesKey: target.target_id,
-      values: timeline.epochs.map((epoch) => {
+    lines: targets.map((target) => {
+      const samples = timeline.epochs.map((epoch) => {
         const row = rowsByTarget.get(target.target_id)?.get(epoch);
-        if (!row) return null;
-        const value =
-          metric === "latency" ? row.latency_avg_ms : row.loss_ratio_avg * 100;
-        return finiteNumber(value);
-      }),
-    })),
+        return row
+          ? {
+              sample_count: row.sample_count,
+              success_count: row.success_count,
+              latency_avg_ms: row.latency_avg_ms,
+              loss_ratio: row.loss_ratio_avg,
+            }
+          : null;
+      });
+      return {
+        color: pingTargetColor(
+          target.target_id,
+          targetMetadata.get(target.target_id),
+        ),
+        label: target.target_name,
+        seriesKey: target.target_id,
+        values:
+          metric === "latency"
+            ? samples.map((row) => finiteNumber(row?.latency_avg_ms))
+            : smoothPingLoss(samples, range.step_secs).map((loss) =>
+                loss === null ? null : loss * 100,
+              ),
+      };
+    }),
   };
 }
 
@@ -1206,7 +1227,11 @@ function pingTargetSummaries(
   primary: CurrentPing | null,
 ) {
   const latest = new Map<string, PingRollupView>();
+  const rowsByTarget = new Map<string, PingRollupView[]>();
   for (const row of rows) {
+    const targetRows = rowsByTarget.get(row.target_id) ?? [];
+    targetRows.push(row);
+    rowsByTarget.set(row.target_id, targetRows);
     const previous = latest.get(row.target_id);
     if (
       !previous ||
@@ -1219,19 +1244,23 @@ function pingTargetSummaries(
   return targets
     .map((target) => {
       const row = latest.get(target.target_id);
-      const summary = row ? pingSummaryFromRow(row) : null;
+      const summary = summarizePingHistory(
+        (rowsByTarget.get(target.target_id) ?? []).map((point) => ({
+          sample_count: point.sample_count,
+          success_count: point.success_count,
+          latency_avg_ms: point.latency_avg_ms,
+          loss_ratio: point.loss_ratio_avg,
+        })),
+      );
       return {
         color: pingTargetColor(target.target_id, target),
         display_order: target.display_order,
         generation: target.generation,
-        latency: target.latency_avg_ms ?? summary?.latency ?? null,
-        loss:
-          target.loss_ratio === null
-            ? (summary?.loss ?? null)
-            : target.loss_ratio * 100,
+        latency: summary.latency,
+        loss: summary.loss === null ? null : summary.loss * 100,
         name: target.target_name,
         primary: primary?.target_id === target.target_id,
-        reason: target.reason ?? summary?.reason ?? null,
+        reason: target.reason ?? row?.latest_reason ?? null,
         status: target.enabled ? target.status || target.state : "disabled",
         targetId: target.target_id,
       };
@@ -1241,19 +1270,6 @@ function pingTargetSummaries(
         comparePingTargetDisplayOrder(left, right) ||
         comparePingSummaries(left, right),
     );
-}
-
-function pingSummaryFromRow(row: PingRollupView) {
-  return {
-    generation: row.generation,
-    latency: row.latency_avg_ms,
-    loss: row.loss_ratio_avg * 100,
-    name: row.target_name,
-    primary: row.is_primary,
-    reason: row.latest_reason,
-    status: row.latest_status,
-    targetId: row.target_id,
-  };
 }
 
 function comparePingSummaries(

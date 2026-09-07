@@ -75,7 +75,7 @@ test("VPS Resources and Ping request only their visible domains and preserve ran
     monitoring.locator(".vpsMonitoringTrafficSummary"),
   ).toContainText("Observed RX");
   await expect(
-    monitoring.getByLabel("Current Ping target evidence"),
+    monitoring.getByLabel("Ping target range averages"),
   ).toHaveCount(0);
   await monitoring
     .getByRole("button", { name: "Last hour", exact: true })
@@ -89,10 +89,16 @@ test("VPS Resources and Ping request only their visible domains and preserve ran
     });
 
   await selectSection(page, "Ping");
-  const targets = monitoring.getByLabel("Current Ping target evidence");
+  const targets = monitoring.getByLabel("Ping target range averages");
   await expect(targets).toContainText("Singapore gateway");
   await expect(targets).toContainText("Cloudflare DNS");
   await expect(targets.locator(".vpsMonitoringPingTarget")).toHaveCount(2);
+  // Successful-check weighting excludes the timeout from latency, while all
+  // three check groups contribute to the selected range's loss percentage.
+  const resolver = targets
+    .locator(".vpsMonitoringPingTarget")
+    .filter({ hasText: "Cloudflare DNS" });
+  await expect(resolver).toContainText("30.7 ms · 34.3% loss");
   await expect(
     monitoring.getByRole("button", { name: "Last hour", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
@@ -166,7 +172,7 @@ test("a late Resources response cannot replace the selected Ping projection", as
     .poll(() => monitoringQueries(page))
     .toEqual([{ points: "720", projection: "resources", window: "15m" }]);
   await selectSection(page, "Ping");
-  const targets = page.getByLabel("Current Ping target evidence");
+  const targets = page.getByLabel("Ping target range averages");
   await expect(targets).toContainText("Singapore gateway");
   await page.evaluate(() => {
     (

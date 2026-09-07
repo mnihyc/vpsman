@@ -1406,6 +1406,7 @@ export type PublicPingPointView = {
   bucket_start: string;
   bucket_secs: number;
   sample_count: number;
+  success_count: number;
   latency_avg_ms: number | null;
   loss_ratio: number;
   status: string;

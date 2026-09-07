@@ -26,7 +26,12 @@ type HoverState = {
   index: number;
   side: "left" | "right";
   timeLabel: string;
-  values: Array<{ color: string; label: string; value: number | null }>;
+  values: Array<{
+    color: string;
+    label: string;
+    seriesKey: string;
+    value: number | null;
+  }>;
 };
 
 type TimeSeriesChartProps = {
@@ -60,6 +65,7 @@ export function TimeSeriesChart({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
+  const [focusedSeriesKey, setFocusedSeriesKey] = useState<string | null>(null);
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(
     () =>
       new Set(
@@ -158,6 +164,8 @@ export function TimeSeriesChart({
   }, [initiallyHiddenKeys, seriesKeys]);
 
   useEffect(() => {
+    setHover(null);
+    setFocusedSeriesKey(null);
     const host = hostRef.current;
     if (!host || unixTimes.length === 0 || sanitizedLines.length === 0) {
       plotRef.current?.destroy();
@@ -204,23 +212,28 @@ export function TimeSeriesChart({
                 setHover(null);
                 return;
               }
-              setHover({
-                fullTimeLabel: formatChartFullTime(unixTimes[index]),
-                index,
-                side:
+              setHover(
+                buildHoverState(
+                  index,
                   (plot.cursor.left ?? 0) > plot.width / 2 ? "left" : "right",
-                timeLabel: formatChartTime(unixTimes[index]),
-                values: sanitizedLines
-                  .filter(
-                    (_line, lineIndex) =>
-                      !effectiveHiddenSeries.has(seriesKeys[lineIndex]),
-                  )
-                  .map((line) => ({
-                    color: line.color,
-                    label: line.label,
-                    value: line.values[index] ?? null,
-                  })),
-              });
+                  unixTimes,
+                  sanitizedLines,
+                  seriesKeys,
+                  effectiveHiddenSeries,
+                ),
+              );
+            },
+          ],
+          setSeries: [
+            (_plot, index, options) => {
+              // The hook type omits focus, although setSeries supplies it.
+              const focus = (options as Parameters<uPlot["setSeries"]>[1]).focus;
+              if (focus === undefined) return;
+              setFocusedSeriesKey(
+                focus && index !== null && index > 0
+                  ? (seriesKeys[index - 1] ?? null)
+                  : null,
+              );
             },
           ],
         },
@@ -321,11 +334,17 @@ export function TimeSeriesChart({
     [unixTimes, visibleLines],
   );
 
+  function clearSeriesFocus() {
+    plotRef.current?.setSeries(null, { focus: true });
+    setFocusedSeriesKey(null);
+  }
+
   function inspectWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
     }
     event.preventDefault();
+    clearSeriesFocus();
     const lastIndex = unixTimes.length - 1;
     const currentIndex = hover?.index ?? lastIndex;
     const nextIndex =
@@ -350,6 +369,7 @@ export function TimeSeriesChart({
 
   function toggleSeries(seriesKey: string) {
     setHover(null);
+    clearSeriesFocus();
     if (controlledVisibleSeries !== null) {
       if (!onVisibleSeriesKeysChange) return;
       const next = new Set(controlledVisibleSeries);
@@ -374,6 +394,7 @@ export function TimeSeriesChart({
 
   function showAllSeries() {
     setHover(null);
+    clearSeriesFocus();
     if (controlledVisibleSeries !== null) {
       if (!onVisibleSeriesKeysChange) return;
       onVisibleSeriesKeysChange(
@@ -432,8 +453,12 @@ export function TimeSeriesChart({
           <div
             aria-label={`${ariaLabel}. Use left and right arrow keys to inspect samples.`}
             className="timeSeriesChart"
-            onBlur={() => setHover(null)}
-            onFocus={() =>
+            onBlur={() => {
+              setHover(null);
+              clearSeriesFocus();
+            }}
+            onFocus={() => {
+              clearSeriesFocus();
               setHover(
                 buildHoverState(
                   unixTimes.length - 1,
@@ -443,9 +468,10 @@ export function TimeSeriesChart({
                   seriesKeys,
                   effectiveHiddenSeries,
                 ),
-              )
-            }
+              );
+            }}
             onKeyDown={inspectWithKeyboard}
+            onPointerLeave={clearSeriesFocus}
             ref={hostRef}
             role="group"
             style={{ minHeight: height }}
@@ -535,7 +561,10 @@ export function TimeSeriesChart({
               <small>{hover.fullTimeLabel}</small>
               {hover.values.map((entry) => (
                 <span
-                  key={`${hover.index}-${entry.label}`}
+                  className={
+                    entry.seriesKey === focusedSeriesKey ? "focused" : undefined
+                  }
+                  key={entry.seriesKey}
                   title={`${entry.label}: ${valueFormatter(entry.value)} at ${hover.fullTimeLabel}.`}
                 >
                   <i style={{ background: entry.color }} />
@@ -611,13 +640,18 @@ function buildHoverState(
     index,
     side,
     timeLabel: formatChartTime(unixTimes[index]),
-    values: lines
-      .filter((_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]))
-      .map((line) => ({
-        color: line.color,
-        label: line.label,
-        value: line.values[index] ?? null,
-      })),
+    values: lines.flatMap((line, lineIndex) =>
+      hiddenSeries.has(seriesKeys[lineIndex])
+        ? []
+        : [
+            {
+              color: line.color,
+              label: line.label,
+              seriesKey: seriesKeys[lineIndex],
+              value: line.values[index] ?? null,
+            },
+          ],
+    ),
   };
 }
 

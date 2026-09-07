@@ -1420,11 +1420,13 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     })
     .click();
   await expect(detail.getByText("Disabled", { exact: true })).toBeVisible();
+  // Fifteen equally weighted historical check groups: mean latency is
+  // 18.9347567 ms; two groups have 3% loss, giving 0.4% for the selected range.
   await expect(
     detail.getByRole("button", {
       name: "Hide Customer gateway Ping history",
     }),
-  ).toContainText("Last sample: 18.5 ms");
+  ).toContainText("18.9 ms · 0.4%");
   await detail
     .getByRole("button", { name: "Hide Regional transit Ping history" })
     .click();
@@ -1448,6 +1450,15 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
       name: /Ping latency shared monitoring chart/,
     }),
   ).toBeVisible();
+  await detail.getByRole("button", { name: "Loss", exact: true }).click();
+  // The final five one-minute groups contain one 8% and four 4% readings.
+  // The displayed trend is 4.8%, not the final raw group's 4%.
+  await expect(
+    detail.getByRole("figure", {
+      name: /Ping packet loss shared monitoring chart\. Latest values: .*Backup resolver 4\.8%/,
+    }),
+  ).toBeVisible();
+  await expect(detail.getByText(/5-minute weighted loss average/)).toBeVisible();
   await detail
     .getByRole("button", {
       name: /Resources .*network · traffic/i,
@@ -2568,6 +2579,7 @@ async function installPublicMonitoringApiMock(
         latency_avg_ms: 19,
         loss_ratio: 0,
         sample_count: 3,
+        success_count: 3,
         status: "ok",
         target_name: pingTargetName,
       },
@@ -2578,6 +2590,7 @@ async function installPublicMonitoringApiMock(
         latency_avg_ms: pingLatencyMs,
         loss_ratio: pingLossRatio,
         sample_count: 3,
+        success_count: pingLatencyMs === null ? 0 : 3,
         status: "ok",
         target_name: pingTargetName,
       },
@@ -2840,6 +2853,7 @@ async function installPublicMonitoringApiMock(
       latency_avg_ms: (pingLatencyMs ?? 18.5) + Math.sin(index / 3) * 2.5,
       loss_ratio: index % 8 === 0 ? 0.03 : 0,
       sample_count: 3,
+      success_count: 3,
       status: "ok",
       target_name: pingTargetName,
     }));
@@ -2898,6 +2912,7 @@ async function installPublicMonitoringApiMock(
               ? 0.08
               : (target.loss_ratio ?? 0),
           sample_count: 3,
+          success_count: 3,
           status: target.status ?? target.state,
           target_name: target.target_name,
         })),

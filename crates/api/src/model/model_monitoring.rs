@@ -622,6 +622,7 @@ pub(crate) struct PublicPingPointView {
     pub(crate) bucket_start: String,
     pub(crate) bucket_secs: i32,
     pub(crate) sample_count: i32,
+    pub(crate) success_count: i32,
     pub(crate) latency_avg_ms: Option<f64>,
     pub(crate) loss_ratio: f64,
     pub(crate) status: String,
