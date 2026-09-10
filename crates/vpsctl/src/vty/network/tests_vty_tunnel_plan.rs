@@ -55,6 +55,7 @@ fn parses_vty_tunnel_plan_for_local_render() {
         vec!["10.255.0.2", "10.255.0.3"]
     );
     assert_eq!(request.input.bandwidth_mbps, 1000);
+    assert!(!request.input.dynamic_bandwidth);
     assert_eq!(request.input.left_mtu, Some(1400));
     assert_eq!(request.input.right_mtu, Some(1476));
     assert!(request.input.ospf.is_none());

@@ -28,6 +28,7 @@ fn plan(kind: TunnelKind) -> TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
+        dynamic_bandwidth: false,
         left_mtu: vpsman_common::default_tunnel_mtu(kind),
         right_mtu: vpsman_common::default_tunnel_mtu(kind),
         ospf: None,

@@ -31,6 +31,7 @@ fn speed_test_plan() -> TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        dynamic_bandwidth: false,
         left_mtu: Some(1476),
         right_mtu: Some(1476),
         ospf: None,

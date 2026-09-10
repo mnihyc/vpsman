@@ -1,11 +1,195 @@
 use super::{
     automatic_evidence_ready, compare_optional_timestamps_desc, current_reachability_windows,
-    update_plan_status,
+    recommend_plan_ospf_cost, topology_identity_hash_for_plan, update_plan_status,
 };
-use crate::model::{NetworkObservationView, NetworkOspfRecommendationView};
+use crate::model::{
+    NetworkObservationView, NetworkOspfRecommendationView, TunnelPlanEndpointRuntimeConfigView,
+    TunnelPlanView,
+};
 use std::cmp::Ordering;
 use uuid::Uuid;
 use vpsman_common::OspfControlMode;
+
+#[test]
+fn dynamic_bandwidth_is_opt_in_without_changing_evidence_or_reachability_gates() {
+    for mode in [OspfControlMode::Reviewed, OspfControlMode::Automatic] {
+        let mut plan = bandwidth_test_plan();
+        plan.input.ospf.as_mut().unwrap().mode = mode;
+        plan.plan.ospf.as_mut().unwrap().mode = mode;
+        let now = chrono::Utc::now().timestamp();
+        let mut observations = bandwidth_test_reachability(&plan, now);
+        let baseline = recommend_plan_ospf_cost(&plan, &observations);
+        observations.push(bandwidth_test_speed(&plan, now - 5, 20.0));
+        observations.push(bandwidth_test_speed(&plan, now - 6, 60.0));
+
+        let fixed = recommend_plan_ospf_cost(&plan, &observations);
+        assert_eq!(fixed.view.effective_bandwidth_mbps, 1_000);
+        assert_eq!(
+            fixed.view.recommended_ospf_cost,
+            baseline.view.recommended_ospf_cost
+        );
+        assert_eq!(fixed.view.confidence, "latency_only");
+        assert!(fixed.view.reason.contains("dynamic bandwidth is disabled"));
+        assert_eq!(fixed.view.throughput_avg_mbps, Some(40.0));
+        assert_eq!(fixed.view.throughput_max_mbps, Some(60.0));
+
+        plan.input.dynamic_bandwidth = true;
+        let dynamic = recommend_plan_ospf_cost(&plan, &observations);
+        assert_eq!(dynamic.view.effective_bandwidth_mbps, 40);
+        assert!(dynamic.view.recommended_ospf_cost > fixed.view.recommended_ospf_cost);
+        assert_eq!(dynamic.view.confidence, "measured");
+        assert_eq!(
+            dynamic.view.throughput_avg_mbps,
+            fixed.view.throughput_avg_mbps
+        );
+        assert_eq!(dynamic.view.sample_count, fixed.view.sample_count);
+        assert_eq!(dynamic.view.degraded_count, fixed.view.degraded_count);
+        assert_eq!(
+            dynamic.view.latest_observed_at,
+            fixed.view.latest_observed_at
+        );
+        assert_eq!(dynamic.healthy_probe_streak, fixed.healthy_probe_streak);
+        assert!(automatic_evidence_ready(
+            &fixed.view,
+            2,
+            fixed.healthy_probe_streak
+        ));
+        assert!(automatic_evidence_ready(
+            &dynamic.view,
+            2,
+            dynamic.healthy_probe_streak
+        ));
+
+        let speed_only = &observations[4..];
+        let dynamic_without_probe = recommend_plan_ospf_cost(&plan, speed_only);
+        assert_eq!(dynamic_without_probe.view.effective_bandwidth_mbps, 1_000);
+        assert_eq!(
+            dynamic_without_probe.view.recommended_ospf_cost,
+            plan.recommended_ospf_cost.unwrap(),
+        );
+        assert!(!automatic_evidence_ready(&dynamic_without_probe.view, 2, 0));
+        plan.input.dynamic_bandwidth = false;
+        let fixed_without_probe = recommend_plan_ospf_cost(&plan, speed_only);
+        assert_eq!(fixed_without_probe.view.confidence, "throughput_only");
+        assert!(fixed_without_probe
+            .view
+            .reason
+            .contains("available for inspection"));
+        assert_eq!(
+            fixed_without_probe.view.recommended_ospf_cost,
+            dynamic_without_probe.view.recommended_ospf_cost,
+        );
+    }
+}
+
+#[test]
+fn dynamic_bandwidth_keeps_expired_and_changed_topology_speed_evidence_out() {
+    let mut plan = bandwidth_test_plan();
+    plan.input.dynamic_bandwidth = true;
+    let now = chrono::Utc::now().timestamp();
+    let reachability = bandwidth_test_reachability(&plan, now);
+    let baseline = recommend_plan_ospf_cost(&plan, &reachability);
+    let expired = bandwidth_test_speed(&plan, now - 11 * 60, 20.0);
+    let mut old_kind = bandwidth_test_speed(&plan, now - 5, 20.0);
+    let mut old_plan = plan.clone();
+    old_plan.plan.kind = vpsman_common::TunnelKind::Ipip;
+    old_kind.topology_identity_hash = Some(topology_identity_hash_for_plan(&old_plan));
+
+    for rejected in [expired, old_kind] {
+        let mut observations = reachability.clone();
+        observations.push(rejected);
+        let fallback = recommend_plan_ospf_cost(&plan, &observations);
+        assert_eq!(fallback.view.effective_bandwidth_mbps, 1_000);
+        assert_eq!(
+            fallback.view.recommended_ospf_cost,
+            baseline.view.recommended_ospf_cost
+        );
+        assert_eq!(fallback.view.confidence, "latency_only");
+        assert_eq!(fallback.view.throughput_avg_mbps, None);
+        assert_eq!(fallback.view.sample_count, baseline.view.sample_count);
+    }
+}
+
+fn bandwidth_test_plan() -> TunnelPlanView {
+    let input: vpsman_common::TunnelPlanInput = serde_json::from_value(serde_json::json!({
+        "name": "left-right",
+        "interface_name": "tunlr",
+        "kind": "gre",
+        "left_client_id": "left-client",
+        "right_client_id": "right-client",
+        "left_remote_underlay": "192.0.2.2",
+        "right_remote_underlay": "192.0.2.1",
+        "address_pool_cidr": "10.0.0.0/24",
+        "ipv4_tunnel": {"left": "10.0.0.0", "right": "10.0.0.1", "prefix_len": 31},
+        "bandwidth_mbps": 1000,
+        "left_mtu": 1476,
+        "right_mtu": 1476,
+        "ospf": {"planned_latency_ms": 20.0, "planned_packet_loss_ratio": 0.0, "preference": 1.0}
+    }))
+    .unwrap();
+    let plan = vpsman_common::plan_tunnel(&input).unwrap();
+    let endpoint = |client_id: &str| TunnelPlanEndpointRuntimeConfigView {
+        client_id: client_id.to_string(),
+        desired: "enabled".to_string(),
+        status: "applied".to_string(),
+        job_id: None,
+        error: None,
+        updated_at: None,
+    };
+    TunnelPlanView {
+        id: Uuid::nil(),
+        name: plan.name.clone(),
+        kind: plan.kind,
+        enabled: true,
+        revision: 1,
+        left_client_id: plan.left_client_id.clone(),
+        right_client_id: plan.right_client_id.clone(),
+        recommended_ospf_cost: plan.recommended_ospf_cost.map(i32::from),
+        ospf_status: "verified".to_string(),
+        left_ospf_status: "verified".to_string(),
+        right_ospf_status: "verified".to_string(),
+        desired_ospf_cost: None,
+        left_current_ospf_cost: None,
+        right_current_ospf_cost: None,
+        left_ospf_job_id: None,
+        right_ospf_job_id: None,
+        connection_assessment: "unknown".to_string(),
+        connection_assessment_note: None,
+        connection_assessed_at: None,
+        connection_assessed_by: None,
+        left_runtime_config: endpoint(&plan.left_client_id),
+        right_runtime_config: endpoint(&plan.right_client_id),
+        input,
+        plan,
+        builtin_credentials: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        deleted_at: None,
+        deleted_by: None,
+        deleted_reason: None,
+    }
+}
+
+fn bandwidth_test_reachability(plan: &TunnelPlanView, now: i64) -> Vec<NetworkObservationView> {
+    let mut observations = Vec::new();
+    for offset in [10, 70] {
+        for side in ["left", "right"] {
+            let mut observation = reachability_observation(side, now - offset, 60, true);
+            observation.topology_identity_hash = Some(topology_identity_hash_for_plan(plan));
+            observations.push(observation);
+        }
+    }
+    observations
+}
+
+fn bandwidth_test_speed(plan: &TunnelPlanView, observed: i64, mbps: f64) -> NetworkObservationView {
+    let mut observation = reachability_observation("left", observed, 60, true);
+    observation.kind = "network_speed_test".to_string();
+    observation.source = "manual".to_string();
+    observation.topology_identity_hash = Some(topology_identity_hash_for_plan(plan));
+    observation.throughput_mbps = Some(mbps);
+    observation
+}
 
 #[test]
 fn recommendation_ordering_handles_mixed_timestamp_formats_and_missing_evidence() {

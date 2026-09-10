@@ -110,6 +110,7 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
+        dynamic_bandwidth: false,
         left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
             .then(|| vpsman_common::default_tunnel_mtu(kind))
             .flatten(),

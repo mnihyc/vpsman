@@ -1218,6 +1218,7 @@ pub(crate) fn tunnel_plan(
         )?,
         latency_primary_family: request.latency_primary_family.into(),
         bandwidth_mbps: request.bandwidth_mbps,
+        dynamic_bandwidth: false,
         left_mtu: request.left_mtu.or(default_mtu),
         right_mtu: request.right_mtu.or(default_mtu),
         ospf,

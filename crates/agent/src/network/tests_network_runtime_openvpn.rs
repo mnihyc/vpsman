@@ -44,6 +44,7 @@ fn openvpn_plan(
         }),
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
+        dynamic_bandwidth: false,
         left_mtu: Some(1500),
         right_mtu: Some(1500),
         ospf: None,

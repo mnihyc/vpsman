@@ -383,6 +383,11 @@ fn recommend_plan_ospf_cost(
     let throughput_avg_mbps = average_observation_value(&speed_observations, |observation| {
         observation.throughput_mbps
     });
+    let cost_throughput_mbps = if plan.input.dynamic_bandwidth {
+        throughput_avg_mbps
+    } else {
+        None
+    };
     let throughput_max_mbps = speed_observations
         .iter()
         .filter_map(|observation| observation.throughput_mbps)
@@ -411,17 +416,19 @@ fn recommend_plan_ospf_cost(
                 latency,
                 packet_loss,
                 ospf.preference,
-                throughput_avg_mbps,
+                cost_throughput_mbps,
             );
             (
                 i32::from(cost),
                 bandwidth,
-                if throughput_avg_mbps.is_some() {
+                if cost_throughput_mbps.is_some() {
                     "measured"
                 } else {
                     "latency_only"
                 },
-                if degraded_count > 0 {
+                if !plan.input.dynamic_bandwidth {
+                    "derived from recent reachability and configured bandwidth; dynamic bandwidth is disabled"
+                } else if degraded_count > 0 {
                     "recent reachability or speed-test evidence includes degraded samples"
                 } else {
                     "derived from the recent reachability and speed-test evidence window"
@@ -448,7 +455,9 @@ fn recommend_plan_ospf_cost(
             } else {
                 "no_recent_observations"
             },
-            if throughput_avg_mbps.is_some() {
+            if throughput_avg_mbps.is_some() && !plan.input.dynamic_bandwidth {
+                "recent throughput is available for inspection; dynamic bandwidth is disabled and the planned cost applies until recent reachability evidence exists"
+            } else if throughput_avg_mbps.is_some() {
                 "recent throughput exists, but recent latency evidence is unavailable"
             } else {
                 "using the planned cost until recent reachability evidence exists"

@@ -613,6 +613,8 @@ pub struct TunnelPlanInput {
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
+    #[serde(default)]
+    pub dynamic_bandwidth: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left_mtu: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

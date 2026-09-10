@@ -46,6 +46,7 @@ fn wireguard_plan(endpoint_mode: RuntimeTunnelWireguardEndpointMode) -> TunnelPl
         }),
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
+        dynamic_bandwidth: false,
         left_mtu: Some(1420),
         right_mtu: Some(1420),
         ospf: None,

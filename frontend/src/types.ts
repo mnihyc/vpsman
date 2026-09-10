@@ -2305,6 +2305,7 @@ export type TunnelPlanInput = {
   ipv6_tunnel?: TunnelAddressPair | null;
   latency_primary_family?: TunnelAddressFamily;
   bandwidth_mbps: number;
+  dynamic_bandwidth: boolean;
   left_mtu?: number | null;
   right_mtu?: number | null;
   ospf?: TunnelOspfConfig | null;
@@ -2333,7 +2334,7 @@ export type RuntimeTunnelTopologyIntent = {
   stale_routes?: RuntimeTunnelRoute[];
 };
 
-export type TunnelPlan = TunnelPlanInput & {
+export type TunnelPlan = Omit<TunnelPlanInput, "dynamic_bandwidth"> & {
   left_tunnel_address: string;
   right_tunnel_address: string;
   tunnel_prefix_len: number;

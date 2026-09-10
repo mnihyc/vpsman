@@ -903,6 +903,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         )?,
         latency_primary_family,
         bandwidth_mbps: required(bandwidth, "--bandwidth-mbps")?,
+        dynamic_bandwidth: false,
         left_mtu: left_mtu.or(default_mtu),
         right_mtu: right_mtu.or(default_mtu),
         ospf,

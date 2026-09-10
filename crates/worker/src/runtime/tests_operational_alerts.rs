@@ -41,6 +41,7 @@ async fn postgres_offline_transition_records_neutral_policy_evidence() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        dynamic_bandwidth: false,
         left_mtu: None,
         right_mtu: None,
         ospf: None,

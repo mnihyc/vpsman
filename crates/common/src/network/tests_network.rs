@@ -41,6 +41,7 @@ fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInpu
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
+        dynamic_bandwidth: false,
         left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
             .then(|| default_tunnel_mtu(kind))
             .flatten(),
@@ -49,6 +50,36 @@ fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInpu
             .flatten(),
         ospf: None,
     }
+}
+
+#[test]
+fn dynamic_bandwidth_defaults_off_and_does_not_change_the_runtime_plan() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.ospf = Some(ospf_config());
+    let mut legacy_input = serde_json::to_value(&input).unwrap();
+    legacy_input
+        .as_object_mut()
+        .unwrap()
+        .remove("dynamic_bandwidth");
+    let decoded: TunnelPlanInput = serde_json::from_value(legacy_input).unwrap();
+    assert!(!decoded.dynamic_bandwidth);
+
+    let static_plan = plan_tunnel(&decoded).unwrap();
+    input.dynamic_bandwidth = true;
+    let opted_in: TunnelPlanInput =
+        serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+    assert!(opted_in.dynamic_bandwidth);
+    let dynamic_plan = plan_tunnel(&opted_in).unwrap();
+    assert_eq!(static_plan, dynamic_plan);
+    assert_eq!(
+        serde_json::to_vec(&static_plan).unwrap(),
+        serde_json::to_vec(&dynamic_plan).unwrap(),
+    );
+    let plan_id = uuid::Uuid::nil();
+    assert_eq!(
+        tunnel_runtime_evidence_identity_hash(plan_id, &static_plan, None),
+        tunnel_runtime_evidence_identity_hash(plan_id, &dynamic_plan, None),
+    );
 }
 
 #[test]

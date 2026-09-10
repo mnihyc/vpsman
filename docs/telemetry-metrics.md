@@ -452,6 +452,11 @@ after their individual current-state window expires; stale newest evidence
 never authorizes an update. Reviewed OSPF and manual probes continue to use the
 same retained evidence model.
 
+OSPF uses configured tunnel bandwidth by default. Enabling **Dynamic** beside
+the bandwidth input uses matching speed-test results from the last ten minutes,
+capped at configured bandwidth; without valid results it uses configured
+bandwidth again. This does not schedule speed tests or change latency/loss probes.
+
 Only observations bound to a saved tunnel plan appear in Network Metrics.
 Status records that do not contain the selected measurement remain evidence but
 do not become empty chart points.

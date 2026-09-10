@@ -149,5 +149,6 @@ fn vty_plan_update_preserves_lifecycle_without_explicit_enabled_flag() {
 
     assert_eq!(body["expected_revision"], 7);
     assert_eq!(body["confirmed"], true);
+    assert_eq!(body["dynamic_bandwidth"], false);
     assert!(body.get("enabled").is_none());
 }

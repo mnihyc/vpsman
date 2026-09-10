@@ -2990,6 +2990,43 @@ function TunnelPlanComposer({
       : ALL_TUNNEL_KINDS;
   const wireguardSelectsLocalSource =
     form.runtimeManager === "agent_builtin" && form.kind === "wireguard";
+  const bandwidthField = (
+    <div className="topologyField">
+      <span>Bandwidth</span>
+      <div className="tunnelBandwidthControls">
+        <label title="Operator-declared planning bandwidth from 10 to 10000 Mbps. New plans use one configured endpoint port speed, or the lower of both, when that value fits the tunnel model.">
+          <UnitInput
+            ariaLabel="Tunnel bandwidth"
+            max={MAX_TUNNEL_BANDWIDTH_MBPS}
+            min={MIN_TUNNEL_BANDWIDTH_MBPS}
+            onChange={(value) => {
+              setAutoFillOwnership((current) => ({
+                ...current,
+                bandwidth: false,
+              }));
+              update("bandwidthMbps", value);
+            }}
+            required
+            unit="Mbps"
+            value={form.bandwidthMbps}
+          />
+        </label>
+        <label
+          className="compactCheckbox"
+          title="Use matching manual speed-test measurements from the last 10 minutes for OSPF bandwidth, capped by the configured value. With no fresh measurement, use the configured value. Off always uses the configured value. Does not run speed tests automatically."
+        >
+          <input
+            checked={form.dynamicBandwidth}
+            onChange={(event) =>
+              update("dynamicBandwidth", event.target.checked)
+            }
+            type="checkbox"
+          />
+          Dynamic
+        </label>
+      </div>
+    </div>
+  );
   return (
     <section className="fleetPanel tunnelPlanComposer">
       <div className="sectionHeader tunnelPlanComposerHeader">
@@ -3211,7 +3248,7 @@ function TunnelPlanComposer({
             </div>
           )}
           {form.runtimeManager !== "external_observed" && (
-            <div className="topologyFormGrid fourColumn compactNumericGrid">
+            <div className="topologyFormGrid fourColumn compactNumericGrid tunnelBandwidthGrid">
               <Field
                 label="Ingress limit"
                 tooltip="Optional ingress shaping limit from 0.064 to 1000 Mbps. This remains separate from display-only port speed."
@@ -3253,50 +3290,12 @@ function TunnelPlanComposer({
                   value={form.burstKb}
                 />
               </Field>
-              <Field
-                label="Bandwidth"
-                tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps. New plans use one configured endpoint port speed, or the lower of both, when that value fits the tunnel model."
-              >
-                <UnitInput
-                  ariaLabel="Tunnel bandwidth"
-                  max={MAX_TUNNEL_BANDWIDTH_MBPS}
-                  min={MIN_TUNNEL_BANDWIDTH_MBPS}
-                  onChange={(value) => {
-                    setAutoFillOwnership((current) => ({
-                      ...current,
-                      bandwidth: false,
-                    }));
-                    update("bandwidthMbps", value);
-                  }}
-                  required
-                  unit="Mbps"
-                  value={form.bandwidthMbps}
-                />
-              </Field>
+              {bandwidthField}
             </div>
           )}
           {form.runtimeManager === "external_observed" && (
             <div className="topologyFormGrid twoColumn compactNumericGrid">
-              <Field
-                label="Bandwidth"
-                tooltip="Operator-declared planning bandwidth from 10 to 10000 Mbps. New plans use one configured endpoint port speed, or the lower of both, when that value fits the tunnel model."
-              >
-                <UnitInput
-                  ariaLabel="Tunnel bandwidth"
-                  max={MAX_TUNNEL_BANDWIDTH_MBPS}
-                  min={MIN_TUNNEL_BANDWIDTH_MBPS}
-                  onChange={(value) => {
-                    setAutoFillOwnership((current) => ({
-                      ...current,
-                      bandwidth: false,
-                    }));
-                    update("bandwidthMbps", value);
-                  }}
-                  required
-                  unit="Mbps"
-                  value={form.bandwidthMbps}
-                />
-              </Field>
+              {bandwidthField}
             </div>
           )}
           {form.runtimeManager === "agent_builtin" ? (
@@ -4631,6 +4630,7 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     bandwidthWeight: String(DEFAULT_OSPF_POLICY.bandwidth_weight),
     burstKb: "",
     desiredInterfaces: "",
+    dynamicBandwidth: false,
     egressMbps: "",
     enabled: false,
     fouIpProto: "4",
@@ -4717,6 +4717,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     bandwidthWeight: String(policy.bandwidth_weight),
     burstKb: optionalNumberText(traffic.burst_kb),
     desiredInterfaces: (topology.desired_interfaces ?? []).join("\n"),
+    dynamicBandwidth: input.dynamic_bandwidth ?? false,
     egressMbps: kbpsToMbpsText(traffic.egress_kbps),
     enabled: record.enabled,
     fouIpProto: String(fou.ipproto),
@@ -5537,6 +5538,7 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
     address_pool_cidr: form.ipv4Pool.trim(),
     bandwidth_mbps: clampTunnelBandwidthMbps(form.bandwidthMbps),
     confirmed: true,
+    dynamic_bandwidth: form.dynamicBandwidth,
     enabled: form.enabled,
     interface_name: form.interfaceName.trim(),
     ipv4_tunnel: form.includeIpv4
@@ -5815,7 +5817,10 @@ function createConfirmationItems(
         .filter(Boolean)
         .join("; "),
     },
-    { label: "Planning bandwidth", value: `${request.bandwidth_mbps} Mbps` },
+    {
+      label: "Planning bandwidth",
+      value: `${request.bandwidth_mbps} Mbps · ${request.dynamic_bandwidth ? "Dynamic OSPF bandwidth" : "Static OSPF bandwidth"}`,
+    },
     ...(runtime?.manager === "agent_builtin"
       ? [
           {
@@ -6235,6 +6240,7 @@ type TunnelPlanForm = {
   bandwidthWeight: string;
   burstKb: string;
   desiredInterfaces: string;
+  dynamicBandwidth: boolean;
   egressMbps: string;
   enabled: boolean;
   fouIpProto: string;
