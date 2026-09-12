@@ -798,7 +798,10 @@ async fn main() -> Result<()> {
         ),
         LongLivedConsumer::new(
             "durable job-output projection consumer",
-            repository_job_outputs::spawn_job_output_projection_consumer(state.repo.clone()),
+            repository_job_outputs::spawn_job_output_projection_consumer(
+                state.repo.clone(),
+                state.events.clone(),
+            ),
         ),
         LongLivedConsumer::new(
             "backup upload session cleanup consumer",

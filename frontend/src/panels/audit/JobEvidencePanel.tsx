@@ -6,6 +6,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import { SubmittedJobRequest } from "../../components/SubmittedJobRequest";
 import { presentAudit } from "../../auditPresentation";
 import { formatLowerBoundCount } from "../../constants";
 import {
@@ -16,6 +17,7 @@ import type {
   AgentView,
   AuditLogRecord,
   JobHistoryRecord,
+  JobSubmittedRequestRecord,
   JobOutputRecord,
   JobTargetRecord,
   JsonValue,
@@ -64,6 +66,7 @@ export function JobEvidencePanel({
   jobsTruncated,
   loading,
   onLoadJobOutputs,
+  onLoadJobRequest,
   onLoadJobTargets,
   onOpenJobDetails,
   onRefresh,
@@ -76,6 +79,7 @@ export function JobEvidencePanel({
   jobsTruncated: boolean;
   loading: boolean;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadJobRequest: (jobId: string) => Promise<JobSubmittedRequestRecord>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onRefresh: () => void;
@@ -340,6 +344,7 @@ export function JobEvidencePanel({
             agentNameById={agentNameById}
             auditsTruncated={auditsTruncated}
             evidence={evidenceByJob[record.job.id] ?? EMPTY_EVIDENCE_STATE}
+            onLoadJobRequest={onLoadJobRequest}
             onOpenJobDetails={onOpenJobDetails}
             record={record}
           />
@@ -365,12 +370,14 @@ function JobEvidenceDetail({
   agentNameById,
   auditsTruncated,
   evidence,
+  onLoadJobRequest,
   onOpenJobDetails,
   record,
 }: {
   agentNameById: Map<string, string>;
   auditsTruncated: boolean;
   evidence: EvidenceLoadState;
+  onLoadJobRequest: (jobId: string) => Promise<JobSubmittedRequestRecord>;
   onOpenJobDetails?: (jobId: string) => void;
   record: EvidenceRecord;
 }) {
@@ -453,6 +460,12 @@ function JobEvidenceDetail({
           <span>{record.job.payload_hash}</span>
         </span>
       </div>
+
+      <SubmittedJobRequest
+        key={`job:${record.job.id}`}
+        loadRequest={() => onLoadJobRequest(record.job.id)}
+        operationType={record.job.command_type}
+      />
 
       <ActionFeedback
         className="jobEvidenceDetailActionFeedback"

@@ -4,6 +4,7 @@ import {
   History,
   Keyboard,
   LockKeyhole,
+  LoaderCircle,
   LogIn,
   Maximize2,
   Play,
@@ -40,7 +41,12 @@ import {
 } from "../../hooks/useTerminalSessionSocket";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
 import { scrollIntoViewWithMotion } from "../../motion";
-import type { AgentView } from "../../types";
+import type {
+  AgentView,
+  CreateJobResponse,
+  JobHistoryRecord,
+} from "../../types";
+import { JOB_TERMINAL_STATUSES } from "../../generated/protocolContracts";
 import type {
   TerminalReplayRecord,
   TerminalSessionRecord,
@@ -88,6 +94,7 @@ type ModalSiblingState = {
 
 export function TerminalSessionsPanel({
   agents,
+  jobs,
   accessToken,
   clientLabel,
   initialTargetClientId,
@@ -99,11 +106,13 @@ export function TerminalSessionsPanel({
   onOpenPrivilegeUnlock,
   onInitialTargetConsumed,
   onOpenTerminal,
+  onOpenJobDetails,
   onReplay,
   onRefresh,
   privilegeMaterial,
 }: {
   agents: AgentView[];
+  jobs: JobHistoryRecord[];
   accessToken: string;
   clientLabel: (clientId: string) => string;
   initialTargetClientId?: string | null;
@@ -120,7 +129,8 @@ export function TerminalSessionsPanel({
     terminalReplayFromSeq?: string;
     terminalUser: string;
     terminalUserPolicy: "fail" | "fallback";
-  }) => Promise<void>;
+  }) => Promise<CreateJobResponse>;
+  onOpenJobDetails: (jobId: string) => void;
   onReplay: (
     clientId: string,
     sessionId: string,
@@ -142,6 +152,11 @@ export function TerminalSessionsPanel({
   const [launchStatusTone, setLaunchStatusTone] =
     useState<ActionFeedbackTone>("info");
   const [launchPending, setLaunchPending] = useState(false);
+  const [submittedLaunch, setSubmittedLaunch] = useState<{
+    clientId: string;
+    sessionId: string;
+    jobId: string;
+  } | null>(null);
   const [replayPreview, setReplayPreview] =
     useState<TerminalReplayPreview | null>(null);
   const [replayPendingKey, setReplayPendingKey] = useState<string | null>(null);
@@ -458,6 +473,45 @@ export function TerminalSessionsPanel({
       sortValue: (session) => session.observed_at,
     },
   ];
+
+  useEffect(() => {
+    if (!submittedLaunch) return;
+    const session = sessions.find(
+      (record) =>
+        record.client_id === submittedLaunch.clientId &&
+        record.session_id === submittedLaunch.sessionId,
+    );
+    if (session && session.state !== "opening") {
+      const key = `${session.client_id}:${session.session_id}`;
+      selectTerminalSession(key);
+      setReplayPreview(null);
+      if (isTerminalActive(session)) {
+        autoFollowedSessionKeyRef.current = key;
+        setFollowKey(key);
+        setLaunchStatusTone("success");
+        setLaunchStatus(
+          `Terminal opened on ${clientLabel(session.client_id)}. Live session selected.`,
+        );
+      } else {
+        setLaunchStatusTone("warning");
+        setLaunchStatus(
+          `Terminal ${session.last_status}: ${session.close_reason ?? formatSessionLifecycle(session)}`,
+        );
+      }
+      setSubmittedLaunch(null);
+      return;
+    }
+    const job = jobs.find((record) => record.id === submittedLaunch.jobId);
+    if (
+      job &&
+      (JOB_TERMINAL_STATUSES as readonly string[]).includes(job.status)
+    ) {
+      setLaunchStatusTone(job.status === "completed" ? "info" : "danger");
+      setLaunchStatus(
+        `Terminal open job ${job.status}. Open job details for execution evidence.`,
+      );
+    }
+  }, [clientLabel, jobs, sessions, submittedLaunch]);
 
   useEffect(() => {
     if (agents.length === 0) {
@@ -821,10 +875,11 @@ export function TerminalSessionsPanel({
       observed_at: now,
     };
     setLaunchPending(true);
+    setSubmittedLaunch(null);
     setLaunchStatusTone("progress");
     setLaunchStatus(`Opening terminal on ${clientLabel(launchTarget.id)}...`);
     try {
-      await onOpenTerminal({
+      const result = await onOpenTerminal({
         maxTimeoutSecs: clampNumber(launchIdleTimeoutSecs, 10, 86400),
         session,
         terminalReplayFromSeq: "",
@@ -832,13 +887,25 @@ export function TerminalSessionsPanel({
         terminalUserPolicy:
           launchUser === "root-fallback" ? "fallback" : "fail",
       });
-      selectTerminalSession(`${session.client_id}:${session.session_id}`);
-      setFollowKey(null);
-      setReplayPreview(null);
-      setLaunchStatusTone("success");
-      setLaunchStatus(
-        `${clientLabel(launchTarget.id)} terminal open job submitted.`,
-      );
+      setSubmittedLaunch({
+        clientId: session.client_id,
+        sessionId: session.session_id,
+        jobId: result.job_id,
+      });
+      if (
+        (JOB_TERMINAL_STATUSES as readonly string[]).includes(result.status)
+      ) {
+        setLaunchStatusTone(result.status === "completed" ? "info" : "danger");
+        setLaunchStatus(
+          result.message ?? result.error ??
+            `Terminal open job ${result.status}. Open job details for execution evidence.`,
+        );
+      } else {
+        setLaunchStatusTone("progress");
+        setLaunchStatus(
+          `${clientLabel(launchTarget.id)} terminal requested; waiting for the agent to open it. It will attach automatically.`,
+        );
+      }
     } catch (error) {
       setLaunchStatusTone("danger");
       setLaunchStatus(
@@ -1038,8 +1105,20 @@ export function TerminalSessionsPanel({
             title={launchPrimaryTitle}
             type="button"
           >
-            {privilegeReady ? <Play size={15} /> : <ShieldCheck size={15} />}
-            <span>{privilegeReady ? "Open terminal" : "Unlock privilege"}</span>
+            {launchPending ? (
+              <LoaderCircle size={15} />
+            ) : privilegeReady ? (
+              <Play size={15} />
+            ) : (
+              <ShieldCheck size={15} />
+            )}
+            <span>
+              {launchPending
+                ? "Opening terminal..."
+                : privilegeReady
+                  ? "Open terminal"
+                  : "Unlock privilege"}
+            </span>
           </button>
         </div>
         <ActionFeedback
@@ -1047,6 +1126,16 @@ export function TerminalSessionsPanel({
           message={launchFeedbackMessage}
           tone={launchFeedbackTone}
         />
+        {submittedLaunch && (
+          <button
+            className="secondaryAction compactAction"
+            onClick={() => onOpenJobDetails(submittedLaunch.jobId)}
+            type="button"
+          >
+            <History size={14} />
+            <span>Open terminal job details</span>
+          </button>
+        )}
       </div>
       <div className="terminalSummaryStrip">
         <span
@@ -1248,6 +1337,7 @@ export function TerminalSessionsPanel({
           </span>
         </div>
         <XtermReplay
+          replayTextLength={activeSocketReplay?.replayTextLength}
           inputEnabled={terminalInputEnabled && !terminalFocusOpen}
           label="Active terminal emulator"
           onData={(data) => {
@@ -1348,6 +1438,7 @@ export function TerminalSessionsPanel({
             />
             <XtermReplay
               autoFocus
+              replayTextLength={activeSocketReplay?.replayTextLength}
               inputEnabled={terminalInputEnabled}
               label="Focused terminal emulator"
               onData={(data) => terminalSocket.queueInput(data)}
@@ -1524,12 +1615,20 @@ export function TerminalSessionsPanel({
   );
 }
 
+type TerminalRenderWrite = {
+  key: string;
+  replay: boolean;
+  reset?: boolean;
+  text: string;
+};
+
 function XtermReplay({
   autoFocus = false,
   inputEnabled,
   label,
   onData,
   onResize,
+  replayTextLength,
   resetKey,
   text,
 }: {
@@ -1538,6 +1637,7 @@ function XtermReplay({
   label: string;
   onData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
+  replayTextLength?: number;
   resetKey: string;
   text: string;
 }) {
@@ -1548,11 +1648,16 @@ function XtermReplay({
   const onDataRef = useRef(onData);
   const onResizeRef = useRef(onResize);
   const inputEnabledRef = useRef(inputEnabled);
+  const currentKeyRef = useRef(resetKey);
+  const parsingKeyRef = useRef<string | null>(null);
+  const parsingReplayRef = useRef(false);
+  const enqueueWriteRef = useRef<((write: TerminalRenderWrite) => void) | null>(null);
   const renderedKeyRef = useRef<string | null>(null);
   const renderedTextRef = useRef("");
   onDataRef.current = onData;
   onResizeRef.current = onResize;
   inputEnabledRef.current = inputEnabled;
+  currentKeyRef.current = resetKey;
 
   useEffect(() => {
     if (!fitHostRef.current) {
@@ -1569,12 +1674,53 @@ function XtermReplay({
       theme: {
         background: consolePalette.neutral.text,
         foreground: consolePalette.neutral.terminalForeground,
+        scrollbarSliderBackground: consolePalette.neutral.muted,
+        scrollbarSliderHoverBackground: consolePalette.neutral.terminalForeground,
+        scrollbarSliderActiveBackground: consolePalette.neutral.terminalForeground,
       },
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(fitHostRef.current);
-    const dataSubscription = terminal.onData((data) => onDataRef.current(data));
+    const dataSubscription = terminal.onData((data) => {
+      if (
+        inputEnabledRef.current &&
+        !parsingReplayRef.current &&
+        parsingKeyRef.current === currentKeyRef.current
+      ) {
+        onDataRef.current(data);
+      }
+    });
+    let disposed = false;
+    let writing = false;
+    const writes: TerminalRenderWrite[] = [];
+    const drainWrites = () => {
+      if (disposed || writing) return;
+      let write = writes.shift();
+      while (write && write.key !== currentKeyRef.current) {
+        write = writes.shift();
+      }
+      parsingReplayRef.current = write?.replay ?? false;
+      terminal.options.disableStdin =
+        !inputEnabledRef.current || parsingReplayRef.current;
+      terminal.options.cursorBlink = !terminal.options.disableStdin;
+      if (!write) return;
+      writing = true;
+      parsingKeyRef.current = write.key;
+      if (write.reset) terminal.reset();
+      // Parsing is asynchronous. Keep historical device replies disabled until
+      // this segment finishes, then restore normal replies for live output.
+      terminal.write(write.text, () => {
+        writing = false;
+        drainWrites();
+      });
+    };
+    enqueueWriteRef.current = (write) => {
+      writes.push(write);
+      drainWrites();
+    };
+    renderedKeyRef.current = null;
+    renderedTextRef.current = "";
     let resizeTimer: number | null = null;
     const terminalResizeSubscription = terminal.onResize(({ cols, rows }) => {
       if (resizeTimer !== null) {
@@ -1616,6 +1762,8 @@ function XtermReplay({
     );
     window.addEventListener("resize", resize);
     return () => {
+      disposed = true;
+      enqueueWriteRef.current = null;
       resizeObserver.disconnect();
       document.removeEventListener(
         "pointerdown",
@@ -1639,32 +1787,53 @@ function XtermReplay({
     if (!terminal) {
       return;
     }
-    terminal.options.disableStdin = !inputEnabled;
-    terminal.options.cursorBlink = inputEnabled;
-    if (inputEnabled && autoFocus) {
-      window.requestAnimationFrame(() => terminal.focus());
-    }
+    terminal.options.disableStdin = !inputEnabled || parsingReplayRef.current;
+    terminal.options.cursorBlink = !terminal.options.disableStdin;
     if (inputEnabled) {
-      window.requestAnimationFrame(() => fitRef.current?.fit());
+      const frame = window.requestAnimationFrame(() => {
+        fitRef.current?.fit();
+        // A fit while disconnected/read-only may already have set these local
+        // dimensions. Publish them when this view gains control even if the
+        // geometry has not changed (including returning from focused view).
+        onResizeRef.current(terminal.cols, terminal.rows);
+        if (autoFocus) terminal.focus();
+      });
+      return () => window.cancelAnimationFrame(frame);
     }
   }, [autoFocus, inputEnabled]);
 
   useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) {
+    const enqueueWrite = enqueueWriteRef.current;
+    if (!enqueueWrite) {
       return;
     }
     const previousText = renderedTextRef.current;
-    if (renderedKeyRef.current !== resetKey || !text.startsWith(previousText)) {
-      terminal.reset();
-      terminal.write(text);
-    } else if (text.length > previousText.length) {
-      terminal.write(text.slice(previousText.length));
+    const initial = renderedKeyRef.current === null;
+    const reset = renderedKeyRef.current !== resetKey || !text.startsWith(previousText);
+    const start = reset ? 0 : previousText.length;
+    if (reset || text.length > start) {
+      // A newly mounted focused view reconstructs already-present output. A
+      // later stream update can batch a historical prefix with a live suffix.
+      const replayEnd = Math.min(
+        text.length,
+        Math.max(start, initial ? text.length : (replayTextLength ?? text.length)),
+      );
+      if (reset || replayEnd > start) {
+        enqueueWrite({
+          key: resetKey,
+          replay: true,
+          reset,
+          text: text.slice(start, replayEnd),
+        });
+      }
+      if (text.length > replayEnd) {
+        enqueueWrite({ key: resetKey, replay: false, text: text.slice(replayEnd) });
+      }
     }
     renderedKeyRef.current = resetKey;
     renderedTextRef.current = text;
     window.setTimeout(() => fitRef.current?.fit(), 0);
-  }, [resetKey, text]);
+  }, [replayTextLength, resetKey, text]);
 
   return (
     <div aria-label={label} className="xtermReplay" ref={shellRef}>

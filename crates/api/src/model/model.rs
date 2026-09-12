@@ -534,6 +534,11 @@ pub(crate) struct JobHistoryView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobSubmittedRequestView {
+    pub(crate) operation: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct JobTargetView {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,

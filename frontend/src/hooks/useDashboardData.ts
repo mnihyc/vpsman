@@ -331,6 +331,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   const hiddenNetworkEvidenceRefreshPendingRef = useRef(false);
   const hiddenBackupRefreshPendingRef = useRef(false);
   const hiddenAuditRefreshPendingRef = useRef(false);
+  const hiddenTerminalRefreshPendingRef = useRef(false);
   const hiddenOperatorProfileRefreshPendingRef = useRef(false);
   const routeHydrationKeyRef = useRef("");
   const suiteConfigHydrationKeyRef = useRef("");
@@ -537,6 +538,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     hiddenNetworkEvidenceRefreshPendingRef.current = false;
     hiddenBackupRefreshPendingRef.current = false;
     hiddenAuditRefreshPendingRef.current = false;
+    hiddenTerminalRefreshPendingRef.current = false;
     hiddenOperatorProfileRefreshPendingRef.current = false;
     routeHydrationKeyRef.current = "";
     suiteConfigHydrationKeyRef.current = "";
@@ -820,6 +822,17 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
       const currentSubpage = activeSubpageRef.current;
       const currentVisitWasHydrated =
         routeHydrationKeyRef.current === routeVisitKey;
+      if (hiddenTerminalRefreshPendingRef.current && apiToken) {
+        hiddenTerminalRefreshPendingRef.current = false;
+        if (
+          currentVisitWasHydrated &&
+          jobProjectionSourcesForRoute(currentView, currentSubpage).includes(
+            "terminalSessions",
+          )
+        ) {
+          void jobs.loadTerminalSessions();
+        }
+      }
       if (hiddenNetworkEvidenceRefreshPendingRef.current && apiToken) {
         hiddenNetworkEvidenceRefreshPendingRef.current = false;
         if (
@@ -905,6 +918,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     homeSnapshotSettledKey,
     homeVisitKey,
     jobs.refreshJobHistoryAfterEvent,
+    jobs.loadTerminalSessions,
     refreshRenderedJobEffects,
     refreshBackupArtifactProjectionsForRoute,
     routeVisitKey,
@@ -1498,8 +1512,17 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
         if (recovering) {
           if (documentIsHidden()) {
             hiddenFleetRefreshPendingRef.current = true;
+            hiddenTerminalRefreshPendingRef.current = true;
           } else {
             void fleet.loadFleetTelemetry(true);
+            if (
+              jobProjectionSourcesForRoute(
+                activeViewRef.current,
+                activeSubpageRef.current,
+              ).includes("terminalSessions")
+            ) {
+              void jobs.loadTerminalSessions();
+            }
           }
         }
       });
@@ -1531,6 +1554,20 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
           return;
         }
         const currentView = activeViewRef.current;
+        if (
+          event.type === "terminal_output_recorded" &&
+          event.terminal_seq === null &&
+          jobProjectionSourcesForRoute(
+            currentView,
+            activeSubpageRef.current,
+          ).includes("terminalSessions")
+        ) {
+          if (documentIsHidden()) {
+            hiddenTerminalRefreshPendingRef.current = true;
+          } else {
+            void jobs.refreshTerminalSessionAfterEvent(event);
+          }
+        }
         setLastLiveEvent(
           event.type === "fleet_telemetry_invalidated"
             ? "telemetry_updated"
@@ -1756,6 +1793,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     dashboardOverview.loadDashboardOverview,
     jobs.reconcileJobStatusEvent,
     jobs.refreshJobHistoryAfterEvent,
+    jobs.refreshTerminalSessionAfterEvent,
+    jobs.loadTerminalSessions,
     refreshRenderedJobEffects,
     refreshBackupArtifactProjectionsForRoute,
     scheduleDashboardOverviewReload,
@@ -2004,6 +2043,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     downloadJobTargetStatuses: jobs.downloadJobTargetStatuses,
     saveFileTransferHandoff: jobs.saveFileTransferHandoff,
     loadJob: jobs.loadJob,
+    loadJobRequest: jobs.loadJobRequest,
+    loadJobApprovalRequest: jobs.loadJobApprovalRequest,
     loadJobRollout: jobs.loadJobRollout,
     loadJobRollouts: jobs.loadJobRollouts,
     loadJobOutputs: jobs.loadJobOutputs,

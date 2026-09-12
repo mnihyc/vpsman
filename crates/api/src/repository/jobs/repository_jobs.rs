@@ -1495,6 +1495,15 @@ struct WebhookJobSummary {
     target_statuses: Vec<String>,
 }
 
+fn job_submitted_request_view(operation: Option<Value>) -> JobSubmittedRequestView {
+    JobSubmittedRequestView {
+        operation: operation.map(|mut operation| {
+            redact_runtime_tunnel_credentials(&mut operation);
+            operation
+        }),
+    }
+}
+
 pub(crate) struct JobCreatedWebhookEvent<'a> {
     pub(crate) job_id: Uuid,
     pub(crate) command_type: &'a str,
@@ -1734,6 +1743,41 @@ fn job_approval_audit(
 }
 
 impl Repository {
+    pub(crate) async fn get_job_submitted_request(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<JobSubmittedRequestView>> {
+        match self {
+            Self::Postgres(pool) => {
+                let operation = sqlx::query_scalar::<_, Option<sqlx::types::Json<Value>>>(
+                    "SELECT operation FROM jobs WHERE id = $1",
+                )
+                .bind(job_id)
+                .fetch_optional(pool)
+                .await?;
+                Ok(operation
+                    .map(|operation| job_submitted_request_view(operation.map(|value| value.0))))
+            }
+        }
+    }
+
+    pub(crate) async fn get_job_approval_submitted_request(
+        &self,
+        approval_id: Uuid,
+    ) -> Result<Option<JobSubmittedRequestView>> {
+        let Some((_, request)) = self.get_job_approval_request(approval_id).await? else {
+            return Ok(None);
+        };
+        // Approval dispatch uses this same frozen request, including requests
+        // submitted through the supported top-level argv input.
+        let operation = request.job_command().map_err(|error| {
+            anyhow::anyhow!("stored job approval operation is invalid: {}", error.code)
+        })?;
+        Ok(Some(job_submitted_request_view(Some(
+            serde_json::to_value(operation)?,
+        ))))
+    }
+
     pub(crate) async fn get_job(&self, job_id: Uuid) -> Result<Option<JobHistoryView>> {
         match self {
             Self::Postgres(pool) => {

@@ -122,6 +122,7 @@ export function RemoteOperationsPanel({
   fileTransferSources,
   fileTransferSourcesTruncated,
   initialTargetIntent,
+  jobs,
   loading,
   readError,
   onCreateFileTransferHandoff,
@@ -162,6 +163,7 @@ export function RemoteOperationsPanel({
   accessToken: string;
   activeSubpage: string;
   agents: AgentView[];
+  jobs: JobHistoryRecord[];
   commandTemplates: CommandTemplateRecord[];
   commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
@@ -360,7 +362,7 @@ export function RemoteOperationsPanel({
       selectorExpression,
       maxTimeoutSecs: request.maxTimeoutSecs,
     });
-    await onCreateJob({
+    const result = await onCreateJob({
       job_id: crypto.randomUUID(),
       selector_expression: selectorExpression,
       target_client_ids: [session.client_id],
@@ -376,6 +378,7 @@ export function RemoteOperationsPanel({
       privilege_assertion: privilegeAssertion,
     });
     onRefresh();
+    return result;
   }
 
   return (
@@ -646,6 +649,7 @@ export function RemoteOperationsPanel({
             <TerminalSessionsPanel
               accessToken={accessToken}
               agents={agents}
+              jobs={jobs}
               clientLabel={clientLabel}
               initialTargetClientId={
                 initialTargetIntent?.destination === "terminal"
@@ -663,6 +667,7 @@ export function RemoteOperationsPanel({
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
               onInitialTargetConsumed={onInitialTargetIntentConsumed}
               onOpenTerminal={openTerminalSessionDirectly}
+              onOpenJobDetails={onOpenJobDetails}
               onReplay={onLoadTerminalReplay}
               onRefresh={onRefresh}
               onOpenSessionEvidence={onOpenSessionEvidence}

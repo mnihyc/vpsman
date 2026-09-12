@@ -7245,6 +7245,162 @@ async fn postgres_tunnel_evidence_clear_is_scoped_counted_and_audited_atomically
 }
 
 #[tokio::test]
+async fn postgres_submitted_job_request_reads_exact_recorded_and_frozen_operations() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "submitted-request-client";
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    let (operator, headers) = postgres_operator_session(&db.repo, "submitted-request-admin").await;
+    let mut state = postgres_app_state(&db);
+    state.gateway = GatewayDispatchClient::new_with_timeouts(
+        Some("http://127.0.0.1:9".to_string()),
+        Some("submitted-request-test-token-at-least-32".to_string()),
+        GatewayClientTimeouts::default(),
+    )
+    .with_test_privilege_auto_approve();
+    let router = crate::routes::build_router(state.clone());
+    let get = |uri: String, headers: HeaderMap| {
+        let router = router.clone();
+        async move {
+            let mut request = Request::builder().uri(uri);
+            *request.headers_mut().unwrap() = headers;
+            let response = router
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            (status, body)
+        }
+    };
+    let argv = vec![
+        "/usr/bin/printf",
+        "%s\n",
+        "",
+        "a b",
+        "\"quoted\"",
+        "back\\slash",
+    ];
+    let argv_operation = json!({"type": "shell", "argv": argv, "pty": false});
+    let operations = [
+        Some(argv_operation.clone()),
+        Some(json!({"type": "shell_script", "script": "  printf '%s\\n' 'a b'\n\n"})),
+        None,
+    ];
+    let mut job_ids = Vec::new();
+    for operation in operations {
+        let job_id = Uuid::new_v4();
+        job_ids.push(job_id);
+        sqlx::query("INSERT INTO jobs (id,command_type,status,target_count,payload_hash,request_fingerprint,operation) VALUES ($1,'shell','completed',0,'fixture','fixture',$2)")
+            .bind(job_id).bind(operation.clone().map(SqlJson)).execute(&db.pool).await.unwrap();
+        let uri = format!("/api/v1/jobs/{job_id}/request");
+        let (status, body) = get(uri, headers.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"operation": operation}));
+        let (_, detail) = get(format!("/api/v1/jobs/{job_id}"), headers.clone()).await;
+        assert!(
+            detail.get("operation").is_none(),
+            "history metadata stays lightweight"
+        );
+    }
+
+    // The current approval API accepts top-level argv, not only operation.
+    let mut request = postgres_approval_job_request(Uuid::new_v4(), client_id);
+    request.argv = argv
+        .iter()
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| (*arg).to_string())
+        .collect();
+    let approved_operation = json!({"type": "shell", "argv": request.argv, "pty": false});
+    let (_, Json(approval)) = crate::routes_jobs::create_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateJobApprovalRequest {
+            approval_id: None,
+            job: request,
+            reason: None,
+            risk: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let frozen_before: Value =
+        sqlx::query_scalar("SELECT job_request FROM job_approvals WHERE id=$1")
+            .bind(approval.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(frozen_before["operation"].is_null());
+    let approval_uri = format!("/api/v1/job-approvals/{}/request", approval.id);
+    let (status, body) = get(approval_uri.clone(), headers.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"operation": approved_operation}));
+    let frozen_after: Value =
+        sqlx::query_scalar("SELECT job_request FROM job_approvals WHERE id=$1")
+            .bind(approval.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        frozen_after, frozen_before,
+        "inspection does not rewrite the frozen request"
+    );
+    assert!(db.repo.get_job(approval.job_id).await.unwrap().is_none());
+    assert_eq!(
+        db.repo
+            .get_job_approval_request(approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .status,
+        "pending"
+    );
+
+    for (prefix, code) in [
+        ("jobs", "job_not_found"),
+        ("job-approvals", "job_approval_not_found"),
+    ] {
+        let (status, body) = get(
+            format!("/api/v1/{prefix}/{}/request", Uuid::new_v4()),
+            headers.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], code);
+    }
+    let job_uri = format!("/api/v1/jobs/{}/request", job_ids[0]);
+    for uri in [&job_uri, &approval_uri] {
+        assert_eq!(
+            get(uri.clone(), HeaderMap::new()).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for (scope, job_status, approval_status) in [
+        ("fleet:read", StatusCode::OK, StatusCode::FORBIDDEN),
+        ("jobs:read", StatusCode::FORBIDDEN, StatusCode::OK),
+    ] {
+        sqlx::query("UPDATE operators SET scopes=$2 WHERE id=$1")
+            .bind(operator.operator.id)
+            .bind(SqlJson(json!([scope])))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(get(job_uri.clone(), headers.clone()).await.0, job_status);
+        assert_eq!(
+            get(approval_uri.clone(), headers.clone()).await.0,
+            approval_status
+        );
+    }
+    drop(router);
+    drop(state);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_job_approval_decisions_preserve_the_frozen_dispatch_fence() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -44475,6 +44631,159 @@ async fn insert_terminal_reconcile_job(pool: &PgPool, job_id: Uuid, client_id: &
 }
 
 #[tokio::test]
+async fn postgres_terminal_projection_notifies_only_after_session_and_replay_are_visible() {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "terminal-projection-notification";
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    let state = postgres_app_state(&db);
+    let mut notifications = state.events.subscribe();
+    let mut expected = HashMap::new();
+    for (prompt, session_already_projected) in [
+        (None, false),
+        (Some(b"initial prompt> ".to_vec()), false),
+        (Some(b"resumed prompt> ".to_vec()), true),
+    ] {
+        let job_id = Uuid::new_v4();
+        insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+        let session_id: Uuid =
+            sqlx::query_scalar("SELECT (operation->>'session_id')::uuid FROM jobs WHERE id=$1")
+                .bind(job_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let output_next_seq = if prompt.is_some() { 2 } else { 1 };
+        let mut outputs = Vec::new();
+        if let Some(data) = prompt.clone() {
+            outputs.push(CommandOutput {
+                job_id,
+                stream: OutputStream::Pty,
+                data,
+                exit_code: None,
+                done: false,
+            });
+        }
+        outputs.push(CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&json!({
+                "type": "terminal_open", "status": "opened", "session_id": session_id,
+                "argv": ["/bin/sh"], "cols": 80, "rows": 24,
+                "idle_timeout_secs": 3600, "flow_window_bytes": 65536,
+                "output_first_seq": 1, "output_next_seq": output_next_seq,
+                "session_exited": false
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: false,
+        });
+        db.repo
+            .record_job_outputs_checked_with_config(
+                job_id,
+                client_id,
+                &outputs,
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(db
+            .repo
+            .list_terminal_sessions(1, Some(client_id), Some(session_id))
+            .await
+            .unwrap()
+            .is_empty());
+        if session_already_projected {
+            // Simulate interruption after the first projection commits but
+            // before replay/work acknowledgement. Reprocessing the same
+            // status must still announce readiness once replay completes.
+            assert_eq!(
+                db.repo
+                    .project_terminal_session_from_job_output(
+                        job_id,
+                        client_id,
+                        i32::try_from(outputs.len() - 1).unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+                Some(session_id)
+            );
+            assert!(db
+                .repo
+                .terminal_session_replay(client_id, session_id, Some(1), 10, 65536, true)
+                .await
+                .unwrap()
+                .chunks
+                .is_empty());
+        }
+        expected.insert(session_id, (job_id, prompt));
+    }
+    assert!(matches!(
+        notifications.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    let consumer = crate::repository_job_outputs::spawn_job_output_projection_consumer(
+        db.repo.clone(),
+        state.events.clone(),
+    );
+    // No direct terminal stream producer runs: even the silent session must
+    // be discoverable from its initial job-output projection notification.
+    while !expected.is_empty() {
+        let event = tokio::time::timeout(Duration::from_secs(10), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WsEvent::TerminalOutputRecorded {
+            job_id,
+            client_id: notified_client,
+            session_id,
+            terminal_seq,
+            done,
+        } = event
+        else {
+            panic!("unexpected projection notification: {event:?}");
+        };
+        assert_eq!(notified_client, client_id);
+        assert_eq!(terminal_seq, None);
+        assert!(!done);
+        let (expected_job, prompt) = expected
+            .remove(&session_id)
+            .expect("one status notification per projected session");
+        assert_eq!(job_id, expected_job);
+        let sessions = db
+            .repo
+            .list_terminal_sessions(1, Some(client_id), Some(session_id))
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, "open");
+        assert_eq!(sessions[0].job_id, job_id);
+        assert_eq!((sessions[0].cols, sessions[0].rows), (Some(80), Some(24)));
+        let replay = db
+            .repo
+            .terminal_session_replay(client_id, session_id, Some(1), 10, 65536, true)
+            .await
+            .unwrap();
+        match prompt {
+            Some(data) => {
+                assert_eq!(replay.chunks.len(), 1);
+                assert_eq!(replay.chunks[0].data_base64, Some(BASE64.encode(data)));
+            }
+            None => assert!(replay.chunks.is_empty()),
+        }
+    }
+    consumer.abort();
+    let _ = consumer.await;
+    drop(state);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_terminal_reconcile_outbox_is_exact_and_replay_safe() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -45017,6 +45326,135 @@ async fn postgres_terminal_control_close_is_atomic_and_exactly_replayable() {
         )
     );
 
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_terminal_stream_ingest_persists_status_without_redundant_notifications() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "terminal-stream-notification";
+    let job_id = Uuid::new_v4();
+    let incarnation = Uuid::new_v4();
+    let gateway_session_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(incarnation)).await;
+    insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+    let session_id: Uuid =
+        sqlx::query_scalar("SELECT (operation->>'session_id')::uuid FROM jobs WHERE id=$1")
+            .bind(job_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO gateway_sessions(id, gateway_id, client_id, status) \
+         VALUES($1, 'gateway-a', $2, 'active')",
+    )
+    .bind(gateway_session_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let state = postgres_app_state(&db);
+    let mut notifications = state.events.subscribe();
+    for (stream, terminal_seq, done, expected_state) in [
+        (OutputStream::Status, None, false, "open"),
+        (OutputStream::Pty, Some(1), false, "open"),
+        (OutputStream::Status, None, true, "closed"),
+    ] {
+        let data = if stream == OutputStream::Pty {
+            b"prompt> ".to_vec()
+        } else {
+            serde_json::to_vec(&json!({
+                "type": if done { "terminal_close" } else { "terminal_stream" },
+                "status": if done { "closed" } else { "streaming" },
+                "session_id": session_id,
+                "output_first_seq": 1, "output_next_seq": if done { 2 } else { 1 },
+                "session_exited": done
+            }))
+            .unwrap()
+        };
+        let event = vpsman_common::GatewayTerminalOutputIngest {
+            gateway_id: "gateway-a".to_string(),
+            gateway_session_id,
+            process_incarnation_id: incarnation,
+            spooled_replay: false,
+            client_id: client_id.to_string(),
+            output: TerminalStreamOutput {
+                job_id,
+                session_id,
+                terminal_seq,
+                output_first_seq: Some(1),
+                output_next_seq: if stream == OutputStream::Pty || done {
+                    2
+                } else {
+                    1
+                },
+                output_retained_first_seq: Some(1),
+                output_retained_bytes: if stream == OutputStream::Pty || done {
+                    8
+                } else {
+                    0
+                },
+                output_dropped_bytes: 0,
+                output_dropped_chunks: 0,
+                output_replay_truncated: false,
+                output: CommandOutput {
+                    job_id,
+                    stream,
+                    data,
+                    exit_code: done.then_some(0),
+                    done,
+                },
+            },
+        };
+        let response = crate::routes_ingest::ingest_terminal_output(
+            State(state.clone()),
+            internal_gateway_headers(),
+            Json(event),
+        )
+        .await
+        .unwrap();
+        assert_eq!(serde_json::to_value(response.0).unwrap()["accepted"], true);
+        let sessions = db
+            .repo
+            .list_terminal_sessions(1, Some(client_id), Some(session_id))
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, expected_state);
+        if terminal_seq.is_some() || done {
+            assert!(matches!(notifications.try_recv().unwrap(),
+                WsEvent::TerminalOutputRecorded {
+                    job_id: notified_job, session_id: notified_session,
+                    terminal_seq: notified_seq, done: notified_done, ..
+                } if notified_job == job_id && notified_session == session_id
+                    && notified_seq == terminal_seq && notified_done == done
+            ));
+            let replay = db
+                .repo
+                .terminal_session_replay(client_id, session_id, Some(1), 10, 65536, true)
+                .await
+                .unwrap();
+            assert_eq!(replay.chunks.len(), 1);
+            assert_eq!(
+                replay.chunks[0].data_base64.as_deref(),
+                Some("cHJvbXB0PiA=")
+            );
+        } else {
+            assert_eq!(sessions[0].last_status, "streaming");
+        }
+        if done {
+            assert!(matches!(notifications.try_recv().unwrap(),
+                WsEvent::JobFinished { job_id: notified_job, .. } if notified_job == job_id
+            ));
+        }
+        assert!(matches!(
+            notifications.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+    drop(state);
     db.cleanup().await;
 }
 

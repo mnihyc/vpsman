@@ -24,9 +24,9 @@ use crate::{
     error::ApiError,
     model::{
         AuditLogView, HistoryQuery, JobHistoryView, JobOutputListItemView, JobOutputListPageView,
-        JobOutputView, JobTargetStatusBatchItem, JobTargetStatusBatchRequest, JobTargetView,
-        ListQuery, NetworkEvidenceQuery, NetworkObservationTrendView, NetworkObservationView,
-        ProcessSupervisorInventoryView,
+        JobOutputView, JobSubmittedRequestView, JobTargetStatusBatchItem,
+        JobTargetStatusBatchRequest, JobTargetView, ListQuery, NetworkEvidenceQuery,
+        NetworkObservationTrendView, NetworkObservationView, ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     repository_job_outputs::{
@@ -123,6 +123,26 @@ pub(crate) async fn get_job(
         ))?
         .ok_or_else(|| ApiError::not_found("job_not_found"))?;
     Ok(Json(job))
+}
+
+pub(crate) async fn get_job_submitted_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<JobSubmittedRequestView>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    let request = state
+        .repo
+        .get_job_submitted_request(job_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_request_unavailable",
+            "The submitted job request could not be loaded.",
+        ))?
+        .ok_or_else(|| ApiError::not_found("job_not_found"))?;
+    Ok(Json(request))
 }
 
 pub(crate) async fn list_job_targets(

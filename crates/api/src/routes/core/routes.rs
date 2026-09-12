@@ -83,17 +83,17 @@ use crate::{
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
         download_job_output_archive, download_job_output_chunk, download_job_output_stream,
-        download_job_target_statuses, get_audit_log, get_job, list_audit_logs,
-        list_exact_job_target_statuses, list_job_outputs, list_job_targets, list_jobs,
-        list_network_observation_trends, list_network_observations,
+        download_job_target_statuses, get_audit_log, get_job, get_job_submitted_request,
+        list_audit_logs, list_exact_job_target_statuses, list_job_outputs, list_job_targets,
+        list_jobs, list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
     routes_job_rollouts::{
         get_job_rollout, list_job_rollouts, pause_job_rollout, resume_job_rollout,
     },
     routes_jobs::{
-        approve_job_approval, cancel_job, create_job, create_job_approval, list_job_approvals,
-        reject_job_approval,
+        approve_job_approval, cancel_job, create_job, create_job_approval,
+        get_job_approval_submitted_request, list_job_approvals, reject_job_approval,
     },
     routes_key_lifecycle::{
         key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
@@ -565,6 +565,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_JOB_CREATE_BODY_BYTES)),
         )
         .route(
+            "/api/v1/job-approvals/{approval_id}/request",
+            get(get_job_approval_submitted_request),
+        )
+        .route(
             "/api/v1/job-approvals/{approval_id}/approve",
             post(approve_job_approval),
         )
@@ -602,6 +606,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(latest_agent_update_release),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job))
+        .route(
+            "/api/v1/jobs/{job_id}/request",
+            get(get_job_submitted_request),
+        )
         .route("/api/v1/job-rollouts", get(list_job_rollouts))
         .route("/api/v1/job-rollouts/{job_id}", get(get_job_rollout))
         .route(

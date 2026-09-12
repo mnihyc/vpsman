@@ -16,6 +16,7 @@ use vpsman_server_core::{
 
 use crate::model::{
     JobOutputListItemView, JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView,
+    WsEvent,
 };
 use crate::object_store::BackupObjectStore;
 use crate::repository::Repository;
@@ -23,6 +24,7 @@ use crate::repository_jobs::{
     enqueue_target_terminal_event_in_tx, finish_jobs_in_tx_and_reconcile_event_sources,
     insert_agent_update_lifecycle_for_stored_job_in_tx,
 };
+use crate::state::WsEventBus;
 use crate::{output_stream_name, TargetDispatchOutcome};
 
 const JOB_OUTPUT_ARTIFACT_PREFIX: &str = "job-outputs";
@@ -244,6 +246,7 @@ pub(crate) struct JobOutputCursor {
 /// after listener recovery.
 pub(crate) fn spawn_job_output_projection_consumer(
     repo: Repository,
+    events: WsEventBus,
 ) -> tokio::task::JoinHandle<()> {
     let pool = match &repo {
         Repository::Postgres(pool) => pool.clone(),
@@ -270,7 +273,7 @@ pub(crate) fn spawn_job_output_projection_consumer(
                 continue;
             }
             loop {
-                match process_next_job_output_projection(&repo).await {
+                match process_next_job_output_projection(&repo, &events).await {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(error) => warn!(%error, "durable job-output projection drain failed"),
@@ -292,7 +295,10 @@ pub(crate) fn spawn_job_output_projection_consumer(
     })
 }
 
-async fn process_next_job_output_projection(repo: &Repository) -> Result<bool> {
+async fn process_next_job_output_projection(
+    repo: &Repository,
+    events: &WsEventBus,
+) -> Result<bool> {
     let Some(owner) = repo.claim_job_output_projection_work().await? else {
         return Ok(false);
     };
@@ -319,9 +325,21 @@ async fn process_next_job_output_projection(repo: &Repository) -> Result<bool> {
         return Ok(true);
     }
     match projection {
-        Ok(()) => {
+        Ok(terminal) => {
+            let notification = terminal.map(|(session_id, done)| WsEvent::TerminalOutputRecorded {
+                job_id: owner.job_id,
+                client_id: owner.client_id.clone(),
+                session_id,
+                terminal_seq: None,
+                done,
+            });
             if !owner.acknowledge().await? {
                 warn!("job-output projection changed owner before acknowledgement");
+            } else if let Some(notification) = notification {
+                // This owner has committed both session state and initial
+                // replay. Admission-time job invalidation is too early for
+                // clients to discover an asynchronously opened terminal.
+                events.publish(notification);
             }
         }
         Err(error) => {
@@ -340,8 +358,9 @@ async fn process_next_job_output_projection(repo: &Repository) -> Result<bool> {
 // starting a listener task whose scheduling would make assertions racy.
 #[cfg(test)]
 pub(crate) async fn drain_job_output_projections_for_test(repo: &Repository) -> Result<usize> {
+    let (events, _) = WsEventBus::new(1);
     let mut projected = 0_usize;
-    while process_next_job_output_projection(repo).await? {
+    while process_next_job_output_projection(repo, &events).await? {
         projected = projected.saturating_add(1);
     }
     Ok(projected)
@@ -761,12 +780,12 @@ impl Repository {
         job_id: Uuid,
         client_id: &str,
         seq: i32,
-    ) -> Result<()> {
+    ) -> Result<Option<(Uuid, bool)>> {
         let Some(output) = self.get_job_output(job_id, client_id, seq).await? else {
             // A cascading job deletion may retire the source and its work row
             // after the claim transaction commits. There is then no surviving
             // authority to project.
-            return Ok(());
+            return Ok(None);
         };
         if let Some(artifact) = job_output_view_server_artifact(&output) {
             self.register_server_artifact(artifact).await?;
@@ -784,11 +803,12 @@ impl Repository {
         .await?;
         self.project_file_transfer_session_from_job_output(job_id, client_id, seq)
             .await?;
-        self.project_terminal_session_from_job_output(job_id, client_id, seq)
+        let terminal_session_id = self
+            .project_terminal_session_from_job_output(job_id, client_id, seq)
             .await?;
         self.project_terminal_command_replay_from_job_output(&output)
             .await?;
-        Ok(())
+        Ok(terminal_session_id.map(|session_id| (session_id, output.done)))
     }
 
     pub(crate) async fn list_process_supervisor_inventory(

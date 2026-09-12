@@ -704,13 +704,18 @@ pub(crate) async fn ingest_terminal_output(
             return Err(ApiError::bad_request("invalid_terminal_output_stream"));
         }
     }
-    state.publish(WsEvent::TerminalOutputRecorded {
-        job_id: event.output.job_id,
-        client_id: event.client_id.clone(),
-        session_id: event.output.session_id,
-        terminal_seq: event.output.terminal_seq,
-        done: event.output.output.done,
-    });
+    // Streaming status persists the latest session metadata, but adds no
+    // replay or lifecycle change beyond the already-notified PTY chunk.
+    // Initial readiness is published by the durable job-output projection.
+    if event.output.terminal_seq.is_some() || event.output.output.done {
+        state.publish(WsEvent::TerminalOutputRecorded {
+            job_id: event.output.job_id,
+            client_id: event.client_id.clone(),
+            session_id: event.output.session_id,
+            terminal_seq: event.output.terminal_seq,
+            done: event.output.output.done,
+        });
+    }
     if event.output.output.done {
         if let Some(job) = state.repo.get_job(event.output.job_id).await? {
             state.publish(WsEvent::JobFinished {

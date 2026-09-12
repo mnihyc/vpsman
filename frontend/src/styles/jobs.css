@@ -3279,6 +3279,10 @@
   max-width: 100%;
 }
 
+.terminalLaunchPanel > .compactAction {
+  justify-self: start;
+}
+
 .terminalSummaryStrip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
@@ -3814,12 +3818,13 @@
   inset: 0;
   z-index: var(--z-modal);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 0;
   background: var(--surface);
 }
 
 .terminalFocusOverlay header {
+  grid-row: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3849,12 +3854,22 @@
 }
 
 .terminalFocusOverlay .xtermReplay {
+  grid-row: 3;
   height: auto;
+  min-height: 0;
   max-height: none;
   margin: 0;
   resize: none;
   border: 0;
   border-radius: 0;
+}
+
+.terminalFocusOverlay > .terminalReplayActionFeedback {
+  grid-row: 2;
+}
+
+.terminalFocusOverlay > .terminalInputFeedback {
+  grid-row: 4;
 }
 
 @media (max-width: 980px) {
@@ -3909,6 +3924,22 @@
 
 .xtermFitHost > .xterm {
   height: 100%;
+}
+
+.xtermFitHost .xterm-viewport {
+  /* Xterm 6 scrolls through its managed element. Its empty legacy viewport
+     must not paint a second native scrollbar beneath the fitted rows. */
+  background: transparent;
+  overflow: hidden;
+}
+
+.xtermFitHost .xterm-scrollable-element > .scrollbar.vertical {
+  background: var(--text);
+  border-left: 1px solid var(--text-secondary);
+}
+
+.xtermFitHost .xterm-scrollable-element > .scrollbar > .slider {
+  border-radius: 4px;
 }
 
 .selectedTerminalSession {

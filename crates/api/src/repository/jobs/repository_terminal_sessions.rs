@@ -1058,7 +1058,7 @@ impl Repository {
         job_id: Uuid,
         client_id: &str,
         seq: i32,
-    ) -> Result<()> {
+    ) -> Result<Option<Uuid>> {
         let Self::Postgres(pool) = self;
         let row = sqlx::query(
             r#"
@@ -1078,12 +1078,12 @@ impl Repository {
         .fetch_optional(pool)
         .await?;
         let Some(row) = row else {
-            return Ok(());
+            return Ok(None);
         };
         if row.try_get::<String, _>("stream")? != "status"
             || row.try_get::<String, _>("command_type")? != "terminal_open"
         {
-            return Ok(());
+            return Ok(None);
         }
         let Some(event) = parse_terminal_event(TerminalStatusOutput {
             job_id,
@@ -1091,7 +1091,7 @@ impl Repository {
             data: row.try_get("data")?,
             created_at: row.try_get("created_at")?,
         }) else {
-            return Ok(());
+            return Ok(None);
         };
         let session_id = event.session_id;
         let incoming_state = event.state;
@@ -1114,7 +1114,7 @@ impl Repository {
                 reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, incoming_state)
                     .await?;
                 tx.commit().await?;
-                return Ok(());
+                return Ok(None);
             }
             anyhow::bail!("terminal_session_job_conflict");
         }
@@ -1132,7 +1132,7 @@ impl Repository {
             record_terminal_job_output_projection_seq_in_tx(&mut tx, client_id, session_id, seq)
                 .await?;
             tx.commit().await?;
-            return Ok(());
+            return Ok(None);
         }
         let existing =
             load_postgres_terminal_projection_session_in_tx(&mut tx, client_id, session_id).await?;
@@ -1151,7 +1151,7 @@ impl Repository {
             .await?;
         reconcile_postgres_terminal_job_in_tx(&mut tx, job_id, client_id, &effective_state).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(Some(session_id))
     }
 }
 

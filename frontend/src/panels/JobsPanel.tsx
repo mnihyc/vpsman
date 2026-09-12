@@ -26,6 +26,7 @@ import {
 } from "../constants";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { SubmittedJobRequest } from "../components/SubmittedJobRequest";
 import {
   useByteCountFormatter,
   usePanelDisplaySettings,
@@ -43,6 +44,7 @@ import type {
   JobApprovalRecord,
   DeleteCommandTemplateRequest,
   JobHistoryRecord,
+  JobSubmittedRequestRecord,
   JobOutputCompareMode,
   JobOutputComparisonRecord,
   JobOutputRecord,
@@ -286,6 +288,8 @@ export function JobsPanel({
   onDownloadFileTransferSource,
   onDispatchPresetApplied,
   onLoadJob,
+  onLoadJobRequest,
+  onLoadJobApprovalRequest,
   onLoadOutputs,
   onLoadOutputComparison,
   onLoadTargets,
@@ -341,6 +345,10 @@ export function JobsPanel({
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDispatchPresetApplied?: () => void;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
+  onLoadJobRequest: (jobId: string) => Promise<JobSubmittedRequestRecord>;
+  onLoadJobApprovalRequest: (
+    approvalId: string,
+  ) => Promise<JobSubmittedRequestRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadOutputComparison: (
     jobId: string,
@@ -1766,6 +1774,13 @@ export function JobsPanel({
                     <X size={16} />
                   </button>
                 </div>
+                <SubmittedJobRequest
+                  key={`job:${selectedJobId}`}
+                  loadRequest={() => onLoadJobRequest(selectedJobId)}
+                  operationType={
+                    jobs.find((job) => job.id === selectedJobId)?.command_type ?? ""
+                  }
+                />
                 <ActionFeedback
                   className="localActionFeedback jobDetailActionFeedback"
                   message={targetDetailFeedbackMessage}
@@ -2403,6 +2418,13 @@ export function JobsPanel({
                     : "normal"
                 }
               >
+                {approvalReview && (
+                  <SubmittedJobRequest
+                    key={`approval:${approvalReview.id}`}
+                    loadRequest={() => onLoadJobApprovalRequest(approvalReview.id)}
+                    operationType={approvalReview.command_type}
+                  />
+                )}
                 <div className="approvalDecisionFields">
                   <div
                     aria-label="Approval decision"

@@ -1945,6 +1945,10 @@ export type JobHistoryRecord = {
   completed_at: string | null;
 };
 
+export type JobSubmittedRequestRecord = {
+  operation: JsonValue | null;
+};
+
 export type JobApprovalStatus = "pending" | "approved" | "rejected";
 
 export type JobApprovalRecord = {

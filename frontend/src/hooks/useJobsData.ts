@@ -29,6 +29,8 @@ import type {
   CreateJobResponse,
   DecideJobApprovalRequest,
   JobHistoryRecord,
+  WsEvent,
+  JobSubmittedRequestRecord,
   JobStatus,
   JobRolloutRecord,
   JobApprovalDecisionResponse,
@@ -81,6 +83,7 @@ type HomeJobsHydrationFence = {
   jobHistoryOverlay: number;
   fileTransfers: number;
   terminal: number;
+  terminalRevision: number;
 };
 
 export function useJobsData(
@@ -132,6 +135,16 @@ export function useJobsData(
   const [jobSourceLoadingVersion, setJobSourceLoadingVersion] = useState(0);
   const [jobsEvidenceAvailable, setJobsEvidenceAvailable] = useState(false);
   const jobsRef = useRef<JobHistoryRecord[]>([]);
+  const terminalSessionsRef = useRef<TerminalSessionRecord[]>([]);
+  const terminalSessionReadConsumers = useRef(
+    new Map<
+      string,
+      {
+        consumer: LatestReadConsumer<TerminalSessionRecord | null>;
+        pending: number;
+      }
+    >(),
+  );
   const jobRolloutsRef = useRef<JobRolloutRecord[]>([]);
   const jobsLoadConsumer = useRef(new LatestReadConsumer());
   const jobHistoryLoadConsumer = useRef(
@@ -156,6 +169,9 @@ export function useJobsData(
   const jobApprovalMutationGeneration = useRef(0);
   const jobRolloutMutationGeneration = useRef(0);
   const jobHistoryOverlay = useRef(createProjectionOverlay<JobHistoryRecord>());
+  const terminalSessionsOverlay = useRef(
+    createProjectionOverlay<TerminalSessionRecord>(),
+  );
   const jobApprovalsOverlay = useRef(
     createProjectionOverlay<JobApprovalRecord>(),
   );
@@ -328,6 +344,7 @@ export function useJobsData(
       jobHistoryOverlay: jobHistoryOverlay.current.revision,
       fileTransfers: ++fileTransfersLoadGeneration.current,
       terminal: ++terminalSessionsLoadGeneration.current,
+      terminalRevision: terminalSessionsOverlay.current.revision,
     };
   }, []);
 
@@ -389,10 +406,17 @@ export function useJobsData(
       }
       if (fence.terminal === terminalSessionsLoadGeneration.current) {
         if (snapshotSourceAvailable(terminalSessionSource)) {
-          setTerminalSessions(terminalSessionSource.data);
-          setTerminalSessionsTruncated(
-            terminalSessionSource.data.length >= FLEET_DETAIL_LIMIT,
+          const merged = mergeProjectionRead(
+            terminalSessionSource.data,
+            terminalSessionsOverlay.current,
+            fence.terminalRevision,
+            terminalSessionKey,
+            compareTerminalSessions,
+            FLEET_DETAIL_LIMIT,
           );
+          terminalSessionsRef.current = merged.records;
+          setTerminalSessions(merged.records);
+          setTerminalSessionsTruncated(merged.truncated);
         }
         setProjectionError(
           jobSourceErrors.current,
@@ -764,6 +788,7 @@ export function useJobsData(
     }
     const generation = terminalSessionsLoadGeneration.current + 1;
     terminalSessionsLoadGeneration.current = generation;
+    const overlayRevision = terminalSessionsOverlay.current.revision;
     setProjectionError(jobSourceErrors.current, "terminalSessions", null);
     publishJobsError();
     try {
@@ -777,8 +802,17 @@ export function useJobsData(
       ) {
         return;
       }
-      setTerminalSessions(records);
-      setTerminalSessionsTruncated(records.length >= FLEET_DETAIL_LIMIT);
+      const merged = mergeProjectionRead(
+        records,
+        terminalSessionsOverlay.current,
+        overlayRevision,
+        terminalSessionKey,
+        compareTerminalSessions,
+        FLEET_DETAIL_LIMIT,
+      );
+      terminalSessionsRef.current = merged.records;
+      setTerminalSessions(merged.records);
+      setTerminalSessionsTruncated(merged.truncated);
       setProjectionError(jobSourceErrors.current, "terminalSessions", null);
       publishJobsError();
     } catch (error) {
@@ -790,6 +824,7 @@ export function useJobsData(
       }
       if (isApiUnauthorized(error)) {
         onUnauthorized();
+        terminalSessionsRef.current = [];
         setTerminalSessions([]);
         setTerminalSessionsTruncated(false);
         setProjectionError(
@@ -810,6 +845,77 @@ export function useJobsData(
       publishJobsError();
     }
   }, [apiToken, onUnauthorized, publishJobsError]);
+
+  const refreshTerminalSessionAfterEvent = useCallback(
+    (event: Extract<WsEvent, { type: "terminal_output_recorded" }>) => {
+      if (event.terminal_seq !== null || currentApiToken.current !== apiToken) {
+        return Promise.resolve(null);
+      }
+      const key = terminalSessionKey(event);
+      // Null-sequence notifications come from completed initial projection
+      // or final stream status. PTY chunks never refetch inventory; ordinary
+      // nonfinal stream status is persisted without a global notification.
+      let consumer = terminalSessionReadConsumers.current.get(key);
+      if (!consumer) {
+        consumer = {
+          consumer: new LatestReadConsumer<TerminalSessionRecord | null>(),
+          pending: 0,
+        };
+        terminalSessionReadConsumers.current.set(key, consumer);
+      }
+      const owner = consumer;
+      owner.pending += 1;
+      return owner.consumer.enqueue(async () => {
+        try {
+          const [record] = await apiGet<TerminalSessionRecord[]>(
+            `/api/v1/terminal-sessions?${new URLSearchParams({
+              client_id: event.client_id,
+              session_id: event.session_id,
+              limit: "1",
+            })}`,
+            apiToken,
+          );
+          if (currentApiToken.current !== apiToken || !record) return null;
+          recordProjectionUpsert(terminalSessionsOverlay.current, key, record);
+          const merged = upsertBoundedProjection(
+            terminalSessionsRef.current,
+            record,
+            terminalSessionKey,
+            compareTerminalSessions,
+            FLEET_DETAIL_LIMIT,
+          );
+          terminalSessionsRef.current = merged.records;
+          setTerminalSessions(merged.records);
+          if (merged.insertedBeyondBound) setTerminalSessionsTruncated(true);
+          setProjectionError(jobSourceErrors.current, "terminalSessions", null);
+          publishJobsError();
+          return record;
+        } catch (error) {
+          if (currentApiToken.current === apiToken) {
+            if (isApiUnauthorized(error)) onUnauthorized();
+            setProjectionError(
+              jobSourceErrors.current,
+              "terminalSessions",
+              error instanceof Error
+                ? `Terminal session: ${error.message}`
+                : "Terminal session unavailable",
+            );
+            publishJobsError();
+          }
+          return null;
+        }
+      }).finally(() => {
+        owner.pending -= 1;
+        if (
+          owner.pending === 0 &&
+          terminalSessionReadConsumers.current.get(key) === owner
+        ) {
+          terminalSessionReadConsumers.current.delete(key);
+        }
+      });
+    },
+    [apiToken, onUnauthorized, publishJobsError],
+  );
 
   const loadFileTransfers = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
@@ -1108,6 +1214,34 @@ export function useJobsData(
       try {
         return await apiGet<JobHistoryRecord>(
           `/api/v1/jobs/${encodeURIComponent(jobId)}`,
+          apiToken,
+        );
+      } catch (error) {
+        return rethrowDirectRequestError(error);
+      }
+    },
+    [apiToken, rethrowDirectRequestError],
+  );
+
+  const loadJobRequest = useCallback(
+    async (jobId: string) => {
+      try {
+        return await apiGet<JobSubmittedRequestRecord>(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/request`,
+          apiToken,
+        );
+      } catch (error) {
+        return rethrowDirectRequestError(error);
+      }
+    },
+    [apiToken, rethrowDirectRequestError],
+  );
+
+  const loadJobApprovalRequest = useCallback(
+    async (approvalId: string) => {
+      try {
+        return await apiGet<JobSubmittedRequestRecord>(
+          `/api/v1/job-approvals/${encodeURIComponent(approvalId)}/request`,
           apiToken,
         );
       } catch (error) {
@@ -1898,6 +2032,12 @@ export function useJobsData(
     jobRolloutMutationGeneration.current += 1;
     currentApiToken.current = "";
     clearProjectionOverlay(jobHistoryOverlay.current);
+    clearProjectionOverlay(terminalSessionsOverlay.current);
+    for (const consumer of terminalSessionReadConsumers.current.values()) {
+      consumer.consumer.discardPending(null);
+    }
+    terminalSessionReadConsumers.current.clear();
+    terminalSessionsRef.current = [];
     clearProjectionOverlay(jobApprovalsOverlay.current);
     clearProjectionOverlay(jobRolloutsOverlay.current);
     clearProjectionOverlay(agentUpdateReleasesOverlay.current);
@@ -1973,6 +2113,8 @@ export function useJobsData(
     cancelServerJob,
     cancelJob,
     loadJob,
+    loadJobRequest,
+    loadJobApprovalRequest,
     reconcileJobStatusEvent,
     refreshJobHistoryAfterEvent,
     loadJobRollout,
@@ -2010,6 +2152,7 @@ export function useJobsData(
     loadServerJobs: trackedLoadServerJobs,
     loadTerminalReplay,
     loadTerminalSessions: trackedLoadTerminalSessions,
+    refreshTerminalSessionAfterEvent,
     updateJobRollout,
     deleteCommandTemplate,
     upsertCommandTemplate,
@@ -2128,6 +2271,23 @@ function compareCreatedRecords(
   return (
     right.created_at.localeCompare(left.created_at) ||
     (right.id ?? right.job_id ?? "").localeCompare(left.id ?? left.job_id ?? "")
+  );
+}
+
+function terminalSessionKey(
+  session: { client_id: string; session_id: string },
+): string {
+  return `${session.client_id}:${session.session_id}`;
+}
+
+function compareTerminalSessions(
+  left: TerminalSessionRecord,
+  right: TerminalSessionRecord,
+): number {
+  return (
+    Date.parse(right.observed_at) - Date.parse(left.observed_at) ||
+    left.client_id.localeCompare(right.client_id) ||
+    left.session_id.localeCompare(right.session_id)
   );
 }
 

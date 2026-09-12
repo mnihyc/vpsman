@@ -27,7 +27,8 @@ use crate::{
     model::{
         AgentView, AuthContext, CancelJobRequest, CancelJobResponse, CancelJobTargetResult,
         CreateJobApprovalRequest, CreateJobRequest, CreateJobResponse, CreateJobTargetCounts,
-        DecideJobApprovalRequest, JobApprovalDecisionResponse, JobApprovalView, ListQuery, WsEvent,
+        DecideJobApprovalRequest, JobApprovalDecisionResponse, JobApprovalView,
+        JobSubmittedRequestView, ListQuery, WsEvent,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     repository_jobs::{aggregate_job_status_from_statuses, PrecompletedJobTarget},
@@ -199,6 +200,26 @@ pub(crate) async fn create_job_approval(
         .await
         .map_err(map_job_approval_repo_error)?;
     Ok((StatusCode::CREATED, Json(approval)))
+}
+
+pub(crate) async fn get_job_approval_submitted_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(approval_id): Path<Uuid>,
+) -> Result<Json<JobSubmittedRequestView>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
+    let request = state
+        .repo
+        .get_job_approval_submitted_request(approval_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_approval_request_unavailable",
+            "The submitted approval request could not be loaded.",
+        ))?
+        .ok_or_else(|| ApiError::not_found("job_approval_not_found"))?;
+    Ok(Json(request))
 }
 
 pub(crate) async fn approve_job_approval(

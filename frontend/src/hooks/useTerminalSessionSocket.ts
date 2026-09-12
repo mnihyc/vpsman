@@ -23,6 +23,7 @@ export type TerminalStreamSnapshot = {
   chunkCount: number;
   firstSeq: number;
   nextSeq: number;
+  replayTextLength: number;
   sessionKey: string;
   text: string;
   truncated: boolean;
@@ -39,7 +40,7 @@ type TerminalServerFrame =
   | {
       available_first_seq?: number | null;
       from_seq?: number;
-      next_seq?: number;
+      next_seq: number;
       replay_truncated?: boolean;
       session: TerminalSessionRecord;
       type: "ready";
@@ -96,6 +97,7 @@ export function useTerminalSessionSocket({
   const pendingControlsRef = useRef(new Map<string, PendingControl>());
   const lastResizeRef = useRef<string | null>(null);
   const nextSeqRef = useRef(Math.max(1, Math.trunc(fromSeq)));
+  const replayUntilSeqRef = useRef(nextSeqRef.current);
   const outputDecoderRef = useRef(new TextDecoder());
   const streamSessionKeyRef = useRef<string | null>(null);
 
@@ -326,6 +328,7 @@ export function useTerminalSessionSocket({
         chunkCount: 0,
         firstSeq: initialFromSeq,
         nextSeq: initialFromSeq,
+        replayTextLength: 0,
         sessionKey,
         text: "",
         truncated: false,
@@ -355,6 +358,7 @@ export function useTerminalSessionSocket({
 
     const handleFrame = (frame: TerminalServerFrame) => {
       if (frame.type === "ready") {
+        replayUntilSeqRef.current = frame.next_seq;
         const availableFirstSeq = finiteSequence(frame.available_first_seq);
         if (
           availableFirstSeq !== null &&
@@ -377,6 +381,7 @@ export function useTerminalSessionSocket({
                 ...current,
                 availableFirstSeq,
                 nextSeq: nextSeqRef.current,
+                replayTextLength: current.text.length,
                 truncated:
                   current.truncated ||
                   Boolean(frame.replay_truncated) ||
@@ -414,6 +419,7 @@ export function useTerminalSessionSocket({
           return;
         }
         const text = outputDecoderRef.current.decode(bytes, { stream: true });
+        const historical = terminalSeq < replayUntilSeqRef.current;
         nextSeqRef.current = terminalSeq + 1;
         setSnapshot((current) => {
           if (!current || current.sessionKey !== sessionKey) {
@@ -424,6 +430,11 @@ export function useTerminalSessionSocket({
             byteCount: current.byteCount + bytes.length,
             chunkCount: current.chunkCount + 1,
             nextSeq: nextSeqRef.current,
+            // String offsets let the renderer split a React-batched update at
+            // the exact retained/live boundary, including multibyte output.
+            replayTextLength: historical
+              ? current.text.length + text.length
+              : current.replayTextLength,
             text: current.text + text,
           };
         });
@@ -638,6 +649,7 @@ function parseServerFrame(value: unknown): TerminalServerFrame | null {
     }
     if (
       frame.type === "ready" &&
+      finiteSequence(frame.next_seq) !== null &&
       typeof (frame.session as Record<string, unknown> | undefined)?.state ===
         "string"
     ) {

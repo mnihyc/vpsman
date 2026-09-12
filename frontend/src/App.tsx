@@ -2639,6 +2639,8 @@ export function App() {
         onDownloadFileTransferSource={dashboard.downloadFileTransferSource}
         onDispatchPresetApplied={() => setJobDispatchPreset(null)}
         onLoadJob={dashboard.loadJob}
+        onLoadJobRequest={dashboard.loadJobRequest}
+        onLoadJobApprovalRequest={dashboard.loadJobApprovalRequest}
         onLoadOutputs={dashboard.loadJobOutputs}
         onLoadOutputComparison={dashboard.loadJobOutputComparison}
         onLoadTargets={dashboard.loadJobTargets}
@@ -2679,6 +2681,7 @@ export function App() {
         accessToken={dashboard.terminalAccessToken}
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
+        jobs={dashboard.jobs}
         commandTemplates={dashboard.commandTemplates}
         commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         dispatchPreset={jobDispatchPreset}
@@ -3355,6 +3358,7 @@ export function App() {
               jobsTruncated={dashboard.jobsTruncated}
               loading={dashboard.jobsLoading || dashboard.auditLoading}
               onLoadJobOutputs={dashboard.loadJobOutputs}
+              onLoadJobRequest={dashboard.loadJobRequest}
               onLoadJobTargets={dashboard.loadJobTargets}
               onOpenJobDetails={openJobDetails}
               onRefresh={() => {
