@@ -2891,6 +2891,7 @@ export function App() {
             dashboard.createNetworkAdapterDefinition
           }
           onCreateTunnelPlan={dashboard.createTunnelPlan}
+          onPreviewTunnelPlan={dashboard.previewTunnelPlan}
           onClearTunnelPlanEvidence={dashboard.clearTunnelPlanEvidence}
           onDeleteNetworkAdapterDefinition={
             dashboard.deleteNetworkAdapterDefinition

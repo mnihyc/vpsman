@@ -53,6 +53,244 @@ fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInpu
 }
 
 #[test]
+fn advanced_defaults_leave_existing_plan_wire_shape_unchanged() {
+    let original = plan_input(TunnelKind::Openvpn, RuntimeTunnelManager::AgentBuiltin);
+    let original_json = serde_json::to_value(&original).unwrap();
+    let mut with_empty_fields = original_json.clone();
+    with_empty_fields["runtime_control"] = serde_json::json!({
+        "manager": "agent_builtin",
+        "hooks": { "left": {}, "right": {} },
+        "openvpn": { "left_config_override": " \n\t", "right_config_override": null }
+    });
+    let restored: TunnelPlanInput = serde_json::from_value(with_empty_fields).unwrap();
+    assert_eq!(restored, original);
+    assert_eq!(serde_json::to_value(&restored).unwrap(), original_json);
+}
+
+#[test]
+fn advanced_endpoint_settings_survive_plan_and_endpoint_rendering() {
+    let mut input = plan_input(TunnelKind::Openvpn, RuntimeTunnelManager::AgentBuiltin);
+    input.runtime_control.openvpn.left_config_override = Some("verb 5\nping 20\n".into());
+    input.runtime_control.openvpn.right_config_override = Some("verb 6\n".into());
+    let hook = RuntimeTunnelCommand {
+        argv: vec!["/usr/bin/logger".into(), "{interface}".into()],
+        ..Default::default()
+    };
+    input.runtime_control.hooks.left.pre_start = Some(hook.clone());
+    input.runtime_control.hooks.right.post_shutdown = Some(hook);
+    let plan = plan_tunnel(&input).unwrap();
+    let roundtrip: TunnelPlan =
+        serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+    assert_eq!(roundtrip, plan);
+    for side in [TunnelEndpointSide::Left, TunnelEndpointSide::Right] {
+        let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
+        assert_eq!(endpoint.runtime_control, input.runtime_control);
+    }
+    let preview = render_tunnel_runtime_preview(&plan).unwrap();
+    assert_eq!(preview.endpoints.len(), 2);
+    assert!(preview.endpoints[0].artifacts[0]
+        .content
+        .contains("verb 5\nping 20\n"));
+    assert!(preview.endpoints[1].artifacts[0]
+        .content
+        .contains("verb 6\n"));
+    assert_eq!(
+        preview.endpoints[0].commands[0].argv,
+        ["/usr/bin/logger", "tunab"]
+    );
+    assert_eq!(
+        preview.endpoints[1].commands.last().unwrap().phase,
+        "post_shutdown"
+    );
+}
+
+#[test]
+fn openvpn_overrides_replace_defaults_and_keep_native_option_order() {
+    let generated = "dev tun0\nping 10\nverb 3\nauth SHA256\n";
+    let text = "# tuning remains native\n--verb 6\nsetenv opt ping 25\nremote-random\nsetenv a first\nsetenv b second\nunknown-future-option anything\n";
+    let merged = merge_openvpn_config_override(generated, Some(text)).unwrap();
+    assert_eq!(merged, format!("dev tun0\nauth SHA256\n{text}"));
+    assert_eq!(
+        merge_openvpn_config_override(generated, Some("  \n")).unwrap(),
+        generated
+    );
+    // Invalid native values are not silently changed or rejected by a tuning allowlist.
+    assert!(validate_openvpn_config_override("ping not-a-number\ncipher future-cipher\ntun-mtu-extra 32\nlink-mtu 1500\nlog /operator/openvpn.log\nscript-security 2\nmanagement /operator/management.sock unix\n").is_ok());
+}
+
+#[test]
+fn openvpn_overrides_cannot_replace_native_owned_resources_indirectly() {
+    for text in [
+        "dev other0",
+        "--dev other0",
+        "\"dev\" other0",
+        "d\\ev other0",
+        "setenv opt dev other0",
+        "--setenv opt --dev other0",
+        "config /tmp/other.conf",
+        "<connection>\nremote 192.0.2.1\n</connection>",
+        "<ca>\nother certificate\n</ca>",
+        "writepid /tmp/other.pid",
+        "up /tmp/script",
+        "route 10.0.0.0 255.255.255.0",
+    ] {
+        assert!(
+            matches!(
+                validate_openvpn_config_override(text),
+                Err(NetworkPlanError::OpenvpnDirectiveOwned(_))
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_hook_templates_preserve_argv_and_do_not_recurse() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.name = "literal-{interface}".into();
+    let plan = plan_tunnel(&input).unwrap();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
+    let command = RuntimeTunnelCommand {
+        argv: [
+            "/usr/bin/logger",
+            "name={plan}",
+            "interface {interface}",
+            "{unknown}",
+            "{local_ipv4}/{prefix_len_ipv4}",
+            "{local_ipv6}",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        ..Default::default()
+    };
+    assert_eq!(
+        render_runtime_tunnel_command(&command, &plan, &endpoint, &[]).unwrap(),
+        [
+            "/usr/bin/logger",
+            "name=literal-{interface}",
+            "interface tunab",
+            "{unknown}",
+            "10.255.0.1/31",
+            ""
+        ]
+    );
+}
+
+#[test]
+fn builtin_advanced_options_cannot_silently_activate_for_other_managers() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::ExternalObserved);
+    input.runtime_control.hooks.left.pre_start = Some(RuntimeTunnelCommand {
+        argv: vec!["/bin/true".into()],
+        ..Default::default()
+    });
+    assert!(plan_tunnel(&input).is_err());
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.runtime_control.openvpn.left_config_override = Some("verb 5".into());
+    assert!(plan_tunnel(&input).is_err());
+}
+
+#[test]
+fn preview_and_native_renderers_use_the_same_endpoint_options() {
+    for kind in [
+        TunnelKind::Gre,
+        TunnelKind::Ipip,
+        TunnelKind::Sit,
+        TunnelKind::Fou,
+        TunnelKind::Wireguard,
+        TunnelKind::Openvpn,
+    ] {
+        let plan = plan_tunnel(&plan_input(kind, RuntimeTunnelManager::AgentBuiltin)).unwrap();
+        let preview = render_tunnel_runtime_preview(&plan).unwrap();
+        for rendered in preview.endpoints {
+            let endpoint = render_tunnel_endpoint_config(&plan, rendered.side).unwrap();
+            let base = ["{runtime_ip_argv}".to_string()];
+            if matches!(
+                kind,
+                TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou
+            ) {
+                let native = build_ip_tunnel_argv(&base, "add", &plan, &endpoint).unwrap();
+                assert!(rendered
+                    .commands
+                    .iter()
+                    .any(|command| command.argv == native));
+            }
+            for native in build_tunnel_address_argv(&base, &plan, &endpoint) {
+                assert!(rendered
+                    .commands
+                    .iter()
+                    .any(|command| command.argv == native));
+            }
+            if kind == TunnelKind::Openvpn {
+                assert!(rendered.artifacts[0]
+                    .content
+                    .contains("ncp-ciphers AES-256-GCM:AES-128-GCM\n"));
+                assert!(rendered.artifacts[1]
+                    .content
+                    .contains("data-ciphers AES-256-GCM:AES-128-GCM\n"));
+            }
+        }
+    }
+}
+
+#[test]
+fn preview_includes_declared_cleanup_routes_and_traffic_policy() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.runtime_topology.stale_interfaces = vec!["retired0".into()];
+    input.runtime_topology.stale_routes = vec![RuntimeTunnelRoute {
+        destination_cidr: "192.0.2.0/24".into(),
+        ..Default::default()
+    }];
+    input.runtime_topology.routes = vec![RuntimeTunnelRoute {
+        destination_cidr: "198.51.100.0/24".into(),
+        metric: Some(17),
+        ..Default::default()
+    }];
+    input.runtime_control.traffic_limit = RuntimeTunnelTrafficLimit {
+        ingress_kbps: Some(8000),
+        egress_kbps: Some(9000),
+        burst_kb: Some(64),
+    };
+    let plan = plan_tunnel(&input).unwrap();
+    let preview = render_tunnel_runtime_preview(&plan).unwrap();
+    let ip = ["{runtime_ip_argv}".into()];
+    let tc = ["{runtime_tc_argv}".into()];
+    for endpoint in preview.endpoints {
+        for native in build_tunnel_topology_cleanup_commands(&ip, &plan) {
+            assert!(endpoint
+                .commands
+                .iter()
+                .any(|command| command.phase == "cleanup" && command.argv == native.argv));
+        }
+        for native in build_tunnel_traffic_limit_commands(
+            &tc,
+            &plan.interface_name,
+            &plan.runtime_control.traffic_limit,
+        ) {
+            assert!(endpoint
+                .commands
+                .iter()
+                .any(|command| command.phase == "configure" && command.argv == native.argv));
+        }
+        let removal = build_ip_route_argv(
+            &ip,
+            "del",
+            &plan.runtime_topology.routes[0],
+            &plan.interface_name,
+        );
+        assert!(endpoint
+            .commands
+            .iter()
+            .any(|command| command.phase == "shutdown" && command.argv == removal));
+    }
+    assert!(build_tunnel_traffic_limit_commands(
+        &[],
+        "tunab",
+        &RuntimeTunnelTrafficLimit::default()
+    )
+    .is_empty());
+}
+
+#[test]
 fn dynamic_bandwidth_defaults_off_and_does_not_change_the_runtime_plan() {
     let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     input.ospf = Some(ospf_config());

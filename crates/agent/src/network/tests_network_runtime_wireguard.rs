@@ -73,6 +73,20 @@ fn prepared(previous_applied: Option<AppliedWireguardState>) -> PreparedWireguar
     }
 }
 
+#[tokio::test]
+async fn preparation_does_not_write_wireguard_keys_before_start_hooks_accept() {
+    let plan_id = Uuid::new_v4().to_string();
+    let prepared = prepare_wireguard_state(
+        Some(&plan_id),
+        TunnelEndpointSide::Left,
+        Some(&credentials()),
+    )
+    .await
+    .unwrap();
+    assert!(!prepared.private_key_path.exists());
+    assert!(!prepared.private_key_path.parent().unwrap().exists());
+}
+
 fn prepared_with_pending(
     previous_applied: Option<AppliedWireguardState>,
     pending: Option<AppliedWireguardState>,

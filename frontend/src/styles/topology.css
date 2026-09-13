@@ -846,6 +846,108 @@
   margin-bottom: 12px;
 }
 
+.tunnelAdvancedBody,
+.tunnelAdvancedSection,
+.tunnelHookEditor {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tunnelAdvancedBody {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.tunnelHookEditor > .topologyFormGrid {
+  /* Align inputs when the longer output-limit caption wraps. */
+  align-items: end;
+}
+
+.tunnelAdvancedBody strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tunnelAdvancedBody .formHint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.tunnelAdvancedBody textarea,
+.tunnelAdvancedBody input,
+.tunnelAdvancedBody button {
+  font-size: 13px;
+}
+
+.tunnelAdvancedSection {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+  gap: 8px;
+}
+
+.tunnelAdvancedToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tunnelAdvancedHeading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.tunnelAdvancedToolbar > .tunnelAdvancedHeading {
+  margin-right: auto;
+}
+
+.tunnelAdvancedToolbar [aria-pressed="true"] {
+  border-color: var(--primary-text);
+  color: var(--primary-text);
+}
+
+.tunnelAdvancedSection > p,
+.tunnelHookHelp p {
+  margin: 0;
+}
+
+.tunnelExpectedPreview {
+  display: grid;
+  gap: 12px;
+  max-height: 280px;
+  overflow: auto;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+
+.tunnelExpectedPreview pre {
+  font-size: 12px;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tunnelHookHelp {
+  font-size: 12px;
+}
+
+.tunnelHookHelp > summary {
+  cursor: pointer;
+}
+
+.tunnelHookHelp[open] p {
+  margin-top: 8px;
+}
+
 .toggleLine {
   display: inline-flex;
   align-items: flex-start;

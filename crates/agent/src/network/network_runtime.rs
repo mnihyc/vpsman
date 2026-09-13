@@ -41,6 +41,7 @@ pub(crate) struct NetworkRuntimeReconcileInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan_id: Option<&'a str>,
     pub(crate) plan: &'a TunnelPlan,
+    pub(crate) previous_plan: Option<&'a TunnelPlan>,
     pub(crate) builtin_credentials: Option<&'a vpsman_common::TunnelEndpointBuiltinCredentials>,
     pub(crate) runtime_adapter: Option<&'a RuntimeTunnelAdapterCommands>,
     pub(crate) side: TunnelEndpointSide,
@@ -81,7 +82,13 @@ pub(crate) async fn execute_runtime_tunnel_reconcile_report_cancelable(
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     time::timeout(
-        Duration::from_secs(input.max_timeout_secs.max(1)),
+        Duration::from_secs(runtime_transition_timeout(
+            input.max_timeout_secs,
+            input.plan,
+            input.previous_plan,
+            input.side,
+            false,
+        )),
         reconcile_runtime_tunnel(input, cancel_token),
     )
     .await
@@ -93,7 +100,13 @@ pub(crate) async fn execute_runtime_tunnel_remove_report_cancelable(
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     time::timeout(
-        Duration::from_secs(input.max_timeout_secs.max(1)),
+        Duration::from_secs(runtime_transition_timeout(
+            input.max_timeout_secs,
+            input.plan,
+            None,
+            input.side,
+            true,
+        )),
         remove_runtime_tunnel(input, cancel_token),
     )
     .await
@@ -168,6 +181,7 @@ async fn reconcile_runtime_tunnel(
     let mut prepared_wireguard = None;
     let mut existing_wireguard_peers = Vec::new();
     let mut prepared_openvpn = None;
+    let previous_plan = input.previous_plan.unwrap_or(input.plan);
     if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin {
         match input.plan.kind {
             TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou => {
@@ -218,19 +232,57 @@ async fn reconcile_runtime_tunnel(
                     &openvpn_version,
                 )
                 .await?;
-                if link_exists && !mutation_will_be_skipped {
-                    let (still_running, validation) =
-                        openvpn::reconcile_existing_openvpn(input.config, input.plan, &prepared)
+                let process_to_stop = if mutation_will_be_skipped {
+                    None
+                } else if link_exists {
+                    let (pid, config_matches, validation) =
+                        openvpn::inspect_existing_openvpn(input.config, input.plan, &prepared)
                             .await?;
-                    active_link_exists = still_running;
                     existing_link_validation = validation;
-                } else if !link_exists && !mutation_will_be_skipped {
-                    if let Some(validation) =
-                        openvpn::ensure_openvpn_start_is_safe(input.config, input.plan, &prepared)
-                            .await?
-                    {
-                        existing_link_validation = validation;
+                    (!config_matches).then_some(pid)
+                } else {
+                    let pid = openvpn::owned_openvpn_pid(input.config, &prepared).await?;
+                    if let Some(pid) = pid {
+                        existing_link_validation = serde_json::json!({"status":"recovered_owned_process_without_interface", "pid":pid});
                     }
+                    pid
+                };
+                if let Some(pid) = process_to_stop {
+                    let previous_hooks = previous_plan.runtime_control.hooks.for_side(input.side);
+                    if !run_lifecycle_hook(
+                        previous_hooks.pre_shutdown.as_ref(),
+                        "runtime_hook_pre_shutdown",
+                        previous_plan,
+                        input.side,
+                        &mut preflight_reports,
+                        cancel_token.clone(),
+                    )
+                    .await
+                    {
+                        return Ok(failed_hook_report(
+                            "runtime_tunnel_reconcile",
+                            input.plan,
+                            input.side,
+                            preflight_reports,
+                        ));
+                    }
+                    openvpn::stop_existing_openvpn(
+                        input.config,
+                        input.plan,
+                        pid,
+                        cancel_token.clone(),
+                    )
+                    .await?;
+                    run_lifecycle_hook(
+                        previous_hooks.post_shutdown.as_ref(),
+                        "runtime_hook_post_shutdown",
+                        previous_plan,
+                        input.side,
+                        &mut preflight_reports,
+                        cancel_token.clone(),
+                    )
+                    .await;
+                    active_link_exists = false;
                 }
                 prepared_openvpn = Some(prepared);
             }
@@ -285,10 +337,49 @@ async fn reconcile_runtime_tunnel(
         )?,
     };
 
+    let starting = input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+        && !active_link_exists
+        && !mutation_will_be_skipped;
+    if starting
+        && !run_lifecycle_hook(
+            input
+                .plan
+                .runtime_control
+                .hooks
+                .for_side(input.side)
+                .pre_start
+                .as_ref(),
+            "runtime_hook_pre_start",
+            input.plan,
+            input.side,
+            &mut preflight_reports,
+            cancel_token.clone(),
+        )
+        .await
+    {
+        return Ok(failed_hook_report(
+            "runtime_tunnel_reconcile",
+            input.plan,
+            input.side,
+            preflight_reports,
+        ));
+    }
     let specs = cleanup_specs.into_iter().chain(specs).collect::<Vec<_>>();
+    if starting {
+        if let Some(prepared) = &prepared_openvpn {
+            openvpn::write_openvpn_state(prepared).await?;
+        }
+    }
     if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
         && input.plan.kind == TunnelKind::Wireguard
     {
+        wireguard::write_wireguard_state(
+            prepared_wireguard
+                .as_ref()
+                .context("WireGuard state was not prepared")?,
+            input.builtin_credentials,
+        )
+        .await?;
         wireguard::mark_wireguard_pending(
             prepared_wireguard
                 .as_ref()
@@ -488,6 +579,24 @@ async fn reconcile_runtime_tunnel(
         None
     };
 
+    if starting && !failed && !degraded {
+        run_lifecycle_hook(
+            input
+                .plan
+                .runtime_control
+                .hooks
+                .for_side(input.side)
+                .post_start
+                .as_ref(),
+            "runtime_hook_post_start",
+            input.plan,
+            input.side,
+            &mut reports,
+            cancel_token.clone(),
+        )
+        .await;
+    }
+    let hook_failures = hook_failure_count(&reports);
     let status = if input.plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved {
         "observed_only"
     } else if failed {
@@ -516,6 +625,7 @@ async fn reconcile_runtime_tunnel(
         "unprivileged_mutation_policy": unprivileged_mutation_policy,
         "commands": reports,
         "compensation": compensation,
+        "hook_failures": hook_failures,
     }))
 }
 
@@ -562,6 +672,20 @@ async fn remove_runtime_tunnel(
     let effective_uid = effective_uid(input.effective_uid_override());
     let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
     let mut reports = Vec::new();
+    let can_mutate = !should_skip_unprivileged_mutation(
+        true,
+        effective_uid,
+        input.plan.runtime_control.manager,
+        unprivileged_mutation_policy,
+    );
+    let owned_process_exists = input.plan.runtime_control.manager
+        == RuntimeTunnelManager::AgentBuiltin
+        && input.plan.kind == TunnelKind::Openvpn
+        && can_mutate
+        && openvpn::has_owned_openvpn_process(input.config, input.plan_id, input.side).await?;
+    let stopping = input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+        && can_mutate
+        && (link_exists || owned_process_exists);
     if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin {
         match input.plan.kind {
             TunnelKind::Wireguard if link_exists => {
@@ -576,14 +700,34 @@ async fn remove_runtime_tunnel(
                 .await?;
                 reports.extend(preflight);
             }
-            TunnelKind::Openvpn
-                if !should_skip_unprivileged_mutation(
-                    true,
-                    effective_uid,
-                    input.plan.runtime_control.manager,
-                    unprivileged_mutation_policy,
-                ) =>
-            {
+            TunnelKind::Openvpn if can_mutate => {
+                if link_exists && !owned_process_exists {
+                    anyhow::bail!("OpenVPN interface exists without an owned plan process");
+                }
+                if stopping
+                    && !run_lifecycle_hook(
+                        input
+                            .plan
+                            .runtime_control
+                            .hooks
+                            .for_side(input.side)
+                            .pre_shutdown
+                            .as_ref(),
+                        "runtime_hook_pre_shutdown",
+                        input.plan,
+                        input.side,
+                        &mut reports,
+                        cancel_token.clone(),
+                    )
+                    .await
+                {
+                    return Ok(failed_hook_report(
+                        "runtime_tunnel_remove",
+                        input.plan,
+                        input.side,
+                        reports,
+                    ));
+                }
                 let stopped_owned_process = openvpn::stop_openvpn_for_remove(
                     input.config,
                     input.plan_id,
@@ -604,6 +748,31 @@ async fn remove_runtime_tunnel(
             }
             _ => {}
         }
+    }
+    if stopping
+        && input.plan.kind != TunnelKind::Openvpn
+        && !run_lifecycle_hook(
+            input
+                .plan
+                .runtime_control
+                .hooks
+                .for_side(input.side)
+                .pre_shutdown
+                .as_ref(),
+            "runtime_hook_pre_shutdown",
+            input.plan,
+            input.side,
+            &mut reports,
+            cancel_token.clone(),
+        )
+        .await
+    {
+        return Ok(failed_hook_report(
+            "runtime_tunnel_remove",
+            input.plan,
+            input.side,
+            reports,
+        ));
     }
     let specs = match input.plan.runtime_control.manager {
         RuntimeTunnelManager::AgentBuiltin => {
@@ -675,6 +844,25 @@ async fn remove_runtime_tunnel(
         }
     }
 
+    if stopping && !failed && !degraded {
+        run_lifecycle_hook(
+            input
+                .plan
+                .runtime_control
+                .hooks
+                .for_side(input.side)
+                .post_shutdown
+                .as_ref(),
+            "runtime_hook_post_shutdown",
+            input.plan,
+            input.side,
+            &mut reports,
+            cancel_token.clone(),
+        )
+        .await;
+    }
+    let hook_failures = hook_failure_count(&reports);
+
     let status = if input.plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved {
         "observed_only"
     } else if failed {
@@ -700,7 +888,97 @@ async fn remove_runtime_tunnel(
         "effective_uid": effective_uid,
         "unprivileged_mutation_policy": unprivileged_mutation_policy,
         "commands": reports,
+        "hook_failures": hook_failures,
     }))
+}
+
+// Extend the existing native-operation budget only by explicitly configured hook
+// budgets. Individual commands retain the same executor limits as adapters.
+fn runtime_transition_timeout(
+    base: u64,
+    plan: &TunnelPlan,
+    previous: Option<&TunnelPlan>,
+    side: TunnelEndpointSide,
+    remove: bool,
+) -> u64 {
+    if plan.runtime_control.manager != RuntimeTunnelManager::AgentBuiltin {
+        return base.max(1);
+    }
+    let start = plan.runtime_control.hooks.for_side(side);
+    let stop = previous
+        .unwrap_or(plan)
+        .runtime_control
+        .hooks
+        .for_side(side);
+    let mut budget = base.max(1);
+    for command in (remove || plan.kind == TunnelKind::Openvpn)
+        .then_some([stop.pre_shutdown.as_ref(), stop.post_shutdown.as_ref()])
+        .into_iter()
+        .flatten()
+        .chain(
+            (!remove)
+                .then_some([start.pre_start.as_ref(), start.post_start.as_ref()])
+                .into_iter()
+                .flatten(),
+        )
+        .flatten()
+    {
+        budget = budget.saturating_add(command.max_timeout_secs.clamp(1, 120));
+    }
+    budget
+}
+
+async fn run_lifecycle_hook(
+    command: Option<&RuntimeTunnelCommand>,
+    label: &'static str,
+    plan: &TunnelPlan,
+    side: TunnelEndpointSide,
+    reports: &mut Vec<serde_json::Value>,
+    cancel_token: CommandCancelToken,
+) -> bool {
+    let Some(command) = command else {
+        return true;
+    };
+    let result = async {
+        let endpoint = render_tunnel_endpoint_config(plan, side)?;
+        let argv = render_runtime_adapter_command(command, plan, &endpoint)?;
+        run_runtime_command_cancelable(
+            label,
+            &argv,
+            true,
+            true,
+            command.max_timeout_secs,
+            command.max_output_bytes as usize,
+            cancel_token,
+        )
+        .await
+    }
+    .await;
+    let report = result.unwrap_or_else(|error| serde_json::json!({"label":label, "mutates":true, "required":true, "success":false, "error":error.to_string()}));
+    let success = report["success"].as_bool() == Some(true);
+    reports.push(report);
+    success
+}
+
+fn hook_failure_count(reports: &[serde_json::Value]) -> usize {
+    reports
+        .iter()
+        .filter(|report| {
+            report["label"]
+                .as_str()
+                .is_some_and(|label| label.starts_with("runtime_hook_"))
+                && report["success"].as_bool() != Some(true)
+        })
+        .count()
+}
+
+fn failed_hook_report(
+    operation: &str,
+    plan: &TunnelPlan,
+    side: TunnelEndpointSide,
+    reports: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({"type":operation, "status":"failed", "reason":"lifecycle_pre_hook_failed", "plan":plan.name, "interface":plan.interface_name, "side":side_name(side), "manager":plan.runtime_control.manager, "hook_failures":hook_failure_count(&reports), "commands":reports})
 }
 
 fn should_skip_unprivileged_mutation(
@@ -813,32 +1091,20 @@ fn build_runtime_topology_cleanup_steps(
     plan: &TunnelPlan,
 ) -> Result<Vec<RuntimeCommandSpec>> {
     ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
-    let mut steps = Vec::new();
-    for route in &plan.runtime_topology.stale_routes {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_route_delete",
-            argv: build_ip_route_argv(
-                &config.network.runtime_ip_argv,
-                "del",
-                route,
-                &plan.interface_name,
-            ),
+    Ok(
+        vpsman_common::build_tunnel_topology_cleanup_commands(
+            &config.network.runtime_ip_argv,
+            plan,
+        )
+        .into_iter()
+        .map(|command| RuntimeCommandSpec {
+            label: command.label,
+            argv: command.argv,
             mutates: true,
-            required: false,
-        });
-    }
-    for interface in &plan.runtime_topology.stale_interfaces {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_stale_link_delete",
-            argv: extend_argv(
-                &config.network.runtime_ip_argv,
-                ["link", "delete", "dev", interface],
-            ),
-            mutates: true,
-            required: false,
-        });
-    }
-    Ok(steps)
+            required: command.required,
+        })
+        .collect(),
+    )
 }
 
 fn build_address_replace_steps(
@@ -847,40 +1113,24 @@ fn build_address_replace_steps(
     endpoint: &TunnelEndpointConfig,
 ) -> Result<Vec<RuntimeCommandSpec>> {
     ensure_command_base(base, "runtime ip")?;
-    Ok(endpoint_address_pairs(plan, endpoint)
-        .into_iter()
-        .map(|(local, remote, prefix_len)| RuntimeCommandSpec {
-            label: "runtime_addr_replace",
-            argv: extend_argv(
-                base,
-                [
-                    "addr",
-                    "replace",
-                    &format!("{local}/{prefix_len}"),
-                    "peer",
-                    remote,
-                    "dev",
-                    &plan.interface_name,
-                ],
-            ),
-            mutates: true,
-            required: true,
-        })
-        .collect())
+    Ok(
+        vpsman_common::build_tunnel_address_argv(base, plan, endpoint)
+            .into_iter()
+            .map(|argv| RuntimeCommandSpec {
+                label: "runtime_addr_replace",
+                argv,
+                mutates: true,
+                required: true,
+            })
+            .collect(),
+    )
 }
 
 fn endpoint_address_pairs<'a>(
     plan: &'a TunnelPlan,
-    endpoint: &TunnelEndpointConfig,
+    endpoint: &'a TunnelEndpointConfig,
 ) -> Vec<(&'a str, &'a str, u8)> {
-    [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
-        .into_iter()
-        .flatten()
-        .map(|pair| match endpoint.side {
-            TunnelEndpointSide::Left => (pair.left.as_str(), pair.right.as_str(), pair.prefix_len),
-            TunnelEndpointSide::Right => (pair.right.as_str(), pair.left.as_str(), pair.prefix_len),
-        })
-        .collect()
+    vpsman_common::tunnel_endpoint_address_pairs(plan, endpoint)
 }
 
 fn build_iproute2_remove_steps(
@@ -935,34 +1185,9 @@ fn build_ip_tunnel_argv(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
 ) -> Result<Vec<String>> {
-    let tunnel_mode = linux_tunnel_mode(plan.kind)?;
-    let mut argv = extend_argv(
-        base,
-        [
-            "tunnel",
-            action,
-            &plan.interface_name,
-            "mode",
-            tunnel_mode,
-            "remote",
-            remote_underlay(plan, endpoint),
-        ],
-    );
-    if let Some(local) = local_underlay(plan, endpoint) {
-        argv.extend(["local".to_string(), local.to_string()]);
-    }
-    argv.extend(["ttl".to_string(), "255".to_string()]);
-    if plan.kind == TunnelKind::Fou {
-        argv.extend([
-            "encap".to_string(),
-            "fou".to_string(),
-            "encap-sport".to_string(),
-            "auto".to_string(),
-            "encap-dport".to_string(),
-            plan.runtime_control.fou.peer_port.to_string(),
-        ]);
-    }
-    Ok(argv)
+    Ok(vpsman_common::build_ip_tunnel_argv(
+        base, action, plan, endpoint,
+    )?)
 }
 
 async fn validate_existing_iproute2_tunnel(
@@ -1396,19 +1621,7 @@ fn build_ip_route_argv(
     route: &RuntimeTunnelRoute,
     default_interface_name: &str,
 ) -> Vec<String> {
-    let interface_name = route
-        .interface_name
-        .as_deref()
-        .unwrap_or(default_interface_name);
-    let mut argv = extend_argv(base, ["route", action, &route.destination_cidr]);
-    if let Some(via) = &route.via {
-        argv.extend(["via".to_string(), via.clone()]);
-    }
-    argv.extend(["dev".to_string(), interface_name.to_string()]);
-    if let Some(metric) = route.metric {
-        argv.extend(["metric".to_string(), metric.to_string()]);
-    }
-    argv
+    vpsman_common::build_ip_route_argv(base, action, route, default_interface_name)
 }
 
 fn build_traffic_limit_steps(
@@ -1420,85 +1633,17 @@ fn build_traffic_limit_steps(
         return Ok(Vec::new());
     }
     ensure_command_base(base, "runtime tc")?;
-    let burst = limit.burst_kb.unwrap_or(32).to_string();
-    let mut steps = Vec::new();
-    if let Some(egress) = limit.egress_kbps {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_traffic_egress_limit",
-            argv: extend_argv(
-                base,
-                [
-                    "qdisc",
-                    "replace",
-                    "dev",
-                    interface_name,
-                    "root",
-                    "tbf",
-                    "rate",
-                    &format!("{egress}kbit"),
-                    "burst",
-                    &format!("{burst}kb"),
-                    "latency",
-                    "50ms",
-                ],
-            ),
-            mutates: true,
-            required: true,
-        });
-    } else {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_traffic_egress_clear",
-            argv: extend_argv(base, ["qdisc", "del", "dev", interface_name, "root"]),
-            mutates: true,
-            required: true,
-        });
-    }
-    if let Some(ingress) = limit.ingress_kbps {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_traffic_ingress_qdisc",
-            argv: extend_argv(base, ["qdisc", "replace", "dev", interface_name, "ingress"]),
-            mutates: true,
-            required: true,
-        });
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_traffic_ingress_filter",
-            argv: extend_argv(
-                base,
-                [
-                    "filter",
-                    "replace",
-                    "dev",
-                    interface_name,
-                    "parent",
-                    "ffff:",
-                    "protocol",
-                    "all",
-                    "u32",
-                    "match",
-                    "u32",
-                    "0",
-                    "0",
-                    "police",
-                    "rate",
-                    &format!("{ingress}kbit"),
-                    "burst",
-                    &format!("{burst}kb"),
-                    "conform-exceed",
-                    "drop",
-                ],
-            ),
-            mutates: true,
-            required: true,
-        });
-    } else {
-        steps.push(RuntimeCommandSpec {
-            label: "runtime_traffic_ingress_clear",
-            argv: extend_argv(base, ["qdisc", "del", "dev", interface_name, "ingress"]),
-            mutates: true,
-            required: true,
-        });
-    }
-    Ok(steps)
+    Ok(
+        vpsman_common::build_tunnel_traffic_limit_commands(base, interface_name, limit)
+            .into_iter()
+            .map(|command| RuntimeCommandSpec {
+                label: command.label,
+                argv: command.argv,
+                mutates: true,
+                required: command.required,
+            })
+            .collect(),
+    )
 }
 
 fn accept_idempotent_traffic_clear(label: &str, report: &mut serde_json::Value) {
@@ -1721,101 +1866,12 @@ pub(crate) fn render_runtime_adapter_command_with_placeholders(
     endpoint: &TunnelEndpointConfig,
     additional_placeholders: &[(&str, String)],
 ) -> Result<Vec<String>> {
-    ensure_command_base(&command.argv, "runtime adapter")?;
-    let mut placeholders = vec![
-        ("{interface}", plan.interface_name.clone()),
-        ("{plan}", plan.name.clone()),
-        ("{kind}", runtime_kind_name(plan.kind).to_string()),
-        ("{local_client_id}", endpoint.local_client_id.clone()),
-        ("{peer_client_id}", endpoint.peer_client_id.clone()),
-        (
-            "{local_underlay}",
-            local_underlay(plan, endpoint)
-                .unwrap_or_default()
-                .to_string(),
-        ),
-        (
-            "{remote_underlay}",
-            remote_underlay(plan, endpoint).to_string(),
-        ),
-        ("{local_address}", local_address(plan, endpoint).to_string()),
-        (
-            "{remote_address}",
-            remote_address(plan, endpoint).to_string(),
-        ),
-        ("{prefix_len}", endpoint.tunnel_prefix_len.to_string()),
-        ("{local_ipv4}", family_address(plan, endpoint, true, true)),
-        ("{remote_ipv4}", family_address(plan, endpoint, true, false)),
-        ("{prefix_len_ipv4}", family_prefix_len(plan, true)),
-        ("{local_ipv6}", family_address(plan, endpoint, false, true)),
-        (
-            "{remote_ipv6}",
-            family_address(plan, endpoint, false, false),
-        ),
-        ("{prefix_len_ipv6}", family_prefix_len(plan, false)),
-        ("{fou_port}", plan.runtime_control.fou.port.to_string()),
-        (
-            "{fou_peer_port}",
-            plan.runtime_control.fou.peer_port.to_string(),
-        ),
-        (
-            "{fou_ipproto}",
-            plan.runtime_control.fou.ipproto.to_string(),
-        ),
-        (
-            "{egress_kbps}",
-            plan.runtime_control
-                .traffic_limit
-                .egress_kbps
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        ),
-        (
-            "{ingress_kbps}",
-            plan.runtime_control
-                .traffic_limit
-                .ingress_kbps
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        ),
-        (
-            "{burst_kb}",
-            plan.runtime_control
-                .traffic_limit
-                .burst_kb
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        ),
-    ];
-    placeholders.extend(additional_placeholders.iter().cloned());
-    Ok(command
-        .argv
-        .iter()
-        .map(|part| render_adapter_argument(part, &placeholders))
-        .collect())
-}
-
-fn render_adapter_argument(argument: &str, placeholders: &[(&str, String)]) -> String {
-    let mut rendered = String::with_capacity(argument.len());
-    let mut cursor = 0;
-    while let Some(relative_start) = argument[cursor..].find('{') {
-        let start = cursor + relative_start;
-        rendered.push_str(&argument[cursor..start]);
-        let Some(relative_end) = argument[start..].find('}') else {
-            rendered.push_str(&argument[start..]);
-            return rendered;
-        };
-        let end = start + relative_end + 1;
-        let token = &argument[start..end];
-        if let Some((_, value)) = placeholders.iter().find(|(key, _)| *key == token) {
-            rendered.push_str(value);
-        } else {
-            rendered.push_str(token);
-        }
-        cursor = end;
-    }
-    rendered.push_str(&argument[cursor..]);
-    rendered
+    Ok(vpsman_common::render_runtime_tunnel_command(
+        command,
+        plan,
+        endpoint,
+        additional_placeholders,
+    )?)
 }
 
 async fn runtime_link_exists(root: &Path, interface_name: &str) -> bool {
@@ -1852,48 +1908,6 @@ fn remote_underlay<'a>(_plan: &'a TunnelPlan, endpoint: &'a TunnelEndpointConfig
     &endpoint.remote_underlay
 }
 
-fn local_address<'a>(_plan: &TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {
-    &endpoint.local_tunnel_address
-}
-
-fn remote_address<'a>(_plan: &TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {
-    &endpoint.remote_tunnel_address
-}
-
-fn family_address(
-    plan: &TunnelPlan,
-    endpoint: &TunnelEndpointConfig,
-    ipv4: bool,
-    local: bool,
-) -> String {
-    let pair = if ipv4 {
-        plan.ipv4_tunnel.as_ref()
-    } else {
-        plan.ipv6_tunnel.as_ref()
-    };
-    let Some(pair) = pair else {
-        return String::new();
-    };
-    match (endpoint.side, local) {
-        (TunnelEndpointSide::Left, true) | (TunnelEndpointSide::Right, false) => pair.left.clone(),
-        (TunnelEndpointSide::Left, false) | (TunnelEndpointSide::Right, true) => pair.right.clone(),
-    }
-}
-
-fn family_prefix_len(plan: &TunnelPlan, ipv4: bool) -> String {
-    if ipv4 {
-        plan.ipv4_tunnel
-            .as_ref()
-            .map(|pair| pair.prefix_len.to_string())
-            .unwrap_or_default()
-    } else {
-        plan.ipv6_tunnel
-            .as_ref()
-            .map(|pair| pair.prefix_len.to_string())
-            .unwrap_or_default()
-    }
-}
-
 fn linux_tunnel_mode(kind: TunnelKind) -> Result<&'static str> {
     match kind {
         TunnelKind::Gre => Ok("gre"),
@@ -1902,19 +1916,6 @@ fn linux_tunnel_mode(kind: TunnelKind) -> Result<&'static str> {
         TunnelKind::Openvpn | TunnelKind::Wireguard | TunnelKind::TunTap | TunnelKind::Custom => {
             anyhow::bail!("tunnel kind is not supported by the Agent builtin iproute2 driver")
         }
-    }
-}
-
-fn runtime_kind_name(kind: TunnelKind) -> &'static str {
-    match kind {
-        TunnelKind::Gre => "gre",
-        TunnelKind::Ipip => "ipip",
-        TunnelKind::Sit => "sit",
-        TunnelKind::Fou => "fou",
-        TunnelKind::Openvpn => "openvpn",
-        TunnelKind::Wireguard => "wireguard",
-        TunnelKind::TunTap => "tun_tap",
-        TunnelKind::Custom => "custom",
     }
 }
 

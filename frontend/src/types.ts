@@ -2184,6 +2184,22 @@ export type RuntimeTunnelCommand = {
   max_output_bytes?: number;
 };
 
+export type RuntimeTunnelLifecycleHooks = {
+  pre_start?: RuntimeTunnelCommand;
+  post_start?: RuntimeTunnelCommand;
+  pre_shutdown?: RuntimeTunnelCommand;
+  post_shutdown?: RuntimeTunnelCommand;
+};
+
+export type TunnelPlanPreviewResponse = {
+  endpoints: Array<{
+    side: TunnelEndpointSide;
+    client_id: string;
+    artifacts: Array<{ label: string; content: string }>;
+    commands: Array<{ phase: string; label: string; argv: string[] }>;
+  }>;
+};
+
 export type RoutingCostAdapterCommands = {
   source?: "plan_override" | "configuration_preset";
   template_id: string;
@@ -2233,6 +2249,8 @@ export type RuntimeTunnelOpenvpnOptions = {
   transport: RuntimeTunnelOpenvpnTransport;
   listener_side: TunnelEndpointSide;
   port: number;
+  left_config_override?: string;
+  right_config_override?: string;
 };
 
 export type RuntimeTunnelControl = {
@@ -2243,6 +2261,10 @@ export type RuntimeTunnelControl = {
   fou?: RuntimeTunnelFouOptions;
   wireguard?: RuntimeTunnelWireguardOptions;
   openvpn?: RuntimeTunnelOpenvpnOptions;
+  hooks?: {
+    left?: RuntimeTunnelLifecycleHooks;
+    right?: RuntimeTunnelLifecycleHooks;
+  };
 };
 
 export type TunnelWireguardPublicEvidence = {

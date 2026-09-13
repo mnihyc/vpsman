@@ -42,6 +42,10 @@ pub enum NetworkPlanError {
     UnsupportedRuntimeManagerTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
     InvalidRuntimeTunnelCommand,
+    #[error("OpenVPN directive '{0}' is owned by the builtin tunnel lifecycle")]
+    OpenvpnDirectiveOwned(String),
+    #[error("invalid runtime tunnel configuration path")]
+    InvalidRuntimeTunnelConfigPath,
     #[error("custom adapter requires endpoint adapter-definition bindings")]
     RuntimeTunnelAdapterCommandRequired,
     #[error("external observed tunnels cannot include mutating commands or traffic limits")]
@@ -460,6 +464,24 @@ pub fn render_tunnel_endpoint_config(
 pub fn validate_runtime_tunnel_control(
     control: &RuntimeTunnelControl,
 ) -> Result<(), NetworkPlanError> {
+    if !control.hooks.is_default() {
+        if control.manager != RuntimeTunnelManager::AgentBuiltin {
+            return Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentBuiltin);
+        }
+        for hooks in [&control.hooks.left, &control.hooks.right] {
+            for command in [
+                hooks.pre_start.as_ref(),
+                hooks.post_start.as_ref(),
+                hooks.pre_shutdown.as_ref(),
+                hooks.post_shutdown.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                super::runtime_render::validate_runtime_tunnel_hook(command)?;
+            }
+        }
+    }
     match control.manager {
         RuntimeTunnelManager::AgentBuiltin => {
             if control.left_adapter_definition_id.is_some()
@@ -564,6 +586,15 @@ fn validate_runtime_openvpn_options(
         && options.port == 0
     {
         return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
+    }
+    for text in [
+        options.left_config_override.as_deref(),
+        options.right_config_override.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        super::runtime_render::validate_openvpn_config_override(text)?;
     }
     Ok(())
 }

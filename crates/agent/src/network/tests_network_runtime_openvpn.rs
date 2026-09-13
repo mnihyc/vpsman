@@ -19,6 +19,7 @@ fn openvpn_plan(
                 transport,
                 listener_side,
                 port: 1194,
+                ..Default::default()
             },
             ..RuntimeTunnelControl::default()
         },
@@ -224,6 +225,7 @@ fn reconcile_always_restores_declared_mtu_and_link_state() {
     let endpoint =
         vpsman_common::render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let prepared = PreparedOpenvpnState {
+        files: Vec::new(),
         endpoint_dir: PathBuf::from("/state"),
         config_path: PathBuf::from("/state/openvpn.conf"),
         pid_path: PathBuf::from("/state/openvpn.pid"),
@@ -293,4 +295,71 @@ fn applied_hash_changes_when_the_peer_identity_changes() {
         b"peer fingerprint two",
     );
     assert_ne!(first, second);
+}
+
+#[tokio::test]
+async fn preparation_defers_private_files_and_hook_edits_do_not_restart_openvpn() {
+    let mut plan = openvpn_plan(
+        RuntimeTunnelOpenvpnTransport::Udp,
+        TunnelEndpointSide::Left,
+        None,
+        None,
+    );
+    let endpoint =
+        vpsman_common::render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let plan_id = Uuid::new_v4().to_string();
+    let credentials = TunnelEndpointBuiltinCredentials::Openvpn {
+        generation: 1,
+        local_private_key_pem: "private-key".to_string(),
+        local_certificate_pem: "certificate".to_string(),
+        peer_issuer_certificate_pem: "peer-ca".to_string(),
+        peer_certificate_sha256_fingerprint: "fingerprint".to_string(),
+    };
+    let original = prepare_openvpn_state(
+        Some(&plan_id),
+        &plan,
+        &endpoint,
+        Some(&credentials),
+        &Version::new(2, 6, 0),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !original.endpoint_dir.exists(),
+        "preparation must not write private runtime files before hooks accept startup"
+    );
+    plan.runtime_control.hooks.left.pre_start = Some(vpsman_common::RuntimeTunnelCommand {
+        argv: vec!["/bin/false".to_string()],
+        max_timeout_secs: 10,
+        max_output_bytes: 16384,
+    });
+    let hook_edit = prepare_openvpn_state(
+        Some(&plan_id),
+        &plan,
+        &endpoint,
+        Some(&credentials),
+        &Version::new(2, 6, 0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        original.config_hash, hook_edit.config_hash,
+        "hook-only edits must not restart an intact tunnel"
+    );
+    assert!(!hook_edit.endpoint_dir.exists());
+    plan.runtime_control.openvpn.left_config_override = Some("verb 4".to_string());
+    let config_edit = prepare_openvpn_state(
+        Some(&plan_id),
+        &plan,
+        &endpoint,
+        Some(&credentials),
+        &Version::new(2, 6, 0),
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        original.config_hash, config_edit.config_hash,
+        "native configuration edits must be applied through a restart"
+    );
+    assert!(!config_edit.endpoint_dir.exists());
 }

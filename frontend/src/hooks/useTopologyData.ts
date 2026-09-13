@@ -22,6 +22,8 @@ import type {
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
   TunnelPlanExport,
+  TunnelPlanInput,
+  TunnelPlanPreviewResponse,
   TunnelPlanCorruptRecord,
   TunnelPlanListItem,
   TopologyGraph,
@@ -503,6 +505,17 @@ export function useTopologyData(
     ],
   );
 
+  const previewTunnelPlan = useCallback(
+    (request: TunnelPlanInput, signal?: AbortSignal) =>
+      apiPost<TunnelPlanPreviewResponse>(
+        "/api/v1/tunnel-plans/preview",
+        apiToken,
+        request,
+        signal,
+      ),
+    [apiToken],
+  );
+
   const createTunnelPlan = useCallback(
     async (request: CreateTunnelPlanRequest) => {
       const response = await apiPost<TunnelPlanMutationResponse>(
@@ -857,6 +870,7 @@ export function useTopologyData(
   }, []);
 
   return {
+    previewTunnelPlan,
     allocateTunnelEndpoints,
     clearTunnelPlanEvidence,
     clearTopology,

@@ -229,6 +229,52 @@ impl Default for RuntimeTunnelCommand {
     }
 }
 
+/// Commands run around native lifecycle transitions, not routine reconciliation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeTunnelEndpointHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_start: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_start: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_shutdown: Option<RuntimeTunnelCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_shutdown: Option<RuntimeTunnelCommand>,
+}
+
+impl RuntimeTunnelEndpointHooks {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeTunnelHooks {
+    #[serde(
+        default,
+        skip_serializing_if = "RuntimeTunnelEndpointHooks::is_default"
+    )]
+    pub left: RuntimeTunnelEndpointHooks,
+    #[serde(
+        default,
+        skip_serializing_if = "RuntimeTunnelEndpointHooks::is_default"
+    )]
+    pub right: RuntimeTunnelEndpointHooks,
+}
+
+impl RuntimeTunnelHooks {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn for_side(&self, side: TunnelEndpointSide) -> &RuntimeTunnelEndpointHooks {
+        match side {
+            TunnelEndpointSide::Left => &self.left,
+            TunnelEndpointSide::Right => &self.right,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeTunnelTrafficLimit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -344,11 +390,36 @@ pub struct RuntimeTunnelOpenvpnOptions {
     pub listener_side: TunnelEndpointSide,
     #[serde(default = "default_runtime_openvpn_port")]
     pub port: u16,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_config_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub left_config_override: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_config_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub right_config_override: Option<String>,
+}
+
+fn deserialize_optional_config_override<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|text| !text.trim().is_empty()))
 }
 
 impl RuntimeTunnelOpenvpnOptions {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    pub fn config_override(&self, side: TunnelEndpointSide) -> Option<&str> {
+        match side {
+            TunnelEndpointSide::Left => self.left_config_override.as_deref(),
+            TunnelEndpointSide::Right => self.right_config_override.as_deref(),
+        }
     }
 }
 
@@ -358,6 +429,8 @@ impl Default for RuntimeTunnelOpenvpnOptions {
             transport: RuntimeTunnelOpenvpnTransport::Udp,
             listener_side: TunnelEndpointSide::Left,
             port: default_runtime_openvpn_port(),
+            left_config_override: None,
+            right_config_override: None,
         }
     }
 }
@@ -439,6 +512,8 @@ pub struct RuntimeTunnelControl {
         skip_serializing_if = "RuntimeTunnelOpenvpnOptions::is_default"
     )]
     pub openvpn: RuntimeTunnelOpenvpnOptions,
+    #[serde(default, skip_serializing_if = "RuntimeTunnelHooks::is_default")]
+    pub hooks: RuntimeTunnelHooks,
 }
 
 impl RuntimeTunnelControl {

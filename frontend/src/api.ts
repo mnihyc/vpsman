@@ -275,8 +275,10 @@ export async function apiPost<T = JsonValue>(
   path: string,
   apiToken: string,
   body: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await apiFetch(path, {
+    signal,
     method: "POST",
     headers: buildJsonHeaders(apiToken),
     body: JSON.stringify(body),

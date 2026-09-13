@@ -1,5 +1,4 @@
 use std::{
-    net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -10,8 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use vpsman_common::{
     ensure_private_dir_tree_async, write_private_file_atomically_async, AgentConfig,
-    RuntimeTunnelOpenvpnTransport, TunnelEndpointBuiltinCredentials, TunnelEndpointConfig,
-    TunnelEndpointSide, TunnelPlan,
+    TunnelEndpointBuiltinCredentials, TunnelEndpointConfig, TunnelEndpointSide, TunnelPlan,
 };
 
 use crate::{command_worker::CommandCancelToken, state_dir::agent_state_dir};
@@ -27,6 +25,7 @@ pub(super) struct PreparedOpenvpnState {
     pub(super) config_path: PathBuf,
     pub(super) pid_path: PathBuf,
     pub(super) config_hash: String,
+    files: Vec<(PathBuf, Vec<u8>)>,
 }
 
 pub(super) async fn prepare_openvpn_state(
@@ -49,24 +48,12 @@ pub(super) async fn prepare_openvpn_state(
     };
     let root = agent_state_dir()?.join("network-tunnels");
     let endpoint_dir = endpoint_state_dir(&root, plan_id, endpoint.side);
-    ensure_private_dir_tree_async(&root, &endpoint_dir)
-        .await
-        .context("create private OpenVPN state directory")?;
     let key_path = endpoint_dir.join("openvpn.key");
     let certificate_path = endpoint_dir.join("openvpn.crt");
     let peer_ca_path = endpoint_dir.join("openvpn-peer-ca.crt");
     let config_path = endpoint_dir.join("openvpn.conf");
     let pid_path = endpoint_dir.join("openvpn.pid");
     let status_path = endpoint_dir.join("openvpn.status");
-    write_private_file_atomically_async(&key_path, local_private_key_pem.as_bytes())
-        .await
-        .context("write OpenVPN private key")?;
-    write_private_file_atomically_async(&certificate_path, local_certificate_pem.as_bytes())
-        .await
-        .context("write OpenVPN certificate")?;
-    write_private_file_atomically_async(&peer_ca_path, peer_issuer_certificate_pem.as_bytes())
-        .await
-        .context("write OpenVPN peer issuer certificate")?;
     let config = render_openvpn_config(
         plan,
         endpoint,
@@ -84,15 +71,35 @@ pub(super) async fn prepare_openvpn_state(
         peer_issuer_certificate_pem.as_bytes(),
         peer_certificate_sha256_fingerprint.as_bytes(),
     );
-    write_private_file_atomically_async(&config_path, config.as_bytes())
-        .await
-        .context("write OpenVPN configuration")?;
+    let files = vec![
+        (key_path, local_private_key_pem.as_bytes().to_vec()),
+        (certificate_path, local_certificate_pem.as_bytes().to_vec()),
+        (
+            peer_ca_path,
+            peer_issuer_certificate_pem.as_bytes().to_vec(),
+        ),
+        (config_path.clone(), config.into_bytes()),
+    ];
     Ok(PreparedOpenvpnState {
         endpoint_dir,
         config_path,
         pid_path,
         config_hash,
+        files,
     })
+}
+
+pub(super) async fn write_openvpn_state(prepared: &PreparedOpenvpnState) -> Result<()> {
+    let root = agent_state_dir()?.join("network-tunnels");
+    ensure_private_dir_tree_async(&root, &prepared.endpoint_dir)
+        .await
+        .context("create private OpenVPN state directory")?;
+    for (path, bytes) in &prepared.files {
+        write_private_file_atomically_async(path, bytes)
+            .await
+            .context("write OpenVPN runtime configuration")?;
+    }
+    Ok(())
 }
 
 fn openvpn_applied_hash(
@@ -155,11 +162,11 @@ pub(super) async fn inspect_openvpn_prerequisites(
     Ok((vec![report], version))
 }
 
-pub(super) async fn reconcile_existing_openvpn(
+pub(super) async fn inspect_existing_openvpn(
     config: &AgentConfig,
     plan: &TunnelPlan,
     prepared: &PreparedOpenvpnState,
-) -> Result<(bool, serde_json::Value)> {
+) -> Result<(u32, bool, serde_json::Value)> {
     let pid = read_owned_pid(config, prepared)
         .await?
         .context("OpenVPN interface exists without an owned plan process")?;
@@ -168,6 +175,7 @@ pub(super) async fn reconcile_existing_openvpn(
         .unwrap_or_default();
     if applied_hash.trim() == prepared.config_hash {
         return Ok((
+            pid,
             true,
             serde_json::json!({
                 "status": "matched",
@@ -178,17 +186,8 @@ pub(super) async fn reconcile_existing_openvpn(
             }),
         ));
     }
-    stop_pid(pid).await?;
-    wait_for_process_exit(pid).await?;
-    let root = Path::new(&config.network.root_dir);
-    wait_for_link_state(
-        root,
-        &plan.interface_name,
-        false,
-        CommandCancelToken::default(),
-    )
-    .await?;
     Ok((
+        pid,
         false,
         serde_json::json!({
             "status": "restarted_for_configuration_change",
@@ -200,22 +199,45 @@ pub(super) async fn reconcile_existing_openvpn(
     ))
 }
 
-pub(super) async fn ensure_openvpn_start_is_safe(
+pub(super) async fn stop_existing_openvpn(
     config: &AgentConfig,
     plan: &TunnelPlan,
+    pid: u32,
+    cancel_token: CommandCancelToken,
+) -> Result<()> {
+    stop_pid(pid).await?;
+    wait_for_process_exit(pid).await?;
+    wait_for_link_state(
+        Path::new(&config.network.root_dir),
+        &plan.interface_name,
+        false,
+        cancel_token,
+    )
+    .await
+}
+
+pub(super) async fn owned_openvpn_pid(
+    config: &AgentConfig,
     prepared: &PreparedOpenvpnState,
-) -> Result<Option<serde_json::Value>> {
-    if let Some(pid) = read_owned_pid(config, prepared).await? {
-        stop_pid(pid).await?;
-        wait_for_process_exit(pid).await?;
-        return Ok(Some(serde_json::json!({
-            "status": "recovered_owned_process_without_interface",
-            "interface": plan.interface_name,
-            "driver": "openvpn",
-            "pid": pid,
-        })));
-    }
-    Ok(None)
+) -> Result<Option<u32>> {
+    read_owned_pid(config, prepared).await
+}
+
+pub(super) async fn has_owned_openvpn_process(
+    config: &AgentConfig,
+    plan_id: Option<&str>,
+    side: TunnelEndpointSide,
+) -> Result<bool> {
+    let root = agent_state_dir()?.join("network-tunnels");
+    let endpoint_dir = endpoint_state_dir(&root, parse_plan_id(plan_id)?, side);
+    let prepared = PreparedOpenvpnState {
+        config_path: endpoint_dir.join("openvpn.conf"),
+        pid_path: endpoint_dir.join("openvpn.pid"),
+        endpoint_dir,
+        config_hash: String::new(),
+        files: Vec::new(),
+    };
+    Ok(read_owned_pid(config, &prepared).await?.is_some())
 }
 
 pub(super) fn build_openvpn_reconcile_steps(
@@ -331,6 +353,7 @@ pub(super) async fn stop_openvpn_for_remove(
         pid_path: endpoint_dir.join("openvpn.pid"),
         endpoint_dir,
         config_hash: String::new(),
+        files: Vec::new(),
     };
     match read_owned_pid(config, &prepared).await? {
         Some(pid) => {
@@ -378,108 +401,18 @@ fn render_openvpn_config(
     status_path: &Path,
     openvpn_version: &Version,
 ) -> Result<String> {
-    let options = &plan.runtime_control.openvpn;
-    let listener = endpoint.side == options.listener_side;
-    let family_address = if listener {
-        endpoint
-            .local_underlay
-            .as_deref()
-            .unwrap_or(match endpoint.side {
-                TunnelEndpointSide::Left => &plan.right_remote_underlay,
-                TunnelEndpointSide::Right => &plan.left_remote_underlay,
-            })
-    } else {
-        &endpoint.remote_underlay
-    };
-    let family = family_address
-        .parse::<IpAddr>()
-        .context("OpenVPN underlay address is invalid")?;
-    let protocol = match (options.transport, listener, family) {
-        (RuntimeTunnelOpenvpnTransport::Udp, _, IpAddr::V4(_)) => "udp4",
-        (RuntimeTunnelOpenvpnTransport::Udp, _, IpAddr::V6(_)) => "udp6",
-        (RuntimeTunnelOpenvpnTransport::Tcp, true, IpAddr::V4(_)) => "tcp4-server",
-        (RuntimeTunnelOpenvpnTransport::Tcp, true, IpAddr::V6(_)) => "tcp6-server",
-        (RuntimeTunnelOpenvpnTransport::Tcp, false, IpAddr::V4(_)) => "tcp4-client",
-        (RuntimeTunnelOpenvpnTransport::Tcp, false, IpAddr::V6(_)) => "tcp6-client",
-    };
-    let mut lines = vec![
-        "mode p2p".to_string(),
-        format!("dev {}", plan.interface_name),
-        "dev-type tun".to_string(),
-        "topology p2p".to_string(),
-        format!("proto {protocol}"),
-        format!(
-            "tun-mtu {}",
-            endpoint
-                .local_mtu
-                .context("Agent builtin OpenVPN endpoint MTU is required")?
-        ),
-        format!("cert {}", config_path_value(certificate_path)?),
-        format!("key {}", config_path_value(key_path)?),
-        format!("ca {}", config_path_value(peer_ca_path)?),
-        if listener {
-            "tls-server".to_string()
-        } else {
-            "tls-client".to_string()
+    Ok(vpsman_common::render_openvpn_config(
+        plan,
+        endpoint,
+        &vpsman_common::OpenvpnConfigPaths {
+            key: key_path,
+            certificate: certificate_path,
+            peer_ca: peer_ca_path,
+            pid: pid_path,
+            status: status_path,
         },
-        if listener {
-            "remote-cert-tls client".to_string()
-        } else {
-            "remote-cert-tls server".to_string()
-        },
-        "tls-version-min 1.2".to_string(),
-        "cipher AES-256-GCM".to_string(),
-        "auth SHA256".to_string(),
-        "persist-key".to_string(),
-        "persist-tun".to_string(),
-        "ping 10".to_string(),
-        "ping-restart 60".to_string(),
-        "daemon".to_string(),
-        format!("writepid {}", config_path_value(pid_path)?),
-        format!("status {} 10", config_path_value(status_path)?),
-        "verb 3".to_string(),
-    ];
-    lines.push(if openvpn_version < &Version::new(2, 5, 0) {
-        "ncp-ciphers AES-256-GCM:AES-128-GCM".to_string()
-    } else {
-        "data-ciphers AES-256-GCM:AES-128-GCM".to_string()
-    });
-    if listener {
-        lines.push("dh none".to_string());
-        lines.push(format!("lport {}", options.port));
-        if let Some(local) = endpoint.local_underlay.as_deref() {
-            lines.push(format!("local {local}"));
-        }
-    } else {
-        lines.push(format!(
-            "remote {} {}",
-            endpoint.remote_underlay, options.port
-        ));
-        if let Some(local) = endpoint.local_underlay.as_deref() {
-            lines.push(format!("local {local}"));
-            lines.push("lport 0".to_string());
-        } else {
-            lines.push("nobind".to_string());
-        }
-    }
-    for pair in [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        let (local, remote) = match endpoint.side {
-            TunnelEndpointSide::Left => (&pair.left, &pair.right),
-            TunnelEndpointSide::Right => (&pair.right, &pair.left),
-        };
-        if local.parse::<IpAddr>()?.is_ipv4() {
-            lines.push(format!("ifconfig {local} {remote}"));
-        } else {
-            lines.push(format!(
-                "ifconfig-ipv6 {local}/{} {remote}",
-                pair.prefix_len
-            ));
-        }
-    }
-    Ok(format!("{}\n", lines.join("\n")))
+        openvpn_version >= &Version::new(2, 5, 0),
+    )?)
 }
 
 fn parse_openvpn_version(output: &str) -> Option<Version> {
@@ -599,17 +532,6 @@ fn endpoint_state_dir(root: &Path, plan_id: Uuid, side: TunnelEndpointSide) -> P
         TunnelEndpointSide::Right => "right",
     };
     root.join(plan_id.to_string()).join(side)
-}
-
-fn config_path_value(path: &Path) -> Result<String> {
-    let value = path.to_str().context("OpenVPN state path is not UTF-8")?;
-    if value.chars().any(char::is_control) {
-        anyhow::bail!("OpenVPN state path contains control characters");
-    }
-    Ok(format!(
-        "\"{}\"",
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
 }
 
 async fn remove_file_if_present(path: PathBuf) -> Result<()> {

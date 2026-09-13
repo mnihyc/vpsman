@@ -1330,6 +1330,140 @@ async fn runtime_config_sync_recreates_tunnel_when_plan_identity_changes() {
     );
 }
 
+fn runtime_hook_command(executable: &str) -> vpsman_common::RuntimeTunnelCommand {
+    vpsman_common::RuntimeTunnelCommand {
+        argv: vec![executable.to_string()],
+        max_timeout_secs: 10,
+        max_output_bytes: 16 * 1024,
+    }
+}
+
+fn runtime_hook_sync_config() -> AgentConfig {
+    AgentConfig {
+        client_id: "left-a".to_string(),
+        network: vpsman_common::AgentNetworkConfig {
+            apply_enabled: true,
+            runtime_reconcile_enabled: true,
+            root_dir: format!(".tmp/runtime-sync-hooks-{}", uuid::Uuid::new_v4()),
+            runtime_ip_argv: vec!["/bin/true".to_string()],
+            runtime_tc_argv: vec!["/bin/true".to_string()],
+            runtime_unprivileged_mutation_policy:
+                vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn runtime_config_sync_accepts_native_success_and_exposes_post_hook_failure_without_replay() {
+    let base = runtime_hook_sync_config();
+    let mut plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
+    plan.runtime_control.hooks.left.post_start = Some(runtime_hook_command("/bin/false"));
+    let mut desired = AgentRuntimeConfig::from_agent_config(12, &base);
+    desired.network.runtime_status_telemetry_plans = vec![runtime_sync_test_telemetry_plan(plan)];
+    let result = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &base,
+        &desired,
+        12,
+        "test-hooks",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    assert!(result.fully_applied);
+    assert!(result.accepted_runtime_config.is_some());
+    assert_eq!(result.outputs[0].exit_code, Some(1));
+    let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+    assert_eq!(body["status"], "applied");
+    assert_eq!(body["hook_failures"], 1);
+    assert_eq!(
+        body["reconcile"]["tunnels"][0]["hook_results"][0]["label"],
+        "runtime_hook_post_start"
+    );
+    assert_eq!(
+        body["reconcile"]["tunnels"][0]["hook_results"][0]["success"],
+        false
+    );
+    let accepted = result.applied_config.unwrap();
+    let next = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &accepted,
+        &desired,
+        12,
+        "test-hooks",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(next.outputs[0].exit_code, Some(0));
+    let next_body: serde_json::Value = serde_json::from_slice(&next.outputs[0].data).unwrap();
+    assert_eq!(next_body["reconcile"]["status"], "unchanged");
+    assert_eq!(next_body["hook_failures"], 0);
+}
+
+#[tokio::test]
+async fn failed_shutdown_hook_blocks_its_replacement_not_unrelated_endpoints() {
+    let mut base = runtime_hook_sync_config();
+    let mut old = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
+    old.runtime_control.hooks.left.pre_shutdown = Some(runtime_hook_command("/bin/false"));
+    let old = runtime_sync_test_telemetry_plan(old);
+    let mut replacement = old.clone();
+    replacement.plan.right_remote_underlay = "203.0.113.99".to_string();
+    replacement.plan.runtime_control.hooks.left.pre_start =
+        Some(runtime_hook_command("/bin/false"));
+    let mut independent = replacement.clone();
+    independent.plan_id = Some("independent-plan".to_string());
+    independent.plan.interface_name = "tun-other".to_string();
+    independent.plan.runtime_control.hooks = Default::default();
+    base.network.runtime_status_telemetry_plans = vec![old.clone()];
+    let root = PathBuf::from(&base.network.root_dir);
+    tokio::fs::create_dir_all(root.join("sys/class/net/tunlr"))
+        .await
+        .unwrap();
+    let mut desired = AgentRuntimeConfig::from_agent_config(12, &base);
+    desired.network.runtime_status_telemetry_plans = vec![replacement, independent];
+    let result = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &base,
+        &desired,
+        12,
+        "test-hooks",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+    assert!(!result.fully_applied);
+    assert!(result.applied_config.is_none());
+    assert_eq!(body["removals"][0]["reason"], "lifecycle_pre_hook_failed");
+    assert_eq!(
+        body["reconcile"]["tunnels"][0]["reason"],
+        "previous_endpoint_removal_failed"
+    );
+    assert!(body["reconcile"]["tunnels"][0]["hook_results"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(body["reconcile"]["tunnels"][1]["status"], "converged");
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[test]
+fn hook_only_and_openvpn_override_updates_preserve_native_endpoint_identity() {
+    let mut old = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+        "203.0.113.20",
+        "10.255.0.0",
+        "10.255.0.1",
+    ));
+    old.plan.kind = vpsman_common::TunnelKind::Openvpn;
+    let mut desired = old.clone();
+    desired.plan.runtime_control.hooks.left.pre_start = Some(runtime_hook_command("/bin/true"));
+    desired.plan.runtime_control.openvpn.left_config_override = Some("verb 4".to_string());
+    assert!(runtime_tunnel_identity_matches(&old, &desired));
+}
+
 #[tokio::test]
 async fn runtime_config_sync_removes_omitted_tunnel_plan() {
     let root = std::env::temp_dir().join(format!(

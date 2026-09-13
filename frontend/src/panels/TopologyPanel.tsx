@@ -105,6 +105,7 @@ import type {
   TunnelAddressPair,
   TunnelKind,
   TunnelPlanExport,
+  TunnelPlanInput,
   TunnelPlanEndpointRuntimeConfig,
   TunnelPlanMutationResponse,
   TunnelPlanRecord,
@@ -131,6 +132,13 @@ import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestContr
 import { TopologyOspfUpdateControls } from "./topology/TopologyOspfUpdateControls";
 import { PortForwardingPanel } from "./topology/PortForwardingPanel";
 import { NetworkAdapterDefinitionsPanel } from "./topology/NetworkAdapterDefinitionsPanel";
+import { TunnelAdvancedFields, type PreviewTunnelPlan } from "./topology/TunnelAdvancedFields";
+import {
+  tunnelAdvancedFromRuntime,
+  validateTunnelAdvanced,
+  withTunnelAdvanced,
+  type TunnelAdvancedDraft,
+} from "../tunnelAdvanced";
 
 const AGENT_TUNNEL_KINDS: TunnelKind[] = [
   "gre",
@@ -177,6 +185,7 @@ export function TopologyPanel({
   onAllocateTunnelEndpoints,
   onCreateJob,
   onCreateTunnelPlan,
+  onPreviewTunnelPlan,
   onCreateNetworkAdapterDefinition,
   onClearTunnelPlanEvidence,
   onDeleteNetworkAdapterDefinition,
@@ -482,6 +491,7 @@ export function TopologyPanel({
       loading={loading}
       onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
       onCreateTunnelPlan={onCreateTunnelPlan}
+      onPreviewTunnelPlan={onPreviewTunnelPlan}
       onCreateNetworkAdapterDefinition={onCreateNetworkAdapterDefinition}
       onClearTunnelPlanEvidence={onClearTunnelPlanEvidence}
       onDeleteNetworkAdapterDefinition={onDeleteNetworkAdapterDefinition}
@@ -691,6 +701,7 @@ function TunnelPlansWorkspace({
   loading,
   onAllocateTunnelEndpoints,
   onCreateTunnelPlan,
+  onPreviewTunnelPlan,
   onCreateNetworkAdapterDefinition,
   onClearTunnelPlanEvidence,
   onDeleteNetworkAdapterDefinition,
@@ -726,6 +737,7 @@ function TunnelPlansWorkspace({
   onCreateTunnelPlan: (
     request: CreateTunnelPlanRequest,
   ) => Promise<TunnelPlanMutationResponse>;
+  onPreviewTunnelPlan: PreviewTunnelPlan;
   onCreateNetworkAdapterDefinition: (
     request: UpsertNetworkAdapterDefinitionRequest,
   ) => Promise<NetworkAdapterDefinitionRecord>;
@@ -1678,6 +1690,7 @@ function TunnelPlansWorkspace({
             initialPlan={editingPlan}
             key={editingPlan?.id ?? "new-tunnel-plan"}
             onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
+            onPreviewTunnelPlan={onPreviewTunnelPlan}
             onClose={() => {
               setCreateOpen(false);
               setEditingPlan(null);
@@ -2585,6 +2598,7 @@ function TunnelPlanComposer({
   initialPlan,
   onAllocateTunnelEndpoints,
   onClose,
+  onPreviewTunnelPlan,
   onSaveTunnelPlan,
   onOpenAdapterDefinitions,
   onOpenConfigurationSources,
@@ -2600,6 +2614,7 @@ function TunnelPlanComposer({
     request: AllocateTunnelEndpointsRequest,
   ) => Promise<AllocateTunnelEndpointsResponse>;
   onClose: () => void;
+  onPreviewTunnelPlan: PreviewTunnelPlan;
   onSaveTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
   onOpenAdapterDefinitions: (domain: NetworkAdapterKind) => void;
   onOpenConfigurationSources: () => void;
@@ -2609,6 +2624,11 @@ function TunnelPlanComposer({
     initialPlan
       ? tunnelPlanFormFromRecord(initialPlan)
       : initialTunnelPlanForm(),
+  );
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const advancedClientNames = useMemo(
+    () => clientDisplayNameMap(agents, vpsNameDisplayMode),
+    [agents, vpsNameDisplayMode],
   );
   const [feedback, setFeedback] = useState<
     (Feedback & { location: "allocation" | "form" | "manager" }) | null
@@ -3537,8 +3557,17 @@ function TunnelPlanComposer({
               </div>
             )}
           {form.runtimeManager === "agent_builtin" && (
-            <details className="topologyAdvancedFields">
-              <summary>Agent builtin routes and cleanup</summary>
+            <TunnelAdvancedFields
+              clientNames={advancedClientNames}
+              draft={form.advanced}
+              draftKey={JSON.stringify(form)}
+              endpointClientIds={{ left: form.leftClientId, right: form.rightClientId }}
+              kind={form.kind}
+              onChange={(value) => update("advanced", value)}
+              onPreview={onPreviewTunnelPlan}
+              request={formError ? null : tunnelPlanPreviewRequest(form)}
+              validationError={formError}
+            >
               <div className="topologyFormGrid twoColumn">
                 <Field
                   label="Desired interfaces"
@@ -3595,7 +3624,7 @@ function TunnelPlanComposer({
                   />
                 </Field>
               </div>
-            </details>
+            </TunnelAdvancedFields>
           )}
         </fieldset>
 
@@ -4626,6 +4655,7 @@ function tunnelConnectionAssessmentError(error: unknown): string {
 function initialTunnelPlanForm(): TunnelPlanForm {
   const defaultMtu = String(defaultAgentTunnelMtu("gre"));
   return {
+    advanced: tunnelAdvancedFromRuntime(),
     bandwidthMbps: String(DEFAULT_TUNNEL_BANDWIDTH_MBPS),
     bandwidthWeight: String(DEFAULT_OSPF_POLICY.bandwidth_weight),
     burstKb: "",
@@ -4713,6 +4743,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
   const policy = ospf?.policy ?? DEFAULT_OSPF_POLICY;
   return {
     ...initialTunnelPlanForm(),
+    advanced: tunnelAdvancedFromRuntime(runtime),
     bandwidthMbps: String(input.bandwidth_mbps),
     bandwidthWeight: String(policy.bandwidth_weight),
     burstKb: optionalNumberText(traffic.burst_kb),
@@ -4809,6 +4840,10 @@ function mbpsToKbpsText(value: string): string {
 }
 
 function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
+  const advancedError = form.runtimeManager === "agent_builtin"
+    ? validateTunnelAdvanced(form.advanced)
+    : null;
+  if (advancedError) return advancedError;
   const planNameError = validateTunnelPlanName(form.name);
   if (planNameError) return planNameError;
   if (!form.interfaceName.trim()) return "Interface name is required";
@@ -5583,9 +5618,14 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
         ? null
         : form.rightLocalUnderlay.trim() || null,
     right_remote_underlay: form.rightRemoteUnderlay.trim(),
-    runtime_control: runtimeControl,
+    runtime_control: withTunnelAdvanced(runtimeControl, form.kind, form.advanced),
     runtime_topology: runtimeTopology,
   };
+}
+
+function tunnelPlanPreviewRequest(form: TunnelPlanForm): TunnelPlanInput {
+  const { confirmed: _confirmed, enabled: _enabled, ...input } = buildTunnelPlanRequest(form);
+  return input;
 }
 
 function ospfPolicyFromForm(form: TunnelPlanForm): OspfCostPolicy {
@@ -5794,6 +5834,19 @@ function createConfirmationItems(
             value: `${adapterDefinitionName(runtime.left_adapter_template_id)} / ${adapterDefinitionName(runtime.right_adapter_template_id)}`,
           },
         ]
+      : []),
+    ...(runtime?.manager === "agent_builtin" && runtime.hooks
+      ? [{
+          label: "Lifecycle hooks",
+          value: `Left ${Object.keys(runtime.hooks.left ?? {}).join(", ") || "none"} · Right ${Object.keys(runtime.hooks.right ?? {}).join(", ") || "none"}`,
+        }]
+      : []),
+    ...(runtime?.manager === "agent_builtin" && request.kind === "openvpn" &&
+      (runtime.openvpn?.left_config_override || runtime.openvpn?.right_config_override)
+      ? [{
+          label: "OpenVPN overrides",
+          value: `Left ${runtime.openvpn?.left_config_override ? "configured" : "defaults"} · Right ${runtime.openvpn?.right_config_override ? "configured" : "defaults"}`,
+        }]
       : []),
     { label: "Traffic policy", value: trafficSummary },
     ...(runtime?.manager === "agent_builtin"
@@ -6236,6 +6289,7 @@ function observedPeerAddress(
 }
 
 type TunnelPlanForm = {
+  advanced: TunnelAdvancedDraft;
   bandwidthMbps: string;
   bandwidthWeight: string;
   burstKb: string;
@@ -6327,6 +6381,7 @@ type ClearEvidenceSnapshot = {
 };
 
 type TopologyPanelProps = {
+  onPreviewTunnelPlan: PreviewTunnelPlan;
   activeSubpage: string;
   requestsEnabled: boolean;
   agents: AgentView[];

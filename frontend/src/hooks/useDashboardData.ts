@@ -1926,6 +1926,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     updateTagOrder: inventory.updateTagOrder,
     allocateTunnelEndpoints: topology.allocateTunnelEndpoints,
     createTunnelPlan: topology.createTunnelPlan,
+    previewTunnelPlan: topology.previewTunnelPlan,
     createNetworkAdapterDefinition: topology.createNetworkAdapterDefinition,
     createPortForwardRule: portForwarding.createPortForwardRule,
     updatePortForwardRule: portForwarding.updatePortForwardRule,

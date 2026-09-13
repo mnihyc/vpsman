@@ -112,9 +112,9 @@ use crate::{
         allocate_tunnel_endpoints, bulk_tunnel_plan_lifecycle, clear_tunnel_plan_evidence,
         create_tunnel_plan, delete_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
         export_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
-        list_network_ospf_update_plans, list_tunnel_plans, refresh_tunnel_plan_ospf_status,
-        rotate_tunnel_plan_credentials, update_tunnel_connection_assessment, update_tunnel_plan,
-        update_tunnel_plan_ospf_cost,
+        list_network_ospf_update_plans, list_tunnel_plans, preview_tunnel_plan,
+        refresh_tunnel_plan_ospf_status, rotate_tunnel_plan_credentials,
+        update_tunnel_connection_assessment, update_tunnel_plan, update_tunnel_plan_ospf_cost,
     },
     routes_port_forwarding::{
         bulk_mutate_port_forward_rules, create_port_forward_rule, delete_port_forward_rule,
@@ -773,6 +773,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/tunnel-plans/allocate",
             post(allocate_tunnel_endpoints),
         )
+        .route("/api/v1/tunnel-plans/preview", post(preview_tunnel_plan))
         .route(
             "/api/v1/tunnel-plans/evidence/clear",
             post(clear_tunnel_plan_evidence),

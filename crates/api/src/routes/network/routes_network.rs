@@ -11,9 +11,9 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, payload_hash, plan_tunnel,
-    routing_cost_update_privilege_payload, JobCommand, NetworkPlanError,
-    RoutingCostAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager, TunnelAddressFamily,
-    TunnelEndpointSide, TunnelPlan,
+    render_tunnel_runtime_preview, routing_cost_update_privilege_payload, JobCommand,
+    NetworkPlanError, RoutingCostAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager,
+    TunnelAddressFamily, TunnelEndpointSide, TunnelPlan, TunnelPlanInput, TunnelRuntimePreview,
 };
 
 use crate::{
@@ -46,6 +46,22 @@ use crate::{
 };
 
 const MAX_BULK_TUNNEL_PLAN_LIFECYCLE_ITEMS: usize = 1_000;
+
+/// Render the draft only. Saving a plan is the separate owner of identities,
+/// credentials, resource allocation, and agent reconciliation.
+pub(crate) async fn preview_tunnel_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<TunnelPlanInput>,
+) -> Result<Json<TunnelRuntimePreview>, ApiError> {
+    state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    let plan = plan_tunnel(&input).map_err(tunnel_plan_bad_request)?;
+    Ok(Json(
+        render_tunnel_runtime_preview(&plan).map_err(tunnel_plan_bad_request)?,
+    ))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,8 +176,7 @@ pub(crate) async fn create_tunnel_plan(
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
     require_tunnel_plan_confirmed(request.confirmed)?;
-    let plan = plan_tunnel(&request.input)
-        .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
+    let plan = plan_tunnel(&request.input).map_err(tunnel_plan_bad_request)?;
     require_tunnel_endpoint_agents(
         &state,
         &request.input.left_client_id,
@@ -245,8 +260,7 @@ pub(crate) async fn update_tunnel_plan(
         return Err(ApiError::bad_request("tunnel_plan_name_is_immutable"));
     }
     let enabled = request.enabled.unwrap_or(identity.enabled);
-    let plan = plan_tunnel(&request.input)
-        .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
+    let plan = plan_tunnel(&request.input).map_err(tunnel_plan_bad_request)?;
     match state.repo.get_tunnel_plan(plan_id).await {
         Ok(Some(existing)) if existing.enabled == enabled && existing.input == request.input => {
             return Ok(Json(TunnelPlanMutationResponse {
@@ -1718,11 +1732,20 @@ fn resolve_allocation_family(
     Ok(None)
 }
 
+fn tunnel_plan_bad_request(error: NetworkPlanError) -> ApiError {
+    if matches!(error, NetworkPlanError::OpenvpnDirectiveOwned(_)) {
+        return ApiError::bad_request_with_message("openvpn_directive_owned", error.to_string());
+    }
+    ApiError::bad_request(tunnel_plan_error_code(error))
+}
+
 fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
     match error {
         NetworkPlanError::InvalidPlanIdentity => "invalid_tunnel_plan_identity",
         NetworkPlanError::InvalidTunnelEndpoints => "invalid_tunnel_plan_endpoints",
         NetworkPlanError::InvalidUnderlayAddress => "invalid_tunnel_underlay_address",
+        NetworkPlanError::OpenvpnDirectiveOwned(_) => "openvpn_directive_owned",
+        NetworkPlanError::InvalidRuntimeTunnelConfigPath => "network_runtime_config_path_invalid",
         NetworkPlanError::InvalidRuntimeTunnelCommand
         | NetworkPlanError::RuntimeTunnelAdapterCommandRequired
         | NetworkPlanError::RuntimeTunnelObservedCannotMutate
@@ -1844,4 +1867,30 @@ pub(crate) fn topology_graph_error(error: anyhow::Error) -> ApiError {
         ),
     };
     ApiError::internal(code, message, error)
+}
+
+#[cfg(test)]
+mod advanced_error_tests {
+    use super::*;
+
+    #[test]
+    fn protected_openvpn_option_reports_the_actionable_ownership_error() {
+        let error = tunnel_plan_bad_request(NetworkPlanError::OpenvpnDirectiveOwned(
+            "writepid".to_string(),
+        ));
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "openvpn_directive_owned");
+        assert_eq!(
+            error.public_message.as_deref(),
+            Some("OpenVPN directive 'writepid' is owned by the builtin tunnel lifecycle")
+        );
+    }
+
+    #[test]
+    fn existing_plan_validation_keeps_its_public_error_contract() {
+        let error = tunnel_plan_bad_request(NetworkPlanError::InvalidInterfaceName);
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_tunnel_plan_input");
+        assert!(error.public_message.is_none());
+    }
 }

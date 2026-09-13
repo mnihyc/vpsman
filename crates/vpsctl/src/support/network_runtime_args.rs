@@ -94,7 +94,9 @@ pub(crate) fn build_runtime_control(args: RuntimeControlArgs<'_>) -> RuntimeTunn
             port: args
                 .openvpn_port
                 .unwrap_or_else(default_runtime_openvpn_port),
+            ..RuntimeTunnelOpenvpnOptions::default()
         },
+        hooks: Default::default(),
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{net::IpAddr, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -36,26 +36,39 @@ pub(super) async fn prepare_wireguard_state(
     credentials: Option<&TunnelEndpointBuiltinCredentials>,
 ) -> Result<PreparedWireguardState> {
     let plan_id = parse_plan_id(plan_id)?;
+    let TunnelEndpointBuiltinCredentials::Wireguard { .. } =
+        credentials.context("WireGuard endpoint credentials are required")?
+    else {
+        anyhow::bail!("WireGuard endpoint credentials have the wrong kind");
+    };
+    load_wireguard_state_for(plan_id, side).await
+}
+
+pub(super) async fn write_wireguard_state(
+    prepared: &PreparedWireguardState,
+    credentials: Option<&TunnelEndpointBuiltinCredentials>,
+) -> Result<()> {
     let TunnelEndpointBuiltinCredentials::Wireguard {
         local_private_key_base64,
         ..
     } = credentials.context("WireGuard endpoint credentials are required")?
     else {
-        anyhow::bail!("WireGuard endpoint credentials have the wrong kind");
+        anyhow::bail!("WireGuard endpoint credentials have the wrong kind")
     };
     let root = agent_state_dir()?.join("network-tunnels");
-    let endpoint_dir = endpoint_state_dir(&root, plan_id, side);
-    ensure_private_dir_tree_async(&root, &endpoint_dir)
+    let endpoint_dir = prepared
+        .private_key_path
+        .parent()
+        .context("WireGuard state path has no parent")?;
+    ensure_private_dir_tree_async(&root, endpoint_dir)
         .await
         .context("create private WireGuard state directory")?;
-    let prepared = load_wireguard_state_for(plan_id, side).await?;
-    let private_key_path = prepared.private_key_path.clone();
     let mut key = local_private_key_base64.trim().as_bytes().to_vec();
     key.push(b'\n');
-    write_private_file_atomically_async(&private_key_path, &key)
+    write_private_file_atomically_async(&prepared.private_key_path, &key)
         .await
         .context("write private WireGuard key")?;
-    Ok(prepared)
+    Ok(())
 }
 
 pub(super) async fn load_wireguard_state(
@@ -362,38 +375,13 @@ fn build_wireguard_configure_argv(
     prepared: &PreparedWireguardState,
     peer_public_key_base64: &str,
 ) -> Result<Vec<String>> {
-    let options = &plan.runtime_control.wireguard;
-    let listen_port = options.listen_port(endpoint.side).to_string();
-    let peer_port = options.peer_listen_port(endpoint.side);
-    let keepalive = options.keepalive_secs(endpoint.side).to_string();
-    let allowed_ips = allowed_ips(plan)?;
-    let mut argv = extend_argv(
+    Ok(vpsman_common::build_wireguard_configure_argv(
         &config.network.runtime_wg_argv,
-        [
-            "set",
-            &plan.interface_name,
-            "private-key",
-            prepared
-                .private_key_path
-                .to_str()
-                .context("WireGuard private key path is not UTF-8")?,
-            "listen-port",
-            &listen_port,
-            "peer",
-            peer_public_key_base64,
-        ],
-    );
-    if options.configures_peer_endpoint(endpoint.side) {
-        let peer_endpoint = format_peer_endpoint(&endpoint.remote_underlay, peer_port)?;
-        argv.extend(["endpoint".to_string(), peer_endpoint]);
-    }
-    argv.extend([
-        "persistent-keepalive".to_string(),
-        keepalive,
-        "allowed-ips".to_string(),
-        allowed_ips,
-    ]);
-    Ok(argv)
+        plan,
+        endpoint,
+        &prepared.private_key_path,
+        peer_public_key_base64,
+    )?)
 }
 
 pub(super) async fn mark_wireguard_applied(
@@ -474,30 +462,6 @@ fn endpoint_state_dir(root: &std::path::Path, plan_id: Uuid, side: TunnelEndpoin
         TunnelEndpointSide::Right => "right",
     };
     root.join(plan_id.to_string()).join(side)
-}
-
-fn format_peer_endpoint(address: &str, port: u16) -> Result<String> {
-    let address = address
-        .parse::<IpAddr>()
-        .context("WireGuard remote underlay is invalid")?;
-    Ok(match address {
-        IpAddr::V4(address) => format!("{address}:{port}"),
-        IpAddr::V6(address) => format!("[{address}]:{port}"),
-    })
-}
-
-fn allowed_ips(plan: &TunnelPlan) -> Result<String> {
-    let mut values = Vec::new();
-    if plan.ipv4_tunnel.is_some() {
-        values.push("0.0.0.0/0");
-    }
-    if plan.ipv6_tunnel.is_some() {
-        values.push("::/0");
-    }
-    if values.is_empty() {
-        anyhow::bail!("WireGuard requires at least one inner address family");
-    }
-    Ok(values.join(","))
 }
 
 async fn remove_file_if_present(path: PathBuf) -> Result<()> {

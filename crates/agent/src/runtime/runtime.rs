@@ -1338,6 +1338,17 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
     trigger: &'static str,
     cancel_token: CommandCancelToken,
 ) -> serde_json::Value {
+    reconcile_configured_runtime_tunnels_with_previous(config, trigger, cancel_token, &[], &[])
+        .await
+}
+
+async fn reconcile_configured_runtime_tunnels_with_previous(
+    config: &AgentConfig,
+    trigger: &'static str,
+    cancel_token: CommandCancelToken,
+    previous: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
+    blocked: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
+) -> serde_json::Value {
     let total = config.network.runtime_status_telemetry_plans.len();
     let mut summaries = Vec::with_capacity(total);
     let mut converged = 0_u64;
@@ -1345,8 +1356,17 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
     let mut skipped = 0_u64;
     let mut degraded = 0_u64;
     let mut failed = 0_u64;
+    let mut hook_failures = 0_u64;
 
     for telemetry_plan in &config.network.runtime_status_telemetry_plans {
+        if blocked
+            .iter()
+            .any(|stale| runtime_tunnel_endpoint_conflicts(stale, telemetry_plan))
+        {
+            failed += 1;
+            summaries.push(runtime_reconcile_summary(trigger, telemetry_plan.plan_id.as_deref(), serde_json::json!({"type":"runtime_tunnel_reconcile", "status":"failed", "reason":"previous_endpoint_removal_failed", "plan":telemetry_plan.plan.name, "interface":telemetry_plan.plan.interface_name, "side":endpoint_side_name(telemetry_plan.endpoint_side), "manager":telemetry_plan.plan.runtime_control.manager}), None));
+            continue;
+        }
         if let Err(error) = cancel_token.check("runtime_config_sync") {
             failed += 1;
             summaries.push(runtime_reconcile_summary(
@@ -1370,6 +1390,10 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
                 config,
                 plan_id: telemetry_plan.plan_id.as_deref(),
                 plan,
+                previous_plan: previous
+                    .iter()
+                    .find(|old| runtime_tunnel_identity_matches(old, telemetry_plan))
+                    .map(|old| &old.plan),
                 builtin_credentials: telemetry_plan.builtin_credentials.as_ref(),
                 runtime_adapter: telemetry_plan.runtime_adapter.as_ref(),
                 side: telemetry_plan.endpoint_side,
@@ -1382,6 +1406,7 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
         .await
         {
             Ok(report) => {
+                hook_failures += report["hook_failures"].as_u64().unwrap_or_default();
                 match report["status"].as_str().unwrap_or("unknown") {
                     "converged" => converged += 1,
                     "observed_only" => observed += 1,
@@ -1443,6 +1468,7 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
         "skipped": skipped,
         "degraded": degraded,
         "failed": failed,
+        "hook_failures": hook_failures,
         "tunnels": summaries,
     })
 }
@@ -1554,6 +1580,7 @@ async fn apply_runtime_config_sync_owned(
         .collect::<Vec<_>>();
 
     let mut removals = Vec::with_capacity(stale_tunnels.len());
+    let mut blocked_tunnels = Vec::new();
     for stale in &stale_tunnels {
         cancel_token.check("runtime_config_sync")?;
         match execute_runtime_tunnel_remove_report_cancelable(
@@ -1592,14 +1619,21 @@ async fn apply_runtime_config_sync_owned(
                 Some(error.to_string()),
             )),
         }
+        if removals.last().is_some_and(|report| {
+            !matches!(report["status"].as_str(), Some("removed" | "observed_only"))
+        }) {
+            blocked_tunnels.push(stale.clone());
+        }
     }
 
     cancel_token.check("runtime_config_sync")?;
     let reconcile = if tunnels_changed || tunnel_reapply {
-        reconcile_configured_runtime_tunnels_cancelable(
+        reconcile_configured_runtime_tunnels_with_previous(
             &candidate_config,
             "runtime_config_sync",
             cancel_token.clone(),
+            &previous_tunnels,
+            &blocked_tunnels,
         )
         .await
     } else {
@@ -1633,6 +1667,11 @@ async fn apply_runtime_config_sync_owned(
     let accepted_runtime_config = applied_config
         .as_ref()
         .map(|config| AgentRuntimeConfig::from_agent_config(desired_version, config));
+    let hook_failures = reconcile["hook_failures"].as_u64().unwrap_or_default()
+        + removals
+            .iter()
+            .map(|report| report["hook_failures"].as_u64().unwrap_or_default())
+            .sum::<u64>();
     let body = serde_json::json!({
         "type": "runtime_config_sync",
         "status": status,
@@ -1645,13 +1684,18 @@ async fn apply_runtime_config_sync_owned(
         "reconcile": reconcile,
         "port_forwarding": port_forwarding,
         "accepted_scope": accepted_scope,
+        "hook_failures": hook_failures,
         "bootstrap_config_persisted": false,
     });
     let output = CommandOutput {
         job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&body)?,
-        exit_code: Some(if status == "applied" { 0 } else { 1 }),
+        exit_code: Some(if status == "applied" && hook_failures == 0 {
+            0
+        } else {
+            1
+        }),
         done: true,
     };
     Ok(RuntimeConfigSyncResult {
@@ -1792,6 +1836,16 @@ fn runtime_tunnel_identity_matches(
         )
 }
 
+fn runtime_tunnel_endpoint_conflicts(
+    left: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
+    right: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
+) -> bool {
+    (left.plan_id.is_some()
+        && left.plan_id == right.plan_id
+        && left.endpoint_side == right.endpoint_side)
+        || left.plan.interface_name == right.plan.interface_name
+}
+
 fn runtime_tunnel_underlay_identity_matches(
     left: &vpsman_common::TunnelPlan,
     right: &vpsman_common::TunnelPlan,
@@ -1868,6 +1922,8 @@ fn runtime_reconcile_summary(
             .cloned()
             .unwrap_or(serde_json::Value::Null),
         "error": error,
+        "hook_failures": report["hook_failures"].as_u64().unwrap_or_default(),
+        "hook_results": report["commands"].as_array().map(|commands| commands.iter().filter(|command| command["label"].as_str().is_some_and(|label| label.starts_with("runtime_hook_"))).cloned().collect::<Vec<_>>()).unwrap_or_default(),
     })
 }
 
