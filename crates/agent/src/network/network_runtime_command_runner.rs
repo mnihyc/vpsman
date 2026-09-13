@@ -40,9 +40,32 @@ pub(super) async fn run_runtime_command_cancelable(
     command.stderr(Stdio::piped());
     command.kill_on_drop(true);
     command.process_group(0);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to run runtime tunnel command {label}"))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            // A command that could not start is still a failed step. Return it
+            // to the transition owner so earlier successful creates can be
+            // compensated; cancellation remains a distinct error above.
+            let empty_output = output_json(LimitedOutput {
+                data: Vec::new(),
+                truncated: false,
+            });
+            return Ok(serde_json::json!({
+                "label": label,
+                "argv": argv,
+                "mutates": mutates,
+                "required": required,
+                "skipped": false,
+                "success": false,
+                "exit_code": null,
+                "error": format!("failed to run runtime tunnel command {label}: {error}"),
+                "timed_out": false,
+                "killed_for_output_limit": false,
+                "stdout": empty_output,
+                "stderr": empty_output,
+            }));
+        }
+    };
     let process_group_id = child.id().map(|pid| pid as libc::pid_t);
     let stdout = child
         .stdout

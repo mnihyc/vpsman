@@ -398,6 +398,7 @@ async fn reconcile_runtime_tunnel(
     let mut failed = false;
     let mut openvpn_start_attempted = false;
     let mut plan_owned_link_created = false;
+    let mut plan_owned_fou_port_created = false;
     let mut failed_required_label = None;
     for spec in specs {
         if should_skip_unprivileged_mutation(
@@ -434,6 +435,30 @@ async fn reconcile_runtime_tunnel(
             cancel_token.clone(),
         )
         .await?;
+        if spec.label == "runtime_fou_add" {
+            // A listener is a separate kernel resource from the tunnel link.
+            // Reusing one never gives this attempt permission to remove it.
+            plan_owned_fou_port_created = report["success"].as_bool() == Some(true);
+            if !plan_owned_fou_port_created {
+                let inspection = run_runtime_command_cancelable(
+                    "runtime_fou_inspect",
+                    &extend_argv(&input.config.network.runtime_ip_argv, ["-j", "fou", "show"]),
+                    false,
+                    false,
+                    input.config.network.runtime_command_timeout_secs,
+                    input.config.network.runtime_command_max_output_bytes as usize,
+                    cancel_token.clone(),
+                )
+                .await?;
+                if inspection["success"].as_bool() == Some(true)
+                    && fou_listener_matches(input.plan, &inspection)
+                {
+                    report["success"] = serde_json::json!(true);
+                    report["accepted_existing_listener"] = serde_json::json!(true);
+                }
+                report["existing_listener_inspection"] = inspection;
+            }
+        }
         accept_idempotent_traffic_clear(spec.label, &mut report);
         if spec.label == "runtime_wireguard_public_key_verify"
             && report["success"].as_bool() == Some(true)
@@ -570,6 +595,7 @@ async fn reconcile_runtime_tunnel(
                 &endpoint,
                 input.runtime_adapter,
                 plan_owned_link_created,
+                plan_owned_fou_port_created,
                 failed_required_label.unwrap_or("unknown_required_step"),
                 cancel_token.clone(),
             )
@@ -999,6 +1025,24 @@ fn should_skip_unprivileged_mutation(
     }
 }
 
+fn fou_listener_matches(plan: &TunnelPlan, inspection: &serde_json::Value) -> bool {
+    let Ok(listeners) = serde_json::from_str::<Vec<serde_json::Value>>(
+        inspection["stdout"]["text"].as_str().unwrap_or_default(),
+    ) else {
+        return false;
+    };
+    listeners.iter().any(|listener| {
+        // The builtin declaration creates an unrestricted IPv4 FOU listener.
+        // A same-number GUE, IPv6, or address/device-bound listener is not it.
+        listener["port"].as_u64() == Some(u64::from(plan.runtime_control.fou.port))
+            && listener["ipproto"].as_u64() == Some(u64::from(plan.runtime_control.fou.ipproto))
+            && matches!(listener["family"].as_str(), None | Some("inet"))
+            && ["gue", "local", "peer", "peer_port", "dev"]
+                .iter()
+                .all(|field| listener.get(*field).is_none())
+    })
+}
+
 fn build_iproute2_reconcile_steps(
     config: &AgentConfig,
     plan: &TunnelPlan,
@@ -1027,7 +1071,7 @@ fn build_iproute2_reconcile_steps(
                 ["fou", "add", "port", &fou_port, "ipproto", &fou_ipproto],
             ),
             mutates: true,
-            required: false,
+            required: true,
         });
     }
 
@@ -1399,7 +1443,8 @@ fn parse_iproute2_addr_json(
                 .get("prefixlen")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|value| u8::try_from(value).ok()),
-            peer: string_field(address, &["peer", "local_peer", "local-peer"]),
+            // iproute2 JSON names the point-to-point destination `address`.
+            peer: string_field(address, &["address", "peer", "local_peer", "local-peer"]),
         })
         .collect())
 }
@@ -1578,6 +1623,9 @@ fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
 }
 
 fn runtime_report_failure_summary(report: &serde_json::Value) -> String {
+    if let Some(error) = report["error"].as_str() {
+        return error.to_string();
+    }
     let exit_code = report
         .get("exit_code")
         .and_then(serde_json::Value::as_i64)
@@ -1747,6 +1795,7 @@ async fn run_runtime_compensation(
     endpoint: &TunnelEndpointConfig,
     runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
     plan_owned_link_created: bool,
+    plan_owned_fou_port_created: bool,
     triggered_by: &'static str,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
@@ -1756,6 +1805,7 @@ async fn run_runtime_compensation(
         endpoint,
         runtime_adapter,
         plan_owned_link_created,
+        plan_owned_fou_port_created,
     )?;
     if specs.is_empty() {
         return Ok(serde_json::json!({
@@ -1798,15 +1848,17 @@ fn build_runtime_compensation_steps(
     endpoint: &TunnelEndpointConfig,
     runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
     plan_owned_link_created: bool,
+    plan_owned_fou_port_created: bool,
 ) -> Result<(Vec<RuntimeCommandSpec>, Option<&'static str>)> {
     match plan.runtime_control.manager {
         RuntimeTunnelManager::AgentBuiltin => {
-            if !plan_owned_link_created {
+            if !plan_owned_link_created && !plan_owned_fou_port_created {
                 return Ok((Vec::new(), Some("no_plan_owned_link_created")));
             }
             ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
-            Ok((
-                vec![RuntimeCommandSpec {
+            let mut steps = Vec::new();
+            if plan_owned_link_created {
+                steps.push(RuntimeCommandSpec {
                     label: "runtime_compensate_link_delete",
                     argv: extend_argv(
                         &config.network.runtime_ip_argv,
@@ -1814,9 +1866,25 @@ fn build_runtime_compensation_steps(
                     ),
                     mutates: true,
                     required: false,
-                }],
-                None,
-            ))
+                });
+            }
+            if plan_owned_fou_port_created {
+                steps.push(RuntimeCommandSpec {
+                    label: "runtime_compensate_fou_delete",
+                    argv: extend_argv(
+                        &config.network.runtime_ip_argv,
+                        [
+                            "fou",
+                            "del",
+                            "port",
+                            &plan.runtime_control.fou.port.to_string(),
+                        ],
+                    ),
+                    mutates: true,
+                    required: false,
+                });
+            }
+            Ok((steps, None))
         }
         RuntimeTunnelManager::ExternalObserved => Ok((Vec::new(), Some("observed_only"))),
         RuntimeTunnelManager::CustomAdapter => {

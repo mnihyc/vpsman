@@ -47,7 +47,7 @@ export function VpsCombobox({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const skipBlurCommitRef = useRef(false);
+  const pendingCommitRef = useRef(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [focused, setFocused] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
@@ -190,15 +190,21 @@ export function VpsCombobox({
   }, [activeIndex, menuStyle, open]);
 
   function selectOption(option: SearchableVpsOption) {
-    skipBlurCommitRef.current = true;
-    onChange(option.id);
+    pendingCommitRef.current = false;
+    if (option.id !== value) {
+      onChange(option.id);
+    }
     setQuery(option.label);
     setOpen(false);
     setFocused(false);
-    window.setTimeout(() => inputRef.current?.blur(), 0);
+    inputRef.current?.blur();
   }
 
   function commitQuery() {
+    // Selection, outside click and blur finish the same edit. Commit it once,
+    // synchronously, so no old selection can replay after a later form edit.
+    if (!pendingCommitRef.current) return;
+    pendingCommitRef.current = false;
     const trimmed = query.trim();
     setOpen(false);
     setFocused(false);
@@ -219,7 +225,9 @@ export function VpsCombobox({
       return;
     }
     if (allowUnknownId) {
-      onChange(trimmed);
+      if (trimmed !== value) {
+        onChange(trimmed);
+      }
       setQuery(displayValue(trimmed, agents));
       return;
     }
@@ -252,7 +260,9 @@ export function VpsCombobox({
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      pendingCommitRef.current = false;
       setOpen(false);
+      setFocused(false);
       setQuery(displayValue(value, agents));
       inputRef.current?.blur();
     }
@@ -275,24 +285,19 @@ export function VpsCombobox({
         id={editorId}
         name={editorId}
         onClick={() => {
+          pendingCommitRef.current = true;
           setFocused(true);
           setOpen(true);
         }}
-        onBlur={() =>
-          window.setTimeout(() => {
-            if (skipBlurCommitRef.current) {
-              skipBlurCommitRef.current = false;
-              return;
-            }
-            commitQuery();
-          }, 120)
-        }
+        onBlur={commitQuery}
         onChange={(event) => {
+          pendingCommitRef.current = true;
           setQuery(event.target.value);
           setOpen(true);
           setFocused(true);
         }}
         onFocus={() => {
+          pendingCommitRef.current = true;
           setFocused(true);
           setOpen(true);
           inputRef.current?.select();

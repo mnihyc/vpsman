@@ -27,6 +27,7 @@ import {
   type ByteCountFormatter,
 } from "../../panelDisplay";
 import { scrollIntoViewWithMotion } from "../../motion";
+import { networkEvidenceMatchesPlan } from "../../networkEvidence";
 import {
   buildPrivilegeForJobOperation,
   type PrivilegeAssertion,
@@ -156,10 +157,8 @@ export function TopologyNetworkTestControls({
   const selectedPlanTrends = useMemo(
     () =>
       selectedPlan
-        ? networkTrends.filter(
-            (trend) =>
-              trend.plan_id === selectedPlan.id ||
-              trend.plan_name === selectedPlan.name,
+        ? networkTrends.filter((trend) =>
+            networkEvidenceMatchesPlan(trend, selectedPlan),
           )
         : [],
     [networkTrends, selectedPlan],

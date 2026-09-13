@@ -9421,6 +9421,121 @@ test("mobile VPS identity registration opens full-screen workflow", async ({
   expect(box?.height).toBeGreaterThanOrEqual((viewport?.height ?? 0) - 2);
 });
 
+test("keeps speed-job baseline attached to its submitted plan across evidence filters", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the same evidence data owner is exercised in the desktop console",
+  );
+  await page.goto("/");
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __speedRequestUnavailable?: boolean;
+      __speedRequestMissing?: boolean;
+    };
+    state.__speedRequestUnavailable = true;
+    const previousFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const url = new URL(
+        input instanceof Request ? input.url : String(input),
+        window.location.href,
+      );
+      const response = await previousFetch(input, init);
+      if (
+        /^\/api\/v1\/jobs\/[^/]+\/request$/.test(url.pathname) &&
+        state.__speedRequestUnavailable
+      ) {
+        return new Response(
+          JSON.stringify({ error: "retained_speed_test_request_unavailable" }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (
+        /^\/api\/v1\/jobs\/[^/]+\/request$/.test(url.pathname) &&
+        state.__speedRequestMissing
+      ) {
+        return new Response(JSON.stringify({ operation: null }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (
+        url.pathname === "/api/v1/network/observations" &&
+        url.searchParams.get("source") === "automatic"
+      ) {
+        return new Response("[]", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return response;
+    };
+  });
+  const requestPaths = () =>
+    page.evaluate(() => {
+      const state = window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      };
+      return (state.__vpsmanFetchRequests ?? [])
+        .map((request) => new URL(request.url, window.location.href).pathname)
+        .filter((path) => /^\/api\/v1\/jobs\/[^/]+\/request$/.test(path));
+    });
+  await openConsoleSubpage(page, "Network", "Evidence");
+  const evidence = page.locator(".topologyEvidence");
+  const speedJob = evidence
+    .getByLabel("Related topology command jobs")
+    .getByRole("row")
+    .filter({ hasText: "job 77777777" });
+  expect(await requestPaths()).toEqual([]);
+  await activate(
+    evidence.getByRole("button", { name: "Load output", exact: true }),
+  );
+  await expect(
+    evidence.getByText(/Retained Speed Test Request Unavailable/i),
+  ).toBeVisible();
+  await expect(speedJob).toContainText("Output not loaded");
+  await page.evaluate(() => {
+    (window as typeof window & { __speedRequestUnavailable?: boolean })
+      .__speedRequestUnavailable = false;
+  });
+  await activate(
+    evidence.getByRole("button", { name: "Load output", exact: true }),
+  );
+  await expect(speedJob).toContainText("degraded throughput");
+  await expect(speedJob).toContainText("expected 100 Mbps");
+  const loadedRequestPaths = await requestPaths();
+  expect(loadedRequestPaths).toEqual([
+    "/api/v1/jobs/77777777-aaaa-4bbb-8ccc-dddddddddddd/request",
+    "/api/v1/jobs/77777777-aaaa-4bbb-8ccc-dddddddddddd/request",
+  ]);
+  await activate(
+    evidence.locator("summary").filter({ hasText: "Advanced filters" }),
+  );
+  await evidence
+    .getByLabel("Network evidence source")
+    .selectOption("automatic");
+  await activate(
+    evidence.getByRole("button", { name: "Apply filters", exact: true }),
+  );
+  await expect(evidence.locator(".observationTable")).toHaveCount(0);
+  await expect(speedJob).toContainText("degraded throughput");
+  await expect(speedJob).toContainText("expected 100 Mbps");
+  expect(await requestPaths()).toEqual(loadedRequestPaths);
+  await page.evaluate(() => {
+    (window as typeof window & { __speedRequestMissing?: boolean })
+      .__speedRequestMissing = true;
+  });
+  await activate(
+    evidence.getByRole("button", { name: "Reload output", exact: true }),
+  );
+  await expect(evidence).toContainText(
+    "bandwidth comparison is unavailable for speed jobs without a retained submitted request",
+  );
+  await expect(speedJob).toContainText("11.2 Mbps");
+  await expect(speedJob).not.toContainText("Output not loaded");
+});
+
 test("shows topology network evidence, speed metrics, and probe latency history", async ({
   page,
 }, testInfo) => {

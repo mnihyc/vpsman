@@ -665,6 +665,9 @@ impl Repository {
         for observation in observations {
             observation.plan_id = Some(plan_id);
             observation.topology_identity_hash = Some(identity.clone());
+            // The frozen job owns the historical label as well as attribution;
+            // optional agent display metadata must not control either one.
+            observation.plan_name = Some(plan.name.clone());
             observation.endpoint_side = Some(
                 if observation.client_id == plan.left_client_id {
                     "left"
@@ -1038,7 +1041,7 @@ pending_fragments AS MATERIALIZED (
     SELECT
         series_id AS physical_series_id,
         'tunnel_reachability'::text AS kind,
-        plan_id, topology_identity_hash, plan_name,
+        plan_id, topology_identity_hash, max(plan_name) AS plan_name,
         interface_name, client_id, peer_client_id,
         date_bin(
             interval '1 minute', observed_at,
@@ -1075,7 +1078,7 @@ pending_fragments AS MATERIALIZED (
         0::numeric AS bytes_total,
         max(observed_at) AS latest_observed_at
     FROM pending_rows
-    GROUP BY series_id, plan_id, topology_identity_hash, plan_name,
+    GROUP BY series_id, plan_id, topology_identity_hash,
              interface_name, client_id, peer_client_id, bucket_start,
              (observation ->> 'healthy')::boolean
 ),
@@ -1176,11 +1179,9 @@ series_bounds AS MATERIALIZED (
     SELECT catalog.*,
            oldest.bucket_start AS oldest_bucket_start,
            oldest.bucket_secs AS oldest_bucket_secs,
-           oldest.plan_name AS oldest_plan_name,
            oldest.latest_observed_at AS oldest_observed_at,
            latest.bucket_start AS latest_bucket_start,
            latest.bucket_secs AS latest_bucket_secs,
-           latest.plan_name AS latest_plan_name,
            latest.latest_observed_at
     FROM series_catalog catalog
     CROSS JOIN LATERAL (
@@ -1325,22 +1326,19 @@ slot_numbers(slot) AS MATERIALIZED (
 endpoint_coordinates AS (
     SELECT series.series_ordinal,
            series.latest_bucket_start AS bucket_start,
-           series.latest_bucket_secs AS bucket_secs,
-           series.latest_plan_name AS plan_name
+           series.latest_bucket_secs AS bucket_secs
     FROM budgeted_series series
     WHERE series.series_budget = 1
     UNION ALL
     SELECT series.series_ordinal,
            series.oldest_bucket_start,
-           series.oldest_bucket_secs,
-           series.oldest_plan_name
+           series.oldest_bucket_secs
     FROM budgeted_series series
     WHERE series.series_budget >= 2
     UNION ALL
     SELECT series.series_ordinal,
            series.latest_bucket_start,
-           series.latest_bucket_secs,
-           series.latest_plan_name
+           series.latest_bucket_secs
     FROM budgeted_series series
     WHERE series.series_budget >= 2
 ),
@@ -1357,8 +1355,7 @@ interior_targets AS (
 interior_coordinates AS (
     SELECT target.series_ordinal,
            nearest.bucket_start,
-           nearest.bucket_secs,
-           nearest.plan_name
+           nearest.bucket_secs
     FROM interior_targets target
     CROSS JOIN LATERAL (
         SELECT candidate.*
@@ -1476,7 +1473,7 @@ interior_coordinates AS (
     ) nearest
 ),
 selected_coordinates AS MATERIALIZED (
-    SELECT DISTINCT series_ordinal, bucket_start, bucket_secs, plan_name
+    SELECT DISTINCT series_ordinal, bucket_start, bucket_secs
     FROM (
         SELECT * FROM endpoint_coordinates
         UNION ALL
@@ -1496,7 +1493,6 @@ selected_fragments AS MATERIALIZED (
      AND point.client_id = series.client_id
      AND point.peer_client_id = series.peer_client_id
      AND point.bucket_start = coordinate.bucket_start
-     AND point.plan_name = coordinate.plan_name
     UNION ALL
     SELECT point.*
     FROM selected_coordinates coordinate
@@ -1512,7 +1508,6 @@ selected_fragments AS MATERIALIZED (
           AND retained.physical_series_id = physical.series_id
           AND retained.bucket_start = coordinate.bucket_start
           AND retained.bucket_secs = coordinate.bucket_secs
-          AND retained.plan_name = coordinate.plan_name
         LIMIT 2
     ) point
     UNION ALL
@@ -1528,7 +1523,6 @@ selected_fragments AS MATERIALIZED (
           AND pending.physical_series_id = physical.series_id
           AND pending.bucket_start = coordinate.bucket_start
           AND pending.bucket_secs = coordinate.bucket_secs
-          AND pending.plan_name = coordinate.plan_name
         LIMIT 2
     ) point
 ),
@@ -1537,7 +1531,9 @@ summarized AS (
         kind,
         plan_id,
         topology_identity_hash,
-        plan_name,
+        -- Names label a measured bucket; they never split its identity.
+        (array_agg(plan_name ORDER BY latest_observed_at DESC, plan_name DESC))[1]
+            AS plan_name,
         interface_name,
         client_id,
         peer_client_id,
@@ -1567,7 +1563,7 @@ summarized AS (
             AS bytes_total,
         max(latest_observed_at)::text AS latest_observed_at
     FROM selected_fragments
-    GROUP BY kind, plan_id, topology_identity_hash, plan_name, interface_name,
+    GROUP BY kind, plan_id, topology_identity_hash, interface_name,
              client_id, peer_client_id, bucket_start, bucket_secs
 )
 SELECT
@@ -2021,7 +2017,6 @@ struct TrendKey {
     kind: String,
     plan_id: Option<Uuid>,
     topology_identity_hash: Option<String>,
-    plan_name: Option<String>,
     interface_name: Option<String>,
     client_id: String,
     peer_client_id: Option<String>,
@@ -2030,6 +2025,7 @@ struct TrendKey {
 
 struct TrendAccumulator {
     key: TrendKey,
+    plan_name: Option<String>,
     sample_count: i64,
     source_bucket_count: i64,
     effective_resolution_secs: Option<i64>,
@@ -2057,12 +2053,12 @@ impl TrendAccumulator {
                 kind: observation.kind.clone(),
                 plan_id: observation.plan_id,
                 topology_identity_hash: observation.topology_identity_hash.clone(),
-                plan_name: observation.plan_name.clone(),
                 interface_name: observation.interface_name.clone(),
                 client_id: observation.client_id.clone(),
                 peer_client_id: observation.peer_client_id.clone(),
                 bucket_start: observation.observed_at.clone(),
             },
+            plan_name: observation.plan_name.clone(),
             sample_count: 0,
             source_bucket_count: 0,
             effective_resolution_secs: None,
@@ -2124,8 +2120,11 @@ impl TrendAccumulator {
         if let Some(value) = observation.bytes {
             self.bytes_total = self.bytes_total.saturating_add(value);
         }
-        if compare_timestamps_desc(&observation.observed_at, &self.latest_observed_at).is_lt() {
+        let time_order =
+            compare_timestamps_desc(&observation.observed_at, &self.latest_observed_at);
+        if time_order.is_lt() || (time_order.is_eq() && observation.plan_name > self.plan_name) {
             self.latest_observed_at = observation.observed_at.clone();
+            self.plan_name = observation.plan_name.clone();
         }
     }
 
@@ -2134,7 +2133,7 @@ impl TrendAccumulator {
             kind: self.key.kind,
             plan_id: self.key.plan_id,
             topology_identity_hash: self.key.topology_identity_hash,
-            plan_name: self.key.plan_name,
+            plan_name: self.plan_name,
             interface_name: self.key.interface_name,
             client_id: self.key.client_id,
             peer_client_id: self.key.peer_client_id,
@@ -2169,7 +2168,6 @@ pub(crate) fn summarize_network_observation_trends(
             kind: observation.kind.clone(),
             plan_id: observation.plan_id,
             topology_identity_hash: observation.topology_identity_hash.clone(),
-            plan_name: observation.plan_name.clone(),
             interface_name: observation.interface_name.clone(),
             client_id: observation.client_id.clone(),
             peer_client_id: observation.peer_client_id.clone(),
@@ -2209,8 +2207,7 @@ fn observation_matches_declared_plan(
     observation: &NetworkObservationView,
     plan: &vpsman_common::TunnelPlan,
 ) -> bool {
-    observation.plan_name.as_deref() == Some(plan.name.as_str())
-        && observation.interface_name.as_deref() == Some(plan.interface_name.as_str())
+    observation.interface_name.as_deref() == Some(plan.interface_name.as_str())
         && matches!(
             (observation.client_id.as_str(), observation.peer_client_id.as_deref()),
             (client, Some(peer)) if (client == plan.left_client_id && peer == plan.right_client_id)

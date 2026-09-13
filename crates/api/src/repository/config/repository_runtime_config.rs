@@ -127,11 +127,17 @@ impl ClaimedRuntimeConfigReconciliation {
             return Ok(None);
         }
 
+        // A newer queued or failed attempt may already have changed live
+        // resources. Until it is resolved, the last applied hash cannot prove
+        // convergence; matching queued work is still reused independently.
         let state = sqlx::query(
             r#"
             SELECT
-                COALESCE(lower(applied_content_hash) = lower($2), FALSE)
-                    AS applied_current,
+                COALESCE(
+                    pending_status IS NULL
+                    AND lower(applied_content_hash) = lower($2),
+                    FALSE
+                ) AS applied_current,
                 COALESCE(
                     pending_status = 'queued'
                     AND lower(pending_content_hash) = lower($2),

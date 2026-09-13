@@ -388,14 +388,16 @@ pub fn build_tunnel_address_argv(
     tunnel_endpoint_address_pairs(plan, endpoint)
         .into_iter()
         .map(|(local, remote, prefix)| {
+            // With a peer, iproute2 takes the network prefix from the peer
+            // address; a bare peer would force a /32 or /128.
             extend_argv(
                 base,
                 [
                     "addr",
                     "replace",
-                    &format!("{local}/{prefix}"),
+                    local,
                     "peer",
-                    remote,
+                    &format!("{remote}/{prefix}"),
                     "dev",
                     &plan.interface_name,
                 ],

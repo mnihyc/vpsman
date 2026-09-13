@@ -190,6 +190,38 @@ fn builtin_advanced_options_cannot_silently_activate_for_other_managers() {
 }
 
 #[test]
+fn native_address_commands_attach_prefix_to_peer_for_both_families_and_sides() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.ipv6_tunnel = Some(TunnelAddressPair {
+        left: "fd00::".to_string(),
+        right: "fd00::1".to_string(),
+        prefix_len: 127,
+    });
+    let plan = plan_tunnel(&input).unwrap();
+    let base = vec!["/sbin/ip".to_string()];
+    for (side, expected) in [
+        (
+            TunnelEndpointSide::Left,
+            [("10.255.0.0", "10.255.0.1/31"), ("fd00::", "fd00::1/127")],
+        ),
+        (
+            TunnelEndpointSide::Right,
+            [("10.255.0.1", "10.255.0.0/31"), ("fd00::1", "fd00::/127")],
+        ),
+    ] {
+        let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
+        let commands = build_tunnel_address_argv(&base, &plan, &endpoint);
+        assert_eq!(commands.len(), expected.len());
+        for (argv, (local, peer)) in commands.into_iter().zip(expected) {
+            assert_eq!(
+                argv,
+                ["/sbin/ip", "addr", "replace", local, "peer", peer, "dev", "tunab"]
+            );
+        }
+    }
+}
+
+#[test]
 fn preview_and_native_renderers_use_the_same_endpoint_options() {
     for kind in [
         TunnelKind::Gre,
@@ -501,6 +533,51 @@ fn planned_ospf_cost_is_optional_and_computed_next_to_operator_inputs() {
     assert_eq!(
         plan_tunnel(&input).unwrap().recommended_ospf_cost,
         Some(expected)
+    );
+}
+
+#[test]
+fn evidence_identities_ignore_display_name_while_command_templates_use_it() {
+    let plan_id = uuid::Uuid::new_v4();
+    let mut plan = plan_tunnel(&plan_input(
+        TunnelKind::Gre,
+        RuntimeTunnelManager::AgentBuiltin,
+    ))
+    .unwrap();
+    let hook = RuntimeTunnelCommand {
+        argv: vec!["/bin/echo".to_string(), "{plan}".to_string()],
+        ..Default::default()
+    };
+    plan.runtime_control.hooks.left.pre_start = Some(hook.clone());
+    let topology_identity = tunnel_topology_identity_hash(plan_id, &plan);
+    let runtime_identity = tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(1));
+    plan.name = "renamed tunnel".to_string();
+
+    assert_eq!(
+        tunnel_topology_identity_hash(plan_id, &plan),
+        topology_identity
+    );
+    assert_eq!(
+        tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(1)),
+        runtime_identity
+    );
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    assert_eq!(
+        render_runtime_tunnel_command(&hook, &plan, &endpoint, &[]).unwrap(),
+        ["/bin/echo", "renamed tunnel"]
+    );
+    assert_ne!(
+        tunnel_topology_identity_hash(uuid::Uuid::new_v4(), &plan),
+        topology_identity
+    );
+    plan.kind = TunnelKind::Ipip;
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &plan),
+        topology_identity
+    );
+    assert_ne!(
+        tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(1)),
+        runtime_identity
     );
 }
 

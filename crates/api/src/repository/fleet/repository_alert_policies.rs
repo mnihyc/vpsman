@@ -1512,7 +1512,6 @@ impl Repository {
                             jsonb_agg(
                                 jsonb_build_object(
                                     'plan_id', identity.telemetry_plan_id,
-                                    'plan_name', identity.telemetry_plan_name,
                                     'interface', identity.interface,
                                     'kind', identity.kind,
                                     'endpoint_side',

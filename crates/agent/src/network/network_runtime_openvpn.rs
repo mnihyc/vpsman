@@ -140,6 +140,9 @@ pub(super) async fn inspect_openvpn_prerequisites(
     )
     .await?;
     if report["success"].as_bool() != Some(true) {
+        if let Some(error) = report["error"].as_str() {
+            anyhow::bail!("{error}");
+        }
         let reason = if report["timed_out"].as_bool() == Some(true) {
             "OpenVPN version probe timed out"
         } else if report["killed_for_output_limit"].as_bool() == Some(true) {

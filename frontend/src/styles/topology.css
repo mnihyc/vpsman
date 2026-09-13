@@ -2179,6 +2179,12 @@
   min-width: 0;
 }
 
+.topologyEvidence .dashboardScopeHint {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
+  line-height: 1.45;
+}
+
 .topologyEvidenceFreshness {
   display: flex;
   align-items: center;

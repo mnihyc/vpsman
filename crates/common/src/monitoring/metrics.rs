@@ -193,11 +193,11 @@ pub struct RuntimeTunnelStat {
 /// Canonical reported endpoint identity. A structurally plausible tunnel is
 /// not current merely because it carries a UUID: projection must match this
 /// complete tuple against the enabled, undeleted plan endpoint owned by the
-/// client transaction.
+/// client transaction. The reported display name is validated separately and
+/// does not change endpoint ownership when a plan is renamed.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ProjectedTelemetryTunnelIdentity {
     pub plan_id: Uuid,
-    pub plan_name: String,
     pub interface: String,
     pub kind: String,
     pub endpoint_side: String,
@@ -241,7 +241,6 @@ pub fn projected_telemetry_tunnel_identity(
     structurally_valid_projected_telemetry_tunnel(tunnel).then_some(())?;
     Some(ProjectedTelemetryTunnelIdentity {
         plan_id: Uuid::parse_str(tunnel.plan_id.as_deref()?).ok()?,
-        plan_name: tunnel.plan_name.clone()?,
         interface: tunnel.interface.clone(),
         kind: tunnel.kind.clone(),
         endpoint_side: tunnel.endpoint_side.clone()?,

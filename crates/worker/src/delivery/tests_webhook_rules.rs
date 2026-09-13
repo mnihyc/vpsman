@@ -51,6 +51,54 @@ fn webhook_rule_worker_config_clamps_operational_bounds_and_validates_retention(
 }
 
 #[test]
+fn telemetry_webhook_keeps_renamed_tunnel_bytes_but_rejects_changed_identity() {
+    let current = vpsman_common::RuntimeTunnelStat {
+        interface: "wg0".to_string(),
+        kind: "wireguard".to_string(),
+        plan_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+        plan_name: Some("Current display name".to_string()),
+        endpoint_side: Some("left".to_string()),
+        peer_client_id: Some("peer".to_string()),
+        rx_bytes: 110,
+        tx_bytes: 120,
+        operstate: Some("up".to_string()),
+        ..Default::default()
+    };
+    let identities =
+        std::collections::HashSet::from([projected_telemetry_tunnel_identity(&current).unwrap()]);
+    for changed_endpoint in [false, true] {
+        let mut reported = current.clone();
+        reported.plan_name = Some("Previous display name".to_string());
+        if changed_endpoint {
+            reported.endpoint_side = Some("right".to_string());
+        }
+        let metrics = AgentMetrics {
+            tunnels: vec![reported],
+            ..Default::default()
+        };
+        let projected = telemetry_webhook_interfaces(
+            &metrics,
+            &NetworkInterfacePolicy::All,
+            &[],
+            &[1],
+            &identities,
+            &managed_tunnel_interfaces(&identities),
+        )
+        .unwrap();
+        assert_eq!(projected.tunnels[0]["operstate"], "up");
+        assert_eq!(projected.tunnels[0]["plan_name"], "Previous display name");
+        assert_eq!(
+            projected.tunnels[0].get("rx_bytes"),
+            (!changed_endpoint).then_some(&json!(110))
+        );
+        assert_eq!(
+            projected.tunnels[0].get("tx_bytes"),
+            (!changed_endpoint).then_some(&json!(120))
+        );
+    }
+}
+
+#[test]
 fn telemetry_webhook_interface_projection_filters_bytes_but_preserves_tunnel_operation() {
     let metrics = AgentMetrics {
         networks: vec![

@@ -62,6 +62,47 @@ fn projected_counter_request() -> TrafficStreamRequest {
 }
 
 #[test]
+fn traffic_freshness_keeps_renamed_tunnel_stream_but_rejects_changed_identity() {
+    let current = vpsman_common::RuntimeTunnelStat {
+        interface: "wg0".to_string(),
+        kind: "wireguard".to_string(),
+        plan_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+        plan_name: Some("Current display name".to_string()),
+        endpoint_side: Some("left".to_string()),
+        peer_client_id: Some("peer".to_string()),
+        ..Default::default()
+    };
+    let identities =
+        HashSet::from([vpsman_common::projected_telemetry_tunnel_identity(&current).unwrap()]);
+    let interfaces = HashSet::from(["wg0".to_string()]);
+    for changed_plan in [false, true] {
+        let mut reported = current.clone();
+        reported.plan_name = Some("Previous display name".to_string());
+        if changed_plan {
+            reported.plan_id = Some("22222222-2222-4222-8222-222222222222".to_string());
+        }
+        let metrics = AgentMetrics {
+            tunnels: vec![reported],
+            ..Default::default()
+        };
+        let streams = super::projected_traffic_streams_with_policy(
+            &metrics,
+            &NetworkInterfacePolicy::All,
+            &[],
+            &[1],
+            &identities,
+            &interfaces,
+        );
+        let expected = if changed_plan {
+            HashSet::new()
+        } else {
+            HashSet::from([("tunnel".to_string(), "wg0".to_string())])
+        };
+        assert_eq!(streams, expected);
+    }
+}
+
+#[test]
 fn projected_traffic_frontier_counts_growth_after_a_same_minute_reset() {
     let request = projected_counter_request();
     let mut usage = vec![usage("eth0", 1)];

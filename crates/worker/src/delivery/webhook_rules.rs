@@ -1422,7 +1422,6 @@ async fn process_telemetry_projection_events(
                 jsonb_agg(
                     jsonb_build_object(
                         'plan_id', tunnel.telemetry_plan_id,
-                        'plan_name', tunnel.telemetry_plan_name,
                         'interface', tunnel.interface,
                         'kind', tunnel.kind,
                         'endpoint_side', tunnel.telemetry_endpoint_side,

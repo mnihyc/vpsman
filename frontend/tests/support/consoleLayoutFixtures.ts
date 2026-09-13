@@ -4319,6 +4319,7 @@ export async function installConsoleApiMock(
       monitoringPingStateCoverageFixture,
       monitoringRangeOverrideFixture,
       networkSpeedSecondDispatchFailureFixture,
+      jobRequestsFixture,
       jobOutputsFixture,
       jobsFixture,
       networkObservationsFixture,
@@ -10269,6 +10270,15 @@ export async function installConsoleApiMock(
             await outputComparisonFor(comparisonMatch[1], mode),
           );
         }
+        const requestMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/request$/,
+        );
+        if (requestMatch && method === "GET") {
+          const request = (
+            jobRequestsFixture as Record<string, unknown>
+          )[requestMatch[1]];
+          if (request) return jsonResponse(request);
+        }
         const outputMatch = pathname.match(
           /^\/api\/v1\/jobs\/([^/]+)\/outputs$/,
         );
@@ -13053,6 +13063,21 @@ export async function installConsoleApiMock(
       monitoringRangeOverrideFixture: options.monitoringRangeOverride ?? null,
       networkSpeedSecondDispatchFailureFixture:
         options.networkSpeedSecondDispatchFailure ?? false,
+      jobRequestsFixture: {
+        [networkSpeedJobId]: {
+          operation: {
+            type: "network_speed_test",
+            plan_id: tunnelPlans[0].id,
+            plan: tunnelPlans[0].plan,
+            server_side: "left",
+            duration_secs: 3,
+            max_bytes: 16777216,
+            rate_limit_kbps: 100000,
+            port: 5201,
+            connect_timeout_ms: 3000,
+          },
+        },
+      },
       jobOutputsFixture: networkJobOutputs,
       jobsFixture: options.alertDomainDuplicateCoverage
         ? [

@@ -522,6 +522,78 @@ async fn postgres_trends_separate_retained_automatic_from_exact_manual_evidence(
         .await
         .unwrap();
 
+    // A rename cannot split a measured coordinate or hide one of its samples.
+    // A different UUID with the same evidence label still owns another series.
+    let other_plan_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tunnel_plans (
+            id,name,kind,enabled,left_client_id,right_client_id,input,plan)
+         VALUES ($1,$2,'wireguard',FALSE,$3,$4,'{}','{}')",
+    )
+    .bind(other_plan_id)
+    .bind(format!("{plan_name}-other"))
+    .bind(&left)
+    .bind(&right)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    for (identity, throughput) in [(plan_id, 160.0), (other_plan_id, 320.0)] {
+        sqlx::query(
+            "INSERT INTO network_observations (
+                id,client_id,kind,source,plan_id,topology_identity_hash,plan_name,
+                interface_name,peer_client_id,healthy,throughput_mbps,observed_at,received_at)
+             VALUES ($1,$2,'network_speed_test','manual',$3,'identity',$4,
+                'tun0',$5,TRUE,$6,to_timestamp($7),to_timestamp($7))",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&left)
+        .bind(identity)
+        .bind(&renamed_plan)
+        .bind(&right)
+        .bind(throughput)
+        .bind(manual_times[1])
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    let renamed_trends = sqlx::query(NETWORK_OBSERVATION_TRENDS_QUERY)
+        .bind(automatic_times[0] - 1)
+        .bind(end_unix)
+        .bind(vec![plan_id, other_plan_id])
+        .bind(None::<&str>)
+        .bind(Some("manual"))
+        .bind(Some("network_speed_test"))
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .bind(false)
+        .bind(4_i64)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(network_observation_trend_from_row)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(renamed_trends.len(), 3);
+    let merged = renamed_trends
+        .iter()
+        .find(|trend| {
+            trend.plan_id == Some(plan_id)
+                && postgres_timestamp_unix(trend.bucket_start.as_deref().unwrap())
+                    == manual_times[1]
+        })
+        .unwrap();
+    assert_eq!(merged.sample_count, 2);
+    assert_eq!(merged.throughput_avg_mbps, Some(140.0));
+    assert_eq!(merged.plan_name.as_deref(), Some(renamed_plan.as_str()));
+    let separate = renamed_trends
+        .iter()
+        .find(|trend| trend.plan_id == Some(other_plan_id))
+        .unwrap();
+    assert_eq!(separate.sample_count, 1);
+    assert_eq!(separate.throughput_avg_mbps, Some(320.0));
+    assert_eq!(separate.plan_name, merged.plan_name);
+
     tx.rollback().await.unwrap();
     pool.close().await;
     sqlx::query(&format!("DROP DATABASE {db_name}"))
@@ -531,10 +603,8 @@ async fn postgres_trends_separate_retained_automatic_from_exact_manual_evidence(
     admin_pool.close().await;
 }
 
-#[test]
-fn parses_probe_and_speed_status_observations() {
-    let job_id = Uuid::new_v4();
-    let probe = CommandOutput {
+fn probe_observation_output(job_id: Uuid) -> CommandOutput {
+    CommandOutput {
         job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&serde_json::json!({
@@ -552,7 +622,52 @@ fn parses_probe_and_speed_status_observations() {
         .unwrap(),
         exit_code: Some(0),
         done: true,
-    };
+    }
+}
+
+#[test]
+fn trend_labels_do_not_split_samples_or_merge_distinct_plan_uuids() {
+    let job_id = Uuid::new_v4();
+    let output = probe_observation_output(job_id);
+    let mut original = parse_network_observation(job_id, "left", 0, &output, "1").unwrap();
+    let plan_id = Uuid::new_v4();
+    original.plan_id = Some(plan_id);
+    original.topology_identity_hash = Some("identity".to_string());
+    original.latency_avg_ms = Some(10.0);
+    let mut renamed = original.clone();
+    renamed.id = Uuid::new_v4();
+    renamed.plan_name = Some("renamed-edge".to_string());
+    renamed.latency_avg_ms = Some(30.0);
+    let mut other = renamed.clone();
+    other.id = Uuid::new_v4();
+    other.plan_id = Some(Uuid::new_v4());
+    other.latency_avg_ms = Some(100.0);
+    for observations in [
+        vec![original.clone(), renamed.clone(), other.clone()],
+        vec![other, renamed, original],
+    ] {
+        let trends = summarize_network_observation_trends(&observations);
+        assert_eq!(trends.len(), 2);
+        let merged = trends
+            .iter()
+            .find(|trend| trend.plan_id == Some(plan_id))
+            .unwrap();
+        assert_eq!(merged.sample_count, 2);
+        assert_eq!(merged.latency_avg_ms, Some(20.0));
+        assert_eq!(merged.plan_name.as_deref(), Some("renamed-edge"));
+        let separate = trends
+            .iter()
+            .find(|trend| trend.plan_id != Some(plan_id))
+            .unwrap();
+        assert_eq!(separate.sample_count, 1);
+        assert_eq!(separate.latency_avg_ms, Some(100.0));
+    }
+}
+
+#[test]
+fn parses_probe_and_speed_status_observations() {
+    let job_id = Uuid::new_v4();
+    let probe = probe_observation_output(job_id);
     let speed = CommandOutput {
         job_id,
         stream: OutputStream::Status,
@@ -585,6 +700,42 @@ fn parses_probe_and_speed_status_observations() {
     assert_eq!(parsed_speed.target.as_deref(), Some("10.0.0.0:5201"));
     assert_eq!(parsed_speed.bytes, Some(1_048_576));
     assert_eq!(parsed_speed.throughput_mbps, Some(33.3));
+}
+
+#[test]
+fn declared_plan_observation_matching_ignores_name_but_requires_interface_and_endpoints() {
+    let input: vpsman_common::TunnelPlanInput = serde_json::from_value(serde_json::json!({
+        "name": "renamed-edge",
+        "interface_name": "tun0",
+        "kind": "gre",
+        "left_client_id": "left",
+        "right_client_id": "right",
+        "left_remote_underlay": "192.0.2.2",
+        "right_remote_underlay": "192.0.2.1",
+        "address_pool_cidr": "10.0.0.0/24",
+        "ipv4_tunnel": {"left": "10.0.0.0", "right": "10.0.0.1", "prefix_len": 31},
+        "bandwidth_mbps": 1000,
+        "left_mtu": 1476,
+        "right_mtu": 1476
+    }))
+    .unwrap();
+    let plan = vpsman_common::plan_tunnel(&input).unwrap();
+    let job_id = Uuid::new_v4();
+    let output = probe_observation_output(job_id);
+    let mut observation = parse_network_observation(job_id, "left", 0, &output, "1").unwrap();
+    assert_eq!(observation.plan_name.as_deref(), Some("edge"));
+    assert!(observation_matches_declared_plan(&observation, &plan));
+
+    observation.interface_name = Some("other0".to_string());
+    assert!(!observation_matches_declared_plan(&observation, &plan));
+    observation.interface_name = Some("tun0".to_string());
+    observation.peer_client_id = Some("other-client".to_string());
+    assert!(!observation_matches_declared_plan(&observation, &plan));
+    observation.peer_client_id = Some("left".to_string());
+    observation.client_id = "right".to_string();
+    assert!(observation_matches_declared_plan(&observation, &plan));
+    observation.client_id = "other-client".to_string();
+    assert!(!observation_matches_declared_plan(&observation, &plan));
 }
 
 #[test]

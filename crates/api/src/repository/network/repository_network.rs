@@ -48,7 +48,6 @@ pub(crate) struct TunnelPlanRecordAttempt {
 }
 
 pub(crate) struct TunnelPlanIdentity {
-    pub(crate) name: String,
     pub(crate) enabled: bool,
     pub(crate) revision: i64,
     pub(crate) left_client_id: String,
@@ -374,7 +373,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    SELECT id, name, enabled, revision, left_client_id, right_client_id
+                    SELECT id, enabled, revision, left_client_id, right_client_id
                     FROM tunnel_plans
                     WHERE id = $1 AND deleted_at IS NULL
                     "#,
@@ -384,7 +383,6 @@ impl Repository {
                 .await?;
                 row.map(|row| {
                     Ok(TunnelPlanIdentity {
-                        name: row.try_get("name")?,
                         enabled: row.try_get("enabled")?,
                         revision: row.try_get("revision")?,
                         left_client_id: row.try_get("left_client_id")?,
@@ -611,7 +609,7 @@ impl Repository {
                 .await?;
                 let existing_row = sqlx::query(
                     r#"
-                    SELECT name, revision, plan, builtin_credentials
+                    SELECT name, enabled, revision, input, plan, builtin_credentials
                     FROM tunnel_plans
                     WHERE id = $1 AND deleted_at IS NULL
                     FOR UPDATE
@@ -626,9 +624,15 @@ impl Repository {
                 if persisted_revision != expected_revision {
                     anyhow::bail!("tunnel_plan_snapshot_stale");
                 }
-                if persisted_name != plan.name {
-                    anyhow::bail!("tunnel_plan_name_is_immutable");
-                }
+                let previous_input: SqlJson<serde_json::Value> = existing_row.try_get("input")?;
+                let rename_only = persisted_name != plan.name
+                    && existing_row.try_get::<bool, _>("enabled")? == enabled
+                    && serde_json::from_value::<TunnelPlanInput>(previous_input.0).is_ok_and(
+                        |mut previous_input| {
+                            previous_input.name.clone_from(&input.name);
+                            previous_input == *input
+                        },
+                    );
                 let previous_plan: SqlJson<serde_json::Value> = existing_row.try_get("plan")?;
                 let previous_plan = serde_json::from_value::<TunnelPlan>(previous_plan.0);
                 let previous_credentials = existing_row
@@ -681,6 +685,7 @@ impl Repository {
                     r#"
                     UPDATE tunnel_plans
                     SET actor_id = $1,
+                        name = $12,
                         kind = $2,
                         enabled = $3,
                         left_client_id = $4,
@@ -689,25 +694,34 @@ impl Repository {
                         plan = $7,
                         builtin_credentials = $8,
                         recommended_ospf_cost = $9,
-                        ospf_status = $10,
-                        left_ospf_status = $10,
-                        right_ospf_status = $10,
-                        desired_ospf_cost = NULL,
-                        left_current_ospf_cost = NULL,
-                        right_current_ospf_cost = NULL,
-                        left_ospf_job_id = NULL,
-                        right_ospf_job_id = NULL,
-                        connection_assessment = 'automatic',
-                        connection_assessment_note = NULL,
-                        connection_assessed_at = NULL,
-                        connection_assessed_by = NULL,
+                        ospf_status = CASE WHEN $14 THEN ospf_status ELSE $10 END,
+                        left_ospf_status = CASE WHEN $14 THEN left_ospf_status ELSE $10 END,
+                        right_ospf_status = CASE WHEN $14 THEN right_ospf_status ELSE $10 END,
+                        desired_ospf_cost = CASE WHEN $14 THEN desired_ospf_cost END,
+                        left_current_ospf_cost = CASE WHEN $14 THEN left_current_ospf_cost END,
+                        right_current_ospf_cost = CASE WHEN $14 THEN right_current_ospf_cost END,
+                        left_ospf_job_id = CASE WHEN $14 THEN left_ospf_job_id END,
+                        right_ospf_job_id = CASE WHEN $14 THEN right_ospf_job_id END,
+                        connection_assessment = CASE WHEN $14 THEN connection_assessment ELSE 'automatic' END,
+                        connection_assessment_note = CASE WHEN $14 THEN connection_assessment_note END,
+                        connection_assessed_at = CASE WHEN $14 THEN connection_assessed_at END,
+                        connection_assessed_by = CASE WHEN $14 THEN connection_assessed_by END,
                         revision = revision + 1,
                         updated_at = clock_timestamp()
                     WHERE id = $11
                       AND deleted_at IS NULL
-                      AND name = $12
                       AND revision = $13
-                    RETURNING revision, created_at::text AS created_at, updated_at::text AS updated_at
+                    RETURNING
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at, updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at, deleted_by, deleted_reason
                     "#,
                 )
                 .bind(persisted_actor_id(operator))
@@ -723,8 +737,18 @@ impl Repository {
                 .bind(plan_id)
                 .bind(&plan.name)
                 .bind(expected_revision)
+                .bind(rename_only)
                 .fetch_optional(&mut *tx)
-                .await?
+                .await
+                .map_err(|error| {
+                    if error.as_database_error().and_then(|error| error.constraint())
+                        == Some("tunnel_plans_active_name_idx")
+                    {
+                        anyhow::anyhow!("tunnel_plan_name_conflict")
+                    } else {
+                        error.into()
+                    }
+                })?
                 .ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
                 let topology_identity_hash =
                     enabled.then(|| tunnel_topology_identity_hash(plan_id, plan));
@@ -734,44 +758,7 @@ impl Repository {
                     topology_identity_hash.as_deref(),
                 )
                 .await?;
-                let updated = TunnelPlanView {
-                    id: plan_id,
-                    name: plan.name.clone(),
-                    kind: plan.kind,
-                    enabled,
-                    revision: row.try_get("revision")?,
-                    left_client_id: plan.left_client_id.clone(),
-                    right_client_id: plan.right_client_id.clone(),
-                    recommended_ospf_cost: plan.recommended_ospf_cost.map(i32::from),
-                    ospf_status: ospf_endpoint_status.to_string(),
-                    left_ospf_status: ospf_endpoint_status.to_string(),
-                    right_ospf_status: ospf_endpoint_status.to_string(),
-                    desired_ospf_cost: None,
-                    left_current_ospf_cost: None,
-                    right_current_ospf_cost: None,
-                    left_ospf_job_id: None,
-                    right_ospf_job_id: None,
-                    connection_assessment: "automatic".to_string(),
-                    connection_assessment_note: None,
-                    connection_assessed_at: None,
-                    connection_assessed_by: None,
-                    left_runtime_config: untracked_tunnel_runtime_config(
-                        &plan.left_client_id,
-                        enabled,
-                    ),
-                    right_runtime_config: untracked_tunnel_runtime_config(
-                        &plan.right_client_id,
-                        enabled,
-                    ),
-                    input: input.clone(),
-                    plan: plan.clone(),
-                    builtin_credentials,
-                    created_at: row.try_get("created_at")?,
-                    updated_at: row.try_get("updated_at")?,
-                    deleted_at: None,
-                    deleted_by: None,
-                    deleted_reason: None,
-                };
+                let updated = tunnel_plan_from_row(&row)?;
                 insert_tunnel_audit(
                     &mut tx,
                     operator,

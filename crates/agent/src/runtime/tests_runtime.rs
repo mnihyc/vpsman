@@ -837,6 +837,118 @@ fn unknown_command_shape_becomes_a_terminal_rejection() {
     );
 }
 
+#[test]
+fn runtime_reconcile_summary_preserves_failed_command_and_compensation_diagnostics() {
+    let failed_exit = serde_json::json!({
+        "label": "runtime_link_mtu",
+        "success": false,
+        "exit_code": 1,
+        "stderr": { "text": "operation failed" },
+    });
+    let failed_launch = serde_json::json!({
+        "label": "runtime_bandwidth_apply",
+        "argv": ["/missing/tc"],
+        "required": true,
+        "mutates": true,
+        "success": false,
+        "exit_code": null,
+        "error": "failed to run runtime tunnel command runtime_bandwidth_apply: No such file or directory (os error 2)",
+    });
+    let later_failed_launch = serde_json::json!({
+        "label": "runtime_hook_post_up",
+        "success": false,
+        "exit_code": null,
+        "error": "failed to run runtime tunnel command runtime_hook_post_up: Permission denied (os error 13)",
+    });
+    let compensation = serde_json::json!({
+        "status": "completed",
+        "triggered_by": "runtime_bandwidth_apply",
+        "all_steps_successful": true,
+        "commands": [{
+            "label": "runtime_compensate_link_delete",
+            "success": true,
+            "exit_code": 0,
+        }],
+    });
+    let report = serde_json::json!({
+        "plan": "test-plan",
+        "interface": "test0",
+        "status": "failed",
+        "hook_failures": 1,
+        "commands": [
+            { "label": "runtime_create", "success": true, "stdout": { "text": "unneeded output" } },
+            { "label": "runtime_skipped", "skipped": true },
+            failed_exit,
+            failed_launch,
+            later_failed_launch,
+        ],
+        "compensation": compensation,
+    });
+
+    let summary = runtime_reconcile_summary("test", Some("plan-id"), report, None);
+
+    assert_eq!(summary["trigger"], "test");
+    assert_eq!(summary["plan_id"], "plan-id");
+    assert_eq!(summary["plan"], "test-plan");
+    assert_eq!(summary["interface"], "test0");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(
+        summary["failed_commands"],
+        serde_json::json!([failed_exit, failed_launch, later_failed_launch])
+    );
+    assert_eq!(summary["compensation"], compensation);
+    assert_eq!(
+        summary["error"],
+        "failed to run runtime tunnel command runtime_bandwidth_apply: No such file or directory (os error 2)"
+    );
+    assert_eq!(summary["hook_failures"], 1);
+    assert_eq!(
+        summary["hook_results"],
+        serde_json::json!([later_failed_launch])
+    );
+    assert!(summary.get("commands").is_none());
+}
+
+#[test]
+fn runtime_reconcile_summary_preserves_explicit_error_over_command_error() {
+    let report = serde_json::json!({
+        "commands": [{
+            "label": "runtime_create",
+            "success": false,
+            "error": "failed to run runtime tunnel command runtime_create: No such file or directory (os error 2)",
+        }],
+    });
+
+    let summary = runtime_reconcile_summary(
+        "test",
+        None,
+        report,
+        Some("original reconcile error".to_string()),
+    );
+
+    assert_eq!(summary["error"], "original reconcile error");
+    assert_eq!(summary["failed_commands"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn runtime_reconcile_summary_without_failures_keeps_diagnostics_empty() {
+    for report in [
+        serde_json::json!({}),
+        serde_json::json!({
+            "commands": [
+                { "label": "runtime_create", "success": true },
+                { "label": "runtime_skipped", "skipped": true },
+            ],
+        }),
+    ] {
+        let summary = runtime_reconcile_summary("test", None, report, None);
+
+        assert_eq!(summary["failed_commands"], serde_json::json!([]));
+        assert!(summary["compensation"].is_null());
+        assert!(summary["error"].is_null());
+    }
+}
+
 #[tokio::test]
 async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
     let root = std::env::temp_dir().join(format!(
@@ -1234,6 +1346,31 @@ fn builtin_driver_versions_are_parsed_from_their_own_markers() {
         parse_marked_version("OpenVPN 2.4.12 x86_64-pc-linux-gnu", "OpenVPN "),
         Some(semver::Version::new(2, 4, 12))
     );
+}
+
+#[tokio::test]
+async fn builtin_driver_capability_preserves_command_spawn_error() {
+    let executable = std::env::current_dir().unwrap().join(format!(
+        "vpsman-missing-builtin-driver-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let capability = probe_builtin_driver(
+        &[executable.to_string_lossy().into_owned()],
+        &["--version"],
+        Some("wireguard-tools v"),
+        None,
+    )
+    .await;
+
+    assert!(!capability.available);
+    assert!(capability.version.is_none());
+    assert!(capability
+        .unavailable_reason
+        .as_deref()
+        .and_then(|reason| reason.strip_prefix(
+            "executable unavailable: failed to run runtime tunnel command builtin_tunnel_driver_version: "
+        ))
+        .is_some_and(|cause| !cause.is_empty()));
 }
 
 #[tokio::test]

@@ -2592,7 +2592,6 @@ async fn load_current_tunnel_plan_snapshot_for_ids_in_tx(
         if left_client_id == client_id {
             snapshot.endpoints.insert(ProjectedTelemetryTunnelIdentity {
                 plan_id,
-                plan_name: plan_name.clone(),
                 interface: interface.clone(),
                 kind: kind.clone(),
                 endpoint_side: "left".to_string(),
@@ -2602,7 +2601,6 @@ async fn load_current_tunnel_plan_snapshot_for_ids_in_tx(
         if right_client_id == client_id {
             snapshot.endpoints.insert(ProjectedTelemetryTunnelIdentity {
                 plan_id,
-                plan_name: plan_name.clone(),
                 interface: interface.clone(),
                 kind: kind.clone(),
                 endpoint_side: "right".to_string(),
@@ -3455,6 +3453,52 @@ mod network_admission_mask_tests {
 
         metrics.tunnels[0].plan_name = Some("p".repeat(129));
         assert!(projected_telemetry_tunnel_identity(&metrics.tunnels[0]).is_none());
+    }
+
+    #[test]
+    fn renamed_tunnel_preserves_admission_but_changed_endpoint_does_not() {
+        let current = valid_tunnel("wg0");
+        let endpoints = HashSet::from([projected_telemetry_tunnel_identity(&current).unwrap()]);
+        let interfaces = HashSet::from(["wg0".to_string()]);
+        for changed_field in [
+            None,
+            Some("plan_id"),
+            Some("interface"),
+            Some("kind"),
+            Some("endpoint_side"),
+            Some("peer_client_id"),
+            Some("invalid_name"),
+        ] {
+            let mut reported = current.clone();
+            reported.plan_name = Some("Previous display name".to_string());
+            match changed_field {
+                Some("plan_id") => {
+                    reported.plan_id = Some("00000000-0000-0000-0000-000000000002".to_string())
+                }
+                Some("interface") => reported.interface = "wg1".to_string(),
+                Some("kind") => reported.kind = "gre".to_string(),
+                Some("endpoint_side") => reported.endpoint_side = Some("right".to_string()),
+                Some("peer_client_id") => reported.peer_client_id = Some("other-peer".to_string()),
+                Some("invalid_name") => reported.plan_name = Some("\n".to_string()),
+                _ => {}
+            }
+            let metrics = AgentMetrics {
+                tunnels: vec![reported],
+                ..Default::default()
+            };
+            let admitted = network_admission_masks(
+                &metrics,
+                &NetworkInterfacePolicy::All,
+                &endpoints,
+                &interfaces,
+            )
+            .1;
+            assert_eq!(
+                admitted,
+                vec![u8::from(changed_field.is_none())],
+                "changed field: {changed_field:?}"
+            );
+        }
     }
 
     #[test]

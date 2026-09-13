@@ -6751,6 +6751,192 @@ struct PgReliabilityTestDb {
 }
 
 #[tokio::test]
+async fn postgres_runtime_config_current_ack_respects_newer_pending_attempts() {
+    use vpsman_common::{runtime_config_content_hash, AgentRuntimeConfig};
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let config_a = AgentRuntimeConfig::default();
+    let mut config_b = config_a.clone();
+    // Any effective configuration difference exercises the shared content guard.
+    config_b.telemetry_interval_secs += 1;
+    let hash_a = runtime_config_content_hash(&config_a).unwrap();
+    let hash_b = runtime_config_content_hash(&config_b).unwrap();
+    let cases = [
+        ("healthy", None, None, &hash_a, Some(None)),
+        (
+            "queued-other",
+            Some("queued"),
+            Some(&config_b),
+            &hash_a,
+            None,
+        ),
+        (
+            "failed-other",
+            Some("failed"),
+            Some(&config_b),
+            &hash_a,
+            None,
+        ),
+        (
+            "queued-match",
+            Some("queued"),
+            Some(&config_b),
+            &hash_b,
+            Some(Some(())),
+        ),
+        (
+            "queued-applied",
+            Some("queued"),
+            Some(&config_a),
+            &hash_a,
+            Some(Some(())),
+        ),
+        (
+            "failed-applied",
+            Some("failed"),
+            Some(&config_a),
+            &hash_a,
+            None,
+        ),
+    ];
+    for (case, pending_status, pending_template, desired_hash, expected) in cases {
+        let client_id = format!("runtime-current-{case}");
+        let incarnation = Uuid::new_v4();
+        insert_client(&db.pool, &client_id, Some(incarnation)).await;
+        let (applied_version, pending_version): (i64, i64) = sqlx::query_as(
+            "SELECT nextval('runtime_config_apply_version_seq'), nextval('runtime_config_apply_version_seq')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let mut applied_config = config_a.clone();
+        applied_config.version = applied_version as u64;
+        let pending_config = pending_template.map(|template| {
+            let mut config = template.clone();
+            config.version = pending_version as u64;
+            config
+        });
+        let pending_hash = pending_config
+            .as_ref()
+            .map(runtime_config_content_hash)
+            .transpose()
+            .unwrap();
+        let job_id = Uuid::new_v4();
+        if let Some(config) = &pending_config {
+            insert_job_target_with_operation(
+                &db.pool,
+                job_id,
+                &client_id,
+                JobCommand::RuntimeConfigSync {
+                    desired_version: pending_version as u64,
+                    reason: "tunnel_plan_updated".to_string(),
+                    config: Box::new(config.clone()),
+                },
+                "runtime_config_sync",
+                None,
+                pending_status.unwrap(),
+                false,
+                Some(incarnation),
+                30,
+                false,
+            )
+            .await;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO client_runtime_config_apply_state (
+                client_id, applied_version, applied_content_hash, applied_config,
+                pending_version, pending_content_hash, pending_config,
+                pending_job_id, pending_status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(&client_id)
+        .bind(applied_version)
+        .bind(&hash_a)
+        .bind(SqlJson(applied_config))
+        .bind(pending_status.map(|_| pending_version))
+        .bind(pending_hash)
+        .bind(pending_config.map(SqlJson))
+        .bind(pending_status.map(|_| job_id))
+        .bind(pending_status.map(|_| "queued"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        if pending_status == Some("failed") {
+            db.repo
+                .record_runtime_config_apply_terminal_for_target_status(
+                    job_id,
+                    &client_id,
+                    "failed",
+                    Some("native configuration failed after partial mutation"),
+                )
+                .await
+                .unwrap();
+        }
+        db.repo
+            .enqueue_runtime_config_reconciliations(
+                std::slice::from_ref(&client_id),
+                "tunnel_plan_updated",
+                None,
+            )
+            .await
+            .unwrap();
+        let claim = db
+            .repo
+            .claim_runtime_config_reconciliation(Some(&client_id), 30)
+            .await
+            .unwrap()
+            .unwrap();
+        let previous_revision: i64 = sqlx::query_scalar(
+            "SELECT reconciled_revision FROM client_runtime_config_owners WHERE client_id = $1",
+        )
+        .bind(&client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let expected = expected.map(|queued| queued.map(|()| job_id));
+        assert_eq!(
+            claim
+                .acknowledge_if_content_current(desired_hash)
+                .await
+                .unwrap(),
+            expected,
+            "{case}",
+        );
+        let (reconciled_revision, work_token): (i64, Option<Uuid>) = sqlx::query_as(
+            r#"
+            SELECT owner.reconciled_revision, work.claim_token
+            FROM client_runtime_config_owners owner
+            LEFT JOIN client_runtime_config_reconcile_work work USING (client_id)
+            WHERE owner.client_id = $1
+            "#,
+        )
+        .bind(&client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            work_token,
+            expected.is_none().then_some(claim.claim_token),
+            "{case}"
+        );
+        assert_eq!(
+            reconciled_revision,
+            if expected.is_some() {
+                claim.desired_revision
+            } else {
+                previous_revision
+            },
+            "{case}",
+        );
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_runtime_config_override_cas_is_atomic_and_supports_reset() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -46500,3 +46686,706 @@ mod ping_history;
 
 #[path = "tests_postgres_ping_display.rs"]
 mod ping_display;
+
+#[tokio::test]
+async fn postgres_manual_tunnel_observations_use_frozen_job_labels() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::ExternalObserved, false);
+    input.name = "historical-job-name".to_string();
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+    let mut jobs = Vec::new();
+    for (command_type, observation_kind, operation) in [
+        (
+            "network_status",
+            "network_status",
+            JobCommand::NetworkStatus {
+                plan_id: saved.id.to_string(),
+                plan: Box::new(plan.clone()),
+                side: TunnelEndpointSide::Left,
+                runtime_adapter: None,
+            },
+        ),
+        (
+            "network_probe",
+            "tunnel_reachability",
+            JobCommand::NetworkProbe {
+                plan_id: saved.id.to_string(),
+                plan: Box::new(plan.clone()),
+                side: TunnelEndpointSide::Left,
+                count: 3,
+                interval_ms: 500,
+            },
+        ),
+        (
+            "network_speed_test",
+            "network_speed_test",
+            JobCommand::NetworkSpeedTest {
+                plan_id: saved.id.to_string(),
+                plan: Box::new(plan.clone()),
+                server_side: TunnelEndpointSide::Right,
+                duration_secs: 3,
+                max_bytes: 16 * 1024 * 1024,
+                rate_limit_kbps: 100_000,
+                port: 5201,
+                connect_timeout_ms: 5000,
+            },
+        ),
+    ] {
+        let job_id = Uuid::new_v4();
+        insert_job_target_with_operation(
+            &db.pool,
+            job_id,
+            &plan.left_client_id,
+            operation,
+            command_type,
+            None,
+            "running",
+            true,
+            None,
+            30,
+            false,
+        )
+        .await;
+        jobs.push((job_id, observation_kind));
+    }
+
+    // Outputs arrive after a rename, but all three jobs reviewed the old label.
+    input.name = "current-plan-name".to_string();
+    let renamed = db
+        .repo
+        .update_tunnel_plan(
+            saved.id,
+            saved.revision,
+            &input,
+            &plan_tunnel(&input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_ne!(renamed.name, plan.name);
+
+    let reported_labels = [
+        None,
+        Some(Value::Null),
+        Some(json!("")),
+        Some(json!("agent-reported-name")),
+    ];
+    for (job_id, observation_kind) in jobs {
+        let context = db
+            .repo
+            .get_job_completion_context(job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let frozen_plan = match context.operation {
+            JobCommand::NetworkStatus { plan, .. }
+            | JobCommand::NetworkProbe { plan, .. }
+            | JobCommand::NetworkSpeedTest { plan, .. } => plan,
+            _ => panic!("expected a persisted network diagnostic snapshot"),
+        };
+        assert_eq!(frozen_plan.name, plan.name);
+        let mut payloads = reported_labels
+            .iter()
+            .map(|label| {
+                let mut payload = json!({
+                    "type": observation_kind,
+                    "interface": &plan.interface_name,
+                    "peer_client_id": &plan.right_client_id,
+                });
+                if let Some(label) = label {
+                    payload["plan"] = label.clone();
+                }
+                payload
+            })
+            .collect::<Vec<_>>();
+        // Supplying the correct label cannot rescue mismatched ownership.
+        for (interface, peer) in [
+            ("wrong-interface", plan.right_client_id.as_str()),
+            (plan.interface_name.as_str(), "wrong-peer"),
+        ] {
+            payloads.push(json!({
+                "type": observation_kind,
+                "plan": &plan.name,
+                "interface": interface,
+                "peer_client_id": peer,
+            }));
+        }
+        let outputs = payloads
+            .iter()
+            .map(|payload| CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: serde_json::to_vec(payload).unwrap(),
+                exit_code: None,
+                done: false,
+            })
+            .collect::<Vec<_>>();
+        db.repo
+            .record_job_outputs_checked_with_config(
+                job_id,
+                &plan.left_client_id,
+                &outputs,
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap();
+        crate::repository_job_outputs::drain_job_output_projections_for_test(&db.repo)
+            .await
+            .unwrap();
+
+        let rows = sqlx::query(
+            "SELECT seq, kind, plan_id, topology_identity_hash, plan_name, metadata
+             FROM network_observations WHERE job_id=$1 ORDER BY seq",
+        )
+        .bind(job_id)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), reported_labels.len(), "{observation_kind}");
+        for (seq, row) in rows.iter().enumerate() {
+            assert_eq!(row.try_get::<i32, _>("seq").unwrap(), seq as i32);
+            assert_eq!(row.try_get::<String, _>("kind").unwrap(), observation_kind);
+            assert_eq!(row.try_get::<Uuid, _>("plan_id").unwrap(), saved.id);
+            assert_eq!(row.try_get::<String, _>("plan_name").unwrap(), plan.name);
+            assert_eq!(
+                row.try_get::<String, _>("topology_identity_hash").unwrap(),
+                tunnel_topology_identity_hash(saved.id, &plan)
+            );
+            assert_eq!(row.try_get::<Value, _>("metadata").unwrap(), payloads[seq]);
+        }
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM job_output_projection_work WHERE job_id=$1")
+                .bind(job_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0, "{observation_kind} projection must not defer");
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_plan_rename_preserves_native_and_operational_identity() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
+    input.kind = TunnelKind::Wireguard;
+    input.left_mtu = Some(1420);
+    input.right_mtu = Some(1420);
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+    let assessed = db
+        .repo
+        .update_tunnel_connection_assessment(
+            saved.id,
+            saved.revision,
+            "connected",
+            Some("Operator verified the circuit"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE tunnel_plans SET ospf_status='verified', left_ospf_status='verified',
+         right_ospf_status='verified', desired_ospf_cost=17, left_current_ospf_cost=17,
+         right_current_ospf_cost=17, left_ospf_job_id=$2, right_ospf_job_id=$3 WHERE id=$1",
+    )
+    .bind(saved.id)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let topology_identity = vpsman_common::tunnel_topology_identity_hash(saved.id, &plan);
+    let series_id: i64 = sqlx::query_scalar(
+        "INSERT INTO network_observation_series (plan_id, topology_identity_hash, plan_name,
+         interface_name, client_id, peer_client_id, endpoint_side, address_family, target)
+         VALUES ($1,$2,$3,$4,'client-a','client-b','left','ipv4','10.10.0.1') RETURNING id",
+    )
+    .bind(saved.id)
+    .bind(&topology_identity)
+    .bind(&input.name)
+    .bind(&input.interface_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let before: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(plan) - ARRAY['name','input','plan','revision','updated_at']
+         FROM tunnel_plans plan WHERE id=$1",
+    )
+    .bind(saved.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    input.name = "Renamed transit circuit".to_string();
+    let renamed_plan = plan_tunnel(&input).unwrap();
+    let renamed = db
+        .repo
+        .update_tunnel_plan(
+            saved.id,
+            assessed.revision,
+            &input,
+            &renamed_plan,
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.id, saved.id);
+    assert_eq!(renamed.revision, assessed.revision + 1);
+    assert_eq!(renamed.name, input.name);
+    assert_eq!(renamed.input.name, input.name);
+    assert_eq!(renamed.plan.name, input.name);
+    assert_eq!(renamed.builtin_credentials, saved.builtin_credentials);
+    assert_eq!(renamed.plan.interface_name, saved.plan.interface_name);
+    assert_eq!(renamed.ospf_status, "verified");
+    assert_eq!(renamed.left_current_ospf_cost, Some(17));
+    assert_eq!(renamed.right_current_ospf_cost, Some(17));
+    assert_eq!(renamed.connection_assessment, "connected");
+    assert_eq!(
+        renamed.connection_assessment_note,
+        assessed.connection_assessment_note
+    );
+    let after: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(plan) - ARRAY['name','input','plan','revision','updated_at']
+         FROM tunnel_plans plan WHERE id=$1",
+    )
+    .bind(saved.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after, before,
+        "display-name editing must not reset native, OSPF, or alert ownership"
+    );
+    let evidence: (String, bool) = sqlx::query_as(
+        "SELECT topology_identity_hash, active FROM network_observation_series WHERE id=$1",
+    )
+    .bind(series_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(evidence, (topology_identity, true));
+    let stale = db
+        .repo
+        .update_tunnel_plan(
+            saved.id,
+            assessed.revision,
+            &input,
+            &renamed_plan,
+            true,
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale.to_string(), "tunnel_plan_snapshot_stale");
+
+    // A reviewed configuration edit retains its existing state-reset semantics.
+    input.bandwidth_mbps += 1;
+    let changed_plan = plan_tunnel(&input).unwrap();
+    let changed = db
+        .repo
+        .update_tunnel_plan(
+            saved.id,
+            renamed.revision,
+            &input,
+            &changed_plan,
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.ospf_status, "unverified");
+    assert_eq!(changed.left_current_ospf_cost, None);
+    assert_eq!(changed.right_current_ospf_cost, None);
+    assert_eq!(changed.connection_assessment, "automatic");
+    assert_eq!(changed.connection_assessment_note, None);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_plan_rename_racing_create_returns_name_conflict_atomically() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["client-a", "client-b", "client-c", "client-d"] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, false, &operator)
+        .await
+        .unwrap();
+    input.name = "Contended display name".to_string();
+    let renamed_plan = plan_tunnel(&input).unwrap();
+    let mut create_input = input.clone();
+    create_input.left_client_id = "client-c".to_string();
+    create_input.right_client_id = "client-d".to_string();
+    create_input.interface_name = "other-tunnel".to_string();
+    create_input.address_pool_cidr = "10.11.0.0/29".to_string();
+    create_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.11.0.0".to_string(),
+        right: "10.11.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let create_plan = plan_tunnel(&create_input).unwrap();
+    let (rename, create) = tokio::join!(
+        db.repo.update_tunnel_plan(
+            saved.id,
+            saved.revision,
+            &input,
+            &renamed_plan,
+            false,
+            &operator
+        ),
+        db.repo
+            .record_tunnel_plan(&create_input, &create_plan, false, &operator),
+    );
+    match (rename, create) {
+        (Ok(renamed), Err(error)) => {
+            assert_eq!(error.to_string(), "tunnel_plan_name_conflict");
+            assert_eq!(renamed.id, saved.id);
+            assert_eq!(renamed.revision, saved.revision + 1);
+        }
+        (Err(error), Ok(_)) => {
+            assert_eq!(error.to_string(), "tunnel_plan_name_conflict");
+            let unchanged = db
+                .repo
+                .get_tunnel_plan_record(saved.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(unchanged.name, saved.name);
+            assert_eq!(unchanged.input, saved.input);
+            assert_eq!(unchanged.plan, saved.plan);
+            assert_eq!(unchanged.revision, saved.revision);
+        }
+        outcomes => panic!("exactly one active plan can acquire the name: {outcomes:?}"),
+    }
+    let names: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tunnel_plans WHERE name=$1 AND deleted_at IS NULL",
+    )
+    .bind(&input.name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(names, 1);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_display_name_migration_resets_only_owned_evidence() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["client-a", "client-b", "unrelated-client"] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    sqlx::query("UPDATE clients SET status='offline' WHERE id='client-b'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    input.kind = TunnelKind::Wireguard;
+    input.left_mtu = Some(1420);
+    input.right_mtu = Some(1420);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+    assert!(saved.builtin_credentials.is_some());
+    let job_id = Uuid::new_v4();
+    insert_job_target(&db.pool, job_id, "client-a", "queued", false, None).await;
+    let sample_id = insert_projected_raw_telemetry_fixture(
+        &db.pool,
+        "client-a",
+        crate::unix_now(),
+        &AgentMetrics::default(),
+        1,
+        &[],
+        &[],
+    )
+    .await;
+    let old_identity = "a".repeat(64);
+    let series_id: i64 = sqlx::query_scalar(
+        "INSERT INTO network_observation_series (
+            plan_id, topology_identity_hash, plan_name, interface_name,
+            client_id, peer_client_id, endpoint_side, address_family, target)
+         VALUES ($1,$2,$3,$4,'client-a','client-b','left','ipv4','10.10.0.1')
+         RETURNING id",
+    )
+    .bind(saved.id)
+    .bind(&old_identity)
+    .bind(&input.name)
+    .bind(&input.interface_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let observation_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO network_observations (
+            id, source, automatic_series_id, automatic_sample_id,
+            automatic_payload_ordinal, plan_name)
+         VALUES ($1,'automatic',$2,$3,1,$4)",
+    )
+    .bind(observation_id)
+    .bind(series_id)
+    .bind(sample_id)
+    .bind(&input.name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_observations (
+            id, job_id, client_id, seq, kind, source, plan_id,
+            topology_identity_hash, plan_name, interface_name, peer_client_id)
+         VALUES ($1,$2,'client-a',1,'network_speed_test','manual',$3,$4,$5,$6,'client-b')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(job_id)
+    .bind(saved.id)
+    .bind(&old_identity)
+    .bind(&input.name)
+    .bind(&input.interface_name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_observation_latest (
+            series_id, observation_id, stale_after_secs, healthy,
+            transmitted, received, packet_loss_ratio, observed_at, received_at)
+         VALUES ($1,$2,180,TRUE,3,3,0.0,now(),now())",
+    )
+    .bind(series_id)
+    .bind(observation_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_observation_rollups (
+            series_id, bucket_secs, bucket_start, health_state,
+            sample_count, transmitted_total, transmitted_sample_count,
+            received_total, received_sample_count, latency_sample_count,
+            latency_mdev_sample_count, packet_loss_sample_count,
+            packet_loss_min_ratio, packet_loss_max_ratio,
+            latest_observation_id, latest_stale_after_secs, latest_healthy,
+            latest_transmitted, latest_received, latest_packet_loss_ratio,
+            latest_observed_at, latest_received_at)
+         VALUES ($1,60,date_trunc('minute',now()),1,
+            1,3,1,3,1,0,0,1,0.0,0.0,$2,180,TRUE,3,3,0.0,now(),now())",
+    )
+    .bind(series_id)
+    .bind(observation_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_topology_identity_hash, telemetry_runtime_evidence_identity_hash,
+            telemetry_endpoint_side, telemetry_peer_client_id)
+         VALUES ('client-a',now(),$1,'wireguard','agent_builtin','managed_desired',
+            'telemetry',$2,$3,$4,$4,'left','client-b')",
+    )
+    .bind(&input.interface_name)
+    .bind(saved.id)
+    .bind(&input.name)
+    .bind(&old_identity)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO telemetry_network_rates (
+            client_id, interface, bucket_start, bucket_secs, sample_count,
+            rx_bytes_avg, tx_bytes_avg, rx_bytes_last, tx_bytes_last, latest_observed_at)
+         VALUES ('unrelated-client','eth0',date_trunc('minute',now()),60,1,
+            100,200,100,200,date_trunc('second',now()))",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    // Seed both queue forms in both domains; only the discarded series loses work.
+    for domain in ["network_observation_rollups", "telemetry_rollups"] {
+        let owner = if domain == "network_observation_rollups" {
+            series_id.to_string()
+        } else {
+            "unrelated-client".to_string()
+        };
+        sqlx::query(
+            "INSERT INTO telemetry_history_due_events (
+                domain, source_bucket_secs, destination_bucket_secs, owner_identity,
+                destination_start, coalesce_ready_at, due_at)
+             VALUES ($1,60,300,ARRAY[$2::text],date_trunc('day',now()),
+                date_trunc('day',now())+interval '1 minute',
+                date_trunc('day',now())+interval '2 days 5 minutes')",
+        )
+        .bind(domain)
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO telemetry_history_due_spans (
+                domain, source_bucket_secs, destination_bucket_secs,
+                owner_identity, destination_start, due_at)
+             VALUES ($1,60,300,ARRAY[$2::text],date_trunc('day',now()),
+                date_trunc('day',now())+interval '2 days 5 minutes')",
+        )
+        .bind(domain)
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("DELETE FROM client_runtime_config_reconcile_work")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let preserved_tables = [
+        "tunnel_plans",
+        "jobs",
+        "job_targets",
+        "telemetry_samples",
+        "telemetry_network_rates",
+        "alert_policy_evidence",
+    ];
+    let mut preserved = Vec::new();
+    for table in preserved_tables {
+        preserved.push(
+            sqlx::query_scalar::<_, Value>(&format!(
+                "SELECT COALESCE(jsonb_agg(to_jsonb(item) ORDER BY to_jsonb(item)::text),'[]')
+                 FROM {table} item"
+            ))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        );
+    }
+    let mut tx = db.pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/0020_tunnel_plan_display_names.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    for (table, before) in preserved_tables.into_iter().zip(preserved) {
+        let after: Value = sqlx::query_scalar(&format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(item) ORDER BY to_jsonb(item)::text),'[]')
+             FROM {table} item"
+        ))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before, "migration changed unrelated owner {table}");
+    }
+    for table in [
+        "network_observations",
+        "network_observation_latest",
+        "network_observation_rollups",
+        "network_observation_series",
+        "telemetry_tunnels",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "old-format evidence remains in {table}");
+    }
+    for table in [
+        "telemetry_history_due_events",
+        "telemetry_history_due_spans",
+    ] {
+        let domains: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT DISTINCT domain FROM {table} ORDER BY domain"
+        ))
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert!(domains.contains(&"telemetry_rollups".to_string()));
+        assert!(!domains.contains(&"network_observation_rollups".to_string()));
+    }
+    let queued: Vec<(String, String)> = sqlx::query_as(
+        "SELECT client_id, reason FROM client_runtime_config_reconcile_work ORDER BY client_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        queued,
+        vec![
+            ("client-a".to_string(), "tunnel_plan_updated".to_string()),
+            ("client-b".to_string(), "tunnel_plan_updated".to_string()),
+        ]
+    );
+    let new_identity = tunnel_topology_identity_hash(saved.id, &plan);
+    assert_ne!(new_identity, old_identity);
+    let new_series_id: i64 = sqlx::query_scalar(
+        "INSERT INTO network_observation_series (
+            plan_id, topology_identity_hash, plan_name, interface_name,
+            client_id, peer_client_id, endpoint_side, address_family, target)
+         VALUES ($1,$2,$3,$4,'client-a','client-b','left','ipv4','10.10.0.1')
+         RETURNING id",
+    )
+    .bind(saved.id)
+    .bind(&new_identity)
+    .bind(&input.name)
+    .bind(&input.interface_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_observation_latest (
+            series_id, observation_id, stale_after_secs, healthy,
+            transmitted, received, packet_loss_ratio, observed_at, received_at)
+         VALUES ($1,$2,180,TRUE,3,3,0.0,now(),now())",
+    )
+    .bind(new_series_id)
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let accepted: String = sqlx::query_scalar(
+        "SELECT series.topology_identity_hash FROM network_observation_latest latest
+         JOIN network_observation_series series ON series.id=latest.series_id",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(accepted, new_identity);
+    db.cleanup().await;
+}

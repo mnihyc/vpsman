@@ -1904,6 +1904,21 @@ fn runtime_reconcile_summary(
     report: serde_json::Value,
     error: Option<String>,
 ) -> serde_json::Value {
+    let failed_commands = report["commands"]
+        .as_array()
+        .map(|commands| {
+            commands
+                .iter()
+                .filter(|command| command["success"].as_bool() == Some(false))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let error = error.or_else(|| {
+        failed_commands
+            .iter()
+            .find_map(|command| command["error"].as_str().map(str::to_string))
+    });
     serde_json::json!({
         "trigger": trigger,
         "plan_id": plan_id,
@@ -1922,6 +1937,8 @@ fn runtime_reconcile_summary(
             .cloned()
             .unwrap_or(serde_json::Value::Null),
         "error": error,
+        "failed_commands": failed_commands,
+        "compensation": report.get("compensation").cloned().unwrap_or(serde_json::Value::Null),
         "hook_failures": report["hook_failures"].as_u64().unwrap_or_default(),
         "hook_results": report["commands"].as_array().map(|commands| commands.iter().filter(|command| command["label"].as_str().is_some_and(|label| label.starts_with("runtime_hook_"))).cloned().collect::<Vec<_>>()).unwrap_or_default(),
     })
@@ -2104,6 +2121,8 @@ async fn probe_builtin_driver(
             "version probe timed out".to_string()
         } else if report["killed_for_output_limit"].as_bool() == Some(true) {
             "version probe exceeded its output limit".to_string()
+        } else if let Some(error) = report["error"].as_str() {
+            format!("executable unavailable: {error}")
         } else {
             format!(
                 "version probe exited with {}",

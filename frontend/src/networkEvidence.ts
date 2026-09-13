@@ -1,4 +1,59 @@
 import type { MonitoringWindow } from "./components/MonitoringRangeTabs";
+import type { NetworkObservationRecord } from "./types";
+
+export type NetworkEvidencePlanIdentity = {
+  planId?: string | null;
+  topologyIdentityHash?: string | null;
+  planName?: string | null;
+  interfaceName?: string | null;
+};
+
+export function networkEvidencePlanKey(
+  identity: NetworkEvidencePlanIdentity,
+): string | null {
+  if (identity.planId) return JSON.stringify(["plan", identity.planId]);
+  if (identity.topologyIdentityHash) {
+    return JSON.stringify(["topology", identity.topologyIdentityHash]);
+  }
+  return identity.planName
+    ? JSON.stringify(["name", identity.planName, identity.interfaceName ?? null])
+    : null;
+}
+
+export function networkEvidenceMatchesPlan(
+  evidence: Pick<NetworkObservationRecord, "plan_id">,
+  plan: { id: string },
+): boolean {
+  return evidence.plan_id === plan.id;
+}
+
+export function networkEvidenceSeriesKey(
+  evidence: Pick<
+    NetworkObservationRecord,
+    | "kind"
+    | "plan_id"
+    | "plan_name"
+    | "topology_identity_hash"
+    | "interface_name"
+    | "client_id"
+    | "peer_client_id"
+  > & { target?: string | null },
+): string {
+  return JSON.stringify([
+    evidence.kind,
+    networkEvidencePlanKey({
+      planId: evidence.plan_id,
+      topologyIdentityHash: evidence.topology_identity_hash,
+      planName: evidence.plan_name,
+      interfaceName: evidence.interface_name,
+    }),
+    evidence.topology_identity_hash,
+    evidence.interface_name,
+    evidence.client_id,
+    evidence.peer_client_id,
+    evidence.target ?? null,
+  ]);
+}
 
 export type NetworkEvidenceSource = "automatic" | "manual" | "";
 export type NetworkEvidenceKind =

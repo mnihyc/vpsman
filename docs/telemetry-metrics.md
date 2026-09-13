@@ -425,11 +425,11 @@ and the Topology graph distinguish automatic monitoring from manual tests and
 show expired evidence as stale. A failed run remains an explicit chart gap; it
 is never omitted or drawn as zero latency.
 
-The topology identity includes the saved plan name, kind, endpoints, interface,
+The topology identity includes the saved plan UUID, kind, endpoints, interface,
 local and remote underlay bindings, tunnel addresses, and primary address
 family. Changing one of those fields starts a new evidence generation. MTU,
 bandwidth, OSPF policy, and runtime command changes do not detach otherwise
-valid reachability history.
+valid reachability history. Renaming a plan preserves its evidence identity.
 
 From **Network > Tunnel plans**, a reviewed **Clear evidence** action can remove
 all retained automatic and manual observations for the selected plans when an

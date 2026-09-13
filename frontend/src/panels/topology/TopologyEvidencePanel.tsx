@@ -26,6 +26,7 @@ import type {
   AgentView,
   JobHistoryRecord,
   JobOutputRecord,
+  JobSubmittedRequestRecord,
   JobStatus,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
@@ -49,9 +50,12 @@ import {
   NETWORK_EVIDENCE_OBSERVATION_LIMIT,
   defaultNetworkEvidenceEndAt,
   defaultNetworkEvidenceStartAt,
+  networkEvidencePlanKey,
+  networkEvidenceSeriesKey,
   networkEvidenceWindowLabel,
   type NetworkEvidenceHealth,
   type NetworkEvidenceKind,
+  type NetworkEvidencePlanIdentity,
   type NetworkEvidenceQuery,
   type NetworkEvidenceSource,
 } from "../../networkEvidence";
@@ -74,6 +78,7 @@ export function TopologyEvidencePanel({
   observations,
   onLoadObservations,
   onLoadJobHistory,
+  onLoadJobRequest,
   onLoadOspfRecommendations,
   onLoadOspfUpdatePlans,
   onLoadOutputs,
@@ -96,6 +101,7 @@ export function TopologyEvidencePanel({
   observations: NetworkObservationRecord[];
   onLoadObservations: (query?: NetworkEvidenceQuery) => Promise<void>;
   onLoadJobHistory: () => Promise<JobHistoryRecord[]>;
+  onLoadJobRequest: (jobId: string) => Promise<JobSubmittedRequestRecord>;
   onLoadOspfRecommendations: () => Promise<void>;
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
@@ -116,8 +122,8 @@ export function TopologyEvidencePanel({
       jobs.filter((job) => networkCommands.has(job.command_type)).slice(0, 8),
     [jobs],
   );
-  const [outputsByJob, setOutputsByJob] = useState<
-    Record<string, JobOutputRecord[]>
+  const [loadedEvidenceByJob, setLoadedEvidenceByJob] = useState<
+    Record<string, { outputs: JobOutputRecord[]; planId: string | null }>
   >({});
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -144,14 +150,15 @@ export function TopologyEvidencePanel({
     [ospfRecommendations, ospfUpdatePlans],
   );
   const rows = networkJobs.map((job) => {
-    const outputs = outputsByJob[job.id];
+    const loaded = loadedEvidenceByJob[job.id];
     return buildEvidenceRow(
       job,
-      outputs ?? [],
+      loaded?.outputs ?? [],
       clientLabel,
-      outputs !== undefined,
+      loaded !== undefined,
       throughputBaselines,
       formatBytes,
+      loaded?.planId,
     );
   });
   const selectedPlanIds = appliedPlanId ? new Set([appliedPlanId]) : null;
@@ -370,13 +377,26 @@ export function TopologyEvidencePanel({
     setOutputNotice(null);
     try {
       const outputEntries = await Promise.all(
-        networkJobs.map(
-          async (job) => [job.id, await onLoadOutputs(job.id)] as const,
-        ),
+        networkJobs.map(async (job) => {
+          const speedTest = job.command_type === "network_speed_test";
+          const [outputs, request] = await Promise.all([
+            onLoadOutputs(job.id),
+            speedTest ? onLoadJobRequest(job.id) : Promise.resolve(null),
+          ]);
+          const operation = asRecord(request?.operation);
+          const planId = asString(operation.plan_id);
+          return [job.id, { outputs, planId }] as const;
+        }),
       );
-      setOutputsByJob(Object.fromEntries(outputEntries));
+      const loadedEvidence = Object.fromEntries(outputEntries);
+      setLoadedEvidenceByJob(loadedEvidence);
+      const missingSpeedRequest = networkJobs.some(
+        (job) =>
+          job.command_type === "network_speed_test" &&
+          loadedEvidence[job.id].planId === null,
+      );
       setOutputNotice(
-        `Loaded retained output for ${outputEntries.length} network job${outputEntries.length === 1 ? "" : "s"}`,
+        `Loaded retained output for ${outputEntries.length} network job${outputEntries.length === 1 ? "" : "s"}${missingSpeedRequest ? "; bandwidth comparison is unavailable for speed jobs without a retained submitted request" : ""}`,
       );
     } catch (loadError) {
       setOutputError(
@@ -1239,13 +1259,6 @@ type ThroughputBaseline = {
   effectiveBandwidthMbps: number;
 };
 
-type ThroughputBaselineIdentity = {
-  interfaceName?: string | null;
-  planId?: string | null;
-  planName?: string | null;
-  topologyIdentityHash?: string | null;
-};
-
 type NetworkEvidenceFreshness = {
   detail: string;
   latestTimestamp: string | null;
@@ -1548,7 +1561,7 @@ function buildThroughputBaselineLookup(
 function addThroughputBaseline(
   lookup: Map<string, ThroughputBaseline>,
   baseline: ThroughputBaseline,
-  identity: ThroughputBaselineIdentity,
+  identity: NetworkEvidencePlanIdentity,
 ) {
   if (
     !Number.isFinite(baseline.configuredBandwidthMbps) ||
@@ -1556,43 +1569,18 @@ function addThroughputBaseline(
   ) {
     return;
   }
-  for (const key of throughputBaselineKeys(identity)) {
-    if (!lookup.has(key)) {
-      lookup.set(key, baseline);
-    }
+  const key = networkEvidencePlanKey(identity);
+  if (key && !lookup.has(key)) {
+    lookup.set(key, baseline);
   }
 }
 
 function throughputBaselineFor(
-  identity: ThroughputBaselineIdentity,
+  identity: NetworkEvidencePlanIdentity,
   lookup: Map<string, ThroughputBaseline>,
 ): ThroughputBaseline | null {
-  for (const key of throughputBaselineKeys(identity)) {
-    const baseline = lookup.get(key);
-    if (baseline) {
-      return baseline;
-    }
-  }
-  return null;
-}
-
-function throughputBaselineKeys(
-  identity: ThroughputBaselineIdentity,
-): string[] {
-  const keys: string[] = [];
-  if (identity.planId) {
-    keys.push(`plan-id:${identity.planId}`);
-  }
-  if (identity.topologyIdentityHash) {
-    keys.push(`topology:${identity.topologyIdentityHash}`);
-  }
-  if (identity.planName && identity.interfaceName) {
-    keys.push(`plan-interface:${identity.planName}:${identity.interfaceName}`);
-  }
-  if (identity.planName) {
-    keys.push(`plan-name:${identity.planName}`);
-  }
-  return keys;
+  const key = networkEvidencePlanKey(identity);
+  return key ? (lookup.get(key) ?? null) : null;
 }
 
 function throughputSampleSignalLabel(
@@ -1724,7 +1712,11 @@ function buildTrendRow(
       ? `; tiered ${formatTrendResolution(trend.effective_resolution_secs)} source bucket`
       : "";
   return {
-    id: `${trend.kind}:${trend.plan_name ?? ""}:${trend.client_id}:${trend.peer_client_id ?? ""}:${trend.bucket_start ?? trend.latest_observed_at}`,
+    id: JSON.stringify([
+      networkEvidenceSeriesKey(trend),
+      trend.bucket_start ?? trend.latest_observed_at,
+      trend.bucket_secs ?? null,
+    ]),
     kind: trend.kind,
     sampleCount: trend.sample_count,
     signalLabel:
@@ -1915,13 +1907,7 @@ function buildLatencyCurveGroups(
     if (observation.kind !== "tunnel_reachability") {
       continue;
     }
-    const key = [
-      observation.plan_name ?? "unplanned",
-      observation.interface_name ?? "interface",
-      observation.client_id,
-      observation.peer_client_id ?? "peer",
-      observation.target ?? "target",
-    ].join(":");
+    const key = networkEvidenceSeriesKey(observation);
     grouped.set(key, [...(grouped.get(key) ?? []), observation]);
   }
   return Array.from(grouped.entries())
@@ -1971,6 +1957,7 @@ function buildEvidenceRow(
   outputsLoaded: boolean,
   throughputBaselines: Map<string, ThroughputBaseline>,
   formatBytes: ByteCountFormatter,
+  submittedPlanId: string | null | undefined,
 ): EvidenceRow {
   const parsedStatus = parseStatusOutput(outputs);
   if (isProbeStatus(parsedStatus)) {
@@ -2052,8 +2039,7 @@ function buildEvidenceRow(
       speedStatuses.every((status) => asBoolean(status.success));
     const baseline = throughputBaselineFor(
       {
-        interfaceName: asString(clientStatus.interface),
-        planName: asString(clientStatus.plan),
+        planId: submittedPlanId,
       },
       throughputBaselines,
     );

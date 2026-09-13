@@ -9,6 +9,64 @@ import {
   validateTunnelPlanName,
 } from "../src/topologyRuntime";
 import { networkSpeedServerSide } from "../src/topologyNetworkJobs";
+import {
+  networkEvidenceMatchesPlan,
+  networkEvidencePlanKey,
+  networkEvidenceSeriesKey,
+} from "../src/networkEvidence";
+
+test("tunnel evidence ownership survives rename without accepting another plan's reused name", () => {
+  const plan = { id: "plan-a", name: "renamed" };
+  const sameOwner = { plan_id: "plan-a", plan_name: "old" };
+  const otherOwner = { plan_id: "plan-b", plan_name: "renamed" };
+  const unbound = { plan_id: null, plan_name: "renamed" };
+  expect(networkEvidenceMatchesPlan(sameOwner, plan)).toBe(true);
+  expect(networkEvidenceMatchesPlan(otherOwner, plan)).toBe(false);
+  expect(networkEvidenceMatchesPlan(unbound, plan)).toBe(false);
+});
+
+test("tunnel bandwidth baseline uses its UUID without falling through to a reused display name", () => {
+  const original = networkEvidencePlanKey({ planId: "plan-a", planName: "old" });
+  const renamed = networkEvidencePlanKey({ planId: "plan-a", planName: "new" });
+  const reusedName = networkEvidencePlanKey({
+    planId: "plan-b",
+    planName: "old",
+  });
+  const unbound = networkEvidencePlanKey({ planName: "old" });
+  const baselines = new Map([[original, 100]]);
+  expect(baselines.get(renamed)).toBe(100);
+  expect(baselines.get(reusedName)).toBeUndefined();
+  expect(baselines.get(unbound)).toBeUndefined();
+  expect(networkEvidencePlanKey({})).toBeNull();
+});
+
+test("tunnel evidence curves share renamed samples but separate topology and stream changes", () => {
+  const observation = {
+    kind: "tunnel_reachability",
+    plan_id: "plan-a",
+    plan_name: "old",
+    topology_identity_hash: "topology-a",
+    interface_name: "tun0",
+    client_id: "left",
+    peer_client_id: "right",
+    target: "10.0.0.1",
+  };
+  const key = networkEvidenceSeriesKey(observation);
+  expect(networkEvidenceSeriesKey({ ...observation, plan_name: "new" })).toBe(
+    key,
+  );
+  for (const change of [
+    { plan_id: "plan-b" },
+    { topology_identity_hash: "topology-b" },
+    { interface_name: "tun1" },
+    { peer_client_id: "other" },
+    { target: "fd00::1" },
+  ]) {
+    expect(networkEvidenceSeriesKey({ ...observation, ...change })).not.toBe(
+      key,
+    );
+  }
+});
 
 const runtimeControlValues = {
   burstKb: "",

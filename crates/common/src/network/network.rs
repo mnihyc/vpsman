@@ -39,11 +39,10 @@ pub use runtime_render::*;
 mod tests;
 
 /// Stable identity for the topology fields that bind reachability evidence.
-/// Endpoint or address-family changes detach old observations; policy-only edits do not.
+/// Endpoint or address-family changes detach old observations; policy and display-name edits do not.
 pub fn tunnel_topology_identity_hash(plan_id: uuid::Uuid, plan: &TunnelPlan) -> String {
     let payload = serde_json::to_vec(&serde_json::json!({
         "plan_id": plan_id.to_string(),
-        "name": &plan.name,
         "kind": format!("{:?}", plan.kind),
         "left_client_id": &plan.left_client_id,
         "right_client_id": &plan.right_client_id,
@@ -62,20 +61,25 @@ pub fn tunnel_topology_identity_hash(plan_id: uuid::Uuid, plan: &TunnelPlan) -> 
     crate::payload_hash(&payload)
 }
 
-/// Stable identity for the complete runtime-tunnel configuration that can
+/// Stable identity for the runtime-tunnel configuration, excluding its display name, that can
 /// affect adapter and traffic evidence. Unlike the topology identity above,
 /// this intentionally changes for policy/runtime-control edits and builtin
 /// credential rotation. A telemetry sample carrying this identity therefore
-/// proves that the agent received the exact desired runtime configuration.
+/// attributes measurements to the desired non-display runtime configuration.
 pub fn tunnel_runtime_evidence_identity_hash(
     plan_id: uuid::Uuid,
     plan: &TunnelPlan,
     credential_generation: Option<u64>,
 ) -> String {
+    let mut runtime_plan = serde_json::to_value(plan).expect("runtime plan serializes");
+    runtime_plan
+        .as_object_mut()
+        .expect("runtime plan is an object")
+        .remove("name");
     let payload = serde_json::to_vec(&serde_json::json!({
         "schema": 1,
         "plan_id": plan_id.to_string(),
-        "plan": plan,
+        "plan": runtime_plan,
         "builtin_credential_generation": credential_generation,
     }))
     .expect("runtime evidence identity payload serializes");

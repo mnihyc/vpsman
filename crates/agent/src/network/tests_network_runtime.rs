@@ -190,6 +190,29 @@ fn iproute2_link_inspection_keeps_observed_mtu() {
 }
 
 #[test]
+fn iproute2_address_inspection_matches_real_peer_fields_without_relaxing_ownership() {
+    for (local, peer, prefix, wrong_peer, family) in [
+        ("10.255.0.0", "10.255.0.1", 31, "10.255.0.2", "inet"),
+        ("fd00:ffff::", "fd00:ffff::1", 127, "fd00:ffff::2", "inet6"),
+    ] {
+        let observed = serde_json::json!([{
+            "ifname": "tunab",
+            "addr_info": [
+                {"family": "inet6", "local": "fe80::1", "prefixlen": 64},
+                {"family": family, "local": local, "address": peer, "prefixlen": prefix}
+            ]
+        }]);
+        let addresses = parse_iproute2_addr_json(&observed.to_string(), "tunab").unwrap();
+        assert!(matching_existing_iproute2_address(&addresses, local, peer, prefix).is_some());
+        assert!(
+            matching_existing_iproute2_address(&addresses, local, wrong_peer, prefix).is_none()
+        );
+        assert!(matching_existing_iproute2_address(&addresses, wrong_peer, peer, prefix).is_none());
+        assert!(matching_existing_iproute2_address(&addresses, local, peer, prefix - 1).is_none());
+    }
+}
+
+#[test]
 fn custom_adapter_renders_all_declared_traffic_limit_values() {
     let mut plan = plan(RuntimeTunnelManager::CustomAdapter);
     plan.runtime_control.traffic_limit = RuntimeTunnelTrafficLimit {
@@ -375,15 +398,97 @@ fn builtin_failure_compensation_requires_proven_link_creation() {
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
 
     let (unproven, reason) =
-        build_runtime_compensation_steps(&config, &plan, &endpoint, None, false).unwrap();
+        build_runtime_compensation_steps(&config, &plan, &endpoint, None, false, false).unwrap();
     assert!(unproven.is_empty());
     assert_eq!(reason, Some("no_plan_owned_link_created"));
 
     let (created, reason) =
-        build_runtime_compensation_steps(&config, &plan, &endpoint, None, true).unwrap();
+        build_runtime_compensation_steps(&config, &plan, &endpoint, None, true, false).unwrap();
     assert_eq!(reason, None);
     assert_eq!(created.len(), 1);
     assert_eq!(created[0].label, "runtime_compensate_link_delete");
+}
+
+#[test]
+fn builtin_compensation_ownership_matrix_deletes_only_new_resources() {
+    let config = AgentConfig::default();
+    let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    plan.kind = TunnelKind::Fou;
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    for (created_link, created_listener) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let (steps, reason) = build_runtime_compensation_steps(
+            &config,
+            &plan,
+            &endpoint,
+            None,
+            created_link,
+            created_listener,
+        )
+        .unwrap();
+        assert_eq!(
+            steps.len(),
+            usize::from(created_link) + usize::from(created_listener)
+        );
+        assert_eq!(reason.is_none(), created_link || created_listener);
+        assert_eq!(
+            steps
+                .iter()
+                .any(|step| step.argv.windows(2).any(|pair| pair == ["link", "delete"])),
+            created_link
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .any(|step| step.argv.windows(2).any(|pair| pair == ["fou", "del"])),
+            created_listener
+        );
+    }
+}
+
+#[test]
+fn fou_listener_idempotency_requires_exact_compatible_kernel_evidence() {
+    let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    plan.kind = TunnelKind::Fou;
+    let valid = serde_json::json!({
+        "port": plan.runtime_control.fou.port,
+        "ipproto": plan.runtime_control.fou.ipproto,
+        "family": "inet"
+    });
+    let report = |listener: serde_json::Value| {
+        serde_json::json!({
+            "success": true, "stdout": {"text": serde_json::json!([listener]).to_string()}
+        })
+    };
+    assert!(fou_listener_matches(&plan, &report(valid.clone())));
+    let mut no_family = valid.clone();
+    no_family.as_object_mut().unwrap().remove("family");
+    assert!(fou_listener_matches(&plan, &report(no_family)));
+    for (field, value) in [
+        ("port", serde_json::json!(0)),
+        ("ipproto", serde_json::json!(255)),
+        ("family", serde_json::json!("inet6")),
+        ("gue", serde_json::json!(true)),
+        ("local", serde_json::json!("192.0.2.1")),
+        ("peer", serde_json::json!("192.0.2.2")),
+        ("peer_port", serde_json::json!(12345)),
+        ("dev", serde_json::json!("eth0")),
+    ] {
+        let mut incompatible = valid.clone();
+        incompatible[field] = value;
+        assert!(
+            !fou_listener_matches(&plan, &report(incompatible)),
+            "accepted {field}"
+        );
+    }
+    for evidence in [
+        serde_json::json!({"success": true, "stdout": {"text": "not JSON"}}),
+        serde_json::json!({"success": true, "stdout": {"text": "[]"}}),
+        serde_json::json!({"success": true, "stdout": {"text": valid.to_string()}}),
+    ] {
+        assert!(!fou_listener_matches(&plan, &evidence));
+    }
 }
 
 fn hooked_builtin_plan() -> TunnelPlan {
@@ -963,4 +1068,693 @@ fn traffic_limit_clear_accepts_only_explicit_already_absent_evidence() {
     accept_idempotent_traffic_clear("runtime_traffic_egress_clear", &mut denied);
     assert_eq!(denied["success"], false);
     assert!(denied.get("reason").is_none());
+}
+
+// These tests exercise the actual reconciler, real iproute2 and real OpenVPN.
+// Run only in a disposable Docker container with private network/PID namespaces,
+// NET_ADMIN, iproute2, OpenVPN, OpenSSL and /dev/net/tun. Never use host networking.
+#[cfg(target_os = "linux")]
+mod isolated_linux_failures {
+    use super::*;
+    use std::{path::PathBuf, process::Output};
+    use vpsman_common::TunnelEndpointBuiltinCredentials;
+
+    fn require_isolated_network() {
+        assert_eq!(
+            std::env::var("VPSMAN_TEST_ISOLATED_NETWORK").as_deref(),
+            Ok("1"),
+            "set VPSMAN_TEST_ISOLATED_NETWORK=1 only in a disposable private-network container"
+        );
+        assert!(
+            Path::new("/.dockerenv").exists(),
+            "Docker isolation is required"
+        );
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "container NET_ADMIN is required"
+        );
+    }
+
+    async fn native(program: &str, args: &[&str]) -> Output {
+        // Each helper is bounded separately; the full reconcile has a 30s budget.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new(program)
+                .args(args)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("native test helper timed out")
+        .expect("native test helper executable is required")
+    }
+
+    async fn checked_native(program: &str, args: &[&str]) -> Output {
+        let output = native(program, args).await;
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    fn unique_interface() -> String {
+        // Linux interface names have a 15-byte limit; 4 + 8 stays below it.
+        format!("vpsf{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+    }
+
+    fn available_udp_port() -> u16 {
+        // Ask this private namespace for a free port instead of sharing a fixed one.
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    struct PreservedResources {
+        interface: String,
+        link_before: Vec<u8>,
+        process: tokio::process::Child,
+    }
+
+    impl PreservedResources {
+        async fn new() -> Self {
+            require_isolated_network();
+            let interface = unique_interface();
+            checked_native("/sbin/ip", &["link", "add", &interface, "type", "dummy"]).await;
+            let link_before =
+                checked_native("/sbin/ip", &["-j", "-d", "link", "show", "dev", &interface])
+                    .await
+                    .stdout;
+            let process = tokio::process::Command::new("/bin/sleep")
+                // Outlast the bounded reconcile; kill_on_drop also covers assertions.
+                .arg("120")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            Self {
+                interface,
+                link_before,
+                process,
+            }
+        }
+
+        async fn assert_preserved(&mut self) {
+            assert_eq!(
+                checked_native(
+                    "/sbin/ip",
+                    &["-j", "-d", "link", "show", "dev", &self.interface]
+                )
+                .await
+                .stdout,
+                self.link_before,
+                "failed apply changed a pre-existing unrelated interface"
+            );
+            assert!(
+                self.process.try_wait().unwrap().is_none(),
+                "failed apply killed an unrelated process"
+            );
+        }
+    }
+
+    impl Drop for PreservedResources {
+        fn drop(&mut self) {
+            // This exact randomly named link was created by this fixture.
+            let _ = std::process::Command::new("/sbin/ip")
+                .args(["link", "delete", "dev", &self.interface])
+                .output();
+        }
+    }
+
+    fn config() -> AgentConfig {
+        let mut config = AgentConfig {
+            client_id: "edge-a".to_string(),
+            ..Default::default()
+        };
+        config.network.apply_enabled = true;
+        config.network.runtime_reconcile_enabled = true;
+        // Use this container's real /proc and /sys for ownership and link evidence.
+        config.network.root_dir = "/".to_string();
+        // Keep the production defaults: /sbin/ip, /sbin/tc and /usr/sbin/openvpn.
+        // Command rendering requires absolute executables, including in fixtures.
+        config.network.runtime_command_timeout_secs = 5;
+        config
+    }
+
+    fn isolated_plan(kind: TunnelKind) -> TunnelPlan {
+        let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+        plan.kind = kind;
+        plan.interface_name = unique_interface();
+        if kind == TunnelKind::Openvpn {
+            // A local listener needs no external peer to create its TUN device.
+            plan.left_local_underlay = Some("127.0.0.1".to_string());
+            plan.runtime_control.openvpn.port = available_udp_port();
+        } else if kind == TunnelKind::Sit {
+            // SIT carries IPv6 inside IPv4, so use an IPv6 inner-address fixture.
+            plan.ipv4_tunnel = None;
+            plan.ipv6_tunnel = Some(TunnelAddressPair {
+                left: "fd00:ffff::".to_string(),
+                right: "fd00:ffff::1".to_string(),
+                prefix_len: 127,
+            });
+            plan.left_tunnel_address = "fd00:ffff::".to_string();
+            plan.right_tunnel_address = "fd00:ffff::1".to_string();
+            plan.tunnel_prefix_len = 127;
+            plan.latency_primary_family = TunnelAddressFamily::Ipv6;
+        }
+        plan
+    }
+
+    async fn reconcile(
+        config: &AgentConfig,
+        plan: &TunnelPlan,
+        plan_id: Option<&str>,
+        credentials: Option<&TunnelEndpointBuiltinCredentials>,
+    ) -> Result<serde_json::Value> {
+        execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
+            config,
+            plan_id,
+            plan,
+            previous_plan: None,
+            builtin_credentials: credentials,
+            runtime_adapter: None,
+            side: TunnelEndpointSide::Left,
+            max_timeout_secs: 30,
+            effective_uid_override: None,
+        })
+        .await
+    }
+
+    fn report_step<'a>(report: &'a serde_json::Value, label: &str) -> &'a serde_json::Value {
+        report["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["label"] == label)
+            .unwrap_or_else(|| panic!("missing {label}: {report}"))
+    }
+
+    async fn assert_link_absent(plan: &TunnelPlan) {
+        assert!(!runtime_link_exists(Path::new("/"), &plan.interface_name).await);
+        assert!(
+            !native("/sbin/ip", &["link", "show", "dev", &plan.interface_name])
+                .await
+                .status
+                .success()
+        );
+    }
+
+    fn fail_mtu_argv() -> Vec<String> {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r#"if [ "$1" = link ] && [ "$2" = set ] && [ "$5" = mtu ]; then
+  printf 'injected MTU apply failure\n' >&2; exit 23
+fi
+exec /sbin/ip "$@""#
+                .to_string(),
+            "injected-ip-mtu-failure".to_string(),
+        ]
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, naturally unavailable kernel FOU, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
+    async fn fou_actual_missing_kernel_capability_fails_without_leaking_resources() {
+        let mut preserved = PreservedResources::new().await;
+        let plan = isolated_plan(TunnelKind::Fou);
+        let before = native("/sbin/ip", &["fou", "show"]).await;
+        // Containers share the host kernel. Assert the observed environment
+        // assumption instead of unloading modules or silently skipping coverage.
+        assert!(
+            !before.status.success(),
+            "this test requires naturally unavailable kernel FOU"
+        );
+        let kernel_error = String::from_utf8_lossy(&before.stderr);
+        assert!(
+            kernel_error.contains("No such file or directory")
+                || kernel_error.contains("Operation not supported"),
+            "expected absent FOU support, not a generic permission/tool failure: {kernel_error}"
+        );
+        let report = reconcile(&config(), &plan, None, None).await.unwrap();
+        assert_eq!(report["status"], "failed", "{report}");
+        assert_eq!(report_step(&report, "runtime_fou_add")["success"], false);
+        assert!(!report["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["label"] == "runtime_tunnel_add"));
+        assert_link_absent(&plan).await;
+        let after = native("/sbin/ip", &["fou", "show"]).await;
+        assert_eq!(after.status.code(), before.status.code());
+        assert_eq!(after.stdout, before.stdout, "FOU listener state changed");
+        preserved.assert_preserved().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, GRE/IPIP/SIT, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
+    async fn iproute2_builtin_apply_failure_ownership_matrix() {
+        let mut preserved = PreservedResources::new().await;
+        let mut config = config();
+        config.network.runtime_ip_argv = fail_mtu_argv();
+        for kind in [TunnelKind::Gre, TunnelKind::Ipip, TunnelKind::Sit] {
+            let plan = isolated_plan(kind);
+            let report = reconcile(&config, &plan, None, None).await.unwrap();
+            assert_eq!(report["status"], "failed", "{kind:?}: {report}");
+            assert_eq!(report_step(&report, "runtime_tunnel_add")["success"], true);
+            assert_eq!(report_step(&report, "runtime_link_mtu")["success"], false);
+            assert_eq!(report["compensation"]["status"], "completed", "{report}");
+            assert_link_absent(&plan).await;
+            preserved.assert_preserved().await;
+
+            // Retry through the same reconciler with the failed command restored.
+            // Its rendered addresses must pass the next attempt's ownership check.
+            let mut native_config = config.clone();
+            native_config.network.runtime_ip_argv = AgentConfig::default().network.runtime_ip_argv;
+            let retried = reconcile(&native_config, &plan, None, None).await.unwrap();
+            assert_eq!(retried["status"], "converged", "{kind:?}: {retried}");
+            let before = checked_native(
+                "/sbin/ip",
+                &["-j", "-d", "link", "show", "dev", &plan.interface_name],
+            )
+            .await
+            .stdout;
+            let report = reconcile(&config, &plan, None, None).await.unwrap();
+            assert_eq!(report["status"], "failed", "{kind:?}: {report}");
+            assert_eq!(report_step(&report, "runtime_link_mtu")["success"], false);
+            assert_eq!(
+                report["compensation"]["status"], "not_available",
+                "{report}"
+            );
+            assert_eq!(
+                checked_native(
+                    "/sbin/ip",
+                    &["-j", "-d", "link", "show", "dev", &plan.interface_name]
+                )
+                .await
+                .stdout,
+                before,
+                "failed apply must preserve a validated pre-existing {kind:?} link"
+            );
+            preserved.assert_preserved().await;
+            checked_native("/sbin/ip", &["link", "delete", "dev", &plan.interface_name]).await;
+        }
+    }
+
+    fn invalid_credentials() -> TunnelEndpointBuiltinCredentials {
+        TunnelEndpointBuiltinCredentials::Openvpn {
+            generation: 1,
+            local_private_key_pem: "deliberately invalid key".to_string(),
+            local_certificate_pem: "deliberately invalid certificate".to_string(),
+            peer_issuer_certificate_pem: "deliberately invalid CA".to_string(),
+            peer_certificate_sha256_fingerprint: "00".repeat(32),
+        }
+    }
+
+    fn endpoint_dir(plan_id: &str) -> PathBuf {
+        crate::state_dir::agent_state_dir()
+            .unwrap()
+            .join("network-tunnels")
+            .join(plan_id)
+            .join("left")
+    }
+
+    fn assert_no_owned_process(plan_id: &str) {
+        let expected = endpoint_dir(plan_id).join("openvpn.conf");
+        let expected = expected.to_string_lossy();
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+                continue;
+            }
+            let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let args = cmdline.split(|byte| *byte == 0).collect::<Vec<_>>();
+            assert!(
+                !args
+                    .windows(2)
+                    .any(|pair| pair[0] == b"--config" && pair[1] == expected.as_bytes()),
+                "failed apply leaked an OpenVPN process for {}",
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
+    async fn openvpn_missing_executable_preserves_existing_interface_and_process() {
+        let mut preserved = PreservedResources::new().await;
+        let mut plan = isolated_plan(TunnelKind::Openvpn);
+        // Even a same-name pre-existing link must be untouched by preflight failure.
+        plan.interface_name = preserved.interface.clone();
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let mut config = config();
+        config.network.runtime_openvpn_argv = vec![std::env::current_dir()
+            .unwrap()
+            .join(format!(".missing-openvpn-{plan_id}"))
+            .to_str()
+            .unwrap()
+            .to_string()];
+        let error = reconcile(&config, &plan, Some(&plan_id), Some(&invalid_credentials()))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("runtime_openvpn_version")
+                && error.to_string().contains("No such file"),
+            "{error:#}"
+        );
+        assert!(
+            !endpoint_dir(&plan_id).exists(),
+            "preflight failure wrote runtime state"
+        );
+        assert_no_owned_process(&plan_id);
+        preserved.assert_preserved().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, OpenVPN, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
+    async fn openvpn_real_invalid_credentials_startup_failure_leaks_no_process_or_link() {
+        let mut preserved = PreservedResources::new().await;
+        let plan = isolated_plan(TunnelKind::Openvpn);
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let report = reconcile(
+            &config(),
+            &plan,
+            Some(&plan_id),
+            Some(&invalid_credentials()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["status"], "failed", "{report}");
+        assert_eq!(
+            report_step(&report, "runtime_openvpn_version")["success"],
+            true
+        );
+        // OpenVPN daemonizes before loading TLS credentials: its launcher can
+        // succeed while asynchronous daemon initialization fails readiness.
+        assert_eq!(
+            report_step(&report, "runtime_openvpn_start")["success"],
+            true
+        );
+        assert_eq!(
+            report_step(&report, "runtime_openvpn_interface_ready")["success"],
+            false
+        );
+        assert_link_absent(&plan).await;
+        assert_no_owned_process(&plan_id);
+        preserved.assert_preserved().await;
+        openvpn::cleanup_openvpn_state(Some(&plan_id), TunnelEndpointSide::Left)
+            .await
+            .unwrap();
+    }
+
+    async fn generated_credentials(plan_id: &str) -> TunnelEndpointBuiltinCredentials {
+        let directory = PathBuf::from(".tmp").join(format!("openvpn-isolated-{plan_id}"));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        let key = directory.join("key.pem");
+        let cert = directory.join("cert.pem");
+        // Disposable TLS fixture only. RSA-2048 satisfies OpenVPN's default TLS
+        // security level, and one day is sufficient for this single test run.
+        checked_native(
+            "/usr/bin/openssl",
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                key.to_str().unwrap(),
+                "-out",
+                cert.to_str().unwrap(),
+                "-days",
+                "1",
+                "-subj",
+                "/CN=isolated-runtime-test",
+            ],
+        )
+        .await;
+        let key_pem = tokio::fs::read_to_string(&key).await.unwrap();
+        let cert_pem = tokio::fs::read_to_string(&cert).await.unwrap();
+        tokio::fs::remove_dir_all(&directory).await.unwrap();
+        TunnelEndpointBuiltinCredentials::Openvpn {
+            generation: 1,
+            local_private_key_pem: key_pem,
+            local_certificate_pem: cert_pem.clone(),
+            peer_issuer_certificate_pem: cert_pem,
+            // No peer handshake is performed; the fingerprint only contributes to the state hash.
+            peer_certificate_sha256_fingerprint: "00".repeat(32),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, OpenVPN, OpenSSL, TUN, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
+    async fn openvpn_real_started_daemon_is_stopped_after_injected_apply_failure() {
+        let mut preserved = PreservedResources::new().await;
+        let plan = isolated_plan(TunnelKind::Openvpn);
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let credentials = generated_credentials(&plan_id).await;
+        let mut config = config();
+        config.network.runtime_ip_argv = fail_mtu_argv();
+        let report = reconcile(&config, &plan, Some(&plan_id), Some(&credentials))
+            .await
+            .unwrap();
+        assert_eq!(report["status"], "failed", "{report}");
+        assert_eq!(
+            report_step(&report, "runtime_openvpn_start")["success"],
+            true
+        );
+        assert_eq!(
+            report_step(&report, "runtime_openvpn_interface_ready")["success"],
+            true
+        );
+        assert_eq!(report_step(&report, "runtime_link_mtu")["success"], false);
+        assert_link_absent(&plan).await;
+        assert_no_owned_process(&plan_id);
+        preserved.assert_preserved().await;
+        openvpn::cleanup_openvpn_state(Some(&plan_id), TunnelEndpointSide::Left)
+            .await
+            .unwrap();
+    }
+}
+
+const MANAGER_TEST_KINDS: [TunnelKind; 8] = [
+    TunnelKind::Gre,
+    TunnelKind::Ipip,
+    TunnelKind::Sit,
+    TunnelKind::Fou,
+    TunnelKind::Wireguard,
+    TunnelKind::Openvpn,
+    TunnelKind::TunTap,
+    TunnelKind::Custom,
+];
+
+#[tokio::test]
+async fn external_observed_never_mutates_or_compensates_for_any_tunnel_kind() {
+    let config = builtin_hook_test_config();
+    let root = Path::new(&config.network.root_dir);
+    for preexisting in [false, true] {
+        if preexisting {
+            tokio::fs::create_dir_all(root.join("sys/class/net/tunab"))
+                .await
+                .unwrap();
+        }
+        for kind in MANAGER_TEST_KINDS {
+            let mut plan = plan(RuntimeTunnelManager::ExternalObserved);
+            plan.kind = kind;
+            let report = reconcile_hook_test(&config, &plan).await;
+            assert_eq!(report["status"], "observed_only", "{kind:?}: {report}");
+            assert_eq!(report["link_existed_before"], preexisting);
+            assert!(report["commands"].as_array().unwrap().is_empty());
+            assert!(report["compensation"].is_null());
+        }
+    }
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn custom_adapter_failure_uses_only_declared_compensation_for_any_tunnel_kind() {
+    let config = builtin_hook_test_config();
+    let root = std::env::current_dir()
+        .unwrap()
+        .join(&config.network.root_dir);
+    let missing = root.join("missing-adapter-start");
+    let mut snapshot = adapter();
+    snapshot.startup = Some(command(&[missing.to_str().unwrap()]));
+    snapshot.stop = Some(command(&["/bin/echo", "declared-stop"]));
+    snapshot.cleanup = Some(command(&["/bin/echo", "declared-cleanup"]));
+    for preexisting in [false, true] {
+        if preexisting {
+            tokio::fs::create_dir_all(root.join("sys/class/net/tunab"))
+                .await
+                .unwrap();
+        }
+        for kind in MANAGER_TEST_KINDS {
+            let mut plan = plan(RuntimeTunnelManager::CustomAdapter);
+            plan.kind = kind;
+            let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
+                config: &config,
+                plan_id: None,
+                plan: &plan,
+                previous_plan: None,
+                builtin_credentials: None,
+                runtime_adapter: Some(&snapshot),
+                side: TunnelEndpointSide::Left,
+                max_timeout_secs: 10,
+                effective_uid_override: Some(0),
+            })
+            .await
+            .unwrap();
+            assert_eq!(report["status"], "failed", "{kind:?}: {report}");
+            assert_eq!(report["link_existed_before"], preexisting);
+            let commands = report["commands"].as_array().unwrap();
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0]["label"], "runtime_adapter_startup");
+            assert!(commands[0]["error"].is_string());
+            let compensation = &report["compensation"];
+            assert_eq!(compensation["status"], "completed");
+            assert_eq!(compensation["commands"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                compensation["commands"][0]["label"],
+                "runtime_adapter_compensate_stop"
+            );
+            assert_eq!(
+                compensation["commands"][0]["argv"],
+                serde_json::json!(["/bin/echo", "declared-stop"])
+            );
+            assert_eq!(
+                compensation["commands"][1]["label"],
+                "runtime_adapter_compensate_cleanup"
+            );
+            assert_eq!(
+                compensation["commands"][1]["argv"],
+                serde_json::json!(["/bin/echo", "declared-cleanup"])
+            );
+            // The adapter contract, not native interface ownership, determines its
+            // cleanup commands; this fixture deliberately declares no deletion.
+            assert_eq!(root.join("sys/class/net/tunab").exists(), preexisting);
+        }
+    }
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn fou_reconcile_command_fixtures_compensate_only_resources_created_by_the_attempt() {
+    // Exercise the actual reconciler and runner with recorded command fixtures.
+    // These wrappers model command outcomes, not native kernel FOU support.
+    for (scenario, failed_label, compensation_label) in [
+        (
+            "new_listener",
+            "runtime_tunnel_add",
+            Some("runtime_compensate_fou_delete"),
+        ),
+        (
+            "reused_listener",
+            "runtime_link_mtu",
+            Some("runtime_compensate_link_delete"),
+        ),
+        ("incompatible_listener", "runtime_fou_add", None),
+    ] {
+        let mut config = builtin_hook_test_config();
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(&config.network.root_dir);
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let calls_path = root.join("commands.log");
+        let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+        plan.kind = TunnelKind::Fou;
+        let listeners = serde_json::json!([{
+            "port": plan.runtime_control.fou.port,
+            "ipproto": plan.runtime_control.fou.ipproto,
+            "family": if scenario == "incompatible_listener" { "inet6" } else { "inet" },
+        }]);
+        config.network.runtime_ip_argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r#"fixture_log=$1
+fixture_case=$2
+fixture_listeners=$3
+shift 3
+printf '%s\n' "$*" >> "$fixture_log"
+case "$1 $2" in
+    'fou add') test "$fixture_case" = 'new_listener' ;;
+    '-j fou') printf '%s\n' "$fixture_listeners" ;;
+    'tunnel add') test "$fixture_case" = 'reused_listener' ;;
+    'link set') exit 1 ;;
+    'fou del'|'link delete'|'link show') exit 0 ;;
+    *) exit 99 ;;
+esac"#
+                .to_string(),
+            "fou-command-fixture".to_string(),
+            calls_path.to_str().unwrap().to_string(),
+            scenario.to_string(),
+            listeners.to_string(),
+        ];
+
+        let report = reconcile_hook_test(&config, &plan).await;
+
+        assert_eq!(report["status"], "failed", "{scenario}: {report}");
+        assert_eq!(report["link_existed_before"], false);
+        let commands = report["commands"].as_array().unwrap();
+        let failed = commands
+            .iter()
+            .find(|command| command["label"] == failed_label)
+            .unwrap();
+        assert_eq!(failed["success"], false, "{scenario}: {report}");
+        let fou_add = commands
+            .iter()
+            .find(|command| command["label"] == "runtime_fou_add")
+            .unwrap();
+        assert_eq!(fou_add["success"], scenario != "incompatible_listener");
+        assert_eq!(
+            fou_add["accepted_existing_listener"].as_bool() == Some(true),
+            scenario == "reused_listener"
+        );
+        if let Some(tunnel_add) = commands
+            .iter()
+            .find(|command| command["label"] == "runtime_tunnel_add")
+        {
+            assert_eq!(tunnel_add["success"], scenario == "reused_listener");
+        }
+        let compensation = &report["compensation"];
+        assert_eq!(
+            compensation["status"],
+            if compensation_label.is_some() {
+                "completed"
+            } else {
+                "not_available"
+            }
+        );
+        assert_eq!(
+            compensation["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|command| command["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            compensation_label.into_iter().collect::<Vec<_>>()
+        );
+        let calls = tokio::fs::read_to_string(&calls_path).await.unwrap();
+        assert_eq!(
+            calls.lines().any(|line| line.starts_with("tunnel add ")),
+            scenario != "incompatible_listener",
+            "{scenario}: {calls}"
+        );
+        let expected_deletions = match scenario {
+            "new_listener" => vec![format!("fou del port {}", plan.runtime_control.fou.port)],
+            "reused_listener" => vec![format!("link delete dev {}", plan.interface_name)],
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("fou del ") || line.starts_with("link delete "))
+                .collect::<Vec<_>>(),
+            expected_deletions,
+            "{scenario}: {calls}"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }

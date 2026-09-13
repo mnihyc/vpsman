@@ -139,8 +139,9 @@ pub(super) async fn validate_existing_wireguard(
     .await?;
     if report["success"].as_bool() != Some(true) {
         anyhow::bail!(
-            "existing interface {} is not an inspectable WireGuard interface",
-            plan.interface_name
+            "existing interface {} is not an inspectable WireGuard interface: {}",
+            plan.interface_name,
+            super::runtime_report_failure_summary(&report)
         );
     }
     let actual = report["stdout"]["text"].as_str().unwrap_or_default().trim();
@@ -171,8 +172,9 @@ pub(super) async fn validate_existing_wireguard(
     .await?;
     if peer_report["success"].as_bool() != Some(true) {
         anyhow::bail!(
-            "existing interface {} does not expose WireGuard peers",
-            plan.interface_name
+            "existing interface {} does not expose WireGuard peers: {}",
+            plan.interface_name,
+            super::runtime_report_failure_summary(&peer_report)
         );
     }
     let peers = peer_report["stdout"]["text"]

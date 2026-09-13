@@ -256,9 +256,6 @@ pub(crate) async fn update_tunnel_plan(
     if identity.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
     }
-    if identity.name != request.input.name {
-        return Err(ApiError::bad_request("tunnel_plan_name_is_immutable"));
-    }
     let enabled = request.enabled.unwrap_or(identity.enabled);
     let plan = plan_tunnel(&request.input).map_err(tunnel_plan_bad_request)?;
     match state.repo.get_tunnel_plan(plan_id).await {
@@ -1322,8 +1319,6 @@ fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("tunnel_plan_address_conflict")
     } else if message.contains("tunnel_plan_listener_port_conflict") {
         ApiError::conflict("tunnel_plan_listener_port_conflict")
-    } else if message.contains("tunnel_plan_name_is_immutable") {
-        ApiError::bad_request("tunnel_plan_name_is_immutable")
     } else if message.contains("tunnel_plan_builtin_credentials_not_supported") {
         ApiError::conflict("tunnel_plan_builtin_credentials_not_supported")
     } else if message.contains("tunnel_plan_builtin_credentials_required") {

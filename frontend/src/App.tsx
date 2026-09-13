@@ -2911,6 +2911,7 @@ export function App() {
             dashboard.loadNetworkAdapterDefinitions
           }
           onLoadJobHistory={dashboard.loadJobHistory}
+          onLoadJobRequest={dashboard.loadJobRequest}
           onLoadTopologyGraph={dashboard.loadTopologyGraph}
           onLoadOutputs={dashboard.loadJobOutputs}
           onLoadTargets={dashboard.loadJobTargets}

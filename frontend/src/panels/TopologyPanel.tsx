@@ -81,6 +81,7 @@ import type {
   CreateJobResponse,
   CreateTunnelPlanRequest,
   JobHistoryRecord,
+  JobSubmittedRequestRecord,
   JobOutputRecord,
   JobTargetRecord,
   NetworkObservationRecord,
@@ -203,6 +204,7 @@ export function TopologyPanel({
   onLoadOspfUpdatePlans,
   onLoadNetworkAdapterDefinitions,
   onLoadJobHistory,
+  onLoadJobRequest,
   onLoadOutputs,
   onLoadTargets,
   onLoadTopologyGraph,
@@ -442,6 +444,7 @@ export function TopologyPanel({
         onLoadOspfRecommendations={onLoadOspfRecommendations}
         onLoadOspfUpdatePlans={onLoadOspfUpdatePlans}
         onLoadJobHistory={onLoadJobHistory}
+        onLoadJobRequest={onLoadJobRequest}
         onLoadOutputs={onLoadOutputs}
         onLoadTrends={onLoadNetworkTrends}
         onOpenGraph={() => onSelectSubpage("graph")}
@@ -2678,47 +2681,6 @@ function TunnelPlanComposer({
 
   useEffect(() => {
     if (initialPlan) return;
-    setSnapshot(null);
-    setForm((current) => {
-      const suggestedLeft = observedPeerAddress(
-        agents,
-        current.rightClientId,
-        current.runtimeManager,
-        current.kind,
-      );
-      const suggestedRight = observedPeerAddress(
-        agents,
-        current.leftClientId,
-        current.runtimeManager,
-        current.kind,
-      );
-      const leftRemoteUnderlay = autoFillOwnership.leftRemote
-        ? (suggestedLeft ?? "")
-        : current.leftRemoteUnderlay;
-      const rightRemoteUnderlay = autoFillOwnership.rightRemote
-        ? (suggestedRight ?? "")
-        : current.rightRemoteUnderlay;
-      if (
-        leftRemoteUnderlay === current.leftRemoteUnderlay &&
-        rightRemoteUnderlay === current.rightRemoteUnderlay
-      ) {
-        return current;
-      }
-      return { ...current, leftRemoteUnderlay, rightRemoteUnderlay };
-    });
-  }, [
-    agents,
-    autoFillOwnership.leftRemote,
-    autoFillOwnership.rightRemote,
-    form.leftClientId,
-    form.rightClientId,
-    form.runtimeManager,
-    form.kind,
-    initialPlan,
-  ]);
-
-  useEffect(() => {
-    if (initialPlan) return;
     if (!portSpeedSelectionKey) {
       setPortSpeedResolution({
         selectionKey: "",
@@ -2870,9 +2832,9 @@ function TunnelPlanComposer({
     policy,
     preference: numberOr(form.preference, 1),
   });
-  const duplicateName =
-    !initialPlan &&
-    existingPlans.some((plan) => plan.name === form.name.trim());
+  const duplicateName = existingPlans.some(
+    (plan) => plan.id !== initialPlan?.id && plan.name === form.name.trim(),
+  );
   const formError = validateTunnelPlanForm(form);
   const resourceConflict = formError
     ? null
@@ -2900,7 +2862,39 @@ function TunnelPlanComposer({
   ) {
     setSnapshot(null);
     setFeedback(null);
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => {
+      const next = { ...current, [key]: value };
+      if (initialPlan) return next;
+      // Prefill belongs to the operator's dependent-field edit, never to a
+      // background evidence refresh or an unrelated edit further down the form.
+      const compatibilityChanged =
+        key === "kind" || key === "runtimeManager";
+      if (
+        autoFillOwnership.leftRemote &&
+        (key === "rightClientId" || compatibilityChanged)
+      ) {
+        next.leftRemoteUnderlay =
+          observedPeerAddress(
+            agents,
+            next.rightClientId,
+            next.runtimeManager,
+            next.kind,
+          ) ?? "";
+      }
+      if (
+        autoFillOwnership.rightRemote &&
+        (key === "leftClientId" || compatibilityChanged)
+      ) {
+        next.rightRemoteUnderlay =
+          observedPeerAddress(
+            agents,
+            next.leftClientId,
+            next.runtimeManager,
+            next.kind,
+          ) ?? "";
+      }
+      return next;
+    });
   }
 
   function changeManager(manager: RuntimeTunnelManager) {
@@ -2915,12 +2909,7 @@ function TunnelPlanComposer({
       });
       return;
     }
-    setSnapshot(null);
-    setFeedback(null);
-    setForm((current) => ({
-      ...current,
-      runtimeManager: manager,
-    }));
+    update("runtimeManager", manager);
   }
 
   async function allocate() {
@@ -3070,20 +3059,12 @@ function TunnelPlanComposer({
         <fieldset className="topologyFormSection">
           <legend>Plan and endpoints</legend>
           <div className="topologyFormGrid threeColumn">
-            <Field
-              label="Plan name"
-              tooltip={
-                existing
-                  ? "Plan identity is fixed; create a new declaration to use another name."
-                  : undefined
-              }
-            >
+            <Field label="Plan name">
               <input
                 aria-label="Tunnel plan name"
                 maxLength={128}
                 onChange={(event) => update("name", event.target.value)}
                 placeholder="edge-a-edge-b"
-                readOnly={Boolean(existing)}
                 required
                 value={form.name}
               />
@@ -3136,7 +3117,7 @@ function TunnelPlanComposer({
             </Field>
             <Field
               label="Left remote destination"
-              tooltip="Outer destination reached from the left VPS. For a new plan, vpsman suggests only the right VPS's latest panel-connection IP when compatible. The value remains editable; interface addresses are never inferred."
+              tooltip="Outer destination reached from the left VPS. New plans prefill the right VPS's latest compatible panel-connection IP on peer selection or kind/ownership changes. Live refreshes never replace the draft; manual edits and cleared values are preserved."
             >
               <input
                 aria-label="Left remote underlay destination"
@@ -3178,7 +3159,7 @@ function TunnelPlanComposer({
             </Field>
             <Field
               label="Right remote destination"
-              tooltip="Outer destination reached from the right VPS. For a new plan, vpsman suggests only the left VPS's latest panel-connection IP when compatible. The value remains editable; interface addresses are never inferred."
+              tooltip="Outer destination reached from the right VPS. New plans prefill the left VPS's latest compatible panel-connection IP on peer selection or kind/ownership changes. Live refreshes never replace the draft; manual edits and cleared values are preserved."
             >
               <input
                 aria-label="Right remote underlay destination"
@@ -6431,6 +6412,7 @@ type TopologyPanelProps = {
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadNetworkAdapterDefinitions: () => Promise<void>;
   onLoadJobHistory: () => Promise<JobHistoryRecord[]>;
+  onLoadJobRequest: (jobId: string) => Promise<JobSubmittedRequestRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onLoadTopologyGraph: (query?: NetworkEvidenceQuery) => Promise<void>;
