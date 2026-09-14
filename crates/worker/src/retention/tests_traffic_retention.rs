@@ -1322,7 +1322,9 @@ async fn large_raw_retention_updates_only_affected_hours_and_keeps_active_cycle_
         )
         SELECT reset_day, reset_hour, cycle_start,
             cycle_start + interval '1 hour',
-            date_bin('1 hour', now(), TIMESTAMPTZ '1970-01-01')
+            -- Keep recent samples in a completed hour so crossing the next
+            -- hour boundary cannot change the active-cycle comparison.
+            date_bin('1 hour', now(), TIMESTAMPTZ '1970-01-01') - interval '1 hour'
         FROM cycle
         "#,
     )
@@ -2922,13 +2924,13 @@ async fn blocked_raw_stream_does_not_hold_the_phase_frontier() {
             client_id, source_kind, interface, observed_at,
             rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
         ) VALUES
-            ('traffic-timeout-a', 'host', 'eth0', date_trunc('minute', now() - interval '41 days'),
+            ('traffic-timeout-a', 'host', 'eth0', date_trunc('hour', now() - interval '41 days'),
                 100, 200, 0, 0, 'agent_networks'),
-            ('traffic-timeout-a', 'host', 'eth0', date_trunc('minute', now() - interval '41 days') + interval '1 minute',
+            ('traffic-timeout-a', 'host', 'eth0', date_trunc('hour', now() - interval '41 days') + interval '1 minute',
                 110, 220, 0, 0, 'agent_networks'),
-            ('traffic-timeout-b', 'host', 'eth0', date_trunc('minute', now() - interval '40 days'),
+            ('traffic-timeout-b', 'host', 'eth0', date_trunc('hour', now() - interval '40 days'),
                 300, 400, 0, 0, 'agent_networks'),
-            ('traffic-timeout-b', 'host', 'eth0', date_trunc('minute', now() - interval '40 days') + interval '1 minute',
+            ('traffic-timeout-b', 'host', 'eth0', date_trunc('hour', now() - interval '40 days') + interval '1 minute',
                 330, 440, 0, 0, 'agent_networks')
         "#,
     )
