@@ -3602,9 +3602,12 @@ export type TunnelPlanRevisionTarget = {
   expected_revision: number;
 };
 
+export type TunnelPlanEvidenceScope = "all" | "speedtest";
+
 export type ClearTunnelPlanEvidenceRequest = {
   targets: TunnelPlanRevisionTarget[];
   confirmed: boolean;
+  scope: TunnelPlanEvidenceScope;
 };
 
 export type ClearTunnelPlanEvidenceResult = {

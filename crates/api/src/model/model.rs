@@ -973,7 +973,17 @@ pub(crate) struct TunnelPlanEvidenceClearTargetRequest {
 pub(crate) struct ClearTunnelPlanEvidenceRequest {
     pub(crate) targets: Vec<TunnelPlanEvidenceClearTargetRequest>,
     #[serde(default)]
+    pub(crate) scope: TunnelPlanEvidenceClearScope,
+    #[serde(default)]
     pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TunnelPlanEvidenceClearScope {
+    #[default]
+    All,
+    Speedtest,
 }
 
 #[derive(Clone, Debug, Serialize)]

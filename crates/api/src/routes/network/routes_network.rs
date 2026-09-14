@@ -102,7 +102,7 @@ pub(crate) async fn clear_tunnel_plan_evidence(
     let targets = normalize_tunnel_plan_evidence_clear_targets(&request)?;
     let results = state
         .repo
-        .clear_tunnel_plan_evidence(&targets, &operator)
+        .clear_tunnel_plan_evidence(&targets, request.scope, &operator)
         .await
         .map_err(tunnel_plan_evidence_clear_error)?;
     let cleared_observation_count = results
@@ -1862,6 +1862,40 @@ pub(crate) fn topology_graph_error(error: anyhow::Error) -> ApiError {
         ),
     };
     ApiError::internal(code, message, error)
+}
+
+#[cfg(test)]
+mod evidence_clear_tests {
+    use super::*;
+    use crate::model::TunnelPlanEvidenceClearScope;
+
+    #[test]
+    fn tunnel_evidence_clear_scope_preserves_default_and_rejects_unknown_values() {
+        let mut body = serde_json::json!({
+            "targets": [{ "plan_id": Uuid::new_v4(), "expected_revision": 1 }],
+            "confirmed": true,
+        });
+        let request: ClearTunnelPlanEvidenceRequest = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(request.scope, TunnelPlanEvidenceClearScope::All);
+        assert_eq!(
+            normalize_tunnel_plan_evidence_clear_targets(&request)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for (value, expected) in [
+            ("all", TunnelPlanEvidenceClearScope::All),
+            ("speedtest", TunnelPlanEvidenceClearScope::Speedtest),
+        ] {
+            body["scope"] = value.into();
+            let request: ClearTunnelPlanEvidenceRequest =
+                serde_json::from_value(body.clone()).unwrap();
+            assert_eq!(request.scope, expected);
+        }
+        body["scope"] = "speedtests".into();
+        assert!(serde_json::from_value::<ClearTunnelPlanEvidenceRequest>(body).is_err());
+    }
 }
 
 #[cfg(test)]

@@ -7341,7 +7341,11 @@ async fn postgres_tunnel_evidence_clear_is_scoped_counted_and_audited_atomically
 
     let results = db
         .repo
-        .clear_tunnel_plan_evidence(&[(selected.id, selected.revision)], &operator)
+        .clear_tunnel_plan_evidence(
+            &[(selected.id, selected.revision)],
+            crate::model::TunnelPlanEvidenceClearScope::All,
+            &operator,
+        )
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -7416,6 +7420,7 @@ async fn postgres_tunnel_evidence_clear_is_scoped_counted_and_audited_atomically
         format!("tunnel_plan:{}", selected.id)
     );
     let metadata = audit.try_get::<serde_json::Value, _>("metadata").unwrap();
+    assert_eq!(metadata["scope"], "all");
     assert_eq!(metadata["cleared_observation_count"], 4);
     assert_eq!(metadata["plans"][0]["reviewed_revision"], selected.revision);
     assert_eq!(
@@ -7427,6 +7432,265 @@ async fn postgres_tunnel_evidence_clear_is_scoped_counted_and_audited_atomically
         selected.revision
     );
 
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_speedtest_evidence_clear_preserves_other_evidence_and_runtime() {
+    use crate::model::TunnelPlanEvidenceClearScope;
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["speed-clear-left", "speed-clear-right"] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let job_id = Uuid::new_v4();
+    insert_job_target(&db.pool, job_id, "speed-clear-left", "failed", false, None).await;
+    let mut plans = Vec::new();
+    for index in 0..3 {
+        let mut input = postgres_alert_test_tunnel_input();
+        input.name = format!("speed-clear-{index}");
+        input.interface_name = format!("tunspd{index}");
+        input.runtime_control = Default::default();
+        input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+        input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+        input.left_client_id = "speed-clear-left".to_string();
+        input.right_client_id = "speed-clear-right".to_string();
+        input.address_pool_cidr = format!("10.74.0.{}/30", index * 4);
+        input.ipv4_tunnel = Some(TunnelAddressPair {
+            left: format!("10.74.0.{}", index * 4),
+            right: format!("10.74.0.{}", index * 4 + 1),
+            prefix_len: 31,
+        });
+        let plan = db
+            .repo
+            .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+            .await
+            .unwrap();
+        for (kind, healthy) in [
+            ("network_status", index == 0),
+            ("tunnel_reachability", index == 0),
+            ("network_speed_test", false),
+            ("network_speed_test", true),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO network_observations (
+                    id, job_id, client_id, kind, source, plan_id, topology_identity_hash,
+                    plan_name, interface_name, peer_client_id, healthy
+                ) VALUES ($1, $2, $3, $4, 'manual', $5, $6, $7, $8, $9, $10)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(job_id)
+            .bind(&plan.left_client_id)
+            .bind(kind)
+            .bind(plan.id)
+            .bind(crate::repository_network_observations::topology_identity_hash_for_plan(&plan))
+            .bind(&plan.name)
+            .bind(&plan.plan.interface_name)
+            .bind(&plan.right_client_id)
+            .bind(healthy)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        record_test_automatic_tunnel_reachability(
+            &db.repo,
+            &db.pool,
+            &plan.left_client_id,
+            &[TunnelReachabilityObservation {
+                id: Uuid::new_v4(),
+                source: TunnelReachabilitySource::Automatic,
+                plan_id: plan.id,
+                topology_identity_hash:
+                    crate::repository_network_observations::topology_identity_hash_for_plan(&plan),
+                endpoint_side: TunnelEndpointSide::Left,
+                peer_client_id: plan.right_client_id.clone(),
+                interface_name: plan.plan.interface_name.clone(),
+                address_family: TunnelAddressFamily::Ipv4,
+                target: input.ipv4_tunnel.as_ref().unwrap().right.clone(),
+                measured_unix: crate::unix_now(),
+                stale_after_secs: 180,
+                transmitted: 3,
+                received: if index == 0 { 3 } else { 0 },
+                latency_min_ms: None,
+                latency_avg_ms: None,
+                latency_max_ms: None,
+                latency_mdev_ms: None,
+                packet_loss_ratio: if index == 0 { 0.0 } else { 1.0 },
+                healthy: index == 0,
+                reason: (index != 0).then(|| "probe_failed".to_string()),
+            }],
+        )
+        .await;
+        plans.push(plan);
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO network_observation_rollups (
+            series_id, bucket_secs, bucket_start, health_state, sample_count,
+            transmitted_total, transmitted_sample_count, received_total, received_sample_count,
+            latency_sample_count, latency_mdev_sample_count, packet_loss_sum_ratio,
+            packet_loss_sample_count, packet_loss_min_ratio, packet_loss_max_ratio,
+            latest_observation_id, latest_stale_after_secs, latest_healthy, latest_transmitted,
+            latest_received, latest_packet_loss_ratio, latest_observed_at, latest_received_at
+        )
+        SELECT series_id, 60, date_trunc('minute', observed_at), healthy::int::smallint, 1,
+               transmitted, 1, received, 1, 0, 0, packet_loss_ratio, 1,
+               packet_loss_ratio, packet_loss_ratio, observation_id, stale_after_secs,
+               healthy, transmitted, received, packet_loss_ratio, observed_at, received_at
+        FROM network_observation_latest
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode, mutation_policy,
+            source, telemetry_plan_id, telemetry_plan_name
+        ) VALUES ('speed-clear-left', now(), 'tunspd0', 'gre', 'managed', 'managed',
+                  'agent', $1, $2)
+        "#,
+    )
+    .bind(plans[0].id)
+    .bind(&plans[0].name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    async fn preserved_state(pool: &PgPool, selected_ids: &[Uuid]) -> Value {
+        sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'observations', (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id)
+                    FROM network_observations o
+                    WHERE o.source = 'automatic' OR NOT (
+                        o.kind = 'network_speed_test' AND o.plan_id = ANY($1::uuid[]))),
+                'series', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id)
+                    FROM network_observation_series s),
+                'latest', (SELECT jsonb_agg(to_jsonb(l) ORDER BY l.series_id)
+                    FROM network_observation_latest l),
+                'rollups', (SELECT jsonb_agg(to_jsonb(r)
+                    ORDER BY r.series_id, r.bucket_secs, r.bucket_start, r.health_state)
+                    FROM network_observation_rollups r),
+                'raw', (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM telemetry_samples t),
+                'runtime', (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.client_id, t.interface)
+                    FROM telemetry_tunnels t),
+                'plans', (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM tunnel_plans p),
+                'jobs', (SELECT jsonb_agg(to_jsonb(j) ORDER BY j.id) FROM jobs j),
+                'targets', (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.job_id, t.client_id)
+                    FROM job_targets t)
+            )
+            "#,
+        )
+        .bind(selected_ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+    let selected_ids = [plans[0].id, plans[1].id];
+    let before = preserved_state(&db.pool, &selected_ids).await;
+    let graph_end = chrono::Utc::now().timestamp() + 1;
+    let graph_before = db
+        .repo
+        .topology_graph(100, graph_end - 3_600, graph_end, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        graph_before
+            .edges
+            .iter()
+            .find(|edge| edge.plan_id == plans[0].id)
+            .unwrap()
+            .degraded_count,
+        1
+    );
+    let stale_targets = [
+        (plans[0].id, plans[0].revision),
+        (plans[1].id, plans[1].revision + 1),
+    ];
+    assert!(db
+        .repo
+        .clear_tunnel_plan_evidence(
+            &stale_targets,
+            TunnelPlanEvidenceClearScope::Speedtest,
+            &operator
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("tunnel_plan_snapshot_stale"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM network_observations WHERE kind = 'network_speed_test'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        6
+    );
+    let targets = [
+        (plans[0].id, plans[0].revision),
+        (plans[1].id, plans[1].revision),
+    ];
+    let results = db
+        .repo
+        .clear_tunnel_plan_evidence(&targets, TunnelPlanEvidenceClearScope::Speedtest, &operator)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    for (result, plan) in results.iter().zip(&plans) {
+        assert_eq!(result.plan_id, plan.id);
+        assert_eq!(result.reviewed_revision, plan.revision);
+        assert_eq!(result.cleared_observation_count, 2);
+    }
+    assert_eq!(preserved_state(&db.pool, &selected_ids).await, before);
+    let graph_after = db
+        .repo
+        .topology_graph(100, graph_end - 3_600, graph_end, &[])
+        .await
+        .unwrap();
+    let cleared_edge = graph_after
+        .edges
+        .iter()
+        .find(|edge| edge.plan_id == plans[0].id)
+        .unwrap();
+    assert_eq!(cleared_edge.degraded_count, 0);
+    assert_ne!(cleared_edge.health, "degraded");
+    assert_eq!(cleared_edge.desired_missing_count, 0);
+    assert_eq!(cleared_edge.stale_present_count, 0);
+    assert!(cleared_edge.unavailable_client_ids.is_empty());
+    assert!(
+        graph_after
+            .edges
+            .iter()
+            .find(|edge| edge.plan_id == plans[1].id)
+            .unwrap()
+            .degraded_count
+            > 0
+    );
+    let remaining: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT plan_id, count(*) FROM network_observations WHERE kind = 'network_speed_test' GROUP BY plan_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, vec![(plans[2].id, 2)]);
+    let audit: Value = sqlx::query_scalar(
+        "SELECT metadata FROM audit_logs WHERE action = 'network.tunnel_plan_evidence_cleared'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit["scope"], "speedtest");
+    assert_eq!(audit["plan_count"], 2);
+    assert_eq!(audit["cleared_observation_count"], 4);
+    assert_eq!(audit["plans"].as_array().unwrap().len(), 2);
     db.cleanup().await;
 }
 

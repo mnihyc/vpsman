@@ -13,7 +13,7 @@ use crate::{
     internal_operator::persisted_actor_id,
     model::{
         AuditLogView, AuthContext, NetworkObservationTrendView, NetworkObservationView,
-        TunnelPlanEvidenceClearResult, TunnelPlanView,
+        TunnelPlanEvidenceClearResult, TunnelPlanEvidenceClearScope, TunnelPlanView,
     },
     repository::Repository,
     repository_network::network_audit_metadata,
@@ -138,6 +138,7 @@ impl Repository {
     pub(crate) async fn clear_tunnel_plan_evidence(
         &self,
         targets: &[(Uuid, i64)],
+        scope: TunnelPlanEvidenceClearScope,
         operator: &AuthContext,
     ) -> Result<Vec<TunnelPlanEvidenceClearResult>> {
         anyhow::ensure!(!targets.is_empty(), "tunnel_plan_evidence_targets_required");
@@ -199,6 +200,8 @@ impl Repository {
                         SELECT id, plan_id
                         FROM network_observation_series
                         WHERE plan_id = ANY($1::uuid[])
+                          -- Automatic series contain only reachability evidence.
+                          AND $2
                     ), pending_automatic AS MATERIALIZED (
                         SELECT locator.id, series.plan_id
                         FROM network_observations locator
@@ -223,6 +226,7 @@ impl Repository {
                         DELETE FROM network_observations observation
                         WHERE observation.source = 'manual'
                           AND observation.plan_id = ANY($1::uuid[])
+                          AND ($2 OR observation.kind = 'network_speed_test')
                         RETURNING observation.plan_id
                     ), deleted_automatic AS (
                         DELETE FROM network_observations observation
@@ -262,6 +266,7 @@ impl Repository {
                     "#,
                 )
                 .bind(&plan_ids)
+                .bind(scope == TunnelPlanEvidenceClearScope::All)
                 .fetch_all(&mut *tx)
                 .await?;
                 let mut cleared_by_plan = HashMap::<Uuid, u64>::new();
@@ -281,7 +286,7 @@ impl Repository {
                         }
                     })
                     .collect::<Vec<_>>();
-                let audit = tunnel_plan_evidence_clear_audit(&results, operator);
+                let audit = tunnel_plan_evidence_clear_audit(&results, scope, operator);
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -2341,6 +2346,7 @@ fn compare_network_observations_desc(
 
 fn tunnel_plan_evidence_clear_audit(
     results: &[TunnelPlanEvidenceClearResult],
+    scope: TunnelPlanEvidenceClearScope,
     operator: &AuthContext,
 ) -> AuditLogView {
     let plan_ids = results
@@ -2364,6 +2370,7 @@ fn tunnel_plan_evidence_clear_audit(
         command_hash: None,
         metadata: network_audit_metadata(
             serde_json::json!({
+                "scope": scope,
                 "plan_ids": plan_ids,
                 "plan_count": results.len(),
                 "cleared_observation_count": cleared_observation_count,

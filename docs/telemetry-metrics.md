@@ -431,12 +431,16 @@ family. Changing one of those fields starts a new evidence generation. MTU,
 bandwidth, OSPF policy, and runtime command changes do not detach otherwise
 valid reachability history. Renaming a plan preserves its evidence identity.
 
-From **Network > Tunnel plans**, a reviewed **Clear evidence** action can remove
+From **Network > Tunnel plans**, a reviewed **Clear all evidence** action can remove
 all retained automatic and manual observations for the selected plans when an
 operator wants to discard evidence from earlier topology identities. The
 action is audited and leaves declarations, runtime state, jobs, assessments,
 and OSPF state unchanged. Monitoring remains enabled and records new evidence
 normally.
+
+**Clear speedtest** removes only retained speedtest observations for the selected
+plans, preserving reachability, runtime-status evidence, and job history. Graph
+Attention refreshes from the remaining evidence; unrelated problems stay visible.
 
 Automatic OSPF control requires the newest paired endpoint reachability window
 to be fresh and the configured number of preceding paired windows to be

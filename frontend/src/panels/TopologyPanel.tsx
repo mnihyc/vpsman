@@ -77,6 +77,7 @@ import type {
   AllocateTunnelEndpointsResponse,
   BulkTunnelPlanLifecycleResponse,
   ClearTunnelPlanEvidenceOutcome,
+  TunnelPlanEvidenceScope,
   ConfigurationSourceView,
   CreateJobRequest,
   CreateJobResponse,
@@ -747,6 +748,7 @@ function TunnelPlansWorkspace({
   ) => Promise<NetworkAdapterDefinitionRecord>;
   onClearTunnelPlanEvidence: (
     targets: TunnelPlanRevisionTarget[],
+    scope: TunnelPlanEvidenceScope,
   ) => Promise<ClearTunnelPlanEvidenceOutcome>;
   onDeleteNetworkAdapterDefinition: (definitionId: string) => Promise<void>;
   onDeleteTunnelPlan: (
@@ -992,13 +994,17 @@ function TunnelPlansWorkspace({
     }
   }
 
-  async function requestClearEvidence(rows: TunnelPlanRecord[]) {
+  async function requestClearEvidence(
+    rows: TunnelPlanRecord[],
+    scope: TunnelPlanEvidenceScope,
+  ) {
     if (rows.length === 0) return;
     setFeedback(null);
     setClearEvidenceReviewPending(true);
     try {
       await waitForReviewRender();
       setClearEvidenceSnapshot({
+        scope,
         plans: [...rows]
           .sort((left, right) => left.id.localeCompare(right.id))
           .map((plan) => ({
@@ -1021,9 +1027,10 @@ function TunnelPlansWorkspace({
           expected_revision: plan.revision,
           plan_id: plan.id,
         })),
+        snapshot.scope,
       );
       setClearEvidenceSnapshot(null);
-      const message = `Cleared ${outcome.cleared_observation_count} retained evidence record${outcome.cleared_observation_count === 1 ? "" : "s"} for ${outcome.plan_count} tunnel plan${outcome.plan_count === 1 ? "" : "s"}`;
+      const message = `Cleared ${outcome.cleared_observation_count} retained ${snapshot.scope === "speedtest" ? "speedtest " : ""}evidence record${outcome.cleared_observation_count === 1 ? "" : "s"} for ${outcome.plan_count} tunnel plan${outcome.plan_count === 1 ? "" : "s"}`;
       setFeedback(
         outcome.refresh_warnings.length === 0
           ? { message, tone: "success" }
@@ -1496,14 +1503,26 @@ function TunnelPlansWorkspace({
     {
       description: (rows) =>
         rows.length > 0
+          ? `Review clearing only retained speedtest evidence for ${rows.length} selected tunnel plan${rows.length === 1 ? "" : "s"}.`
+          : "Select one or more tunnel plans to clear retained speedtest evidence.",
+      disabled: (rows) =>
+        pending || clearEvidenceReviewPending || rows.length === 0,
+      icon: <Eraser size={14} />,
+      label: "Clear speedtest",
+      onSelect: (rows) => void requestClearEvidence(rows, "speedtest"),
+      separatorBefore: true,
+      tone: "danger",
+    },
+    {
+      description: (rows) =>
+        rows.length > 0
           ? `Review clearing retained network evidence for ${rows.length} selected tunnel plan${rows.length === 1 ? "" : "s"}.`
           : "Select one or more tunnel plans to clear retained evidence.",
       disabled: (rows) =>
         pending || clearEvidenceReviewPending || rows.length === 0,
       icon: <Eraser size={14} />,
-      label: "Clear evidence",
-      onSelect: (rows) => void requestClearEvidence(rows),
-      separatorBefore: true,
+      label: "Clear all evidence",
+      onSelect: (rows) => void requestClearEvidence(rows, "all"),
       tone: "danger",
     },
     {
@@ -1636,8 +1655,16 @@ function TunnelPlansWorkspace({
         />
       </section>
       <ConfirmationPrompt
-        confirmLabel="Clear evidence"
-        detail="Permanently remove all retained automatic and manual observations for these reviewed tunnel plans, across prior topology identities. Plan and endpoint runtime state do not change; future monitoring repopulates evidence."
+        confirmLabel={
+          clearEvidenceSnapshot?.scope === "speedtest"
+            ? "Clear speedtest"
+            : "Clear all evidence"
+        }
+        detail={
+          clearEvidenceSnapshot?.scope === "speedtest"
+            ? "Permanently remove only retained speedtest observations for these reviewed tunnel plans, across prior topology identities. Reachability, runtime-status evidence, job history, and plan and endpoint runtime state do not change."
+            : "Permanently remove all retained automatic and manual observations for these reviewed tunnel plans, across prior topology identities. Plan and endpoint runtime state do not change; future monitoring repopulates evidence."
+        }
         error={
           clearEvidenceSnapshot && feedback?.tone === "danger"
             ? feedback.message
@@ -1658,7 +1685,9 @@ function TunnelPlansWorkspace({
                 {
                   label: "Evidence removed",
                   value:
-                    "Retained reachability, runtime-status, and speed-test observations",
+                    clearEvidenceSnapshot.scope === "speedtest"
+                      ? "Retained speedtest observations only"
+                      : "Retained reachability, runtime-status, and speed-test observations",
                 },
                 {
                   label: "Plan and runtime state",
@@ -1666,7 +1695,10 @@ function TunnelPlansWorkspace({
                 },
                 {
                   label: "After clearing",
-                  value: "Future monitoring creates fresh evidence",
+                  value:
+                    clearEvidenceSnapshot.scope === "speedtest"
+                      ? "Run another speedtest to create fresh speedtest evidence"
+                      : "Future monitoring creates fresh evidence",
                 },
               ]
             : []
@@ -1678,7 +1710,11 @@ function TunnelPlansWorkspace({
         }
         open={clearEvidenceSnapshot !== null}
         pending={pending}
-        title="Confirm tunnel evidence clear"
+        title={
+          clearEvidenceSnapshot?.scope === "speedtest"
+            ? "Confirm tunnel speedtest evidence clear"
+            : "Confirm tunnel evidence clear"
+        }
         tone="danger"
       />
       {createOpen && (
@@ -6355,6 +6391,7 @@ type DeleteSnapshot = {
 };
 
 type ClearEvidenceSnapshot = {
+  scope: TunnelPlanEvidenceScope;
   plans: Array<{
     id: string;
     name: string;
@@ -6393,6 +6430,7 @@ type TopologyPanelProps = {
   ) => Promise<NetworkAdapterDefinitionRecord>;
   onClearTunnelPlanEvidence: (
     targets: TunnelPlanRevisionTarget[],
+    scope: TunnelPlanEvidenceScope,
   ) => Promise<ClearTunnelPlanEvidenceOutcome>;
   onDeleteNetworkAdapterDefinition: (definitionId: string) => Promise<void>;
   onDeleteTunnelPlan: (

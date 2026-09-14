@@ -13,7 +13,11 @@ import {
   unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
-import type { ScheduleRecord, VpsRuleValueRecord } from "../src/types";
+import type {
+  ScheduleRecord,
+  TopologyGraph,
+  VpsRuleValueRecord,
+} from "../src/types";
 
 const tunnelPortSpeedRules: VpsRuleValueRecord[] = [
   {
@@ -9745,7 +9749,7 @@ test("clears selected tunnel evidence against frozen plan revisions", async ({
   const editor = page.locator(".tunnelPlanComposer");
   await expect(editor).toBeVisible();
 
-  await runGridAction(page, "Tunnel plans", "Clear evidence");
+  await runGridAction(page, "Tunnel plans", "Clear all evidence");
   const prompt = page.locator(".confirmationPrompt", {
     hasText: "Confirm tunnel evidence clear",
   });
@@ -9767,7 +9771,7 @@ test("clears selected tunnel evidence against frozen plan revisions", async ({
   await expect(prompt).toContainText("Unchanged");
   await expect(editor).toBeVisible();
 
-  await confirmVisiblePrompt(page, "Clear evidence");
+  await confirmVisiblePrompt(page, "Clear all evidence");
   await expect(editor).toBeVisible();
   await expect(page.locator(".topologyPlanActionFeedback")).toContainText(
     "Cleared 5 retained evidence records for 2 tunnel plans",
@@ -9783,6 +9787,7 @@ test("clears selected tunnel evidence against frozen plan revisions", async ({
   });
   expect(request).toEqual({
     confirmed: true,
+    scope: "all",
     targets: [
       {
         expected_revision: tunnelPlans[0].revision,
@@ -9795,6 +9800,117 @@ test("clears selected tunnel evidence against frozen plan revisions", async ({
     ],
   });
 });
+
+for (const targetCount of [1, 2]) {
+  test(`clears speedtest evidence for ${targetCount} selected tunnel plans and refreshes graph attention`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "tunnel selection and evidence confirmation are covered on desktop",
+    );
+
+    await page.goto("/");
+    await waitForConsoleShell(page);
+    await page.evaluate((keepRuntimeDegraded) => {
+      const originalFetch = window.fetch.bind(window);
+      let speedtestCleared = false;
+      let graphRefreshCount = 0;
+      Object.defineProperty(window, "__speedtestClearGraphRefreshes", {
+        get: () => graphRefreshCount,
+      });
+      window.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        const url = new URL(
+          typeof input === "string"
+            ? input
+            : input instanceof Request
+              ? input.url
+              : input.href,
+          window.location.origin,
+        );
+        if (url.pathname === "/api/v1/tunnel-plans/evidence/clear") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            scope?: string;
+          };
+          if (response.ok && body.scope === "speedtest") {
+            speedtestCleared = true;
+          }
+        }
+        if (url.pathname !== "/api/v1/network/topology-graph") {
+          return response;
+        }
+        if (speedtestCleared) graphRefreshCount += 1;
+        const graph = (await response.json()) as TopologyGraph;
+        graph.edges = graph.edges.map((edge) => ({
+          ...edge,
+          degraded_count: speedtestCleared ? 0 : 1,
+          health: keepRuntimeDegraded ? "degraded" : "healthy",
+        }));
+        return new Response(JSON.stringify(graph), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      };
+    }, targetCount === 2);
+    await openConsoleSubpage(page, "Network", "Graph");
+    await expect(page.getByLabel("Topology graph legend")).toContainText(
+      "1 attention",
+    );
+    await openConsoleSubpage(page, "Network", "Tunnel plans");
+    const selectedPlans = tunnelPlans.slice(0, targetCount);
+    for (const plan of selectedPlans) {
+      await selectGridRow(page, "Tunnel plans", plan.id);
+    }
+    await runGridAction(page, "Tunnel plans", "Clear speedtest");
+    const prompt = page.locator(".confirmationPrompt", {
+      hasText: "Confirm tunnel speedtest evidence clear",
+    });
+    await expect(prompt).toBeVisible();
+    await expect(prompt).toContainText("Retained speedtest observations only");
+    await expect(prompt).toContainText(
+      "Reachability, runtime-status evidence, job history, and plan and endpoint runtime state do not change",
+    );
+    for (const plan of selectedPlans) {
+      await expect(prompt).toContainText(
+        `${plan.name} · ${plan.id} · revision ${plan.revision}`,
+      );
+    }
+    await testInfo.attach("clear-speedtest-review", {
+      body: await page.screenshot(),
+      contentType: "image/png",
+    });
+    await confirmVisiblePrompt(page, "Clear speedtest");
+    await expect(page.locator(".topologyPlanActionFeedback")).toContainText(
+      `retained speedtest evidence records for ${targetCount} tunnel plan`,
+    );
+    const clearState = await page.evaluate(() => {
+      const state = window as unknown as {
+        __speedtestClearGraphRefreshes: number;
+        __vpsmanTestRequests: { tunnelPlanEvidenceClears: unknown[] };
+      };
+      return {
+        graphRefreshes: state.__speedtestClearGraphRefreshes,
+        requests: state.__vpsmanTestRequests.tunnelPlanEvidenceClears,
+      };
+    });
+    expect(clearState.graphRefreshes).toBeGreaterThan(0);
+    expect(clearState.requests).toEqual([
+      {
+        confirmed: true,
+        scope: "speedtest",
+        targets: selectedPlans.map((plan) => ({
+          expected_revision: plan.revision,
+          plan_id: plan.id,
+        })),
+      },
+    ]);
+    await openConsoleSubpage(page, "Network", "Graph");
+    await expect(page.getByLabel("Topology graph legend")).toContainText(
+      targetCount === 2 ? "1 attention" : "0 attention",
+    );
+  });
+}
 
 test("submits selected tunnel lifecycle changes as one ordered request", async ({
   page,

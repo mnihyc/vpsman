@@ -31,6 +31,7 @@ import type {
   TunnelPlanRecord,
   TunnelPlanMutationResponse,
   TunnelPlanRevisionTarget,
+  TunnelPlanEvidenceScope,
   UpsertNetworkAdapterDefinitionRequest,
   UpdateTunnelConnectionAssessmentRequest,
   UpdateTunnelPlanOspfCostRequest,
@@ -729,9 +730,11 @@ export function useTopologyData(
   const clearTunnelPlanEvidence = useCallback(
     async (
       targets: TunnelPlanRevisionTarget[],
+      scope: TunnelPlanEvidenceScope,
     ): Promise<ClearTunnelPlanEvidenceOutcome> => {
       const request: ClearTunnelPlanEvidenceRequest = {
         confirmed: true,
+        scope,
         targets,
       };
       const response = await apiPost<ClearTunnelPlanEvidenceResponse>(

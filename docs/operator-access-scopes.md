@@ -88,7 +88,8 @@ apply require `config:write`. Reading live agent evidence additionally dispatche
 an explicit ConfigRead job under the existing job-dispatch authority; the page
 does not poll it or use it as the saved override base.
 
-Tunnel-plan mutations and the reviewed, plan-scoped **Clear evidence** action
+Tunnel-plan mutations and the reviewed, plan-scoped **Clear speedtest** and
+**Clear all evidence** actions
 require `network:write`. Clearing evidence does not grant access to job or audit
 payloads and does not change tunnel runtime state.
 
