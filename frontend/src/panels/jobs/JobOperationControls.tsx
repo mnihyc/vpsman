@@ -5,6 +5,7 @@ import {
   PackageCheck,
   Upload,
 } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { useByteCountFormatter } from "../../panelDisplay";
 import {
   FILE_TRANSFER_CHUNK_BYTES,
@@ -400,7 +401,7 @@ export function JobOperationEditor({
             title="Command and arguments submitted to each selected VPS."
           >
             <span>Command argv</span>
-            <textarea
+            <NumberedTextarea
               aria-label="Command argv"
               onChange={(event) => setCommandText(event.target.value)}
               placeholder={COMMAND_ARGV_PLACEHOLDER}
@@ -444,7 +445,7 @@ export function JobOperationEditor({
       <div className="commandPayloadEditor">
         <label title="Shell script executed on each selected VPS.">
           <span>Shell script</span>
-          <textarea
+          <NumberedTextarea
             aria-label="Shell script"
             onChange={(event) => setShellScript(event.target.value)}
             placeholder="set -eu&#10;hostname&#10;uptime"
@@ -890,7 +891,7 @@ export function JobOperationEditor({
           title="Comma-separated host interfaces to import, such as eth0, ens3. Leave blank to import every interface reported by vnStat."
         >
           <span>Host interfaces</span>
-          <textarea
+          <NumberedTextarea
             aria-label="vnStat import host interfaces"
             onChange={(event) =>
               setNetworkTrafficImportInterfacesText(event.target.value)
@@ -968,7 +969,7 @@ export function JobOperationEditor({
         </div>
         <label className="wideField">
           <span>Selected paths</span>
-          <textarea
+          <NumberedTextarea
             aria-label="Backup selected paths"
             onChange={(event) => setBackupPathsText(event.target.value)}
             placeholder={JOB_BACKUP_PATHS_PLACEHOLDER}
@@ -1265,7 +1266,7 @@ function SupervisorEditor({
             title="Command and arguments used to start the managed process."
           >
             <span>Command argv</span>
-            <textarea
+            <NumberedTextarea
               aria-label="Supervisor command argv"
               onChange={(event) => setSupervisorArgv(event.target.value)}
               placeholder={SUPERVISOR_COMMAND_PLACEHOLDER}
@@ -1287,7 +1288,7 @@ function SupervisorEditor({
             title="Environment entries for the managed process, one KEY=value pair per line."
           >
             <span>Env</span>
-            <textarea
+            <NumberedTextarea
               aria-label="Supervisor environment"
               onChange={(event) => setSupervisorEnv(event.target.value)}
               placeholder="KEY=value"

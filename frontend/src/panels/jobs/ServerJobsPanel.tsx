@@ -1,4 +1,5 @@
 import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { useByteCountFormatter } from "../../panelDisplay";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
@@ -483,7 +484,7 @@ export function ServerJobsPanel({
                 title="Advanced expression filters artifacts inside the selected artifact types. It is combined with the common criteria above."
               >
                 <span>Additional filter expression</span>
-                <textarea
+                <NumberedTextarea
                   aria-label="Expression"
                   rows={3}
                   value={advancedExpression}

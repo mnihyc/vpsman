@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { clientDisplayNameFromMap } from "../../utils";
 import {
   TUNNEL_HOOK_PHASES,
@@ -213,7 +214,7 @@ export function TunnelAdvancedFields({
             </div>
             <label>
               <span>Native configuration</span>
-              <textarea
+              <NumberedTextarea
                 aria-label={`${side} OpenVPN configuration overrides`}
                 onChange={(event) => updateEndpoint({ ...draft[side], configOverride: event.target.value })}
                 placeholder={"ping 15\nping-restart 90\nverb 4"}
@@ -241,7 +242,7 @@ export function TunnelAdvancedFields({
             {TUNNEL_HOOK_PHASES.map(({ key, label }) => (
               <label key={key}>
                 <span>{label}</span>
-                <textarea
+                <NumberedTextarea
                   aria-label={`${side} ${label} hook argv`}
                   onChange={(event) => updateHook(key, "argv", event.target.value)}
                   placeholder={"/absolute/path/to/executable\n{interface}"}

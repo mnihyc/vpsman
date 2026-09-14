@@ -24,6 +24,7 @@ import {
   Trash2,
   Wifi,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import { clearLocalStorageSelections } from "../localStorageSelections";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { FRONTEND_BUILD_NUMBER } from "../buildInfo";
@@ -885,7 +886,7 @@ export function PreferencesPanel({
                 </div>
                 <label>
                   <span>Curve exclusions</span>
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Home telemetry curve exclusions"
                     name="dashboard_curve_exclusions"
                     onChange={(event) =>

@@ -27,6 +27,7 @@ import {
   UserX,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -2218,7 +2219,7 @@ export function SystemUsersPanel({
             <div className="operatorScopeEditor">
               <label>
                 <FieldLabel help={operatorHelpText.scopes} label="Scopes" />
-                <textarea
+                <NumberedTextarea
                   aria-label="Operator scopes"
                   data-tooltip-disabled-reason={operatorFieldDisabledReason(
                     canManageUsers,
@@ -6325,7 +6326,7 @@ function SystemConfigPanel({
                         "Restart notes unavailable"}
                     </span>
                   </div>
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Suite config TOML"
                     className="systemConfigToml"
                     onChange={(event) => {

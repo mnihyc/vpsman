@@ -114,6 +114,53 @@ textarea {
   font-family: var(--font-mono);
 }
 
+.numberedTextarea {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.numberedTextarea > textarea {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.numberedTextareaGutter {
+  position: absolute;
+  width: calc(var(--textarea-line-digits) * 1ch + 12px);
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  font-family: var(--font-mono);
+  background: var(--surface-neutral);
+  border-right: 1px solid var(--border);
+  box-shadow: 1px 0 2px rgb(0 0 0 / 5%);
+}
+
+.numberedTextareaMirror {
+  position: absolute;
+  right: 6px;
+  color: transparent;
+}
+
+.numberedTextareaLine {
+  position: relative;
+}
+
+.numberedTextareaNumber {
+  position: absolute;
+  top: 0;
+  right: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-weight: 400;
+  text-align: right;
+  text-indent: 0;
+  white-space: pre;
+  direction: ltr;
+}
+
 .srOnly {
   position: absolute;
   left: -10000px;

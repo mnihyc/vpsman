@@ -16,6 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -2301,7 +2302,7 @@ function BulkConfigApply({
                 </span>
               </div>
             )}
-            <textarea
+            <NumberedTextarea
               aria-label="Patch generator values JSON"
               onChange={(event) => {
                 setValuesText(event.target.value);
@@ -2312,7 +2313,7 @@ function BulkConfigApply({
               value={valuesText}
             />
             {rendered && (
-              <textarea
+              <NumberedTextarea
                 aria-label="Rendered bulk runtime config patch TOML"
                 readOnly
                 rows={8}
@@ -2321,7 +2322,7 @@ function BulkConfigApply({
             )}
           </>
         ) : (
-          <textarea
+          <NumberedTextarea
             aria-label="Temporary bulk runtime config patch TOML"
             onChange={(event) => {
               setTemporaryToml(event.target.value);
@@ -2634,7 +2635,7 @@ function BulkConfigApply({
                     title="Define the patch generator fields as JSON."
                   >
                     <span>Field schema JSON</span>
-                    <textarea
+                    <NumberedTextarea
                       required
                       rows={7}
                       value={patchGeneratorEditor.fieldSchemaText}
@@ -2650,7 +2651,7 @@ function BulkConfigApply({
                     title="Define the configuration template rendered by this patch generator."
                   >
                     <span>Generator body</span>
-                    <textarea
+                    <NumberedTextarea
                       required
                       rows={8}
                       value={patchGeneratorEditor.rawGeneratorBody}
@@ -2667,7 +2668,7 @@ function BulkConfigApply({
                     title="Define patch generator documentation metadata as JSON."
                   >
                     <span>Docs metadata JSON</span>
-                    <textarea
+                    <NumberedTextarea
                       required
                       rows={6}
                       value={patchGeneratorEditor.docsMetadataText}
@@ -4332,7 +4333,7 @@ function VpsRulesPanel({
                   title="Edit advanced VPS rule key/value lines not covered by the common typed cards"
                 >
                   <summary>Advanced raw key/value</summary>
-                  <textarea
+                  <NumberedTextarea
                     aria-label="VPS rule set values"
                     data-tooltip-disabled-reason="Wait for the current VPS rule operation to finish before editing raw values."
                     disabled={applyPending}

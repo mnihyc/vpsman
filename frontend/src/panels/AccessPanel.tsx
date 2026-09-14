@@ -26,6 +26,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -2215,7 +2216,7 @@ export function AccessPanel({
               </label>
               <label className="wideField">
                 <span>Noise public key</span>
-                <textarea
+                <NumberedTextarea
                   aria-label="Agent identity public key hex"
                   data-tooltip-disabled-reason={
                     !canManageOperators
@@ -3415,7 +3416,7 @@ function InstallCommand({
           title="Comma- or newline-separated gateway endpoints accepted by the installer."
         >
           <span>Gateway endpoints</span>
-          <textarea
+          <NumberedTextarea
             aria-describedby={
               gatewayEndpointsInvalid ? gatewayEndpointsErrorId : undefined
             }

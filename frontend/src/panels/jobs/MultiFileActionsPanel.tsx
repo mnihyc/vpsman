@@ -1,4 +1,5 @@
 import { Download, RefreshCw, ShieldCheck, Upload } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import {
   useByteCountFormatter,
   type ByteCountFormatter,
@@ -899,7 +900,7 @@ export function MultiFileActionsPanel({
           {action === "write_text" && (
             <label title="Text written to the selected remote files.">
               <span>Content</span>
-              <textarea
+              <NumberedTextarea
                 onChange={(event) => {
                   setContent(event.target.value);
                   invalidateBulkReview();

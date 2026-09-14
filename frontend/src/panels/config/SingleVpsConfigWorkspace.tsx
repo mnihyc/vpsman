@@ -18,6 +18,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { parse, stringify, type TomlTable } from "smol-toml";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../../components/ConsoleLayout";
@@ -969,7 +970,7 @@ export function SingleVpsConfigWorkspace({
                     <span>Delete override</span>
                   </button>
                 </div>
-                <textarea
+                <NumberedTextarea
                   aria-label="VPS replacement override TOML"
                   aria-invalid={advancedError ? "true" : undefined}
                   onBlur={() => syncAdvancedToTree(false)}
@@ -1745,7 +1746,7 @@ function ArrayEditor({
         <div className="singleConfigArrayItem" key={index}>
           <span className="singleConfigArrayIndex">{index + 1}</span>
           {isObject(entry) || Array.isArray(entry) ? (
-            <textarea
+            <NumberedTextarea
               aria-label={`Array item ${index + 1}`}
               data-tooltip-disabled-reason={
                 disabled

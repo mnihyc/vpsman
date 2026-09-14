@@ -9,6 +9,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -1527,7 +1528,7 @@ export function ConfigurationSourcesPanel({
                     Current server-rendered configuration. A preset choice above
                     is only a candidate until you review and apply it.
                   </span>
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Effective agent config TOML"
                     readOnly
                     value={renderedConfig.toml}
@@ -1903,7 +1904,7 @@ function PresetDefinitionEditor({
         />
         <label title="Variables injected into command execution; enter one KEY=value pair per line.">
           <span>Environment values (KEY=value, one per line)</span>
-          <textarea
+          <NumberedTextarea
             aria-label="Command environment values"
             onChange={(event) =>
               onTextDraftChange("environment_set", event.target.value)
@@ -2033,7 +2034,7 @@ function ArgvField({
   return (
     <label title="Put the absolute executable path on the first line, followed by one argument per line.">
       <span>{label} (one argument per line)</span>
-      <textarea
+      <NumberedTextarea
         aria-label={label}
         onChange={(event) => onChange(event.target.value)}
         placeholder={"/absolute/path/to/executable\n--argument"}
@@ -2055,7 +2056,7 @@ function StringListField({
   return (
     <label title="Names from the inherited environment that remain available to the command.">
       <span>{label} (one per line)</span>
-      <textarea
+      <NumberedTextarea
         aria-label={label}
         onChange={(event) => onChange(event.target.value)}
         value={value}

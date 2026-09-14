@@ -1,4 +1,5 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import {
   useByteCountFormatter,
   type ByteCountFormatter,
@@ -1974,7 +1975,7 @@ export function FileBrowserPanel({
                 {createType === "file" && (
                   <label title="Text written to the new remote file.">
                     <span>Content</span>
-                    <textarea
+                    <NumberedTextarea
                       aria-label="New file text content"
                       onChange={(event) => {
                         setCreateContent(event.target.value);

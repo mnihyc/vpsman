@@ -1,5 +1,6 @@
 import type { FormEvent } from "react";
 import { CalendarClock, Save } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
   BACKUP_PATH_PLACEHOLDER,
@@ -131,7 +132,7 @@ export function BackupPolicyForm({
         </div>
         <label>
           <span>Selected paths</span>
-          <textarea
+          <NumberedTextarea
             aria-label="Backup policy selected paths"
             onChange={(event) => onPathsTextChange(event.target.value)}
             placeholder={BACKUP_PATH_PLACEHOLDER}

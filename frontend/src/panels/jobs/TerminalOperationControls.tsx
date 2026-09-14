@@ -1,4 +1,5 @@
 import { TerminalSquare } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 
 export function TerminalOperationControls({
   terminalArgv,
@@ -63,7 +64,7 @@ export function TerminalOperationControls({
         title="Command and arguments used to open the terminal session."
       >
         <span>Argv</span>
-        <textarea
+        <NumberedTextarea
           aria-label="Terminal argv"
           onChange={(event) => setTerminalArgv(event.target.value)}
           rows={2}

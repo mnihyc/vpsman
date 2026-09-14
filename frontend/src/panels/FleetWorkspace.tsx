@@ -36,6 +36,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import { agentDisplayState } from "../agentDisplayState";
 import {
   buildBulkJobProgress,
@@ -2424,7 +2425,7 @@ function FleetInstancesPanel({
         {suspensionSnapshot?.action === "suspend" ? (
           <label className="confirmationTypedInput">
             <span>Optional suspension reason</span>
-            <textarea
+            <NumberedTextarea
               aria-label="Suspension reason"
               autoFocus
               maxLength={240}
@@ -7123,7 +7124,7 @@ export function FleetAlertPolicyManager({
                 ) : null}
               </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
-                <textarea
+                <NumberedTextarea
                   aria-label="Policy notes"
                   value={notes}
                   onChange={(event) => setNotes(event.target.value)}
@@ -7321,7 +7322,7 @@ export function FleetAlertPolicyManager({
                             className="fieldFull"
                             labelTitle="The selected evidence source defines available fields and types. Operators include >, >=, <, <=, =, !=, in, arithmetic, &&, ||, !, and parentheses."
                           >
-                            <textarea
+                            <NumberedTextarea
                               aria-label="Rule Trigger condition expression"
                               placeholder={
                                 source?.example ?? "evidence.status = failed"
@@ -7396,7 +7397,7 @@ export function FleetAlertPolicyManager({
                               label="Resolve condition expression (optional)"
                               labelTitle="Leave blank for the exact inverse of Trigger. Supply a separate expression for hysteresis, such as triggering above 90% and resolving below 75%."
                             >
-                              <textarea
+                              <NumberedTextarea
                                 aria-label="Rule Resolve condition expression"
                                 placeholder="blank = Trigger condition is conclusively false"
                                 value={draft.resolve_condition_expression}
@@ -7487,7 +7488,7 @@ export function FleetAlertPolicyManager({
                           className="fieldFull"
                           label="Alert detail template"
                         >
-                          <textarea
+                          <NumberedTextarea
                             aria-label="Rule alert detail template"
                             placeholder="{subject.display_name} has remained {evidence.status}."
                             value={draft.detail_template}
@@ -9085,7 +9086,7 @@ export function FleetAlertNotificationManager({
                 </pre>
               </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
-                <textarea
+                <NumberedTextarea
                   aria-label="Notification channel notes"
                   value={notes}
                   onChange={(event) => setNotes(event.target.value)}
@@ -10782,7 +10783,7 @@ export function WebhookRuleManager({
                 />
               </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
-                <textarea
+                <NumberedTextarea
                   aria-label="Webhook rule notes"
                   value={notes}
                   onChange={(event) => setNotes(event.target.value)}

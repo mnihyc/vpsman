@@ -15,6 +15,7 @@ import {
   Server,
   VolumeX,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { formatBoundedCount } from "../constants";
@@ -1340,7 +1341,7 @@ function FleetAlertList({
       >
         <label className="confirmationTypedInput">
           <span>Resolution reason</span>
-          <textarea
+          <NumberedTextarea
             aria-label="Incident resolution reason"
             autoFocus
             maxLength={1024}

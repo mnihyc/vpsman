@@ -1657,7 +1657,7 @@
 }
 
 .webhookRuleGrid .wideField,
-.webhookRuleGrid textarea {
+.webhookRuleGrid .numberedTextarea {
   grid-column: 1 / -1;
 }
 
@@ -3852,7 +3852,7 @@
 }
 
 .singleConfigArrayItem > input,
-.singleConfigArrayItem > textarea {
+.singleConfigArrayItem > .numberedTextarea > textarea {
   width: 100%;
   min-width: 0;
   font-family:
@@ -3897,7 +3897,7 @@
   align-items: start;
 }
 
-.singleConfigAdvancedMode > textarea {
+.singleConfigAdvancedMode > .numberedTextarea > textarea {
   width: 100%;
   min-width: 0;
   font-family:
@@ -3906,7 +3906,7 @@
   line-height: 1.55;
 }
 
-.singleConfigAdvancedMode > textarea[aria-invalid="true"] {
+.singleConfigAdvancedMode > .numberedTextarea > textarea[aria-invalid="true"] {
   border-color: var(--danger);
 }
 
@@ -6248,7 +6248,7 @@
   font-weight: 700;
 }
 
-.vpsRulesAdvancedRaw textarea {
+.vpsRulesAdvancedRaw .numberedTextarea {
   margin-top: 8px;
 }
 

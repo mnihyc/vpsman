@@ -1459,8 +1459,12 @@ nav {
   padding: 7px 10px;
 }
 
-.confirmationTypedInput textarea {
+.confirmationTypedInput .numberedTextarea {
   width: min(520px, 100%);
+}
+
+.confirmationTypedInput textarea {
+  width: 100%;
   resize: vertical;
 }
 

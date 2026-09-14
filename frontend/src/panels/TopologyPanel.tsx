@@ -19,6 +19,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -3554,7 +3555,7 @@ function TunnelPlanComposer({
                   label="Desired interfaces"
                   tooltip="One exact interface per line. The plan interface is always included by the server."
                 >
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Desired tunnel interfaces"
                     onChange={(event) =>
                       update("desiredInterfaces", event.target.value)
@@ -3568,7 +3569,7 @@ function TunnelPlanComposer({
                   label="Stale interfaces"
                   tooltip="Only interfaces explicitly listed here are eligible for cleanup."
                 >
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Stale tunnel interfaces"
                     onChange={(event) =>
                       update("staleInterfaces", event.target.value)
@@ -3582,7 +3583,7 @@ function TunnelPlanComposer({
                   label="Desired routes"
                   tooltip="One route per line: CIDR, via=IP, dev=interface, metric=number."
                 >
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Desired tunnel routes"
                     onChange={(event) => update("routes", event.target.value)}
                     placeholder="10.0.0.0/24, via=10.255.0.1"
@@ -3594,7 +3595,7 @@ function TunnelPlanComposer({
                   label="Stale routes"
                   tooltip="Only exact routes listed here are eligible for cleanup."
                 >
-                  <textarea
+                  <NumberedTextarea
                     aria-label="Stale tunnel routes"
                     onChange={(event) =>
                       update("staleRoutes", event.target.value)

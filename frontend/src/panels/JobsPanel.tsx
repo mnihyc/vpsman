@@ -14,6 +14,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -2481,7 +2482,7 @@ export function JobsPanel({
                         ? " (optional)"
                         : " (required)"}
                     </span>
-                    <textarea
+                    <NumberedTextarea
                       aria-label={approvalDecisionNoteLabel}
                       data-tooltip-disabled-reason={
                         approvalActionPending

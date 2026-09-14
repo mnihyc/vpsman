@@ -1,5 +1,6 @@
 import type { FormEvent } from "react";
 import { DatabaseBackup, Play } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import {
   BACKUP_PATH_PLACEHOLDER,
@@ -68,7 +69,7 @@ export function BackupRequestForm({
         </label>
         <label>
           <span>Selected paths</span>
-          <textarea
+          <NumberedTextarea
             aria-label="Backup selected paths"
             onChange={(event) => onPathsTextChange(event.target.value)}
             placeholder={BACKUP_PATH_PLACEHOLDER}

@@ -26,6 +26,7 @@ import {
   Trash2,
   WandSparkles,
 } from "lucide-react";
+import { NumberedTextarea } from "../components/NumberedTextarea";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -2097,7 +2098,7 @@ export function SchedulesPanel({
                   ? "Event job argv template"
                   : "Command argv"}
               </span>
-              <textarea
+              <NumberedTextarea
                 aria-label="Schedule job argv"
                 data-tooltip-disabled-reason={
                   selectedTemplate

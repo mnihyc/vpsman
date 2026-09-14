@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
+import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
@@ -572,7 +573,7 @@ function AdapterCommandFields({
                 {label}
                 {` (${hint})`}
               </span>
-              <textarea
+              <NumberedTextarea
                 aria-label={`${label} adapter command`}
                 onChange={(event) => {
                   const argv = lines(event.target.value);
