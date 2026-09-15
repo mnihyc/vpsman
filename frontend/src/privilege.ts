@@ -486,7 +486,50 @@ function operationPayloadBytes(operation: JobOperation): Uint8Array {
 }
 
 export function canonicalOperationJson(operation: JobOperation): string {
-  return JSON.stringify(canonicalJobOperation(operation));
+  const canonical = canonicalJobOperation(operation);
+  if (!("plan" in operation) || !operation.plan.ospf) {
+    return JSON.stringify(canonical);
+  }
+
+  // The API serializes these seven fields as Rust f64, even when their values
+  // are whole numbers. Preserve its numeric spelling for the signed bytes;
+  // the operation sent to the API and all other fields remain unchanged.
+  const ospf = operation.plan.ospf;
+  const ospfJson = jsonObjectWithFields(ospf, {
+    planned_latency_ms: rustF64Json(ospf.planned_latency_ms),
+    planned_packet_loss_ratio: rustF64Json(ospf.planned_packet_loss_ratio),
+    preference: rustF64Json(ospf.preference),
+    policy: jsonObjectWithFields(ospf.policy, {
+      latency_weight: rustF64Json(ospf.policy.latency_weight),
+      loss_weight: rustF64Json(ospf.policy.loss_weight),
+      bandwidth_weight: rustF64Json(ospf.policy.bandwidth_weight),
+      preference_bias: rustF64Json(ospf.policy.preference_bias),
+    }),
+  });
+  return jsonObjectWithFields(canonical as object, {
+    plan: jsonObjectWithFields(operation.plan, { ospf: ospfJson }),
+  });
+}
+
+function jsonObjectWithFields(value: object, fields: Record<string, string>): string {
+  return `{${Object.entries(value)
+    .filter(([, item]) => item !== undefined)
+    .map(([key, item]) =>
+      `${JSON.stringify(key)}:${Object.prototype.hasOwnProperty.call(fields, key) ? fields[key] : JSON.stringify(item)}`,
+    )
+    .join(",")}}`;
+}
+
+function rustF64Json(value: number): string {
+  if (!Number.isFinite(value)) return "null";
+  // JSON.stringify sends either signed zero as 0, which Rust receives as +0.0.
+  if (value === 0) return "0.0";
+  // serde_json uses scientific notation outside decimal exponents -5..15.
+  // These are encoding boundaries, not limits on the configured OSPF values.
+  if (Math.abs(value) < 1e-5 || Math.abs(value) >= 1e16) {
+    return value.toExponential();
+  }
+  return `${value}${Number.isInteger(value) ? ".0" : ""}`;
 }
 
 type JsonValue =

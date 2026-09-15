@@ -41,11 +41,12 @@ use vpsman_common::{
     FilePushChunk, HostPackageProvider, HostServiceAction, HostServiceProvider, JobCommand,
     ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile,
     RoutingCostAdapterCommands, RuntimeTunnelCommand, TerminalUserPolicy, TunnelAddressPair,
-    TunnelEndpointSide, TunnelKind, TunnelPlanInput, ALERT_EVENT_ARGV_CONTROL_TOKENS,
-    ALERT_EVENT_ARGV_HELPER_TOKENS, ALERT_EVENT_ARGV_MAX_BYTES, ALERT_EVENT_ARGV_MAX_ELEMENTS,
-    ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES, ALERT_EVENT_ARGV_SCALAR_PATHS, ALERT_EVENT_CATEGORIES,
-    ALERT_EVENT_IMMUTABLE_FIELDS, ALERT_EVENT_SEVERITIES, CURRENT_COMMAND_PROTOCOL_VERSION,
-    MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
+    TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    ALERT_EVENT_ARGV_CONTROL_TOKENS, ALERT_EVENT_ARGV_HELPER_TOKENS, ALERT_EVENT_ARGV_MAX_BYTES,
+    ALERT_EVENT_ARGV_MAX_ELEMENTS, ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES,
+    ALERT_EVENT_ARGV_SCALAR_PATHS, ALERT_EVENT_CATEGORIES, ALERT_EVENT_IMMUTABLE_FIELDS,
+    ALERT_EVENT_SEVERITIES, CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES,
+    MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
 };
 
 fn main() -> io::Result<()> {
@@ -930,9 +931,9 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         cpu_shares: Some(256),
         no_new_privileges: true,
     };
-    let network_plan = golden_tunnel_plan()?;
+    let network_plan = golden_tunnel_plan(None)?;
 
-    let vectors = vec![
+    let mut vectors = vec![
         golden_vector(
             "shell_argv",
             JobCommand::Shell {
@@ -1452,6 +1453,57 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
             },
         ),
     ];
+    // OSPF uses f64 fields even when their values are whole numbers. Exercise
+    // those typed fields and both serializers' decimal/exponent boundaries in
+    // each network operation that carries a tunnel plan.
+    let mut ospf_vectors = Vec::new();
+    for values in [
+        [12.0, 0.0, 1.0, 1.0, 400.0, 10.0, 1.0],
+        [12.5, 0.025, 1.25, 1.5, 400.25, 10.75, 0.5],
+        [1e-5, 1e-6, 0.1, 1e15, 1e16, 1e20, 1e21],
+        [
+            5e-324,
+            1e-7,
+            100.0,
+            1e308,
+            1e-308,
+            1.2345678901234567,
+            f64::MAX,
+        ],
+    ] {
+        let plan = golden_tunnel_plan(Some(TunnelOspfConfig {
+            mode: Default::default(),
+            planned_latency_ms: values[0],
+            planned_packet_loss_ratio: values[1],
+            preference: values[2],
+            policy: vpsman_common::OspfCostPolicy {
+                latency_weight: values[3],
+                loss_weight: values[4],
+                bandwidth_weight: values[5],
+                preference_bias: values[6],
+                ..Default::default()
+            },
+            min_cost_delta: 5,
+            healthy_windows: 3,
+            left_adapter_definition_id: None,
+            right_adapter_definition_id: None,
+        }))?;
+        for vector in &vectors {
+            let mut operation = vector.operation.clone();
+            match &mut operation {
+                JobCommand::NetworkStatus { plan: target, .. }
+                | JobCommand::NetworkProbe { plan: target, .. }
+                | JobCommand::NetworkSpeedTest { plan: target, .. }
+                | JobCommand::NetworkRoutingStatus { plan: target, .. }
+                | JobCommand::NetworkRoutingApply { plan: target, .. } => {
+                    *target = Box::new(plan.clone());
+                }
+                _ => continue,
+            }
+            ospf_vectors.push(golden_vector(vector.command_type, operation));
+        }
+    }
+    vectors.extend(ospf_vectors);
     Ok(vectors)
 }
 
@@ -1485,7 +1537,7 @@ fn explicit_follow_symlinks_false_input(operation: &JobCommand) -> String {
     serde_json::to_string(&input).expect("golden vector serializes")
 }
 
-fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
+fn golden_tunnel_plan(ospf: Option<TunnelOspfConfig>) -> io::Result<vpsman_common::TunnelPlan> {
     plan_tunnel(&TunnelPlanInput {
         name: "left-a-right-b".to_string(),
         interface_name: "tunab".to_string(),
@@ -1512,7 +1564,7 @@ fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
         dynamic_bandwidth: false,
         left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
         right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
-        ospf: None,
+        ospf,
     })
     .map_err(io::Error::other)
 }

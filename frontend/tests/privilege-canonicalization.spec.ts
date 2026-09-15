@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createHash, createHmac } from "node:crypto";
 import { PRIVILEGE_OPERATION_GOLDEN_VECTORS } from "../src/generated/protocolContracts";
 import {
   agentIdentityPayloadHashHex,
@@ -81,6 +82,52 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
   for (const vector of PRIVILEGE_OPERATION_GOLDEN_VECTORS) {
     const operation = JSON.parse(vector.input_json) as JobOperation;
     expect(canonicalOperationJson(operation), vector.command_type).toBe(vector.canonical_json);
+  }
+});
+
+test("OSPF network actions sign Rust operation bytes without changing the dispatch payload", async () => {
+  const superKeyHex = "11".repeat(32);
+  for (const vector of PRIVILEGE_OPERATION_GOLDEN_VECTORS) {
+    const operation = JSON.parse(vector.input_json) as JobOperation;
+    if (!("plan" in operation) || !operation.plan.ospf) continue;
+    // Browser JSON sends -0 as 0. The signature must bind the received value.
+    if (operation.plan.ospf.planned_packet_loss_ratio === 0) {
+      operation.plan.ospf.planned_packet_loss_ratio = -0;
+    }
+    const outboundJson = JSON.stringify(operation);
+    const built = await buildPrivilegeForJobOperation({
+      clientIds: ["left-a", "right-b"],
+      commandType: vector.command_type,
+      operation,
+      privilegeMaterial: { superKeyHex },
+      selectorExpression: "*",
+      maxTimeoutSecs: 30,
+    });
+    const expectedHash = createHash("sha256").update(vector.canonical_json).digest("hex");
+    expect(built.payloadHashHex, vector.command_type).toBe(expectedHash);
+    expect(JSON.stringify(operation)).toBe(outboundJson);
+    expect(canonicalOperationJson(JSON.parse(outboundJson))).toBe(vector.canonical_json);
+
+    const intent = canonicalJobPrivilegeIntent({
+      selectorExpression: "*",
+      commandType: vector.command_type,
+      operationPayloadHash: expectedHash,
+      resolvedTargets: ["left-a", "right-b"],
+      maxTimeoutSecs: 30,
+      forceUnprivileged: false,
+      privileged: true,
+    });
+    const assertion = built.privilegeAssertion;
+    const timestamps = Buffer.alloc(16);
+    timestamps.writeBigUInt64BE(BigInt(assertion.issued_unix), 0);
+    timestamps.writeBigUInt64BE(BigInt(assertion.expires_unix), 8);
+    const expectedAssertion = createHmac("sha256", Buffer.from(superKeyHex, "hex"))
+      .update("vpsman-gateway-privilege-assertion-v1")
+      .update(createHash("sha256").update(intent).digest("hex"))
+      .update(Buffer.from(assertion.nonce_hex, "hex"))
+      .update(timestamps)
+      .digest("hex");
+    expect(assertion.assertion_hex, vector.command_type).toBe(expectedAssertion);
   }
 });
 
