@@ -376,6 +376,117 @@ async fn tier_promotion_replaces_natural_spans_and_preserves_counts() {
 }
 
 #[tokio::test]
+async fn ping_rollup_replacement_skips_cleanup_wake_but_expiry_preserves_it() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let anchor = retention_test_anchor(&db.pool).await;
+    insert_test_client(&db.pool, "ping-cleanup-wake").await;
+    let series_id = insert_test_ping_series(
+        &db.pool,
+        "ping-cleanup-wake",
+        "40000000-0000-0000-0000-000000000002",
+        "ping-cleanup-wake",
+    )
+    .await;
+    for minute in 0..5 {
+        insert_ping_point(
+            &db.pool,
+            series_id,
+            anchor + ChronoDuration::minutes(minute),
+            60,
+            10.0,
+        )
+        .await;
+    }
+    sqlx::query(
+        "INSERT INTO telemetry_ping_current \
+         (series_id, latest_status, rolling_loss_ratio, latest_checked_at) \
+         VALUES ($1, 'ok', 0, $2)",
+    )
+    .bind(series_id)
+    .bind(anchor)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut listener = db.notification_listener().await.unwrap();
+    listener.listen("vpsman_telemetry_retention").await.unwrap();
+
+    async fn cleanup_wakes(pool: &PgPool, listener: &mut sqlx::postgres::PgListener) -> usize {
+        // A later committed notification bounds observation without sleeping
+        // to infer absence. The timeout only guards a broken test connection.
+        sqlx::query("SELECT pg_notify('vpsman_telemetry_retention', 'test-barrier')")
+            .execute(pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut count = 0;
+            loop {
+                let notice = listener.recv().await.unwrap();
+                if notice.payload() == "test-barrier" {
+                    return count;
+                }
+                let payload: Value = serde_json::from_str(notice.payload()).unwrap();
+                if payload["effect"] == "ping_rollups_deleted" {
+                    count += 1;
+                }
+            }
+        })
+        .await
+        .expect("retention notification barrier timed out")
+    }
+
+    let promoted = promote_ping_tier(&db.pool, 300, 60, 1, &[60])
+        .await
+        .unwrap();
+    assert_eq!(
+        (promoted.promotion.promoted, promoted.promotion.source_rows),
+        (1, 5)
+    );
+    assert_eq!(cleanup_wakes(&db.pool, &mut listener).await, 0);
+    let retained: (i32, i32, f64) = sqlx::query_as(
+        "SELECT bucket_secs, sample_count, latency_sum_ms \
+         FROM telemetry_ping_rollups WHERE series_id = $1",
+    )
+    .bind(series_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained, (300, 5, 50.0));
+
+    let policy = RetentionPolicy {
+        enabled: true,
+        retention_days: 1,
+        prune_limit: 1,
+    };
+    assert_eq!(
+        super::prune_ping_current(&db.pool, policy).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        prune_domain(&db.pool, PING_ROLLUP_DOMAIN, policy)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(cleanup_wakes(&db.pool, &mut listener).await, 1);
+    assert_eq!(
+        super::prune_ping_current(&db.pool, policy).await.unwrap(),
+        1
+    );
+    assert_eq!(super::prune_ping_series(&db.pool, policy).await.unwrap(), 1);
+    assert_eq!(
+        prune_domain(&db.pool, PING_ROLLUP_DOMAIN, policy)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(cleanup_wakes(&db.pool, &mut listener).await, 0);
+    drop(listener);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn ping_promotion_obeys_ingest_parent_before_child_lock_order() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;

@@ -2774,6 +2774,17 @@ async fn prune_domain(pool: &PgPool, domain: &str, policy: RetentionPolicy) -> R
             .await?
             .rows_affected()
     };
+    if domain == "telemetry_ping_rollups" && rows_affected > 0 {
+        // Expiry can orphan a series; promotion's same-transaction replacement
+        // cannot. Publish only from this terminal deletion owner, after deletion
+        // and before commit so rolled-back work never wakes cleanup.
+        sqlx::query(
+            "SELECT pg_notify('vpsman_telemetry_retention', \
+             '{\"owner\":\"history_retention\",\"effect\":\"ping_rollups_deleted\"}')",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(rows_affected)
 }

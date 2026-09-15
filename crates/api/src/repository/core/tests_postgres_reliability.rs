@@ -9739,6 +9739,168 @@ async fn postgres_network_trend_budget_preserves_retained_minute_day_for_120_ser
 }
 
 #[tokio::test]
+async fn postgres_ping_rollup_prune_notifies_only_committed_deletions() {
+    async fn committed_notifications(pool: &PgPool, listener: &mut PgListener) -> Vec<Value> {
+        // A later committed notification bounds observation without sleeping
+        // to infer absence. The timeout only guards a broken test connection.
+        sqlx::query("SELECT pg_notify('vpsman_telemetry_retention', 'test-barrier')")
+            .execute(pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut notifications = Vec::new();
+            loop {
+                let notification = listener.recv().await.unwrap();
+                if notification.payload() == "test-barrier" {
+                    return notifications;
+                }
+                notifications.push(serde_json::from_str(notification.payload()).unwrap());
+            }
+        })
+        .await
+        .expect("retention notification barrier timed out")
+    }
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "ping-terminal-prune";
+    insert_client(&db.pool, client_id, None).await;
+    let target_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_targets (id, name, host, probe_kind, selector_expression)
+        VALUES ($1, 'Ping prune target', '192.0.2.1', 'icmp', '*')
+        "#,
+    )
+    .bind(target_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let series_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+        VALUES ($1, $2, 1) RETURNING id
+        "#,
+    )
+    .bind(client_id)
+    .bind(target_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_ping_rollups (
+            series_id, bucket_start, bucket_secs, sample_count,
+            success_count, latency_sum_ms, latency_avg_ms,
+            latency_min_ms, latency_max_ms, loss_ratio_avg,
+            loss_ratio_sum, loss_ratio_max, latest_status, latest_checked_at
+        ) VALUES ($1, TIMESTAMPTZ '2024-01-01 00:00:00+00', 60, 1,
+            1, 10, 10, 10, 10, 0, 0, 0, 'ok',
+            TIMESTAMPTZ '2024-01-01 00:00:00+00')
+        "#,
+    )
+    .bind(series_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let plan = HistoryRetentionPrunePlan {
+        domain: HistoryRetentionDomain::TelemetryPingRollups,
+        prune_limit: 10,
+        enabled: true,
+    };
+    // The complete minute is strictly before this fixed UTC day boundary.
+    let cutoff = 1_704_153_600;
+    let mut listener = PgListener::connect_with(&db.pool).await.unwrap();
+    listener.listen("vpsman_telemetry_retention").await.unwrap();
+
+    let preview = db
+        .repo
+        .prune_history_domain(&plan, cutoff, true)
+        .await
+        .unwrap();
+    assert_eq!((preview.matched_rows, preview.pruned_rows), (1, 0));
+    assert!(
+        committed_notifications(&db.pool, &mut listener)
+            .await
+            .is_empty(),
+        "preview must not wake orphan cleanup"
+    );
+
+    // Fail at commit, after both DELETE and NOTIFY have executed, to exercise
+    // the repository transaction rather than only PostgreSQL statement failure.
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION reject_ping_prune_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'test ping prune commit rejected';
+        END;
+        $$;
+        CREATE CONSTRAINT TRIGGER reject_ping_prune_commit
+        AFTER DELETE ON telemetry_ping_rollups
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION reject_ping_prune_commit();
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let error = db
+        .repo
+        .prune_history_domain(&plan, cutoff, false)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("test ping prune commit rejected"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM telemetry_ping_rollups WHERE series_id = $1"
+        )
+        .bind(series_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert!(
+        committed_notifications(&db.pool, &mut listener)
+            .await
+            .is_empty(),
+        "rolled-back deletion must not wake orphan cleanup"
+    );
+    sqlx::query("DROP TRIGGER reject_ping_prune_commit ON telemetry_ping_rollups")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let applied = db
+        .repo
+        .prune_history_domain(&plan, cutoff, false)
+        .await
+        .unwrap();
+    assert_eq!((applied.matched_rows, applied.pruned_rows), (1, 1));
+    assert_eq!(
+        committed_notifications(&db.pool, &mut listener).await,
+        vec![json!({"owner": "history_retention", "effect": "ping_rollups_deleted"})],
+        "committed terminal prune must wake orphan cleanup once"
+    );
+    let empty = db
+        .repo
+        .prune_history_domain(&plan, cutoff, false)
+        .await
+        .unwrap();
+    assert_eq!((empty.matched_rows, empty.pruned_rows), (0, 0));
+    assert!(
+        committed_notifications(&db.pool, &mut listener)
+            .await
+            .is_empty(),
+        "no-op prune must not wake orphan cleanup"
+    );
+    drop(listener);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_network_observation_prune_preserves_current_state_lifecycle() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;

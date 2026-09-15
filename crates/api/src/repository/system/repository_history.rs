@@ -1410,11 +1410,33 @@ async fn prune_telemetry_ping_rollups(
         RETURNING rollup.series_id
         "#
     };
-    let rows = sqlx::query(query)
-        .bind(cutoff_unix as i64)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let rows = if dry_run {
+        sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+    } else {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        if !rows.is_empty() {
+            sqlx::query(
+                r#"
+                SELECT pg_notify('vpsman_telemetry_retention',
+                    jsonb_build_object('owner', 'history_retention',
+                        'effect', 'ping_rollups_deleted')::text)
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        rows
+    };
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
