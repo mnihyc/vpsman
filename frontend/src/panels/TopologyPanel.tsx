@@ -51,6 +51,11 @@ import { tunnelEndpointRuntimeStateBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import {
+  additionalAddressChanges,
+  additionalAddressDraft,
+  additionalAddressLines,
+  additionalAddressReservations,
+  additionalAddressesFromDraft,
   buildRuntimeControl,
   buildRuntimeTopology,
   calculateOspfCostPreview,
@@ -70,6 +75,9 @@ import {
   readableTelemetryToken,
   runtimeManagerLabel,
   validateTunnelPlanName,
+  isTunnelLinkLocal,
+  tunnelLinkLocalSummary,
+  type TunnelAdditionalAddressDraft,
 } from "../topologyRuntime";
 import type {
   AgentView,
@@ -2675,6 +2683,11 @@ function TunnelPlanComposer({
   >(null);
   const [pending, setPending] = useState(false);
   const [allocationPending, setAllocationPending] = useState(false);
+  const [additionalAddressesOpen, setAdditionalAddressesOpen] = useState(() =>
+    Object.values(form.additionalAddresses).some((side) =>
+      Boolean(side.ipv4 || side.ipv6),
+    ),
+  );
   const [snapshot, setSnapshot] = useState<CreateTunnelPlanRequest | null>(
     null,
   );
@@ -2872,6 +2885,7 @@ function TunnelPlanComposer({
   const duplicateName = existingPlans.some(
     (plan) => plan.id !== initialPlan?.id && plan.name === form.name.trim(),
   );
+  const additionalAddressError = validateAdditionalAddresses(form);
   const formError = validateTunnelPlanForm(form);
   const resourceConflict = formError
     ? null
@@ -2958,7 +2972,7 @@ function TunnelPlanComposer({
         include_ipv6: form.includeIpv6,
         ipv4_pool_cidr: form.ipv4Pool.trim() || null,
         ipv6_pool_cidr: form.ipv6Pool.trim() || null,
-        reserved_addresses: [],
+        reserved_addresses: additionalAddressReservations(form.additionalAddresses),
       });
       setForm((current) => applyAllocation(current, response));
       setFeedback({
@@ -3346,7 +3360,7 @@ function TunnelPlanComposer({
                   ariaLabel="Left tunnel MTU"
                   max={MAX_TUNNEL_MTU}
                   min={
-                    form.includeIpv6 || form.kind === "sit"
+                    form.includeIpv6 || additionalAddressLines(form.additionalAddresses.left.ipv6).length > 0 || form.kind === "sit"
                       ? MIN_IPV6_TUNNEL_MTU
                       : MIN_TUNNEL_MTU
                   }
@@ -3370,7 +3384,7 @@ function TunnelPlanComposer({
                   ariaLabel="Right tunnel MTU"
                   max={MAX_TUNNEL_MTU}
                   min={
-                    form.includeIpv6 || form.kind === "sit"
+                    form.includeIpv6 || additionalAddressLines(form.additionalAddresses.right.ipv6).length > 0 || form.kind === "sit"
                       ? MIN_IPV6_TUNNEL_MTU
                       : MIN_TUNNEL_MTU
                   }
@@ -3583,6 +3597,7 @@ function TunnelPlanComposer({
               kind={form.kind}
               onChange={(value) => update("advanced", value)}
               onPreview={onPreviewTunnelPlan}
+              planId={initialPlan?.id}
               request={formError ? null : tunnelPlanPreviewRequest(form)}
               validationError={formError}
             >
@@ -3657,7 +3672,7 @@ function TunnelPlanComposer({
                 }
                 type="checkbox"
               />{" "}
-              IPv4
+              IPv4 primary pair
             </label>
             <label className="compactCheckbox">
               <input
@@ -3667,7 +3682,7 @@ function TunnelPlanComposer({
                 }
                 type="checkbox"
               />{" "}
-              IPv6
+              IPv6 primary pair
             </label>
             {form.includeIpv4 && form.includeIpv6 && (
               <label
@@ -3797,6 +3812,70 @@ function TunnelPlanComposer({
                 />
               </Field>
             </div>
+          )}
+          {form.runtimeManager === "agent_builtin" && (
+            <>
+              <label
+                className="compactCheckbox"
+                title="On each endpoint with configured IPv6, maintain one stable automatic link-local address and any explicit manual addresses, replacing native automatic link-local addresses. Manual entries are optional and additive. Off restores native behavior; explicit manual addresses still apply. IPv4-only endpoints are unchanged."
+              >
+                <input
+                  checked={form.manageLinkLocal}
+                  onChange={(event) => update("manageLinkLocal", event.target.checked)}
+                  type="checkbox"
+                />
+                Manage link-local
+              </label>
+              <details
+                className="topologyAdvancedFields"
+                open={additionalAddressesOpen}
+                onToggle={(event) => setAdditionalAddressesOpen(event.currentTarget.open)}
+              >
+                <summary>
+                  Additional addresses · Left {additionalAddressLines(form.additionalAddresses.left.ipv4).length + additionalAddressLines(form.additionalAddresses.left.ipv6).length}
+                  {" · "}Right {additionalAddressLines(form.additionalAddresses.right.ipv4).length + additionalAddressLines(form.additionalAddresses.right.ipv6).length}
+                </summary>
+                <div className="topologyFormGrid twoColumn">
+                  {(["left", "right"] as const).map((side) => {
+                    const label = side === "left" ? "Left" : "Right";
+                    const clientId = side === "left" ? form.leftClientId : form.rightClientId;
+                    return (
+                      <div className="tunnelAdditionalEndpoint" key={side}>
+                        <div className="tunnelAdditionalEndpointTitle">
+                          {label} endpoint · {clientId ? clientDisplayNameFromMap(clientId, advancedClientNames) : "Select VPS"}
+                        </div>
+                        {(["ipv4", "ipv6"] as const).map((family) => (
+                          <Field
+                            key={family}
+                            label={`Additional ${family === "ipv4" ? "IPv4" : "IPv6"}`}
+                            tooltip="One endpoint CIDR per line, including its prefix. Independent of primary pairs; allocation and probes continue to use only primary pairs."
+                          >
+                            <NumberedTextarea
+                              aria-label={`${label} additional ${family === "ipv4" ? "IPv4" : "IPv6"}`}
+                              aria-invalid={additionalAddressError?.side === side && additionalAddressError.family === family || undefined}
+                              aria-describedby={additionalAddressError?.side === side && additionalAddressError.family === family
+                                ? `tunnel-additional-${side}-${family}-error` : undefined}
+                              onChange={(event) => update("additionalAddresses", {
+                                ...form.additionalAddresses,
+                                [side]: { ...form.additionalAddresses[side], [family]: event.target.value },
+                              })}
+                              placeholder={family === "ipv4" ? "192.0.2.10/32" : "fd00::10/128\nfe80::10/64"}
+                              rows={3}
+                              value={form.additionalAddresses[side][family]}
+                            />
+                            {additionalAddressError?.side === side && additionalAddressError.family === family && (
+                              <small className="fieldError" id={`tunnel-additional-${side}-${family}-error`} role="alert">
+                                {additionalAddressError.message}
+                              </small>
+                            )}
+                          </Field>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            </>
           )}
         </fieldset>
 
@@ -4673,6 +4752,8 @@ function tunnelConnectionAssessmentError(error: unknown): string {
 function initialTunnelPlanForm(): TunnelPlanForm {
   const defaultMtu = String(defaultAgentTunnelMtu("gre"));
   return {
+    additionalAddresses: additionalAddressDraft(),
+    manageLinkLocal: true,
     advanced: tunnelAdvancedFromRuntime(),
     bandwidthMbps: String(DEFAULT_TUNNEL_BANDWIDTH_MBPS),
     bandwidthWeight: String(DEFAULT_OSPF_POLICY.bandwidth_weight),
@@ -4761,6 +4842,8 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
   const policy = ospf?.policy ?? DEFAULT_OSPF_POLICY;
   return {
     ...initialTunnelPlanForm(),
+    additionalAddresses: additionalAddressDraft(input.additional_addresses),
+    manageLinkLocal: input.manage_link_local ?? true,
     advanced: tunnelAdvancedFromRuntime(runtime),
     bandwidthMbps: String(input.bandwidth_mbps),
     bandwidthWeight: String(policy.bandwidth_weight),
@@ -4857,7 +4940,45 @@ function mbpsToKbpsText(value: string): string {
   return String(Math.round(Number(value) * 1_000));
 }
 
+function validateAdditionalAddresses(form: TunnelPlanForm): {
+  side: "left" | "right";
+  family: "ipv4" | "ipv6";
+  message: string;
+} | null {
+  const seen = new Set<string>();
+  for (const [enabled, left, right, bits] of [
+    [form.includeIpv4, form.leftIpv4, form.rightIpv4, 32],
+    [form.includeIpv6, form.leftIpv6, form.rightIpv6, 128],
+  ] as const) {
+    if (!enabled) continue;
+    for (const address of [left, right]) {
+      const key = ipAddressKey(address, bits);
+      if (key) seen.add(key);
+    }
+  }
+  for (const side of ["left", "right"] as const) {
+    for (const family of ["ipv4", "ipv6"] as const) {
+      const bits = family === "ipv4" ? 32 : 128;
+      const lines = form.additionalAddresses[side][family].split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index].trim();
+        if (!line) continue;
+        const label = `${side === "left" ? "Left" : "Right"} additional ${family === "ipv4" ? "IPv4" : "IPv6"}, line ${index + 1}`;
+        if (!isIpCidr(line, bits) || !/^\d+$/.test(line.split("/")[1] ?? "")) {
+          return { side, family, message: `${label}: enter an address with a valid CIDR prefix` };
+        }
+        const key = ipAddressKey(line.split("/")[0], bits)!;
+        if (seen.has(key)) return { side, family, message: `${label}: this address is already configured on this tunnel` };
+        seen.add(key);
+      }
+    }
+  }
+  return null;
+}
+
 function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
+  const extraError = validateAdditionalAddresses(form);
+  if (extraError) return extraError.message;
   const advancedError = form.runtimeManager === "agent_builtin"
     ? validateTunnelAdvanced(form.advanced)
     : null;
@@ -4897,21 +5018,21 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
   )
     return `Bandwidth must be a whole number from ${MIN_TUNNEL_BANDWIDTH_MBPS} to ${MAX_TUNNEL_BANDWIDTH_MBPS} Mbps`;
   if (form.runtimeManager === "agent_builtin") {
-    const minimumMtu =
-      form.includeIpv6 || form.kind === "sit"
+    const minimumMtu = (side: "left" | "right") =>
+      form.includeIpv6 || additionalAddressLines(form.additionalAddresses[side].ipv6).length > 0 || form.kind === "sit"
         ? MIN_IPV6_TUNNEL_MTU
         : MIN_TUNNEL_MTU;
     const mtuError =
       validateIntegerRange(
         form.leftMtu,
         "Left MTU",
-        minimumMtu,
+        minimumMtu("left"),
         MAX_TUNNEL_MTU,
       ) ??
       validateIntegerRange(
         form.rightMtu,
         "Right MTU",
-        minimumMtu,
+        minimumMtu("right"),
         MAX_TUNNEL_MTU,
       );
     if (mtuError) return mtuError;
@@ -5308,8 +5429,9 @@ function validateExistingTunnelPlanConflicts(
     [
       form.includeIpv4 ? ipAddressKey(form.leftIpv4, 32) : null,
       form.includeIpv4 ? ipAddressKey(form.rightIpv4, 32) : null,
-      form.includeIpv6 ? ipAddressKey(form.leftIpv6, 128) : null,
-      form.includeIpv6 ? ipAddressKey(form.rightIpv6, 128) : null,
+      form.includeIpv6 && !isTunnelLinkLocal(form.leftIpv6) ? ipAddressKey(form.leftIpv6, 128) : null,
+      form.includeIpv6 && !isTunnelLinkLocal(form.rightIpv6) ? ipAddressKey(form.rightIpv6, 128) : null,
+      ...additionalAddressConflictKeys(additionalAddressesFromDraft(form.additionalAddresses)),
     ].filter((value): value is string => Boolean(value)),
   );
   const requestedListeners = tunnelFormListenerResources(form);
@@ -5329,12 +5451,13 @@ function validateExistingTunnelPlanConflicts(
       plan.plan.ipv4_tunnel
         ? ipAddressKey(plan.plan.ipv4_tunnel.right, 32)
         : null,
-      plan.plan.ipv6_tunnel
+      plan.plan.ipv6_tunnel && !isTunnelLinkLocal(plan.plan.ipv6_tunnel.left)
         ? ipAddressKey(plan.plan.ipv6_tunnel.left, 128)
         : null,
-      plan.plan.ipv6_tunnel
+      plan.plan.ipv6_tunnel && !isTunnelLinkLocal(plan.plan.ipv6_tunnel.right)
         ? ipAddressKey(plan.plan.ipv6_tunnel.right, 128)
         : null,
+      ...additionalAddressConflictKeys(plan.plan.additional_addresses),
     ];
     if (
       savedAddresses.some(
@@ -5358,6 +5481,14 @@ function validateExistingTunnelPlanConflicts(
     }
   }
   return null;
+}
+
+function additionalAddressConflictKeys(addresses: TunnelPlanInput["additional_addresses"]): Array<string | null> {
+  if (!addresses) return [];
+  return [addresses.left, addresses.right].flatMap((side) => [
+    ...side.ipv4.map((cidr) => ipAddressKey(cidr.split("/")[0], 32)),
+    ...side.ipv6.filter((cidr) => !isTunnelLinkLocal(cidr)).map((cidr) => ipAddressKey(cidr.split("/")[0], 128)),
+  ]);
 }
 
 type TunnelListenerResource = {
@@ -5589,6 +5720,8 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
       : {};
   return {
     address_pool_cidr: form.ipv4Pool.trim(),
+    additional_addresses: additionalAddressesFromDraft(form.additionalAddresses),
+    manage_link_local: form.manageLinkLocal,
     bandwidth_mbps: clampTunnelBandwidthMbps(form.bandwidthMbps),
     confirmed: true,
     dynamic_bandwidth: form.dynamicBandwidth,
@@ -5876,7 +6009,7 @@ function createConfirmationItems(
         ]
       : []),
     {
-      label: "Addresses",
+      label: "Primary addresses",
       value: [
         request.ipv4_tunnel
           ? `${request.ipv4_tunnel.left}/${request.ipv4_tunnel.prefix_len} / ${request.ipv4_tunnel.right}/${request.ipv4_tunnel.prefix_len}`
@@ -5888,6 +6021,26 @@ function createConfirmationItems(
         .filter(Boolean)
         .join("; "),
     },
+    ...(runtime?.manager === "agent_builtin"
+      ? (["left", "right"] as const).flatMap((side) => {
+          const label = side === "left" ? "Left" : "Right";
+          const current = request.additional_addresses?.[side];
+          const previous = existing?.input.additional_addresses?.[side];
+          return [
+            {
+              label: `${label} additional addresses`,
+              value: additionalAddressChanges(
+                [...(current?.ipv4 ?? []), ...(current?.ipv6 ?? [])],
+                [...(previous?.ipv4 ?? []), ...(previous?.ipv6 ?? [])],
+              ),
+            },
+            {
+              label: `${label} link-local`,
+              value: tunnelLinkLocalSummary(request, side),
+            },
+          ];
+        })
+      : []),
     {
       label: "Planning bandwidth",
       value: `${request.bandwidth_mbps} Mbps · ${request.dynamic_bandwidth ? "Dynamic OSPF bandwidth" : "Static OSPF bandwidth"}`,
@@ -6307,6 +6460,8 @@ function observedPeerAddress(
 }
 
 type TunnelPlanForm = {
+  additionalAddresses: TunnelAdditionalAddressDraft;
+  manageLinkLocal: boolean;
   advanced: TunnelAdvancedDraft;
   bandwidthMbps: string;
   bandwidthWeight: string;

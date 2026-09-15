@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use vpsman_common::{
     default_ospf_healthy_windows, default_ospf_min_cost_delta, default_tunnel_mtu, plan_tunnel,
     BandwidthMbps, OspfControlMode, OspfCostPolicy, RuntimeTunnelManager,
-    RuntimeTunnelOpenvpnTransport, RuntimeTunnelWireguardEndpointMode, TunnelAddressFamily,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
-    MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
+    RuntimeTunnelOpenvpnTransport, RuntimeTunnelWireguardEndpointMode, TunnelAdditionalAddresses,
+    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
+    TunnelPlanInput, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 
 use crate::network_runtime_args::{
@@ -41,6 +41,8 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut ipv6_address_pool_cidr = None::<String>;
     let mut left_tunnel_ipv6_cidr = None::<String>;
     let mut right_tunnel_ipv6_cidr = None::<String>;
+    let mut additional_addresses = TunnelAdditionalAddresses::default();
+    let mut manage_link_local = true;
     let mut latency_primary_family = TunnelAddressFamily::Ipv4;
     let mut bandwidth = None::<BandwidthMbps>;
     let mut left_mtu = None::<u16>;
@@ -293,6 +295,46 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             value if value.starts_with("--right-tunnel-ipv6-cidr=") => {
                 right_tunnel_ipv6_cidr =
                     Some(flag_value(value, "--right-tunnel-ipv6-cidr=").to_string());
+                index += 1;
+            }
+            value
+                if matches!(
+                    value.split('=').next(),
+                    Some(
+                        "--additional-left-ipv4"
+                            | "--additional-left-ipv6"
+                            | "--additional-right-ipv4"
+                            | "--additional-right-ipv6"
+                    )
+                ) =>
+            {
+                let (flag, value) = if let Some((flag, value)) = value.split_once('=') {
+                    index += 1;
+                    (flag, value)
+                } else {
+                    let argument = next_value(tokens, index, value)?;
+                    index += 2;
+                    (value, argument)
+                };
+                let addresses = match flag {
+                    "--additional-left-ipv4" => &mut additional_addresses.left.ipv4,
+                    "--additional-left-ipv6" => &mut additional_addresses.left.ipv6,
+                    "--additional-right-ipv4" => &mut additional_addresses.right.ipv4,
+                    "--additional-right-ipv6" => &mut additional_addresses.right.ipv6,
+                    _ => unreachable!(),
+                };
+                addresses.extend(split_csv_values(value));
+            }
+            "--manage-link-local" => {
+                manage_link_local = next_value(tokens, index, "--manage-link-local")?
+                    .parse()
+                    .context("--manage-link-local must be true or false")?;
+                index += 2;
+            }
+            value if value.starts_with("--manage-link-local=") => {
+                manage_link_local = flag_value(value, "--manage-link-local=")
+                    .parse()
+                    .context("--manage-link-local must be true or false")?;
                 index += 1;
             }
             "--latency-primary-family" => {
@@ -901,6 +943,8 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             TunnelAddressFamily::Ipv6,
             "IPv6",
         )?,
+        additional_addresses,
+        manage_link_local,
         latency_primary_family,
         bandwidth_mbps: required(bandwidth, "--bandwidth-mbps")?,
         dynamic_bandwidth: false,

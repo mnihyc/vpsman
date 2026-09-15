@@ -44,6 +44,8 @@ fn openvpn_plan(
             prefix_len: 127,
         }),
         latency_primary_family: TunnelAddressFamily::Ipv4,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1500),
@@ -231,9 +233,15 @@ fn reconcile_always_restores_declared_mtu_and_link_state() {
         pid_path: PathBuf::from("/state/openvpn.pid"),
         config_hash: "hash".to_string(),
     };
-    let steps =
-        build_openvpn_reconcile_steps(&AgentConfig::default(), &plan, &endpoint, &prepared, true)
-            .unwrap();
+    let steps = build_openvpn_reconcile_steps(
+        &AgentConfig::default(),
+        &plan,
+        &endpoint,
+        &prepared,
+        true,
+        Some(Uuid::nil()),
+    )
+    .unwrap();
     let labels = steps.iter().map(|step| step.label).collect::<Vec<_>>();
     assert!(labels.contains(&"runtime_link_mtu"));
     assert!(labels.contains(&"runtime_link_up"));

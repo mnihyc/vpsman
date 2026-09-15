@@ -60,6 +60,7 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
     let (mut ping_argv, command_source) = ping_base_argv(input.config)?;
     let count_arg = count.to_string();
     let interval_secs = format!("{:.3}", f64::from(interval_ms) / 1000.0);
+    append_link_local_interface(&mut ping_argv, target, &input.plan.interface_name);
     ping_argv.extend([
         "-n".to_string(),
         "-c".to_string(),
@@ -149,6 +150,19 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
         exit_code: output.exit_code,
         done: true,
     }])
+}
+
+pub(crate) fn append_link_local_interface(
+    argv: &mut Vec<String>,
+    target: &str,
+    interface_name: &str,
+) {
+    if target
+        .parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|address| address.is_unicast_link_local())
+    {
+        argv.extend(["-I".to_string(), interface_name.to_string()]);
+    }
 }
 
 fn ping_base_argv(config: &AgentConfig) -> Result<(Vec<String>, &'static str)> {

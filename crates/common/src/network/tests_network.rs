@@ -1,5 +1,7 @@
 use super::*;
 
+const TEST_PLAN_ID: uuid::Uuid = uuid::Uuid::from_u128(0x11111111_1111_4111_8111_111111111111);
+
 const LEFT_RUNTIME_ADAPTER: &str = "11111111-1111-4111-8111-111111111111";
 const RIGHT_RUNTIME_ADAPTER: &str = "22222222-2222-4222-8222-222222222222";
 const LEFT_ROUTING_ADAPTER: &str = "33333333-3333-4333-8333-333333333333";
@@ -39,6 +41,8 @@ fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInpu
         ipv4_tunnel: Some(ipv4_pair("10.255.0.0", "10.255.0.1")),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
         dynamic_bandwidth: false,
@@ -86,7 +90,7 @@ fn advanced_endpoint_settings_survive_plan_and_endpoint_rendering() {
         let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
         assert_eq!(endpoint.runtime_control, input.runtime_control);
     }
-    let preview = render_tunnel_runtime_preview(&plan).unwrap();
+    let preview = render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).unwrap();
     assert_eq!(preview.endpoints.len(), 2);
     assert!(preview.endpoints[0].artifacts[0]
         .content
@@ -210,14 +214,403 @@ fn native_address_commands_attach_prefix_to_peer_for_both_families_and_sides() {
         ),
     ] {
         let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
-        let commands = build_tunnel_address_argv(&base, &plan, &endpoint);
-        assert_eq!(commands.len(), expected.len());
+        let commands = build_tunnel_address_argv(&base, &plan, &endpoint, Some(TEST_PLAN_ID));
+        assert_eq!(commands.len(), expected.len() + 1);
+        assert_eq!(
+            commands.last().unwrap()[3],
+            tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.local_client_id)
+        );
         for (argv, (local, peer)) in commands.into_iter().zip(expected) {
             assert_eq!(
                 argv,
                 ["/sbin/ip", "addr", "replace", local, "peer", peer, "dev", "tunab"]
             );
         }
+    }
+}
+
+#[test]
+fn additional_addresses_are_independent_and_keep_primary_targets_unchanged() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.additional_addresses.left.ipv4 = vec![" 10.20.1.99/24 ".into()];
+    input.additional_addresses.left.ipv6 = vec!["FD00:AB::1234/64".into(), "fe80::a/64".into()];
+    input.additional_addresses.right.ipv6 = vec!["fe80::b/64".into()];
+    let plan = plan_tunnel(&input).unwrap();
+    assert_eq!(plan.additional_addresses.left.ipv4, ["10.20.1.99/24"]);
+    assert_eq!(
+        plan.additional_addresses.left.ipv6,
+        ["fd00:ab::1234/64", "fe80::a/64"]
+    );
+    assert_eq!(plan.left_tunnel_address, "10.255.0.0");
+    assert_eq!(plan.right_tunnel_address, "10.255.0.1");
+    assert_eq!(plan.latency_primary_family, TunnelAddressFamily::Ipv4);
+    assert!(plan.ipv6_tunnel.is_none());
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
+    assert_eq!(
+        endpoint.additional_addresses,
+        plan.additional_addresses.right
+    );
+    assert_eq!(
+        endpoint.peer_additional_addresses,
+        plan.additional_addresses.left
+    );
+    assert_eq!(
+        tunnel_endpoint_explicit_address_cidrs(&plan, &endpoint),
+        ["10.255.0.1/31", "fe80::b/64"]
+    );
+}
+
+#[test]
+fn additional_addresses_reject_wrong_family_and_same_link_duplicates() {
+    for (ipv4, entries) in [
+        (true, vec!["fd00::1/64"]),
+        (false, vec!["10.0.0.1/32"]),
+        (true, vec!["10.0.0.1/33"]),
+        (false, vec!["fe80::1/129"]),
+        (false, vec!["fe80::1"]),
+        (true, vec!["10.255.0.0/32"]),
+        (false, vec!["fe80::1/64", "FE80:0:0:0:0:0:0:1/128"]),
+    ] {
+        let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+        let list = if ipv4 {
+            &mut input.additional_addresses.left.ipv4
+        } else {
+            &mut input.additional_addresses.left.ipv6
+        };
+        *list = entries.iter().map(|entry| (*entry).to_string()).collect();
+        assert!(
+            matches!(
+                plan_tunnel(&input),
+                Err(NetworkPlanError::InvalidAdditionalAddress(_))
+            ),
+            "{entries:?}"
+        );
+    }
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.additional_addresses.left.ipv6 = vec!["fe80::1/64".into()];
+    input.additional_addresses.right.ipv6 = vec!["fe80::1/128".into()];
+    assert!(matches!(
+        plan_tunnel(&input),
+        Err(NetworkPlanError::InvalidAdditionalAddress(_))
+    ));
+    input.additional_addresses.right.ipv6 = vec!["fe80::2/64".into()];
+    input.reserved_addresses = vec!["fe80::1".into()];
+    assert!(
+        plan_tunnel(&input).is_ok(),
+        "another link may reuse a link-local address"
+    );
+}
+
+#[test]
+fn additional_ipv6_mtu_requirement_is_endpoint_scoped() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    input.additional_addresses.left.ipv6 = vec!["fd00::1/64".into()];
+    input.left_mtu = Some(1280);
+    input.right_mtu = Some(1000);
+    assert!(plan_tunnel(&input).is_ok());
+    input.left_mtu = Some(1279);
+    assert_eq!(plan_tunnel(&input), Err(NetworkPlanError::InvalidTunnelMtu));
+}
+
+#[test]
+fn every_builtin_kind_renders_additional_addresses_without_extra_openvpn_ifconfig() {
+    for kind in [
+        TunnelKind::Gre,
+        TunnelKind::Ipip,
+        TunnelKind::Sit,
+        TunnelKind::Fou,
+        TunnelKind::Wireguard,
+        TunnelKind::Openvpn,
+    ] {
+        let mut input = plan_input(kind, RuntimeTunnelManager::AgentBuiltin);
+        input.additional_addresses.left.ipv4 = vec!["10.20.1.99/24".into()];
+        input.additional_addresses.right.ipv6 = vec!["fd00:ab::1234/64".into()];
+        let plan = plan_tunnel(&input).unwrap();
+        let preview = render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).unwrap();
+        for (side, expected) in [
+            (TunnelEndpointSide::Left, "10.20.1.99/24"),
+            (TunnelEndpointSide::Right, "fd00:ab::1234/64"),
+        ] {
+            let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
+            let commands =
+                build_tunnel_address_argv(&["ip".into()], &plan, &endpoint, Some(TEST_PLAN_ID));
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command == &["ip", "addr", "replace", expected, "dev", "tunab"]),
+                "{kind:?} {side:?}"
+            );
+            let endpoint_preview = preview
+                .endpoints
+                .iter()
+                .find(|entry| entry.side == side)
+                .unwrap();
+            assert!(endpoint_preview
+                .commands
+                .iter()
+                .any(|command| command.argv.get(3).is_some_and(|value| value == expected)));
+            if kind == TunnelKind::Openvpn {
+                for artifact in &endpoint_preview.artifacts {
+                    if artifact.label.starts_with("OpenVPN") {
+                        assert_eq!(
+                            artifact
+                                .content
+                                .lines()
+                                .filter(|line| line.starts_with("ifconfig "))
+                                .count(),
+                            1
+                        );
+                        assert!(!artifact
+                            .content
+                            .lines()
+                            .any(|line| line.starts_with("ifconfig-ipv6 ")));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn wireguard_additional_family_permissions_are_peer_host_scoped() {
+    let mut input = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::AgentBuiltin);
+    input.additional_addresses.left.ipv6 = vec!["fd00::a/64".into()];
+    input.additional_addresses.right.ipv6 = vec!["fd00::b/64".into(), "fe80::b/64".into()];
+    let plan = plan_tunnel(&input).unwrap();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let command = build_wireguard_configure_argv(
+        &["wg".into()],
+        &plan,
+        &endpoint,
+        std::path::Path::new("key"),
+        "peer",
+        Some(TEST_PLAN_ID),
+    )
+    .unwrap();
+    assert_eq!(
+        command.last().unwrap(),
+        &format!(
+            "0.0.0.0/0,fd00::b/128,fe80::b/128,{}/128",
+            tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.peer_client_id)
+                .trim_end_matches("/64")
+        )
+    );
+}
+
+#[test]
+fn managed_link_local_is_stable_additive_and_only_uses_explicit_ipv6_intent() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    let plan = plan_tunnel(&input).unwrap();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    assert!(!tunnel_endpoint_manages_link_local(&plan, &endpoint));
+    input.additional_addresses.left.ipv6 = vec!["fe80::1234/64".into()];
+    let plan = plan_tunnel(&input).unwrap();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    assert!(tunnel_endpoint_manages_link_local(&plan, &endpoint));
+    let generated = tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.local_client_id);
+    assert_ne!(
+        generated,
+        tunnel_generated_link_local(uuid::Uuid::from_u128(2), &endpoint.local_client_id),
+        "the same endpoint has distinct identities on different tunnel plans"
+    );
+    let address: std::net::Ipv6Addr = generated.trim_end_matches("/64").parse().unwrap();
+    assert!(address.is_unicast_link_local());
+    assert_eq!(address.octets()[8] & 0x02, 0);
+    assert_ne!(
+        generated,
+        tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.peer_client_id)
+    );
+    let commands = build_tunnel_address_argv(&["ip".into()], &plan, &endpoint, Some(TEST_PLAN_ID));
+    assert!(commands
+        .iter()
+        .any(|command| command.get(3) == Some(&generated)));
+    assert!(commands
+        .iter()
+        .any(|command| command.get(3).is_some_and(|value| value == "fe80::1234/64")));
+    let mut renamed = plan.clone();
+    renamed.name = "new display name".into();
+    renamed.interface_name = "new0".into();
+    renamed.kind = TunnelKind::Wireguard;
+    let renamed_endpoint =
+        render_tunnel_endpoint_config(&renamed, TunnelEndpointSide::Left).unwrap();
+    assert_eq!(
+        generated,
+        tunnel_generated_link_local(TEST_PLAN_ID, &renamed_endpoint.local_client_id)
+    );
+    renamed.manage_link_local = false;
+    assert!(!tunnel_endpoint_manages_link_local(
+        &renamed,
+        &renamed_endpoint
+    ));
+    let commands = build_tunnel_address_argv(
+        &["ip".into()],
+        &renamed,
+        &renamed_endpoint,
+        Some(TEST_PLAN_ID),
+    );
+    assert!(!commands
+        .iter()
+        .any(|command| command.get(3) == Some(&generated)));
+    assert!(commands
+        .iter()
+        .any(|command| command.get(3).is_some_and(|value| value == "fe80::1234/64")));
+    renamed.manage_link_local = true;
+    renamed.runtime_control.manager = RuntimeTunnelManager::ExternalObserved;
+    assert!(!tunnel_endpoint_manages_link_local(
+        &renamed,
+        &renamed_endpoint
+    ));
+}
+
+#[test]
+fn generated_link_local_already_listed_explicitly_is_not_applied_twice() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    let generated = tunnel_generated_link_local(TEST_PLAN_ID, &input.left_client_id);
+    input.additional_addresses.left.ipv6 = vec![generated.clone()];
+    let plan = plan_tunnel(&input).unwrap();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let commands = build_tunnel_address_argv(&["ip".into()], &plan, &endpoint, Some(TEST_PLAN_ID));
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.get(3) == Some(&generated))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn explicit_ipv6_cannot_duplicate_the_peers_active_generated_link_local() {
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    let generated_left = tunnel_generated_link_local(TEST_PLAN_ID, &input.left_client_id);
+    input.additional_addresses.left.ipv6 = vec!["fd00::a/64".into()];
+    input.additional_addresses.right.ipv6 = vec![generated_left.clone()];
+    let plan = plan_tunnel(&input).unwrap();
+    assert!(matches!(
+        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan),
+        Err(NetworkPlanError::InvalidAdditionalAddress(_))
+    ));
+    assert!(validate_tunnel_link_local_addresses(uuid::Uuid::from_u128(2), &plan).is_ok());
+    assert!(
+        render_tunnel_runtime_preview(&plan, None).is_ok(),
+        "an unsaved draft cannot invent its future plan UUID"
+    );
+    assert!(render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).is_err());
+    input.additional_addresses.left.ipv6.clear();
+    assert!(
+        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan_tunnel(&input).unwrap()).is_ok(),
+        "left has no IPv6 intent, so its automatic address is inactive"
+    );
+    input.ipv6_tunnel = Some(TunnelAddressPair {
+        left: "fe80::a".into(),
+        right: generated_left.trim_end_matches("/64").into(),
+        prefix_len: 64,
+    });
+    input.additional_addresses.right.ipv6.clear();
+    assert!(matches!(
+        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan_tunnel(&input).unwrap()),
+        Err(NetworkPlanError::InvalidAdditionalAddress(_))
+    ));
+    input.manage_link_local = false;
+    assert!(
+        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan_tunnel(&input).unwrap()).is_ok(),
+        "native mode has no generated address claim"
+    );
+    input.manage_link_local = true;
+    input.ipv6_tunnel.as_mut().unwrap().left = generated_left.trim_end_matches("/64").into();
+    input.ipv6_tunnel.as_mut().unwrap().right = "fe80::b".into();
+    assert!(
+        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan_tunnel(&input).unwrap()).is_ok(),
+        "explicit own address coalesces with the generated address"
+    );
+}
+
+#[test]
+fn draft_link_local_preview_is_placeholder_while_saved_preview_matches_runtime() {
+    let mut input = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::AgentBuiltin);
+    input.additional_addresses.left.ipv6 = vec!["fd00::a/64".into()];
+    input.additional_addresses.right.ipv6 = vec!["fd00::b/64".into()];
+    let plan = plan_tunnel(&input).unwrap();
+    let draft = render_tunnel_runtime_preview(&plan, None).unwrap();
+    let saved = render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).unwrap();
+    let base = ["{runtime_ip_argv}".to_string()];
+    for (draft_endpoint, saved_endpoint) in draft.endpoints.iter().zip(&saved.endpoints) {
+        let endpoint = render_tunnel_endpoint_config(&plan, saved_endpoint.side).unwrap();
+        assert!(draft_endpoint.commands.iter().any(|command| command
+            .argv
+            .contains(&"{generated_link_local}/64".to_string())));
+        assert!(draft_endpoint.commands.iter().any(|command| command
+            .argv
+            .iter()
+            .any(|arg| arg.contains("{generated_peer_link_local}/128"))));
+        assert!(!saved_endpoint
+            .commands
+            .iter()
+            .any(|command| command.argv.iter().any(|arg| arg.contains("{generated_"))));
+        for command in build_tunnel_address_argv(&base, &plan, &endpoint, Some(TEST_PLAN_ID)) {
+            assert!(saved_endpoint
+                .commands
+                .iter()
+                .any(|rendered| rendered.argv == command));
+        }
+        let peer = tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.peer_client_id);
+        let peer_allowance = format!("{}/128", peer.trim_end_matches("/64"));
+        assert!(saved_endpoint
+            .commands
+            .iter()
+            .any(|command| command.argv.iter().any(|arg| arg.contains(&peer_allowance))));
+    }
+}
+
+#[test]
+fn address_management_defaults_preserve_serialized_default_plan_shape() {
+    let input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    let value = serde_json::to_value(&input).unwrap();
+    assert!(value.get("additional_addresses").is_none());
+    assert!(value.get("manage_link_local").is_none());
+    let decoded: TunnelPlanInput = serde_json::from_value(value).unwrap();
+    assert!(decoded.manage_link_local);
+    assert!(decoded.additional_addresses.is_empty());
+    let mut plan = plan_tunnel(&decoded).unwrap();
+    plan.manage_link_local = false;
+    plan.additional_addresses.left.ipv4 = vec!["10.0.0.2/32".into()];
+    let roundtrip: TunnelPlan =
+        serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+    assert_eq!(plan, roundtrip);
+}
+
+#[test]
+fn fou_native_commands_keep_endpoint_intent_with_link_encapsulation() {
+    let mut input = plan_input(TunnelKind::Fou, RuntimeTunnelManager::AgentBuiltin);
+    input.left_local_underlay = Some("192.0.2.1".into());
+    input.runtime_control.fou.peer_port = 15555;
+    let plan = plan_tunnel(&input).unwrap();
+    let base = ["/sbin/ip".into()];
+    for (side, remote, local) in [
+        (TunnelEndpointSide::Left, "198.51.100.10", Some("192.0.2.1")),
+        (TunnelEndpointSide::Right, "203.0.113.20", None),
+    ] {
+        let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
+        let mut expected = vec![
+            "/sbin/ip", "link", "add", "tunab", "type", "ipip", "remote", remote,
+        ];
+        if let Some(local) = local {
+            expected.extend(["local", local]);
+        }
+        expected.extend([
+            "ttl",
+            "255",
+            "encap",
+            "fou",
+            "encap-sport",
+            "auto",
+            "encap-dport",
+            "15555",
+        ]);
+        assert_eq!(
+            build_ip_tunnel_argv(&base, "add", &plan, &endpoint).unwrap(),
+            expected
+        );
     }
 }
 
@@ -232,7 +625,7 @@ fn preview_and_native_renderers_use_the_same_endpoint_options() {
         TunnelKind::Openvpn,
     ] {
         let plan = plan_tunnel(&plan_input(kind, RuntimeTunnelManager::AgentBuiltin)).unwrap();
-        let preview = render_tunnel_runtime_preview(&plan).unwrap();
+        let preview = render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).unwrap();
         for rendered in preview.endpoints {
             let endpoint = render_tunnel_endpoint_config(&plan, rendered.side).unwrap();
             let base = ["{runtime_ip_argv}".to_string()];
@@ -246,7 +639,7 @@ fn preview_and_native_renderers_use_the_same_endpoint_options() {
                     .iter()
                     .any(|command| command.argv == native));
             }
-            for native in build_tunnel_address_argv(&base, &plan, &endpoint) {
+            for native in build_tunnel_address_argv(&base, &plan, &endpoint, Some(TEST_PLAN_ID)) {
                 assert!(rendered
                     .commands
                     .iter()
@@ -283,7 +676,7 @@ fn preview_includes_declared_cleanup_routes_and_traffic_policy() {
         burst_kb: Some(64),
     };
     let plan = plan_tunnel(&input).unwrap();
-    let preview = render_tunnel_runtime_preview(&plan).unwrap();
+    let preview = render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).unwrap();
     let ip = ["{runtime_ip_argv}".into()];
     let tc = ["{runtime_tc_argv}".into()];
     for endpoint in preview.endpoints {

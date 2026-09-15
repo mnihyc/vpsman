@@ -279,7 +279,7 @@ fn tunnel_plan_defaults_do_not_enable_or_require_ospf() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            let parsed = Args::try_parse_from([
+            let base = [
                 "vpsctl",
                 "tunnel-plan",
                 "--name",
@@ -302,8 +302,38 @@ fn tunnel_plan_defaults_do_not_enable_or_require_ospf() {
                 "10.255.0.1/31",
                 "--bandwidth-mbps",
                 "100",
-            ]);
-            assert!(parsed.is_ok(), "{parsed:?}");
+            ];
+            let parsed = Args::try_parse_from(base);
+            let Command::TunnelPlan(request) = parsed.unwrap().command else {
+                panic!("expected tunnel-plan command");
+            };
+            assert!(request.manage_link_local);
+            assert!(request.additional_left_ipv4.is_empty());
+            assert!(request.additional_left_ipv6.is_empty());
+            assert!(request.additional_right_ipv4.is_empty());
+            assert!(request.additional_right_ipv6.is_empty());
+            let parsed = Args::try_parse_from(base.into_iter().chain([
+                "--additional-left-ipv4=192.0.2.1/32,192.0.2.2/32",
+                "--additional-left-ipv4",
+                "192.0.2.3/32",
+                "--additional-right-ipv4=192.0.2.4/32",
+                "--additional-left-ipv6=fe80::1/64",
+                "--additional-right-ipv6",
+                "fd00::2/128,fe80::2/64",
+                "--manage-link-local=false",
+            ]))
+            .unwrap();
+            let Command::TunnelPlan(request) = parsed.command else {
+                panic!("expected tunnel-plan command");
+            };
+            assert_eq!(
+                request.additional_left_ipv4,
+                ["192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"]
+            );
+            assert_eq!(request.additional_right_ipv4, ["192.0.2.4/32"]);
+            assert_eq!(request.additional_left_ipv6, ["fe80::1/64"]);
+            assert_eq!(request.additional_right_ipv6, ["fd00::2/128", "fe80::2/64"]);
+            assert!(!request.manage_link_local);
         })
         .expect("spawn CLI parser test")
         .join()

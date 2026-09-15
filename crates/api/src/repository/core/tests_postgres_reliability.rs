@@ -37072,6 +37072,8 @@ fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
@@ -37977,6 +37979,193 @@ async fn postgres_tunnel_plan_bulk_lifecycle_is_ordered_partial_and_set_owned() 
         (false, first.revision + 1)
     );
 
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_additional_addresses_preserve_link_scope_and_round_trip() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let (operator, headers) = postgres_operator_session(&db.repo, "network-operator").await;
+    let state = postgres_app_state(&db);
+    let mut first =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    first.additional_addresses.left.ipv4 = vec!["192.0.2.10/32".into()];
+    first.additional_addresses.left.ipv6 = vec!["fe80::10/64".into()];
+    first.additional_addresses.right.ipv6 = vec!["fe80::20/64".into()];
+    let first_plan = plan_tunnel(&first).unwrap();
+    let stored = db
+        .repo
+        .record_tunnel_plan(&first, &first_plan, false, &operator)
+        .await
+        .unwrap();
+    let read = db.repo.get_tunnel_plan(stored.id).await.unwrap().unwrap();
+    assert_eq!(read.input.additional_addresses, first.additional_addresses);
+    assert_eq!(read.plan.additional_addresses, first.additional_addresses);
+    assert!(read.input.manage_link_local && read.plan.manage_link_local);
+
+    let generated_left = vpsman_common::tunnel_generated_link_local(stored.id, "client-a");
+    let draft_preview = crate::routes_network::preview_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Query(crate::routes_network::TunnelPlanPreviewQuery::default()),
+        Json(first.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(draft_preview.endpoints[0]
+        .commands
+        .iter()
+        .any(|command| command
+            .argv
+            .iter()
+            .any(|arg| arg == "{generated_link_local}/64")));
+    let saved_preview = crate::routes_network::preview_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Query(crate::routes_network::TunnelPlanPreviewQuery {
+            plan_id: Some(stored.id),
+        }),
+        Json(first.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(saved_preview.endpoints[0]
+        .commands
+        .iter()
+        .any(|command| command.argv.contains(&generated_left)));
+    assert_eq!(
+        db.repo.list_tunnel_plans().await.unwrap().len(),
+        1,
+        "preview must not allocate or save a plan"
+    );
+    let missing = crate::routes_network::preview_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Query(crate::routes_network::TunnelPlanPreviewQuery {
+            plan_id: Some(Uuid::new_v4()),
+        }),
+        Json(first.clone()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    let mut collision = first.clone();
+    collision
+        .additional_addresses
+        .right
+        .ipv6
+        .push(generated_left);
+    // The draft is valid until bound to this saved plan's actual generated LL.
+    let collision_plan = plan_tunnel(&collision).unwrap();
+    assert!(db
+        .repo
+        .update_tunnel_plan(
+            stored.id,
+            stored.revision,
+            &collision,
+            &collision_plan,
+            false,
+            &operator
+        )
+        .await
+        .unwrap_err()
+        .downcast_ref::<vpsman_common::NetworkPlanError>()
+        .is_some());
+    let error = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(stored.id),
+        Json(crate::model::UpdateTunnelPlanRequest {
+            input: collision,
+            expected_revision: stored.revision,
+            enabled: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "invalid_tunnel_additional_address");
+    assert_eq!(
+        db.repo
+            .get_tunnel_plan(stored.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        stored.revision
+    );
+
+    let mut second = first.clone();
+    second.name = "second-link".into();
+    second.interface_name = "second-link".into();
+    second.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.10.0.2".into(),
+        right: "10.10.0.3".into(),
+        prefix_len: 31,
+    });
+    let second_plan = plan_tunnel(&second).unwrap();
+    let error = db
+        .repo
+        .record_tunnel_plan(&second, &second_plan, false, &operator)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "tunnel_plan_address_conflict");
+    // An alias cannot collide with another link's primary address either.
+    second.additional_addresses.left.ipv4 = vec!["10.10.0.0/32".into()];
+    let second_plan = plan_tunnel(&second).unwrap();
+    assert_eq!(
+        db.repo
+            .record_tunnel_plan(&second, &second_plan, false, &operator)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "tunnel_plan_address_conflict"
+    );
+    second.additional_addresses.left.ipv4.clear();
+    let second_plan = plan_tunnel(&second).unwrap();
+    // The same explicit LLs are legal on a different interface on these VPSs.
+    db.repo
+        .record_tunnel_plan(&second, &second_plan, false, &operator)
+        .await
+        .unwrap();
+
+    first.additional_addresses.left.ipv4.clear();
+    first.manage_link_local = false;
+    let updated_plan = plan_tunnel(&first).unwrap();
+    let updated = db
+        .repo
+        .update_tunnel_plan(
+            stored.id,
+            stored.revision,
+            &first,
+            &updated_plan,
+            false,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(updated.plan.additional_addresses.left.ipv4.is_empty());
+    assert_eq!(
+        updated.plan.additional_addresses.left.ipv6,
+        vec!["fe80::10/64"]
+    );
+    assert!(!updated.plan.manage_link_local && !updated.input.manage_link_local);
+    assert_eq!(
+        updated.plan.left_tunnel_address,
+        first_plan.left_tunnel_address
+    );
+    assert_eq!(
+        updated.plan.right_tunnel_address,
+        first_plan.right_tunnel_address
+    );
     db.cleanup().await;
 }
 

@@ -8,6 +8,8 @@ use vpsman_common::{
     RuntimeTunnelTrafficLimit, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
 };
 
+#[path = "network_runtime_addresses.rs"]
+mod addresses;
 #[path = "network_runtime_command_runner.rs"]
 mod command_runner;
 #[path = "network_runtime_openvpn.rs"]
@@ -173,6 +175,13 @@ async fn reconcile_runtime_tunnel(
         }));
     }
 
+    let plan_uuid = if !mutation_will_be_skipped
+        && input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+    {
+        resolved_link_local_plan_uuid(input.plan_id, input.plan, &endpoint)?
+    } else {
+        input.plan_id.and_then(|id| uuid::Uuid::parse_str(id).ok())
+    };
     let root = Path::new(&input.config.network.root_dir);
     let link_exists = runtime_link_exists(root, &input.plan.interface_name).await;
     let mut active_link_exists = link_exists;
@@ -305,6 +314,7 @@ async fn reconcile_runtime_tunnel(
                     input.plan,
                     &endpoint,
                     active_link_exists,
+                    plan_uuid,
                 )?
             }
             TunnelKind::Wireguard => wireguard::build_wireguard_reconcile_steps(
@@ -326,6 +336,7 @@ async fn reconcile_runtime_tunnel(
                     .as_ref()
                     .context("OpenVPN state was not prepared")?,
                 active_link_exists,
+                plan_uuid,
             )?,
             TunnelKind::TunTap | TunnelKind::Custom => unreachable!(),
         },
@@ -400,7 +411,50 @@ async fn reconcile_runtime_tunnel(
     let mut plan_owned_link_created = false;
     let mut plan_owned_fou_port_created = false;
     let mut failed_required_label = None;
+    let use_address_management = input.plan.runtime_control.manager
+        == RuntimeTunnelManager::AgentBuiltin
+        && !mutation_will_be_skipped
+        && addresses::needs_address_management(input.plan_id, input.plan, &endpoint).await?;
+    let mut addresses_reconciled = false;
     for spec in specs {
+        if spec.label == "runtime_addr_replace" && use_address_management {
+            if addresses_reconciled {
+                continue;
+            }
+            addresses_reconciled = true;
+            let result = addresses::reconcile_addresses(
+                addresses::AddressReconcileInput {
+                    config: input.config,
+                    plan_id: input.plan_id,
+                    plan: input.plan,
+                    previous_plan: input.previous_plan,
+                    endpoint: &endpoint,
+                    created: starting,
+                    plan_uuid,
+                },
+                cancel_token.clone(),
+            )
+            .await;
+            let success = match result {
+                Ok((address_reports, success)) => {
+                    reports.extend(address_reports);
+                    success
+                }
+                Err(error) => {
+                    reports.push(serde_json::json!({
+                        "label": "runtime_addresses_reconcile", "required": true,
+                        "success": false, "error": error.to_string(),
+                    }));
+                    false
+                }
+            };
+            if !success {
+                failed = true;
+                failed_required_label = Some("runtime_addresses_reconcile");
+                break;
+            }
+            continue;
+        }
         if should_skip_unprivileged_mutation(
             spec.mutates,
             effective_uid,
@@ -868,6 +922,14 @@ async fn remove_runtime_tunnel(
             }
             _ => {}
         }
+        if !runtime_link_exists(root, &input.plan.interface_name).await {
+            addresses::remove_address_ownership(
+                input.plan_id,
+                &input.plan.interface_name,
+                input.side,
+            )
+            .await?;
+        }
     }
 
     if stopping && !failed && !degraded {
@@ -1048,6 +1110,7 @@ fn build_iproute2_reconcile_steps(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     link_exists: bool,
+    plan_uuid: Option<uuid::Uuid>,
 ) -> Result<Vec<RuntimeCommandSpec>> {
     ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
     let mut steps = Vec::new();
@@ -1107,6 +1170,7 @@ fn build_iproute2_reconcile_steps(
         &config.network.runtime_ip_argv,
         plan,
         endpoint,
+        plan_uuid,
     )?);
     steps.push(RuntimeCommandSpec {
         label: "runtime_link_up",
@@ -1155,10 +1219,11 @@ fn build_address_replace_steps(
     base: &[String],
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    plan_uuid: Option<uuid::Uuid>,
 ) -> Result<Vec<RuntimeCommandSpec>> {
     ensure_command_base(base, "runtime ip")?;
     Ok(
-        vpsman_common::build_tunnel_address_argv(base, plan, endpoint)
+        vpsman_common::build_tunnel_address_argv(base, plan, endpoint, plan_uuid)
             .into_iter()
             .map(|argv| RuntimeCommandSpec {
                 label: "runtime_addr_replace",
@@ -1168,6 +1233,35 @@ fn build_address_replace_steps(
             })
             .collect(),
     )
+}
+
+fn resolved_link_local_plan_uuid(
+    plan_id: Option<&str>,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Result<Option<uuid::Uuid>> {
+    let plan_uuid = plan_id.and_then(|id| uuid::Uuid::parse_str(id).ok());
+    let local_generation = vpsman_common::tunnel_endpoint_manages_link_local(plan, endpoint);
+    let peer_generation = if plan.kind == TunnelKind::Wireguard {
+        let peer_side = match endpoint.side {
+            TunnelEndpointSide::Left => TunnelEndpointSide::Right,
+            TunnelEndpointSide::Right => TunnelEndpointSide::Left,
+        };
+        let peer = render_tunnel_endpoint_config(plan, peer_side)?;
+        vpsman_common::tunnel_endpoint_manages_link_local(plan, &peer)
+    } else {
+        false
+    };
+    if local_generation || peer_generation {
+        anyhow::ensure!(
+            plan_uuid.is_some(),
+            "automatic tunnel link-local management requires a valid plan UUID"
+        );
+    }
+    if let Some(plan_uuid) = plan_uuid {
+        vpsman_common::validate_tunnel_link_local_addresses(plan_uuid, plan)?;
+    }
+    Ok(plan_uuid)
 }
 
 fn endpoint_address_pairs<'a>(
@@ -1395,16 +1489,24 @@ fn parse_iproute2_link_json(stdout: &str, interface_name: &str) -> Result<Existi
         local: string_field(data, &["local", "local_address", "local-address"]),
         remote: string_field(data, &["remote", "remote_address", "remote-address"]),
         ttl: string_field(data, &["ttl", "hoplimit", "hop_limit", "hop-limit"]),
-        encap: string_field(data, &["encap", "encap_type", "encap-type"]),
-        encap_dport: string_field(
-            data,
-            &[
-                "encap_dport",
-                "encap-dport",
-                "encap_dport_be16",
-                "encap-dport-be16",
-            ],
-        ),
+        encap: data
+            .get("encap")
+            .and_then(|encap| string_field(encap, &["type"]))
+            .or_else(|| string_field(data, &["encap", "encap_type", "encap-type"])),
+        encap_dport: data
+            .get("encap")
+            .and_then(|encap| string_field(encap, &["dport"]))
+            .or_else(|| {
+                string_field(
+                    data,
+                    &[
+                        "encap_dport",
+                        "encap-dport",
+                        "encap_dport_be16",
+                        "encap-dport-be16",
+                    ],
+                )
+            }),
     })
 }
 

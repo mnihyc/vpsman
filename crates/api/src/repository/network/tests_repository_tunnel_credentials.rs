@@ -26,6 +26,8 @@ fn plan(kind: TunnelKind) -> TunnelPlan {
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,

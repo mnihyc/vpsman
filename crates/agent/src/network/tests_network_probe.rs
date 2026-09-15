@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn link_local_ping_selects_the_tunnel_without_changing_global_probes() {
+    for target in ["fe80::1", "febf::2"] {
+        let mut argv = vec!["ping".to_string()];
+        append_link_local_interface(&mut argv, target, "tunab");
+        assert_eq!(argv, ["ping", "-I", "tunab"]);
+    }
+    for target in ["fd00::1", "10.0.0.1"] {
+        let mut argv = vec!["ping".to_string()];
+        append_link_local_interface(&mut argv, target, "tunab");
+        assert_eq!(argv, ["ping"]);
+    }
+}
+
+#[test]
 fn parses_linux_ping_latency_and_loss() {
     let parsed = parse_ping_measurement(
         "3 packets transmitted, 2 received, 33.3333% packet loss, time 400ms\n\

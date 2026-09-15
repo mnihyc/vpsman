@@ -450,6 +450,7 @@ impl Repository {
             "disabled"
         };
         let plan_id = Uuid::new_v4();
+        vpsman_common::validate_tunnel_link_local_addresses(plan_id, plan)?;
         let builtin_credentials = generate_tunnel_builtin_credentials(plan_id, plan, 1)?;
         let view = TunnelPlanView {
             id: plan_id,
@@ -572,6 +573,7 @@ impl Repository {
         enabled: bool,
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
+        vpsman_common::validate_tunnel_link_local_addresses(plan_id, plan)?;
         let previous = self
             .get_tunnel_plan_identity(plan_id)
             .await?
@@ -1748,17 +1750,34 @@ const TUNNEL_PLAN_RESOURCE_ROWS_QUERY: &str = r#"
     ORDER BY id
 "#;
 
-fn tunnel_plan_addresses(plan: &TunnelPlan) -> Result<HashSet<IpAddr>> {
+pub(crate) fn tunnel_plan_addresses(plan: &TunnelPlan) -> Result<HashSet<IpAddr>> {
     [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
         .into_iter()
         .flatten()
         .flat_map(|pair| [&pair.left, &pair.right])
+        .map(String::as_str)
+        .chain(
+            [
+                &plan.additional_addresses.left,
+                &plan.additional_addresses.right,
+            ]
+            .into_iter()
+            .flat_map(|endpoint| endpoint.ipv4.iter().chain(&endpoint.ipv6))
+            .map(|cidr| cidr.split('/').next().unwrap_or(cidr)),
+        )
         .map(|address| {
             address
-                .parse()
+                .parse::<IpAddr>()
                 .map_err(|_| anyhow::anyhow!("tunnel_plan_address_invalid"))
         })
-        .collect()
+        .collect::<Result<HashSet<_>>>()
+        .map(|addresses| {
+            // Link-local addresses belong to an interface, not the fleet-wide
+            // allocation space. Interface collisions are checked separately.
+            addresses.into_iter().filter(|address| {
+                !matches!(address, IpAddr::V6(address) if address.is_unicast_link_local())
+            }).collect()
+        })
 }
 
 fn validate_tunnel_plan_resource_pair(

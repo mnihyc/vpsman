@@ -17,6 +17,7 @@ import type {
 export type PreviewTunnelPlan = (
   request: TunnelPlanInput,
   signal?: AbortSignal,
+  planId?: string,
 ) => Promise<TunnelPlanPreviewResponse>;
 
 export function TunnelAdvancedFields({
@@ -28,6 +29,7 @@ export function TunnelAdvancedFields({
   kind,
   onChange,
   onPreview,
+  planId,
   request,
   validationError,
 }: {
@@ -39,6 +41,7 @@ export function TunnelAdvancedFields({
   kind: TunnelKind;
   onChange: (value: TunnelAdvancedDraft) => void;
   onPreview: PreviewTunnelPlan;
+  planId?: string;
   request: TunnelPlanInput | null;
   validationError: string | null;
 }) {
@@ -70,7 +73,7 @@ export function TunnelAdvancedFields({
     setError(null);
     setCopyFeedback(null);
     try {
-      const result = await onPreview(request, controller.signal);
+      const result = await onPreview(request, controller.signal, planId);
       if (!controller.signal.aborted && currentKey.current === key) {
         setPreview({ key, result });
       }

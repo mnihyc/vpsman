@@ -378,14 +378,26 @@ fn validate_runtime_status_telemetry_plans(
         let stateful_builtin = plan.plan.runtime_control.manager
             == RuntimeTunnelManager::AgentBuiltin
             && matches!(plan.plan.kind, TunnelKind::Wireguard | TunnelKind::Openvpn);
-        if stateful_builtin {
+        let managed_link_local = plan.plan.runtime_control.manager
+            == RuntimeTunnelManager::AgentBuiltin
+            && plan.plan.manage_link_local
+            && (plan.plan.ipv6_tunnel.is_some()
+                || !plan
+                    .plan
+                    .additional_addresses
+                    .for_side(plan.endpoint_side)
+                    .ipv6
+                    .is_empty());
+        if stateful_builtin || managed_link_local {
             let plan_id = plan
                 .plan_id
                 .as_deref()
                 .ok_or_else(|| "network_runtime_status_telemetry_plan_id_required".to_string())?;
-            if uuid::Uuid::parse_str(plan_id).is_err() {
-                return Err("network_runtime_status_telemetry_plan_id_invalid".to_string());
-            }
+            let plan_id = uuid::Uuid::parse_str(plan_id)
+                .map_err(|_| "network_runtime_status_telemetry_plan_id_invalid".to_string())?;
+            crate::validate_tunnel_link_local_addresses(plan_id, &plan.plan).map_err(|_| {
+                "network_runtime_status_telemetry_link_local_address_invalid".to_string()
+            })?;
         } else if let Some(plan_id) = &plan.plan_id {
             validate_identifier(plan_id, "network_runtime_status_telemetry_plan_id", 128)?;
         }

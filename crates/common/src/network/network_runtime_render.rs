@@ -1,9 +1,14 @@
 //! Pure native rendering shared by the agent and the draft-plan preview.
 //! This module never inspects a host, accesses credentials, or executes commands.
 
-use std::{collections::HashSet, net::IpAddr, path::Path};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv6Addr},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     render_tunnel_endpoint_config, NetworkPlanError, RuntimeTunnelCommand, RuntimeTunnelManager,
@@ -282,13 +287,19 @@ pub fn build_ip_tunnel_argv(
         TunnelKind::Sit => "sit",
         _ => return Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind),
     };
+    // UDP encapsulation is a link-type option; `ip tunnel` does not accept it.
+    let (object, mode_option) = if plan.kind == TunnelKind::Fou {
+        ("link", "type")
+    } else {
+        ("tunnel", "mode")
+    };
     let mut argv = extend_argv(
         base,
         [
-            "tunnel",
+            object,
             action,
             &plan.interface_name,
-            "mode",
+            mode_option,
             mode,
             "remote",
             &endpoint.remote_underlay,
@@ -311,12 +322,15 @@ pub fn build_ip_tunnel_argv(
     Ok(argv)
 }
 
+/// `None` is draft-preview context; executable commands require the saved plan
+/// UUID whenever generated peer link-local addresses are included.
 pub fn build_wireguard_configure_argv(
     base: &[String],
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     private_key_path: &Path,
     peer_public_key: &str,
+    plan_id: Option<uuid::Uuid>,
 ) -> Result<Vec<String>, NetworkPlanError> {
     let options = &plan.runtime_control.wireguard;
     let private_key = private_key_path
@@ -324,10 +338,36 @@ pub fn build_wireguard_configure_argv(
         .ok_or(NetworkPlanError::InvalidRuntimeTunnelConfigPath)?;
     let mut allowed_ips = Vec::new();
     if plan.ipv4_tunnel.is_some() {
-        allowed_ips.push("0.0.0.0/0");
+        allowed_ips.push("0.0.0.0/0".to_string());
+    } else {
+        for cidr in &endpoint.peer_additional_addresses.ipv4 {
+            let (address, _) = cidr.split_once('/').ok_or(NetworkPlanError::InvalidCidr)?;
+            allowed_ips.push(format!("{address}/32"));
+        }
     }
     if plan.ipv6_tunnel.is_some() {
-        allowed_ips.push("::/0");
+        allowed_ips.push("::/0".to_string());
+    } else {
+        for cidr in &endpoint.peer_additional_addresses.ipv6 {
+            let (address, _) = cidr.split_once('/').ok_or(NetworkPlanError::InvalidCidr)?;
+            allowed_ips.push(format!("{address}/128"));
+        }
+        if plan.manage_link_local
+            && plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+            && !endpoint.peer_additional_addresses.ipv6.is_empty()
+        {
+            let generated_peer = plan_id
+                .map_or_else(
+                    || "{generated_peer_link_local}/64".to_string(),
+                    |plan_id| tunnel_generated_link_local(plan_id, &endpoint.peer_client_id),
+                )
+                .trim_end_matches("/64")
+                .to_string();
+            let allowance = format!("{generated_peer}/128");
+            if !allowed_ips.contains(&allowance) {
+                allowed_ips.push(allowance);
+            }
+        }
     }
     if allowed_ips.is_empty() {
         return Err(NetworkPlanError::TunnelAddressRequired);
@@ -380,12 +420,15 @@ pub fn tunnel_endpoint_address_pairs<'a>(
         .collect()
 }
 
+/// `None` renders an explicit draft placeholder for a generated address. Runtime
+/// callers bind the authoritative UUID before invoking address configuration.
 pub fn build_tunnel_address_argv(
     base: &[String],
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    plan_id: Option<uuid::Uuid>,
 ) -> Vec<Vec<String>> {
-    tunnel_endpoint_address_pairs(plan, endpoint)
+    let mut commands = tunnel_endpoint_address_pairs(plan, endpoint)
         .into_iter()
         .map(|(local, remote, prefix)| {
             // With a peer, iproute2 takes the network prefix from the peer
@@ -403,7 +446,73 @@ pub fn build_tunnel_address_argv(
                 ],
             )
         })
+        .collect::<Vec<_>>();
+    commands.extend(
+        endpoint
+            .additional_addresses
+            .ipv4
+            .iter()
+            .chain(&endpoint.additional_addresses.ipv6)
+            .map(|cidr| extend_argv(base, ["addr", "replace", cidr, "dev", &plan.interface_name])),
+    );
+    if tunnel_endpoint_manages_link_local(plan, endpoint) {
+        let generated = plan_id.map_or_else(
+            || "{generated_link_local}/64".to_string(),
+            |plan_id| tunnel_generated_link_local(plan_id, &endpoint.local_client_id),
+        );
+        if !tunnel_endpoint_explicit_address_cidrs(plan, endpoint)
+            .iter()
+            .any(|cidr| cidr.split('/').next() == generated.split('/').next())
+        {
+            commands.push(extend_argv(
+                base,
+                ["addr", "replace", &generated, "dev", &plan.interface_name],
+            ));
+        }
+    }
+    commands
+}
+
+/// Explicit operator intent only; generated link-local addresses are derived
+/// separately so disabling their management never removes manual addresses.
+pub fn tunnel_endpoint_explicit_address_cidrs(
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Vec<String> {
+    tunnel_endpoint_address_pairs(plan, endpoint)
+        .into_iter()
+        .map(|(local, _, prefix)| format!("{local}/{prefix}"))
+        .chain(endpoint.additional_addresses.ipv4.iter().cloned())
+        .chain(endpoint.additional_addresses.ipv6.iter().cloned())
         .collect()
+}
+
+/// IPv6 intent is explicit configuration, never a previously generated address.
+pub fn tunnel_endpoint_manages_link_local(
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> bool {
+    plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+        && plan.manage_link_local
+        && (plan.ipv6_tunnel.is_some() || !endpoint.additional_addresses.ipv6.is_empty())
+}
+
+/// One stable, locally assigned /64 address per immutable plan and endpoint.
+/// Display names, configuration and evidence generations cannot change it.
+pub fn tunnel_generated_link_local(plan_id: uuid::Uuid, client_id: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"vpsman-tunnel-link-local-v1\0");
+    hash.update(plan_id.as_bytes());
+    hash.update([0]);
+    hash.update(client_id.as_bytes());
+    let hash = hash.finalize();
+    let mut iid = [0; 8];
+    iid.copy_from_slice(&hash[..8]);
+    iid[0] &= !0x02; // Locally assigned, not a globally unique EUI-64 identifier.
+    let mut bytes = [0; 16];
+    bytes[..2].copy_from_slice(&[0xfe, 0x80]);
+    bytes[8..].copy_from_slice(&iid);
+    format!("{}/64", Ipv6Addr::from(bytes))
 }
 
 pub fn build_ip_route_argv(
@@ -716,9 +825,13 @@ pub struct TunnelRuntimePreviewCommand {
 
 pub fn render_tunnel_runtime_preview(
     plan: &TunnelPlan,
+    plan_id: Option<uuid::Uuid>,
 ) -> Result<TunnelRuntimePreview, NetworkPlanError> {
     if plan.runtime_control.manager != RuntimeTunnelManager::AgentBuiltin {
         return Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind);
+    }
+    if let Some(plan_id) = plan_id {
+        super::validate_tunnel_link_local_addresses(plan_id, plan)?;
     }
     let mut endpoints = Vec::new();
     for side in [TunnelEndpointSide::Left, TunnelEndpointSide::Right] {
@@ -799,6 +912,7 @@ pub fn render_tunnel_runtime_preview(
                         &endpoint,
                         &endpoint_state_dir.join("wireguard.key"),
                         "{peer_public_key}",
+                        plan_id,
                     )?,
                 );
             }
@@ -857,7 +971,28 @@ pub fn render_tunnel_runtime_preview(
                 ],
             ),
         );
-        for argv in build_tunnel_address_argv(&ip, plan, &endpoint) {
+        if tunnel_endpoint_manages_link_local(plan, &endpoint) {
+            artifacts.push(TunnelRuntimePreviewArtifact {
+                label: "Managed IPv6 link-local".to_string(),
+                content: format!("The agent disables native link-local generation and maintains one stable generated /64 address for this plan UUID and endpoint identity, plus all explicitly configured link-local addresses. Other link-local addresses on this agent-owned interface are removed.{}", if plan_id.is_none() { " The generated address is assigned when this draft is saved; placeholders below are not executable addresses." } else { "" }),
+            });
+            push(
+                "configure",
+                "Set managed link-local generation mode",
+                extend_argv(
+                    &ip,
+                    [
+                        "link",
+                        "set",
+                        "dev",
+                        &plan.interface_name,
+                        "addrgenmode",
+                        "none",
+                    ],
+                ),
+            );
+        }
+        for argv in build_tunnel_address_argv(&ip, plan, &endpoint, plan_id) {
             push("configure", "Set tunnel address", argv);
         }
         push(

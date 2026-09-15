@@ -8,9 +8,10 @@ use super::{
     models::{
         RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
         RuntimeTunnelOpenvpnOptions, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
-        RuntimeTunnelTrafficLimit, RuntimeTunnelWireguardOptions, TunnelAddressFamily,
-        TunnelAddressPair, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation,
-        TunnelOspfConfig, TunnelPlan, TunnelPlanInput, MIN_IPV6_TUNNEL_MTU, MIN_TUNNEL_MTU,
+        RuntimeTunnelTrafficLimit, RuntimeTunnelWireguardOptions, TunnelAdditionalAddresses,
+        TunnelAddressFamily, TunnelAddressPair, TunnelEndpointAdditionalAddresses,
+        TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelOspfConfig,
+        TunnelPlan, TunnelPlanInput, MIN_IPV6_TUNNEL_MTU, MIN_TUNNEL_MTU,
     },
 };
 
@@ -38,6 +39,8 @@ pub enum NetworkPlanError {
     AddressPoolRequired,
     #[error("tunnel plan requires at least one IPv4 or IPv6 endpoint pair")]
     TunnelAddressRequired,
+    #[error("invalid additional tunnel address: {0}")]
+    InvalidAdditionalAddress(String),
     #[error("tunnel kind is not supported by the selected runtime manager")]
     UnsupportedRuntimeManagerTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
@@ -99,12 +102,20 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         .collect::<HashSet<_>>();
     let ipv4_tunnel = resolve_ipv4_tunnel(input, &reserved_ipv4)?;
     let ipv6_tunnel = resolve_ipv6_tunnel(input, &reserved_ipv6)?;
+    let additional_addresses = canonical_additional_addresses(
+        &input.additional_addresses,
+        ipv4_tunnel.as_ref(),
+        ipv6_tunnel.as_ref(),
+    )?;
     validate_tunnel_mtus(
         input.runtime_control.manager,
         input.kind,
         input.left_mtu,
         input.right_mtu,
-        ipv6_tunnel.is_some(),
+        [
+            ipv6_tunnel.is_some() || !additional_addresses.left.ipv6.is_empty(),
+            ipv6_tunnel.is_some() || !additional_addresses.right.ipv6.is_empty(),
+        ],
     )?;
     if ipv4_tunnel.is_none() && ipv6_tunnel.is_none() {
         return Err(NetworkPlanError::TunnelAddressRequired);
@@ -156,6 +167,8 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         tunnel_prefix_len: primary_tunnel.prefix_len,
         ipv4_tunnel: ipv4_tunnel.clone(),
         ipv6_tunnel: ipv6_tunnel.clone(),
+        additional_addresses,
+        manage_link_local: input.manage_link_local,
         latency_primary_family: primary_family,
         bandwidth_mbps: input.bandwidth_mbps,
         left_mtu: input.left_mtu,
@@ -276,15 +289,15 @@ fn validate_tunnel_mtus(
     kind: TunnelKind,
     left_mtu: Option<u16>,
     right_mtu: Option<u16>,
-    ipv6_enabled: bool,
+    ipv6_enabled: [bool; 2],
 ) -> Result<(), NetworkPlanError> {
     match manager {
         RuntimeTunnelManager::AgentBuiltin => {
             let (Some(left_mtu), Some(right_mtu)) = (left_mtu, right_mtu) else {
                 return Err(NetworkPlanError::TunnelMtuRequired);
             };
-            let requires_ipv6_mtu = ipv6_enabled || kind == TunnelKind::Sit;
-            for value in [left_mtu, right_mtu] {
+            for (value, ipv6_enabled) in [left_mtu, right_mtu].into_iter().zip(ipv6_enabled) {
+                let requires_ipv6_mtu = ipv6_enabled || kind == TunnelKind::Sit;
                 if value < MIN_TUNNEL_MTU || (requires_ipv6_mtu && value < MIN_IPV6_TUNNEL_MTU) {
                     return Err(NetworkPlanError::InvalidTunnelMtu);
                 }
@@ -458,7 +471,137 @@ pub fn render_tunnel_endpoint_config(
         primary_family: plan.latency_primary_family,
         ipv4_tunnel: plan.ipv4_tunnel.clone(),
         ipv6_tunnel: plan.ipv6_tunnel.clone(),
+        additional_addresses: plan.additional_addresses.for_side(side).clone(),
+        peer_additional_addresses: plan
+            .additional_addresses
+            .for_side(match side {
+                TunnelEndpointSide::Left => TunnelEndpointSide::Right,
+                TunnelEndpointSide::Right => TunnelEndpointSide::Left,
+            })
+            .clone(),
+        manage_link_local: plan.manage_link_local,
     })
+}
+
+fn canonical_additional_addresses(
+    input: &TunnelAdditionalAddresses,
+    ipv4: Option<&TunnelAddressPair>,
+    ipv6: Option<&TunnelAddressPair>,
+) -> Result<TunnelAdditionalAddresses, NetworkPlanError> {
+    // Both endpoints occupy the same tunnel link. Link-local addresses may be
+    // reused on other plans, but cannot identify both ends of this link.
+    let mut seen = [ipv4, ipv6]
+        .into_iter()
+        .flatten()
+        .flat_map(|pair| [&pair.left, &pair.right])
+        .filter_map(|address| address.parse::<IpAddr>().ok())
+        .collect::<HashSet<_>>();
+    let mut canonical = TunnelAdditionalAddresses::default();
+    for (side, source, destination) in [
+        ("left", &input.left, &mut canonical.left),
+        ("right", &input.right, &mut canonical.right),
+    ] {
+        *destination = TunnelEndpointAdditionalAddresses {
+            ipv4: canonical_additional_family(&source.ipv4, side, true, &mut seen)?,
+            ipv6: canonical_additional_family(&source.ipv6, side, false, &mut seen)?,
+        };
+    }
+    Ok(canonical)
+}
+
+/// A generated address has meaning only after the authoritative plan UUID is
+/// known. Pure draft validation still checks all explicit address duplicates.
+pub fn validate_tunnel_link_local_addresses(
+    plan_id: uuid::Uuid,
+    plan: &TunnelPlan,
+) -> Result<(), NetworkPlanError> {
+    if plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin && plan.manage_link_local
+    {
+        for (local, client_id, local_extra, peer, peer_primary, peer_extra) in [
+            (
+                "left",
+                &plan.left_client_id,
+                &plan.additional_addresses.left,
+                "right",
+                plan.ipv6_tunnel.as_ref().map(|pair| &pair.right),
+                &plan.additional_addresses.right,
+            ),
+            (
+                "right",
+                &plan.right_client_id,
+                &plan.additional_addresses.right,
+                "left",
+                plan.ipv6_tunnel.as_ref().map(|pair| &pair.left),
+                &plan.additional_addresses.left,
+            ),
+        ] {
+            if plan.ipv6_tunnel.is_none() && local_extra.ipv6.is_empty() {
+                continue;
+            }
+            let generated = super::tunnel_generated_link_local(plan_id, client_id);
+            let generated_ip = generated.trim_end_matches("/64");
+            let collides = |address: &str| {
+                address
+                    .parse::<Ipv6Addr>()
+                    .ok()
+                    .is_some_and(|address| address.to_string() == generated_ip)
+            };
+            if peer_primary.is_some_and(|address| collides(address)) {
+                return Err(NetworkPlanError::InvalidAdditionalAddress(format!(
+                    "{peer} primary IPv6 conflicts with {local} automatic link-local {generated}"
+                )));
+            }
+            if let Some(index) = peer_extra
+                .ipv6
+                .iter()
+                .position(|cidr| collides(cidr.split('/').next().unwrap_or(cidr)))
+            {
+                return Err(NetworkPlanError::InvalidAdditionalAddress(format!(
+                    "{peer} IPv6 line {} conflicts with {local} automatic link-local {generated}",
+                    index + 1
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_additional_family(
+    entries: &[String],
+    side: &str,
+    ipv4: bool,
+    seen: &mut HashSet<IpAddr>,
+) -> Result<Vec<String>, NetworkPlanError> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let error = |reason: &str| {
+                NetworkPlanError::InvalidAdditionalAddress(format!(
+                    "{side} IPv{} line {}: {reason}",
+                    if ipv4 { 4 } else { 6 },
+                    index + 1
+                ))
+            };
+            let (address, prefix) = entry
+                .trim()
+                .split_once('/')
+                .ok_or_else(|| error("a CIDR prefix is required"))?;
+            let address = address
+                .parse::<IpAddr>()
+                .map_err(|_| error("invalid IP address"))?;
+            let prefix = prefix
+                .parse::<u8>()
+                .map_err(|_| error("invalid prefix length"))?;
+            if address.is_ipv4() != ipv4 || prefix > if ipv4 { 32 } else { 128 } {
+                return Err(error("address family or prefix length does not match"));
+            }
+            if !seen.insert(address) {
+                return Err(error("address is already configured on this tunnel"));
+            }
+            Ok(format!("{address}/{prefix}"))
+        })
+        .collect()
 }
 
 pub fn validate_runtime_tunnel_control(

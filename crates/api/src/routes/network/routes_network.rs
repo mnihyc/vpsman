@@ -47,19 +47,33 @@ use crate::{
 
 const MAX_BULK_TUNNEL_PLAN_LIFECYCLE_ITEMS: usize = 1_000;
 
-/// Render the draft only. Saving a plan is the separate owner of identities,
-/// credentials, resource allocation, and agent reconciliation.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct TunnelPlanPreviewQuery {
+    pub(crate) plan_id: Option<Uuid>,
+}
+
+/// Render only; saving owns identities, credentials and agent reconciliation.
+/// An existing plan ID supplies rendering context without changing its declaration.
 pub(crate) async fn preview_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<TunnelPlanPreviewQuery>,
     Json(input): Json<TunnelPlanInput>,
 ) -> Result<Json<TunnelRuntimePreview>, ApiError> {
     state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
+    if let Some(plan_id) = query.plan_id {
+        state
+            .repo
+            .get_tunnel_plan_identity(plan_id)
+            .await
+            .map_err(tunnel_plan_unavailable)?
+            .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
+    }
     let plan = plan_tunnel(&input).map_err(tunnel_plan_bad_request)?;
     Ok(Json(
-        render_tunnel_runtime_preview(&plan).map_err(tunnel_plan_bad_request)?,
+        render_tunnel_runtime_preview(&plan, query.plan_id).map_err(tunnel_plan_bad_request)?,
     ))
 }
 
@@ -170,13 +184,17 @@ fn tunnel_plan_evidence_clear_error(error: anyhow::Error) -> ApiError {
 pub(crate) async fn create_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateTunnelPlanRequest>,
+    Json(mut request): Json<CreateTunnelPlanRequest>,
 ) -> Result<(StatusCode, Json<TunnelPlanMutationResponse>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
     require_tunnel_plan_confirmed(request.confirmed)?;
     let plan = plan_tunnel(&request.input).map_err(tunnel_plan_bad_request)?;
+    request
+        .input
+        .additional_addresses
+        .clone_from(&plan.additional_addresses);
     require_tunnel_endpoint_agents(
         &state,
         &request.input.left_client_id,
@@ -238,7 +256,7 @@ pub(crate) async fn update_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
-    Json(request): Json<UpdateTunnelPlanRequest>,
+    Json(mut request): Json<UpdateTunnelPlanRequest>,
 ) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
@@ -258,6 +276,10 @@ pub(crate) async fn update_tunnel_plan(
     }
     let enabled = request.enabled.unwrap_or(identity.enabled);
     let plan = plan_tunnel(&request.input).map_err(tunnel_plan_bad_request)?;
+    request
+        .input
+        .additional_addresses
+        .clone_from(&plan.additional_addresses);
     match state.repo.get_tunnel_plan(plan_id).await {
         Ok(Some(existing)) if existing.enabled == enabled && existing.input == request.input => {
             return Ok(Json(TunnelPlanMutationResponse {
@@ -347,14 +369,14 @@ pub(crate) async fn allocate_tunnel_endpoints(
             "Tunnel plans could not be loaded.",
         ))?
     {
-        if let Some(pair) = plan.plan.ipv4_tunnel {
-            reserved_addresses.push(pair.left);
-            reserved_addresses.push(pair.right);
-        }
-        if let Some(pair) = plan.plan.ipv6_tunnel {
-            reserved_addresses.push(pair.left);
-            reserved_addresses.push(pair.right);
-        }
+        // Allocation and conflict detection share the same global address
+        // scope; link-local reservations supplied by this draft stay above.
+        reserved_addresses.extend(
+            crate::repository_network::tunnel_plan_addresses(&plan.plan)
+                .map_err(tunnel_plan_repository_error)?
+                .into_iter()
+                .map(|address| address.to_string()),
+        );
     }
     let (configured_ipv4_pool, configured_ipv6_pool) = state.tunnel_allocation_pool_cidrs();
     let ipv4_pool = normalize_optional_string(request.ipv4_pool_cidr);
@@ -1308,6 +1330,10 @@ fn tunnel_plan_unavailable(error: anyhow::Error) -> ApiError {
 }
 
 fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
+    let error = match error.downcast::<NetworkPlanError>() {
+        Ok(error) => return tunnel_plan_bad_request(error),
+        Err(error) => error,
+    };
     let message = error.to_string();
     if message.contains("tunnel_plan_name_conflict") {
         ApiError::conflict("tunnel_plan_name_conflict")
@@ -1728,6 +1754,12 @@ fn resolve_allocation_family(
 }
 
 fn tunnel_plan_bad_request(error: NetworkPlanError) -> ApiError {
+    if matches!(error, NetworkPlanError::InvalidAdditionalAddress(_)) {
+        return ApiError::bad_request_with_message(
+            "invalid_tunnel_additional_address",
+            error.to_string(),
+        );
+    }
     if matches!(error, NetworkPlanError::OpenvpnDirectiveOwned(_)) {
         return ApiError::bad_request_with_message("openvpn_directive_owned", error.to_string());
     }
@@ -1739,6 +1771,7 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         NetworkPlanError::InvalidPlanIdentity => "invalid_tunnel_plan_identity",
         NetworkPlanError::InvalidTunnelEndpoints => "invalid_tunnel_plan_endpoints",
         NetworkPlanError::InvalidUnderlayAddress => "invalid_tunnel_underlay_address",
+        NetworkPlanError::InvalidAdditionalAddress(_) => "invalid_tunnel_additional_address",
         NetworkPlanError::OpenvpnDirectiveOwned(_) => "openvpn_directive_owned",
         NetworkPlanError::InvalidRuntimeTunnelConfigPath => "network_runtime_config_path_invalid",
         NetworkPlanError::InvalidRuntimeTunnelCommand

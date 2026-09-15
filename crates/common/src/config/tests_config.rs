@@ -44,6 +44,8 @@ fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
@@ -291,6 +293,98 @@ fn stateful_builtin_runtime_plans_require_uuid_identity() {
         validate_agent_config_shape(&config).unwrap_err(),
         "network_runtime_status_telemetry_plan_id_invalid"
     );
+}
+
+#[test]
+fn managed_link_local_requires_uuid_only_for_the_managed_native_endpoint() {
+    let mut config = AgentConfig::default();
+    config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
+        plan_id: None,
+        topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
+        endpoint_side: TunnelEndpointSide::Left,
+        plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
+        builtin_credentials: None,
+        runtime_adapter: None,
+        latency_monitoring_enabled: true,
+    }];
+    // Native IPv4-only declarations retain their optional identity contract.
+    validate_agent_config_shape(&config).unwrap();
+    config.network.runtime_status_telemetry_plans[0]
+        .plan
+        .additional_addresses
+        .left
+        .ipv6 = vec!["fd00::1/64".into()];
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_plan_id_required"
+    );
+    config.network.runtime_status_telemetry_plans[0].plan_id = Some("local-plan".into());
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_plan_id_invalid"
+    );
+    let plan_id = uuid::Uuid::from_u128(0xaaaaaaaa_aaaa_4aaa_8aaa_aaaaaaaaaaaa);
+    config.network.runtime_status_telemetry_plans[0].plan_id = Some(plan_id.to_string());
+    validate_agent_config_shape(&config).unwrap();
+
+    let generated = crate::tunnel_generated_link_local(plan_id, "edge-a");
+    config.network.runtime_status_telemetry_plans[0]
+        .plan
+        .additional_addresses
+        .right
+        .ipv6 = vec![generated];
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_link_local_address_invalid"
+    );
+    config.network.runtime_status_telemetry_plans[0]
+        .plan
+        .additional_addresses
+        .right
+        .ipv6
+        .clear();
+    config.network.runtime_status_telemetry_plans[0].plan_id = None;
+    config.network.runtime_status_telemetry_plans[0]
+        .plan
+        .manage_link_local = false;
+    validate_agent_config_shape(&config).unwrap();
+
+    config.network.runtime_status_telemetry_plans[0]
+        .plan
+        .manage_link_local = true;
+    config.network.runtime_status_telemetry_plans[0].endpoint_side = TunnelEndpointSide::Right;
+    // The peer's IPv6 intent does not impose identity on an IPv4-only native endpoint.
+    validate_agent_config_shape(&config).unwrap();
+    config.network.runtime_status_telemetry_plans[0]
+        .plan
+        .ipv6_tunnel = Some(TunnelAddressPair {
+        left: "fd00::10".into(),
+        right: "fd00::11".into(),
+        prefix_len: 127,
+    });
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_plan_id_required"
+    );
+}
+
+#[test]
+fn externally_owned_ipv6_does_not_require_a_managed_address_identity() {
+    let mut config = AgentConfig::default();
+    let mut plan = explicit_plan(RuntimeTunnelManager::ExternalObserved);
+    plan.additional_addresses.left.ipv6 = vec!["fd00::1/64".into()];
+    config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
+        plan_id: None,
+        topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
+        endpoint_side: TunnelEndpointSide::Left,
+        plan,
+        builtin_credentials: None,
+        runtime_adapter: None,
+        latency_monitoring_enabled: true,
+    }];
+    validate_agent_config_shape(&config).unwrap();
 }
 
 #[test]

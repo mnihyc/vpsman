@@ -388,6 +388,134 @@ fn runtime_config_commands_require_the_current_dispatch_protocol() {
 }
 
 #[test]
+fn only_configs_and_commands_with_new_address_requirements_need_new_agent_support() {
+    let input: crate::TunnelPlanInput = serde_json::from_value(serde_json::json!({
+        "name": "protocol-address-test", "interface_name": "tun-test", "kind": "gre",
+        "left_client_id": "left", "right_client_id": "right",
+        "left_remote_underlay": "192.0.2.1", "right_remote_underlay": "192.0.2.2",
+        "address_pool_cidr": "", "bandwidth_mbps": 100,
+        "ipv4_tunnel": {"left": "10.0.0.0", "right": "10.0.0.1", "prefix_len": 31},
+        "left_mtu": 1476, "right_mtu": 1476
+    }))
+    .unwrap();
+    let baseline = crate::plan_tunnel(&input).unwrap();
+    for (additional, primary_ipv6, manage, manager, expected) in [
+        (
+            false,
+            false,
+            true,
+            crate::RuntimeTunnelManager::AgentBuiltin,
+            super::CONFIG_COMMAND_PROTOCOL_VERSION,
+        ),
+        (
+            true,
+            false,
+            false,
+            crate::RuntimeTunnelManager::AgentBuiltin,
+            super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION,
+        ),
+        (
+            false,
+            true,
+            true,
+            crate::RuntimeTunnelManager::AgentBuiltin,
+            super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION,
+        ),
+        (
+            false,
+            true,
+            false,
+            crate::RuntimeTunnelManager::AgentBuiltin,
+            super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION,
+        ),
+        (
+            true,
+            true,
+            true,
+            crate::RuntimeTunnelManager::ExternalObserved,
+            super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION,
+        ),
+        (
+            true,
+            true,
+            true,
+            crate::RuntimeTunnelManager::CustomAdapter,
+            super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION,
+        ),
+        (
+            false,
+            true,
+            true,
+            crate::RuntimeTunnelManager::ExternalObserved,
+            super::CONFIG_COMMAND_PROTOCOL_VERSION,
+        ),
+    ] {
+        let mut plan = baseline.clone();
+        if additional {
+            plan.additional_addresses
+                .right
+                .ipv4
+                .push("10.2.0.1/32".into());
+        }
+        if primary_ipv6 {
+            plan.ipv6_tunnel = Some(crate::TunnelAddressPair {
+                left: "fd00::".into(),
+                right: "fd00::1".into(),
+                prefix_len: 127,
+            });
+        }
+        plan.manage_link_local = manage;
+        plan.runtime_control.manager = manager;
+        let mut config = crate::AgentRuntimeConfig::default();
+        config.network.runtime_status_telemetry_plans.push(
+            crate::AgentRuntimeStatusTelemetryPlan {
+                plan_id: None,
+                topology_identity_hash: String::new(),
+                runtime_evidence_identity_hash: String::new(),
+                endpoint_side: crate::TunnelEndpointSide::Left,
+                plan: plan.clone(),
+                builtin_credentials: None,
+                runtime_adapter: None,
+                latency_monitoring_enabled: true,
+            },
+        );
+        let command = JobCommand::RuntimeConfigSync {
+            desired_version: 1,
+            reason: "address-test".into(),
+            config: Box::new(config),
+        };
+        assert_eq!(super::job_command_protocol_version(&command), expected);
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&command),
+            expected
+        );
+        assert_eq!(
+            super::job_command_min_supported_protocol_version(&command),
+            expected
+        );
+        let status = JobCommand::NetworkStatus {
+            plan_id: "plan".into(),
+            plan: Box::new(plan),
+            side: crate::TunnelEndpointSide::Left,
+            runtime_adapter: None,
+        };
+        let network_expected = if additional || !manage {
+            super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION
+        } else {
+            super::NETWORK_COMMAND_PROTOCOL_VERSION
+        };
+        assert_eq!(
+            super::job_command_min_supported_protocol_version(&status),
+            network_expected
+        );
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&status),
+            network_expected
+        );
+    }
+}
+
+#[test]
 fn network_plan_operations_keep_the_current_dispatch_protocol() {
     let command = JobCommand::NetworkStatus {
         plan_id: "00000000-0000-0000-0000-000000000001".to_string(),
@@ -408,6 +536,8 @@ fn network_plan_operations_keep_the_current_dispatch_protocol() {
             tunnel_prefix_len: 31,
             ipv4_tunnel: None,
             ipv6_tunnel: None,
+            additional_addresses: Default::default(),
+            manage_link_local: true,
             latency_primary_family: Default::default(),
             bandwidth_mbps: 100,
             left_mtu: Some(1476),

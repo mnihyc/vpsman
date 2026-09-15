@@ -30,6 +30,8 @@ fn speed_test_plan() -> TunnelPlan {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1476),
@@ -52,10 +54,24 @@ fn speed_test_nonce_is_job_and_payload_bound() {
 #[test]
 fn socket_address_requires_an_explicit_ip() {
     assert_eq!(
-        socket_addr("10.255.0.1", 42000).unwrap(),
+        tunnel_socket_addr("10.255.0.1", 42000, "unused").unwrap(),
         "10.255.0.1:42000".parse().unwrap()
     );
-    assert!(socket_addr("example.invalid", 42000).is_err());
+    assert!(tunnel_socket_addr("example.invalid", 42000, "unused").is_err());
+}
+
+#[test]
+fn speed_test_scopes_only_link_local_addresses_to_the_selected_interface() {
+    let SocketAddr::V6(link_local) = tunnel_socket_addr("fe80::1", 42000, "lo").unwrap() else {
+        panic!("IPv6 expected");
+    };
+    assert_ne!(link_local.scope_id(), 0);
+    assert!(tunnel_socket_addr("fe80::1", 42000, "missing-vpsman").is_err());
+    let SocketAddr::V6(global) = tunnel_socket_addr("fd00::1", 42000, "missing-vpsman").unwrap()
+    else {
+        panic!("IPv6 expected");
+    };
+    assert_eq!(global.scope_id(), 0);
 }
 
 #[test]

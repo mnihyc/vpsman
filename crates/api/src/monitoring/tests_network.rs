@@ -108,6 +108,8 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
         dynamic_bandwidth: false,

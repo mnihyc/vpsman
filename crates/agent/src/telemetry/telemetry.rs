@@ -1338,6 +1338,7 @@ async fn run_latency_probe(
     config: &AgentConfig,
     family: TunnelAddressFamily,
     target: &str,
+    interface_name: &str,
 ) -> Result<LatencyProbeResult> {
     let (mut argv, source) = latency_ping_base_argv(config)?;
     if source == "linux_ping_preset" {
@@ -1346,6 +1347,7 @@ async fn run_latency_probe(
             TunnelAddressFamily::Ipv6 => "-6".to_string(),
         });
     }
+    crate::network_probe::append_link_local_interface(&mut argv, target, interface_name);
     argv.extend([
         "-n".to_string(),
         "-c".to_string(),
@@ -1513,11 +1515,18 @@ async fn apply_latency_monitoring(
         .latency_monitors
         .entry(key.to_string())
         .or_default();
-    let probe = match run_latency_probe(config, family, &target).await {
+    let probe = match run_latency_probe(config, family, &target, &plan.interface_name).await {
         Ok(probe) if probe.healthy => probe,
         Ok(primary) => {
             if let Some((fallback_family, fallback_target)) = fallback {
-                match run_latency_probe(config, fallback_family, &fallback_target).await {
+                match run_latency_probe(
+                    config,
+                    fallback_family,
+                    &fallback_target,
+                    &plan.interface_name,
+                )
+                .await
+                {
                     Ok(fallback_probe) if fallback_probe.healthy => fallback_probe,
                     Ok(fallback_probe) => {
                         retain_primary_after_unhealthy_fallback(primary, fallback_probe)

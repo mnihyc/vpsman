@@ -45,6 +45,8 @@ fn wireguard_plan(endpoint_mode: RuntimeTunnelWireguardEndpointMode) -> TunnelPl
             prefix_len: 127,
         }),
         latency_primary_family: TunnelAddressFamily::Ipv4,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1420),
@@ -65,6 +67,7 @@ fn credentials() -> TunnelEndpointBuiltinCredentials {
 
 fn prepared(previous_applied: Option<AppliedWireguardState>) -> PreparedWireguardState {
     PreparedWireguardState {
+        plan_id: Uuid::nil(),
         private_key_path: PathBuf::from("/state/wireguard.key"),
         applied_state_path: PathBuf::from("/state/wireguard.applied.json"),
         pending_state_path: PathBuf::from("/state/wireguard.pending.json"),
@@ -137,13 +140,12 @@ fn both_mode_sets_bracketed_ipv6_endpoint_and_both_allowed_families() {
         .argv
         .windows(2)
         .any(|pair| pair == ["allowed-ips", "0.0.0.0/0,::/0"]));
-    assert_eq!(
-        steps
-            .iter()
-            .filter(|step| step.label == "runtime_addr_replace")
-            .count(),
-        2
-    );
+    let generated = vpsman_common::tunnel_generated_link_local(Uuid::nil(), "v-1");
+    assert!(steps.iter().any(|step| step.label == "runtime_addr_replace"
+        && step
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["replace", generated.as_str()])));
 }
 
 #[test]

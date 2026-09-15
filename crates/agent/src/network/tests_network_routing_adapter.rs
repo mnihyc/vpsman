@@ -24,6 +24,8 @@ fn test_plan() -> TunnelPlan {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1476),

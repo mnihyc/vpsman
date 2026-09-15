@@ -59,6 +59,73 @@ fn parses_vty_tunnel_plan_for_local_render() {
     assert_eq!(request.input.left_mtu, Some(1400));
     assert_eq!(request.input.right_mtu, Some(1476));
     assert!(request.input.ospf.is_none());
+    assert!(request.input.additional_addresses.is_empty());
+    assert!(request.input.manage_link_local);
+}
+
+#[test]
+fn tunnel_plan_additional_addresses_survive_reviewed_update_and_link_local_opt_out() {
+    let base = [
+        "--name=edge",
+        "--interface=tun0",
+        "--kind=gre",
+        "--left-client=left",
+        "--right-client=right",
+        "--left-remote-underlay=198.51.100.10",
+        "--right-remote-underlay=203.0.113.20",
+        "--left-tunnel-ipv4-cidr=10.255.0.0/31",
+        "--right-tunnel-ipv4-cidr=10.255.0.1/31",
+        "--bandwidth-mbps=100",
+    ];
+    let mut arguments = base.to_vec();
+    arguments.extend([
+        "--save",
+        "--confirmed",
+        "--update-plan-id=00000000-0000-4000-8000-000000000001",
+        "--expected-revision=7",
+        "--additional-left-ipv4=192.0.2.1/32,192.0.2.2/32",
+        "--additional-left-ipv4",
+        "192.0.2.3/32",
+        "--additional-right-ipv4=192.0.2.4/32",
+        "--additional-left-ipv6",
+        "fe80::1/64",
+        "--additional-right-ipv6=fd00::2/128,fe80::2/64",
+        "--manage-link-local",
+        "false",
+    ]);
+    let request = parse_vty_tunnel_plan(&arguments).unwrap();
+    assert_eq!(
+        request.input.additional_addresses.left.ipv4,
+        ["192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"]
+    );
+    assert_eq!(
+        request.input.additional_addresses.right.ipv4,
+        ["192.0.2.4/32"]
+    );
+    assert_eq!(request.input.additional_addresses.left.ipv6, ["fe80::1/64"]);
+    assert_eq!(
+        request.input.additional_addresses.right.ipv6,
+        ["fd00::2/128", "fe80::2/64"]
+    );
+    assert!(!request.input.manage_link_local);
+    assert!(request.input.ipv6_tunnel.is_none());
+    assert_eq!(request.expected_revision, Some(7));
+    let mut enabled = base.to_vec();
+    enabled.push("--manage-link-local=true");
+    assert!(
+        parse_vty_tunnel_plan(&enabled)
+            .unwrap()
+            .input
+            .manage_link_local
+    );
+    for bad in [
+        "--manage-link-local=maybe",
+        "--additional-left-ipv6=192.0.2.1/32",
+    ] {
+        let mut invalid = base.to_vec();
+        invalid.push(bad);
+        assert!(parse_vty_tunnel_plan(&invalid).is_err(), "accepted {bad}");
+    }
 }
 
 #[test]

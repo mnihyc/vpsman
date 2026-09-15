@@ -656,6 +656,49 @@ pub struct TunnelAddressPair {
     pub prefix_len: u8,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TunnelEndpointAdditionalAddresses {
+    #[serde(default)]
+    pub ipv4: Vec<String>,
+    #[serde(default)]
+    pub ipv6: Vec<String>,
+}
+
+impl TunnelEndpointAdditionalAddresses {
+    pub fn is_empty(&self) -> bool {
+        self.ipv4.is_empty() && self.ipv6.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TunnelAdditionalAddresses {
+    #[serde(default)]
+    pub left: TunnelEndpointAdditionalAddresses,
+    #[serde(default)]
+    pub right: TunnelEndpointAdditionalAddresses,
+}
+
+impl TunnelAdditionalAddresses {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.right.is_empty()
+    }
+
+    pub fn for_side(&self, side: TunnelEndpointSide) -> &TunnelEndpointAdditionalAddresses {
+        match side {
+            TunnelEndpointSide::Left => &self.left,
+            TunnelEndpointSide::Right => &self.right,
+        }
+    }
+}
+
+fn default_manage_link_local() -> bool {
+    true
+}
+
+fn managed_link_local_default(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TunnelPlanInput {
     pub name: String,
@@ -685,6 +728,13 @@ pub struct TunnelPlanInput {
     pub ipv6_address_pool_cidr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6_tunnel: Option<TunnelAddressPair>,
+    #[serde(default, skip_serializing_if = "TunnelAdditionalAddresses::is_empty")]
+    pub additional_addresses: TunnelAdditionalAddresses,
+    #[serde(
+        default = "default_manage_link_local",
+        skip_serializing_if = "managed_link_local_default"
+    )]
+    pub manage_link_local: bool,
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
@@ -725,6 +775,13 @@ pub struct TunnelPlan {
     pub ipv4_tunnel: Option<TunnelAddressPair>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6_tunnel: Option<TunnelAddressPair>,
+    #[serde(default, skip_serializing_if = "TunnelAdditionalAddresses::is_empty")]
+    pub additional_addresses: TunnelAdditionalAddresses,
+    #[serde(
+        default = "default_manage_link_local",
+        skip_serializing_if = "managed_link_local_default"
+    )]
+    pub manage_link_local: bool,
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
@@ -760,4 +817,19 @@ pub struct TunnelEndpointConfig {
     pub ipv4_tunnel: Option<TunnelAddressPair>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6_tunnel: Option<TunnelAddressPair>,
+    #[serde(
+        default,
+        skip_serializing_if = "TunnelEndpointAdditionalAddresses::is_empty"
+    )]
+    pub additional_addresses: TunnelEndpointAdditionalAddresses,
+    #[serde(
+        default,
+        skip_serializing_if = "TunnelEndpointAdditionalAddresses::is_empty"
+    )]
+    pub peer_additional_addresses: TunnelEndpointAdditionalAddresses,
+    #[serde(
+        default = "default_manage_link_local",
+        skip_serializing_if = "managed_link_local_default"
+    )]
+    pub manage_link_local: bool,
 }

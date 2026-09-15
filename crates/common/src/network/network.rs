@@ -21,16 +21,18 @@ pub use models::{
     RuntimeTunnelEndpointHooks, RuntimeTunnelFouOptions, RuntimeTunnelHooks, RuntimeTunnelManager,
     RuntimeTunnelOpenvpnOptions, RuntimeTunnelOpenvpnTransport, RuntimeTunnelRoute,
     RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, RuntimeTunnelWireguardEndpointMode,
-    RuntimeTunnelWireguardOptions, TunnelAddressFamily, TunnelAddressPair,
-    TunnelBuiltinCredentials, TunnelEndpointBuiltinCredentials, TunnelEndpointConfig,
-    TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelOpenvpnIdentity, TunnelOspfConfig,
-    TunnelPlan, TunnelPlanInput, TunnelWireguardIdentity, MAX_TUNNEL_MTU, MIN_IPV6_TUNNEL_MTU,
-    MIN_TUNNEL_MTU, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+    RuntimeTunnelWireguardOptions, TunnelAdditionalAddresses, TunnelAddressFamily,
+    TunnelAddressPair, TunnelBuiltinCredentials, TunnelEndpointAdditionalAddresses,
+    TunnelEndpointBuiltinCredentials, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind,
+    TunnelObservation, TunnelOpenvpnIdentity, TunnelOspfConfig, TunnelPlan, TunnelPlanInput,
+    TunnelWireguardIdentity, MAX_TUNNEL_MTU, MIN_IPV6_TUNNEL_MTU, MIN_TUNNEL_MTU,
+    ROUTING_COST_ADAPTER_CONTRACT_VERSION,
 };
 pub use planner::{
     allocate_tunnel_endpoints, plan_tunnel, render_tunnel_endpoint_config,
     validate_runtime_topology_intent, validate_runtime_tunnel_control,
-    validate_runtime_tunnel_driver_options, NetworkPlanError, TunnelEndpointAllocation,
+    validate_runtime_tunnel_driver_options, validate_tunnel_link_local_addresses, NetworkPlanError,
+    TunnelEndpointAllocation,
 };
 pub use runtime_render::*;
 

@@ -7,15 +7,16 @@ use uuid::Uuid;
 use vpsman_common::{
     default_tunnel_mtu, payload_hash, plan_tunnel, render_tunnel_endpoint_config,
     routing_cost_update_privilege_payload, BandwidthMbps, JobCommand, OspfControlMode,
-    OspfCostPolicy, RuntimeTunnelManager, RuntimeTunnelOpenvpnTransport, TunnelAddressFamily,
-    TunnelAddressPair, TunnelKind, TunnelOspfConfig, TunnelPlan, TunnelPlanInput,
-    DEFAULT_MAX_JOB_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
-    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
-    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
-    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
-    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+    OspfCostPolicy, RuntimeTunnelManager, RuntimeTunnelOpenvpnTransport, TunnelAdditionalAddresses,
+    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointAdditionalAddresses, TunnelKind,
+    TunnelOspfConfig, TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
+    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
+    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
+    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES, NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
+    NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
 };
 
 use crate::{
@@ -78,6 +79,36 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) left_tunnel_ipv6_cidr: Option<String>,
     #[arg(long)]
     pub(crate) right_tunnel_ipv6_cidr: Option<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "CIDR",
+        help = "Additional left IPv4 addresses; repeat or comma-separate"
+    )]
+    pub(crate) additional_left_ipv4: Vec<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "CIDR",
+        help = "Additional left IPv6 addresses; repeat or comma-separate"
+    )]
+    pub(crate) additional_left_ipv6: Vec<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "CIDR",
+        help = "Additional right IPv4 addresses; repeat or comma-separate"
+    )]
+    pub(crate) additional_right_ipv4: Vec<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "CIDR",
+        help = "Additional right IPv6 addresses; repeat or comma-separate"
+    )]
+    pub(crate) additional_right_ipv6: Vec<String>,
+    #[arg(long, default_value_t = true, action = ArgAction::Set, help = "Manage automatic link-local on builtin endpoints with IPv6; manual addresses remain additive")]
+    pub(crate) manage_link_local: bool,
     #[arg(long, value_enum, default_value = "ipv4")]
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,
     #[arg(long, value_name = "MBPS")]
@@ -1216,6 +1247,17 @@ pub(crate) fn tunnel_plan(
             TunnelAddressFamily::Ipv6,
             "IPv6",
         )?,
+        additional_addresses: TunnelAdditionalAddresses {
+            left: TunnelEndpointAdditionalAddresses {
+                ipv4: request.additional_left_ipv4,
+                ipv6: request.additional_left_ipv6,
+            },
+            right: TunnelEndpointAdditionalAddresses {
+                ipv4: request.additional_right_ipv4,
+                ipv6: request.additional_right_ipv6,
+            },
+        },
+        manage_link_local: request.manage_link_local,
         latency_primary_family: request.latency_primary_family.into(),
         bandwidth_mbps: request.bandwidth_mbps,
         dynamic_bandwidth: false,

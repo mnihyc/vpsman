@@ -1503,7 +1503,26 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
             ospf_vectors.push(golden_vector(vector.command_type, operation));
         }
     }
+    let mut address_vectors = Vec::new();
+    for vector in vectors.iter().chain(ospf_vectors.iter().take(5)) {
+        let mut operation = vector.operation.clone();
+        match &mut operation {
+            JobCommand::NetworkStatus { plan, .. }
+            | JobCommand::NetworkProbe { plan, .. }
+            | JobCommand::NetworkSpeedTest { plan, .. }
+            | JobCommand::NetworkRoutingStatus { plan, .. }
+            | JobCommand::NetworkRoutingApply { plan, .. } => {
+                plan.additional_addresses.left.ipv4 = vec!["10.40.0.9/24".to_string()];
+                plan.additional_addresses.left.ipv6 = vec!["fe80::a/64".to_string()];
+                plan.additional_addresses.right.ipv6 = vec!["fe80::b/64".to_string()];
+                plan.manage_link_local = false;
+            }
+            _ => continue,
+        }
+        address_vectors.push(golden_vector(vector.command_type, operation));
+    }
     vectors.extend(ospf_vectors);
+    vectors.extend(address_vectors);
     Ok(vectors)
 }
 
@@ -1559,6 +1578,8 @@ fn golden_tunnel_plan(ospf: Option<TunnelOspfConfig>) -> io::Result<vpsman_commo
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,

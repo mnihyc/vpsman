@@ -16,6 +16,7 @@ use super::{
 };
 
 pub(super) struct PreparedWireguardState {
+    plan_id: Uuid,
     pub(super) private_key_path: PathBuf,
     applied_state_path: PathBuf,
     pending_state_path: PathBuf,
@@ -89,6 +90,7 @@ async fn load_wireguard_state_for(
     let previous_applied = read_wireguard_public_state(&applied_state_path).await?;
     let pending = read_wireguard_public_state(&pending_state_path).await?;
     Ok(PreparedWireguardState {
+        plan_id,
         private_key_path: endpoint_dir.join("wireguard.key"),
         applied_state_path,
         pending_state_path,
@@ -347,6 +349,7 @@ pub(super) fn build_wireguard_reconcile_steps(
         &config.network.runtime_ip_argv,
         plan,
         endpoint,
+        Some(prepared.plan_id),
     )?);
     steps.push(RuntimeCommandSpec {
         label: "runtime_link_up",
@@ -383,6 +386,7 @@ fn build_wireguard_configure_argv(
         endpoint,
         &prepared.private_key_path,
         peer_public_key_base64,
+        Some(prepared.plan_id),
     )?)
 }
 

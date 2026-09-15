@@ -507,9 +507,9 @@ export function useTopologyData(
   );
 
   const previewTunnelPlan = useCallback(
-    (request: TunnelPlanInput, signal?: AbortSignal) =>
+    (request: TunnelPlanInput, signal?: AbortSignal, planId?: string) =>
       apiPost<TunnelPlanPreviewResponse>(
-        "/api/v1/tunnel-plans/preview",
+        `/api/v1/tunnel-plans/preview${planId ? `?plan_id=${encodeURIComponent(planId)}` : ""}`,
         apiToken,
         request,
         signal,

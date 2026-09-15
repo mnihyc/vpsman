@@ -249,6 +249,7 @@ pub(super) fn build_openvpn_reconcile_steps(
     endpoint: &TunnelEndpointConfig,
     prepared: &PreparedOpenvpnState,
     link_exists: bool,
+    plan_uuid: Option<Uuid>,
 ) -> Result<Vec<RuntimeCommandSpec>> {
     ensure_command_base(&config.network.runtime_openvpn_argv, "runtime openvpn")?;
     ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
@@ -294,6 +295,7 @@ pub(super) fn build_openvpn_reconcile_steps(
         &config.network.runtime_ip_argv,
         plan,
         endpoint,
+        plan_uuid,
     )?);
     steps.push(RuntimeCommandSpec {
         label: "runtime_link_up",

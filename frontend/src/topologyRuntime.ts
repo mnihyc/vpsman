@@ -10,7 +10,66 @@ import type {
   RuntimeTunnelWireguardEndpointMode,
   RuntimeTunnelWireguardOptions,
   TunnelKind,
+  TunnelAdditionalAddresses,
+  TunnelPlanInput,
 } from "./types";
+
+export type TunnelAdditionalAddressDraft = {
+  left: { ipv4: string; ipv6: string };
+  right: { ipv4: string; ipv6: string };
+};
+
+export function additionalAddressDraft(addresses?: TunnelAdditionalAddresses): TunnelAdditionalAddressDraft {
+  return {
+    left: { ipv4: addresses?.left.ipv4.join("\n") ?? "", ipv6: addresses?.left.ipv6.join("\n") ?? "" },
+    right: { ipv4: addresses?.right.ipv4.join("\n") ?? "", ipv6: addresses?.right.ipv6.join("\n") ?? "" },
+  };
+}
+
+export function additionalAddressLines(value: string): string[] {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+export function additionalAddressesFromDraft(draft: TunnelAdditionalAddressDraft): TunnelAdditionalAddresses {
+  return {
+    left: { ipv4: additionalAddressLines(draft.left.ipv4), ipv6: additionalAddressLines(draft.left.ipv6) },
+    right: { ipv4: additionalAddressLines(draft.right.ipv4), ipv6: additionalAddressLines(draft.right.ipv6) },
+  };
+}
+
+export function additionalAddressReservations(draft: TunnelAdditionalAddressDraft): string[] {
+  return [draft.left, draft.right].flatMap((side) =>
+    [...additionalAddressLines(side.ipv4), ...additionalAddressLines(side.ipv6)]
+      .map((cidr) => cidr.split("/")[0]),
+  );
+}
+
+export function isTunnelLinkLocal(address: string): boolean {
+  return /^fe[89ab][0-9a-f]:/i.test(address.trim());
+}
+
+export function tunnelLinkLocalSummary(
+  input: Pick<TunnelPlanInput, "ipv6_tunnel" | "additional_addresses" | "manage_link_local">,
+  side: "left" | "right",
+): string {
+  const addresses = [input.ipv6_tunnel?.[side], ...(input.additional_addresses?.[side].ipv6 ?? [])]
+    .filter((address): address is string => Boolean(address));
+  const manual = addresses.filter(isTunnelLinkLocal);
+  if (input.manage_link_local === false) {
+    return `Off · native behavior${manual.length ? `; explicit ${manual.join(", ")}` : ""}`;
+  }
+  if (addresses.length === 0) return "On · inactive (no configured IPv6)";
+  return `On · automatic link-local${manual.length ? `; explicit ${manual.join(", ")}` : ""}`;
+}
+
+export function additionalAddressChanges(current: string[], previous: string[] = []): string {
+  const added = current.filter((address) => !previous.includes(address));
+  const removed = previous.filter((address) => !current.includes(address));
+  return [
+    added.length ? `Add ${added.join(", ")}` : null,
+    removed.length ? `Remove ${removed.join(", ")}` : null,
+  ].filter(Boolean).join("; ") || (current.join(", ") || "None");
+}
 
 export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = {
   port: 5555,

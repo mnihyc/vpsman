@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, SocketAddrV6},
     time::{Duration, Instant},
 };
 
@@ -163,7 +163,8 @@ struct NetworkSpeedRoleInput<'a> {
 }
 
 async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutput> {
-    let bind_addr = socket_addr(input.server_address, input.port)?;
+    let bind_addr =
+        tunnel_socket_addr(input.server_address, input.port, &input.plan.interface_name)?;
     let expected_peer_ip = ip_addr(input.peer_tunnel_address)?;
     let nonce_hex = speed_test_nonce_hex(input.job_id, input.command_payload_hash);
     let listener = TcpListener::bind(bind_addr)
@@ -295,8 +296,9 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
 }
 
 async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutput> {
-    let target_addr = socket_addr(input.server_address, input.port)?;
-    let local_addr = socket_addr(input.peer_tunnel_address, 0)?;
+    let target_addr =
+        tunnel_socket_addr(input.server_address, input.port, &input.plan.interface_name)?;
+    let local_addr = tunnel_socket_addr(input.peer_tunnel_address, 0, &input.plan.interface_name)?;
     let mut stream = connect_with_retry(target_addr, local_addr, input.connect_timeout).await?;
     let nonce_hex = speed_test_nonce_hex(input.job_id, input.command_payload_hash);
     write_speed_test_handshake(&mut stream, &nonce_hex)
@@ -712,8 +714,22 @@ fn speed_test_direction<'a>(
     }
 }
 
-fn socket_addr(address: &str, port: u16) -> Result<SocketAddr> {
-    Ok(SocketAddr::new(ip_addr(address)?, port))
+fn tunnel_socket_addr(address: &str, port: u16, interface_name: &str) -> Result<SocketAddr> {
+    let address = ip_addr(address)?;
+    if let IpAddr::V6(ipv6) = address {
+        if ipv6.is_unicast_link_local() {
+            let interface =
+                std::ffi::CString::new(interface_name).context("invalid tunnel interface name")?;
+            // A link-local destination is meaningful only on the selected tunnel.
+            let index = unsafe { libc::if_nametoindex(interface.as_ptr()) };
+            anyhow::ensure!(
+                index != 0,
+                "tunnel interface {interface_name} was not found"
+            );
+            return Ok(SocketAddr::V6(SocketAddrV6::new(ipv6, port, 0, index)));
+        }
+    }
+    Ok(SocketAddr::new(address, port))
 }
 
 fn ip_addr(address: &str) -> Result<IpAddr> {

@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 import {
+  additionalAddressChanges,
+  additionalAddressDraft,
+  additionalAddressLines,
+  additionalAddressReservations,
+  additionalAddressesFromDraft,
   buildRuntimeControl,
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
@@ -7,7 +12,78 @@ import {
   isDerivedAgentTunnelMtu,
   runtimeManagerLabel,
   validateTunnelPlanName,
+  tunnelLinkLocalSummary,
+  isTunnelLinkLocal,
 } from "../src/topologyRuntime";
+import type { TunnelPlanInput } from "../src/types";
+
+test("additional tunnel addresses round trip independently without changing editable lines", () => {
+  const addresses = {
+    left: { ipv4: ["192.0.2.1/32"], ipv6: [] },
+    right: { ipv4: [], ipv6: ["fd00::2/128", "fe80::2/64"] },
+  };
+  const draft = additionalAddressDraft(addresses);
+  expect(additionalAddressesFromDraft(draft)).toEqual(addresses);
+  draft.left.ipv6 = "\n  fd00::1/128  \r\n\nfe80::1/64\n";
+  const before = structuredClone(draft);
+  expect(additionalAddressesFromDraft(draft).left.ipv6).toEqual(["fd00::1/128", "fe80::1/64"]);
+  expect(additionalAddressesFromDraft(draft).right).toEqual(addresses.right);
+  expect(draft).toEqual(before);
+  draft.right.ipv6 = "";
+  expect(additionalAddressesFromDraft(draft).right.ipv6).toEqual([]);
+  expect(additionalAddressLines("\n \r\n")).toEqual([]);
+});
+
+test("allocation reserves unsaved extra host addresses without changing CIDR drafts", () => {
+  const draft = additionalAddressDraft();
+  draft.left.ipv4 = " 10.255.0.2/32\n10.255.0.3/24\n";
+  draft.left.ipv6 = "fe80::1/64";
+  draft.right.ipv6 = "fd00::2/128\nfe80::2/64";
+  const before = structuredClone(draft);
+  expect(additionalAddressReservations(draft)).toEqual([
+    "10.255.0.2", "10.255.0.3", "fe80::1", "fd00::2", "fe80::2",
+  ]);
+  expect(draft).toEqual(before);
+});
+
+test("link-local policy is per endpoint and manual addresses survive unmanaged mode", () => {
+  const input: Pick<TunnelPlanInput, "ipv6_tunnel" | "additional_addresses" | "manage_link_local"> = {
+    additional_addresses: {
+      left: { ipv4: [], ipv6: ["fe80::1/64"] },
+      right: { ipv4: ["192.0.2.2/32"], ipv6: [] },
+    },
+  };
+  expect(tunnelLinkLocalSummary(input, "left")).toBe("On · automatic link-local; explicit fe80::1/64");
+  expect(tunnelLinkLocalSummary(input, "right")).toBe("On · inactive (no configured IPv6)");
+  input.additional_addresses!.right.ipv6 = ["fd00::2/128"];
+  expect(tunnelLinkLocalSummary(input, "right")).toBe("On · automatic link-local");
+  input.manage_link_local = false;
+  expect(tunnelLinkLocalSummary(input, "left")).toBe("Off · native behavior; explicit fe80::1/64");
+  expect(tunnelLinkLocalSummary(input, "right")).toBe("Off · native behavior");
+  input.manage_link_local = true;
+  input.additional_addresses!.left.ipv6 = [];
+  input.ipv6_tunnel = { left: "fe80::10", right: "fe80::20", prefix_len: 64 };
+  expect(tunnelLinkLocalSummary(input, "left")).toBe("On · automatic link-local; explicit fe80::10");
+});
+
+test("link-local classification preserves link scope across the entire fe80::/10 range", () => {
+  for (const address of ["fe80::1", "FE9A::1/64", "feaf::1", "febf::1/128"]) {
+    expect(isTunnelLinkLocal(address)).toBe(true);
+  }
+  for (const address of ["fec0::1", "fd00::1", "192.0.2.1"]) {
+    expect(isTunnelLinkLocal(address)).toBe(false);
+  }
+});
+
+test("address review reports exact additions and removals without treating reorder as replacement", () => {
+  expect(additionalAddressChanges(["fd00::2/128"], ["fd00::1/128"]))
+    .toBe("Add fd00::2/128; Remove fd00::1/128");
+  expect(additionalAddressChanges(["fd00::2/128", "fd00::1/128"], ["fd00::1/128", "fd00::2/128"]))
+    .toBe("fd00::2/128, fd00::1/128");
+  expect(additionalAddressChanges([], ["fd00::1/128"]))
+    .toBe("Remove fd00::1/128");
+  expect(additionalAddressChanges([])).toBe("None");
+});
 import { networkSpeedServerSide } from "../src/topologyNetworkJobs";
 import {
   networkEvidenceMatchesPlan,

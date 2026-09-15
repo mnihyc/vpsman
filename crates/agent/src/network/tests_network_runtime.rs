@@ -82,6 +82,8 @@ fn plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         }),
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
+        additional_addresses: Default::default(),
+        manage_link_local: true,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
@@ -140,14 +142,86 @@ fn iproute2_tunnel_argv_uses_only_the_endpoint_declared_source_and_destination()
 }
 
 #[test]
+fn generated_link_local_identity_requires_only_its_approved_runtime_context() {
+    let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    assert_eq!(
+        resolved_link_local_plan_uuid(None, &plan, &endpoint).unwrap(),
+        None
+    );
+    plan.additional_addresses.left.ipv6 = vec!["fd00:123::1/64".into()];
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    assert!(resolved_link_local_plan_uuid(None, &plan, &endpoint).is_err());
+    assert!(resolved_link_local_plan_uuid(Some("local-plan"), &plan, &endpoint).is_err());
+    let identity = uuid::Uuid::new_v4();
+    assert_eq!(
+        resolved_link_local_plan_uuid(Some(&identity.to_string()), &plan, &endpoint).unwrap(),
+        Some(identity)
+    );
+    plan.manage_link_local = false;
+    assert_eq!(
+        resolved_link_local_plan_uuid(None, &plan, &endpoint).unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn missing_link_local_plan_identity_fails_before_native_commands_or_hooks() {
+    let mut config = builtin_hook_test_config();
+    let root = std::env::current_dir()
+        .unwrap()
+        .join(&config.network.root_dir);
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    let marker = root.join("native-or-hook-called");
+    let mutation = command(&[
+        "/bin/sh",
+        "-c",
+        "printf touched > \"$1\"",
+        "identity-test",
+        marker.to_str().unwrap(),
+    ]);
+    config.network.runtime_ip_argv = mutation.argv.clone();
+    let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    plan.additional_addresses.left.ipv6 = vec!["fd00:123::1/64".into()];
+    plan.runtime_control.hooks.left.pre_start = Some(mutation);
+    for plan_id in [None, Some("opaque-local-id")] {
+        let result = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
+            config: &config,
+            plan_id,
+            plan: &plan,
+            previous_plan: None,
+            builtin_credentials: None,
+            runtime_adapter: None,
+            side: TunnelEndpointSide::Left,
+            max_timeout_secs: 10,
+            effective_uid_override: Some(0),
+        })
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a valid plan UUID"));
+        assert!(
+            !marker.exists(),
+            "identity validation followed a native mutation or hook"
+        );
+    }
+    config.network.apply_enabled = false;
+    let skipped = reconcile_hook_test(&config, &plan).await;
+    assert_eq!(skipped["status"], "skipped");
+    assert!(!marker.exists());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[test]
 fn iproute2_reconcile_applies_the_local_endpoint_mtu() {
     let config = AgentConfig::default();
     let plan = plan(RuntimeTunnelManager::AgentBuiltin);
     let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
 
-    let left_steps = build_iproute2_reconcile_steps(&config, &plan, &left, false).unwrap();
-    let right_steps = build_iproute2_reconcile_steps(&config, &plan, &right, false).unwrap();
+    let left_steps = build_iproute2_reconcile_steps(&config, &plan, &left, false, None).unwrap();
+    let right_steps = build_iproute2_reconcile_steps(&config, &plan, &right, false, None).unwrap();
     let left_mtu = left_steps
         .iter()
         .find(|step| step.label == "runtime_link_mtu")
@@ -209,6 +283,54 @@ fn iproute2_address_inspection_matches_real_peer_fields_without_relaxing_ownersh
         );
         assert!(matching_existing_iproute2_address(&addresses, wrong_peer, peer, prefix).is_none());
         assert!(matching_existing_iproute2_address(&addresses, local, peer, prefix - 1).is_none());
+    }
+}
+
+#[test]
+fn fou_link_inspection_normalizes_encapsulation_shapes_without_relaxing_ownership() {
+    // Captured from real `ip -d -j link show` after creating an IPv4 FOU link.
+    let captured = r#"[{"ifindex":7,"ifname":"tunfou","mtu":1472,"linkinfo":{"info_kind":"ipip","info_data":{"proto":"any","remote":"192.0.2.2","local":"192.0.2.1","ttl":255,"pmtudisc":true,"encap":{"type":"fou","sport":0,"dport":5555,"csum":false,"csum6":false,"remcsum":false}}}}]"#;
+    let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    plan.kind = TunnelKind::Fou;
+    plan.interface_name = "tunfou".into();
+    plan.left_local_underlay = Some("192.0.2.1".into());
+    plan.left_remote_underlay = "192.0.2.2".into();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let nested: serde_json::Value = serde_json::from_str(captured).unwrap();
+    let mut flat = nested.clone();
+    flat[0]["linkinfo"]["info_data"]["encap"] = serde_json::json!("fou");
+    flat[0]["linkinfo"]["info_data"]["encap_dport"] = serde_json::json!(5555);
+    for (record, nested_shape) in [(nested, true), (flat, false)] {
+        let parsed = parse_iproute2_link_json(&record.to_string(), "tunfou").unwrap();
+        assert_eq!(parsed.encap.as_deref(), Some("fou"));
+        assert_eq!(parsed.encap_dport.as_deref(), Some("5555"));
+        assert!(
+            existing_iproute2_tunnel_mismatches(&parsed, &plan, &endpoint)
+                .unwrap()
+                .is_empty()
+        );
+        for (field, value) in [
+            ("type", serde_json::json!("gue")),
+            ("dport", serde_json::json!(5556)),
+        ] {
+            let mut incompatible = record.clone();
+            if nested_shape {
+                incompatible[0]["linkinfo"]["info_data"]["encap"][field] = value;
+            } else {
+                incompatible[0]["linkinfo"]["info_data"][if field == "type" {
+                    "encap"
+                } else {
+                    "encap_dport"
+                }] = value;
+            }
+            let parsed = parse_iproute2_link_json(&incompatible.to_string(), "tunfou").unwrap();
+            assert!(
+                !existing_iproute2_tunnel_mismatches(&parsed, &plan, &endpoint)
+                    .unwrap()
+                    .is_empty(),
+                "foreign encapsulation was accepted: {incompatible}"
+            );
+        }
     }
 }
 
@@ -1321,7 +1443,10 @@ exec /sbin/ip "$@""#
         config.network.runtime_ip_argv = fail_mtu_argv();
         for kind in [TunnelKind::Gre, TunnelKind::Ipip, TunnelKind::Sit] {
             let plan = isolated_plan(kind);
-            let report = reconcile(&config, &plan, None, None).await.unwrap();
+            let plan_id = uuid::Uuid::new_v4().to_string();
+            let report = reconcile(&config, &plan, Some(&plan_id), None)
+                .await
+                .unwrap();
             assert_eq!(report["status"], "failed", "{kind:?}: {report}");
             assert_eq!(report_step(&report, "runtime_tunnel_add")["success"], true);
             assert_eq!(report_step(&report, "runtime_link_mtu")["success"], false);
@@ -1333,7 +1458,9 @@ exec /sbin/ip "$@""#
             // Its rendered addresses must pass the next attempt's ownership check.
             let mut native_config = config.clone();
             native_config.network.runtime_ip_argv = AgentConfig::default().network.runtime_ip_argv;
-            let retried = reconcile(&native_config, &plan, None, None).await.unwrap();
+            let retried = reconcile(&native_config, &plan, Some(&plan_id), None)
+                .await
+                .unwrap();
             assert_eq!(retried["status"], "converged", "{kind:?}: {retried}");
             let before = checked_native(
                 "/sbin/ip",
@@ -1341,7 +1468,9 @@ exec /sbin/ip "$@""#
             )
             .await
             .stdout;
-            let report = reconcile(&config, &plan, None, None).await.unwrap();
+            let report = reconcile(&config, &plan, Some(&plan_id), None)
+                .await
+                .unwrap();
             assert_eq!(report["status"], "failed", "{kind:?}: {report}");
             assert_eq!(report_step(&report, "runtime_link_mtu")["success"], false);
             assert_eq!(
@@ -1493,6 +1622,10 @@ exec /sbin/ip "$@""#
                 "1",
                 "-subj",
                 "/CN=isolated-runtime-test",
+                "-addext",
+                "extendedKeyUsage=serverAuth,clientAuth",
+                "-addext",
+                "keyUsage=digitalSignature,keyEncipherment",
             ],
         )
         .await;
@@ -1507,6 +1640,346 @@ exec /sbin/ip "$@""#
             // No peer handshake is performed; the fingerprint only contributes to the state hash.
             peer_certificate_sha256_fingerprint: "00".repeat(32),
         }
+    }
+
+    async fn wireguard_credentials() -> TunnelEndpointBuiltinCredentials {
+        use tokio::io::AsyncWriteExt;
+        let private_key =
+            String::from_utf8(checked_native("/usr/bin/wg", &["genkey"]).await.stdout).unwrap();
+        let mut command = tokio::process::Command::new("/usr/bin/wg")
+            .arg("pubkey")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        command
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(private_key.as_bytes())
+            .await
+            .unwrap();
+        let output = command.wait_with_output().await.unwrap();
+        assert!(output.status.success());
+        let public_key = String::from_utf8(output.stdout).unwrap();
+        let peer_private = checked_native("/usr/bin/wg", &["genkey"]).await.stdout;
+        let mut peer = tokio::process::Command::new("/usr/bin/wg")
+            .arg("pubkey")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        peer.stdin
+            .take()
+            .unwrap()
+            .write_all(&peer_private)
+            .await
+            .unwrap();
+        let peer = peer.wait_with_output().await.unwrap();
+        assert!(peer.status.success());
+        TunnelEndpointBuiltinCredentials::Wireguard {
+            generation: 1,
+            local_private_key_base64: private_key.trim().to_string(),
+            local_public_key_base64: public_key.trim().to_string(),
+            peer_public_key_base64: String::from_utf8(peer.stdout).unwrap().trim().to_string(),
+        }
+    }
+
+    async fn address_set(interface: &str) -> Vec<String> {
+        let result = checked_native("/sbin/ip", &["-j", "addr", "show", "dev", interface]).await;
+        let links: Vec<serde_json::Value> = serde_json::from_slice(&result.stdout).unwrap();
+        links[0]["addr_info"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|address| {
+                format!(
+                    "{}/{}",
+                    address["local"].as_str().unwrap(),
+                    address["prefixlen"].as_u64().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, NET_ADMIN, IPv6, TUN, iproute2, WireGuard and OpenVPN"]
+    async fn builtin_address_policy_converges_edits_native_restore_and_remove() {
+        builtin_address_policy_matrix(&[
+            TunnelKind::Gre,
+            TunnelKind::Ipip,
+            TunnelKind::Sit,
+            TunnelKind::Wireguard,
+            TunnelKind::Openvpn,
+        ])
+        .await;
+    }
+
+    async fn builtin_address_policy_matrix(kinds: &[TunnelKind]) {
+        require_isolated_network();
+        for &kind in kinds {
+            let mut plan = isolated_plan(kind);
+            let plan_id = uuid::Uuid::new_v4().to_string();
+            let credentials = match kind {
+                TunnelKind::Wireguard => Some(wireguard_credentials().await),
+                TunnelKind::Openvpn => Some(generated_credentials(&plan_id).await),
+                _ => None,
+            };
+            if kind != TunnelKind::Sit {
+                plan.additional_addresses.left.ipv4 = vec!["10.254.0.10/32".into()];
+            }
+            if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+                plan.additional_addresses.left.ipv6 =
+                    vec!["fd00:123::10/128".into(), "fe80::123/64".into()];
+            }
+            let config = config();
+            let report = reconcile(&config, &plan, Some(&plan_id), credentials.as_ref())
+                .await
+                .unwrap();
+            assert_eq!(report["status"], "converged", "{kind:?}: {report}");
+            let initial_index = tokio::fs::read_to_string(format!(
+                "/sys/class/net/{}/ifindex",
+                plan.interface_name
+            ))
+            .await
+            .unwrap();
+            let current = address_set(&plan.interface_name).await;
+            let state: serde_json::Value = serde_json::from_slice(
+                &tokio::fs::read(endpoint_dir(&plan_id).join("addresses.json"))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let native_mode = state["native_addr_gen_mode"].as_u64();
+            for address in plan
+                .additional_addresses
+                .left
+                .ipv4
+                .iter()
+                .chain(plan.additional_addresses.left.ipv6.iter())
+            {
+                assert!(
+                    current.contains(address),
+                    "{kind:?}: missing {address}: {current:?}"
+                );
+            }
+            let generated = vpsman_common::tunnel_generated_link_local(
+                uuid::Uuid::parse_str(&plan_id).unwrap(),
+                &plan.left_client_id,
+            );
+            if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+                let mut link_local = current
+                    .iter()
+                    .filter(|address| address.starts_with("fe80:"))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                link_local.sort();
+                let mut expected = vec![generated.clone(), "fe80::123/64".into()];
+                expected.sort();
+                assert_eq!(link_local, expected, "{kind:?}");
+                assert_eq!(
+                    tokio::fs::read_to_string(format!(
+                        "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
+                        plan.interface_name
+                    ))
+                    .await
+                    .unwrap()
+                    .trim(),
+                    "1"
+                );
+            }
+            // Reconciliation can change aliases on an existing owned device,
+            // while an address introduced by another owner stays untouched.
+            let unowned = if kind == TunnelKind::Sit {
+                "fd00:123::999/128"
+            } else {
+                "10.254.0.99/32"
+            };
+            checked_native(
+                "/sbin/ip",
+                &["addr", "add", unowned, "dev", &plan.interface_name],
+            )
+            .await;
+            plan.additional_addresses.left.ipv4.clear();
+            plan.additional_addresses
+                .left
+                .ipv6
+                .retain(|address| address.starts_with("fe80:"));
+            plan.manage_link_local = false;
+            let report = reconcile(&config, &plan, Some(&plan_id), credentials.as_ref())
+                .await
+                .unwrap();
+            assert_eq!(report["status"], "converged", "{kind:?}: {report}");
+            assert_eq!(
+                tokio::fs::read_to_string(format!(
+                    "/sys/class/net/{}/ifindex",
+                    plan.interface_name
+                ))
+                .await
+                .unwrap(),
+                initial_index,
+                "{kind:?}: address edit recreated device"
+            );
+            let current = address_set(&plan.interface_name).await;
+            assert!(
+                current.contains(&unowned.to_string()),
+                "{kind:?}: unowned address removed"
+            );
+            if kind == TunnelKind::Fou {
+                assert_eq!(
+                    report_step(&report, "runtime_fou_add")["accepted_existing_listener"],
+                    true,
+                    "{report}"
+                );
+                let repeated = reconcile(&config, &plan, Some(&plan_id), credentials.as_ref())
+                    .await
+                    .unwrap();
+                assert_eq!(repeated["status"], "converged", "{repeated}");
+                assert_eq!(
+                    report_step(&repeated, "runtime_fou_add")["accepted_existing_listener"],
+                    true,
+                    "{repeated}"
+                );
+                let mut before = current.clone();
+                let mut after = address_set(&plan.interface_name).await;
+                before.sort();
+                after.sort();
+                assert_eq!(after, before, "idempotent FOU reconcile changed addresses");
+                assert_eq!(
+                    tokio::fs::read_to_string(format!(
+                        "/sys/class/net/{}/ifindex",
+                        plan.interface_name
+                    ))
+                    .await
+                    .unwrap(),
+                    initial_index,
+                    "idempotent FOU reconcile recreated interface"
+                );
+            }
+            assert!(!current.contains(&"10.254.0.10/32".to_string()));
+            assert!(!current.contains(&"fd00:123::10/128".to_string()));
+            if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+                assert!(current.contains(&"fe80::123/64".to_string()));
+                assert!(!current.contains(&generated));
+                let expected_mode = native_mode.unwrap().to_string();
+                assert_eq!(
+                    tokio::fs::read_to_string(format!(
+                        "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
+                        plan.interface_name
+                    ))
+                    .await
+                    .unwrap()
+                    .trim(),
+                    expected_mode,
+                    "{kind:?}: native mode not restored"
+                );
+            }
+            let report = execute_runtime_tunnel_remove_report_cancelable(
+                NetworkRuntimeRemoveInput {
+                    config: &config,
+                    plan_id: Some(&plan_id),
+                    plan: &plan,
+                    builtin_credentials: credentials.as_ref(),
+                    runtime_adapter: None,
+                    side: TunnelEndpointSide::Left,
+                    max_timeout_secs: 30,
+                    effective_uid_override: None,
+                },
+                CommandCancelToken::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report["status"], "removed", "{kind:?}: {report}");
+            if kind == TunnelKind::Fou {
+                assert_eq!(
+                    report_step(&report, "runtime_fou_delete")["success"],
+                    true,
+                    "{report}"
+                );
+                let listeners: serde_json::Value = serde_json::from_slice(
+                    &checked_native("/sbin/ip", &["-j", "fou", "show"])
+                        .await
+                        .stdout,
+                )
+                .unwrap();
+                assert!(
+                    listeners
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|listener| listener["port"].as_u64()
+                            != Some(u64::from(plan.runtime_control.fou.port))),
+                    "FOU listener survived teardown: {listeners}"
+                );
+            }
+            assert_link_absent(&plan).await;
+            assert!(!endpoint_dir(&plan_id).join("addresses.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Docker private networking and NET_ADMIN"]
+    async fn interrupted_address_edit_preserves_existing_device_and_reconciles_owned_partial_apply()
+    {
+        require_isolated_network();
+        let mut plan = isolated_plan(TunnelKind::Gre);
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let mut config = config();
+        let initial = reconcile(&config, &plan, Some(&plan_id), None)
+            .await
+            .unwrap();
+        assert_eq!(initial["status"], "converged", "{initial}");
+        let index =
+            tokio::fs::read_to_string(format!("/sys/class/net/{}/ifindex", plan.interface_name))
+                .await
+                .unwrap();
+        plan.additional_addresses.left.ipv4 = vec!["10.254.2.1/32".into(), "10.254.2.2/32".into()];
+        config.network.runtime_ip_argv = vec!["/bin/sh".into(), "-c".into(),
+            r#"if [ "$1" = addr ] && [ "$2" = replace ] && [ "$3" = 10.254.2.2/32 ]; then exit 23; fi
+exec /sbin/ip "$@""#.into(), "injected-address-failure".into()];
+        let failed = reconcile(&config, &plan, Some(&plan_id), None)
+            .await
+            .unwrap();
+        assert_eq!(failed["status"], "failed", "{failed}");
+        assert_eq!(
+            failed["compensation"]["status"], "not_available",
+            "{failed}"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(format!("/sys/class/net/{}/ifindex", plan.interface_name))
+                .await
+                .unwrap(),
+            index
+        );
+        assert!(address_set(&plan.interface_name)
+            .await
+            .contains(&"10.254.2.1/32".to_string()));
+        plan.additional_addresses.left.ipv4.clear();
+        config.network.runtime_ip_argv = AgentConfig::default().network.runtime_ip_argv;
+        // No in-memory prior plan: persisted attempted ownership must survive
+        // an agent restart and clean the successfully applied first alias.
+        let retry = reconcile(&config, &plan, Some(&plan_id), None)
+            .await
+            .unwrap();
+        assert_eq!(retry["status"], "converged", "{retry}");
+        assert!(!address_set(&plan.interface_name)
+            .await
+            .iter()
+            .any(|address| address.starts_with("10.254.2.")));
+        assert_eq!(
+            tokio::fs::read_to_string(format!("/sys/class/net/{}/ifindex", plan.interface_name))
+                .await
+                .unwrap(),
+            index
+        );
+        checked_native("/sbin/ip", &["link", "del", "dev", &plan.interface_name]).await;
+        addresses::remove_address_ownership(
+            Some(&plan_id),
+            &plan.interface_name,
+            TunnelEndpointSide::Left,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1538,6 +2011,7 @@ exec /sbin/ip "$@""#
             .await
             .unwrap();
     }
+    include!("tests_network_runtime_packets.rs");
 }
 
 const MANAGER_TEST_KINDS: [TunnelKind; 8] = [
@@ -1681,7 +2155,7 @@ printf '%s\n' "$*" >> "$fixture_log"
 case "$1 $2" in
     'fou add') test "$fixture_case" = 'new_listener' ;;
     '-j fou') printf '%s\n' "$fixture_listeners" ;;
-    'tunnel add') test "$fixture_case" = 'reused_listener' ;;
+    'link add') test "$fixture_case" = 'reused_listener' ;;
     'link set') exit 1 ;;
     'fou del'|'link delete'|'link show') exit 0 ;;
     *) exit 99 ;;
@@ -1738,7 +2212,7 @@ esac"#
         );
         let calls = tokio::fs::read_to_string(&calls_path).await.unwrap();
         assert_eq!(
-            calls.lines().any(|line| line.starts_with("tunnel add ")),
+            calls.lines().any(|line| line.starts_with("link add ")),
             scenario != "incompatible_listener",
             "{scenario}: {calls}"
         );

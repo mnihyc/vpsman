@@ -34,13 +34,14 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 5;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 6;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 3;
+pub const TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION: u16 = 6;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION: u16 = 5;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -3282,9 +3283,8 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::FileCopy { .. }
         | JobCommand::FileDownload { .. }
         | JobCommand::FileArchiveTar { .. } => FILE_COMMAND_PROTOCOL_VERSION,
-        JobCommand::ConfigRead | JobCommand::RuntimeConfigSync { .. } => {
-            CONFIG_COMMAND_PROTOCOL_VERSION
-        }
+        JobCommand::ConfigRead => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::RuntimeConfigSync { config, .. } => runtime_config_protocol_version(config),
         JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3310,15 +3310,18 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::Restore { .. } | JobCommand::RestoreRollback { .. } => {
             RESTORE_COMMAND_PROTOCOL_VERSION
         }
-        JobCommand::NetworkStatus { .. }
-        | JobCommand::NetworkInterfaces
-        | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkInterfaces => NETWORK_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkStatus { plan, .. }
+        | JobCommand::NetworkProbe { plan, .. }
+        | JobCommand::NetworkSpeedTest { plan, .. } => {
+            tunnel_plan_command_protocol_version(plan, NETWORK_COMMAND_PROTOCOL_VERSION)
+        }
         JobCommand::NetworkTrafficImportVnstat { .. } => {
             NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION
         }
-        JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
-            NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
+        JobCommand::NetworkRoutingStatus { plan, .. }
+        | JobCommand::NetworkRoutingApply { plan, .. } => {
+            tunnel_plan_command_protocol_version(plan, NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION)
         }
     }
 }
@@ -3379,20 +3382,22 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
-        JobCommand::ConfigRead | JobCommand::RuntimeConfigSync { .. } => {
-            CONFIG_COMMAND_PROTOCOL_VERSION
-        }
+        JobCommand::ConfigRead => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::RuntimeConfigSync { config, .. } => runtime_config_protocol_version(config),
         JobCommand::AgentStop | JobCommand::AgentRestart => {
             AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
         }
-        JobCommand::NetworkStatus { .. }
-        | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkStatus { plan, .. }
+        | JobCommand::NetworkProbe { plan, .. }
+        | JobCommand::NetworkSpeedTest { plan, .. } => {
+            tunnel_plan_command_protocol_version(plan, NETWORK_COMMAND_PROTOCOL_VERSION)
+        }
         JobCommand::NetworkTrafficImportVnstat { .. } => {
             NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION
         }
-        JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
-            NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
+        JobCommand::NetworkRoutingStatus { plan, .. }
+        | JobCommand::NetworkRoutingApply { plan, .. } => {
+            tunnel_plan_command_protocol_version(plan, NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION)
         }
         JobCommand::StorageInventory { .. } => HOST_STORAGE_COMMAND_PROTOCOL_VERSION,
         JobCommand::ServiceInventory { .. }
@@ -3402,6 +3407,39 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
             HOST_PACKAGE_COMMAND_PROTOCOL_VERSION
         }
     }
+}
+
+fn runtime_config_protocol_version(config: &AgentRuntimeConfig) -> u16 {
+    if config
+        .network
+        .runtime_status_telemetry_plans
+        .iter()
+        .any(|entry| {
+            let plan = &entry.plan;
+            tunnel_plan_has_address_wire_fields(plan)
+                || (plan.runtime_control.manager == crate::RuntimeTunnelManager::AgentBuiltin
+                    && plan.manage_link_local
+                    && plan.ipv6_tunnel.is_some())
+        })
+    {
+        TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION
+    } else {
+        CONFIG_COMMAND_PROTOCOL_VERSION
+    }
+}
+
+fn tunnel_plan_command_protocol_version(plan: &TunnelPlan, baseline: u16) -> u16 {
+    // Older agents discard these new serialized fields. Their command hashes
+    // would then differ during replay and the two-ended speedtest handshake.
+    if tunnel_plan_has_address_wire_fields(plan) {
+        TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION
+    } else {
+        baseline
+    }
+}
+
+fn tunnel_plan_has_address_wire_fields(plan: &TunnelPlan) -> bool {
+    !plan.additional_addresses.is_empty() || !plan.manage_link_local
 }
 
 pub fn job_command_type_label(command: &JobCommand) -> &'static str {

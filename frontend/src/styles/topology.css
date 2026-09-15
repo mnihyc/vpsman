@@ -846,6 +846,18 @@
   margin-bottom: 12px;
 }
 
+.tunnelAdditionalEndpoint {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tunnelAdditionalEndpointTitle {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .tunnelAdvancedBody,
 .tunnelAdvancedSection,
 .tunnelHookEditor {

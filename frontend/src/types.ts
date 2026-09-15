@@ -2329,6 +2329,8 @@ export type TunnelPlanInput = {
   ipv4_tunnel?: TunnelAddressPair | null;
   ipv6_address_pool_cidr?: string | null;
   ipv6_tunnel?: TunnelAddressPair | null;
+  additional_addresses?: TunnelAdditionalAddresses;
+  manage_link_local?: boolean;
   latency_primary_family?: TunnelAddressFamily;
   bandwidth_mbps: number;
   dynamic_bandwidth: boolean;
@@ -2338,6 +2340,11 @@ export type TunnelPlanInput = {
 };
 
 export type TunnelAddressFamily = "ipv4" | "ipv6";
+
+export type TunnelAdditionalAddresses = {
+  left: { ipv4: string[]; ipv6: string[] };
+  right: { ipv4: string[]; ipv6: string[] };
+};
 
 export type TunnelAddressPair = {
   left: string;
