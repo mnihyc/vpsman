@@ -1496,7 +1496,7 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
                 | JobCommand::NetworkSpeedTest { plan: target, .. }
                 | JobCommand::NetworkRoutingStatus { plan: target, .. }
                 | JobCommand::NetworkRoutingApply { plan: target, .. } => {
-                    *target = Box::new(plan.clone());
+                    **target = plan.clone();
                 }
                 _ => continue,
             }
