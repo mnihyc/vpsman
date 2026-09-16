@@ -275,18 +275,24 @@ pub fn openvpn_config_path_value(path: &Path) -> Result<String, NetworkPlanError
     ))
 }
 
+/// Native device kind shared by command rendering and agent ownership checks.
+pub fn tunnel_iproute2_mode(plan: &TunnelPlan) -> Result<&'static str, NetworkPlanError> {
+    match plan.kind {
+        TunnelKind::Gre => Ok("gre"),
+        TunnelKind::Ipip => Ok("ipip"),
+        TunnelKind::Sit => Ok("sit"),
+        TunnelKind::Fou => Ok(plan.runtime_control.fou.tunnel_kind.linux_tunnel_mode()),
+        _ => Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind),
+    }
+}
+
 pub fn build_ip_tunnel_argv(
     base: &[String],
     action: &str,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
 ) -> Result<Vec<String>, NetworkPlanError> {
-    let mode = match plan.kind {
-        TunnelKind::Gre => "gre",
-        TunnelKind::Ipip | TunnelKind::Fou => "ipip",
-        TunnelKind::Sit => "sit",
-        _ => return Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind),
-    };
+    let mode = tunnel_iproute2_mode(plan)?;
     // UDP encapsulation is a link-type option; `ip tunnel` does not accept it.
     let (object, mode_option) = if plan.kind == TunnelKind::Fou {
         ("link", "type")
@@ -741,7 +747,11 @@ pub fn render_runtime_tunnel_command(
         ),
         (
             "{fou_ipproto}",
-            plan.runtime_control.fou.ipproto.to_string(),
+            plan.runtime_control
+                .fou
+                .tunnel_kind
+                .ip_protocol()
+                .to_string(),
         ),
         (
             "{egress_kbps}",
@@ -876,7 +886,12 @@ pub fn render_tunnel_runtime_preview(
                                 "port",
                                 &plan.runtime_control.fou.port.to_string(),
                                 "ipproto",
-                                &plan.runtime_control.fou.ipproto.to_string(),
+                                &plan
+                                    .runtime_control
+                                    .fou
+                                    .tunnel_kind
+                                    .ip_protocol()
+                                    .to_string(),
                             ],
                         ),
                     );

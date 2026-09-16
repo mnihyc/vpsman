@@ -1,6 +1,7 @@
 import type {
   OspfCostPolicy,
   RuntimeTunnelControl,
+  RuntimeTunnelFouKind,
   RuntimeTunnelFouOptions,
   RuntimeTunnelManager,
   RuntimeTunnelOpenvpnOptions,
@@ -13,6 +14,12 @@ import type {
   TunnelAdditionalAddresses,
   TunnelPlanInput,
 } from "./types";
+import {
+  FOU_TUNNEL_DEFAULTS,
+  FOU_TUNNEL_KINDS,
+  FOU_TUNNEL_KIND_DETAILS,
+} from "./generated/protocolContracts";
+export { FOU_TUNNEL_KINDS, FOU_TUNNEL_KIND_DETAILS } from "./generated/protocolContracts";
 
 export type TunnelAdditionalAddressDraft = {
   left: { ipv4: string; ipv6: string };
@@ -71,11 +78,7 @@ export function additionalAddressChanges(current: string[], previous: string[] =
   ].filter(Boolean).join("; ") || (current.join(", ") || "None");
 }
 
-export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = {
-  port: 5555,
-  peer_port: 5555,
-  ipproto: 4,
-};
+export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = FOU_TUNNEL_DEFAULTS;
 export const DEFAULT_RUNTIME_WIREGUARD_OPTIONS: RuntimeTunnelWireguardOptions = {
   endpoint_mode: "both",
   left_listen_port: 51820,
@@ -109,7 +112,7 @@ export type RuntimeControlFormValues = {
   burstKb: string;
   fouPort?: string;
   fouPeerPort?: string;
-  fouIpproto?: string;
+  fouTunnelKind?: RuntimeTunnelFouKind;
   wireguardEndpointMode?: RuntimeTunnelWireguardEndpointMode;
   wireguardLeftListenPort?: string;
   wireguardRightListenPort?: string;
@@ -253,7 +256,10 @@ export function clampTunnelBandwidthMbps(value: unknown): number {
   );
 }
 
-export function defaultAgentTunnelMtu(kind: TunnelKind): number | null {
+export function defaultAgentTunnelMtu(
+  kind: TunnelKind,
+  fouKind: RuntimeTunnelFouKind = DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind,
+): number | null {
   switch (kind) {
     case "gre":
       return 1476;
@@ -261,7 +267,7 @@ export function defaultAgentTunnelMtu(kind: TunnelKind): number | null {
     case "sit":
       return 1480;
     case "fou":
-      return 1472;
+      return FOU_TUNNEL_KIND_DETAILS[fouKind].default_mtu;
     case "wireguard":
       return 1420;
     case "openvpn":
@@ -272,12 +278,38 @@ export function defaultAgentTunnelMtu(kind: TunnelKind): number | null {
   }
 }
 
+export function fouRuntimeFacts(
+  options: RuntimeTunnelFouOptions = DEFAULT_RUNTIME_FOU_OPTIONS,
+): { label: string; value: string }[] {
+  return [
+    {
+      label: "FOU tunnel",
+      value: `${options.tunnel_kind.toUpperCase()} over UDP · IP protocol ${FOU_TUNNEL_KIND_DETAILS[options.tunnel_kind].ip_protocol}`,
+    },
+    { label: "FOU receive port", value: `${options.port} UDP (both VPSs)` },
+    { label: "FOU peer port", value: `${options.peer_port} UDP` },
+  ];
+}
+
+export function validateFouAddressFamilies(
+  kind: RuntimeTunnelFouKind,
+  ipv4: boolean,
+  ipv6: boolean,
+): string | null {
+  const details = FOU_TUNNEL_KIND_DETAILS[kind];
+  if (!details) return "FOU tunnel type must be GRE, IPIP, or SIT";
+  if (ipv4 && !details.ipv4) return "FOU SIT carries IPv6 only; remove IPv4 addresses or select GRE";
+  if (ipv6 && !details.ipv6) return "FOU IPIP carries IPv4 only; remove IPv6 addresses or select GRE";
+  return null;
+}
+
 export function isDerivedAgentTunnelMtu(
   kind: TunnelKind,
   mtu: number | null | undefined,
+  fouKind: RuntimeTunnelFouKind = DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind,
 ): boolean {
   if (mtu == null) return true;
-  const defaultMtu = defaultAgentTunnelMtu(kind);
+  const defaultMtu = defaultAgentTunnelMtu(kind, fouKind);
   return defaultMtu !== null && mtu === defaultMtu;
 }
 
@@ -576,6 +608,9 @@ function nonNegativeIntegerValue(value: string): number | undefined {
 function buildFouOptions(
   values: RuntimeControlFormValues,
 ): RuntimeTunnelFouOptions | undefined {
+  if (values.fouTunnelKind && !FOU_TUNNEL_KINDS.includes(values.fouTunnelKind)) {
+    throw new Error("FOU tunnel type must be GRE, IPIP, or SIT");
+  }
   const fou: RuntimeTunnelFouOptions = {
     port: numericValueOrDefault(
       values.fouPort,
@@ -585,15 +620,12 @@ function buildFouOptions(
       values.fouPeerPort,
       DEFAULT_RUNTIME_FOU_OPTIONS.peer_port,
     ),
-    ipproto: numericValueOrDefault(
-      values.fouIpproto,
-      DEFAULT_RUNTIME_FOU_OPTIONS.ipproto,
-    ),
+    tunnel_kind: values.fouTunnelKind ?? DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind,
   };
   if (
     fou.port === DEFAULT_RUNTIME_FOU_OPTIONS.port &&
     fou.peer_port === DEFAULT_RUNTIME_FOU_OPTIONS.peer_port &&
-    fou.ipproto === DEFAULT_RUNTIME_FOU_OPTIONS.ipproto
+    fou.tunnel_kind === DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind
   ) {
     return undefined;
   }

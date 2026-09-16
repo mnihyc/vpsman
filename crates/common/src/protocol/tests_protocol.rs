@@ -388,6 +388,84 @@ fn runtime_config_commands_require_the_current_dispatch_protocol() {
 }
 
 #[test]
+fn fou_defaults_and_explicit_types_require_typed_protocol_support() {
+    let input: crate::TunnelPlanInput = serde_json::from_value(serde_json::json!({
+        "name":"fou-protocol", "interface_name":"tun-fou", "kind":"fou",
+        "left_client_id":"left", "right_client_id":"right",
+        "left_remote_underlay":"192.0.2.1", "right_remote_underlay":"192.0.2.2",
+        "address_pool_cidr":"", "bandwidth_mbps":100,
+        "ipv4_tunnel":{"left":"10.0.0.0","right":"10.0.0.1","prefix_len":31},
+        "left_mtu":1468,"right_mtu":1468
+    }))
+    .unwrap();
+    let baseline = crate::plan_tunnel(&input).unwrap();
+    // No serialized FOU object still means GRE, so the default needs the gate too.
+    assert!(serde_json::to_value(&baseline)
+        .unwrap()
+        .get("runtime_control")
+        .is_none());
+    for kind in crate::RuntimeTunnelFouKind::ALL {
+        let mut plan = baseline.clone();
+        plan.runtime_control.fou.tunnel_kind = kind;
+        if kind == crate::RuntimeTunnelFouKind::Sit {
+            plan.ipv4_tunnel = None;
+            plan.ipv6_tunnel = Some(crate::TunnelAddressPair {
+                left: "fd00::".into(),
+                right: "fd00::1".into(),
+                prefix_len: 127,
+            });
+            plan.left_tunnel_address = "fd00::".into();
+            plan.right_tunnel_address = "fd00::1".into();
+            plan.tunnel_prefix_len = 127;
+            plan.latency_primary_family = crate::TunnelAddressFamily::Ipv6;
+        }
+        let status = JobCommand::NetworkStatus {
+            plan_id: uuid::Uuid::from_u128(1).to_string(),
+            plan: Box::new(plan.clone()),
+            side: crate::TunnelEndpointSide::Left,
+            runtime_adapter: None,
+        };
+        let mut config = crate::AgentRuntimeConfig::default();
+        config.network.runtime_status_telemetry_plans.push(
+            crate::AgentRuntimeStatusTelemetryPlan {
+                plan_id: Some(uuid::Uuid::from_u128(1).to_string()),
+                topology_identity_hash: String::new(),
+                runtime_evidence_identity_hash: String::new(),
+                endpoint_side: crate::TunnelEndpointSide::Left,
+                plan,
+                builtin_credentials: None,
+                runtime_adapter: None,
+                latency_monitoring_enabled: true,
+            },
+        );
+        let sync = JobCommand::RuntimeConfigSync {
+            desired_version: 1,
+            reason: "fou-test".into(),
+            config: Box::new(config),
+        };
+        for command in [status, sync] {
+            assert_eq!(
+                super::job_command_protocol_version(&command),
+                super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+            );
+            assert_eq!(
+                super::job_command_dispatch_protocol_version(&command),
+                super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+            );
+            assert_eq!(
+                super::job_command_min_supported_protocol_version(&command),
+                super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+            );
+            assert!(super::job_command_min_supported_protocol_version(&command) > 6);
+        }
+    }
+    assert_eq!(
+        super::job_command_min_supported_protocol_version(&JobCommand::ConfigRead),
+        3
+    );
+}
+
+#[test]
 fn only_configs_and_commands_with_new_address_requirements_need_new_agent_support() {
     let input: crate::TunnelPlanInput = serde_json::from_value(serde_json::json!({
         "name": "protocol-address-test", "interface_name": "tun-test", "kind": "gre",

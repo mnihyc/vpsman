@@ -3,15 +3,15 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 use vpsman_common::{
     default_ospf_healthy_windows, default_ospf_min_cost_delta, default_tunnel_mtu, plan_tunnel,
-    BandwidthMbps, OspfControlMode, OspfCostPolicy, RuntimeTunnelManager,
+    BandwidthMbps, OspfControlMode, OspfCostPolicy, RuntimeTunnelFouKind, RuntimeTunnelManager,
     RuntimeTunnelOpenvpnTransport, RuntimeTunnelWireguardEndpointMode, TunnelAdditionalAddresses,
     TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
     TunnelPlanInput, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 
 use crate::network_runtime_args::{
-    build_runtime_control, build_runtime_topology, parse_runtime_manager, RuntimeControlArgs,
-    RuntimeTopologyArgs,
+    build_runtime_control, build_runtime_topology, parse_fou_tunnel_kind, parse_runtime_manager,
+    RuntimeControlArgs, RuntimeTopologyArgs,
 };
 
 #[derive(Debug, PartialEq)]
@@ -70,7 +70,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut traffic_burst_kb = None::<u32>;
     let mut fou_port = None::<u16>;
     let mut fou_peer_port = None::<u16>;
-    let mut fou_ipproto = None::<u8>;
+    let mut fou_tunnel_kind = None::<RuntimeTunnelFouKind>;
     let mut wireguard_left_listen_port = None::<u16>;
     let mut wireguard_right_listen_port = None::<u16>;
     let mut wireguard_left_keepalive_secs = None::<u16>;
@@ -680,18 +680,19 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
                 )?);
                 index += 1;
             }
-            "--fou-ipproto" => {
-                fou_ipproto = Some(parse_u8(
-                    next_value(tokens, index, "--fou-ipproto")?,
-                    "--fou-ipproto",
-                )?);
+            "--fou-tunnel-kind" => {
+                fou_tunnel_kind = Some(parse_fou_tunnel_kind(next_value(
+                    tokens,
+                    index,
+                    "--fou-tunnel-kind",
+                )?)?);
                 index += 2;
             }
-            value if value.starts_with("--fou-ipproto=") => {
-                fou_ipproto = Some(parse_u8(
-                    flag_value(value, "--fou-ipproto="),
-                    "--fou-ipproto",
-                )?);
+            value if value.starts_with("--fou-tunnel-kind=") => {
+                fou_tunnel_kind = Some(parse_fou_tunnel_kind(flag_value(
+                    value,
+                    "--fou-tunnel-kind=",
+                ))?);
                 index += 1;
             }
             "--wireguard-left-listen-port" => {
@@ -890,7 +891,13 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     };
     let kind = required(kind, "--kind")?;
     let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentBuiltin)
-        .then(|| default_tunnel_mtu(kind))
+        .then(|| {
+            if kind == TunnelKind::Fou {
+                Some(fou_tunnel_kind.unwrap_or_default().default_mtu())
+            } else {
+                default_tunnel_mtu(kind)
+            }
+        })
         .flatten();
     let input = TunnelPlanInput {
         name: required(name, "--name")?,
@@ -905,7 +912,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             traffic_burst_kb,
             fou_port,
             fou_peer_port,
-            fou_ipproto,
+            fou_tunnel_kind,
             wireguard_left_listen_port,
             wireguard_right_listen_port,
             wireguard_left_keepalive_secs,

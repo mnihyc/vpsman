@@ -1097,7 +1097,10 @@ fn fou_listener_matches(plan: &TunnelPlan, inspection: &serde_json::Value) -> bo
         // The builtin declaration creates an unrestricted IPv4 FOU listener.
         // A same-number GUE, IPv6, or address/device-bound listener is not it.
         listener["port"].as_u64() == Some(u64::from(plan.runtime_control.fou.port))
-            && listener["ipproto"].as_u64() == Some(u64::from(plan.runtime_control.fou.ipproto))
+            && listener["ipproto"].as_u64()
+                == Some(u64::from(
+                    plan.runtime_control.fou.tunnel_kind.ip_protocol(),
+                ))
             && matches!(listener["family"].as_str(), None | Some("inet"))
             && ["gue", "local", "peer", "peer_port", "dev"]
                 .iter()
@@ -1126,7 +1129,12 @@ fn build_iproute2_reconcile_steps(
 
     if plan.kind == TunnelKind::Fou {
         let fou_port = plan.runtime_control.fou.port.to_string();
-        let fou_ipproto = plan.runtime_control.fou.ipproto.to_string();
+        let fou_ipproto = plan
+            .runtime_control
+            .fou
+            .tunnel_kind
+            .ip_protocol()
+            .to_string();
         steps.push(RuntimeCommandSpec {
             label: "runtime_fou_add",
             argv: extend_argv(
@@ -1556,7 +1564,7 @@ fn existing_iproute2_tunnel_mismatches(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
 ) -> Result<Vec<String>> {
-    let expected_mode = linux_tunnel_mode(plan.kind)?;
+    let expected_mode = vpsman_common::tunnel_iproute2_mode(plan)?;
     let expected_local = local_underlay(plan, endpoint);
     let expected_remote = remote_underlay(plan, endpoint);
     let mut mismatches = Vec::new();
@@ -2076,17 +2084,6 @@ fn local_underlay<'a>(
 
 fn remote_underlay<'a>(_plan: &'a TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {
     &endpoint.remote_underlay
-}
-
-fn linux_tunnel_mode(kind: TunnelKind) -> Result<&'static str> {
-    match kind {
-        TunnelKind::Gre => Ok("gre"),
-        TunnelKind::Ipip | TunnelKind::Fou => Ok("ipip"),
-        TunnelKind::Sit => Ok("sit"),
-        TunnelKind::Openvpn | TunnelKind::Wireguard | TunnelKind::TunTap | TunnelKind::Custom => {
-            anyhow::bail!("tunnel kind is not supported by the Agent builtin iproute2 driver")
-        }
-    }
 }
 
 fn side_name(side: TunnelEndpointSide) -> &'static str {

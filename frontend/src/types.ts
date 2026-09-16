@@ -2227,10 +2227,12 @@ export type RuntimeTunnelTrafficLimit = {
   burst_kb?: number | null;
 };
 
+export type RuntimeTunnelFouKind = import("./generated/protocolContracts").GeneratedRuntimeTunnelFouKind;
+
 export type RuntimeTunnelFouOptions = {
   port: number;
   peer_port: number;
-  ipproto: number;
+  tunnel_kind: RuntimeTunnelFouKind;
 };
 
 export type RuntimeTunnelWireguardEndpointMode = "left" | "right" | "both";

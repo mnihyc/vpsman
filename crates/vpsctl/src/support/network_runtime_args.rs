@@ -1,12 +1,12 @@
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use vpsman_common::{
-    default_runtime_fou_ipproto, default_runtime_fou_peer_port, default_runtime_fou_port,
-    default_runtime_openvpn_port, default_runtime_wireguard_keepalive_secs,
-    default_runtime_wireguard_listen_port, RuntimeTunnelControl, RuntimeTunnelFouOptions,
-    RuntimeTunnelManager, RuntimeTunnelOpenvpnOptions, RuntimeTunnelOpenvpnTransport,
-    RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
-    RuntimeTunnelWireguardEndpointMode, RuntimeTunnelWireguardOptions, TunnelEndpointSide,
+    default_runtime_fou_peer_port, default_runtime_fou_port, default_runtime_openvpn_port,
+    default_runtime_wireguard_keepalive_secs, default_runtime_wireguard_listen_port,
+    RuntimeTunnelControl, RuntimeTunnelFouKind, RuntimeTunnelFouOptions, RuntimeTunnelManager,
+    RuntimeTunnelOpenvpnOptions, RuntimeTunnelOpenvpnTransport, RuntimeTunnelRoute,
+    RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, RuntimeTunnelWireguardEndpointMode,
+    RuntimeTunnelWireguardOptions, TunnelEndpointSide,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -28,6 +28,30 @@ impl From<RuntimeManagerArg> for RuntimeTunnelManager {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum FouTunnelKindArg {
+    Gre,
+    Ipip,
+    Sit,
+}
+
+impl From<FouTunnelKindArg> for RuntimeTunnelFouKind {
+    fn from(value: FouTunnelKindArg) -> Self {
+        match value {
+            FouTunnelKindArg::Gre => Self::Gre,
+            FouTunnelKindArg::Ipip => Self::Ipip,
+            FouTunnelKindArg::Sit => Self::Sit,
+        }
+    }
+}
+
+pub(crate) fn parse_fou_tunnel_kind(value: &str) -> Result<RuntimeTunnelFouKind> {
+    FouTunnelKindArg::from_str(value, false)
+        .map(Into::into)
+        .map_err(|_| anyhow::anyhow!("FOU tunnel kind must be gre, ipip, or sit"))
+}
+
 pub(crate) struct RuntimeControlArgs<'a> {
     pub(crate) manager: RuntimeTunnelManager,
     pub(crate) left_adapter_definition_id: Option<&'a str>,
@@ -37,7 +61,7 @@ pub(crate) struct RuntimeControlArgs<'a> {
     pub(crate) traffic_burst_kb: Option<u32>,
     pub(crate) fou_port: Option<u16>,
     pub(crate) fou_peer_port: Option<u16>,
-    pub(crate) fou_ipproto: Option<u8>,
+    pub(crate) fou_tunnel_kind: Option<RuntimeTunnelFouKind>,
     pub(crate) wireguard_left_listen_port: Option<u16>,
     pub(crate) wireguard_right_listen_port: Option<u16>,
     pub(crate) wireguard_left_keepalive_secs: Option<u16>,
@@ -71,7 +95,7 @@ pub(crate) fn build_runtime_control(args: RuntimeControlArgs<'_>) -> RuntimeTunn
             peer_port: args
                 .fou_peer_port
                 .unwrap_or_else(default_runtime_fou_peer_port),
-            ipproto: args.fou_ipproto.unwrap_or_else(default_runtime_fou_ipproto),
+            tunnel_kind: args.fou_tunnel_kind.unwrap_or_default(),
         },
         wireguard: RuntimeTunnelWireguardOptions {
             endpoint_mode: args.wireguard_endpoint_mode.unwrap_or_default(),

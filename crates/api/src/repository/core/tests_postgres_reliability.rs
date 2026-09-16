@@ -37983,6 +37983,157 @@ async fn postgres_tunnel_plan_bulk_lifecycle_is_ordered_partial_and_set_owned() 
 }
 
 #[tokio::test]
+async fn postgres_fou_typed_model_round_trips_without_rewriting_other_tunnels() {
+    use vpsman_common::RuntimeTunnelFouKind;
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let (operator, headers) = postgres_operator_session(&db.repo, "fou-model-operator").await;
+    let state = postgres_app_state(&db);
+    // Model the stated upgrade boundary: a current schema with existing non-FOU
+    // declarations but no FOU owner to convert. No migration rewrites are needed.
+    let unrelated =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    let unrelated_plan = plan_tunnel(&unrelated).unwrap();
+    let other = db
+        .repo
+        .record_tunnel_plan(&unrelated, &unrelated_plan, false, &operator)
+        .await
+        .unwrap();
+    let before: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('input', input, 'plan', plan, 'revision', revision) FROM tunnel_plans WHERE id=$1"
+    ).bind(other.id).fetch_one(&db.pool).await.unwrap();
+    assert!(before["input"].get("runtime_control").is_none());
+
+    let mut input = unrelated.clone();
+    input.kind = TunnelKind::Fou;
+    input.name = "typed-fou".into();
+    input.interface_name = "typedfou".into();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.20.0.0".into(),
+        right: "10.20.0.1".into(),
+        prefix_len: 31,
+    });
+    input.runtime_control.fou.port = 15555;
+    input.runtime_control.fou.peer_port = 15556;
+    input.left_mtu = Some(RuntimeTunnelFouKind::Gre.default_mtu());
+    input.right_mtu = input.left_mtu;
+    let mut stored = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), false, &operator)
+        .await
+        .unwrap();
+    let mut previous_identity = None;
+    for kind in RuntimeTunnelFouKind::ALL {
+        input.runtime_control.fou.tunnel_kind = kind;
+        input.left_mtu = Some(kind.default_mtu());
+        input.right_mtu = input.left_mtu;
+        if kind == RuntimeTunnelFouKind::Sit {
+            input.ipv4_tunnel = None;
+            input.ipv6_tunnel = Some(TunnelAddressPair {
+                left: "fd00:20::".into(),
+                right: "fd00:20::1".into(),
+                prefix_len: 127,
+            });
+            input.latency_primary_family = TunnelAddressFamily::Ipv6;
+        }
+        let plan = plan_tunnel(&input).unwrap();
+        stored = db
+            .repo
+            .update_tunnel_plan(stored.id, stored.revision, &input, &plan, false, &operator)
+            .await
+            .unwrap();
+        let read = db.repo.get_tunnel_plan(stored.id).await.unwrap().unwrap();
+        assert_eq!(read.input.runtime_control.fou, input.runtime_control.fou);
+        assert_eq!(read.plan.runtime_control.fou, input.runtime_control.fou);
+        let raw: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_build_object('input',input,'plan',plan) FROM tunnel_plans WHERE id=$1",
+        )
+        .bind(stored.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        for owner in ["input", "plan"] {
+            assert_eq!(
+                raw[owner]["runtime_control"]["fou"]["tunnel_kind"],
+                kind.linux_tunnel_mode()
+            );
+            assert!(raw[owner]["runtime_control"]["fou"]
+                .get("ipproto")
+                .is_none());
+        }
+        let identity = vpsman_common::tunnel_topology_identity_hash(stored.id, &read.plan);
+        if let Some(previous) = previous_identity.replace(identity.clone()) {
+            assert_ne!(identity, previous);
+        }
+        let preview = crate::routes_network::preview_tunnel_plan(
+            State(state.clone()),
+            headers.clone(),
+            Query(crate::routes_network::TunnelPlanPreviewQuery {
+                plan_id: Some(stored.id),
+            }),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        for endpoint in preview.endpoints {
+            assert!(endpoint.commands.iter().any(|command| command
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["type", kind.linux_tunnel_mode()])));
+            assert!(endpoint.commands.iter().any(|command| command
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["ipproto", &kind.ip_protocol().to_string()])));
+        }
+    }
+    // A typed SIT declaration cannot accept an IPv4 alias. Route validation
+    // leaves its previous reviewed revision and stored declaration untouched.
+    let mut invalid = input.clone();
+    invalid
+        .additional_addresses
+        .left
+        .ipv4
+        .push("10.20.1.1/32".into());
+    let error = crate::routes_network::update_tunnel_plan(
+        State(state),
+        headers,
+        axum::extract::Path(stored.id),
+        Json(crate::model::UpdateTunnelPlanRequest {
+            input: invalid,
+            expected_revision: stored.revision,
+            enabled: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "invalid_fou_address_family");
+    assert_eq!(
+        db.repo
+            .get_tunnel_plan(stored.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        stored.revision
+    );
+    let after: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('input', input, 'plan', plan, 'revision', revision) FROM tunnel_plans WHERE id=$1"
+    ).bind(other.id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        before, after,
+        "FOU model change rewrote an unrelated tunnel"
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_tunnel_additional_addresses_preserve_link_scope_and_round_trip() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;

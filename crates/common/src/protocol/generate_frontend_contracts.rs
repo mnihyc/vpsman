@@ -40,7 +40,8 @@ use vpsman_common::{
     workflow_status_classes, FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy,
     FilePushChunk, HostPackageProvider, HostServiceAction, HostServiceProvider, JobCommand,
     ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile,
-    RoutingCostAdapterCommands, RuntimeTunnelCommand, TerminalUserPolicy, TunnelAddressPair,
+    RoutingCostAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelFouKind,
+    RuntimeTunnelFouOptions, TerminalUserPolicy, TunnelAddressFamily, TunnelAddressPair,
     TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
     ALERT_EVENT_ARGV_CONTROL_TOKENS, ALERT_EVENT_ARGV_HELPER_TOKENS, ALERT_EVENT_ARGV_MAX_BYTES,
     ALERT_EVENT_ARGV_MAX_ELEMENTS, ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES,
@@ -67,6 +68,40 @@ fn main() -> io::Result<()> {
         output,
         "export const COMMAND_PROTOCOL_VERSION = {} as const;",
         CURRENT_COMMAND_PROTOCOL_VERSION
+    )?;
+    write_string_array(
+        &mut output,
+        "FOU_TUNNEL_KINDS",
+        &RuntimeTunnelFouKind::ALL.map(RuntimeTunnelFouKind::linux_tunnel_mode),
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedRuntimeTunnelFouKind = typeof FOU_TUNNEL_KINDS[number];"
+    )?;
+    writeln!(
+        output,
+        "export const FOU_TUNNEL_DEFAULTS = {} as const;",
+        serde_json::to_string_pretty(&RuntimeTunnelFouOptions::default())
+            .expect("FOU defaults serialize")
+    )?;
+    let fou_details = RuntimeTunnelFouKind::ALL
+        .into_iter()
+        .map(|kind| {
+            (
+                kind.linux_tunnel_mode(),
+                serde_json::json!({
+                    "ip_protocol": kind.ip_protocol(),
+                    "default_mtu": kind.default_mtu(),
+                    "ipv4": kind.supports_family(TunnelAddressFamily::Ipv4),
+                    "ipv6": kind.supports_family(TunnelAddressFamily::Ipv6),
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    writeln!(
+        output,
+        "export const FOU_TUNNEL_KIND_DETAILS = {} as const;",
+        serde_json::to_string_pretty(&fou_details).expect("FOU tunnel details serialize")
     )?;
     writeln!(
         output,

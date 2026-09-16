@@ -34,7 +34,7 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 6;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 7;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -42,6 +42,7 @@ pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION: u16 = 6;
+pub const FOU_TUNNEL_KIND_PROTOCOL_VERSION: u16 = 7;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION: u16 = 5;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -3410,6 +3411,16 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
 }
 
 fn runtime_config_protocol_version(config: &AgentRuntimeConfig) -> u16 {
+    // Even the omitted/default FOU options now mean GRE rather than IPIP.
+    // Older agents must not receive a FOU plan and reinterpret that default.
+    if config
+        .network
+        .runtime_status_telemetry_plans
+        .iter()
+        .any(|entry| entry.plan.kind == crate::TunnelKind::Fou)
+    {
+        return FOU_TUNNEL_KIND_PROTOCOL_VERSION;
+    }
     if config
         .network
         .runtime_status_telemetry_plans
@@ -3429,6 +3440,9 @@ fn runtime_config_protocol_version(config: &AgentRuntimeConfig) -> u16 {
 }
 
 fn tunnel_plan_command_protocol_version(plan: &TunnelPlan, baseline: u16) -> u16 {
+    if plan.kind == crate::TunnelKind::Fou {
+        return FOU_TUNNEL_KIND_PROTOCOL_VERSION;
+    }
     // Older agents discard these new serialized fields. Their command hashes
     // would then differ during replay and the two-ended speedtest handshake.
     if tunnel_plan_has_address_wire_fields(plan) {

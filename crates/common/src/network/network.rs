@@ -12,21 +12,21 @@ pub use cost::{
     MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 pub use models::{
-    default_ospf_healthy_windows, default_ospf_min_cost_delta, default_runtime_fou_ipproto,
-    default_runtime_fou_peer_port, default_runtime_fou_port, default_runtime_openvpn_port,
+    default_ospf_healthy_windows, default_ospf_min_cost_delta, default_runtime_fou_peer_port,
+    default_runtime_fou_port, default_runtime_openvpn_port,
     default_runtime_wireguard_keepalive_secs, default_runtime_wireguard_listen_port,
     default_tunnel_mtu, BandwidthMbps, OspfControlMode, OspfCostPolicy, RoutingCostAdapterCommands,
     RoutingCostAdapterJobResult, RoutingCostAdapterOperation, RoutingCostCommandSource,
     RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelControl,
-    RuntimeTunnelEndpointHooks, RuntimeTunnelFouOptions, RuntimeTunnelHooks, RuntimeTunnelManager,
-    RuntimeTunnelOpenvpnOptions, RuntimeTunnelOpenvpnTransport, RuntimeTunnelRoute,
-    RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, RuntimeTunnelWireguardEndpointMode,
-    RuntimeTunnelWireguardOptions, TunnelAdditionalAddresses, TunnelAddressFamily,
-    TunnelAddressPair, TunnelBuiltinCredentials, TunnelEndpointAdditionalAddresses,
-    TunnelEndpointBuiltinCredentials, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind,
-    TunnelObservation, TunnelOpenvpnIdentity, TunnelOspfConfig, TunnelPlan, TunnelPlanInput,
-    TunnelWireguardIdentity, MAX_TUNNEL_MTU, MIN_IPV6_TUNNEL_MTU, MIN_TUNNEL_MTU,
-    ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+    RuntimeTunnelEndpointHooks, RuntimeTunnelFouKind, RuntimeTunnelFouOptions, RuntimeTunnelHooks,
+    RuntimeTunnelManager, RuntimeTunnelOpenvpnOptions, RuntimeTunnelOpenvpnTransport,
+    RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
+    RuntimeTunnelWireguardEndpointMode, RuntimeTunnelWireguardOptions, TunnelAdditionalAddresses,
+    TunnelAddressFamily, TunnelAddressPair, TunnelBuiltinCredentials,
+    TunnelEndpointAdditionalAddresses, TunnelEndpointBuiltinCredentials, TunnelEndpointConfig,
+    TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelOpenvpnIdentity, TunnelOspfConfig,
+    TunnelPlan, TunnelPlanInput, TunnelWireguardIdentity, MAX_TUNNEL_MTU, MIN_IPV6_TUNNEL_MTU,
+    MIN_TUNNEL_MTU, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
 };
 pub use planner::{
     allocate_tunnel_endpoints, plan_tunnel, render_tunnel_endpoint_config,
@@ -43,7 +43,7 @@ mod tests;
 /// Stable identity for the topology fields that bind reachability evidence.
 /// Endpoint or address-family changes detach old observations; policy and display-name edits do not.
 pub fn tunnel_topology_identity_hash(plan_id: uuid::Uuid, plan: &TunnelPlan) -> String {
-    let payload = serde_json::to_vec(&serde_json::json!({
+    let mut identity = serde_json::json!({
         "plan_id": plan_id.to_string(),
         "kind": format!("{:?}", plan.kind),
         "left_client_id": &plan.left_client_id,
@@ -58,8 +58,14 @@ pub fn tunnel_topology_identity_hash(plan_id: uuid::Uuid, plan: &TunnelPlan) -> 
         "ipv4_tunnel": &plan.ipv4_tunnel,
         "ipv6_tunnel": &plan.ipv6_tunnel,
         "latency_primary_family": format!("{:?}", plan.latency_primary_family),
-    }))
-    .expect("topology identity payload serializes");
+    });
+    if plan.kind == TunnelKind::Fou {
+        // Changing the encapsulated tunnel or UDP path invalidates earlier
+        // reachability evidence. Non-FOU identity bytes remain unchanged.
+        identity["fou"] =
+            serde_json::to_value(&plan.runtime_control.fou).expect("FOU options serialize");
+    }
+    let payload = serde_json::to_vec(&identity).expect("topology identity payload serializes");
     crate::payload_hash(&payload)
 }
 

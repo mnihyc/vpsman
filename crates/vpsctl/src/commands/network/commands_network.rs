@@ -23,8 +23,8 @@ use crate::{
     commands_schedules::selector_expression_from_targets,
     http::{http_get, http_post_json, http_put_json},
     network_runtime_args::{
-        build_runtime_control, build_runtime_topology, RuntimeControlArgs, RuntimeManagerArg,
-        RuntimeTopologyArgs,
+        build_runtime_control, build_runtime_topology, FouTunnelKindArg, RuntimeControlArgs,
+        RuntimeManagerArg, RuntimeTopologyArgs,
     },
     privilege::{
         build_privilege_for_db, build_privilege_for_job_command, load_super_password,
@@ -193,8 +193,9 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) fou_port: Option<u16>,
     #[arg(long)]
     pub(crate) fou_peer_port: Option<u16>,
-    #[arg(long)]
-    pub(crate) fou_ipproto: Option<u8>,
+    /// Encapsulated FOU tunnel type; defaults to GRE and derives the IP protocol.
+    #[arg(long, value_enum)]
+    pub(crate) fou_tunnel_kind: Option<FouTunnelKindArg>,
     #[arg(long, value_name = "PORT")]
     pub(crate) wireguard_left_listen_port: Option<u16>,
     #[arg(long, value_name = "PORT")]
@@ -1169,8 +1170,17 @@ pub(crate) fn tunnel_plan(
 ) -> Result<()> {
     let kind: TunnelKind = request.kind.into();
     let runtime_manager: RuntimeTunnelManager = request.runtime_manager.into();
+    let fou_tunnel_kind = request
+        .fou_tunnel_kind
+        .map(vpsman_common::RuntimeTunnelFouKind::from);
     let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentBuiltin)
-        .then(|| default_tunnel_mtu(kind))
+        .then(|| {
+            if kind == TunnelKind::Fou {
+                Some(fou_tunnel_kind.unwrap_or_default().default_mtu())
+            } else {
+                default_tunnel_mtu(kind)
+            }
+        })
         .flatten();
     let ospf = if request.ospf {
         Some(TunnelOspfConfig {
@@ -1209,7 +1219,7 @@ pub(crate) fn tunnel_plan(
             traffic_burst_kb: request.traffic_burst_kb,
             fou_port: request.fou_port,
             fou_peer_port: request.fou_peer_port,
-            fou_ipproto: request.fou_ipproto,
+            fou_tunnel_kind,
             wireguard_left_listen_port: request.wireguard_left_listen_port,
             wireguard_right_listen_port: request.wireguard_right_listen_port,
             wireguard_left_keepalive_secs: request.wireguard_left_keepalive_secs,

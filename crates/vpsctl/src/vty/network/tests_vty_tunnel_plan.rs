@@ -5,6 +5,66 @@ use vpsman_common::{
 };
 
 #[test]
+fn fou_vty_type_selection_defaults_and_legacy_rejection() {
+    let base = [
+        "--name=typed-fou",
+        "--interface-name=foutest",
+        "--kind=fou",
+        "--left-client-id=left",
+        "--right-client-id=right",
+        "--left-remote-underlay=192.0.2.2",
+        "--right-remote-underlay=192.0.2.1",
+        "--bandwidth-mbps=100",
+    ];
+    let ipv4 = [
+        "--left-tunnel-ipv4-cidr=10.0.0.0/31",
+        "--right-tunnel-ipv4-cidr=10.0.0.1/31",
+    ];
+    let ipv6 = [
+        "--left-tunnel-ipv6-cidr=fd00::/127",
+        "--right-tunnel-ipv6-cidr=fd00::1/127",
+    ];
+    for kind in vpsman_common::RuntimeTunnelFouKind::ALL {
+        let flag = format!("--fou-tunnel-kind={}", kind.linux_tunnel_mode());
+        let mut args = base.to_vec();
+        args.extend(if kind == vpsman_common::RuntimeTunnelFouKind::Sit {
+            ipv6
+        } else {
+            ipv4
+        });
+        args.push(&flag);
+        let request = parse_vty_tunnel_plan(&args).unwrap();
+        assert_eq!(request.input.runtime_control.fou.tunnel_kind, kind);
+        assert_eq!(request.input.left_mtu, Some(kind.default_mtu()));
+        assert_eq!(request.input.right_mtu, Some(kind.default_mtu()));
+        args.extend(["--left-mtu=1400", "--right-mtu=1401"]);
+        let explicit = parse_vty_tunnel_plan(&args).unwrap();
+        assert_eq!(explicit.input.left_mtu, Some(1400));
+        assert_eq!(explicit.input.right_mtu, Some(1401));
+    }
+    let mut args = base.to_vec();
+    args.extend(ipv4);
+    assert_eq!(
+        parse_vty_tunnel_plan(&args)
+            .unwrap()
+            .input
+            .runtime_control
+            .fou
+            .tunnel_kind,
+        vpsman_common::RuntimeTunnelFouKind::Gre
+    );
+    for invalid in [
+        "--fou-ipproto=47",
+        "--fou-tunnel-kind=47",
+        "--fou-tunnel-kind=gretap",
+    ] {
+        let mut invalid_args = args.clone();
+        invalid_args.push(invalid);
+        assert!(parse_vty_tunnel_plan(&invalid_args).is_err(), "{invalid}");
+    }
+}
+
+#[test]
 fn parses_vty_tunnel_plan_for_local_render() {
     let request = parse_vty_tunnel_plan(&[
         "--name=lax-hkg",
@@ -152,7 +212,7 @@ fn parses_vty_tunnel_plan_save_aliases() {
         "--bandwidth-mbps=100",
         "--fou-port=6655",
         "--fou-peer-port=7755",
-        "--fou-ipproto=47",
+        "--fou-tunnel-kind=gre",
         "--enabled",
         "--confirmed",
     ])
@@ -168,11 +228,14 @@ fn parses_vty_tunnel_plan_save_aliases() {
     assert!(request.confirmed);
     assert_eq!(request.input.kind, TunnelKind::Fou);
     assert_eq!(request.input.bandwidth_mbps, 100);
-    assert_eq!(request.input.left_mtu, Some(1472));
-    assert_eq!(request.input.right_mtu, Some(1472));
+    assert_eq!(request.input.left_mtu, Some(1468));
+    assert_eq!(request.input.right_mtu, Some(1468));
     assert_eq!(request.input.runtime_control.fou.port, 6655);
     assert_eq!(request.input.runtime_control.fou.peer_port, 7755);
-    assert_eq!(request.input.runtime_control.fou.ipproto, 47);
+    assert_eq!(
+        request.input.runtime_control.fou.tunnel_kind,
+        vpsman_common::RuntimeTunnelFouKind::Gre
+    );
 }
 
 #[test]

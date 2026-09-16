@@ -275,6 +275,55 @@ fn agent_update_check_activation_is_explicit() {
 }
 
 #[test]
+fn fou_cli_accepts_only_typed_encapsulation_flags() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let base = [
+                "vpsctl",
+                "tunnel-plan",
+                "--name=fou-cli",
+                "--interface-name=foucli",
+                "--kind=fou",
+                "--left-client-id=left",
+                "--right-client-id=right",
+                "--left-remote-underlay=192.0.2.2",
+                "--right-remote-underlay=192.0.2.1",
+                "--left-tunnel-ipv4-cidr=10.0.0.0/31",
+                "--right-tunnel-ipv4-cidr=10.0.0.1/31",
+                "--bandwidth-mbps=100",
+            ];
+            for kind in vpsman_common::RuntimeTunnelFouKind::ALL {
+                let flag = format!("--fou-tunnel-kind={}", kind.linux_tunnel_mode());
+                let parsed = Args::try_parse_from(base.into_iter().chain([flag.as_str()])).unwrap();
+                let Command::TunnelPlan(request) = parsed.command else {
+                    panic!("expected tunnel-plan");
+                };
+                assert_eq!(
+                    request
+                        .fou_tunnel_kind
+                        .map(vpsman_common::RuntimeTunnelFouKind::from),
+                    Some(kind)
+                );
+            }
+            // Family validation belongs to the shared planner, not Clap parsing.
+            for invalid in [
+                "--fou-ipproto=47",
+                "--fou-tunnel-kind=47",
+                "--fou-tunnel-kind=gretap",
+            ] {
+                assert!(
+                    Args::try_parse_from(base.into_iter().chain([invalid])).is_err(),
+                    "{invalid}"
+                );
+            }
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}
+
+#[test]
 fn tunnel_plan_defaults_do_not_enable_or_require_ospf() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

@@ -135,7 +135,7 @@ install packages or change firewall policy:
 
 | Kind | Additional plan inputs | Endpoint prerequisites and ownership |
 | --- | --- | --- |
-| GRE, IPIP, SIT, FOU | Existing underlay addresses and kind-specific FOU ports/protocol where applicable. | Configured `ip` and `tc` commands, Linux support for the selected kind, and root execution under the default mutation gate. The agent owns the declared link, addresses, MTU, routes, and shaping. |
+| GRE, IPIP, SIT, FOU | Existing underlay addresses; FOU additionally selects GRE, IPIP, or SIT encapsulation and local/peer UDP ports. | Configured `ip` and `tc` commands, Linux support for the selected kind, and root execution under the default mutation gate. The agent owns the declared link, addresses, MTU, routes, and shaping. |
 | WireGuard | Fixed VPS (`left`, `right`, or `both`, default `both`); left and right UDP listen ports (default `51820`); left and right persistent-keepalive seconds (`25` recommended, `0` disables it). | Configured `ip` and `wg` commands, kernel WireGuard support, and root execution. In a one-sided mode the roaming VPS receives the fixed VPS destination and should initiate traffic; the fixed VPS omits the roaming destination and learns it from authenticated WireGuard traffic. The enabled IPv4/IPv6 families use a full-family peer ACL so static and OSPF-learned routes can traverse the point-to-point link; this does not install a default route. WireGuard has no TCP mode or direct local-source bind setting. |
 | OpenVPN | Transport (`UDP` or `TCP`), listener side (`left` or `right`), and listener port (default `1194`). | Configured `openvpn` 2.4 or newer (verified with 2.4–2.6), `/dev/net/tun`, and root execution under the default mutation gate. The agent selects the installed version's supported cipher directive. The listener is the TLS server; the other endpoint is the TLS client, including complementary `tcp-server`/`tcp-client` roles for TCP. |
 
@@ -146,6 +146,39 @@ driver must report a missing command, kernel feature, TUN device, privilege, or
 credential as explicit endpoint evidence. It must not reinterpret the plan or
 run a custom adapter. Local runtime convergence and peer reachability remain
 separate: use the existing probe and observation evidence for connectivity.
+
+### FOU encapsulated tunnel type
+
+FOU transports a selected tunnel protocol over UDP. Choose **GRE** (the default),
+**IPIP**, or **SIT** in **Encapsulated tunnel**. The agent uses the same selection
+for its native link type and the receive port's IP protocol; protocol numbers are
+not a separate editable input.
+
+| Encapsulated tunnel | Derived IP protocol | Inner address families | Suggested MTU |
+| --- | ---: | --- | ---: |
+| GRE | 47 | IPv4 and IPv6 | 1468 |
+| IPIP | 4 | IPv4 only | 1472 |
+| SIT | 41 | IPv6 only | 1472 |
+
+These MTU suggestions assume a 1500-byte IPv4 underlay and account for UDP and
+any GRE header. Both endpoint MTUs remain editable. Changing the type updates
+only still-derived suggestions; explicit MTUs and addresses are not silently
+rewritten. Unsupported primary or additional address families are rejected.
+The existing IPv4 outer-address requirement is unchanged.
+
+The declaration stores `runtime_control.fou.tunnel_kind` as `gre`, `ipip`, or
+`sit`. CLI and VTY use `--fou-tunnel-kind gre|ipip|sit`, with optional
+`--fou-port` and `--fou-peer-port`. The old `--fou-ipproto` flag and JSON `ipproto`
+input are rejected rather than interpreted as a different tunnel type.
+The hook placeholder `{fou_ipproto}` remains available as the derived value.
+Changing the type or UDP path invalidates old reachability evidence and uses the
+existing runtime identity/reconciliation lifecycle. It does not reuse a native
+link or listener whose type or receive protocol does not match.
+
+FOU commands and runtime configurations require agents advertising command
+protocol **7** or newer, even when GRE defaults are omitted from the declaration.
+Update both endpoint agents before enabling a FOU plan. Unrelated tunnel kinds
+retain their existing protocol requirements.
 
 ### Built-in credentials
 

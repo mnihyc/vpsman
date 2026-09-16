@@ -6,9 +6,14 @@ import {
   additionalAddressReservations,
   additionalAddressesFromDraft,
   buildRuntimeControl,
+  DEFAULT_RUNTIME_FOU_OPTIONS,
+  FOU_TUNNEL_KINDS,
+  FOU_TUNNEL_KIND_DETAILS,
+  validateFouAddressFamilies,
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
   defaultAgentTunnelMtu,
+  fouRuntimeFacts,
   isDerivedAgentTunnelMtu,
   runtimeManagerLabel,
   validateTunnelPlanName,
@@ -16,6 +21,43 @@ import {
   isTunnelLinkLocal,
 } from "../src/topologyRuntime";
 import type { TunnelPlanInput } from "../src/types";
+
+test("FOU type owns derived protocol, family support and editable MTU baseline", () => {
+  expect(FOU_TUNNEL_KINDS).toEqual(["gre", "ipip", "sit"]);
+  expect(DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind).toBe("gre");
+  for (const [kind, protocol, mtu] of [["gre", 47, 1468], ["ipip", 4, 1472], ["sit", 41, 1472]] as const) {
+    const runtime = buildRuntimeControl("agent_builtin", {
+      ingressKbps: "", egressKbps: "", burstKb: "", fouTunnelKind: kind,
+      fouPort: "15555", fouPeerPort: "15556",
+    });
+    expect(runtime.fou).toEqual({tunnel_kind: kind, port: 15555, peer_port: 15556});
+    expect(runtime.fou).not.toHaveProperty("ipproto");
+    expect(FOU_TUNNEL_KIND_DETAILS[kind].ip_protocol).toBe(protocol);
+    expect(defaultAgentTunnelMtu("fou", kind)).toBe(mtu);
+    expect(isDerivedAgentTunnelMtu("fou", mtu, kind)).toBe(true);
+    expect(isDerivedAgentTunnelMtu("fou", 1400, kind)).toBe(false);
+  }
+  expect(validateFouAddressFamilies("gre", true, true)).toBeNull();
+  expect(validateFouAddressFamilies("ipip", true, false)).toBeNull();
+  expect(validateFouAddressFamilies("sit", false, true)).toBeNull();
+  expect(validateFouAddressFamilies("ipip", false, true)).toContain("IPv4 only");
+  expect(validateFouAddressFamilies("sit", true, false)).toContain("IPv6 only");
+  expect(() => buildRuntimeControl("agent_builtin", {
+    ingressKbps: "", egressKbps: "", burstKb: "", fouTunnelKind: "47" as never,
+  })).toThrow("FOU tunnel type must be GRE, IPIP, or SIT");
+});
+
+test("FOU review separates receive and peer ports from the encapsulated type", () => {
+  expect(fouRuntimeFacts({ tunnel_kind: "gre", port: 65535, peer_port: 54321 })).toEqual([
+    { label: "FOU tunnel", value: "GRE over UDP · IP protocol 47" },
+    { label: "FOU receive port", value: "65535 UDP (both VPSs)" },
+    { label: "FOU peer port", value: "54321 UDP" },
+  ]);
+});
+
+test("FOU defaults do not add serialized options to unrelated runtime controls", () => {
+  expect(buildRuntimeControl("agent_builtin", {ingressKbps: "", egressKbps: "", burstKb: ""})).not.toHaveProperty("fou");
+});
 
 test("additional tunnel addresses round trip independently without changing editable lines", () => {
   const addresses = {
@@ -315,7 +357,7 @@ test("Agent builtin tunnel MTU defaults account for encapsulation", () => {
   expect(defaultAgentTunnelMtu("gre")).toBe(1476);
   expect(defaultAgentTunnelMtu("ipip")).toBe(1480);
   expect(defaultAgentTunnelMtu("sit")).toBe(1480);
-  expect(defaultAgentTunnelMtu("fou")).toBe(1472);
+  expect(defaultAgentTunnelMtu("fou")).toBe(1468);
   expect(defaultAgentTunnelMtu("wireguard")).toBe(1420);
   expect(defaultAgentTunnelMtu("openvpn")).toBe(1500);
   expect(defaultAgentTunnelMtu("tun_tap")).toBeNull();

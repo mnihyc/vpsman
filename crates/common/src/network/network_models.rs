@@ -39,13 +39,8 @@ pub enum RuntimeTunnelManager {
 }
 
 impl TunnelKind {
-    pub(crate) fn linux_tunnel_mode(self) -> Option<&'static str> {
-        match self {
-            Self::Gre => Some("gre"),
-            Self::Ipip | Self::Fou => Some("ipip"),
-            Self::Sit => Some("sit"),
-            Self::Openvpn | Self::Wireguard | Self::TunTap | Self::Custom => None,
-        }
+    pub(crate) fn uses_ipv4_iproute2(self) -> bool {
+        matches!(self, Self::Gre | Self::Ipip | Self::Sit | Self::Fou)
     }
 }
 
@@ -64,7 +59,7 @@ pub const fn default_tunnel_mtu(kind: TunnelKind) -> Option<u16> {
     match kind {
         TunnelKind::Gre => Some(1476),
         TunnelKind::Ipip | TunnelKind::Sit => Some(1480),
-        TunnelKind::Fou => Some(1472),
+        TunnelKind::Fou => Some(RuntimeTunnelFouKind::Gre.default_mtu()),
         TunnelKind::Wireguard => Some(1420),
         TunnelKind::Openvpn => Some(1500),
         TunnelKind::TunTap | TunnelKind::Custom => None,
@@ -285,14 +280,63 @@ pub struct RuntimeTunnelTrafficLimit {
     pub burst_kb: Option<u32>,
 }
 
+/// FOU transports one declared layer-3 tunnel protocol over UDP. This single
+/// choice owns both the transmit link type and receive-port IP protocol.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTunnelFouKind {
+    #[default]
+    Gre,
+    Ipip,
+    Sit,
+}
+
+impl RuntimeTunnelFouKind {
+    pub const ALL: [Self; 3] = [Self::Gre, Self::Ipip, Self::Sit];
+
+    pub const fn linux_tunnel_mode(self) -> &'static str {
+        match self {
+            Self::Gre => "gre",
+            Self::Ipip => "ipip",
+            Self::Sit => "sit",
+        }
+    }
+
+    pub const fn ip_protocol(self) -> u8 {
+        match self {
+            Self::Gre => 47,
+            Self::Ipip => 4,
+            Self::Sit => 41,
+        }
+    }
+
+    /// Editable baseline: 1500-byte underlay minus IPv4, UDP and tunnel headers.
+    pub const fn default_mtu(self) -> u16 {
+        match self {
+            Self::Gre => 1468,              // 1500 - 20 IPv4 - 8 UDP - 4 GRE.
+            Self::Ipip | Self::Sit => 1472, // No header between UDP and inner IP.
+        }
+    }
+
+    pub const fn supports_family(self, family: TunnelAddressFamily) -> bool {
+        matches!(
+            (self, family),
+            (Self::Gre, _)
+                | (Self::Ipip, TunnelAddressFamily::Ipv4)
+                | (Self::Sit, TunnelAddressFamily::Ipv6)
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeTunnelFouOptions {
     #[serde(default = "default_runtime_fou_port")]
     pub port: u16,
     #[serde(default = "default_runtime_fou_peer_port")]
     pub peer_port: u16,
-    #[serde(default = "default_runtime_fou_ipproto")]
-    pub ipproto: u8,
+    #[serde(default)]
+    pub tunnel_kind: RuntimeTunnelFouKind,
 }
 
 impl RuntimeTunnelFouOptions {
@@ -440,7 +484,7 @@ impl Default for RuntimeTunnelFouOptions {
         Self {
             port: default_runtime_fou_port(),
             peer_port: default_runtime_fou_peer_port(),
-            ipproto: default_runtime_fou_ipproto(),
+            tunnel_kind: RuntimeTunnelFouKind::default(),
         }
     }
 }
@@ -536,10 +580,6 @@ pub fn default_runtime_fou_port() -> u16 {
 
 pub fn default_runtime_fou_peer_port() -> u16 {
     5555
-}
-
-pub fn default_runtime_fou_ipproto() -> u8 {
-    4
 }
 
 pub fn default_runtime_wireguard_listen_port() -> u16 {

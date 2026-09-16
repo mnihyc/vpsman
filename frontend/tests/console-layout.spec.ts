@@ -9955,6 +9955,48 @@ test("submits selected tunnel lifecycle changes as one ordered request", async (
   ]);
 });
 
+test("FOU review keeps the selected type and both UDP ports fully readable", async ({ page }) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+  for (const [kind, protocol] of [["gre", 47], ["ipip", 4], ["sit", 41]] as const) {
+    await page.getByRole("button", { name: "Create plan", exact: true }).click();
+    const composer = page.locator(".tunnelPlanComposer");
+    await composer.getByLabel("Tunnel plan name").fill(`fou-review-${kind}`);
+    await composer.getByLabel("Tunnel interface", { exact: true }).fill("fou-review");
+    await composer.getByLabel("Tunnel kind", { exact: true }).selectOption("fou");
+    await composer.getByLabel("FOU encapsulated tunnel", { exact: true }).selectOption(kind);
+    await chooseVpsBySearch(composer, "Left tunnel VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
+    await chooseVpsBySearch(composer, "Right tunnel VPS", "fra", /core-fra-02.*agent-fra-02/);
+    await composer.getByLabel("FOU local port", { exact: true }).fill("65535");
+    await composer.getByLabel("FOU peer port", { exact: true }).fill("54321");
+    if (kind === "sit") {
+      await composer.getByRole("checkbox", { name: "IPv6 primary pair", exact: true }).check();
+      await composer.getByRole("checkbox", { name: "IPv4 primary pair", exact: true }).uncheck();
+      await composer.getByLabel("Left tunnel IPv6", { exact: true }).fill("fd00:987::");
+      await composer.getByLabel("Right tunnel IPv6", { exact: true }).fill("fd00:987::1");
+    } else {
+      await composer.getByLabel("Left tunnel IPv4", { exact: true }).fill("10.252.87.0");
+      await composer.getByLabel("Right tunnel IPv4", { exact: true }).fill("10.252.87.1");
+    }
+    await composer.getByRole("button", { name: "Review plan", exact: true }).click();
+    const prompt = page.locator(".confirmationPrompt");
+    for (const [label, value] of [
+      ["FOU tunnel", `${kind.toUpperCase()} over UDP · IP protocol ${protocol}`],
+      ["FOU receive port", "65535 UDP (both VPSs)"],
+      ["FOU peer port", "54321 UDP"],
+    ]) {
+      const fact = prompt.locator("dl > div").filter({ has: page.getByText(label, { exact: true }) });
+      // A tooltip is not a substitute for readable reviewed network parameters.
+      const text = fact.locator("dd");
+      await expect(text).toHaveText(value);
+      await text.scrollIntoViewIfNeeded();
+      expect(await text.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    }
+    await prompt.getByRole("button", { name: "Cancel", exact: true }).click();
+    await composer.getByRole("button", { name: "Close tunnel plan editor" }).click();
+  }
+});
+
 test(
   "authors explicit tunnel plans with endpoint-scoped adapters",
   {
@@ -10086,7 +10128,21 @@ test(
     await leftMtu.fill("1400");
     await kind.selectOption("fou");
     await expect(leftMtu).toHaveValue("1400");
+    await expect(rightMtu).toHaveValue("1468");
+    const fouKind = composer.getByLabel("FOU encapsulated tunnel");
+    await expect(fouKind).toHaveValue("gre");
+    await expect(fouKind.locator("option")).toHaveText(["GRE", "IPIP", "SIT"]);
+    await expect(composer.getByLabel("FOU IP protocol", { exact: true })).toHaveCount(0);
+    await expect(composer).toContainText("IP protocol 47 · derived from tunnel type");
+    await fouKind.selectOption("ipip");
+    await expect(leftMtu).toHaveValue("1400");
     await expect(rightMtu).toHaveValue("1472");
+    await expect(composer).toContainText("IP protocol 4 · derived from tunnel type");
+    await fouKind.selectOption("sit");
+    await expect(leftMtu).toHaveValue("1400");
+    await expect(composer).toContainText("IP protocol 41 · derived from tunnel type");
+    await fouKind.selectOption("gre");
+    await expect(rightMtu).toHaveValue("1468");
     await kind.selectOption("gre");
     await expect(leftMtu).toHaveValue("1400");
     await expect(rightMtu).toHaveValue("1476");

@@ -1267,6 +1267,29 @@ async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
 }
 
 #[test]
+fn fou_type_changes_use_the_existing_remove_then_recreate_identity_boundary() {
+    let mut baseline = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+        "203.0.113.20",
+        "10.255.0.0",
+        "10.255.0.1",
+    ));
+    baseline.plan.kind = vpsman_common::TunnelKind::Fou;
+    baseline.plan.runtime_control.fou.tunnel_kind = vpsman_common::RuntimeTunnelFouKind::Gre;
+    let mut renamed = baseline.clone();
+    renamed.plan.name.push_str("-renamed");
+    assert!(runtime_tunnel_identity_matches(&baseline, &renamed));
+    for kind in [
+        vpsman_common::RuntimeTunnelFouKind::Ipip,
+        vpsman_common::RuntimeTunnelFouKind::Sit,
+    ] {
+        let mut changed = baseline.clone();
+        changed.plan.runtime_control.fou.tunnel_kind = kind;
+        assert!(!runtime_tunnel_identity_matches(&baseline, &changed));
+        assert!(runtime_tunnel_endpoint_conflicts(&baseline, &changed));
+    }
+}
+
+#[test]
 fn runtime_tunnel_identity_allows_in_place_policy_changes() {
     let mut changed_cost = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
         "203.0.113.20",

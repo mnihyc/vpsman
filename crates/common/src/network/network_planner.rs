@@ -41,6 +41,8 @@ pub enum NetworkPlanError {
     TunnelAddressRequired,
     #[error("invalid additional tunnel address: {0}")]
     InvalidAdditionalAddress(String),
+    #[error("FOU {0} does not carry the configured inner address family")]
+    InvalidFouAddressFamily(String),
     #[error("tunnel kind is not supported by the selected runtime manager")]
     UnsupportedRuntimeManagerTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
@@ -106,6 +108,13 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         &input.additional_addresses,
         ipv4_tunnel.as_ref(),
         ipv6_tunnel.as_ref(),
+    )?;
+    validate_fou_address_families(
+        input.kind,
+        &input.runtime_control,
+        ipv4_tunnel.is_some(),
+        ipv6_tunnel.is_some(),
+        &additional_addresses,
     )?;
     validate_tunnel_mtus(
         input.runtime_control.manager,
@@ -224,7 +233,7 @@ fn validate_endpoint_underlay(
         .transpose()
         .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
     let builtin_iproute =
-        manager == RuntimeTunnelManager::AgentBuiltin && kind.linux_tunnel_mode().is_some();
+        manager == RuntimeTunnelManager::AgentBuiltin && kind.uses_ipv4_iproute2();
     let builtin_wireguard =
         manager == RuntimeTunnelManager::AgentBuiltin && kind == TunnelKind::Wireguard;
     let builtin_openvpn =
@@ -429,6 +438,13 @@ pub fn render_tunnel_endpoint_config(
     side: TunnelEndpointSide,
 ) -> Result<TunnelEndpointConfig, NetworkPlanError> {
     validate_interface_name(&plan.interface_name)?;
+    validate_fou_address_families(
+        plan.kind,
+        &plan.runtime_control,
+        plan.ipv4_tunnel.is_some(),
+        plan.ipv6_tunnel.is_some(),
+        &plan.additional_addresses,
+    )?;
     let (
         local_client_id,
         peer_client_id,
@@ -481,6 +497,31 @@ pub fn render_tunnel_endpoint_config(
             .clone(),
         manage_link_local: plan.manage_link_local,
     })
+}
+
+fn validate_fou_address_families(
+    kind: TunnelKind,
+    control: &RuntimeTunnelControl,
+    primary_ipv4: bool,
+    primary_ipv6: bool,
+    additional: &TunnelAdditionalAddresses,
+) -> Result<(), NetworkPlanError> {
+    if kind != TunnelKind::Fou || control.manager != RuntimeTunnelManager::AgentBuiltin {
+        return Ok(());
+    }
+    let ipv4 =
+        primary_ipv4 || !additional.left.ipv4.is_empty() || !additional.right.ipv4.is_empty();
+    let ipv6 =
+        primary_ipv6 || !additional.left.ipv6.is_empty() || !additional.right.ipv6.is_empty();
+    let tunnel_kind = control.fou.tunnel_kind;
+    if (ipv4 && !tunnel_kind.supports_family(TunnelAddressFamily::Ipv4))
+        || (ipv6 && !tunnel_kind.supports_family(TunnelAddressFamily::Ipv6))
+    {
+        return Err(NetworkPlanError::InvalidFouAddressFamily(
+            tunnel_kind.linux_tunnel_mode().to_uppercase(),
+        ));
+    }
+    Ok(())
 }
 
 fn canonical_additional_addresses(
@@ -689,7 +730,7 @@ fn validate_runtime_fou_options(
     if kind != TunnelKind::Fou && !options.is_default() {
         return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
     }
-    if options.port == 0 || options.peer_port == 0 || options.ipproto == 0 {
+    if options.port == 0 || options.peer_port == 0 {
         return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
     }
     Ok(())

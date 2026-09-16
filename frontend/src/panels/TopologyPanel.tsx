@@ -62,6 +62,10 @@ import {
   clampTunnelBandwidthMbps,
   DEFAULT_TUNNEL_BANDWIDTH_MBPS,
   DEFAULT_RUNTIME_FOU_OPTIONS,
+  FOU_TUNNEL_KINDS,
+  FOU_TUNNEL_KIND_DETAILS,
+  validateFouAddressFamilies,
+  fouRuntimeFacts,
   DEFAULT_RUNTIME_OPENVPN_OPTIONS,
   DEFAULT_RUNTIME_WIREGUARD_OPTIONS,
   defaultAgentTunnelMtu,
@@ -110,6 +114,7 @@ import type {
   RuntimeTunnelManager,
   RuntimeTunnelOpenvpnTransport,
   RuntimeTunnelWireguardEndpointMode,
+  RuntimeTunnelFouKind,
   TelemetryTunnelRecord,
   TopologyGraph,
   TopologyGraphEdge,
@@ -2139,6 +2144,11 @@ function TunnelPlanDetails({
             value={builtinDriverCapabilitySummary(plan, agents)}
           />
         ) : null}
+        {plan.kind === "fou" && isAgentBuiltinTunnelPlan(plan)
+          ? fouRuntimeFacts(plan.plan.runtime_control?.fou).map((fact) => (
+              <PlanFact key={fact.label} label={fact.label} value={fact.value} />
+            ))
+          : null}
         {plan.kind === "wireguard" && isAgentBuiltinTunnelPlan(plan) ? (
           <PlanFact
             label="WireGuard runtime"
@@ -2701,6 +2711,7 @@ function TunnelPlanComposer({
         isDerivedAgentTunnelMtu(
           initialPlan.input.kind,
           initialPlan.input.left_mtu,
+          initialPlan.input.runtime_control?.fou?.tunnel_kind,
         )),
     leftRemote: !initialPlan,
     rightMtu:
@@ -2711,6 +2722,7 @@ function TunnelPlanComposer({
         isDerivedAgentTunnelMtu(
           initialPlan.input.kind,
           initialPlan.input.right_mtu,
+          initialPlan.input.runtime_control?.fou?.tunnel_kind,
         )),
     rightRemote: !initialPlan,
   }));
@@ -2822,7 +2834,7 @@ function TunnelPlanComposer({
   }, [autoFillOwnership.bandwidth, bandwidthSuggestion.value, initialPlan]);
   useEffect(() => {
     if (form.runtimeManager !== "agent_builtin") return;
-    const kindMtu = defaultAgentTunnelMtu(form.kind);
+    const kindMtu = defaultAgentTunnelMtu(form.kind, form.fouTunnelKind);
     if (kindMtu === null) return;
     const suggestedMtu = String(kindMtu);
     setSnapshot(null);
@@ -2842,6 +2854,7 @@ function TunnelPlanComposer({
     autoFillOwnership.leftMtu,
     autoFillOwnership.rightMtu,
     form.kind,
+    form.fouTunnelKind,
     form.runtimeManager,
   ]);
   const runtimeDefinitions = networkAdapterDefinitions.filter(
@@ -3435,17 +3448,19 @@ function TunnelPlanComposer({
                   />
                 </Field>
                 <Field
-                  label="IP protocol"
-                  tooltip="Inner IP protocol registered with FOU; 4 is IP-in-IP and 47 is GRE."
+                  label="Encapsulated tunnel"
+                  tooltip="FOU carries GRE, IPIP, or SIT over UDP. This choice controls both the native tunnel device and the receive protocol. GRE supports IPv4 and IPv6; IPIP carries IPv4; SIT carries IPv6."
                 >
-                  <UnitInput
-                    ariaLabel="FOU IP protocol"
-                    max={255}
-                    min={1}
-                    onChange={(value) => update("fouIpProto", value)}
-                    unit="id"
-                    value={form.fouIpProto}
-                  />
+                  <select
+                    aria-label="FOU encapsulated tunnel"
+                    onChange={(event) => update("fouTunnelKind", event.target.value as RuntimeTunnelFouKind)}
+                    value={form.fouTunnelKind}
+                  >
+                    {FOU_TUNNEL_KINDS.map((kind) => (
+                      <option key={kind} value={kind}>{kind.toUpperCase()}</option>
+                    ))}
+                  </select>
+                  <span className="formHint">IP protocol {FOU_TUNNEL_KIND_DETAILS[form.fouTunnelKind].ip_protocol} · derived from tunnel type</span>
                 </Field>
               </div>
             )}
@@ -4762,7 +4777,7 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     dynamicBandwidth: false,
     egressMbps: "",
     enabled: false,
-    fouIpProto: "4",
+    fouTunnelKind: DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind,
     fouPeerPort: "5555",
     fouPort: "5555",
     healthyWindows: "2",
@@ -4835,7 +4850,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
   };
   const topology = input.runtime_topology ?? {};
   const traffic = runtime.traffic_limit ?? {};
-  const fou = runtime.fou ?? { ipproto: 4, peer_port: 5555, port: 5555 };
+  const fou = runtime.fou ?? DEFAULT_RUNTIME_FOU_OPTIONS;
   const wireguard = runtime.wireguard ?? DEFAULT_RUNTIME_WIREGUARD_OPTIONS;
   const openvpn = runtime.openvpn ?? DEFAULT_RUNTIME_OPENVPN_OPTIONS;
   const ospf = input.ospf ?? null;
@@ -4852,7 +4867,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     dynamicBandwidth: input.dynamic_bandwidth ?? false,
     egressMbps: kbpsToMbpsText(traffic.egress_kbps),
     enabled: record.enabled,
-    fouIpProto: String(fou.ipproto),
+    fouTunnelKind: fou.tunnel_kind,
     fouPeerPort: String(fou.peer_port),
     fouPort: String(fou.port),
     healthyWindows: String(ospf?.healthy_windows ?? 2),
@@ -4873,7 +4888,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     leftRoutingDefinitionId: ospf?.left_adapter_template_id ?? "",
     leftRuntimeDefinitionId: runtime.left_adapter_template_id ?? "",
     leftLocalUnderlay: input.left_local_underlay ?? "",
-    leftMtu: String(input.left_mtu ?? defaultAgentTunnelMtu(input.kind) ?? ""),
+    leftMtu: String(input.left_mtu ?? defaultAgentTunnelMtu(input.kind, fou.tunnel_kind) ?? ""),
     leftRemoteUnderlay: input.left_remote_underlay,
     lossWeight: String(policy.loss_weight),
     maxCost: String(policy.max_cost),
@@ -4896,7 +4911,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     rightRuntimeDefinitionId: runtime.right_adapter_template_id ?? "",
     rightLocalUnderlay: input.right_local_underlay ?? "",
     rightMtu: String(
-      input.right_mtu ?? defaultAgentTunnelMtu(input.kind) ?? "",
+      input.right_mtu ?? defaultAgentTunnelMtu(input.kind, fou.tunnel_kind) ?? "",
     ),
     rightRemoteUnderlay: input.right_remote_underlay,
     routes: (topology.routes ?? []).map(formatRuntimeRoute).join("\n"),
@@ -5047,8 +5062,16 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
   if (form.kind === "fou" && form.runtimeManager !== "external_observed") {
     const fouError =
       validateIntegerRange(form.fouPort, "FOU port", 1, 65_535) ??
-      validateIntegerRange(form.fouPeerPort, "FOU peer port", 1, 65_535) ??
-      validateIntegerRange(form.fouIpProto, "FOU IP protocol", 1, 255);
+      validateIntegerRange(form.fouPeerPort, "FOU peer port", 1, 65_535);
+    if (!FOU_TUNNEL_KINDS.includes(form.fouTunnelKind)) return "FOU tunnel type must be GRE, IPIP, or SIT";
+    if (form.runtimeManager === "agent_builtin") {
+      const familyError = validateFouAddressFamilies(
+        form.fouTunnelKind,
+        form.includeIpv4 || Object.values(form.additionalAddresses).some((side) => additionalAddressLines(side.ipv4).length > 0),
+        form.includeIpv6 || Object.values(form.additionalAddresses).some((side) => additionalAddressLines(side.ipv6).length > 0),
+      );
+      if (familyError) return familyError;
+    }
     if (fouError) return fouError;
   }
   if (form.kind === "wireguard" && form.runtimeManager === "agent_builtin") {
@@ -5656,7 +5679,7 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
   const runtimeControl = buildRuntimeControl(form.runtimeManager, {
     burstKb: form.burstKb,
     egressKbps: mbpsToKbpsText(form.egressMbps),
-    fouIpproto: form.kind === "fou" ? form.fouIpProto : undefined,
+    fouTunnelKind: form.kind === "fou" ? form.fouTunnelKind : undefined,
     fouPeerPort: form.kind === "fou" ? form.fouPeerPort : undefined,
     fouPort: form.kind === "fou" ? form.fouPort : undefined,
     ingressKbps: mbpsToKbpsText(form.ingressMbps),
@@ -5710,11 +5733,11 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
       ? {
           left_mtu: integerOr(
             form.leftMtu,
-            defaultAgentTunnelMtu(form.kind) ?? 1500,
+            defaultAgentTunnelMtu(form.kind, form.fouTunnelKind) ?? 1500,
           ),
           right_mtu: integerOr(
             form.rightMtu,
-            defaultAgentTunnelMtu(form.kind) ?? 1500,
+            defaultAgentTunnelMtu(form.kind, form.fouTunnelKind) ?? 1500,
           ),
         }
       : {};
@@ -5961,6 +5984,9 @@ function createConfirmationItems(
       label: "Runtime owner",
       value: runtimeManagerLabel(request.runtime_control?.manager),
     },
+    ...(runtime?.manager === "agent_builtin" && request.kind === "fou"
+      ? fouRuntimeFacts(runtime.fou)
+      : []),
     ...(runtime?.manager === "agent_builtin" && request.kind === "wireguard"
       ? [
           {
@@ -6470,7 +6496,7 @@ type TunnelPlanForm = {
   dynamicBandwidth: boolean;
   egressMbps: string;
   enabled: boolean;
-  fouIpProto: string;
+  fouTunnelKind: RuntimeTunnelFouKind;
   fouPeerPort: string;
   fouPort: string;
   healthyWindows: string;

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "tests_fou.rs"]
+mod fou;
+
 const TEST_PLAN_ID: uuid::Uuid = uuid::Uuid::from_u128(0x11111111_1111_4111_8111_111111111111);
 
 const LEFT_RUNTIME_ADAPTER: &str = "11111111-1111-4111-8111-111111111111";
@@ -584,6 +587,7 @@ fn fou_native_commands_keep_endpoint_intent_with_link_encapsulation() {
     let mut input = plan_input(TunnelKind::Fou, RuntimeTunnelManager::AgentBuiltin);
     input.left_local_underlay = Some("192.0.2.1".into());
     input.runtime_control.fou.peer_port = 15555;
+    input.runtime_control.fou.tunnel_kind = RuntimeTunnelFouKind::Ipip;
     let plan = plan_tunnel(&input).unwrap();
     let base = ["/sbin/ip".into()];
     for (side, remote, local) in [
@@ -750,7 +754,7 @@ fn tunnel_mtu_defaults_are_kind_aware_1500_underlay_baselines() {
     assert_eq!(default_tunnel_mtu(TunnelKind::Gre), Some(1476));
     assert_eq!(default_tunnel_mtu(TunnelKind::Ipip), Some(1480));
     assert_eq!(default_tunnel_mtu(TunnelKind::Sit), Some(1480));
-    assert_eq!(default_tunnel_mtu(TunnelKind::Fou), Some(1472));
+    assert_eq!(default_tunnel_mtu(TunnelKind::Fou), Some(1468));
     assert_eq!(default_tunnel_mtu(TunnelKind::Wireguard), Some(1420));
     assert_eq!(default_tunnel_mtu(TunnelKind::Openvpn), Some(1500));
     assert_eq!(default_tunnel_mtu(TunnelKind::TunTap), None);

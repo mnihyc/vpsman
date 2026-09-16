@@ -293,6 +293,7 @@ fn fou_link_inspection_normalizes_encapsulation_shapes_without_relaxing_ownershi
     let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
     plan.kind = TunnelKind::Fou;
     plan.interface_name = "tunfou".into();
+    plan.runtime_control.fou.tunnel_kind = vpsman_common::RuntimeTunnelFouKind::Ipip;
     plan.left_local_underlay = Some("192.0.2.1".into());
     plan.left_remote_underlay = "192.0.2.2".into();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
@@ -575,7 +576,7 @@ fn fou_listener_idempotency_requires_exact_compatible_kernel_evidence() {
     plan.kind = TunnelKind::Fou;
     let valid = serde_json::json!({
         "port": plan.runtime_control.fou.port,
-        "ipproto": plan.runtime_control.fou.ipproto,
+        "ipproto": plan.runtime_control.fou.tunnel_kind.ip_protocol(),
         "family": "inet"
     });
     let report = |listener: serde_json::Value| {
@@ -1716,19 +1717,64 @@ exec /sbin/ip "$@""#
     }
 
     async fn builtin_address_policy_matrix(kinds: &[TunnelKind]) {
+        builtin_address_policy_matrix_with_fou(
+            kinds,
+            vpsman_common::RuntimeTunnelFouKind::default(),
+        )
+        .await;
+    }
+
+    fn set_fou_test_kind(plan: &mut TunnelPlan, kind: vpsman_common::RuntimeTunnelFouKind) {
+        if plan.kind != TunnelKind::Fou {
+            return;
+        }
+        plan.runtime_control.fou.tunnel_kind = kind;
+        plan.left_mtu = Some(kind.default_mtu());
+        plan.right_mtu = Some(kind.default_mtu());
+        if kind == vpsman_common::RuntimeTunnelFouKind::Sit {
+            plan.ipv4_tunnel = None;
+            plan.ipv6_tunnel = Some(TunnelAddressPair {
+                left: "fd00:ffff::".into(),
+                right: "fd00:ffff::1".into(),
+                prefix_len: 127,
+            });
+            plan.left_tunnel_address = "fd00:ffff::".into();
+            plan.right_tunnel_address = "fd00:ffff::1".into();
+            plan.tunnel_prefix_len = 127;
+            plan.latency_primary_family = TunnelAddressFamily::Ipv6;
+        }
+    }
+
+    fn packet_test_supports_family(plan: &TunnelPlan, family: TunnelAddressFamily) -> bool {
+        if plan.kind == TunnelKind::Fou {
+            return plan.runtime_control.fou.tunnel_kind.supports_family(family);
+        }
+        match family {
+            TunnelAddressFamily::Ipv4 => plan.kind != TunnelKind::Sit,
+            TunnelAddressFamily::Ipv6 => plan.kind != TunnelKind::Ipip,
+        }
+    }
+
+    async fn builtin_address_policy_matrix_with_fou(
+        kinds: &[TunnelKind],
+        fou_kind: vpsman_common::RuntimeTunnelFouKind,
+    ) {
         require_isolated_network();
         for &kind in kinds {
             let mut plan = isolated_plan(kind);
+            set_fou_test_kind(&mut plan, fou_kind);
+            let carries_ipv4 = packet_test_supports_family(&plan, TunnelAddressFamily::Ipv4);
+            let carries_ipv6 = packet_test_supports_family(&plan, TunnelAddressFamily::Ipv6);
             let plan_id = uuid::Uuid::new_v4().to_string();
             let credentials = match kind {
                 TunnelKind::Wireguard => Some(wireguard_credentials().await),
                 TunnelKind::Openvpn => Some(generated_credentials(&plan_id).await),
                 _ => None,
             };
-            if kind != TunnelKind::Sit {
+            if carries_ipv4 {
                 plan.additional_addresses.left.ipv4 = vec!["10.254.0.10/32".into()];
             }
-            if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+            if carries_ipv6 {
                 plan.additional_addresses.left.ipv6 =
                     vec!["fd00:123::10/128".into(), "fe80::123/64".into()];
             }
@@ -1767,7 +1813,7 @@ exec /sbin/ip "$@""#
                 uuid::Uuid::parse_str(&plan_id).unwrap(),
                 &plan.left_client_id,
             );
-            if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+            if carries_ipv6 {
                 let mut link_local = current
                     .iter()
                     .filter(|address| address.starts_with("fe80:"))
@@ -1790,7 +1836,7 @@ exec /sbin/ip "$@""#
             }
             // Reconciliation can change aliases on an existing owned device,
             // while an address introduced by another owner stays untouched.
-            let unowned = if kind == TunnelKind::Sit {
+            let unowned = if !carries_ipv4 {
                 "fd00:123::999/128"
             } else {
                 "10.254.0.99/32"
@@ -1858,7 +1904,7 @@ exec /sbin/ip "$@""#
             }
             assert!(!current.contains(&"10.254.0.10/32".to_string()));
             assert!(!current.contains(&"fd00:123::10/128".to_string()));
-            if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+            if carries_ipv6 {
                 assert!(current.contains(&"fe80::123/64".to_string()));
                 assert!(!current.contains(&generated));
                 let expected_mode = native_mode.unwrap().to_string();
@@ -2141,7 +2187,7 @@ async fn fou_reconcile_command_fixtures_compensate_only_resources_created_by_the
         plan.kind = TunnelKind::Fou;
         let listeners = serde_json::json!([{
             "port": plan.runtime_control.fou.port,
-            "ipproto": plan.runtime_control.fou.ipproto,
+            "ipproto": plan.runtime_control.fou.tunnel_kind.ip_protocol(),
             "family": if scenario == "incompatible_listener" { "inet6" } else { "inet" },
         }]);
         config.network.runtime_ip_argv = vec![

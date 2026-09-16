@@ -18,8 +18,22 @@ async fn fou_additional_ipv4_packet_and_address_lifecycle() {
     // This is deliberately separate from the missing-capability test: success
     // requires a real FOU listener and real IPv4-in-UDP traffic.
     checked_native("/sbin/ip", &["fou", "show"]).await;
-    builtin_packet_matrix(&[TunnelKind::Fou]).await;
-    builtin_address_policy_matrix(&[TunnelKind::Fou]).await;
+    builtin_packet_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Ipip).await;
+    builtin_address_policy_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Ipip).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and available kernel FOU/GRE"]
+async fn fou_gre_packet_and_address_lifecycle() {
+    builtin_packet_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Gre).await;
+    builtin_address_policy_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Gre).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and available kernel FOU/SIT"]
+async fn fou_sit_packet_and_address_lifecycle() {
+    builtin_packet_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Sit).await;
+    builtin_address_policy_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Sit).await;
 }
 
 async fn create_packet_namespaces() {
@@ -243,6 +257,10 @@ async fn parallel_plans_keep_distinct_stable_link_local_addresses_and_packets() 
 }
 
 async fn builtin_packet_matrix(kinds: &[TunnelKind]) {
+    builtin_packet_matrix_with_fou(kinds, vpsman_common::RuntimeTunnelFouKind::default()).await;
+}
+
+async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_common::RuntimeTunnelFouKind) {
     require_isolated_network();
     // Re-enter this test in each isolated endpoint namespace. The child executes
     // the production reconciler; the parent verifies real packets.
@@ -278,16 +296,19 @@ async fn builtin_packet_matrix(kinds: &[TunnelKind]) {
         let id = uuid::Uuid::new_v4().to_string();
         create_packet_namespaces().await;
         let mut plan = isolated_plan(kind);
+        set_fou_test_kind(&mut plan, fou_kind);
+        let carries_ipv4 = packet_test_supports_family(&plan, TunnelAddressFamily::Ipv4);
+        let carries_ipv6 = packet_test_supports_family(&plan, TunnelAddressFamily::Ipv6);
         plan.interface_name = "vpspkt".into();
         plan.left_local_underlay = Some("192.0.2.1".into());
         plan.right_local_underlay = Some("192.0.2.2".into());
         plan.left_remote_underlay = "192.0.2.2".into();
         plan.right_remote_underlay = "192.0.2.1".into();
-        if kind != TunnelKind::Sit {
+        if carries_ipv4 {
             plan.additional_addresses.left.ipv4 = vec!["10.254.20.1/30".into()];
             plan.additional_addresses.right.ipv4 = vec!["10.254.20.2/30".into()];
         }
-        if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+        if carries_ipv6 {
             plan.additional_addresses.left.ipv6 =
                 vec!["fd00:123::1/64".into(), "fe80::111/64".into()];
             plan.additional_addresses.right.ipv6 =
@@ -348,10 +369,10 @@ async fn builtin_packet_matrix(kinds: &[TunnelKind]) {
             reconcile_packet_endpoint(namespace, &id, &plan, side, credentials.as_ref()).await;
         }
         let mut targets = Vec::new();
-        if kind != TunnelKind::Sit {
+        if carries_ipv4 {
             targets.push("10.254.20.2".to_string());
         }
-        if !matches!(kind, TunnelKind::Ipip | TunnelKind::Fou) {
+        if carries_ipv6 {
             targets.push("fd00:123::2".to_string());
             targets.push("fe80::222".to_string());
             targets.push(

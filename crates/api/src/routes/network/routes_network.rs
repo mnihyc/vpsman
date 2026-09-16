@@ -1760,6 +1760,9 @@ fn tunnel_plan_bad_request(error: NetworkPlanError) -> ApiError {
             error.to_string(),
         );
     }
+    if matches!(error, NetworkPlanError::InvalidFouAddressFamily(_)) {
+        return ApiError::bad_request_with_message("invalid_fou_address_family", error.to_string());
+    }
     if matches!(error, NetworkPlanError::OpenvpnDirectiveOwned(_)) {
         return ApiError::bad_request_with_message("openvpn_directive_owned", error.to_string());
     }
@@ -1772,6 +1775,7 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         NetworkPlanError::InvalidTunnelEndpoints => "invalid_tunnel_plan_endpoints",
         NetworkPlanError::InvalidUnderlayAddress => "invalid_tunnel_underlay_address",
         NetworkPlanError::InvalidAdditionalAddress(_) => "invalid_tunnel_additional_address",
+        NetworkPlanError::InvalidFouAddressFamily(_) => "invalid_fou_address_family",
         NetworkPlanError::OpenvpnDirectiveOwned(_) => "openvpn_directive_owned",
         NetworkPlanError::InvalidRuntimeTunnelConfigPath => "network_runtime_config_path_invalid",
         NetworkPlanError::InvalidRuntimeTunnelCommand
