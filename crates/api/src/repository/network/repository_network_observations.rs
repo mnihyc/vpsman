@@ -31,6 +31,9 @@ const OBSERVATION_COLUMNS: &str = r#"
     received_at::text AS received_at
 "#;
 
+#[path = "repository_network_observation_reads.rs"]
+mod exact_reads;
+
 const NETWORK_OBSERVATION_ID_LOCK_HASH_SEED: i64 = 0x4e4f_4253_4944_4c4b;
 
 /// Serializes only writers proposing the same global observation UUID. This
@@ -345,82 +348,20 @@ impl Repository {
         const MAX_FAIR_RESPONSE_ROWS: i64 = 250_000;
         match self {
             Self::Postgres(pool) if fair_per_series => {
-                let rows = sqlx::query(&format!(
-                    r#"
-                    WITH ranked AS (
-                        SELECT observation.*,
-                            row_number() OVER (
-                                PARTITION BY observation.plan_id,
-                                    observation.topology_identity_hash,
-                                    observation.kind,
-                                    COALESCE(observation.endpoint_side, observation.client_id)
-                                ORDER BY observation.observed_at DESC, observation.id DESC
-                            ) AS evidence_rank
-                        FROM network_observation_exact_evidence observation
-                        WHERE observation.observed_at >= to_timestamp($1)
-                          AND observation.observed_at <= to_timestamp($2)
-                          AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
-                          AND ($4::text IS NULL OR observation.client_id = $4 OR observation.peer_client_id = $4)
-                          AND ($5::text IS NULL OR observation.source = $5)
-                          AND ($6::text IS NULL OR observation.kind = $6)
-                          AND (
-                            $7::text IS NULL
-                            OR ($7 = 'healthy' AND observation.healthy IS TRUE)
-                            OR ($7 = 'unhealthy' AND observation.healthy IS FALSE)
-                            OR ($7 = 'unknown' AND observation.healthy IS NULL)
-                          )
-                          AND (
-                            $8::text IS NULL
-                            OR concat_ws(' ', observation.client_id, observation.peer_client_id,
-                                observation.plan_name, observation.interface_name, observation.target,
-                                observation.reason, observation.kind, observation.source) ILIKE '%' || $8 || '%'
-                          )
-                          AND (
-                            NOT $9
-                            OR (
-                                EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id AND status <> 'suspended')
-                                AND (observation.peer_client_id IS NULL OR EXISTS (
-                                    SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id AND status <> 'suspended'
-                                ))
-                                AND EXISTS (
-                                    SELECT 1
-                                    FROM tunnel_plans plan
-                                    WHERE plan.id = observation.plan_id
-                                      AND plan.deleted_at IS NULL
-                                      AND NOT EXISTS (
-                                          SELECT 1 FROM visible_clients endpoint
-                                          WHERE endpoint.id=plan.left_client_id
-                                            AND endpoint.status = 'suspended'
-                                      )
-                                      AND NOT EXISTS (
-                                          SELECT 1 FROM visible_clients endpoint
-                                          WHERE endpoint.id=plan.right_client_id
-                                            AND endpoint.status = 'suspended'
-                                      )
-                                )
-                            )
-                          )
-                    )
-                    SELECT {OBSERVATION_COLUMNS}
-                    FROM ranked
-                    WHERE evidence_rank <= $10
-                    ORDER BY evidence_rank, observed_at DESC, id DESC
-                    LIMIT $11
-                    "#
-                ))
-                .bind(filter.start_unix)
-                .bind(filter.end_unix)
-                .bind(&filter.plan_ids)
-                .bind(filter.client_id.as_deref())
-                .bind(filter.source.as_deref())
-                .bind(filter.kind.as_deref())
-                .bind(filter.health.as_deref())
-                .bind(filter.search.as_deref())
-                .bind(filter.visible_only)
-                .bind(filter.limit.max(1))
-                .bind(MAX_FAIR_RESPONSE_ROWS)
-                .fetch_all(pool)
-                .await?;
+                let rows = sqlx::query(&exact_reads::query(false))
+                    .bind(filter.start_unix)
+                    .bind(filter.end_unix)
+                    .bind(&filter.plan_ids)
+                    .bind(filter.client_id.as_deref())
+                    .bind(filter.source.as_deref())
+                    .bind(filter.kind.as_deref())
+                    .bind(filter.health.as_deref())
+                    .bind(filter.search.as_deref())
+                    .bind(filter.visible_only)
+                    .bind(filter.limit.max(1))
+                    .bind(MAX_FAIR_RESPONSE_ROWS)
+                    .fetch_all(pool)
+                    .await?;
                 rows.into_iter()
                     .map(|row| network_observation_from_row(row).map_err(Into::into))
                     .collect()
@@ -517,50 +458,19 @@ impl Repository {
         let limit = sample_limit_per_plan_kind_endpoint.max(1);
         let mut rows = match self {
             Self::Postgres(pool) => {
-                let query = format!(
-                    r#"
-                    SELECT *
-                    FROM (
-                        SELECT {OBSERVATION_COLUMNS},
-                            row_number() OVER (
-                                PARTITION BY plan_id, kind, COALESCE(endpoint_side, client_id)
-                                ORDER BY observed_at DESC, id DESC
-                            ) AS evidence_rank
-                        FROM network_observation_exact_evidence
-                        WHERE observed_at >= to_timestamp($1)
-                          AND observed_at <= to_timestamp($2)
-                          AND plan_id = ANY($3::uuid[])
-                          AND kind IN ('tunnel_reachability', 'network_speed_test', 'network_status')
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM visible_clients suspended_client
-                              WHERE suspended_client.status = 'suspended'
-                                AND (
-                                    suspended_client.id = network_observation_exact_evidence.client_id
-                                    OR suspended_client.id = network_observation_exact_evidence.peer_client_id
-                                )
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM tunnel_plans plan
-                              JOIN visible_clients suspended_endpoint
-                                ON suspended_endpoint.status = 'suspended'
-                               AND suspended_endpoint.id IN (
-                                   plan.left_client_id,
-                                   plan.right_client_id
-                               )
-                              WHERE plan.id = network_observation_exact_evidence.plan_id
-                          )
-                    ) ranked
-                    WHERE evidence_rank <= $4
-                    ORDER BY observed_at DESC, id DESC
-                    "#
-                );
+                let query = exact_reads::query(true);
                 sqlx::query(&query)
                     .bind(start_unix)
                     .bind(end_unix)
                     .bind(&plan_ids)
+                    .bind(None::<&str>) // client
+                    .bind(None::<&str>) // source
+                    .bind(None::<&str>) // kind
+                    .bind(None::<&str>) // health
+                    .bind(None::<&str>) // search
+                    .bind(true) // retain graph suspension visibility
                     .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+                    .bind(None::<i64>) // no global response cap for graph evidence
                     .fetch_all(pool)
                     .await?
                     .into_iter()
@@ -2386,3 +2296,7 @@ fn tunnel_plan_evidence_clear_audit(
 #[cfg(test)]
 #[path = "tests_repository_network_observations.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_repository_network_observation_reads.rs"]
+mod tests_exact_reads;
