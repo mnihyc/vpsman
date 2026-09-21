@@ -145,10 +145,7 @@ fn iproute2_tunnel_argv_uses_only_the_endpoint_declared_source_and_destination()
 fn generated_link_local_identity_requires_only_its_approved_runtime_context() {
     let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    assert_eq!(
-        resolved_link_local_plan_uuid(None, &plan, &endpoint).unwrap(),
-        None
-    );
+    assert!(resolved_link_local_plan_uuid(None, &plan, &endpoint).is_err());
     plan.additional_addresses.left.ipv6 = vec!["fd00:123::1/64".into()];
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     assert!(resolved_link_local_plan_uuid(None, &plan, &endpoint).is_err());
@@ -182,7 +179,7 @@ async fn missing_link_local_plan_identity_fails_before_native_commands_or_hooks(
     ]);
     config.network.runtime_ip_argv = mutation.argv.clone();
     let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
-    plan.additional_addresses.left.ipv6 = vec!["fd00:123::1/64".into()];
+    // No configured IPv6: identity must still be checked before side effects.
     plan.runtime_control.hooks.left.pre_start = Some(mutation);
     for plan_id in [None, Some("opaque-local-id")] {
         let result = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
@@ -616,6 +613,8 @@ fn fou_listener_idempotency_requires_exact_compatible_kernel_evidence() {
 
 fn hooked_builtin_plan() -> TunnelPlan {
     let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    // Hook-only command fixtures do not emulate kernel address state.
+    plan.manage_link_local = false;
     plan.runtime_control.hooks.left = vpsman_common::RuntimeTunnelEndpointHooks {
         pre_start: Some(command(&["/bin/echo", "pre-start:{interface}"])),
         post_start: Some(command(&["/bin/echo", "post-start:{interface}"])),
@@ -1704,6 +1703,96 @@ exec /sbin/ip "$@""#
     }
 
     #[tokio::test]
+    #[ignore = "requires disposable Docker private networking, NET_ADMIN, IPv6 and iproute2"]
+    async fn managed_link_local_survives_removing_the_last_configured_ipv6_address() {
+        require_isolated_network();
+        let config = config();
+        let mut plan = isolated_plan(TunnelKind::Gre);
+        let plan_id = uuid::Uuid::new_v4();
+        let id = plan_id.to_string();
+        assert!(plan.manage_link_local);
+        assert!(plan.ipv6_tunnel.is_none());
+        assert!(plan.additional_addresses.is_empty());
+        let generated = vpsman_common::tunnel_generated_link_local(plan_id, &plan.left_client_id);
+        let mode_path = format!(
+            "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
+            plan.interface_name
+        );
+        let index_path = format!("/sys/class/net/{}/ifindex", plan.interface_name);
+        let report = reconcile(&config, &plan, Some(&id), None).await.unwrap();
+        assert_eq!(report["status"], "converged", "{report}");
+        let index = tokio::fs::read_to_string(&index_path).await.unwrap();
+        let state: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(endpoint_dir(&id).join("addresses.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let native_mode = state["native_addr_gen_mode"].as_u64().unwrap();
+        let unowned = "192.0.2.99/32";
+        checked_native(
+            "/sbin/ip",
+            &["addr", "add", unowned, "dev", &plan.interface_name],
+        )
+        .await;
+        for extra in [vec!["fd00:123::10/128".into()], Vec::new()] {
+            plan.additional_addresses.left.ipv6 = extra;
+            // Simulate a leftover automatically assigned address on the owned link.
+            checked_native(
+                "/sbin/ip",
+                &[
+                    "addr",
+                    "replace",
+                    "fe80::999/64",
+                    "dev",
+                    &plan.interface_name,
+                ],
+            )
+            .await;
+            let report = reconcile(&config, &plan, Some(&id), None).await.unwrap();
+            assert_eq!(report["status"], "converged", "{report}");
+            let current = address_set(&plan.interface_name).await;
+            assert!(current.contains(&generated));
+            assert!(!current.contains(&"fe80::999/64".to_string()));
+            assert!(current.contains(&unowned.to_string()));
+            assert_eq!(tokio::fs::read_to_string(&index_path).await.unwrap(), index);
+            assert_eq!(
+                tokio::fs::read_to_string(&mode_path).await.unwrap().trim(),
+                "1"
+            );
+        }
+        assert!(!address_set(&plan.interface_name)
+            .await
+            .contains(&"fd00:123::10/128".to_string()));
+        plan.manage_link_local = false;
+        let report = reconcile(&config, &plan, Some(&id), None).await.unwrap();
+        assert_eq!(report["status"], "converged", "{report}");
+        assert!(!address_set(&plan.interface_name).await.contains(&generated));
+        assert_eq!(
+            tokio::fs::read_to_string(&mode_path).await.unwrap().trim(),
+            native_mode.to_string()
+        );
+        let report = execute_runtime_tunnel_remove_report_cancelable(
+            NetworkRuntimeRemoveInput {
+                config: &config,
+                plan_id: Some(&id),
+                plan: &plan,
+                builtin_credentials: None,
+                runtime_adapter: None,
+                side: TunnelEndpointSide::Left,
+                max_timeout_secs: 30,
+                effective_uid_override: None,
+            },
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["status"], "removed", "{report}");
+        assert_link_absent(&plan).await;
+        assert!(!endpoint_dir(&id).join("addresses.json").exists());
+    }
+
+    #[tokio::test]
     #[ignore = "requires disposable Docker private networking, NET_ADMIN, IPv6, TUN, iproute2, WireGuard and OpenVPN"]
     async fn builtin_address_policy_converges_edits_native_restore_and_remove() {
         builtin_address_policy_matrix(&[
@@ -1813,27 +1902,28 @@ exec /sbin/ip "$@""#
                 uuid::Uuid::parse_str(&plan_id).unwrap(),
                 &plan.left_client_id,
             );
+            let mut link_local = current
+                .iter()
+                .filter(|address| address.starts_with("fe80:"))
+                .cloned()
+                .collect::<Vec<_>>();
+            link_local.sort();
+            let mut expected = vec![generated.clone()];
             if carries_ipv6 {
-                let mut link_local = current
-                    .iter()
-                    .filter(|address| address.starts_with("fe80:"))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                link_local.sort();
-                let mut expected = vec![generated.clone(), "fe80::123/64".into()];
-                expected.sort();
-                assert_eq!(link_local, expected, "{kind:?}");
-                assert_eq!(
-                    tokio::fs::read_to_string(format!(
-                        "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
-                        plan.interface_name
-                    ))
-                    .await
-                    .unwrap()
-                    .trim(),
-                    "1"
-                );
+                expected.push("fe80::123/64".into());
             }
+            expected.sort();
+            assert_eq!(link_local, expected, "{kind:?}");
+            assert_eq!(
+                tokio::fs::read_to_string(format!(
+                    "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
+                    plan.interface_name
+                ))
+                .await
+                .unwrap()
+                .trim(),
+                "1"
+            );
             // Reconciliation can change aliases on an existing owned device,
             // while an address introduced by another owner stays untouched.
             let unowned = if !carries_ipv4 {
@@ -1906,20 +1996,20 @@ exec /sbin/ip "$@""#
             assert!(!current.contains(&"fd00:123::10/128".to_string()));
             if carries_ipv6 {
                 assert!(current.contains(&"fe80::123/64".to_string()));
-                assert!(!current.contains(&generated));
-                let expected_mode = native_mode.unwrap().to_string();
-                assert_eq!(
-                    tokio::fs::read_to_string(format!(
-                        "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
-                        plan.interface_name
-                    ))
-                    .await
-                    .unwrap()
-                    .trim(),
-                    expected_mode,
-                    "{kind:?}: native mode not restored"
-                );
             }
+            assert!(!current.contains(&generated));
+            let expected_mode = native_mode.unwrap().to_string();
+            assert_eq!(
+                tokio::fs::read_to_string(format!(
+                    "/proc/sys/net/ipv6/conf/{}/addr_gen_mode",
+                    plan.interface_name
+                ))
+                .await
+                .unwrap()
+                .trim(),
+                expected_mode,
+                "{kind:?}: native mode not restored"
+            );
             let report = execute_runtime_tunnel_remove_report_cancelable(
                 NetworkRuntimeRemoveInput {
                     config: &config,
@@ -2184,6 +2274,8 @@ async fn fou_reconcile_command_fixtures_compensate_only_resources_created_by_the
         tokio::fs::create_dir_all(&root).await.unwrap();
         let calls_path = root.join("commands.log");
         let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+        // This fixture fails before addresses and has no kernel address state.
+        plan.manage_link_local = false;
         plan.kind = TunnelKind::Fou;
         let listeners = serde_json::json!([{
             "port": plan.runtime_control.fou.port,

@@ -401,11 +401,49 @@ fn wireguard_additional_family_permissions_are_peer_host_scoped() {
 }
 
 #[test]
-fn managed_link_local_is_stable_additive_and_only_uses_explicit_ipv6_intent() {
+fn wireguard_ipv4_only_allows_only_the_generated_peer_link_local() {
+    let input = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::AgentBuiltin);
+    let mut plan = plan_tunnel(&input).unwrap();
+    for managed in [true, false] {
+        plan.manage_link_local = managed;
+        for side in [TunnelEndpointSide::Left, TunnelEndpointSide::Right] {
+            let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
+            let command = build_wireguard_configure_argv(
+                &["wg".into()],
+                &plan,
+                &endpoint,
+                std::path::Path::new("key"),
+                "peer",
+                Some(TEST_PLAN_ID),
+            )
+            .unwrap();
+            let expected = if managed {
+                format!(
+                    "0.0.0.0/0,{}/128",
+                    tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.peer_client_id)
+                        .trim_end_matches("/64")
+                )
+            } else {
+                "0.0.0.0/0".to_string()
+            };
+            assert_eq!(command.last().unwrap(), &expected);
+            assert!(plan.ipv6_tunnel.is_none());
+            assert!(plan.additional_addresses.is_empty());
+        }
+    }
+}
+
+#[test]
+fn managed_link_local_is_stable_additive_and_independent_of_explicit_ipv6() {
     let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     let plan = plan_tunnel(&input).unwrap();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    assert!(!tunnel_endpoint_manages_link_local(&plan, &endpoint));
+    assert!(tunnel_endpoint_manages_link_local(&plan, &endpoint));
+    let generated = tunnel_generated_link_local(TEST_PLAN_ID, &endpoint.local_client_id);
+    let commands = build_tunnel_address_argv(&["ip".into()], &plan, &endpoint, Some(TEST_PLAN_ID));
+    assert!(commands
+        .iter()
+        .any(|command| command.get(3) == Some(&generated)));
     input.additional_addresses.left.ipv6 = vec!["fe80::1234/64".into()];
     let plan = plan_tunnel(&input).unwrap();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
@@ -501,8 +539,8 @@ fn explicit_ipv6_cannot_duplicate_the_peers_active_generated_link_local() {
     assert!(render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).is_err());
     input.additional_addresses.left.ipv6.clear();
     assert!(
-        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan_tunnel(&input).unwrap()).is_ok(),
-        "left has no IPv6 intent, so its automatic address is inactive"
+        validate_tunnel_link_local_addresses(TEST_PLAN_ID, &plan_tunnel(&input).unwrap()).is_err(),
+        "left still owns its generated address without configured IPv6"
     );
     input.ipv6_tunnel = Some(TunnelAddressPair {
         left: "fe80::a".into(),
@@ -530,9 +568,7 @@ fn explicit_ipv6_cannot_duplicate_the_peers_active_generated_link_local() {
 
 #[test]
 fn draft_link_local_preview_is_placeholder_while_saved_preview_matches_runtime() {
-    let mut input = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::AgentBuiltin);
-    input.additional_addresses.left.ipv6 = vec!["fd00::a/64".into()];
-    input.additional_addresses.right.ipv6 = vec!["fd00::b/64".into()];
+    let input = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::AgentBuiltin);
     let plan = plan_tunnel(&input).unwrap();
     let draft = render_tunnel_runtime_preview(&plan, None).unwrap();
     let saved = render_tunnel_runtime_preview(&plan, Some(TEST_PLAN_ID)).unwrap();

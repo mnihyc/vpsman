@@ -88,7 +88,7 @@ test("allocation reserves unsaved extra host addresses without changing CIDR dra
   expect(draft).toEqual(before);
 });
 
-test("link-local policy is per endpoint and manual addresses survive unmanaged mode", () => {
+test("link-local policy is independent of configured IPv6 and preserves manual addresses", () => {
   const input: Pick<TunnelPlanInput, "ipv6_tunnel" | "additional_addresses" | "manage_link_local"> = {
     additional_addresses: {
       left: { ipv4: [], ipv6: ["fe80::1/64"] },
@@ -96,9 +96,12 @@ test("link-local policy is per endpoint and manual addresses survive unmanaged m
     },
   };
   expect(tunnelLinkLocalSummary(input, "left")).toBe("On · automatic link-local; explicit fe80::1/64");
-  expect(tunnelLinkLocalSummary(input, "right")).toBe("On · inactive (no configured IPv6)");
+  expect(tunnelLinkLocalSummary(input, "right")).toBe("On · automatic link-local");
   input.additional_addresses!.right.ipv6 = ["fd00::2/128"];
   expect(tunnelLinkLocalSummary(input, "right")).toBe("On · automatic link-local");
+  input.additional_addresses!.right.ipv6 = [];
+  expect(tunnelLinkLocalSummary(input, "right")).toBe("On · automatic link-local");
+  expect(tunnelLinkLocalSummary({}, "left")).toBe("On · automatic link-local");
   input.manage_link_local = false;
   expect(tunnelLinkLocalSummary(input, "left")).toBe("Off · native behavior; explicit fe80::1/64");
   expect(tunnelLinkLocalSummary(input, "right")).toBe("Off · native behavior");

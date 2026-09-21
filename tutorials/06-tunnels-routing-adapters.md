@@ -147,6 +147,24 @@ credential as explicit endpoint evidence. It must not reinterpret the plan or
 run a custom adapter. Local runtime convergence and peer reachability remain
 separate: use the existing probe and observation evidence for connectivity.
 
+### Managed link-local addresses
+
+**Manage link-local** applies to each Agent builtin endpoint independently of
+its primary or additional IPv4/IPv6 addresses. With the option on, the agent
+suppresses native automatic link-local generation and maintains one stable
+plan/endpoint link-local address plus explicitly configured link-local addresses.
+Removing the last configured IPv6 address does not deactivate management.
+
+Turning the option off retains the existing behavior: remove only obsolete
+agent-owned addresses, preserve explicit addresses, and restore the recorded
+native generation mode. External observed and Custom adapter ownership are
+unchanged. The option does not change transport-family support or enable IPv6
+that has been disabled in the host kernel.
+
+Upgrade endpoint agents to v0.5.20 for this behavior. Runtime configurations
+whose behavior changed require protocol 8; unchanged configurations keep their
+existing protocol requirements. No database migration or plan rewrite is needed.
+
 ### FOU encapsulated tunnel type
 
 FOU transports a selected tunnel protocol over UDP. Choose **GRE** (the default),

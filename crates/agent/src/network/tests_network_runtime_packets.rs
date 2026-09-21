@@ -11,6 +11,163 @@ async fn builtin_additional_and_link_local_packet_matrix() {
     .await;
 }
 
+// OpenVPN's TUN/PID readiness is local convergence, not completion of TLS.
+// Keep this separation in the packet fixture; do not change production startup.
+#[tokio::test]
+#[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN, TUN and OpenVPN"]
+async fn openvpn_additional_and_link_local_packets_after_tls_ready() {
+    builtin_packet_matrix(&[TunnelKind::Openvpn]).await;
+}
+
+fn packet_openvpn_path(plan_id: &str, side: &str, name: &str) -> PathBuf {
+    crate::state_dir::agent_state_dir()
+        .unwrap()
+        .join("network-tunnels")
+        .join(plan_id)
+        .join(side)
+        .join(name)
+}
+
+fn packet_openvpn_log_ready(log: &str) -> std::result::Result<bool, String> {
+    // These fresh, unique per-run logs must show a successful first connection.
+    // Do not accept a previous success followed by failure/restart, or "With Errors".
+    for line in log.lines() {
+        if [
+            "VERIFY ERROR:",
+            "TLS Error:",
+            "AUTH_FAILED",
+            "Options error:",
+            "OPTIONS ERROR:",
+            "Exiting due to fatal error",
+            "Initialization Sequence Completed With Errors",
+            "SIGUSR1[",
+            "SIGTERM[",
+            "SIGHUP[",
+        ]
+        .iter()
+        .any(|marker| line.contains(marker))
+        {
+            return Err(line.to_string());
+        }
+    }
+    Ok(log.lines().any(|line| {
+        line.trim_end().ends_with("Initialization Sequence Completed")
+    }))
+}
+
+#[test]
+fn openvpn_packet_readiness_requires_successful_tls_initialization() {
+    for log in [
+        "",
+        "TUN/TAP device vpspkt opened\n",
+        "Peer Connection Initiated with [AF_INET]192.0.2.2:1194\n",
+    ] {
+        assert_eq!(packet_openvpn_log_ready(log), Ok(false));
+    }
+    let ready = "2026-09-17 00:00:00 Initialization Sequence Completed\n";
+    assert_eq!(packet_openvpn_log_ready(ready), Ok(true));
+    for error in [
+        "Initialization Sequence Completed With Errors",
+        "VERIFY ERROR: depth=0, error=certificate has expired",
+        "TLS Error: TLS handshake failed",
+        "AUTH_FAILED",
+        "Options error: unsupported option",
+        "OPTIONS ERROR: failed to import crypto options",
+        "Exiting due to fatal error",
+        "SIGUSR1[soft,tls-error] received, process restarting",
+        "SIGTERM[hard,] received, process exiting",
+        "SIGHUP[hard,] received, process restarting",
+    ] {
+        assert!(packet_openvpn_log_ready(error).is_err(), "{error}");
+        assert!(packet_openvpn_log_ready(&format!("{ready}{error}\n")).is_err());
+    }
+}
+
+async fn packet_file_tail(path: &Path) -> std::io::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    // Match the fixture's 16 KiB command-report budget. Never read credentials
+    // or entire logs into a panic; only these explicit log/status files.
+    const MAX_BYTES: u64 = 16 * 1024;
+    let mut file = tokio::fs::File::open(path).await?;
+    let start = file.metadata().await?.len().saturating_sub(MAX_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES).read_to_end(&mut bytes).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn dump_packet_openvpn_diagnostics(plan_id: &str, interface: &str) {
+    eprintln!("=== OpenVPN packet diagnostics (disposable fixture only) ===");
+    for (namespace, side) in [("address-left", "left"), ("address-right", "right")] {
+        for name in ["packet-openvpn.log", "openvpn.status", "openvpn.pid"] {
+            let path = packet_openvpn_path(plan_id, side, name);
+            match packet_file_tail(&path).await {
+                Ok(text) => eprintln!("--- {namespace}/{name} ---\n{text}"),
+                Err(error) => eprintln!("--- {namespace}/{name}: {error} ---"),
+            }
+        }
+    }
+    // Read-only namespace state; neither keys, PEM files, process environments
+    // nor generated configurations are dumped. Each command has the existing
+    // native() ten-second helper bound.
+    for namespace in ["address-left", "address-right"] {
+        for args in [
+            vec!["-n", namespace, "-s", "-d", "link", "show", "dev", interface],
+            vec!["-n", namespace, "addr", "show", "dev", interface],
+            vec!["-n", namespace, "route", "show", "table", "all"],
+            vec!["-n", namespace, "-6", "route", "show", "table", "all"],
+        ] {
+            let output = native("/sbin/ip", &args).await;
+            eprintln!(
+                "--- ip {args:?} ({}) ---\n{}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+async fn wait_for_packet_openvpn_tls(plan_id: &str, interface: &str) {
+    let started = tokio::time::Instant::now();
+    // Test setup only: one default OpenVPN handshake window, not an arbitrary
+    // sleep, ping retry, daemon restart, or change to production timeouts.
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let mut ready = true;
+            for side in ["left", "right"] {
+                let path = packet_openvpn_path(plan_id, side, "packet-openvpn.log");
+                let log = match packet_file_tail(&path).await {
+                    Ok(log) => log,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(error) => return Err(format!("{side}: cannot read daemon log: {error}")),
+                };
+                ready &= packet_openvpn_log_ready(&log)
+                    .map_err(|error| format!("{side}: {error}"))?;
+            }
+            if ready {
+                return Ok::<(), String>(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let failure = match result {
+        Ok(Ok(())) => {
+            eprintln!(
+                "OpenVPN packet fixture: both TLS sessions ready after {:?}; measuring packets now",
+                started.elapsed()
+            );
+            return;
+        }
+        Ok(Err(error)) => error,
+        Err(_) => "both endpoints did not complete TLS initialization within 60 seconds".into(),
+    };
+    dump_packet_openvpn_diagnostics(plan_id, interface).await;
+    panic!("OpenVPN packet setup failed before measurement: {failure}");
+}
+
 #[tokio::test]
 #[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and available kernel FOU"]
 async fn fou_additional_ipv4_packet_and_address_lifecycle() {
@@ -95,6 +252,9 @@ async fn reconcile_packet_endpoint(
         .args(["netns", "exec", namespace]).arg(std::env::current_exe().unwrap())
         .args(["network_runtime::tests::isolated_linux_failures::builtin_additional_and_link_local_packet_matrix", "--exact", "--ignored", "--nocapture"])
         .env("VPSMAN_ADDRESS_TEST_ENDPOINT", fixture.to_string()).output().await.unwrap();
+    if !output.status.success() && plan.kind == TunnelKind::Openvpn {
+        dump_packet_openvpn_diagnostics(id, &plan.interface_name).await;
+    }
     assert!(
         output.status.success(),
         "{:?}/{namespace}: {} {}",
@@ -125,8 +285,10 @@ async fn parallel_plans_keep_distinct_stable_link_local_addresses_and_packets() 
         pair.right = format!("10.255.0.{}", index * 2 + 1);
         plan.left_tunnel_address = pair.left.clone();
         plan.right_tunnel_address = pair.right.clone();
-        plan.additional_addresses.left.ipv6 = vec![format!("fd00:{}::1/64", 124 + index)];
-        plan.additional_addresses.right.ipv6 = vec![format!("fd00:{}::2/64", 124 + index)];
+        // Only IPv4 is configured. Generated link-local addresses and the
+        // WireGuard peer /128 must still work without permitting all IPv6.
+        assert!(plan.ipv6_tunnel.is_none());
+        assert!(plan.additional_addresses.is_empty());
         let mut left = wireguard_credentials().await;
         let mut right = wireguard_credentials().await;
         if let (
@@ -314,6 +476,22 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
             plan.additional_addresses.right.ipv6 =
                 vec!["fd00:123::2/64".into(), "fe80::222/64".into()];
         }
+        if kind == TunnelKind::Openvpn {
+            // Daemon output normally goes to syslog, which this image does not
+            // collect. Only add endpoint-local logging through the existing
+            // override renderer; leave TLS, DCO, MTUs and all addresses intact.
+            for (side, overrides) in [
+                ("left", &mut plan.runtime_control.openvpn.left_config_override),
+                ("right", &mut plan.runtime_control.openvpn.right_config_override),
+            ] {
+                assert!(overrides.is_none(), "packet fixture already has native overrides");
+                let path = packet_openvpn_path(&id, side, "packet-openvpn.log");
+                *overrides = Some(format!(
+                    "log {}\n",
+                    vpsman_common::openvpn_config_path_value(&path).unwrap()
+                ));
+            }
+        }
         let (mut left_credentials, mut right_credentials) = match kind {
             TunnelKind::Wireguard => (
                 Some(wireguard_credentials().await),
@@ -368,6 +546,9 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
         ] {
             reconcile_packet_endpoint(namespace, &id, &plan, side, credentials.as_ref()).await;
         }
+        if kind == TunnelKind::Openvpn {
+            wait_for_packet_openvpn_tls(&id, &plan.interface_name).await;
+        }
         let mut targets = Vec::new();
         if carries_ipv4 {
             targets.push("10.254.20.2".to_string());
@@ -407,6 +588,9 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
                 ],
             )
             .await;
+            if !output.status.success() && kind == TunnelKind::Openvpn {
+                dump_packet_openvpn_diagnostics(&id, &plan.interface_name).await;
+            }
             assert!(
                 output.status.success(),
                 "{kind:?} could not reach {target}: {} {}",

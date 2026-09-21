@@ -358,10 +358,7 @@ pub fn build_wireguard_configure_argv(
             let (address, _) = cidr.split_once('/').ok_or(NetworkPlanError::InvalidCidr)?;
             allowed_ips.push(format!("{address}/128"));
         }
-        if plan.manage_link_local
-            && plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
-            && !endpoint.peer_additional_addresses.ipv6.is_empty()
-        {
+        if tunnel_endpoint_manages_link_local(plan, endpoint) {
             let generated_peer = plan_id
                 .map_or_else(
                     || "{generated_peer_link_local}/64".to_string(),
@@ -493,14 +490,12 @@ pub fn tunnel_endpoint_explicit_address_cidrs(
         .collect()
 }
 
-/// IPv6 intent is explicit configuration, never a previously generated address.
+/// Link-local ownership is independent of primary and additional address families.
 pub fn tunnel_endpoint_manages_link_local(
     plan: &TunnelPlan,
-    endpoint: &TunnelEndpointConfig,
+    _endpoint: &TunnelEndpointConfig,
 ) -> bool {
-    plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
-        && plan.manage_link_local
-        && (plan.ipv6_tunnel.is_some() || !endpoint.additional_addresses.ipv6.is_empty())
+    plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin && plan.manage_link_local
 }
 
 /// One stable, locally assigned /64 address per immutable plan and endpoint.

@@ -107,7 +107,7 @@ pub(crate) struct TunnelPlanCommand {
         help = "Additional right IPv6 addresses; repeat or comma-separate"
     )]
     pub(crate) additional_right_ipv6: Vec<String>,
-    #[arg(long, default_value_t = true, action = ArgAction::Set, help = "Manage automatic link-local on builtin endpoints with IPv6; manual addresses remain additive")]
+    #[arg(long, default_value_t = true, action = ArgAction::Set, help = "Manage automatic link-local on builtin endpoints independently of configured address families; manual addresses remain additive")]
     pub(crate) manage_link_local: bool,
     #[arg(long, value_enum, default_value = "ipv4")]
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,

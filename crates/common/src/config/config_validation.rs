@@ -380,14 +380,7 @@ fn validate_runtime_status_telemetry_plans(
             && matches!(plan.plan.kind, TunnelKind::Wireguard | TunnelKind::Openvpn);
         let managed_link_local = plan.plan.runtime_control.manager
             == RuntimeTunnelManager::AgentBuiltin
-            && plan.plan.manage_link_local
-            && (plan.plan.ipv6_tunnel.is_some()
-                || !plan
-                    .plan
-                    .additional_addresses
-                    .for_side(plan.endpoint_side)
-                    .ipv6
-                    .is_empty());
+            && plan.plan.manage_link_local;
         if stateful_builtin || managed_link_local {
             let plan_id = plan
                 .plan_id

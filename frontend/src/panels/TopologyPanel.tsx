@@ -3832,7 +3832,7 @@ function TunnelPlanComposer({
             <>
               <label
                 className="compactCheckbox"
-                title="On each endpoint with configured IPv6, maintain one stable automatic link-local address and any explicit manual addresses, replacing native automatic link-local addresses. Manual entries are optional and additive. Off restores native behavior; explicit manual addresses still apply. IPv4-only endpoints are unchanged."
+                title="On each Agent builtin endpoint, maintain one stable automatic link-local address and any explicit manual addresses, replacing native automatic link-local addresses regardless of configured IPv4 or IPv6 addresses. Manual entries are optional and additive. Off restores native behavior; explicit manual addresses still apply."
               >
                 <input
                   checked={form.manageLinkLocal}

@@ -979,7 +979,8 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         additional_addresses: Default::default(),
-        manage_link_local: true,
+        // These lifecycle fixtures use command stubs, not kernel address state.
+        manage_link_local: false,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1476),
@@ -1859,7 +1860,8 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         additional_addresses: Default::default(),
-        manage_link_local: true,
+        // These lifecycle fixtures use command stubs, not kernel address state.
+        manage_link_local: false,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1476),
@@ -2011,7 +2013,8 @@ fn runtime_sync_test_plan(
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         additional_addresses: Default::default(),
-        manage_link_local: true,
+        // These lifecycle fixtures use command stubs, not kernel address state.
+        manage_link_local: false,
         bandwidth_mbps: 100,
         dynamic_bandwidth: false,
         left_mtu: Some(1476),

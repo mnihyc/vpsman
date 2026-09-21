@@ -443,18 +443,23 @@ fn fou_defaults_and_explicit_types_require_typed_protocol_support() {
             reason: "fou-test".into(),
             config: Box::new(config),
         };
-        for command in [status, sync] {
-            assert_eq!(
-                super::job_command_protocol_version(&command),
-                super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
-            );
+        let sync_version = if kind == crate::RuntimeTunnelFouKind::Sit {
+            super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+        } else {
+            super::INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION
+        };
+        for (command, expected) in [
+            (status, super::FOU_TUNNEL_KIND_PROTOCOL_VERSION),
+            (sync, sync_version),
+        ] {
+            assert_eq!(super::job_command_protocol_version(&command), expected);
             assert_eq!(
                 super::job_command_dispatch_protocol_version(&command),
-                super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+                expected
             );
             assert_eq!(
                 super::job_command_min_supported_protocol_version(&command),
-                super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+                expected
             );
             assert!(super::job_command_min_supported_protocol_version(&command) > 6);
         }
@@ -483,7 +488,7 @@ fn only_configs_and_commands_with_new_address_requirements_need_new_agent_suppor
             false,
             true,
             crate::RuntimeTunnelManager::AgentBuiltin,
-            super::CONFIG_COMMAND_PROTOCOL_VERSION,
+            super::INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION,
         ),
         (
             true,
@@ -590,6 +595,76 @@ fn only_configs_and_commands_with_new_address_requirements_need_new_agent_suppor
             super::job_command_dispatch_protocol_version(&status),
             network_expected
         );
+    }
+}
+
+#[test]
+fn independent_link_local_protocol_gate_is_endpoint_and_behavior_scoped() {
+    use crate::{RuntimeTunnelManager, TunnelEndpointSide, TunnelKind};
+    let input: crate::TunnelPlanInput = serde_json::from_value(serde_json::json!({
+        "name":"link-local-gate", "interface_name":"tun-gate", "kind":"gre",
+        "left_client_id":"left", "right_client_id":"right",
+        "left_remote_underlay":"192.0.2.1", "right_remote_underlay":"192.0.2.2",
+        "address_pool_cidr":"", "bandwidth_mbps":100,
+        "ipv4_tunnel":{"left":"10.0.0.0","right":"10.0.0.1","prefix_len":31},
+        "left_mtu":1476, "right_mtu":1476
+    }))
+    .unwrap();
+    let baseline = crate::plan_tunnel(&input).unwrap();
+    for kind in [TunnelKind::Gre, TunnelKind::Wireguard] {
+        for left_ipv6 in [false, true] {
+            for right_ipv6 in [false, true] {
+                for side in [TunnelEndpointSide::Left, TunnelEndpointSide::Right] {
+                    let mut plan = baseline.clone();
+                    plan.kind = kind;
+                    if left_ipv6 {
+                        plan.additional_addresses.left.ipv6 = vec!["fd00::1/64".into()];
+                    }
+                    if right_ipv6 {
+                        plan.additional_addresses.right.ipv6 = vec!["fd00::2/64".into()];
+                    }
+                    let local_ipv6 = match side {
+                        TunnelEndpointSide::Left => left_ipv6,
+                        TunnelEndpointSide::Right => right_ipv6,
+                    };
+                    for managed in [false, true] {
+                        for manager in [
+                            RuntimeTunnelManager::AgentBuiltin,
+                            RuntimeTunnelManager::ExternalObserved,
+                        ] {
+                            plan.manage_link_local = managed;
+                            plan.runtime_control.manager = manager;
+                            let mut config = crate::AgentRuntimeConfig::default();
+                            config.network.runtime_status_telemetry_plans.push(
+                                crate::AgentRuntimeStatusTelemetryPlan {
+                                    plan_id: Some(uuid::Uuid::from_u128(1).to_string()),
+                                    topology_identity_hash: String::new(),
+                                    runtime_evidence_identity_hash: String::new(),
+                                    endpoint_side: side,
+                                    plan: plan.clone(),
+                                    builtin_credentials: None,
+                                    runtime_adapter: None,
+                                    latency_monitoring_enabled: true,
+                                },
+                            );
+                            let changed = manager == RuntimeTunnelManager::AgentBuiltin
+                                && managed
+                                && (!local_ipv6
+                                    || (kind == TunnelKind::Wireguard
+                                        && (!left_ipv6 || !right_ipv6)));
+                            let expected = if changed {
+                                super::INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION
+                            } else if left_ipv6 || right_ipv6 || !managed {
+                                super::TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION
+                            } else {
+                                super::CONFIG_COMMAND_PROTOCOL_VERSION
+                            };
+                            assert_eq!(super::runtime_config_protocol_version(&config), expected);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -558,11 +558,10 @@ pub fn validate_tunnel_link_local_addresses(
 ) -> Result<(), NetworkPlanError> {
     if plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin && plan.manage_link_local
     {
-        for (local, client_id, local_extra, peer, peer_primary, peer_extra) in [
+        for (local, client_id, peer, peer_primary, peer_extra) in [
             (
                 "left",
                 &plan.left_client_id,
-                &plan.additional_addresses.left,
                 "right",
                 plan.ipv6_tunnel.as_ref().map(|pair| &pair.right),
                 &plan.additional_addresses.right,
@@ -570,15 +569,11 @@ pub fn validate_tunnel_link_local_addresses(
             (
                 "right",
                 &plan.right_client_id,
-                &plan.additional_addresses.right,
                 "left",
                 plan.ipv6_tunnel.as_ref().map(|pair| &pair.left),
                 &plan.additional_addresses.left,
             ),
         ] {
-            if plan.ipv6_tunnel.is_none() && local_extra.ipv6.is_empty() {
-                continue;
-            }
             let generated = super::tunnel_generated_link_local(plan_id, client_id);
             let generated_ip = generated.trim_end_matches("/64");
             let collides = |address: &str| {

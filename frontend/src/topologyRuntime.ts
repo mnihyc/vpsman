@@ -65,7 +65,6 @@ export function tunnelLinkLocalSummary(
   if (input.manage_link_local === false) {
     return `Off · native behavior${manual.length ? `; explicit ${manual.join(", ")}` : ""}`;
   }
-  if (addresses.length === 0) return "On · inactive (no configured IPv6)";
   return `On · automatic link-local${manual.length ? `; explicit ${manual.join(", ")}` : ""}`;
 }
 

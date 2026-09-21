@@ -296,7 +296,7 @@ fn stateful_builtin_runtime_plans_require_uuid_identity() {
 }
 
 #[test]
-fn managed_link_local_requires_uuid_only_for_the_managed_native_endpoint() {
+fn managed_link_local_requires_uuid_regardless_of_configured_address_family() {
     let mut config = AgentConfig::default();
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: None,
@@ -308,13 +308,7 @@ fn managed_link_local_requires_uuid_only_for_the_managed_native_endpoint() {
         runtime_adapter: None,
         latency_monitoring_enabled: true,
     }];
-    // Native IPv4-only declarations retain their optional identity contract.
-    validate_agent_config_shape(&config).unwrap();
-    config.network.runtime_status_telemetry_plans[0]
-        .plan
-        .additional_addresses
-        .left
-        .ipv6 = vec!["fd00::1/64".into()];
+    // The IPv4-only endpoint now owns a generated link-local address too.
     assert_eq!(
         validate_agent_config_shape(&config).unwrap_err(),
         "network_runtime_status_telemetry_plan_id_required"
@@ -354,8 +348,11 @@ fn managed_link_local_requires_uuid_only_for_the_managed_native_endpoint() {
         .plan
         .manage_link_local = true;
     config.network.runtime_status_telemetry_plans[0].endpoint_side = TunnelEndpointSide::Right;
-    // The peer's IPv6 intent does not impose identity on an IPv4-only native endpoint.
-    validate_agent_config_shape(&config).unwrap();
+    // Both endpoints need their immutable identity without configured IPv6.
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_plan_id_required"
+    );
     config.network.runtime_status_telemetry_plans[0]
         .plan
         .ipv6_tunnel = Some(TunnelAddressPair {

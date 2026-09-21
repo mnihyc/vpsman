@@ -676,11 +676,11 @@ fn changed_network_wire_shapes_require_their_exact_protocol_generation() {
     let runtime_config = mutating_runtime_config_sync_command();
     assert_eq!(
         vpsman_common::job_command_protocol_version(&runtime_config),
-        vpsman_common::CONFIG_COMMAND_PROTOCOL_VERSION
+        vpsman_common::INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION
     );
     assert_eq!(
         vpsman_common::job_command_min_supported_protocol_version(&runtime_config),
-        vpsman_common::CONFIG_COMMAND_PROTOCOL_VERSION
+        vpsman_common::INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION
     );
 }
 
