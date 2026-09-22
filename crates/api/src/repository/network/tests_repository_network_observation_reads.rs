@@ -246,11 +246,22 @@ async fn postgres_bounded_exact_reads_preserve_view_filters_ranking_and_fallback
     seed(&pool, 6).await;
     sqlx::raw_sql(
         r#"
-        INSERT INTO network_observations(id,client_id,peer_client_id,kind,source,
+        INSERT INTO jobs(id,command_type,status,payload_hash,request_fingerprint)
+        VALUES (md5('read-manual-job')::uuid,'network_speed_test','completed','fixture','fixture');
+        INSERT INTO job_targets(job_id,client_id,status)
+        VALUES (md5('read-manual-job')::uuid,'read-left','completed');
+        -- Non-null source-specific fields distinguish hydration from a key-only
+        -- match; the complete-row oracle below must preserve all of them.
+        INSERT INTO network_observations(id,job_id,client_id,peer_client_id,kind,source,
             plan_id,topology_identity_hash,plan_name,interface_name,endpoint_side,
-            healthy,reason,metadata,observed_at,received_at)
-        SELECT gen_random_uuid(),'read-left',peer,kinds.kind,'manual',plan.id,
-            'identity','manual-label','tun0',side,healthy,'Manual Diagnostic',
+            seq,role,target,address_family,stale_after_secs,healthy,transmitted,received,
+            latency_min_ms,latency_avg_ms,latency_max_ms,latency_mdev_ms,packet_loss_ratio,
+            reason,throughput_mbps,bytes,metadata,observed_at,received_at)
+        SELECT gen_random_uuid(),md5('read-manual-job')::uuid,'read-left',peer,kinds.kind,'manual',plan.id,
+            'identity','manual-label','tun0',side,
+            (row_number() OVER (ORDER BY plan.id,kinds.kind,side,healthy,peer))::integer,
+            'endpoint','10.9.0.2','ipv4',240,
+            healthy,4,3,20.0,25.0,30.0,2.0,0.25,'Manual Diagnostic',87.5,1234567,
             '{"nested":{"preserved":true}}',
             to_timestamp(1999999998 + CASE WHEN healthy IS NULL THEN 0.25 ELSE 0 END),
             to_timestamp(1999999999)
@@ -271,11 +282,12 @@ async fn postgres_bounded_exact_reads_preserve_view_filters_ranking_and_fallback
         -- Inactive series retain raw history; only their fallback is excluded.
         UPDATE network_observation_series SET active=false WHERE address_family='ipv6';
         INSERT INTO network_observation_latest(series_id,observation_id,stale_after_secs,
-            healthy,transmitted,received,packet_loss_ratio,reason,metadata,observed_at,received_at)
+            healthy,transmitted,received,latency_min_ms,latency_avg_ms,latency_max_ms,
+            latency_mdev_ms,packet_loss_ratio,reason,metadata,observed_at,received_at)
         SELECT id,
             CASE WHEN endpoint_side='left' THEN md5(id || ':observation:6')::uuid
                  ELSE md5(id || ':fallback')::uuid END,
-            180,true,3,3,0,'Latest Diagnostic','{"latest":true}',
+            180,true,3,3,40.0,45.0,50.0,3.0,0,'Latest Diagnostic','{"latest":true}',
             to_timestamp(2000000000),to_timestamp(2000000000)
         FROM network_observation_series;
         -- Even an out-of-window invalid locator shadows its active latest UUID.
@@ -558,6 +570,26 @@ async fn postgres_bounded_exact_reads_stop_payload_reads_at_each_physical_cap() 
                 })
                 .sum();
             assert_eq!(payload_rows, 16 * 7, "{mode} graph={graph}: {plan}");
+            let cte_rows_visited: u64 = nodes
+                .iter()
+                .filter(|node| node["Node Type"] == "CTE Scan")
+                .map(|node| {
+                    (node["Actual Rows"].as_u64().unwrap()
+                        + node["Rows Removed by Filter"].as_u64().unwrap_or(0))
+                        * node["Actual Loops"].as_u64().unwrap()
+                })
+                .sum();
+            let returned_rows = plan[0]["Plan"]["Actual Rows"].as_u64().unwrap();
+            // With no manual/latest rows in this fixture, grouping consumes
+            // each of the 16 series at most four times (two dictionary reads,
+            // raw candidates and latest lookup). The three source hydration
+            // branches may each inspect every selected row once. Reattaching
+            // selected rows to unindexed candidate/series CTEs violates this
+            // linear work budget even when all data happen to be memory-hot.
+            assert!(
+                cte_rows_visited <= 4 * 16 + 3 * returned_rows,
+                "{mode} graph={graph}: {cte_rows_visited} CTE tuple visits: {plan}"
+            );
             assert!(
                 nodes.iter().any(|node| node["Index Name"]
                     == "network_observations_automatic_series_observed_idx"),

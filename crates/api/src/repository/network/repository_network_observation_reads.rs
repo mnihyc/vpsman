@@ -59,7 +59,7 @@ pub(super) fn query(for_topology: bool) -> String {
 
     format!(
         r#"
-WITH automatic_series AS MATERIALIZED (
+WITH automatic_series AS (
     SELECT observation.*
     FROM network_observation_series observation
     WHERE (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
@@ -67,9 +67,59 @@ WITH automatic_series AS MATERIALIZED (
       AND ($5::text IS NULL OR $5 = 'automatic')
       AND ($6::text IS NULL OR $6 = 'tunnel_reachability')
       AND ({visibility})
-), automatic_raw AS MATERIALIZED (
-    SELECT series.id AS series_id, bounded.*
-    FROM automatic_series series
+), manual_keys AS (
+    -- There is no physical-series catalogue for manual job evidence. Keep its
+    -- exact filtered key pass; do not truncate it before the common rank.
+    SELECT observation.id, observation.plan_id, observation.topology_identity_hash,
+           observation.kind, COALESCE(observation.endpoint_side, observation.client_id) AS endpoint,
+           observation.observed_at
+    FROM network_observations observation
+    WHERE observation.source = 'manual'
+      AND observation.observed_at >= to_timestamp($1)
+      AND observation.observed_at <= to_timestamp($2)
+      AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
+      AND ($4::text IS NULL OR observation.client_id = $4 OR observation.peer_client_id = $4)
+      AND ($5::text IS NULL OR observation.source = $5)
+      AND ($6::text IS NULL OR observation.kind = $6)
+      {kind_scope}
+      AND (
+          $7::text IS NULL
+          OR ($7 = 'healthy' AND observation.healthy IS TRUE)
+          OR ($7 = 'unhealthy' AND observation.healthy IS FALSE)
+          OR ($7 = 'unknown' AND observation.healthy IS NULL)
+      )
+      AND (
+          $8::text IS NULL
+          OR concat_ws(' ', observation.client_id, observation.peer_client_id,
+              observation.plan_name, observation.interface_name, observation.target,
+              observation.reason, observation.kind, observation.source) ILIKE '%' || $8 || '%'
+      )
+      AND ({visibility})
+), rank_sources AS MATERIALIZED (
+    -- Resolve the existing grouping tuples once, before ranking sample keys.
+    -- IDs are query-local and collision-free, not persisted evidence identities.
+    -- Carry the existing series record into its producer rather than joining
+    -- candidate rows back to a materialized series catalogue.
+    SELECT sources.series_record, sources.series_id, sources.observation_id, sources.observed_at,
+           dense_rank() OVER (
+               ORDER BY plan_id, {identity_partition} kind, endpoint
+           ) AS group_id
+    FROM (
+        SELECT ROW(automatic_series.*)::public.network_observation_series AS series_record,
+               id AS series_id, NULL::uuid AS observation_id,
+               NULL::timestamptz AS observed_at, plan_id, {identity_partition}
+               'tunnel_reachability'::text AS kind, endpoint_side AS endpoint
+        FROM automatic_series
+        UNION ALL
+        SELECT NULL::public.network_observation_series, NULL::bigint,
+               id, observed_at, plan_id, {identity_partition} kind, endpoint
+        FROM manual_keys
+    ) sources
+), grouped_series AS MATERIALIZED (
+    SELECT (series_record).*, group_id FROM rank_sources WHERE series_id IS NOT NULL
+), automatic_raw AS (
+    SELECT series.id AS series_id, series.group_id, bounded.*
+    FROM grouped_series series
     CROSS JOIN LATERAL (
         SELECT locator.id, locator.plan_name, locator.observed_at,
                locator.received_at, raw.observation
@@ -110,9 +160,9 @@ WITH automatic_series AS MATERIALIZED (
         ORDER BY locator.observed_at DESC, locator.id DESC
         LIMIT $10
     ) bounded
-), automatic_latest AS MATERIALIZED (
-    SELECT latest.*
-    FROM automatic_series series
+), automatic_latest AS (
+    SELECT latest.*, series.group_id, latest AS latest_record
+    FROM grouped_series series
     JOIN network_observation_latest latest ON latest.series_id = series.id
     WHERE series.active
       AND latest.observed_at >= to_timestamp($1)
@@ -134,71 +184,36 @@ WITH automatic_series AS MATERIALIZED (
               series.plan_name, series.interface_name, series.target,
               latest.reason, 'tunnel_reachability', 'automatic') ILIKE '%' || $8 || '%'
       )
-), manual_keys AS (
-    -- There is no physical-series catalogue for manual job evidence. Keep its
-    -- exact filtered key pass; do not truncate it before the common rank.
-    SELECT observation.id, observation.plan_id, observation.topology_identity_hash,
-           observation.kind, COALESCE(observation.endpoint_side, observation.client_id) AS endpoint,
-           observation.observed_at
-    FROM network_observations observation
-    WHERE observation.source = 'manual'
-      AND observation.observed_at >= to_timestamp($1)
-      AND observation.observed_at <= to_timestamp($2)
-      AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
-      AND ($4::text IS NULL OR observation.client_id = $4 OR observation.peer_client_id = $4)
-      AND ($5::text IS NULL OR observation.source = $5)
-      AND ($6::text IS NULL OR observation.kind = $6)
-      {kind_scope}
-      AND (
-          $7::text IS NULL
-          OR ($7 = 'healthy' AND observation.healthy IS TRUE)
-          OR ($7 = 'unhealthy' AND observation.healthy IS FALSE)
-          OR ($7 = 'unknown' AND observation.healthy IS NULL)
-      )
-      AND (
-          $8::text IS NULL
-          OR concat_ws(' ', observation.client_id, observation.peer_client_id,
-              observation.plan_name, observation.interface_name, observation.target,
-              observation.reason, observation.kind, observation.source) ILIKE '%' || $8 || '%'
-      )
-      AND ({visibility})
-), rank_sources AS MATERIALIZED (
-    -- Resolve the existing grouping tuples once, before ranking sample keys.
-    -- IDs are query-local and collision-free, not persisted evidence identities.
-    -- Manual and automatic evidence must share this dictionary so they compete
-    -- in the same group; graph groups still deliberately omit topology identity.
-    SELECT sources.series_id, sources.observation_id, sources.observed_at,
-           dense_rank() OVER (
-               ORDER BY plan_id, {identity_partition} kind, endpoint
-           ) AS group_id
-    FROM (
-        SELECT id AS series_id, NULL::uuid AS observation_id,
-               NULL::timestamptz AS observed_at, plan_id, {identity_partition}
-               'tunnel_reachability'::text AS kind, endpoint_side AS endpoint
-        FROM automatic_series
-        UNION ALL
-        SELECT NULL::bigint, id, observed_at, plan_id, {identity_partition} kind, endpoint
-        FROM manual_keys
-    ) sources
-), grouped_series AS MATERIALIZED (
-    SELECT series_id AS id, group_id FROM rank_sources WHERE series_id IS NOT NULL
 ), ranked AS (
+    -- Carry already-read payloads forward; reattaching materialized candidates
+    -- after selection can multiply work under generic-plan row estimates.
+    -- Origin tags name disjoint existing sources: raw=1, latest=2, manual=3.
+    -- Registry UUID uniqueness and latest's global anti-join ensure no overlap.
     SELECT keys.*,
            row_number() OVER (
                PARTITION BY group_id ORDER BY observed_at DESC, id DESC
            ) AS evidence_rank
     FROM (
-        SELECT raw.id, series.group_id, raw.observed_at
-        FROM automatic_raw raw JOIN grouped_series series ON series.id = raw.series_id
+        SELECT raw.id, raw.group_id, raw.observed_at, 1 AS origin,
+               raw.series_id, raw.plan_name, raw.received_at, raw.observation,
+               NULL::public.network_observation_latest AS latest_record
+        FROM automatic_raw raw
         UNION ALL
-        SELECT latest.observation_id, series.group_id, latest.observed_at
-        FROM automatic_latest latest JOIN grouped_series series ON series.id = latest.series_id
+        SELECT latest.observation_id, latest.group_id, latest.observed_at, 2,
+               latest.series_id, NULL::text, NULL::timestamptz, NULL::jsonb,
+               latest.latest_record
+        FROM automatic_latest latest
         UNION ALL
-        SELECT observation_id, group_id, observed_at FROM rank_sources
+        SELECT observation_id, group_id, observed_at, 3, NULL::bigint,
+               NULL::text, NULL::timestamptz, NULL::jsonb,
+               NULL::public.network_observation_latest
+        FROM rank_sources
         WHERE observation_id IS NOT NULL
     ) keys
 ), selected AS MATERIALIZED (
-    SELECT id, evidence_rank, observed_at
+    -- Keep the final selection boundary: only winning payloads may have their
+    -- numeric metric fields decoded by the hydration branches below.
+    SELECT *
     FROM ranked
     WHERE evidence_rank <= $10
     -- Existing response ordering uses the projected timestamp text; ranking
@@ -217,7 +232,7 @@ WITH automatic_series AS MATERIALIZED (
            observation.bytes, observation.metadata, observation.observed_at, observation.received_at,
            selected.evidence_rank
     FROM selected JOIN network_observations observation USING (id)
-    WHERE observation.source = 'manual'
+    WHERE observation.source = 'manual' AND selected.origin = 3
     UNION ALL
     SELECT raw.id, NULL::uuid, series.client_id, NULL::integer,
            'tunnel_reachability', 'automatic', 'endpoint', series.plan_id,
@@ -234,9 +249,10 @@ WITH automatic_series AS MATERIALIZED (
            (raw.observation ->> 'packet_loss_ratio')::double precision,
            raw.observation ->> 'reason', NULL::double precision, NULL::bigint,
            jsonb_build_object('type', 'tunnel_reachability', 'source', 'automatic'),
-           raw.observed_at, raw.received_at, selected.evidence_rank
-    FROM selected JOIN automatic_raw raw USING (id)
-    JOIN automatic_series series ON series.id = raw.series_id
+           raw.observed_at, raw.received_at, raw.evidence_rank
+    FROM selected raw
+    JOIN network_observation_series series ON series.id = raw.series_id
+    WHERE raw.origin = 1
     UNION ALL
     SELECT latest.observation_id, NULL::uuid, series.client_id, NULL::integer,
            'tunnel_reachability', 'automatic', 'endpoint', series.plan_id,
@@ -247,8 +263,10 @@ WITH automatic_series AS MATERIALIZED (
            latest.latency_mdev_ms, latest.packet_loss_ratio, latest.reason,
            NULL::double precision, NULL::bigint, latest.metadata,
            latest.observed_at, latest.received_at, selected.evidence_rank
-    FROM selected JOIN automatic_latest latest ON latest.observation_id = selected.id
-    JOIN automatic_series series ON series.id = latest.series_id
+    FROM selected
+    JOIN network_observation_series series ON series.id = selected.series_id
+    CROSS JOIN LATERAL (SELECT (selected.latest_record).*) latest
+    WHERE selected.origin = 2
 )
 SELECT {OBSERVATION_COLUMNS}
 FROM hydrated
