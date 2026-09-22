@@ -31,12 +31,20 @@ pub enum NetworkPlanError {
     InvalidInterfaceName,
     #[error("invalid IPv4 CIDR")]
     InvalidCidr,
-    #[error("address pool must have prefix length 31 or shorter")]
+    #[error("address pool is too small for the requested tunnel subnet")]
     AddressPoolTooSmall,
     #[error("address pool is exhausted")]
     AddressPoolExhausted,
     #[error("address pool is required for endpoint allocation")]
     AddressPoolRequired,
+    #[error("tunnel prefix must allow two endpoints (IPv4 0-31, IPv6 0-127)")]
+    InvalidTunnelPrefix,
+    #[error("preferred tunnel endpoints must be distinct addresses in the requested subnet")]
+    InvalidPreferredTunnelAddress,
+    #[error("requested tunnel subnet overlaps an occupied network")]
+    TunnelAddressConflict,
+    #[error("invalid reserved tunnel address or subnet: {0}")]
+    InvalidReservedAddress(String),
     #[error("tunnel plan requires at least one IPv4 or IPv6 endpoint pair")]
     TunnelAddressRequired,
     #[error("invalid additional tunnel address: {0}")]
@@ -354,83 +362,6 @@ fn validate_ospf_config(config: &TunnelOspfConfig) -> Result<(), NetworkPlanErro
         return Err(NetworkPlanError::InvalidOspfConfig);
     }
     Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TunnelEndpointAllocation {
-    pub ipv4_tunnel: Option<TunnelAddressPair>,
-    pub ipv6_tunnel: Option<TunnelAddressPair>,
-    pub latency_primary_family: TunnelAddressFamily,
-}
-
-pub fn allocate_tunnel_endpoints(
-    ipv4_pool_cidr: Option<&str>,
-    ipv6_pool_cidr: Option<&str>,
-    reserved_addresses: &[String],
-    include_ipv4: bool,
-    include_ipv6: bool,
-) -> Result<TunnelEndpointAllocation, NetworkPlanError> {
-    if !include_ipv4 && !include_ipv6 {
-        return Err(NetworkPlanError::TunnelAddressRequired);
-    }
-    let reserved_ipv4 = reserved_addresses
-        .iter()
-        .filter_map(|address| address.parse::<Ipv4Addr>().ok())
-        .map(ipv4_to_u32)
-        .collect::<HashSet<_>>();
-    let reserved_ipv6 = reserved_addresses
-        .iter()
-        .filter_map(|address| address.parse::<Ipv6Addr>().ok())
-        .map(ipv6_to_u128)
-        .collect::<HashSet<_>>();
-
-    let ipv4_tunnel = if include_ipv4 {
-        let pool = ipv4_pool_cidr
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or(NetworkPlanError::AddressPoolRequired)?;
-        let cidr = Ipv4Cidr::parse(pool)?;
-        if cidr.prefix_len > 31 {
-            return Err(NetworkPlanError::AddressPoolTooSmall);
-        }
-        let (left, right) = allocate_tunnel_pair(cidr, &reserved_ipv4)?;
-        Some(TunnelAddressPair {
-            left: left.to_string(),
-            right: right.to_string(),
-            prefix_len: 31,
-        })
-    } else {
-        None
-    };
-
-    let ipv6_tunnel = if include_ipv6 {
-        let pool = ipv6_pool_cidr
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or(NetworkPlanError::AddressPoolRequired)?;
-        let cidr = Ipv6Cidr::parse(pool)?;
-        if cidr.prefix_len > 127 {
-            return Err(NetworkPlanError::AddressPoolTooSmall);
-        }
-        let (left, right) = allocate_tunnel_pair_v6(cidr, &reserved_ipv6)?;
-        Some(TunnelAddressPair {
-            left: left.to_string(),
-            right: right.to_string(),
-            prefix_len: 127,
-        })
-    } else {
-        None
-    };
-
-    Ok(TunnelEndpointAllocation {
-        latency_primary_family: primary_family(
-            TunnelAddressFamily::Ipv4,
-            ipv4_tunnel.as_ref(),
-            ipv6_tunnel.as_ref(),
-        ),
-        ipv4_tunnel,
-        ipv6_tunnel,
-    })
 }
 
 pub fn render_tunnel_endpoint_config(
@@ -902,7 +833,6 @@ fn validate_interface_name(name: &str) -> Result<(), NetworkPlanError> {
 struct Ipv4Cidr {
     network: u32,
     broadcast: u32,
-    prefix_len: u8,
 }
 
 impl Ipv4Cidr {
@@ -924,37 +854,14 @@ impl Ipv4Cidr {
         };
         let network = ipv4_to_u32(address) & mask;
         let broadcast = network | !mask;
-        Ok(Self {
-            network,
-            broadcast,
-            prefix_len,
-        })
+        Ok(Self { network, broadcast })
     }
-}
-
-fn allocate_tunnel_pair(
-    cidr: Ipv4Cidr,
-    reserved: &HashSet<u32>,
-) -> Result<(Ipv4Addr, Ipv4Addr), NetworkPlanError> {
-    let mut candidate = cidr.network;
-    while candidate < cidr.broadcast {
-        let peer = candidate.saturating_add(1);
-        if peer > cidr.broadcast {
-            break;
-        }
-        if !reserved.contains(&candidate) && !reserved.contains(&peer) {
-            return Ok((u32_to_ipv4(candidate), u32_to_ipv4(peer)));
-        }
-        candidate = candidate.saturating_add(2);
-    }
-    Err(NetworkPlanError::AddressPoolExhausted)
 }
 
 #[derive(Clone, Copy)]
 struct Ipv6Cidr {
     network: u128,
     broadcast: u128,
-    prefix_len: u8,
 }
 
 impl Ipv6Cidr {
@@ -976,30 +883,8 @@ impl Ipv6Cidr {
         };
         let network = ipv6_to_u128(address) & mask;
         let broadcast = network | !mask;
-        Ok(Self {
-            network,
-            broadcast,
-            prefix_len,
-        })
+        Ok(Self { network, broadcast })
     }
-}
-
-fn allocate_tunnel_pair_v6(
-    cidr: Ipv6Cidr,
-    reserved: &HashSet<u128>,
-) -> Result<(Ipv6Addr, Ipv6Addr), NetworkPlanError> {
-    let mut candidate = cidr.network;
-    while candidate < cidr.broadcast {
-        let peer = candidate.saturating_add(1);
-        if peer > cidr.broadcast {
-            break;
-        }
-        if !reserved.contains(&candidate) && !reserved.contains(&peer) {
-            return Ok((u128_to_ipv6(candidate), u128_to_ipv6(peer)));
-        }
-        candidate = candidate.saturating_add(2);
-    }
-    Err(NetworkPlanError::AddressPoolExhausted)
 }
 
 fn resolve_ipv4_tunnel(

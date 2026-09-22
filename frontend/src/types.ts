@@ -3663,8 +3663,13 @@ export type TunnelPlanOspfDispatchRecord = {
 };
 
 export type AllocateTunnelEndpointsRequest = {
+  plan_id?: string | null;
   ipv4_pool_cidr?: string | null;
   ipv6_pool_cidr?: string | null;
+  ipv4_prefix_len?: number;
+  ipv6_prefix_len?: number;
+  preferred_ipv4_tunnel?: TunnelAddressPair | null;
+  preferred_ipv6_tunnel?: TunnelAddressPair | null;
   reserved_addresses?: string[];
   include_ipv4?: boolean;
   include_ipv6?: boolean;

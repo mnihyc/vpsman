@@ -162,23 +162,40 @@ WITH automatic_series AS MATERIALIZED (
               observation.reason, observation.kind, observation.source) ILIKE '%' || $8 || '%'
       )
       AND ({visibility})
+), rank_sources AS MATERIALIZED (
+    -- Resolve the existing grouping tuples once, before ranking sample keys.
+    -- IDs are query-local and collision-free, not persisted evidence identities.
+    -- Manual and automatic evidence must share this dictionary so they compete
+    -- in the same group; graph groups still deliberately omit topology identity.
+    SELECT sources.series_id, sources.observation_id, sources.observed_at,
+           dense_rank() OVER (
+               ORDER BY plan_id, {identity_partition} kind, endpoint
+           ) AS group_id
+    FROM (
+        SELECT id AS series_id, NULL::uuid AS observation_id,
+               NULL::timestamptz AS observed_at, plan_id, {identity_partition}
+               'tunnel_reachability'::text AS kind, endpoint_side AS endpoint
+        FROM automatic_series
+        UNION ALL
+        SELECT NULL::bigint, id, observed_at, plan_id, {identity_partition} kind, endpoint
+        FROM manual_keys
+    ) sources
+), grouped_series AS MATERIALIZED (
+    SELECT series_id AS id, group_id FROM rank_sources WHERE series_id IS NOT NULL
 ), ranked AS (
     SELECT keys.*,
            row_number() OVER (
-               PARTITION BY plan_id, {identity_partition} kind, endpoint
-               ORDER BY observed_at DESC, id DESC
+               PARTITION BY group_id ORDER BY observed_at DESC, id DESC
            ) AS evidence_rank
     FROM (
-        SELECT raw.id, series.plan_id, series.topology_identity_hash,
-               'tunnel_reachability'::text AS kind, series.endpoint_side AS endpoint,
-               raw.observed_at
-        FROM automatic_raw raw JOIN automatic_series series ON series.id = raw.series_id
+        SELECT raw.id, series.group_id, raw.observed_at
+        FROM automatic_raw raw JOIN grouped_series series ON series.id = raw.series_id
         UNION ALL
-        SELECT latest.observation_id, series.plan_id, series.topology_identity_hash,
-               'tunnel_reachability', series.endpoint_side, latest.observed_at
-        FROM automatic_latest latest JOIN automatic_series series ON series.id = latest.series_id
+        SELECT latest.observation_id, series.group_id, latest.observed_at
+        FROM automatic_latest latest JOIN grouped_series series ON series.id = latest.series_id
         UNION ALL
-        SELECT * FROM manual_keys
+        SELECT observation_id, group_id, observed_at FROM rank_sources
+        WHERE observation_id IS NOT NULL
     ) keys
 ), selected AS MATERIALIZED (
     SELECT id, evidence_rank, observed_at

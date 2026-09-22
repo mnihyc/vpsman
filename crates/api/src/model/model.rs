@@ -1141,6 +1141,8 @@ pub(crate) struct TunnelPlanOspfDispatchView {
 #[derive(Debug, Deserialize)]
 pub(crate) struct AllocateTunnelEndpointsRequest {
     #[serde(default)]
+    pub(crate) plan_id: Option<Uuid>,
+    #[serde(default)]
     pub(crate) ipv4_pool_cidr: Option<String>,
     #[serde(default)]
     pub(crate) ipv6_pool_cidr: Option<String>,
@@ -1150,6 +1152,14 @@ pub(crate) struct AllocateTunnelEndpointsRequest {
     pub(crate) include_ipv4: Option<bool>,
     #[serde(default)]
     pub(crate) include_ipv6: Option<bool>,
+    #[serde(default)]
+    pub(crate) ipv4_prefix_len: Option<u8>,
+    #[serde(default)]
+    pub(crate) ipv6_prefix_len: Option<u8>,
+    #[serde(default)]
+    pub(crate) preferred_ipv4_tunnel: Option<TunnelAddressPair>,
+    #[serde(default)]
+    pub(crate) preferred_ipv6_tunnel: Option<TunnelAddressPair>,
 }
 
 #[derive(Debug, Serialize)]

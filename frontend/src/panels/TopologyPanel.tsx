@@ -54,7 +54,7 @@ import {
   additionalAddressChanges,
   additionalAddressDraft,
   additionalAddressLines,
-  additionalAddressReservations,
+  buildTunnelAllocationRequest,
   additionalAddressesFromDraft,
   buildRuntimeControl,
   buildRuntimeTopology,
@@ -2693,6 +2693,8 @@ function TunnelPlanComposer({
   >(null);
   const [pending, setPending] = useState(false);
   const [allocationPending, setAllocationPending] = useState(false);
+  const allocationFormRef = useRef(form);
+  allocationFormRef.current = form;
   const [additionalAddressesOpen, setAdditionalAddressesOpen] = useState(() =>
     Object.values(form.additionalAddresses).some((side) =>
       Boolean(side.ipv4 || side.ipv6),
@@ -2980,18 +2982,23 @@ function TunnelPlanComposer({
     setAllocationPending(true);
     setFeedback(null);
     try {
-      const response = await onAllocateTunnelEndpoints({
-        include_ipv4: form.includeIpv4,
-        include_ipv6: form.includeIpv6,
-        ipv4_pool_cidr: form.ipv4Pool.trim() || null,
-        ipv6_pool_cidr: form.ipv6Pool.trim() || null,
-        reserved_addresses: additionalAddressReservations(form.additionalAddresses),
-      });
+      const request = buildTunnelAllocationRequest(form, initialPlan?.id);
+      const response = await onAllocateTunnelEndpoints(request);
+      // A completed request owns only the address draft submitted with it.
+      // Other edits, including masks and manually cleared pairs, stay operator-owned.
+      let currentRequest: AllocateTunnelEndpointsRequest;
+      try {
+        currentRequest = buildTunnelAllocationRequest(allocationFormRef.current, initialPlan?.id);
+      } catch {
+        return;
+      }
+      if (JSON.stringify(currentRequest) !== JSON.stringify(request)) return;
+      setSnapshot(null);
       setForm((current) => applyAllocation(current, response));
       setFeedback({
         message:
           response.ipv4_tunnel || response.ipv6_tunnel
-            ? "Allocated unused endpoint addresses"
+            ? "Kept valid endpoint subnets or allocated unused subnets"
             : "No allocation pool is configured; enter endpoint addresses manually",
         location: "allocation",
         tone:
@@ -3001,7 +3008,7 @@ function TunnelPlanComposer({
       setFeedback({
         location: "allocation",
         message:
-          error instanceof Error ? error.message : "Address allocation failed",
+          tunnelAddressAllocationError(error),
         tone: "danger",
       });
     } finally {
@@ -3731,7 +3738,7 @@ function TunnelPlanComposer({
                   ? "Address allocation is already in progress"
                   : !form.includeIpv4 && !form.includeIpv6
                     ? "Select IPv4 or IPv6 before allocating addresses"
-                    : "Allocate an unused endpoint pair from the configured pool"
+                    : "Fill empty endpoint addresses using the selected prefix. Keep valid existing addresses, including outside the pool."
               }
               type="button"
             >
@@ -3750,7 +3757,7 @@ function TunnelPlanComposer({
             <div className="topologyFormGrid fourColumn compactNumericGrid">
               <Field
                 label="IPv4 pool"
-                tooltip="Optional. Leave empty to use the server-configured allocation pool."
+                tooltip="Used when no endpoint address is filled. Leave empty to use the configured pool. A filled endpoint keeps its subnet; Allocate fills the empty address using the selected prefix."
               >
                 <input
                   aria-label="IPv4 allocation pool"
@@ -3791,7 +3798,7 @@ function TunnelPlanComposer({
             <div className="topologyFormGrid fourColumn compactNumericGrid">
               <Field
                 label="IPv6 pool"
-                tooltip="Optional. Leave empty to use the server-configured allocation pool."
+                tooltip="Used when no endpoint address is filled. Leave empty to use the configured pool. A filled endpoint keeps its subnet; Allocate fills the empty address using the selected prefix."
               >
                 <input
                   aria-label="IPv6 allocation pool"
@@ -5448,15 +5455,10 @@ function validateExistingTunnelPlanConflicts(
   editingPlanId?: string,
 ): string | null {
   const clientIds = new Set([form.leftClientId, form.rightClientId]);
-  const requestedAddresses = new Set(
-    [
-      form.includeIpv4 ? ipAddressKey(form.leftIpv4, 32) : null,
-      form.includeIpv4 ? ipAddressKey(form.rightIpv4, 32) : null,
-      form.includeIpv6 && !isTunnelLinkLocal(form.leftIpv6) ? ipAddressKey(form.leftIpv6, 128) : null,
-      form.includeIpv6 && !isTunnelLinkLocal(form.rightIpv6) ? ipAddressKey(form.rightIpv6, 128) : null,
-      ...additionalAddressConflictKeys(additionalAddressesFromDraft(form.additionalAddresses)),
-    ].filter((value): value is string => Boolean(value)),
-  );
+  const requestedNetworks = tunnelAddressNetworks({
+    ipv4_tunnel: form.includeIpv4 ? addressPair(form.leftIpv4, form.rightIpv4, form.ipv4Prefix) : null,
+    ipv6_tunnel: form.includeIpv6 ? addressPair(form.leftIpv6, form.rightIpv6, form.ipv6Prefix) : null,
+  });
   const requestedListeners = tunnelFormListenerResources(form);
   for (const plan of plans) {
     if (plan.id === editingPlanId) continue;
@@ -5467,27 +5469,12 @@ function validateExistingTunnelPlanConflicts(
     ) {
       return "Another saved plan already uses this interface on one of the selected VPSs";
     }
-    const savedAddresses = [
-      plan.plan.ipv4_tunnel
-        ? ipAddressKey(plan.plan.ipv4_tunnel.left, 32)
-        : null,
-      plan.plan.ipv4_tunnel
-        ? ipAddressKey(plan.plan.ipv4_tunnel.right, 32)
-        : null,
-      plan.plan.ipv6_tunnel && !isTunnelLinkLocal(plan.plan.ipv6_tunnel.left)
-        ? ipAddressKey(plan.plan.ipv6_tunnel.left, 128)
-        : null,
-      plan.plan.ipv6_tunnel && !isTunnelLinkLocal(plan.plan.ipv6_tunnel.right)
-        ? ipAddressKey(plan.plan.ipv6_tunnel.right, 128)
-        : null,
-      ...additionalAddressConflictKeys(plan.plan.additional_addresses),
-    ];
+    const savedNetworks = tunnelAddressNetworks(plan.plan);
     if (
-      savedAddresses.some(
-        (address) => address && requestedAddresses.has(address),
-      )
+      savedNetworks.some((saved) => requestedNetworks.some((requested) =>
+        requested.bits === saved.bits && requested.first <= saved.last && saved.first <= requested.last))
     ) {
-      return "Another saved plan already uses one of these tunnel endpoint addresses";
+      return "A main tunnel subnet overlaps a main subnet reserved by another saved plan";
     }
     const savedListeners = tunnelPlanListenerResources(plan);
     if (
@@ -5506,12 +5493,22 @@ function validateExistingTunnelPlanConflicts(
   return null;
 }
 
-function additionalAddressConflictKeys(addresses: TunnelPlanInput["additional_addresses"]): Array<string | null> {
-  if (!addresses) return [];
-  return [addresses.left, addresses.right].flatMap((side) => [
-    ...side.ipv4.map((cidr) => ipAddressKey(cidr.split("/")[0], 32)),
-    ...side.ipv6.filter((cidr) => !isTunnelLinkLocal(cidr)).map((cidr) => ipAddressKey(cidr.split("/")[0], 128)),
-  ]);
+function tunnelAddressNetworks(plan: Pick<TunnelPlanInput, "ipv4_tunnel" | "ipv6_tunnel">) {
+  const networks: Array<{ bits: 32 | 128; first: bigint; last: bigint }> = [];
+  function add(address: string, prefix: number, bits: 32 | 128) {
+    const value = ipAddressValue(address, bits);
+    if (value === null || !Number.isInteger(prefix) || prefix < 0 || prefix > bits) return;
+    const hostBits = BigInt(bits - prefix);
+    const first = (value >> hostBits) << hostBits;
+    const last = first + (1n << hostBits) - 1n;
+    // Only wholly link-local networks are interface-scoped; a broad global
+    // subnet containing link-local space is not itself a link-local reservation.
+    if (bits === 128 && prefix >= 10 && isTunnelLinkLocal(address)) return;
+    networks.push({ bits, first, last });
+  }
+  if (plan.ipv4_tunnel) add(plan.ipv4_tunnel.left, plan.ipv4_tunnel.prefix_len, 32);
+  if (plan.ipv6_tunnel) add(plan.ipv6_tunnel.left, plan.ipv6_tunnel.prefix_len, 128);
+  return networks;
 }
 
 type TunnelListenerResource = {
@@ -6156,7 +6153,7 @@ function tunnelPlanSaveError(error: unknown): string {
       return "Another saved plan already uses this interface on one of the selected VPSs.";
     }
     if (error.code === "tunnel_plan_address_conflict") {
-      return "Another saved plan already uses one of these tunnel endpoint addresses.";
+      return "A main tunnel subnet overlaps a main subnet reserved by another saved plan.";
     }
     if (error.code === "tunnel_plan_listener_port_conflict") {
       return "Another saved plan already reserves this listener port and transport on one of the selected VPSs.";
@@ -6172,6 +6169,21 @@ function tunnelPlanSaveError(error: unknown): string {
     }
   }
   return error instanceof Error ? error.message : "Tunnel plan save failed";
+}
+
+function tunnelAddressAllocationError(error: unknown): string {
+  if (error instanceof ApiResponseError) {
+    if (error.code === "invalid_tunnel_prefix") {
+      return "Choose a prefix from 0 to 31 for IPv4 or 0 to 127 for IPv6, leaving room for both endpoints.";
+    }
+    if (error.code === "invalid_preferred_tunnel_address") {
+      return "Filled endpoint addresses must be valid and belong to the same subnet with the selected prefix. Correct an invalid value or clear it for allocation.";
+    }
+    if (error.code === "tunnel_plan_address_conflict") {
+      return "The main subnet overlaps another saved plan or an explicit reservation. Choose an unreserved main subnet.";
+    }
+  }
+  return error instanceof Error ? error.message : "Address allocation failed";
 }
 
 function tunnelPlanDeleteError(error: unknown): string {

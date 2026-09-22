@@ -1,3 +1,5 @@
+#[path = "network_allocator.rs"]
+mod allocator;
 #[path = "network_cost.rs"]
 mod cost;
 #[path = "network_models.rs"]
@@ -7,6 +9,10 @@ mod planner;
 #[path = "network_runtime_render.rs"]
 mod runtime_render;
 
+pub use allocator::{
+    allocate_tunnel_endpoints, allocate_tunnel_endpoints_with_options, tunnel_networks_overlap,
+    tunnel_plan_global_networks, TunnelEndpointAllocation, TunnelEndpointAllocationOptions,
+};
 pub use cost::{
     effective_bandwidth_mbps, observed_ospf_cost, ospf_cost, routing_cost_update_privilege_payload,
     MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
@@ -29,10 +35,9 @@ pub use models::{
     MIN_TUNNEL_MTU, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
 };
 pub use planner::{
-    allocate_tunnel_endpoints, plan_tunnel, render_tunnel_endpoint_config,
-    validate_runtime_topology_intent, validate_runtime_tunnel_control,
-    validate_runtime_tunnel_driver_options, validate_tunnel_link_local_addresses, NetworkPlanError,
-    TunnelEndpointAllocation,
+    plan_tunnel, render_tunnel_endpoint_config, validate_runtime_topology_intent,
+    validate_runtime_tunnel_control, validate_runtime_tunnel_driver_options,
+    validate_tunnel_link_local_addresses, NetworkPlanError,
 };
 pub use runtime_render::*;
 

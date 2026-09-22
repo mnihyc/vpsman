@@ -1,15 +1,13 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use sqlx::{types::Json as SqlJson, QueryBuilder, Row};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    tunnel_topology_identity_hash, RuntimeTunnelManager, TunnelBuiltinCredentials,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    tunnel_networks_overlap, tunnel_plan_global_networks, tunnel_topology_identity_hash,
+    RuntimeTunnelManager, TunnelBuiltinCredentials, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput,
 };
 
 use crate::{
@@ -433,6 +431,27 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = fetch_postgres_tunnel_plan_resource_rows(pool, excluded_plan_id).await?;
                 validate_postgres_tunnel_plan_resource_rows(plan, rows)
+            }
+        }
+    }
+
+    pub(crate) async fn tunnel_plan_reserved_networks(
+        &self,
+        excluded_plan_id: Option<Uuid>,
+    ) -> Result<Vec<String>> {
+        match self {
+            Self::Postgres(pool) => {
+                let rows = fetch_postgres_tunnel_plan_resource_rows(pool, excluded_plan_id).await?;
+                let mut networks = BTreeSet::new();
+                for row in rows {
+                    let existing: SqlJson<TunnelPlan> = row.try_get("plan")?;
+                    networks.extend(
+                        tunnel_plan_global_networks(&existing.0)?
+                            .into_iter()
+                            .map(|network| network.to_string()),
+                    );
+                }
+                Ok(networks.into_iter().collect())
             }
         }
     }
@@ -1750,39 +1769,9 @@ const TUNNEL_PLAN_RESOURCE_ROWS_QUERY: &str = r#"
     ORDER BY id
 "#;
 
-pub(crate) fn tunnel_plan_addresses(plan: &TunnelPlan) -> Result<HashSet<IpAddr>> {
-    [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
-        .into_iter()
-        .flatten()
-        .flat_map(|pair| [&pair.left, &pair.right])
-        .map(String::as_str)
-        .chain(
-            [
-                &plan.additional_addresses.left,
-                &plan.additional_addresses.right,
-            ]
-            .into_iter()
-            .flat_map(|endpoint| endpoint.ipv4.iter().chain(&endpoint.ipv6))
-            .map(|cidr| cidr.split('/').next().unwrap_or(cidr)),
-        )
-        .map(|address| {
-            address
-                .parse::<IpAddr>()
-                .map_err(|_| anyhow::anyhow!("tunnel_plan_address_invalid"))
-        })
-        .collect::<Result<HashSet<_>>>()
-        .map(|addresses| {
-            // Link-local addresses belong to an interface, not the fleet-wide
-            // allocation space. Interface collisions are checked separately.
-            addresses.into_iter().filter(|address| {
-                !matches!(address, IpAddr::V6(address) if address.is_unicast_link_local())
-            }).collect()
-        })
-}
-
 fn validate_tunnel_plan_resource_pair(
     requested: &TunnelPlan,
-    requested_addresses: &HashSet<IpAddr>,
+    requested_networks: &[ipnet::IpNet],
     existing: &TunnelPlan,
     existing_left_client_id: &str,
     existing_right_client_id: &str,
@@ -1797,8 +1786,11 @@ fn validate_tunnel_plan_resource_pair(
         !shares_endpoint || requested.interface_name != existing.interface_name,
         "tunnel_plan_interface_conflict"
     );
+    let existing_networks = tunnel_plan_global_networks(existing)?;
     anyhow::ensure!(
-        requested_addresses.is_disjoint(&tunnel_plan_addresses(existing)?),
+        requested_networks.iter().all(|requested| existing_networks
+            .iter()
+            .all(|existing| !tunnel_networks_overlap(requested, existing))),
         "tunnel_plan_address_conflict"
     );
     let existing_ports = tunnel_plan_listener_resources(existing)
@@ -1875,14 +1867,14 @@ fn validate_postgres_tunnel_plan_resource_rows(
     requested: &TunnelPlan,
     rows: Vec<sqlx::postgres::PgRow>,
 ) -> Result<()> {
-    let requested_addresses = tunnel_plan_addresses(requested)?;
+    let requested_networks = tunnel_plan_global_networks(requested)?;
     for row in rows {
         let existing: SqlJson<serde_json::Value> = row.try_get("plan")?;
         let existing = serde_json::from_value::<TunnelPlan>(existing.0)
             .map_err(|error| anyhow::anyhow!("invalid persisted tunnel plan: {error}"))?;
         validate_tunnel_plan_resource_pair(
             requested,
-            &requested_addresses,
+            &requested_networks,
             &existing,
             &row.try_get::<String, _>("left_client_id")?,
             &row.try_get::<String, _>("right_client_id")?,
@@ -1920,9 +1912,16 @@ async fn lock_postgres_tunnel_plan_write(
 }
 
 fn tunnel_plan_resource_identities(plan: &TunnelPlan) -> Result<Vec<String>> {
-    let mut identities = tunnel_plan_addresses(plan)?
+    // Different endpoints and prefix lengths can reserve overlapping subnets.
+    // Configuration writes therefore serialize per global address family via
+    // the existing advisory definition locks. These rare declaration writes
+    // do not lock tables or block independent telemetry/read transactions.
+    let mut identities = tunnel_plan_global_networks(plan)?
         .into_iter()
-        .map(|address| format!("tunnel-address:{address}"))
+        .map(|network| match network {
+            ipnet::IpNet::V4(_) => "tunnel-address-space:ipv4".to_string(),
+            ipnet::IpNet::V6(_) => "tunnel-address-space:ipv6".to_string(),
+        })
         .collect::<Vec<_>>();
     identities.extend(
         [plan.left_client_id.as_str(), plan.right_client_id.as_str()]

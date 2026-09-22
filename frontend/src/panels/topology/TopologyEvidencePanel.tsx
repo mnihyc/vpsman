@@ -1,10 +1,12 @@
-import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   useByteCountFormatter,
   type ByteCountFormatter,
 } from "../../panelDisplay";
 import {
   Activity,
+  ChevronLeft,
+  ChevronRight,
   ExternalLink,
   GitBranch,
   GitCompareArrows,
@@ -19,6 +21,10 @@ import {
   topologyRuntimeStateBadgeClass,
 } from "../../jobStatusPresentation";
 import { ActionFeedback } from "../../components/ActionFeedback";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import { NetworkEvidenceRangeControls } from "../../components/NetworkEvidenceRangeControls";
 import type { MonitoringWindow } from "../../components/MonitoringRangeTabs";
 import { VpsCombobox } from "../../components/VpsCombobox";
@@ -59,6 +65,13 @@ import {
   type NetworkEvidenceQuery,
   type NetworkEvidenceSource,
 } from "../../networkEvidence";
+import {
+  buildLatencyCurveGroups,
+  LATENCY_CURVE_SAMPLE_COUNT,
+  latestObservationRows,
+  maximumLatency,
+  type LatencyCurvePoint,
+} from "./topologyEvidenceData";
 
 const networkCommands = new Set([
   "runtime_config_sync",
@@ -144,6 +157,9 @@ export function TopologyEvidencePanel({
   const [health, setHealth] = useState<NetworkEvidenceHealth>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [appliedPlanId, setAppliedPlanId] = useState("");
+  const [appliedQueryKey, setAppliedQueryKey] = useState(() =>
+    evidenceQueryPageKey({ window: DEFAULT_NETWORK_EVIDENCE_WINDOW }),
+  );
   const refreshGenerationRef = useRef(0);
   const throughputBaselines = useMemo(
     () => buildThroughputBaselineLookup(ospfRecommendations, ospfUpdatePlans),
@@ -161,24 +177,20 @@ export function TopologyEvidencePanel({
       loaded?.planId,
     );
   });
-  const selectedPlanIds = appliedPlanId ? new Set([appliedPlanId]) : null;
   const ospfUpdateRows = ospfUpdatePlans
-    .filter((plan) => !selectedPlanIds || selectedPlanIds.has(plan.plan_id))
+    .filter((plan) => !appliedPlanId || plan.plan_id === appliedPlanId)
     .map(buildOspfUpdatePlanRow);
   const ospfRows = ospfRecommendations
-    .filter(
-      (recommendation) =>
-        !selectedPlanIds || selectedPlanIds.has(recommendation.plan_id),
-    )
+    .filter((recommendation) => !appliedPlanId || recommendation.plan_id === appliedPlanId)
     .map(buildOspfRecommendationRow);
-  const observationRows = latestObservationRows(observations).map(
-    (observation) =>
-      buildObservationRow(
-        observation,
-        clientLabel,
-        throughputBaselines,
-        formatBytes,
-      ),
+  const latestObservations = useMemo(
+    () => latestObservationRows(observations),
+    [observations],
+  );
+  // Presentation labels depend on wall-clock freshness, so refresh them on
+  // every render while retaining memoized aggregation of the exact history.
+  const observationRows = latestObservations.map((observation) =>
+    buildObservationRow(observation, clientLabel, throughputBaselines, formatBytes),
   );
   const trendRows = trends.map((trend) =>
     buildTrendRow(trend, clientLabel, throughputBaselines, formatBytes),
@@ -187,21 +199,19 @@ export function TopologyEvidencePanel({
     (row) => row.metric === "Output not loaded",
   );
   const hasTrendComparison = trendRows.length > 0;
-  const freshness = buildNetworkEvidenceFreshness(observations);
-  const timelineStages = buildTimelineStages({
+  const latestReachability = useMemo(
+    () => latestReachabilityObservation(observations),
+    [observations],
+  );
+  const freshness = buildNetworkEvidenceFreshness(latestReachability);
+  const timelineStages = useMemo(() => buildTimelineStages({
     commandRows: rows,
     observationRows,
     ospfRecommendationRows: ospfRows,
     ospfUpdateRows,
     trendRows,
-  });
-  const probePoints: Array<{
-    healthy?: boolean | null;
-    jobId: string;
-    latencyAvgMs: number | null;
-    lossRatio: number | null;
-    reason?: string | null;
-  }> = [
+  }), [rows, observationRows, ospfRows, ospfUpdateRows, trendRows]);
+  const probePoints = useMemo<Array<LatencyCurvePoint & { jobId: string }>>(() => [
     ...rows
       .filter(
         (row) =>
@@ -221,17 +231,14 @@ export function TopologyEvidencePanel({
         lossRatio: observation.packet_loss_ratio ?? null,
         reason: observation.reason,
       })),
-  ];
-  const maxLatency = Math.max(
-    1,
-    ...probePoints.flatMap((point) =>
-      typeof point.latencyAvgMs === "number" ? [point.latencyAvgMs] : [],
-    ),
-  );
+  ], [rows, observations]);
+  const maxLatency = useMemo(() => maximumLatency(probePoints), [probePoints]);
   const latencyGroups = useMemo(
     () => buildLatencyCurveGroups(observations, clientLabel),
     [clientLabel, observations],
   );
+  const curvePage = useEvidencePage(latencyGroups, appliedQueryKey);
+  const probePage = useEvidencePage(probePoints, appliedQueryKey, LATENCY_CURVE_SAMPLE_COUNT);
   const hasStandaloneProbeCurve =
     probePoints.length > 1 && latencyGroups.length === 0;
   const hasMeasurementEvidence =
@@ -244,13 +251,13 @@ export function TopologyEvidencePanel({
     Number(Boolean(health)) +
     Number(Boolean(searchQuery.trim()));
   const selectedRangeLabel = networkEvidenceWindowLabel(evidenceWindow);
-  const retainedResolution = trends.reduce(
+  const retainedResolution = useMemo(() => trends.reduce(
     (coarsest, trend) =>
       trend.retained && typeof trend.effective_resolution_secs === "number"
         ? Math.max(coarsest, trend.effective_resolution_secs)
         : coarsest,
     0,
-  );
+  ), [trends]);
   const status = `${observations.length} exact observations / ${trends.length} trend points in ${selectedRangeLabel}${
     retainedResolution > 0
       ? ` · tiered ${formatTrendResolution(retainedResolution)} coarsest source`
@@ -307,6 +314,7 @@ export function TopologyEvidencePanel({
       await Promise.all(requests);
       if (generation !== refreshGenerationRef.current) return;
       setAppliedPlanId(planId);
+      setAppliedQueryKey(evidenceQueryPageKey(query));
     } catch (loadError) {
       if (generation !== refreshGenerationRef.current) return;
       setRefreshError(
@@ -357,6 +365,7 @@ export function TopologyEvidencePanel({
         onLoadOspfUpdatePlans(),
       ]);
       if (generation !== refreshGenerationRef.current) return;
+      setAppliedQueryKey(evidenceQueryPageKey(query));
     } catch (loadError) {
       if (generation !== refreshGenerationRef.current) return;
       setRefreshError(
@@ -719,110 +728,26 @@ export function TopologyEvidencePanel({
           title="Recommendation evidence"
         >
           {ospfUpdateRows.length > 0 && (
-            <div
-              aria-label="OSPF update plan evidence"
-              className="table historyTable trendTable"
-              role="table"
-            >
-              <div
-                className="historyRow heading topologyEvidenceGrid"
-                role="row"
-              >
-                <span role="columnheader">OSPF update plan</span>
-                <span role="columnheader">Health</span>
-                <span role="columnheader">Cost</span>
-                <span role="columnheader">Approval</span>
-                <span role="columnheader">Latest</span>
-              </div>
-              {ospfUpdateRows.map((row) => (
-                <div
-                  className="historyRow topologyEvidenceGrid"
-                  key={row.id}
-                  role="row"
-                  title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}. Health: ${row.signalLabel}; ${row.healthDetail}. Cost: ${row.metric}; ${row.metricDetail}. Approval: ${row.target}; ${row.targetDetail}. Latest: ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}.`}
-                >
-                  <span className="historyPrimary" role="cell">
-                    <EvidenceMobileLabel>OSPF update plan</EvidenceMobileLabel>
-                    <strong>{row.planName}</strong>
-                    <small>{row.interfaceName}</small>
-                    <small>{row.confidence}</small>
-                  </span>
-                  <span className="topologyEvidenceStatusCell" role="cell">
-                    <EvidenceMobileLabel>Health</EvidenceMobileLabel>
-                    <span
-                      className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                    >
-                      {row.signalLabel}
-                    </span>
-                  </span>
-                  <span className="topologyMetric" role="cell">
-                    <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
-                    <strong>{row.metric}</strong>
-                    <small>{row.metricDetail}</small>
-                  </span>
-                  <span className="topologyMetric" role="cell">
-                    <EvidenceMobileLabel>Approval</EvidenceMobileLabel>
-                    <strong>{row.target}</strong>
-                    <small>{row.targetDetail}</small>
-                  </span>
-                  <EvidenceTime label="Latest" value={row.latestObservedAt} />
-                </div>
-              ))}
-            </div>
+            <ConsoleDataGrid
+              columns={ospfUpdateColumns}
+              getRowId={evidenceRowId}
+              pageResetKey={appliedQueryKey}
+              rows={ospfUpdateRows}
+              selectable={false}
+              storageKey="topology-evidence-ospf-updates"
+              title="OSPF update plan evidence"
+            />
           )}
           {ospfRows.length > 0 && (
-            <div
-              aria-label="OSPF recommendation evidence"
-              className="table historyTable trendTable"
-              role="table"
-            >
-              <div
-                className="historyRow heading topologyEvidenceGrid"
-                role="row"
-              >
-                <span role="columnheader">OSPF recommendation</span>
-                <span role="columnheader">Health</span>
-                <span role="columnheader">Cost</span>
-                <span role="columnheader">Evidence</span>
-                <span role="columnheader">Latest</span>
-              </div>
-              {ospfRows.map((row) => (
-                <div
-                  className="historyRow topologyEvidenceGrid"
-                  key={row.id}
-                  role="row"
-                  title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}. Health: ${row.signalLabel}; ${row.healthDetail}. Cost: ${row.metric}; ${row.metricDetail}. Evidence: ${row.target}; ${row.targetDetail}. Latest: ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}.`}
-                >
-                  <span className="historyPrimary" role="cell">
-                    <EvidenceMobileLabel>
-                      OSPF recommendation
-                    </EvidenceMobileLabel>
-                    <strong>{row.planName}</strong>
-                    <small>{row.interfaceName}</small>
-                    <small>{row.confidence}</small>
-                  </span>
-                  <span className="topologyEvidenceStatusCell" role="cell">
-                    <EvidenceMobileLabel>Health</EvidenceMobileLabel>
-                    <span
-                      className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                    >
-                      {row.signalLabel}
-                    </span>
-                  </span>
-                  <span className="topologyMetric" role="cell">
-                    <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
-                    <strong>{row.metric}</strong>
-                    <small>{row.metricDetail}</small>
-                  </span>
-                  <span className="topologyMetric" role="cell">
-                    <EvidenceMobileLabel>Evidence</EvidenceMobileLabel>
-                    <strong>{row.target}</strong>
-                    <small>{row.targetDetail}</small>
-                  </span>
-                  <EvidenceTime label="Latest" value={row.latestObservedAt} />
-                </div>
-              ))}
-            </div>
+            <ConsoleDataGrid
+              columns={ospfRecommendationColumns}
+              getRowId={evidenceRowId}
+              pageResetKey={appliedQueryKey}
+              rows={ospfRows}
+              selectable={false}
+              storageKey="topology-evidence-ospf-recommendations"
+              title="OSPF recommendation evidence"
+            />
           )}
         </EvidenceGroup>
       )}
@@ -832,11 +757,13 @@ export function TopologyEvidencePanel({
           title="Measurement evidence"
         >
           {hasStandaloneProbeCurve && (
+            <>
+            <EvidencePager label="Network probe samples" page={probePage} />
             <div
               className="latencyCurve"
               aria-label="Network probe latency history"
             >
-              {probePoints.map((point) => (
+              {probePage.rows.map((point) => (
                 <span
                   className={
                     point.latencyAvgMs === null
@@ -866,13 +793,16 @@ export function TopologyEvidencePanel({
                 />
               ))}
             </div>
+            </>
           )}
           {latencyGroups.length > 0 && (
+            <>
+            <EvidencePager label="Tunnel latency curves" page={curvePage} />
             <div
               className="latencyCurveGroups"
               aria-label="Per tunnel latency curves"
             >
-              {latencyGroups.map((group) => (
+              {curvePage.rows.map((group) => (
                 <div
                   className="latencyCurveCard"
                   key={group.key}
@@ -919,56 +849,21 @@ export function TopologyEvidencePanel({
                 </div>
               ))}
             </div>
+            </>
           )}
           {trendRows.length > 0 && (
             <div
-              aria-label="Network observation trends"
-              className="table historyTable trendTable"
               id="topology-evidence-trends"
-              role="table"
             >
-              <div
-                className="historyRow heading topologyEvidenceGrid"
-                role="row"
-              >
-                <span role="columnheader">Trend</span>
-                <span role="columnheader">Health</span>
-                <span role="columnheader">Metric</span>
-                <span role="columnheader">Endpoint</span>
-                <span role="columnheader">Latest</span>
-              </div>
-              {trendRows.map((row) => (
-                <div
-                  className="historyRow topologyEvidenceGrid"
-                  key={row.id}
-                  role="row"
-                >
-                  <span className="historyPrimary" role="cell">
-                    <EvidenceMobileLabel>Trend</EvidenceMobileLabel>
-                    <strong>{humanStatus(row.kind)}</strong>
-                    <small>{row.sampleCount} samples</small>
-                  </span>
-                  <span className="topologyEvidenceStatusCell" role="cell">
-                    <EvidenceMobileLabel>Health</EvidenceMobileLabel>
-                    <span
-                      className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                    >
-                      {row.signalLabel}
-                    </span>
-                  </span>
-                  <span className="topologyMetric" role="cell">
-                    <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
-                    <strong>{row.metric}</strong>
-                    <small>{row.metricDetail}</small>
-                  </span>
-                  <span className="topologyMetric" role="cell">
-                    <EvidenceMobileLabel>Endpoint</EvidenceMobileLabel>
-                    <strong>{row.target}</strong>
-                    <small>{row.targetDetail}</small>
-                  </span>
-                  <EvidenceTime label="Latest" value={row.latestObservedAt} />
-                </div>
-              ))}
+              <ConsoleDataGrid
+                columns={trendColumns}
+                getRowId={evidenceRowId}
+                pageResetKey={appliedQueryKey}
+                rows={trendRows}
+                selectable={false}
+                storageKey="topology-evidence-trends"
+                title="Network observation trends"
+              />
             </div>
           )}
         </EvidenceGroup>
@@ -978,57 +873,15 @@ export function TopologyEvidencePanel({
           detail="Persisted status, probe, and speed-test observations remain separate from recommendations and related jobs."
           title="Status and probe results"
         >
-          <div
-            aria-label="Status and probe observations"
-            className="table historyTable observationTable"
-            role="table"
-          >
-            <div className="historyRow heading topologyEvidenceGrid" role="row">
-              <span role="columnheader">Observation</span>
-              <span role="columnheader">Signal</span>
-              <span role="columnheader">Metric</span>
-              <span role="columnheader">Target</span>
-              <span role="columnheader">Observed</span>
-            </div>
-            {observationRows.map((row) => (
-              <div
-                className="historyRow topologyEvidenceGrid"
-                key={row.id}
-                role="row"
-              >
-                <span className="historyPrimary" role="cell">
-                  <EvidenceMobileLabel>Observation</EvidenceMobileLabel>
-                  <strong>{humanStatus(row.kind)}</strong>
-                  <small>
-                    {row.source === "automatic"
-                      ? "automatic monitor"
-                      : row.jobId
-                        ? `manual job ${shortId(row.jobId)}`
-                        : "manual observation"}
-                  </small>
-                </span>
-                <span className="topologyEvidenceStatusCell" role="cell">
-                  <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
-                  <span
-                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                  >
-                    {row.signalLabel}
-                  </span>
-                </span>
-                <span className="topologyMetric" role="cell">
-                  <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
-                  <strong>{row.metric}</strong>
-                  <small>{row.metricDetail}</small>
-                </span>
-                <span className="topologyMetric" role="cell">
-                  <EvidenceMobileLabel>Target</EvidenceMobileLabel>
-                  <strong>{row.target}</strong>
-                  <small>{row.targetDetail}</small>
-                </span>
-                <EvidenceTime label="Observed" value={row.observedAt} />
-              </div>
-            ))}
-          </div>
+          <ConsoleDataGrid
+            columns={observationColumns}
+            getRowId={evidenceRowId}
+            pageResetKey={appliedQueryKey}
+            rows={observationRows}
+            selectable={false}
+            storageKey="topology-evidence-observations"
+            title="Status and probe observations"
+          />
         </EvidenceGroup>
       )}
       <EvidenceGroup
@@ -1108,6 +961,179 @@ export function TopologyEvidencePanel({
   );
 }
 
+function evidenceQueryPageKey(query: NetworkEvidenceQuery): string {
+  return JSON.stringify([
+    query.window ?? DEFAULT_NETWORK_EVIDENCE_WINDOW,
+    query.window === "custom" ? [query.startAt, query.endAt] : null,
+    query.planIds ?? [],
+    query.clientId ?? "",
+    query.source ?? "",
+    query.kind ?? "",
+    query.health ?? "",
+    query.query?.trim() ?? "",
+  ]);
+}
+
+// Curves are paged after grouping; their default matches the shared table's
+// ten-row page. Standalone history uses one existing 24-sample curve per page.
+function useEvidencePage<T>(rows: T[], resetKey: string, pageSize = 10) {
+  const [page, setPage] = useState({ index: 0, resetKey });
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const pageIndex = page.resetKey === resetKey
+    ? Math.min(page.index, pageCount - 1)
+    : 0;
+  useEffect(() => {
+    setPage((current) => current.resetKey === resetKey && current.index === pageIndex
+      ? current
+      : { index: pageIndex, resetKey });
+  }, [pageIndex, resetKey]);
+  return {
+    count: rows.length,
+    pageCount,
+    pageIndex,
+    pageSize,
+    rows: rows.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize),
+    setPageIndex: (index: number) => setPage({ index, resetKey }),
+  };
+}
+
+function EvidencePager({ label, page }: {
+  label: string;
+  page: Omit<ReturnType<typeof useEvidencePage>, "rows">;
+}) {
+  return (
+    <div className="topologyEvidenceCurvePager" aria-label={`${label} pagination`}>
+      <span>
+        {label} · {page.pageIndex * page.pageSize + 1}–{Math.min((page.pageIndex + 1) * page.pageSize, page.count)} of {page.count}
+      </span>
+      <span className="gridPagination">
+        <button
+          aria-label={`${label} previous page`}
+          className="iconButton"
+          disabled={page.pageIndex === 0}
+          onClick={() => page.setPageIndex(page.pageIndex - 1)}
+          title={`Previous ${label.toLowerCase()} page`}
+          type="button"
+        ><ChevronLeft size={16} /></button>
+        <span className="gridPageLabel" title={`Page ${page.pageIndex + 1} of ${page.pageCount}`}>
+          {page.pageIndex + 1} / {page.pageCount}
+        </span>
+        <button
+          aria-label={`${label} next page`}
+          className="iconButton"
+          disabled={page.pageIndex + 1 >= page.pageCount}
+          onClick={() => page.setPageIndex(page.pageIndex + 1)}
+          title={`Next ${label.toLowerCase()} page`}
+          type="button"
+        ><ChevronRight size={16} /></button>
+      </span>
+    </div>
+  );
+}
+
+type EvidenceMetricRow = {
+  id: string;
+  signalLabel: string;
+  signalStatus: TopologyObservationState;
+  metric: string;
+  metricDetail: string;
+  target: string;
+  targetDetail: string;
+  healthDetail?: string;
+};
+
+function evidenceRowId(row: { id: string }): string {
+  return row.id;
+}
+
+function evidenceColumns<T extends EvidenceMetricRow>(
+  primary: ConsoleDataGridColumn<T>,
+  observedAt: (row: T) => string | null,
+  { signal = "Health", metric = "Metric", target = "Endpoint", time = "Latest" } = {},
+): ConsoleDataGridColumn<T>[] {
+  return [
+    { ...primary, mobilePrimary: true, size: 185 },
+    {
+      id: "signal", header: signal, mobileState: true, size: 150,
+      cell: (row) => <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalLabel}</span>,
+      searchValue: (row) => `${row.signalLabel} ${row.healthDetail ?? ""}`,
+      sortValue: (row) => row.signalLabel,
+      tooltip: (row) => row.healthDetail,
+    },
+    {
+      id: "metric", header: metric, size: 220,
+      cell: (row) => <span className="topologyMetric"><strong>{row.metric}</strong><small>{row.metricDetail}</small></span>,
+      searchValue: (row) => `${row.metric} ${row.metricDetail}`,
+      sortValue: (row) => row.metric,
+      tooltip: (row) => `${row.metric}; ${row.metricDetail}`,
+    },
+    {
+      id: "target", header: target, size: 200,
+      cell: (row) => <span className="topologyMetric"><strong>{row.target}</strong><small>{row.targetDetail}</small></span>,
+      searchValue: (row) => `${row.target} ${row.targetDetail}`,
+      sortValue: (row) => row.target,
+      tooltip: (row) => `${row.target}; ${row.targetDetail}`,
+    },
+    {
+      id: "observed", header: time, size: 110,
+      cell: (row) => {
+        const value = observedAt(row);
+        return value ? <time dateTime={value} title={formatFullTime(value)}>{formatCompactTime(value)}</time> : "pending";
+      },
+      searchValue: observedAt,
+      sortValue: (row) => {
+        const value = observedAt(row);
+        return value ? timestampMillis(value) : 0;
+      },
+      tooltip: (row) => {
+        const value = observedAt(row);
+        return value ? formatFullTime(value) : "not reported";
+      },
+    },
+  ];
+}
+
+function ospfEvidenceColumns(primaryLabel: string, target: string) {
+  return evidenceColumns<OspfRecommendationRow>(
+    {
+      id: "plan", header: primaryLabel,
+      cell: (row) => <span className="historyPrimary"><strong>{row.planName}</strong><small>{row.interfaceName}</small><small>{row.confidence}</small></span>,
+      searchValue: (row) => `${row.planName} ${row.interfaceName} ${row.confidence}`,
+      sortValue: (row) => row.planName,
+      tooltip: (row) => `${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}`,
+    },
+    (row) => row.latestObservedAt,
+    { metric: "Cost", target },
+  );
+}
+
+const ospfUpdateColumns = ospfEvidenceColumns("OSPF update plan", "Approval");
+const ospfRecommendationColumns = ospfEvidenceColumns("OSPF recommendation", "Evidence");
+const trendColumns = evidenceColumns<TrendRow>(
+  {
+    id: "trend", header: "Trend",
+    cell: (row) => <span className="historyPrimary"><strong>{humanStatus(row.kind)}</strong><small>{row.sampleCount} samples</small></span>,
+    searchValue: (row) => `${humanStatus(row.kind)} ${row.sampleCount} samples`,
+    sortValue: (row) => row.kind,
+  },
+  (row) => row.latestObservedAt,
+);
+
+function observationSourceLabel(row: ObservationRow): string {
+  return row.source === "automatic" ? "automatic monitor" : row.jobId ? `manual job ${shortId(row.jobId)}` : "manual observation";
+}
+
+const observationColumns = evidenceColumns<ObservationRow>(
+  {
+    id: "observation", header: "Observation",
+    cell: (row) => <span className="historyPrimary"><strong>{humanStatus(row.kind)}</strong><small>{observationSourceLabel(row)}</small></span>,
+    searchValue: (row) => `${humanStatus(row.kind)} ${observationSourceLabel(row)} ${row.jobId ?? ""}`,
+    sortValue: (row) => row.kind,
+  },
+  (row) => row.observedAt,
+  { signal: "Signal", target: "Target", time: "Observed" },
+);
+
 function EvidenceGroup({
   children,
   detail,
@@ -1175,19 +1201,6 @@ type EvidenceRow = {
   targetDetail: string;
   latencyAvgMs?: number;
   lossRatio?: number;
-};
-
-type LatencyCurveGroup = {
-  key: string;
-  label: string;
-  detail: string;
-  maxLatency: number;
-  points: {
-    healthy: boolean | null;
-    latencyAvgMs: number | null;
-    lossRatio: number | null;
-    reason: string | null;
-  }[];
 };
 
 type ObservationRow = {
@@ -1617,12 +1630,11 @@ function sampleFreshnessLabel(
   return "Recorded sample";
 }
 
-function buildNetworkEvidenceFreshness(
+function latestReachabilityObservation(
   observations: NetworkObservationRecord[],
-): NetworkEvidenceFreshness | null {
-  const latest = observations
-    .filter((observation) => observation.kind === "tunnel_reachability")
-    .reduce<NetworkObservationRecord | null>((current, observation) => {
+): NetworkObservationRecord | null {
+  return observations.reduce<NetworkObservationRecord | null>((current, observation) => {
+      if (observation.kind !== "tunnel_reachability") return current;
       if (!current) {
         return observation;
       }
@@ -1631,6 +1643,11 @@ function buildNetworkEvidenceFreshness(
         ? observation
         : current;
     }, null);
+}
+
+function buildNetworkEvidenceFreshness(
+  latest: NetworkObservationRecord | null,
+): NetworkEvidenceFreshness | null {
   if (!latest) {
     return null;
   }
@@ -1745,34 +1762,6 @@ function formatTrendResolution(seconds: number): string {
   if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
   if (seconds % 60 === 0) return `${seconds / 60}m`;
   return `${seconds}s`;
-}
-
-function latestObservationRows(
-  observations: NetworkObservationRecord[],
-): NetworkObservationRecord[] {
-  const latest = new Map<string, NetworkObservationRecord>();
-  for (const observation of observations) {
-    const key = [
-      observation.plan_id ?? "unplanned",
-      observation.topology_identity_hash ?? "identity",
-      observation.kind,
-      observation.endpoint_side ?? observation.client_id,
-    ].join(":");
-    const current = latest.get(key);
-    if (
-      !current ||
-      timestampMillis(observation.observed_at) >
-        timestampMillis(current.observed_at)
-    ) {
-      latest.set(key, observation);
-    }
-  }
-  return Array.from(latest.values()).sort(
-    (left, right) =>
-      timestampMillis(right.observed_at) - timestampMillis(left.observed_at) ||
-      (left.plan_name ?? "").localeCompare(right.plan_name ?? "") ||
-      left.client_id.localeCompare(right.client_id),
-  );
 }
 
 function buildObservationRow(
@@ -1896,58 +1885,6 @@ function buildObservationRow(
     ),
     observedAt: observation.observed_at,
   };
-}
-
-function buildLatencyCurveGroups(
-  observations: NetworkObservationRecord[],
-  clientLabel: (clientId: string) => string,
-): LatencyCurveGroup[] {
-  const grouped = new Map<string, NetworkObservationRecord[]>();
-  for (const observation of observations) {
-    if (observation.kind !== "tunnel_reachability") {
-      continue;
-    }
-    const key = networkEvidenceSeriesKey(observation);
-    grouped.set(key, [...(grouped.get(key) ?? []), observation]);
-  }
-  return Array.from(grouped.entries())
-    .map(([key, rows]) => {
-      const sorted = rows
-        .slice()
-        .sort((left, right) =>
-          left.observed_at.localeCompare(right.observed_at),
-        )
-        .slice(-24);
-      const points = sorted.map((row) => ({
-        healthy: row.healthy,
-        latencyAvgMs: row.latency_avg_ms,
-        lossRatio: row.packet_loss_ratio ?? null,
-        reason: row.reason,
-      }));
-      const latest = sorted[sorted.length - 1];
-      return {
-        key,
-        label: latest.plan_name ?? latest.interface_name ?? "network probe",
-        detail: endpointLabel(
-          latest.client_id,
-          latest.peer_client_id,
-          clientLabel,
-        ),
-        maxLatency: Math.max(
-          1,
-          ...points.flatMap((point) =>
-            typeof point.latencyAvgMs === "number" ? [point.latencyAvgMs] : [],
-          ),
-        ),
-        points,
-      };
-    })
-    .filter((group) => group.points.length > 1)
-    .sort(
-      (left, right) =>
-        left.label.localeCompare(right.label) ||
-        left.detail.localeCompare(right.detail),
-    );
 }
 
 function buildEvidenceRow(

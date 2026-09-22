@@ -10,10 +10,11 @@ use serde::Deserialize;
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, payload_hash, plan_tunnel,
+    allocate_tunnel_endpoints_with_options, payload_hash, plan_tunnel,
     render_tunnel_runtime_preview, routing_cost_update_privilege_payload, JobCommand,
     NetworkPlanError, RoutingCostAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager,
-    TunnelAddressFamily, TunnelEndpointSide, TunnelPlan, TunnelPlanInput, TunnelRuntimePreview,
+    TunnelAddressFamily, TunnelEndpointAllocationOptions, TunnelEndpointSide, TunnelPlan,
+    TunnelPlanInput, TunnelRuntimePreview,
 };
 
 use crate::{
@@ -359,47 +360,59 @@ pub(crate) async fn allocate_tunnel_endpoints(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
-    let mut reserved_addresses = request.reserved_addresses.clone();
-    for plan in state
-        .repo
-        .list_tunnel_plans()
-        .await
-        .map_err(ApiError::internal_mapper(
-            "tunnel_plans_unavailable",
-            "Tunnel plans could not be loaded.",
-        ))?
-    {
-        // Allocation and conflict detection share the same global address
-        // scope; link-local reservations supplied by this draft stay above.
-        reserved_addresses.extend(
-            crate::repository_network::tunnel_plan_addresses(&plan.plan)
-                .map_err(tunnel_plan_repository_error)?
-                .into_iter()
-                .map(|address| address.to_string()),
-        );
+    if let Some(plan_id) = request.plan_id {
+        state
+            .repo
+            .get_tunnel_plan_identity(plan_id)
+            .await
+            .map_err(tunnel_plan_unavailable)?
+            .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
     }
+    // Unlike the capped management list, this reads every active declaration.
+    // Only the explicitly edited plan is excluded, never another plan whose
+    // addresses happen to match the draft.
+    let mut reserved_addresses = request.reserved_addresses.clone();
+    reserved_addresses.extend(
+        state
+            .repo
+            .tunnel_plan_reserved_networks(request.plan_id)
+            .await
+            .map_err(tunnel_plan_repository_error)?,
+    );
     let (configured_ipv4_pool, configured_ipv6_pool) = state.tunnel_allocation_pool_cidrs();
     let ipv4_pool = normalize_optional_string(request.ipv4_pool_cidr);
     let ipv6_pool = normalize_optional_string(request.ipv6_pool_cidr);
+    // Either entered endpoint anchors its subnet; two cleared fields request a
+    // fresh subnet and therefore need a pool, just like an absent pair.
+    let preferred_ipv4 = request
+        .preferred_ipv4_tunnel
+        .filter(|pair| !pair.left.trim().is_empty() || !pair.right.trim().is_empty());
+    let preferred_ipv6 = request
+        .preferred_ipv6_tunnel
+        .filter(|pair| !pair.left.trim().is_empty() || !pair.right.trim().is_empty());
     let explicit_request = ipv4_pool.is_some()
         || ipv6_pool.is_some()
         || request.include_ipv4.is_some()
-        || request.include_ipv6.is_some();
-    let resolved_ipv4 = resolve_allocation_family(
+        || request.include_ipv6.is_some()
+        || preferred_ipv4.is_some()
+        || preferred_ipv6.is_some();
+    let (include_ipv4, resolved_ipv4) = resolve_allocation_family(
         request.include_ipv4,
         ipv4_pool,
         configured_ipv4_pool,
+        preferred_ipv4.is_some(),
         explicit_request,
         "ipv4_allocation_pool_required",
     )?;
-    let resolved_ipv6 = resolve_allocation_family(
+    let (include_ipv6, resolved_ipv6) = resolve_allocation_family(
         request.include_ipv6,
         ipv6_pool,
         configured_ipv6_pool,
+        preferred_ipv6.is_some(),
         explicit_request,
         "ipv6_allocation_pool_required",
     )?;
-    if resolved_ipv4.is_none() && resolved_ipv6.is_none() {
+    if !include_ipv4 && !include_ipv6 {
         return Ok(Json(AllocateTunnelEndpointsResponse {
             ipv4_tunnel: None,
             ipv6_tunnel: None,
@@ -407,12 +420,18 @@ pub(crate) async fn allocate_tunnel_endpoints(
             conflicts: Vec::new(),
         }));
     }
-    let allocation = allocate_tunnel_endpoint_pairs(
+    let allocation = allocate_tunnel_endpoints_with_options(
         resolved_ipv4.as_deref(),
         resolved_ipv6.as_deref(),
         &reserved_addresses,
-        resolved_ipv4.is_some(),
-        resolved_ipv6.is_some(),
+        TunnelEndpointAllocationOptions {
+            include_ipv4,
+            include_ipv6,
+            ipv4_prefix_len: request.ipv4_prefix_len.unwrap_or(31),
+            ipv6_prefix_len: request.ipv6_prefix_len.unwrap_or(127),
+            preferred_ipv4: preferred_ipv4.as_ref(),
+            preferred_ipv6: preferred_ipv6.as_ref(),
+        },
     )
     .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
     Ok(Json(AllocateTunnelEndpointsResponse {
@@ -1733,24 +1752,28 @@ fn resolve_allocation_family(
     include: Option<bool>,
     request_pool: Option<String>,
     configured_pool: Option<String>,
+    has_preferred_pair: bool,
     explicit_request: bool,
     missing_code: &'static str,
-) -> Result<Option<String>, ApiError> {
+) -> Result<(bool, Option<String>), ApiError> {
     if matches!(include, Some(false)) {
-        return Ok(None);
+        return Ok((false, None));
     }
     if let Some(pool) = request_pool {
-        return Ok(Some(pool));
+        return Ok((true, Some(pool)));
+    }
+    if has_preferred_pair {
+        return Ok((true, configured_pool));
     }
     if matches!(include, Some(true)) {
         return configured_pool
-            .map(Some)
+            .map(|pool| (true, Some(pool)))
             .ok_or_else(|| ApiError::bad_request(missing_code));
     }
     if !explicit_request {
-        return Ok(configured_pool);
+        return Ok((configured_pool.is_some(), configured_pool));
     }
-    Ok(None)
+    Ok((false, None))
 }
 
 fn tunnel_plan_bad_request(error: NetworkPlanError) -> ApiError {
@@ -1773,6 +1796,10 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
     match error {
         NetworkPlanError::InvalidPlanIdentity => "invalid_tunnel_plan_identity",
         NetworkPlanError::InvalidTunnelEndpoints => "invalid_tunnel_plan_endpoints",
+        NetworkPlanError::InvalidTunnelPrefix => "invalid_tunnel_prefix",
+        NetworkPlanError::InvalidPreferredTunnelAddress => "invalid_preferred_tunnel_address",
+        NetworkPlanError::TunnelAddressConflict => "tunnel_plan_address_conflict",
+        NetworkPlanError::InvalidReservedAddress(_) => "invalid_reserved_tunnel_address",
         NetworkPlanError::InvalidUnderlayAddress => "invalid_tunnel_underlay_address",
         NetworkPlanError::InvalidAdditionalAddress(_) => "invalid_tunnel_additional_address",
         NetworkPlanError::InvalidFouAddressFamily(_) => "invalid_fou_address_family",

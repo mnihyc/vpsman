@@ -2561,6 +2561,39 @@
   border-bottom: 0;
 }
 
+.topologyEvidence .latencyCurveCard {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.topologyEvidence .latencyCurve {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 4px;
+  min-width: 0;
+}
+
+.topologyEvidence .latencyCurve > span {
+  min-width: 0;
+  width: 100%;
+  max-width: 18px;
+}
+
+.topologyEvidence .latencyCurve.compact > span {
+  max-width: 9px;
+}
+
+.topologyEvidenceCurvePager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .ospfSnippetGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));

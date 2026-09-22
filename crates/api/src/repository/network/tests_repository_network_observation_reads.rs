@@ -440,6 +440,60 @@ async fn postgres_bounded_exact_reads_preserve_view_filters_ranking_and_fallback
     cleanup(admin, pool, name).await;
 }
 
+#[tokio::test]
+async fn postgres_bounded_exact_reads_do_not_cast_payload_fields_outside_final_cap() {
+    let Some((admin, pool, name)) = database().await else {
+        return;
+    };
+    seed(&pool, 2).await;
+    let mut connection = pool.acquire().await.unwrap();
+    let case = filter();
+    let cap = Some(1);
+    let mut expected = Vec::new();
+    for graph in [false, true] {
+        // Capture the complete winning row while all payloads are valid. The
+        // canonical view need not defer casts on malformed losing payloads.
+        let rows = query_rows(&mut connection, &oracle(graph), &case, cap).await;
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        expected.push((graph, rows));
+    }
+    let corrupted = sqlx::raw_sql(
+        r#"
+        -- The second globally newest row has physical and logical rank <= 2
+        -- in either reader, but the final cap of one excludes it. Keep its ID
+        -- valid and corrupt only a field that is not needed by any filter.
+        UPDATE telemetry_samples sample
+        SET payload = jsonb_set(sample.payload,
+            ARRAY['tunnel_reachability',
+                (locator.automatic_payload_ordinal::integer - 1)::text, 'transmitted'],
+            '"not-an-integer"'::jsonb)
+        FROM (
+            SELECT automatic_sample_id, automatic_payload_ordinal
+            FROM network_observations
+            ORDER BY observed_at DESC, id DESC
+            OFFSET 1 LIMIT 1
+        ) locator
+        WHERE sample.id = locator.automatic_sample_id
+        "#,
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(corrupted.rows_affected(), 1);
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::query(&format!("SET plan_cache_mode={mode}"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        for (graph, expected_rows) in &expected {
+            let actual = query_rows(&mut connection, &exact_reads::query(*graph), &case, cap).await;
+            assert_eq!(actual, *expected_rows, "mode={mode} graph={graph}");
+        }
+    }
+    drop(connection);
+    cleanup(admin, pool, name).await;
+}
+
 fn plan_nodes<'a>(node: &'a serde_json::Value, nodes: &mut Vec<&'a serde_json::Value>) {
     nodes.push(node);
     if let Some(children) = node["Plans"].as_array() {

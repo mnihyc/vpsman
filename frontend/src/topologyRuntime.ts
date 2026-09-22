@@ -1,4 +1,5 @@
 import type {
+  AllocateTunnelEndpointsRequest,
   OspfCostPolicy,
   RuntimeTunnelControl,
   RuntimeTunnelFouKind,
@@ -44,11 +45,45 @@ export function additionalAddressesFromDraft(draft: TunnelAdditionalAddressDraft
   };
 }
 
-export function additionalAddressReservations(draft: TunnelAdditionalAddressDraft): string[] {
-  return [draft.left, draft.right].flatMap((side) =>
-    [...additionalAddressLines(side.ipv4), ...additionalAddressLines(side.ipv6)]
-      .map((cidr) => cidr.split("/")[0]),
-  );
+export type TunnelAllocationDraft = {
+  includeIpv4: boolean;
+  includeIpv6: boolean;
+  ipv4Pool: string;
+  ipv6Pool: string;
+  ipv4Prefix: string;
+  ipv6Prefix: string;
+  leftIpv4: string;
+  rightIpv4: string;
+  leftIpv6: string;
+  rightIpv6: string;
+};
+
+export function buildTunnelAllocationRequest(
+  draft: TunnelAllocationDraft,
+  planId?: string,
+): AllocateTunnelEndpointsRequest {
+  function family(enabled: boolean, label: string, prefix: string, max: number, left: string, right: string) {
+    if (!enabled) return { prefix: undefined, preferred: null };
+    const length = Number(prefix);
+    if (!/^\d+$/.test(prefix.trim()) || !Number.isInteger(length) || length < 0 || length > max) {
+      throw new Error(`${label} prefix must be a whole number from 0 to ${max}`);
+    }
+    const local = left.trim(), peer = right.trim();
+    return { prefix: length, preferred: local || peer ? { left: local, right: peer, prefix_len: length } : null };
+  }
+  const ipv4 = family(draft.includeIpv4, "IPv4", draft.ipv4Prefix, 31, draft.leftIpv4, draft.rightIpv4);
+  const ipv6 = family(draft.includeIpv6, "IPv6", draft.ipv6Prefix, 127, draft.leftIpv6, draft.rightIpv6);
+  return {
+    plan_id: planId ?? null,
+    include_ipv4: draft.includeIpv4,
+    include_ipv6: draft.includeIpv6,
+    ipv4_pool_cidr: draft.ipv4Pool.trim() || null,
+    ipv6_pool_cidr: draft.ipv6Pool.trim() || null,
+    ipv4_prefix_len: ipv4.prefix,
+    ipv6_prefix_len: ipv6.prefix,
+    preferred_ipv4_tunnel: ipv4.preferred,
+    preferred_ipv6_tunnel: ipv6.preferred,
+  };
 }
 
 export function isTunnelLinkLocal(address: string): boolean {

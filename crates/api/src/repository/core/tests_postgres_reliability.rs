@@ -1,3 +1,6 @@
+#[path = "tests_postgres_subnet_allocation.rs"]
+mod subnet_allocation;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
@@ -38263,30 +38266,31 @@ async fn postgres_tunnel_additional_addresses_preserve_link_scope_and_round_trip
         prefix_len: 31,
     });
     let second_plan = plan_tunnel(&second).unwrap();
-    let error = db
+    // Additional addresses are operator-owned, not global subnet reservations.
+    // Reuse on another link, including the same explicit LLs, remains allowed.
+    let second_stored = db
         .repo
         .record_tunnel_plan(&second, &second_plan, false, &operator)
         .await
-        .unwrap_err();
-    assert_eq!(error.to_string(), "tunnel_plan_address_conflict");
-    // An alias cannot collide with another link's primary address either.
+        .unwrap();
     second.additional_addresses.left.ipv4 = vec!["10.10.0.0/32".into()];
     let second_plan = plan_tunnel(&second).unwrap();
-    assert_eq!(
-        db.repo
-            .record_tunnel_plan(&second, &second_plan, false, &operator)
-            .await
-            .unwrap_err()
-            .to_string(),
-        "tunnel_plan_address_conflict"
-    );
-    second.additional_addresses.left.ipv4.clear();
-    let second_plan = plan_tunnel(&second).unwrap();
-    // The same explicit LLs are legal on a different interface on these VPSs.
-    db.repo
-        .record_tunnel_plan(&second, &second_plan, false, &operator)
+    let second_updated = db
+        .repo
+        .update_tunnel_plan(
+            second_stored.id,
+            second_stored.revision,
+            &second,
+            &second_plan,
+            false,
+            &operator,
+        )
         .await
         .unwrap();
+    assert_eq!(
+        second_updated.plan.additional_addresses.left.ipv4,
+        vec!["10.10.0.0/32"]
+    );
 
     first.additional_addresses.left.ipv4.clear();
     first.manage_link_local = false;

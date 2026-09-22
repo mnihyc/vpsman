@@ -3,7 +3,7 @@ import {
   additionalAddressChanges,
   additionalAddressDraft,
   additionalAddressLines,
-  additionalAddressReservations,
+  buildTunnelAllocationRequest,
   additionalAddressesFromDraft,
   buildRuntimeControl,
   DEFAULT_RUNTIME_FOU_OPTIONS,
@@ -76,16 +76,44 @@ test("additional tunnel addresses round trip independently without changing edit
   expect(additionalAddressLines("\n \r\n")).toEqual([]);
 });
 
-test("allocation reserves unsaved extra host addresses without changing CIDR drafts", () => {
-  const draft = additionalAddressDraft();
-  draft.left.ipv4 = " 10.255.0.2/32\n10.255.0.3/24\n";
-  draft.left.ipv6 = "fe80::1/64";
-  draft.right.ipv6 = "fd00::2/128\nfe80::2/64";
+test("allocation preserves filled endpoints and masks without reserving Additional addresses", () => {
+  const draft = {
+    includeIpv4: true, includeIpv6: true,
+    ipv4Pool: "10.0.0.0/8", ipv6Pool: "fd00::/64",
+    ipv4Prefix: "24", ipv6Prefix: "124",
+    leftIpv4: "192.0.2.1", rightIpv4: "192.0.2.2",
+    leftIpv6: "fd01::1", rightIpv6: "fd01::2",
+    additionalAddresses: additionalAddressDraft(),
+  };
+  draft.additionalAddresses.left.ipv4 = " 10.255.0.2/32\n10.255.0.3/24\n";
   const before = structuredClone(draft);
-  expect(additionalAddressReservations(draft)).toEqual([
-    "10.255.0.2", "10.255.0.3", "fe80::1", "fd00::2", "fe80::2",
-  ]);
+  const request = buildTunnelAllocationRequest(draft, "edited-plan");
+  expect(request.plan_id).toBe("edited-plan");
+  expect(request.ipv4_prefix_len).toBe(24);
+  expect(request.ipv6_prefix_len).toBe(124);
+  expect(request.preferred_ipv4_tunnel).toEqual({ left: "192.0.2.1", right: "192.0.2.2", prefix_len: 24 });
+  expect(request.preferred_ipv6_tunnel).toEqual({ left: "fd01::1", right: "fd01::2", prefix_len: 124 });
+  expect(request).not.toHaveProperty("additional_addresses");
+  expect(request.reserved_addresses).toBeUndefined();
   expect(draft).toEqual(before);
+  draft.leftIpv4 = "";
+  expect(buildTunnelAllocationRequest(draft).preferred_ipv4_tunnel).toEqual({ left: "", right: "192.0.2.2", prefix_len: 24 });
+  draft.leftIpv4 = "192.0.2.1";
+  draft.rightIpv4 = "";
+  expect(buildTunnelAllocationRequest(draft).preferred_ipv4_tunnel).toEqual({ left: "192.0.2.1", right: "", prefix_len: 24 });
+  draft.leftIpv6 = "";
+  expect(buildTunnelAllocationRequest(draft).preferred_ipv6_tunnel).toEqual({ left: "", right: "fd01::2", prefix_len: 124 });
+  draft.leftIpv6 = "fd01::1";
+  draft.rightIpv6 = "";
+  expect(buildTunnelAllocationRequest(draft).preferred_ipv6_tunnel).toEqual({ left: "fd01::1", right: "", prefix_len: 124 });
+  draft.leftIpv4 = "";
+  draft.rightIpv4 = "";
+  expect(buildTunnelAllocationRequest(draft).preferred_ipv4_tunnel).toBeNull();
+  expect(buildTunnelAllocationRequest(draft).ipv4_prefix_len).toBe(24);
+  draft.ipv4Prefix = "";
+  expect(() => buildTunnelAllocationRequest(draft)).toThrow("IPv4 prefix");
+  draft.includeIpv4 = false;
+  expect(buildTunnelAllocationRequest(draft).preferred_ipv4_tunnel).toBeNull();
 });
 
 test("link-local policy is independent of configured IPv6 and preserves manual addresses", () => {
