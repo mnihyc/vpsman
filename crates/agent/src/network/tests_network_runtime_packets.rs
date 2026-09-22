@@ -19,6 +19,17 @@ async fn openvpn_additional_and_link_local_packets_after_tls_ready() {
     builtin_packet_matrix(&[TunnelKind::Openvpn]).await;
 }
 
+#[tokio::test]
+#[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN, TUN and OpenVPN"]
+async fn openvpn_legacy_generated_config_upgrade_removes_duplicate_addresses() {
+    builtin_packet_matrix_with_openvpn_upgrade(
+        &[TunnelKind::Openvpn],
+        vpsman_common::RuntimeTunnelFouKind::default(),
+        true,
+    )
+    .await;
+}
+
 fn packet_openvpn_path(plan_id: &str, side: &str, name: &str) -> PathBuf {
     crate::state_dir::agent_state_dir()
         .unwrap()
@@ -247,7 +258,22 @@ async fn reconcile_packet_endpoint(
     side: TunnelEndpointSide,
     credentials: Option<&TunnelEndpointBuiltinCredentials>,
 ) {
-    let fixture = serde_json::json!({"id":id, "plan":plan, "side":side, "credentials":credentials});
+    reconcile_packet_endpoint_fixture(namespace, id, plan, side, credentials, false, None).await;
+}
+
+async fn reconcile_packet_endpoint_fixture(
+    namespace: &str,
+    id: &str,
+    plan: &TunnelPlan,
+    side: TunnelEndpointSide,
+    credentials: Option<&TunnelEndpointBuiltinCredentials>,
+    legacy_openvpn: bool,
+    expect_restart: Option<bool>,
+) {
+    let fixture = serde_json::json!({
+        "id":id, "plan":plan, "side":side, "credentials":credentials,
+        "legacy_openvpn":legacy_openvpn, "expect_restart":expect_restart,
+    });
     let output = tokio::process::Command::new("/sbin/ip")
         .args(["netns", "exec", namespace]).arg(std::env::current_exe().unwrap())
         .args(["network_runtime::tests::isolated_linux_failures::builtin_additional_and_link_local_packet_matrix", "--exact", "--ignored", "--nocapture"])
@@ -262,6 +288,63 @@ async fn reconcile_packet_endpoint(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+async fn packet_openvpn_address_state(namespace: &str, interface: &str) -> serde_json::Value {
+    let output = checked_native(
+        "/sbin/ip", &["-n", namespace, "-j", "addr", "show", "dev", interface],
+    ).await;
+    let links: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(links.as_array().unwrap().len(), 1);
+    links[0].clone()
+}
+
+fn assert_packet_openvpn_address_tuples(
+    state: &serde_json::Value,
+    id: &str,
+    plan: &TunnelPlan,
+    side: TunnelEndpointSide,
+) {
+    // Compare the complete multiset, not CIDR membership: /32 + /31 for the
+    // same IPv4 local address must fail, as must a peerless IPv6 primary.
+    let canonical = |address: &str| address.parse::<std::net::IpAddr>().unwrap().to_string();
+    let mut actual = state["addr_info"].as_array().unwrap().iter().map(|address| (
+        address["family"].as_str().unwrap().to_string(),
+        canonical(address["local"].as_str().unwrap()),
+        address["prefixlen"].as_u64().unwrap(),
+        address.get("address").or_else(|| address.get("peer"))
+            .and_then(serde_json::Value::as_str).map(canonical),
+    )).collect::<Vec<_>>();
+    let mut expected = Vec::new();
+    for (family, pair) in [("inet", &plan.ipv4_tunnel), ("inet6", &plan.ipv6_tunnel)] {
+        let pair = pair.as_ref().unwrap();
+        let (local, peer) = if side == TunnelEndpointSide::Left {
+            (&pair.left, &pair.right)
+        } else {
+            (&pair.right, &pair.left)
+        };
+        expected.push((family.to_string(), canonical(local), u64::from(pair.prefix_len), Some(canonical(peer))));
+    }
+    let (extra, client) = if side == TunnelEndpointSide::Left {
+        (&plan.additional_addresses.left, &plan.left_client_id)
+    } else {
+        (&plan.additional_addresses.right, &plan.right_client_id)
+    };
+    let generated = vpsman_common::tunnel_generated_link_local(uuid::Uuid::parse_str(id).unwrap(), client);
+    for cidr in extra.ipv4.iter().chain(&extra.ipv6).chain(std::iter::once(&generated)) {
+        let (local, prefix) = cidr.split_once('/').unwrap();
+        let family = if local.parse::<std::net::IpAddr>().unwrap().is_ipv4() { "inet" } else { "inet6" };
+        expected.push((family.to_string(), canonical(local), prefix.parse().unwrap(), None));
+    }
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected, "{side:?}: exact local/peer/prefix multiplicity");
+}
+
+async fn packet_openvpn_identity(id: &str, side: &str, state: &serde_json::Value) -> (u32, u64) {
+    let pid = tokio::fs::read_to_string(packet_openvpn_path(id, side, "openvpn.pid"))
+        .await.unwrap().trim().parse().unwrap();
+    (pid, state["ifindex"].as_u64().unwrap())
 }
 
 #[tokio::test]
@@ -423,6 +506,14 @@ async fn builtin_packet_matrix(kinds: &[TunnelKind]) {
 }
 
 async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_common::RuntimeTunnelFouKind) {
+    builtin_packet_matrix_with_openvpn_upgrade(kinds, fou_kind, false).await;
+}
+
+async fn builtin_packet_matrix_with_openvpn_upgrade(
+    kinds: &[TunnelKind],
+    fou_kind: vpsman_common::RuntimeTunnelFouKind,
+    legacy_openvpn: bool,
+) {
     require_isolated_network();
     // Re-enter this test in each isolated endpoint namespace. The child executes
     // the production reconciler; the parent verifies real packets.
@@ -438,6 +529,18 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
         } else {
             plan.right_client_id.clone()
         };
+        let legacy_openvpn = fixture["legacy_openvpn"].as_bool().unwrap_or(false);
+        if legacy_openvpn {
+            assert_eq!(plan.kind, TunnelKind::Openvpn);
+            // Launch the actual old generated configuration with the real
+            // daemon. exec retains the normal executable/config ownership
+            // evidence; only this disposable first-start fixture is altered.
+            config.network.runtime_openvpn_argv = vec![
+                "/bin/sh".into(), "-c".into(),
+                "if [ \"$1\" = --config ]; then sed -i '/^ifconfig-noexec$/d' \"$2\"; fi\nexec /usr/sbin/openvpn \"$@\"".into(),
+                "legacy-openvpn-fixture".into(),
+            ];
+        }
         let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
             config: &config,
             plan_id: fixture["id"].as_str(),
@@ -452,6 +555,21 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
         .await
         .unwrap();
         assert_eq!(report["status"], "converged", "{report}");
+        if let Some(restart) = fixture["expect_restart"].as_bool() {
+            assert_eq!(report["existing_link_validation"]["config_hash_matches"], !restart, "{report}");
+            assert_eq!(report["commands"].as_array().unwrap().iter()
+                .any(|step| step["label"] == "runtime_openvpn_start"), restart, "{report}");
+        }
+        if legacy_openvpn {
+            let side_name = if side == TunnelEndpointSide::Left { "left" } else { "right" };
+            // An explicit stale applied marker models the pre-upgrade hash.
+            // This tests the existing mismatch/restart path, not a duplicate
+            // implementation of the production config+credentials hash.
+            tokio::fs::write(
+                packet_openvpn_path(fixture["id"].as_str().unwrap(), side_name, "applied.sha256"),
+                "legacy-generated-config\n",
+            ).await.unwrap();
+        }
         return;
     }
     for &kind in kinds {
@@ -477,6 +595,11 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
                 vec!["fd00:123::2/64".into(), "fe80::222/64".into()];
         }
         if kind == TunnelKind::Openvpn {
+            // OpenVPN accepts IPv6 prefixes through /124; exercise a valid
+            // dual-stack primary independently of the additional IPv6 aliases.
+            plan.ipv6_tunnel = Some(TunnelAddressPair {
+                left: "fd00:ffff::".into(), right: "fd00:ffff::1".into(), prefix_len: 124,
+            });
             // Daemon output normally goes to syslog, which this image does not
             // collect. Only add endpoint-local logging through the existing
             // override renderer; leave TLS, DCO, MTUs and all addresses intact.
@@ -537,19 +660,74 @@ async fn builtin_packet_matrix_with_fou(kinds: &[TunnelKind], fou_kind: vpsman_c
             _ => {}
         }
         for (namespace, side, credentials) in [
-            ("address-left", TunnelEndpointSide::Left, left_credentials),
+            ("address-left", TunnelEndpointSide::Left, &left_credentials),
             (
                 "address-right",
                 TunnelEndpointSide::Right,
-                right_credentials,
+                &right_credentials,
             ),
         ] {
-            reconcile_packet_endpoint(namespace, &id, &plan, side, credentials.as_ref()).await;
+            reconcile_packet_endpoint_fixture(namespace, &id, &plan, side, credentials.as_ref(), legacy_openvpn, None).await;
         }
         if kind == TunnelKind::Openvpn {
             wait_for_packet_openvpn_tls(&id, &plan.interface_name).await;
+            for (namespace, side, side_name, credentials) in [
+                ("address-left", TunnelEndpointSide::Left, "left", &left_credentials),
+                ("address-right", TunnelEndpointSide::Right, "right", &right_credentials),
+            ] {
+                let before = packet_openvpn_address_state(namespace, &plan.interface_name).await;
+                let identity = packet_openvpn_identity(&id, side_name, &before).await;
+                if legacy_openvpn {
+                    let local = if side == TunnelEndpointSide::Left {
+                        &plan.ipv4_tunnel.as_ref().unwrap().left
+                    } else {
+                        &plan.ipv4_tunnel.as_ref().unwrap().right
+                    };
+                    let mut prefixes = before["addr_info"].as_array().unwrap().iter()
+                        .filter(|address| address["family"] == "inet" && address["local"] == local.as_str())
+                        .map(|address| address["prefixlen"].as_u64().unwrap()).collect::<Vec<_>>();
+                    prefixes.sort();
+                    assert_eq!(prefixes, [31, 32], "legacy daemon must reproduce the real duplicate");
+                } else {
+                    assert_packet_openvpn_address_tuples(&before, &id, &plan, side);
+                }
+                reconcile_packet_endpoint_fixture(namespace, &id, &plan, side, credentials.as_ref(), false, Some(legacy_openvpn)).await;
+                let after = packet_openvpn_address_state(namespace, &plan.interface_name).await;
+                let after_identity = packet_openvpn_identity(&id, side_name, &after).await;
+                if legacy_openvpn {
+                    assert_ne!(identity.0, after_identity.0, "upgrade must restart the owned daemon");
+                    assert_ne!(identity.1, after_identity.1, "upgrade must replace the old TUN link");
+                } else {
+                    assert_eq!(identity, after_identity, "unchanged reapply must preserve daemon and link");
+                }
+                assert_packet_openvpn_address_tuples(&after, &id, &plan, side);
+            }
+            if !legacy_openvpn {
+                // A single dual-stack prefix edit must remove both old primary
+                // tuples while retaining extras and the generated link-local.
+                plan.ipv4_tunnel.as_mut().unwrap().prefix_len = 30;
+                plan.tunnel_prefix_len = 30;
+                plan.ipv6_tunnel.as_mut().unwrap().prefix_len = 120;
+                for (namespace, side, side_name, credentials) in [
+                    ("address-left", TunnelEndpointSide::Left, "left", &left_credentials),
+                    ("address-right", TunnelEndpointSide::Right, "right", &right_credentials),
+                ] {
+                    let before = packet_openvpn_address_state(namespace, &plan.interface_name).await;
+                    let identity = packet_openvpn_identity(&id, side_name, &before).await;
+                    reconcile_packet_endpoint_fixture(namespace, &id, &plan, side, credentials.as_ref(), false, Some(true)).await;
+                    let after = packet_openvpn_address_state(namespace, &plan.interface_name).await;
+                    let after_identity = packet_openvpn_identity(&id, side_name, &after).await;
+                    assert_ne!(identity.0, after_identity.0, "native config edit must restart the daemon");
+                    assert_packet_openvpn_address_tuples(&after, &id, &plan, side);
+                }
+            }
+            wait_for_packet_openvpn_tls(&id, &plan.interface_name).await;
         }
         let mut targets = Vec::new();
+        if kind == TunnelKind::Openvpn {
+            targets.push(plan.ipv4_tunnel.as_ref().unwrap().right.clone());
+            targets.push(plan.ipv6_tunnel.as_ref().unwrap().right.clone());
+        }
         if carries_ipv4 {
             targets.push("10.254.20.2".to_string());
         }

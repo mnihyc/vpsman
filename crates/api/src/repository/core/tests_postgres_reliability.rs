@@ -7439,6 +7439,162 @@ async fn postgres_tunnel_evidence_clear_is_scoped_counted_and_audited_atomically
 }
 
 #[tokio::test]
+async fn postgres_topology_graph_preserves_disconnected_and_revoked_endpoints() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let left = "graph-lifecycle-left";
+    let right = "graph-lifecycle-right";
+    for client_id in [left, right] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "graph-lifecycle".to_string();
+    input.runtime_control = Default::default();
+    input.left_client_id = left.to_string();
+    input.right_client_id = right.to_string();
+    input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    let plan = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let mut session = GatewaySessionLifecycleIngest {
+        gateway_id: "graph-lifecycle-gateway".to_string(),
+        client_id: left.to_string(),
+        session_id: Uuid::new_v4(),
+        noise_public_key_hex: None,
+        remote_ip: None,
+        agent_version: Some("postgres-test".to_string()),
+        reason: None,
+    };
+    db.repo
+        .record_gateway_session_started(&session)
+        .await
+        .unwrap();
+
+    // A failed peer probe has loss evidence but no RTT: it must remain visible
+    // regardless of the other endpoint's connection or access state.
+    let job_id = Uuid::new_v4();
+    insert_job_target(&db.pool, job_id, right, "failed", false, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id, job_id, client_id, kind, source, plan_id, topology_identity_hash,
+            plan_name, interface_name, peer_client_id, endpoint_side, address_family,
+            target, stale_after_secs, healthy, transmitted, received, packet_loss_ratio,
+            reason
+        ) VALUES (
+            $1, $2, $3, 'tunnel_reachability', 'manual', $4, $5,
+            $6, $7, $8, 'right', 'ipv4', $9, 180, false, 3, 0, 1.0,
+            'probe_failed'
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(job_id)
+    .bind(right)
+    .bind(plan.id)
+    .bind(crate::repository_network_observations::topology_identity_hash_for_plan(&plan))
+    .bind(&plan.name)
+    .bind(&plan.plan.interface_name)
+    .bind(left)
+    .bind(&input.ipv4_tunnel.as_ref().unwrap().left)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    for (step, status) in ["online", "disconnected", "online", "revoked"]
+        .into_iter()
+        .enumerate()
+    {
+        match step {
+            1 => {
+                session.reason = Some("connection closed".to_string());
+                db.repo
+                    .record_gateway_session_ended(&session)
+                    .await
+                    .unwrap();
+            }
+            2 => {
+                session.session_id = Uuid::new_v4();
+                session.reason = None;
+                db.repo
+                    .record_gateway_session_started(&session)
+                    .await
+                    .unwrap();
+            }
+            3 => {
+                db.repo
+                    .revoke_current_client_key(left, Some("operator revoked"), &operator)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let end = Utc::now().timestamp() + 1;
+        let graph = db
+            .repo
+            .topology_graph(24, end - 3_600, end, &[plan.id])
+            .await
+            .unwrap();
+        assert_eq!(graph.nodes.len(), 2, "state: {status}");
+        let left_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.client_id == left)
+            .unwrap();
+        let right_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.client_id == right)
+            .unwrap();
+        assert_eq!(left_node.status, status);
+        assert_eq!(right_node.status, "online");
+        assert_eq!(left_node.tunnel_count, 1);
+        assert_eq!(right_node.tunnel_count, 1);
+        assert_eq!(graph.edges.len(), 1);
+        let edge = &graph.edges[0];
+        assert_eq!(edge.plan_id, plan.id);
+        assert_eq!(edge.left_client_id, left);
+        assert_eq!(edge.right_client_id, right);
+        assert_eq!(edge.health, "degraded");
+        assert_eq!(edge.right_reachability_state, "probe_failed");
+        assert_eq!(
+            edge.right_reachability_reason.as_deref(),
+            Some("probe_failed")
+        );
+        assert_eq!(edge.packet_loss_avg_ratio, Some(1.0));
+        assert_eq!(edge.latency_avg_ms, None);
+        assert_eq!(edge.latest_latency_avg_ms, None);
+        assert!(edge.latency_series_ms.is_empty());
+        if status == "online" {
+            assert!(edge.unavailable_client_ids.is_empty());
+            assert!(edge.availability_reasons.is_empty());
+            assert_eq!(edge.left_runtime_state, "unknown");
+            assert_eq!(
+                edge.left_runtime_reason.as_deref(),
+                Some("declared_endpoint_not_observed")
+            );
+        } else {
+            assert_eq!(edge.unavailable_client_ids, vec![left]);
+            assert_eq!(
+                edge.availability_reasons,
+                vec![format!("endpoint_not_online:{left}:{status}")]
+            );
+            assert_eq!(edge.left_runtime_state, "degraded");
+            assert_eq!(
+                edge.left_runtime_reason,
+                Some(format!("endpoint_not_online:{status}"))
+            );
+        }
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_tunnel_speedtest_evidence_clear_preserves_other_evidence_and_runtime() {
     use crate::model::TunnelPlanEvidenceClearScope;
 

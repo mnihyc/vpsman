@@ -190,6 +190,9 @@ pub fn render_openvpn_config(
         format!("dev {}", plan.interface_name),
         "dev-type tun".to_string(),
         "topology p2p".to_string(),
+        // The agent applies the declared prefixes, additional addresses and
+        // link-local policy. Native p2p ifconfig would add a second IPv4 /32.
+        "ifconfig-noexec".to_string(),
         format!("proto {protocol}"),
         format!(
             "tun-mtu {}",

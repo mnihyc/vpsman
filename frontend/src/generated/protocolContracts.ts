@@ -936,18 +936,22 @@ export const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS = {
 
 export const TOPOLOGY_NODE_STATUSES = [
   "online",
+  "disconnected",
   "offline",
   "never",
   "stale",
+  "revoked",
   "unknown",
 ] as const;
 export type GeneratedTopologyNodeStatus = typeof TOPOLOGY_NODE_STATUSES[number];
 
 export const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS = {
   "online": "successful",
+  "disconnected": "warning",
   "offline": "warning",
   "never": "neutral",
   "stale": "warning",
+  "revoked": "warning",
   "unknown": "neutral",
 } as const satisfies Record<GeneratedTopologyNodeStatus, GeneratedWorkflowStatusClass>;
 

@@ -307,11 +307,13 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
-pub const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+pub const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS: [(&str, &str); 7] = [
     ("online", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("disconnected", WORKFLOW_STATUS_CLASS_WARNING),
     ("offline", WORKFLOW_STATUS_CLASS_WARNING),
     ("never", WORKFLOW_STATUS_CLASS_NEUTRAL),
     ("stale", WORKFLOW_STATUS_CLASS_WARNING),
+    ("revoked", WORKFLOW_STATUS_CLASS_WARNING),
     ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
@@ -2412,7 +2414,15 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES: &[&str] = &[
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
 ];
 
-pub const TOPOLOGY_NODE_STATUSES: &[&str] = &["online", "offline", "never", "stale", "unknown"];
+pub const TOPOLOGY_NODE_STATUSES: &[&str] = &[
+    "online",
+    "disconnected",
+    "offline",
+    "never",
+    "stale",
+    "revoked",
+    "unknown",
+];
 pub const TOPOLOGY_EDGE_HEALTH_STATUSES: &[&str] = &["disabled", "unknown", "healthy", "degraded"];
 pub const TOPOLOGY_NEIGHBOR_STATES: &[&str] = &[
     "unknown",
