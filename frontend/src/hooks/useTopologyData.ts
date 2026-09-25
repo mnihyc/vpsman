@@ -40,6 +40,8 @@ import type {
 import { retainMutationSuccessAfterRefresh } from "../utils";
 import {
   buildNetworkEvidenceSearch,
+  decodeNetworkObservations,
+  type CompactNetworkObservations,
   type NetworkEvidenceQuery,
 } from "../networkEvidence";
 
@@ -247,10 +249,10 @@ export function useTopologyData(
 
   const queryNetworkObservations = useCallback(
     (query: NetworkEvidenceQuery = {}) =>
-      apiGet<NetworkObservationRecord[]>(
-        `/api/v1/network/observations?${buildNetworkEvidenceSearch(query)}`,
+      apiGet<CompactNetworkObservations>(
+        `/api/v1/network/observations?${buildNetworkEvidenceSearch(query)}&format=compact`,
         apiToken,
-      ),
+      ).then(decodeNetworkObservations),
     [apiToken],
   );
 

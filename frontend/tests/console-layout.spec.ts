@@ -9468,7 +9468,8 @@ test("keeps speed-job baseline attached to its submitted plan across evidence fi
         url.pathname === "/api/v1/network/observations" &&
         url.searchParams.get("source") === "automatic"
       ) {
-        return new Response("[]", {
+        const body = await response.json();
+        return new Response(JSON.stringify(Array.isArray(body) ? [] : { ...body, rows: [] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -9522,7 +9523,7 @@ test("keeps speed-job baseline attached to its submitted plan across evidence fi
   await activate(
     evidence.getByRole("button", { name: "Apply filters", exact: true }),
   );
-  await expect(evidence.locator(".observationTable")).toHaveCount(0);
+  await expect(evidence.getByLabel("Status and probe observations data grid", { exact: true })).toHaveCount(0);
   await expect(speedJob).toContainText("degraded throughput");
   await expect(speedJob).toContainText("expected 100 Mbps");
   expect(await requestPaths()).toEqual(loadedRequestPaths);
@@ -9538,6 +9539,18 @@ test("keeps speed-job baseline attached to its submitted plan across evidence fi
   );
   await expect(speedJob).toContainText("11.2 Mbps");
   await expect(speedJob).not.toContainText("Output not loaded");
+  const observationRequests = await page.evaluate(() => {
+    const state = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+    };
+    return (state.__vpsmanFetchRequests ?? [])
+      .map((request) => new URL(request.url, window.location.href))
+      .filter((url) => url.pathname === "/api/v1/network/observations")
+      .map((url) => ({ format: url.searchParams.get("format"), source: url.searchParams.get("source") }));
+  });
+  expect(observationRequests.length).toBeGreaterThanOrEqual(2);
+  expect(observationRequests.every((request) => request.format === "compact")).toBe(true);
+  expect(observationRequests.some((request) => request.source === "automatic")).toBe(true);
 });
 
 test("shows topology network evidence, speed metrics, and probe latency history", async ({
@@ -9647,7 +9660,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     evidence.getByRole("button", { name: "Open OSPF" }),
   ).toBeVisible();
   await expect(evidence.getByText("Tunnel reachability").first()).toBeVisible();
-  await expect(evidence.getByLabel("OSPF update plan evidence")).toBeVisible();
+  await expect(evidence.getByLabel("OSPF update plan evidence data grid", { exact: true })).toBeVisible();
   await expect(evidence.getByText("approval required")).toBeVisible();
   await expect(
     evidence
@@ -9669,12 +9682,12 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     evidence.getByText("10.9-14.8 ms; 0.25% loss", { exact: true }),
   ).toBeVisible();
-  const observationTable = evidence.locator(".observationTable");
+  const observationTable = evidence.getByLabel("Status and probe observations data grid", { exact: true });
   await expect(observationTable.getByText("Network speed test")).toBeVisible();
   await expect(observationTable.getByText("automatic monitor")).toBeVisible();
   await expect(observationTable.getByText(/manual job 99999999/)).toBeVisible();
   const speedObservationRow = observationTable
-    .locator(".historyRow")
+    .getByRole("row")
     .filter({ hasText: "Network speed test" });
   await expect(observationTable).toContainText(
     "Stale sample · degraded throughput",

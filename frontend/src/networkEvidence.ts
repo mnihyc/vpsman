@@ -1,6 +1,77 @@
 import type { MonitoringWindow } from "./components/MonitoringRangeTabs";
 import type { NetworkObservationRecord } from "./types";
 
+// This fixed schema is the observations endpoint's opt-in fields-once format.
+export const NETWORK_OBSERVATION_FIELDS = [
+  "id", "job_id", "client_id", "seq", "kind", "source", "role", "plan_id",
+  "topology_identity_hash", "plan_name", "interface_name", "peer_client_id",
+  "target", "endpoint_side", "address_family", "stale_after_secs", "healthy",
+  "transmitted", "received", "latency_min_ms", "latency_avg_ms", "latency_max_ms",
+  "latency_mdev_ms", "packet_loss_ratio", "reason", "throughput_mbps", "bytes",
+  "metadata", "observed_at", "received_at",
+] as const satisfies readonly (keyof NetworkObservationRecord)[];
+
+type NetworkObservationValues<Fields extends readonly (keyof NetworkObservationRecord)[]> = {
+  [Index in keyof Fields]: NetworkObservationRecord[Fields[Index]];
+};
+
+export type CompactNetworkObservations = {
+  fields: typeof NETWORK_OBSERVATION_FIELDS;
+  rows: NetworkObservationValues<typeof NETWORK_OBSERVATION_FIELDS>[];
+};
+
+export function decodeNetworkObservations(
+  response: CompactNetworkObservations,
+): NetworkObservationRecord[] {
+  if (
+    !Array.isArray(response.fields) ||
+    response.fields.length !== NETWORK_OBSERVATION_FIELDS.length ||
+    NETWORK_OBSERVATION_FIELDS.some((field, index) => response.fields[index] !== field) ||
+    !Array.isArray(response.rows)
+  ) {
+    throw new Error("Unsupported compact network observation schema");
+  }
+  return response.rows.map((row) => {
+    if (!Array.isArray(row) || row.length !== NETWORK_OBSERVATION_FIELDS.length) {
+      throw new Error("Invalid compact network observation row");
+    }
+    // Rebuild the existing record shape once at the API boundary. Explicit
+    // fields avoid temporary entry arrays and preserve metadata without edits.
+    return {
+      id: row[0],
+      job_id: row[1],
+      client_id: row[2],
+      seq: row[3],
+      kind: row[4],
+      source: row[5],
+      role: row[6],
+      plan_id: row[7],
+      topology_identity_hash: row[8],
+      plan_name: row[9],
+      interface_name: row[10],
+      peer_client_id: row[11],
+      target: row[12],
+      endpoint_side: row[13],
+      address_family: row[14],
+      stale_after_secs: row[15],
+      healthy: row[16],
+      transmitted: row[17],
+      received: row[18],
+      latency_min_ms: row[19],
+      latency_avg_ms: row[20],
+      latency_max_ms: row[21],
+      latency_mdev_ms: row[22],
+      packet_loss_ratio: row[23],
+      reason: row[24],
+      throughput_mbps: row[25],
+      bytes: row[26],
+      metadata: row[27],
+      observed_at: row[28],
+      received_at: row[29],
+    };
+  });
+}
+
 export type NetworkEvidencePlanIdentity = {
   planId?: string | null;
   topologyIdentityHash?: string | null;

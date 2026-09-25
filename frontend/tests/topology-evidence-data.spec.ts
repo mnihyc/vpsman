@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { networkEvidenceSeriesKey } from "../src/networkEvidence";
+import {
+  decodeNetworkObservations,
+  NETWORK_OBSERVATION_FIELDS,
+  networkEvidenceSeriesKey,
+  type CompactNetworkObservations,
+} from "../src/networkEvidence";
 import {
   buildLatencyCurveGroups,
   latestObservationRows,
@@ -21,6 +26,66 @@ function observation(index: number, overrides: Partial<NetworkObservationRecord>
     received_at: "2026-09-22T12:00:00Z", ...overrides,
   };
 }
+
+function compactObservations(records: NetworkObservationRecord[]): CompactNetworkObservations {
+  // Simulate the JSON boundary, preserving the same values as an object reply.
+  return JSON.parse(JSON.stringify({
+    fields: NETWORK_OBSERVATION_FIELDS,
+    rows: records.map((record) => NETWORK_OBSERVATION_FIELDS.map((field) => record[field])),
+  }));
+}
+
+test("compact observations preserve every manual field, null, empty key and arbitrary metadata in order", () => {
+  const manual = observation(7, {
+    job_id: "22222222-2222-4222-8222-222222222222", source: "manual",
+    seq: 0, kind: "network_speed_test", role: "client", interface_name: "",
+    target: "[2001:db8::1]:5201", endpoint_side: "right", address_family: "ipv6",
+    healthy: false, received: 0, latency_min_ms: 0, latency_avg_ms: 1.25,
+    latency_max_ms: 3.5, latency_mdev_ms: 0.75, packet_loss_ratio: 1,
+    reason: "line\nquote\"", throughput_mbps: 42.125, bytes: Number.MAX_SAFE_INTEGER,
+    plan_name: "Plan \"quoted\" / 隧道",
+    metadata: JSON.parse('{"":null,"nested":[true,false,0,-1.25,{"id":"not-a-column","__proto__":{"safe":true}}]}'),
+    observed_at: "2026-09-26T01:02:03.123456Z",
+    received_at: "2026-09-26T01:02:04Z",
+  });
+  const nullable = observation(8, {
+    job_id: null, client_id: "", seq: null, role: null, plan_id: null,
+    topology_identity_hash: null, plan_name: null, interface_name: null,
+    peer_client_id: null, target: null, endpoint_side: null, address_family: null,
+    stale_after_secs: null, healthy: null, transmitted: null, received: null,
+    latency_min_ms: null, latency_avg_ms: null, latency_max_ms: null,
+    latency_mdev_ms: null, packet_loss_ratio: null, reason: null,
+    throughput_mbps: null, bytes: null, metadata: null,
+    observed_at: "2026-09-26T01:02:00Z", received_at: "",
+  });
+  const records = [manual, nullable, ...[[], {}, "", false, 12.5].map((metadata) => ({ ...nullable, metadata }))];
+  const response = compactObservations(records);
+  const restored = decodeNetworkObservations(response);
+  expect(restored).toEqual(records);
+  expect(restored.map((record) => Object.keys(record).sort())).toEqual(
+    records.map((record) => Object.keys(record).sort()),
+  );
+  expect(restored[0].metadata).toBe(response.rows[0][27]);
+  expect(NETWORK_OBSERVATION_FIELDS).toHaveLength(30);
+  expect(new Set(NETWORK_OBSERVATION_FIELDS).size).toBe(30);
+  expect(JSON.stringify(response).length).toBeLessThan(JSON.stringify(records).length);
+  expect(decodeNetworkObservations(compactObservations([]))).toEqual([]);
+});
+
+test("compact observations reject missing, duplicated or reordered fields and truncated rows", () => {
+  const response = compactObservations([observation(1)]);
+  const malformed = [
+    [],
+    { ...response, fields: response.fields.slice(1) },
+    { ...response, fields: response.fields.map((field, index) => index === 1 ? "id" : field) },
+    { ...response, fields: response.fields.slice().reverse() },
+    { ...response, rows: [response.rows[0].slice(1)] },
+    { ...response, rows: [[...response.rows[0], "unexpected"]] },
+  ];
+  for (const payload of malformed) {
+    expect(() => decodeNetworkObservations(JSON.parse(JSON.stringify(payload)))).toThrow(/compact network observation/);
+  }
+});
 
 test("dense 250,000-observation series keeps the latest 24 stable ties without a spread-argument limit", () => {
   const observations = Array.from({ length: 250_000 }, (_, index) => observation(index));

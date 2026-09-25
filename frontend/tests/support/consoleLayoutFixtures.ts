@@ -11,6 +11,7 @@ import {
 } from "./jobSessionFixtures";
 import { installTransferJobApiMock } from "./transferJobMock";
 import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../src/generated/protocolContracts";
+import { NETWORK_OBSERVATION_FIELDS } from "../../src/networkEvidence";
 import type {
   AuditLogRecord,
   BackupPolicyRecord,
@@ -4323,6 +4324,7 @@ export async function installConsoleApiMock(
       jobOutputsFixture,
       jobsFixture,
       networkObservationsFixture,
+      networkObservationFieldsFixture,
       ospfRecommendationsFixture,
       ospfUpdatePlansFixture,
       networkTrendsFixture,
@@ -10199,6 +10201,14 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/network/observations" && method === "GET") {
+          if (new URL(url, window.location.href).searchParams.get("format") === "compact") {
+            return jsonResponse({
+              fields: networkObservationFieldsFixture,
+              rows: networkObservationsFixture.map((observation) =>
+                networkObservationFieldsFixture.map((field) => observation[field]),
+              ),
+            });
+          }
           return jsonResponse(networkObservationsFixture);
         }
         if (
@@ -13094,6 +13104,7 @@ export async function installConsoleApiMock(
           ]
         : networkJobs,
       networkObservationsFixture: networkObservations,
+      networkObservationFieldsFixture: NETWORK_OBSERVATION_FIELDS,
       ospfRecommendationsFixture: ospfRecommendations,
       ospfUpdatePlansFixture:
         options.ospfUpdatePlansOverride ?? ospfUpdatePlans,

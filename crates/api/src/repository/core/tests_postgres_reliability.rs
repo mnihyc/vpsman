@@ -9681,6 +9681,158 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
 
 #[tokio::test]
 async fn postgres_network_trend_budget_preserves_retained_minute_day_for_120_series() {
+    fn cte_examined_rows(plan: &Value) -> f64 {
+        let own_rows = if plan.get("Node Type").and_then(Value::as_str) == Some("CTE Scan") {
+            (plan["Actual Rows"].as_f64().unwrap_or(0.0)
+                + plan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                * plan["Actual Loops"].as_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        own_rows
+            + plan["Plans"].as_array().map_or(0.0, |children| {
+                children.iter().map(cte_examined_rows).sum::<f64>()
+            })
+    }
+
+    async fn prepared_trends(
+        pool: &PgPool,
+        start_unix: i64,
+        limit: i64,
+        retained_rows: i64,
+        manual_rows: i64,
+        logical_series: i64,
+        search: Option<&str>,
+    ) -> Vec<Value> {
+        let query = crate::repository_network_observations::NETWORK_OBSERVATION_TRENDS_QUERY;
+        let signature = "(bigint, bigint, uuid[], text, text, text, text, text, boolean, bigint)";
+        let search_argument = search.map_or_else(
+            || "NULL".to_owned(),
+            |value| format!("'{}'", value.replace('\'', "''")),
+        );
+        let arguments = format!(
+            "({start_unix}, {}, ARRAY[]::uuid[], NULL, NULL, NULL, NULL, {search_argument}, TRUE, {limit})",
+            start_unix + 86_400
+        );
+        let mut baseline = None;
+        let mut baseline_order = None;
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query(&format!("SET LOCAL plan_cache_mode = '{mode}'"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(&format!("PREPARE trend_work {signature} AS {query}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let explain: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE trend_work{arguments}"
+            ))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+            // Explain the unwrapped production statement above. The second
+            // preparation only converts every result column for parity checks.
+            sqlx::query(&format!(
+                "PREPARE trend_values {signature} AS SELECT to_jsonb(trend) FROM ({query}) trend"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            let mut rows: Vec<Value> =
+                sqlx::query_scalar(&format!("EXECUTE trend_values{arguments}"))
+                    .fetch_all(&mut *tx)
+                    .await
+                    .unwrap();
+            for name in ["trend_work", "trend_values"] {
+                sqlx::query(&format!("DEALLOCATE {name}"))
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+            tx.commit().await.unwrap();
+
+            let plan = &explain[0]["Plan"];
+            let retained_examined =
+                explain_relation_examined_rows(plan, "network_observation_rollups");
+            // Endpoints, the two nearest-coordinate directions, and hydration
+            // may each inspect two health fragments. A single input scan is
+            // also valid when the full response budget approaches input size.
+            let retained_bound = (retained_rows + 8 * (limit + logical_series)) as f64;
+            assert!(
+                retained_examined <= retained_bound,
+                "{mode}: examined {retained_examined} retained rows, bound {retained_bound}: {explain}"
+            );
+            let manual_examined = explain_relation_examined_rows(plan, "network_observations");
+            let manual_bound = (8 * (manual_rows + limit + logical_series)) as f64;
+            assert!(
+                manual_examined <= manual_bound,
+                "{mode}: repeated timestamp-only manual hydration examined {manual_examined} rows, bound {manual_bound}: {explain}"
+            );
+            // This fixture has one physical series per automatic logical
+            // series and at most one pending row. Allow one materialized input
+            // pass, then 18 series passes: four source-catalogue consumers,
+            // catalogue + bounds, two pending endpoints, nine budget consumers
+            // (including interior iteration), and the slot-join remainder.
+            // Allow 12 coordinate passes: three pending probes, slot + interior
+            // iteration, three coordinate consumers, and up to four hydrated
+            // health fragments (retained + pending). The two pending-owner
+            // stages each scan the single pending row once. This guards
+            // catalogue-per-coordinate rescans without depending on CTE names.
+            let cte_bound =
+                (retained_rows + manual_rows + 18 * logical_series + 12 * limit + 2) as f64;
+            let cte_examined = cte_examined_rows(plan);
+            assert!(
+                cte_examined <= cte_bound,
+                "{mode}: materialized stages examined {cte_examined} rows, bound {cte_bound}: {explain}"
+            );
+            // Spill depends on row width and deployment work_mem, not just
+            // bounded executor work. Record it at the real response budget;
+            // zero spill from the former 480-point fixture is not a contract.
+            eprintln!(
+                "trend work: mode={mode}, search={search:?}, manual_rows={manual_rows}, retained_examined={retained_examined}, manual_examined={manual_examined}, cte_examined={cte_examined}, temp_read_blocks={}, temp_written_blocks={}",
+                plan["Temp Read Blocks"].as_u64().unwrap_or(0),
+                plan["Temp Written Blocks"].as_u64().unwrap_or(0)
+            );
+            assert!(rows.len() <= limit as usize);
+            let order = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row["latest_observed_at"].as_str().unwrap().to_owned(),
+                        row["kind"].as_str().unwrap().to_owned(),
+                        row["client_id"].as_str().unwrap().to_owned(),
+                        row["bucket_start"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(order.windows(2).all(|pair| {
+                let (left, right) = (&pair[0], &pair[1]);
+                right
+                    .0
+                    .cmp(&left.0)
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| left.2.cmp(&right.2))
+                    .then_with(|| right.3.cmp(&left.3))
+                    != std::cmp::Ordering::Greater
+            }));
+            // The public sort keys do not break ties between identities.
+            // Preserve their order-key sequence but canonicalize tied values
+            // for complete field parity between actual prepared plan modes.
+            rows.sort_by_cached_key(Value::to_string);
+            if let Some(expected) = &baseline {
+                assert_eq!(&rows, expected, "prepared trend result fields diverged");
+                assert_eq!(Some(&order), baseline_order.as_ref());
+            } else {
+                baseline = Some(rows);
+                baseline_order = Some(order);
+            }
+        }
+        baseline.unwrap()
+    }
+
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
@@ -9854,45 +10006,211 @@ async fn postgres_network_trend_budget_preserves_retained_minute_day_for_120_ser
         assert!(timestamps.len() <= 84);
     }
 
-    let explain_limit = 480_i64;
-    let explain_sql = format!(
-        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-        crate::repository_network_observations::NETWORK_OBSERVATION_TRENDS_QUERY
+    sqlx::raw_sql(
+        "ANALYZE clients; ANALYZE tunnel_plans; ANALYZE network_observation_series; \
+         ANALYZE network_observation_rollups; ANALYZE network_observations;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let retained = prepared_trends(&db.pool, start_unix, 10_000, 34_560, 0, 120, None).await;
+    assert_eq!(retained.len(), trends.len());
+
+    // Thousands of logical groups deliberately share one exact timestamp.
+    // Hydration must use their full identity, not revisit every timestamp peer
+    // for each coordinate. The duplicate proves hydration cannot LIMIT 1.
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id, client_id, kind, source, plan_id, topology_identity_hash,
+            plan_name, interface_name, peer_client_id, healthy,
+            throughput_mbps, bytes, observed_at, received_at
+        )
+        SELECT md5('trend-manual-' || point_no)::uuid,
+               'trend-budget-left', 'network_speed_test', 'manual', $1,
+               'trend-manual-identity-' || greatest(point_no, 1),
+               CASE WHEN point_no = 0 THEN 'renamed-manual' ELSE 'manual-plan' END,
+               'trend-manual-interface-' || greatest(point_no, 1),
+               'trend-budget-right', TRUE,
+               CASE WHEN point_no = 0 THEN 20.0 ELSE 10.0 END,
+               1024, to_timestamp($2), to_timestamp($2)
+        FROM generate_series(0, 4000) point_no
+        "#,
+    )
+    .bind(plan_id)
+    .bind(start_unix + 86_340)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let pending_id = Uuid::new_v4();
+    let sample_id = Uuid::new_v4();
+    let pending_at = start_unix + 287 * 300 + 10;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_samples (
+            id, client_id, observed_at, cpu_cores, cpu_load_1, cpu_load_5,
+            cpu_load_15, memory_total_bytes, memory_available_bytes,
+            disk_total_bytes, disk_available_bytes, tcp_sockets, udp_sockets,
+            payload, accepted_seq, accepted_at, source_gateway_id,
+            source_gateway_session_id, source_process_incarnation_id,
+            source_telemetry_seq, reported_observed_unix
+        ) VALUES (
+            $1, 'trend-budget-left', to_timestamp($2), 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, $3, 1, now(), 'trend-budget-gateway',
+            $4, $5, 1, $2
+        )
+        "#,
+    )
+    .bind(sample_id)
+    .bind(pending_at)
+    .bind(json!({"tunnel_reachability": [{
+        "id": pending_id, "healthy": false,
+        "latency_avg_ms": 15.0, "packet_loss_ratio": 1.0,
+        "reason": "pending unhealthy"
+    }]}))
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id, source, automatic_series_id, automatic_sample_id,
+            automatic_payload_ordinal, plan_name, observed_at, received_at
+        )
+        SELECT $1, 'automatic', id, $2, 1, plan_name,
+               to_timestamp($3), to_timestamp($3)
+        FROM network_observation_series
+        WHERE plan_id = $4 AND topology_identity_hash = 'trend-budget-identity-1'
+        "#,
+    )
+    .bind(pending_id)
+    .bind(sample_id)
+    .bind(pending_at)
+    .bind(plan_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "UPDATE telemetry_projection_heads SET accepted_seq = 1, projected_seq = 1, \
+         accepted_at = now(), projected_at = now() WHERE client_id = 'trend-budget-left'; \
+         ANALYZE telemetry_samples; ANALYZE network_observations; \
+         ANALYZE telemetry_projection_heads; ANALYZE telemetry_minute_materialization_heads;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mixed = prepared_trends(&db.pool, start_unix, 10_000, 34_560, 4001, 4120, None).await;
+    // The 4,120 series all receive two slots; the extra slots go to newer
+    // one-coordinate manual series, while every retained series keeps both ends.
+    assert_eq!(mixed.len(), 4000 + 2 * 120);
+    assert_eq!(
+        mixed
+            .iter()
+            .filter(|row| row["kind"] == "network_speed_test")
+            .count(),
+        4000
     );
-    let explain: Value = sqlx::query_scalar(&explain_sql)
-        .bind(start_unix)
-        .bind(start_unix + 86_400)
-        .bind(vec![plan_id])
-        .bind(None::<&str>)
-        .bind(Some("automatic"))
-        .bind(Some("tunnel_reachability"))
-        .bind(None::<&str>)
-        .bind(None::<&str>)
-        .bind(false)
-        .bind(explain_limit)
-        .fetch_one(&db.pool)
+    let manual = mixed
+        .iter()
+        .find(|row| row["topology_identity_hash"] == "trend-manual-identity-1")
+        .unwrap();
+    assert_eq!(manual["sample_count"], 2);
+    assert_eq!(manual["manual_count"], 2);
+    assert_eq!(manual["source_bucket_count"], 2);
+    assert_eq!(manual["throughput_sum_mbps"], 30.0);
+    assert_eq!(manual["throughput_sample_count"], 2);
+    assert_eq!(manual["bytes_total"], 2048);
+    assert_eq!(manual["plan_name"], "renamed-manual");
+    assert_eq!(manual["bucket_secs"], Value::Null);
+    assert_eq!(manual["retained"], false);
+    let merged = mixed
+        .iter()
+        .find(|row| {
+            row["topology_identity_hash"] == "trend-budget-identity-1" && row["sample_count"] == 2
+        })
+        .unwrap();
+    assert_eq!(merged["automatic_count"], 2);
+    assert_eq!(merged["healthy_count"], 1);
+    assert_eq!(merged["degraded_count"], 1);
+    assert_eq!(merged["latency_sum_ms"], 20.0);
+    assert_eq!(merged["packet_loss_sum_ratio"], 1.0);
+    assert_eq!(merged["source_bucket_count"], 1);
+    assert_eq!(merged["bucket_secs"], 60);
+    assert_eq!(merged["retained"], true);
+
+    // Search finds only two manual points, but their logical identity also owns
+    // retained automatic history. Empty retained seeks must not rescan that
+    // history for every interior slot of the unchanged 10,000-point budget.
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id, client_id, kind, source, plan_id, topology_identity_hash,
+            plan_name, interface_name, peer_client_id, healthy,
+            latency_avg_ms, reason, observed_at, received_at
+        )
+        SELECT md5('trend-manual-search-' || point_no)::uuid,
+               series.client_id, 'tunnel_reachability', 'manual', series.plan_id,
+               series.topology_identity_hash, 'searched-manual-plan',
+               series.interface_name, series.peer_client_id, TRUE,
+               point_no * 10.0, 'trend-manual-search-only',
+               to_timestamp($2::bigint + point_no * 120),
+               to_timestamp($2::bigint + point_no * 120)
+        FROM network_observation_series series
+        CROSS JOIN generate_series(1, 2) point_no
+        WHERE series.plan_id = $1
+          AND series.topology_identity_hash = 'trend-budget-identity-1'
+        "#,
+    )
+    .bind(plan_id)
+    .bind(start_unix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE network_observations")
+        .execute(&db.pool)
         .await
         .unwrap();
-    let explain_root = &explain[0]["Plan"];
-    let explain_text = explain.to_string();
-    let retained_examined =
-        explain_relation_examined_rows(explain_root, "network_observation_rollups");
-    let selected_coordinate_bound = (explain_limit * 8 + 120 * 8) as f64;
-    assert!(
-        retained_examined <= selected_coordinate_bound,
-        "480 selected coordinates examined {retained_examined} retained rows (bound {selected_coordinate_bound}): {explain_text}"
-    );
-    assert!(
-        retained_examined < retained_shape.0 as f64 / 2.0,
-        "bounded coordinate seeks revisited the 34,560-row retained fixture: {explain_text}"
-    );
-    assert!(
-        explain_text.contains("network_observation_rollups_series_time_idx"),
-        "bounded coordinate seeks did not use the series/time index: {explain_text}"
-    );
-    assert!(
-        !explain_plan_uses_temporary_blocks(explain_root),
-        "bounded coordinate seeks spilled to temporary storage: {explain_text}"
+    let searched = prepared_trends(
+        &db.pool,
+        start_unix,
+        10_000,
+        34_560,
+        4003,
+        120,
+        Some("trend-manual-search-only"),
+    )
+    .await;
+    assert_eq!(searched.len(), 2);
+    let mut searched_timestamps = Vec::new();
+    for row in &searched {
+        assert_eq!(row["kind"], "tunnel_reachability");
+        assert_eq!(row["plan_id"], json!(plan_id));
+        assert_eq!(row["topology_identity_hash"], "trend-budget-identity-1");
+        assert_eq!(row["interface_name"], "trend-budget-interface-1");
+        assert_eq!(row["client_id"], "trend-budget-left");
+        assert_eq!(row["peer_client_id"], "trend-budget-right");
+        assert_eq!(row["plan_name"], "searched-manual-plan");
+        assert_eq!(row["sample_count"], 1);
+        assert_eq!(row["manual_count"], 1);
+        assert_eq!(row["automatic_count"], 0);
+        assert_eq!(row["source_bucket_count"], 1);
+        assert_eq!(row["retained"], false);
+        assert_eq!(row["bucket_secs"], Value::Null);
+        let timestamp =
+            crate::util::parse_timestamp_unix(row["bucket_start"].as_str().unwrap()).unwrap();
+        searched_timestamps.push(timestamp);
+        assert_eq!(
+            row["latency_sum_ms"],
+            ((timestamp as i64 - start_unix) / 120) as f64 * 10.0
+        );
+    }
+    searched_timestamps.sort_unstable();
+    assert_eq!(
+        searched_timestamps,
+        vec![(start_unix + 120) as u64, (start_unix + 240) as u64]
     );
     db.cleanup().await;
 }

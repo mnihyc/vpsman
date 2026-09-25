@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { expectPrivilegeVerifiedForViewport } from "./support/consoleNavigation";
+import { NETWORK_OBSERVATION_FIELDS } from "../src/networkEvidence";
 
 const accessToken = "a".repeat(64);
 const refreshToken = "b".repeat(64);
@@ -769,7 +770,10 @@ async function installAuthSessionApiMock(
                   revocation_count: 0,
                   suggested_client_id: "v-1",
                 }
-            : [],
+            : path === "network/observations" &&
+                new URL(route.request().url()).searchParams.get("format") === "compact"
+              ? { fields: NETWORK_OBSERVATION_FIELDS, rows: [] }
+              : [],
       });
     });
   }

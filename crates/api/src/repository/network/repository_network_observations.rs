@@ -775,7 +775,25 @@ pub(crate) async fn record_postgres_automatic_tunnel_reachability_suffix_in_tx(
 }
 
 pub(crate) const NETWORK_OBSERVATION_TRENDS_QUERY: &str = r#"
-WITH RECURSIVE automatic_physical_series AS MATERIALIZED (
+WITH RECURSIVE eligible_visible_clients AS MATERIALIZED (
+    -- Reuse visibility membership across manual seeks instead of repeating
+    -- the same correlated client/plan checks for every selected coordinate.
+    SELECT id FROM visible_clients WHERE status <> 'suspended'
+),
+eligible_visible_plans AS MATERIALIZED (
+    SELECT plan.id
+    FROM tunnel_plans plan
+    WHERE plan.deleted_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM visible_clients endpoint
+          WHERE endpoint.id = plan.left_client_id AND endpoint.status = 'suspended'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM visible_clients endpoint
+          WHERE endpoint.id = plan.right_client_id AND endpoint.status = 'suspended'
+      )
+),
+automatic_physical_series AS MATERIALIZED (
     SELECT series.*
     FROM network_observation_series series
     WHERE (cardinality($3::uuid[]) = 0 OR series.plan_id = ANY($3::uuid[]))
@@ -787,28 +805,9 @@ WITH RECURSIVE automatic_physical_series AS MATERIALIZED (
       AND (
         NOT $9
         OR (
-            EXISTS (
-                SELECT 1 FROM visible_clients
-                WHERE id = series.client_id AND status <> 'suspended'
-            )
-            AND EXISTS (
-                SELECT 1 FROM visible_clients
-                WHERE id = series.peer_client_id AND status <> 'suspended'
-            )
-            AND EXISTS (
-                SELECT 1 FROM tunnel_plans plan
-                WHERE plan.id = series.plan_id AND plan.deleted_at IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM visible_clients endpoint
-                      WHERE endpoint.id = plan.left_client_id
-                        AND endpoint.status = 'suspended'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM visible_clients endpoint
-                      WHERE endpoint.id = plan.right_client_id
-                        AND endpoint.status = 'suspended'
-                  )
-            )
+            series.client_id IN (SELECT id FROM eligible_visible_clients)
+            AND series.peer_client_id IN (SELECT id FROM eligible_visible_clients)
+            AND series.plan_id IN (SELECT id FROM eligible_visible_plans)
         )
       )
 ),
@@ -870,22 +869,9 @@ manual_points AS NOT MATERIALIZED (
       AND (
         NOT $9
         OR (
-            EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id AND status <> 'suspended')
-            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id AND status <> 'suspended')
-            AND EXISTS (
-                SELECT 1 FROM tunnel_plans plan
-                WHERE plan.id = observation.plan_id AND plan.deleted_at IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM visible_clients endpoint
-                      WHERE endpoint.id=plan.left_client_id
-                        AND endpoint.status = 'suspended'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM visible_clients endpoint
-                      WHERE endpoint.id=plan.right_client_id
-                        AND endpoint.status = 'suspended'
-                  )
-            )
+            observation.client_id IN (SELECT id FROM eligible_visible_clients)
+            AND observation.peer_client_id IN (SELECT id FROM eligible_visible_clients)
+            AND observation.plan_id IN (SELECT id FROM eligible_visible_plans)
         )
       )
 ),
@@ -893,14 +879,17 @@ manual_series AS MATERIALIZED (
     -- Manual job evidence has no persistent series catalogue. This exact
     -- distinct pass is deliberately isolated from high-volume automatic
     -- telemetry; arbitrary reason substring matching cannot be index-seeked
-    -- without changing the schema or its matching semantics.
+    -- without changing the schema or its matching semantics. The same pass
+    -- owns manual endpoints: observed_at is both bucket and latest timestamp.
     SELECT
         point.kind,
         point.plan_id,
         point.topology_identity_hash,
         point.interface_name,
         point.client_id,
-        point.peer_client_id
+        point.peer_client_id,
+        min(point.bucket_start) AS oldest_manual_bucket_start,
+        max(point.bucket_start) AS latest_manual_bucket_start
     FROM manual_points point
     GROUP BY point.kind, point.plan_id, point.topology_identity_hash,
              point.interface_name, point.client_id, point.peer_client_id
@@ -913,10 +902,17 @@ pending_samples AS MATERIALIZED (
         SELECT DISTINCT client_id
         FROM automatic_physical_series
     ) eligible_client USING (client_id)
-    JOIN telemetry_samples sample
-      ON sample.client_id = head.client_id
-     AND sample.accepted_seq > head.materialized_seq
-     AND sample.accepted_seq <= projection.projected_seq
+    -- Keep both ownership watermarks inside the client-keyed sample lookup.
+    -- OFFSET 0 prevents a generic plan from applying the upper bound only
+    -- after it has read the entire unmaterialized accepted suffix.
+    CROSS JOIN LATERAL (
+        SELECT sample.id, sample.payload
+        FROM telemetry_samples sample
+        WHERE sample.client_id = head.client_id
+          AND sample.accepted_seq > head.materialized_seq
+          AND sample.accepted_seq <= projection.projected_seq
+        OFFSET 0
+    ) sample
 ),
 pending_rows AS MATERIALIZED (
     SELECT locator.id, series.plan_name, locator.observed_at,
@@ -925,9 +921,17 @@ pending_rows AS MATERIALIZED (
            series.client_id, series.peer_client_id, series.target,
            raw.observation
     FROM pending_samples sample
-    JOIN network_observations locator
-      ON locator.automatic_sample_id = sample.id
-     AND locator.source = 'automatic'
+    -- Only locators owned by these pending samples may reach payload decoding.
+    -- Retain the sample key inside the lookup in both prepared-plan modes.
+    CROSS JOIN LATERAL (
+        SELECT locator.*
+        FROM network_observations locator
+        WHERE locator.automatic_sample_id = sample.id
+          AND locator.source = 'automatic'
+          AND locator.observed_at >= to_timestamp($1)
+          AND locator.observed_at <= to_timestamp($2)
+        OFFSET 0
+    ) locator
     JOIN automatic_physical_series series
       ON series.id = locator.automatic_series_id
     CROSS JOIN LATERAL (
@@ -1031,7 +1035,9 @@ retained_fragments AS NOT MATERIALIZED (
         0::numeric AS bytes_total,
         rollup.latest_observed_at
     FROM network_observation_rollups rollup
-    JOIN automatic_physical_series series ON series.id = rollup.series_id
+    -- The rollup foreign key guarantees this label row. A left join lets
+    -- coordinate-only probes omit it; hydration still receives every label.
+    LEFT JOIN network_observation_series series ON series.id = rollup.series_id
     WHERE rollup.bucket_start > to_timestamp($1) - interval '1 day'
       AND rollup.bucket_start <= to_timestamp($2)
       AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs) > to_timestamp($1)
@@ -1043,10 +1049,14 @@ retained_fragments AS NOT MATERIALIZED (
       )
       AND (
         $8::text IS NULL
-        OR concat_ws(' ', series.client_id, series.peer_client_id,
-            series.plan_name, series.interface_name, series.target,
-            rollup.latest_reason, 'tunnel_reachability', 'automatic')
-            ILIKE '%' || $8 || '%'
+        OR EXISTS (
+            SELECT 1 FROM network_observation_series searchable
+            WHERE searchable.id = rollup.series_id
+              AND concat_ws(' ', searchable.client_id, searchable.peer_client_id,
+                  searchable.plan_name, searchable.interface_name, searchable.target,
+                  rollup.latest_reason, 'tunnel_reachability', 'automatic')
+                  ILIKE '%' || $8 || '%'
+        )
       )
 ),
 series_sources AS (
@@ -1058,7 +1068,9 @@ series_sources AS (
         series.client_id,
         series.peer_client_id,
         series.id AS automatic_series_id,
-        FALSE AS has_manual
+        FALSE AS has_manual,
+        NULL::timestamptz AS oldest_manual_bucket_start,
+        NULL::timestamptz AS latest_manual_bucket_start
     FROM automatic_physical_series series
     UNION ALL
     SELECT
@@ -1069,10 +1081,12 @@ series_sources AS (
         manual.client_id,
         manual.peer_client_id,
         NULL::bigint AS automatic_series_id,
-        TRUE AS has_manual
+        TRUE AS has_manual,
+        manual.oldest_manual_bucket_start,
+        manual.latest_manual_bucket_start
     FROM manual_series manual
 ),
-series_catalog AS MATERIALIZED (
+series_identity_catalog AS (
     SELECT
         source.kind,
         source.plan_id,
@@ -1085,12 +1099,54 @@ series_catalog AS MATERIALIZED (
                 FILTER (WHERE source.automatic_series_id IS NOT NULL),
             ARRAY[]::bigint[]
         ) AS automatic_series_ids,
-        bool_or(source.has_manual) AS has_manual
+        bool_or(source.has_manual) AS has_manual,
+        min(source.oldest_manual_bucket_start) AS oldest_manual_bucket_start,
+        max(source.latest_manual_bucket_start) AS latest_manual_bucket_start
     FROM series_sources source
     GROUP BY source.kind, source.plan_id, source.topology_identity_hash,
              source.interface_name, source.client_id, source.peer_client_id
 ),
+pending_coordinates AS MATERIALIZED (
+    -- Pending fragments have no persistent index. Cache only paired coordinate
+    -- arrays per logical series, so each seek avoids scanning other series.
+    -- Identical ordering in both aggregates keeps their timestamps aligned.
+    SELECT kind, plan_id, topology_identity_hash,
+           interface_name, client_id, peer_client_id,
+           array_agg(bucket_start ORDER BY bucket_start, latest_observed_at)
+               AS bucket_starts,
+           array_agg(latest_observed_at ORDER BY bucket_start, latest_observed_at)
+               AS latest_observed_ats
+    FROM pending_fragments
+    GROUP BY kind, plan_id, topology_identity_hash,
+             interface_name, client_id, peer_client_id
+),
+series_catalog AS MATERIALIZED (
+    SELECT catalog.*,
+           -- Cache retained membership under the exact window/health/search
+           -- predicates. Empty physical series must not rescan their entire
+           -- retained window for every interior target supplied by manual or
+           -- pending evidence. The one-row probe uses the existing series key.
+           ARRAY(
+               SELECT physical.series_id
+               FROM unnest(catalog.automatic_series_ids) physical(series_id)
+               CROSS JOIN LATERAL (
+                   SELECT 1
+                   FROM retained_fragments point
+                   WHERE point.physical_series_id = physical.series_id
+                   LIMIT 1
+               ) retained
+           ) AS retained_series_ids,
+           pending.bucket_starts AS pending_bucket_starts,
+           pending.latest_observed_ats AS pending_latest_observed_ats
+    FROM series_identity_catalog catalog
+    LEFT JOIN pending_coordinates pending
+      USING (kind, plan_id, topology_identity_hash,
+             interface_name, client_id, peer_client_id)
+),
 series_bounds AS MATERIALIZED (
+    -- Label ties cannot change a coordinate once bucket, resolution and latest
+    -- timestamp are equal. Keep labels out of all coordinate probes; the final
+    -- selected fragments still choose the exact latest-observation label.
     SELECT catalog.*,
            oldest.bucket_start AS oldest_bucket_start,
            oldest.bucket_secs AS oldest_bucket_secs,
@@ -1103,101 +1159,83 @@ series_bounds AS MATERIALIZED (
         SELECT retained_candidate.*
         FROM (
             SELECT retained.*
-            FROM unnest(catalog.automatic_series_ids) physical(series_id)
+            FROM unnest(catalog.retained_series_ids) physical(series_id)
             CROSS JOIN LATERAL (
-                SELECT point.bucket_start, point.bucket_secs,
-                       point.plan_name, point.latest_observed_at
+                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
                 FROM retained_fragments point
                 WHERE point.physical_series_id = physical.series_id
                 ORDER BY point.bucket_start, point.bucket_secs,
-                         point.latest_observed_at, point.plan_name
+                         point.latest_observed_at
                 LIMIT 1
             ) retained
             ORDER BY retained.bucket_start, retained.bucket_secs,
-                     retained.latest_observed_at, retained.plan_name
+                     retained.latest_observed_at
             LIMIT 1
         ) retained_candidate
         UNION ALL
         SELECT pending.*
         FROM (
-            SELECT point.bucket_start, point.bucket_secs,
-                   point.plan_name, point.latest_observed_at
-            FROM pending_fragments point
-            WHERE point.physical_series_id = ANY(catalog.automatic_series_ids)
+            SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
+            FROM (
+                SELECT coordinate.bucket_start, 60::integer AS bucket_secs,
+                       coordinate.latest_observed_at
+                FROM unnest(catalog.pending_bucket_starts,
+                            catalog.pending_latest_observed_ats)
+                    coordinate(bucket_start, latest_observed_at)
+            ) point
             ORDER BY point.bucket_start, point.bucket_secs,
-                     point.latest_observed_at, point.plan_name
+                     point.latest_observed_at
             LIMIT 1
         ) pending
         UNION ALL
-        SELECT manual.*
-        FROM (
-            SELECT point.bucket_start, point.bucket_secs,
-                   point.plan_name, point.latest_observed_at
-            FROM manual_points point
-            WHERE catalog.has_manual
-              AND point.kind = catalog.kind
-              AND point.plan_id = catalog.plan_id
-              AND point.topology_identity_hash = catalog.topology_identity_hash
-              AND point.interface_name = catalog.interface_name
-              AND point.client_id = catalog.client_id
-              AND point.peer_client_id = catalog.peer_client_id
-            ORDER BY point.bucket_start, point.latest_observed_at,
-                     point.plan_name
-            LIMIT 1
-        ) manual
+        SELECT catalog.oldest_manual_bucket_start AS bucket_start,
+               NULL::integer AS bucket_secs,
+               catalog.oldest_manual_bucket_start AS latest_observed_at
+        WHERE catalog.has_manual
         ORDER BY bucket_start, bucket_secs NULLS FIRST,
-                 latest_observed_at, plan_name
+                 latest_observed_at
         LIMIT 1
     ) oldest
     CROSS JOIN LATERAL (
         SELECT retained_candidate.*
         FROM (
             SELECT retained.*
-            FROM unnest(catalog.automatic_series_ids) physical(series_id)
+            FROM unnest(catalog.retained_series_ids) physical(series_id)
             CROSS JOIN LATERAL (
-                SELECT point.bucket_start, point.bucket_secs,
-                       point.plan_name, point.latest_observed_at
+                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
                 FROM retained_fragments point
                 WHERE point.physical_series_id = physical.series_id
                 ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
-                         point.bucket_secs DESC, point.plan_name
+                         point.bucket_secs DESC
                 LIMIT 1
             ) retained
             ORDER BY retained.bucket_start DESC,
                      retained.latest_observed_at DESC,
-                     retained.bucket_secs DESC, retained.plan_name
+                     retained.bucket_secs DESC
             LIMIT 1
         ) retained_candidate
         UNION ALL
         SELECT pending.*
         FROM (
-            SELECT point.bucket_start, point.bucket_secs,
-                   point.plan_name, point.latest_observed_at
-            FROM pending_fragments point
-            WHERE point.physical_series_id = ANY(catalog.automatic_series_ids)
+            SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
+            FROM (
+                SELECT coordinate.bucket_start, 60::integer AS bucket_secs,
+                       coordinate.latest_observed_at
+                FROM unnest(catalog.pending_bucket_starts,
+                            catalog.pending_latest_observed_ats)
+                    coordinate(bucket_start, latest_observed_at)
+            ) point
             ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
-                     point.bucket_secs DESC, point.plan_name
+                     point.bucket_secs DESC
             LIMIT 1
         ) pending
         UNION ALL
-        SELECT manual.*
-        FROM (
-            SELECT point.bucket_start, point.bucket_secs,
-                   point.plan_name, point.latest_observed_at
-            FROM manual_points point
-            WHERE catalog.has_manual
-              AND point.kind = catalog.kind
-              AND point.plan_id = catalog.plan_id
-              AND point.topology_identity_hash = catalog.topology_identity_hash
-              AND point.interface_name = catalog.interface_name
-              AND point.client_id = catalog.client_id
-              AND point.peer_client_id = catalog.peer_client_id
-            ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
-                     point.plan_name
-            LIMIT 1
-        ) manual
+        SELECT catalog.latest_manual_bucket_start AS bucket_start,
+               NULL::integer AS bucket_secs,
+               catalog.latest_manual_bucket_start AS latest_observed_at
+        WHERE catalog.has_manual
         ORDER BY bucket_start DESC, latest_observed_at DESC,
-                 bucket_secs DESC NULLS LAST, plan_name
+                 bucket_secs DESC NULLS LAST
         LIMIT 1
     ) latest
 ),
@@ -1278,74 +1316,77 @@ interior_coordinates AS (
             SELECT retained_before.*
             FROM (
                 SELECT retained.*
-                FROM unnest(target.automatic_series_ids) physical(series_id)
+                FROM unnest(target.retained_series_ids) physical(series_id)
                 CROSS JOIN LATERAL (
-                    SELECT point.bucket_start, point.bucket_secs,
-                           point.plan_name, point.latest_observed_at
+                    SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
                     FROM retained_fragments point
                     WHERE point.physical_series_id = physical.series_id
                       AND point.bucket_start <= target.target_at
                     ORDER BY point.bucket_start DESC,
                              point.latest_observed_at DESC,
-                             point.bucket_secs DESC, point.plan_name
+                             point.bucket_secs DESC
                     LIMIT 1
                 ) retained
                 ORDER BY retained.bucket_start DESC,
                          retained.latest_observed_at DESC,
-                         retained.bucket_secs DESC, retained.plan_name
+                         retained.bucket_secs DESC
                 LIMIT 1
             ) retained_before
             UNION ALL
             SELECT retained_after.*
             FROM (
                 SELECT retained.*
-                FROM unnest(target.automatic_series_ids) physical(series_id)
+                FROM unnest(target.retained_series_ids) physical(series_id)
                 CROSS JOIN LATERAL (
-                    SELECT point.bucket_start, point.bucket_secs,
-                           point.plan_name, point.latest_observed_at
+                    SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
                     FROM retained_fragments point
                     WHERE point.physical_series_id = physical.series_id
                       AND point.bucket_start >= target.target_at
                     ORDER BY point.bucket_start, point.bucket_secs,
-                             point.latest_observed_at, point.plan_name
+                             point.latest_observed_at
                     LIMIT 1
                 ) retained
                 ORDER BY retained.bucket_start, retained.bucket_secs,
-                         retained.latest_observed_at, retained.plan_name
+                         retained.latest_observed_at
                 LIMIT 1
             ) retained_after
             UNION ALL
             SELECT pending.*
             FROM (
-                SELECT point.bucket_start, point.bucket_secs,
-                       point.plan_name, point.latest_observed_at
-                FROM pending_fragments point
-                WHERE point.physical_series_id
-                        = ANY(target.automatic_series_ids)
-                  AND point.bucket_start <= target.target_at
+                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
+                FROM (
+                    SELECT coordinate.bucket_start, 60::integer AS bucket_secs,
+                           coordinate.latest_observed_at
+                    FROM unnest(target.pending_bucket_starts,
+                                target.pending_latest_observed_ats)
+                        coordinate(bucket_start, latest_observed_at)
+                ) point
+                WHERE point.bucket_start <= target.target_at
                 ORDER BY point.bucket_start DESC,
                          point.latest_observed_at DESC,
-                         point.bucket_secs DESC, point.plan_name
+                         point.bucket_secs DESC
                 LIMIT 1
             ) pending
             UNION ALL
             SELECT pending.*
             FROM (
-                SELECT point.bucket_start, point.bucket_secs,
-                       point.plan_name, point.latest_observed_at
-                FROM pending_fragments point
-                WHERE point.physical_series_id
-                        = ANY(target.automatic_series_ids)
-                  AND point.bucket_start >= target.target_at
+                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
+                FROM (
+                    SELECT coordinate.bucket_start, 60::integer AS bucket_secs,
+                           coordinate.latest_observed_at
+                    FROM unnest(target.pending_bucket_starts,
+                                target.pending_latest_observed_ats)
+                        coordinate(bucket_start, latest_observed_at)
+                ) point
+                WHERE point.bucket_start >= target.target_at
                 ORDER BY point.bucket_start, point.bucket_secs,
-                         point.latest_observed_at, point.plan_name
+                         point.latest_observed_at
                 LIMIT 1
             ) pending
             UNION ALL
             SELECT manual.*
             FROM (
-                SELECT point.bucket_start, point.bucket_secs,
-                       point.plan_name, point.latest_observed_at
+                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
                 FROM manual_points point
                 WHERE target.has_manual
                   AND point.kind = target.kind
@@ -1357,14 +1398,13 @@ interior_coordinates AS (
                   AND point.peer_client_id = target.peer_client_id
                   AND point.bucket_start <= target.target_at
                 ORDER BY point.bucket_start DESC,
-                         point.latest_observed_at DESC, point.plan_name
+                         point.latest_observed_at DESC
                 LIMIT 1
             ) manual
             UNION ALL
             SELECT manual.*
             FROM (
-                SELECT point.bucket_start, point.bucket_secs,
-                       point.plan_name, point.latest_observed_at
+                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
                 FROM manual_points point
                 WHERE target.has_manual
                   AND point.kind = target.kind
@@ -1375,15 +1415,14 @@ interior_coordinates AS (
                   AND point.client_id = target.client_id
                   AND point.peer_client_id = target.peer_client_id
                   AND point.bucket_start >= target.target_at
-                ORDER BY point.bucket_start, point.latest_observed_at,
-                         point.plan_name
+                ORDER BY point.bucket_start, point.latest_observed_at
                 LIMIT 1
             ) manual
         ) candidate
         ORDER BY
             abs(extract(epoch FROM (bucket_start - target.target_at))),
             bucket_start DESC, latest_observed_at DESC,
-            bucket_secs DESC NULLS LAST, plan_name
+            bucket_secs DESC NULLS LAST
         LIMIT 1
     ) nearest
 ),
@@ -1395,24 +1434,30 @@ selected_coordinates AS MATERIALIZED (
         SELECT * FROM interior_coordinates
     ) coordinate
 ),
-selected_fragments AS MATERIALIZED (
-    SELECT point.*
+selected_fragments AS NOT MATERIALIZED (
+    SELECT coordinate.series_ordinal, point.*
     FROM selected_coordinates coordinate
     JOIN budgeted_series series USING (series_ordinal)
-    JOIN manual_points point
-      ON coordinate.bucket_secs IS NULL
-     AND point.kind = series.kind
-     AND point.plan_id = series.plan_id
-     AND point.topology_identity_hash = series.topology_identity_hash
-     AND point.interface_name = series.interface_name
-     AND point.client_id = series.client_id
-     AND point.peer_client_id = series.peer_client_id
-     AND point.bucket_start = coordinate.bucket_start
+    -- Keep the full series key and timestamp in the manual hydration lookup.
+    -- No LIMIT: every matching manual observation contributes to this bucket.
+    CROSS JOIN LATERAL (
+        SELECT point.*
+        FROM manual_points point
+        WHERE coordinate.bucket_secs IS NULL
+          AND point.kind = series.kind
+          AND point.plan_id = series.plan_id
+          AND point.topology_identity_hash = series.topology_identity_hash
+          AND point.interface_name = series.interface_name
+          AND point.client_id = series.client_id
+          AND point.peer_client_id = series.peer_client_id
+          AND point.bucket_start = coordinate.bucket_start
+        OFFSET 0
+    ) point
     UNION ALL
-    SELECT point.*
+    SELECT coordinate.series_ordinal, point.*
     FROM selected_coordinates coordinate
     JOIN budgeted_series series USING (series_ordinal)
-    CROSS JOIN LATERAL unnest(series.automatic_series_ids)
+    CROSS JOIN LATERAL unnest(series.retained_series_ids)
         physical(series_id)
     CROSS JOIN LATERAL (
         -- Health is the final primary-key dimension, so one physical series
@@ -1426,7 +1471,7 @@ selected_fragments AS MATERIALIZED (
         LIMIT 2
     ) point
     UNION ALL
-    SELECT point.*
+    SELECT coordinate.series_ordinal, point.*
     FROM selected_coordinates coordinate
     JOIN budgeted_series series USING (series_ordinal)
     CROSS JOIN LATERAL unnest(series.automatic_series_ids)
@@ -1435,6 +1480,9 @@ selected_fragments AS MATERIALIZED (
         SELECT pending.*
         FROM pending_fragments pending
         WHERE coordinate.bucket_secs IS NOT NULL
+          -- Skip scans when this series has no pending fragment at the selected
+          -- coordinate, without changing the existing two-fragment bound.
+          AND coordinate.bucket_start = ANY(series.pending_bucket_starts)
           AND pending.physical_series_id = physical.series_id
           AND pending.bucket_start = coordinate.bucket_start
           AND pending.bucket_secs = coordinate.bucket_secs
@@ -1442,16 +1490,14 @@ selected_fragments AS MATERIALIZED (
     ) point
 ),
 summarized AS (
+    -- The catalogue ordinal owns the complete logical identity. Aggregate its
+    -- narrow key, then attach identity fields once instead of sorting repeated
+    -- text labels and endpoint identifiers through every selected fragment.
     SELECT
-        kind,
-        plan_id,
-        topology_identity_hash,
+        series_ordinal,
         -- Names label a measured bucket; they never split its identity.
         (array_agg(plan_name ORDER BY latest_observed_at DESC, plan_name DESC))[1]
             AS plan_name,
-        interface_name,
-        client_id,
-        peer_client_id,
         bucket_start::text AS bucket_start,
         bucket_secs::bigint AS bucket_secs,
         bool_or(retained) AS retained,
@@ -1478,8 +1524,7 @@ summarized AS (
             AS bytes_total,
         max(latest_observed_at)::text AS latest_observed_at
     FROM selected_fragments
-    GROUP BY kind, plan_id, topology_identity_hash, interface_name,
-             client_id, peer_client_id, bucket_start, bucket_secs
+    GROUP BY series_ordinal, bucket_start, bucket_secs
 )
 SELECT
     kind, plan_id, topology_identity_hash, plan_name, interface_name,
@@ -1489,9 +1534,10 @@ SELECT
     latency_sum_ms, latency_sample_count, latency_min_ms, latency_max_ms,
     packet_loss_sum_ratio, packet_loss_sample_count, throughput_sum_mbps,
     throughput_sample_count, throughput_max_mbps, bytes_total,
-    latest_observed_at
+    summarized.latest_observed_at
 FROM summarized
-ORDER BY latest_observed_at DESC, kind, client_id, bucket_start DESC
+JOIN budgeted_series USING (series_ordinal)
+ORDER BY summarized.latest_observed_at DESC, kind, client_id, bucket_start DESC
 LIMIT $10
 "#;
 

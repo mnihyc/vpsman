@@ -14,7 +14,7 @@ use base64::{
     Engine as _,
 };
 use futures_util::stream;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeSeq, Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -1550,25 +1550,184 @@ pub(crate) async fn get_audit_log(
     Ok(Json(audit))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NetworkObservationFormat {
+    Compact,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct NetworkObservationFormatQuery {
+    pub(crate) format: Option<NetworkObservationFormat>,
+}
+
+// Keep the compact schema explicit and stable. The roundtrip test compares every
+// field against the default object representation, including nulls and metadata.
+const NETWORK_OBSERVATION_FIELDS: [&str; 30] = [
+    "id",
+    "job_id",
+    "client_id",
+    "seq",
+    "kind",
+    "source",
+    "role",
+    "plan_id",
+    "topology_identity_hash",
+    "plan_name",
+    "interface_name",
+    "peer_client_id",
+    "target",
+    "endpoint_side",
+    "address_family",
+    "stale_after_secs",
+    "healthy",
+    "transmitted",
+    "received",
+    "latency_min_ms",
+    "latency_avg_ms",
+    "latency_max_ms",
+    "latency_mdev_ms",
+    "packet_loss_ratio",
+    "reason",
+    "throughput_mbps",
+    "bytes",
+    "metadata",
+    "observed_at",
+    "received_at",
+];
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum NetworkObservationsResponse {
+    Records(Vec<NetworkObservationView>),
+    Compact {
+        fields: &'static [&'static str],
+        rows: NetworkObservationRows,
+    },
+}
+
+impl NetworkObservationsResponse {
+    fn new(
+        observations: Vec<NetworkObservationView>,
+        format: Option<NetworkObservationFormat>,
+    ) -> Self {
+        match format {
+            None => Self::Records(observations),
+            Some(NetworkObservationFormat::Compact) => Self::Compact {
+                fields: &NETWORK_OBSERVATION_FIELDS,
+                rows: NetworkObservationRows(observations),
+            },
+        }
+    }
+}
+
+pub(crate) struct NetworkObservationRows(Vec<NetworkObservationView>);
+
+impl Serialize for NetworkObservationRows {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut rows = serializer.serialize_seq(Some(self.0.len()))?;
+        for observation in &self.0 {
+            rows.serialize_element(&NetworkObservationRow(observation))?;
+        }
+        rows.end()
+    }
+}
+
+struct NetworkObservationRow<'a>(&'a NetworkObservationView);
+
+impl Serialize for NetworkObservationRow<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Directly serialize borrowed values: no per-row JSON object or array is
+        // built. Exhaustive destructuring also catches newly added model fields.
+        let NetworkObservationView {
+            id,
+            job_id,
+            client_id,
+            seq,
+            kind,
+            source,
+            role,
+            plan_id,
+            topology_identity_hash,
+            plan_name,
+            interface_name,
+            peer_client_id,
+            target,
+            endpoint_side,
+            address_family,
+            stale_after_secs,
+            healthy,
+            transmitted,
+            received,
+            latency_min_ms,
+            latency_avg_ms,
+            latency_max_ms,
+            latency_mdev_ms,
+            packet_loss_ratio,
+            reason,
+            throughput_mbps,
+            bytes,
+            metadata,
+            observed_at,
+            received_at,
+        } = self.0;
+        let mut row = serializer.serialize_seq(Some(NETWORK_OBSERVATION_FIELDS.len()))?;
+        row.serialize_element(id)?;
+        row.serialize_element(job_id)?;
+        row.serialize_element(client_id)?;
+        row.serialize_element(seq)?;
+        row.serialize_element(kind)?;
+        row.serialize_element(source)?;
+        row.serialize_element(role)?;
+        row.serialize_element(plan_id)?;
+        row.serialize_element(topology_identity_hash)?;
+        row.serialize_element(plan_name)?;
+        row.serialize_element(interface_name)?;
+        row.serialize_element(peer_client_id)?;
+        row.serialize_element(target)?;
+        row.serialize_element(endpoint_side)?;
+        row.serialize_element(address_family)?;
+        row.serialize_element(stale_after_secs)?;
+        row.serialize_element(healthy)?;
+        row.serialize_element(transmitted)?;
+        row.serialize_element(received)?;
+        row.serialize_element(latency_min_ms)?;
+        row.serialize_element(latency_avg_ms)?;
+        row.serialize_element(latency_max_ms)?;
+        row.serialize_element(latency_mdev_ms)?;
+        row.serialize_element(packet_loss_ratio)?;
+        row.serialize_element(reason)?;
+        row.serialize_element(throughput_mbps)?;
+        row.serialize_element(bytes)?;
+        row.serialize_element(metadata)?;
+        row.serialize_element(observed_at)?;
+        row.serialize_element(received_at)?;
+        row.end()
+    }
+}
+
 pub(crate) async fn list_network_observations(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<NetworkEvidenceQuery>,
-) -> Result<Json<Vec<NetworkObservationView>>, ApiError> {
+    Query(format): Query<NetworkObservationFormatQuery>,
+) -> Result<Json<NetworkObservationsResponse>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
     let filter = network_observation_filter(&query, 100_000, true)?;
-    Ok(Json(
-        state
-            .repo
-            .list_network_observations_filtered(&filter)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "network_observations_unavailable",
-                "Network observations could not be loaded.",
-            ))?,
-    ))
+    let observations = state
+        .repo
+        .list_network_observations_filtered(&filter)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_observations_unavailable",
+            "Network observations could not be loaded.",
+        ))?;
+    Ok(Json(NetworkObservationsResponse::new(
+        observations,
+        format.format,
+    )))
 }
 
 pub(crate) async fn list_network_observation_trends(
