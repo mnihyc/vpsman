@@ -9757,10 +9757,12 @@ async fn postgres_network_trend_budget_preserves_retained_minute_day_for_120_ser
             let plan = &explain[0]["Plan"];
             let retained_examined =
                 explain_relation_examined_rows(plan, "network_observation_rollups");
-            // Endpoints, the two nearest-coordinate directions, and hydration
-            // may each inspect two health fragments. A single input scan is
-            // also valid when the full response budget approaches input size.
-            let retained_bound = (retained_rows + 8 * (limit + logical_series)) as f64;
+            // Presence, both endpoints, and both disjoint directions may each
+            // inspect one retained input pass. This fixture has one physical
+            // ID and one retained health fragment per timestamp; 8 slots of
+            // boundary/hydration/EXPLAIN-rounding allowance per coordinate or
+            // endpoint remain sufficient without requiring a particular plan.
+            let retained_bound = (5 * retained_rows + 8 * (limit + logical_series)) as f64;
             assert!(
                 retained_examined <= retained_bound,
                 "{mode}: examined {retained_examined} retained rows, bound {retained_bound}: {explain}"
@@ -9771,23 +9773,10 @@ async fn postgres_network_trend_budget_preserves_retained_minute_day_for_120_ser
                 manual_examined <= manual_bound,
                 "{mode}: repeated timestamp-only manual hydration examined {manual_examined} rows, bound {manual_bound}: {explain}"
             );
-            // This fixture has one physical series per automatic logical
-            // series and at most one pending row. Allow one materialized input
-            // pass, then 18 series passes: four source-catalogue consumers,
-            // catalogue + bounds, two pending endpoints, nine budget consumers
-            // (including interior iteration), and the slot-join remainder.
-            // Allow 12 coordinate passes: three pending probes, slot + interior
-            // iteration, three coordinate consumers, and up to four hydrated
-            // health fragments (retained + pending). The two pending-owner
-            // stages each scan the single pending row once. This guards
-            // catalogue-per-coordinate rescans without depending on CTE names.
-            let cte_bound =
-                (retained_rows + manual_rows + 18 * logical_series + 12 * limit + 2) as f64;
+            // Intermediate passes are diagnostic, not a fixed CTE topology
+            // contract. The disjoint-bin regression below bounds base-relation
+            // work and repeated pending-coordinate expansion instead.
             let cte_examined = cte_examined_rows(plan);
-            assert!(
-                cte_examined <= cte_bound,
-                "{mode}: materialized stages examined {cte_examined} rows, bound {cte_bound}: {explain}"
-            );
             // Spill depends on row width and deployment work_mem, not just
             // bounded executor work. Record it at the real response budget;
             // zero spill from the former 480-point fixture is not a contract.
@@ -10212,6 +10201,663 @@ async fn postgres_network_trend_budget_preserves_retained_minute_day_for_120_ser
         searched_timestamps,
         vec![(start_unix + 120) as u64, (start_unix + 240) as u64]
     );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_network_trend_bins_preserve_selection_and_bound_shuffled_history() {
+    #[derive(Clone, Debug)]
+    struct Point {
+        logical: usize,
+        family: u8, // retained, pending, manual; directional winners stay separate
+        bucket: i64,
+        secs: Option<i64>,
+        latest: i64,
+        healthy: Option<bool>,
+        label: String,
+        latency: Option<f64>,
+        loss: Option<f64>,
+    }
+
+    type Coordinate = (usize, i64, Option<i64>);
+
+    async fn reference_coordinates(
+        pool: &PgPool,
+        points: &[&Point],
+        limit: i64,
+    ) -> BTreeSet<Coordinate> {
+        // This reference is deliberately not a bin/carry implementation. It
+        // directly binary-searches the complete directional ordering of each
+        // source family for every target, then applies the public tie order.
+        let mut series = (1..=8)
+            .filter_map(|logical| {
+                let rows = points
+                    .iter()
+                    .copied()
+                    .filter(|p| p.logical == logical)
+                    .collect::<Vec<_>>();
+                let oldest = rows.iter().min_by_key(|p| (p.bucket, p.secs, p.latest))?;
+                let latest = rows.iter().max_by_key(|p| (p.bucket, p.latest, p.secs))?;
+                Some((logical, *oldest, *latest))
+            })
+            .collect::<Vec<_>>();
+        series.sort_by_key(|(logical, _, latest)| (std::cmp::Reverse(latest.latest), *logical));
+        let count = series.len() as i64;
+        let mut selected = BTreeSet::new();
+        for (ordinal, (logical, oldest, latest)) in series.iter().enumerate() {
+            let budget = limit / count + i64::from((ordinal as i64) < limit % count);
+            if budget >= 1 {
+                selected.insert((*logical, latest.bucket, latest.secs));
+            }
+            if budget >= 2 {
+                selected.insert((*logical, oldest.bucket, oldest.secs));
+            }
+            if budget < 3 {
+                continue;
+            }
+            // Let PostgreSQL perform its documented interval arithmetic; the
+            // independent selector must not guess floating-point rounding at
+            // sub-microsecond target boundaries.
+            let targets: Vec<i64> = sqlx::query_scalar(
+                "SELECT (extract(epoch FROM (to_timestamp($1) +
+                    (to_timestamp($2) - to_timestamp($1)) *
+                    ((slot - 1)::double precision / ($3 - 1)::double precision)))
+                    * 1000000)::bigint
+                 FROM generate_series(2::bigint, $3 - 1) slot",
+            )
+            .bind(oldest.bucket)
+            .bind(latest.bucket)
+            .bind(budget)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+            let families = (0..3)
+                .map(|family| {
+                    let mut before = points
+                        .iter()
+                        .copied()
+                        .filter(|p| p.logical == *logical && p.family == family)
+                        .collect::<Vec<_>>();
+                    before.sort_by_key(|p| (p.bucket, p.latest, p.secs));
+                    let mut after = before.clone();
+                    after.sort_by_key(|p| (p.bucket, p.secs, p.latest));
+                    (before, after)
+                })
+                .collect::<Vec<_>>();
+            for target in targets {
+                let winner = families
+                    .iter()
+                    .flat_map(|(before, after)| {
+                        let preceding = before.partition_point(|p| p.bucket * 1_000_000 <= target);
+                        let following = after.partition_point(|p| p.bucket * 1_000_000 < target);
+                        [
+                            preceding
+                                .checked_sub(1)
+                                .and_then(|index| before.get(index))
+                                .copied(),
+                            after.get(following).copied(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                    })
+                    .min_by_key(|p| {
+                        (
+                            (p.bucket * 1_000_000 - target).abs(),
+                            std::cmp::Reverse(p.bucket),
+                            std::cmp::Reverse(p.latest),
+                            std::cmp::Reverse(p.secs),
+                        )
+                    })
+                    .unwrap();
+                selected.insert((*logical, winner.bucket, winner.secs));
+            }
+        }
+        selected
+    }
+
+    fn assert_rows(
+        rows: &[Value],
+        points: &[&Point],
+        expected: &BTreeSet<Coordinate>,
+        plan_id: Uuid,
+    ) {
+        let mut actual = BTreeSet::new();
+        for row in rows {
+            let logical = row["interface_name"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("sweep-")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let bucket = crate::util::parse_timestamp_unix(row["bucket_start"].as_str().unwrap())
+                .unwrap() as i64;
+            let secs = row["bucket_secs"].as_i64();
+            assert!(
+                actual.insert((logical, bucket, secs)),
+                "duplicate output coordinate"
+            );
+            let fragments = points
+                .iter()
+                .copied()
+                .filter(|p| p.logical == logical && p.bucket == bucket && p.secs == secs)
+                .collect::<Vec<_>>();
+            assert!(!fragments.is_empty());
+            let latest = fragments
+                .iter()
+                .max_by(|a, b| a.latest.cmp(&b.latest).then(a.label.cmp(&b.label)))
+                .unwrap();
+            assert_eq!(row["kind"], "tunnel_reachability");
+            assert_eq!(row["plan_id"], json!(plan_id));
+            assert_eq!(
+                row["topology_identity_hash"],
+                format!("sweep-identity-{logical}")
+            );
+            assert_eq!(row["client_id"], "sweep-left");
+            assert_eq!(row["peer_client_id"], "sweep-right");
+            assert_eq!(row["plan_name"].as_str(), Some(latest.label.as_str()));
+            assert_eq!(
+                crate::util::parse_timestamp_unix(row["latest_observed_at"].as_str().unwrap())
+                    .unwrap() as i64,
+                latest.latest
+            );
+            assert_eq!(row["retained"], fragments.iter().any(|p| p.family == 0));
+            for (field, value) in [
+                ("sample_count", fragments.len()),
+                (
+                    "source_bucket_count",
+                    if secs.is_none() { fragments.len() } else { 1 },
+                ),
+                (
+                    "automatic_count",
+                    fragments.iter().filter(|p| p.family != 2).count(),
+                ),
+                (
+                    "manual_count",
+                    fragments.iter().filter(|p| p.family == 2).count(),
+                ),
+                (
+                    "healthy_count",
+                    fragments.iter().filter(|p| p.healthy == Some(true)).count(),
+                ),
+                (
+                    "degraded_count",
+                    fragments
+                        .iter()
+                        .filter(|p| p.healthy == Some(false))
+                        .count(),
+                ),
+                (
+                    "latency_sample_count",
+                    fragments.iter().filter(|p| p.latency.is_some()).count(),
+                ),
+                (
+                    "packet_loss_sample_count",
+                    fragments.iter().filter(|p| p.loss.is_some()).count(),
+                ),
+            ] {
+                assert_eq!(
+                    row[field].as_u64(),
+                    Some(value as u64),
+                    "{field} at {logical}/{bucket}/{secs:?}"
+                );
+            }
+            assert_eq!(row["effective_resolution_secs"].as_i64(), secs);
+            assert_eq!(
+                row["latency_sum_ms"].as_f64(),
+                Some(fragments.iter().filter_map(|p| p.latency).sum())
+            );
+            assert_eq!(
+                row["latency_min_ms"].as_f64(),
+                fragments.iter().filter_map(|p| p.latency).reduce(f64::min)
+            );
+            assert_eq!(
+                row["latency_max_ms"].as_f64(),
+                fragments.iter().filter_map(|p| p.latency).reduce(f64::max)
+            );
+            assert_eq!(
+                row["packet_loss_sum_ratio"].as_f64(),
+                Some(fragments.iter().filter_map(|p| p.loss).sum())
+            );
+            assert_eq!(row["throughput_sum_mbps"].as_f64(), Some(0.0));
+            assert_eq!(row["throughput_sample_count"], 0);
+            assert_eq!(row["throughput_max_mbps"], Value::Null);
+            assert_eq!(row["bytes_total"], 0);
+        }
+        assert_eq!(&actual, expected);
+    }
+
+    fn expanded_function_rows(plan: &Value) -> f64 {
+        let own = if plan["Node Type"] == "Function Scan" {
+            (plan["Actual Rows"].as_f64().unwrap_or(0.0)
+                + plan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                * plan["Actual Loops"].as_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        own + plan["Plans"].as_array().map_or(0.0, |children| {
+            children.iter().map(expanded_function_rows).sum::<f64>()
+        })
+    }
+
+    fn intermediate_scan_rows(plan: &Value) -> f64 {
+        let own = if plan["Node Type"] == "CTE Scan" {
+            (plan["Actual Rows"].as_f64().unwrap_or(0.0)
+                + plan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                * plan["Actual Loops"].as_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        own + plan["Plans"].as_array().map_or(0.0, |children| {
+            children.iter().map(intermediate_scan_rows).sum::<f64>()
+        })
+    }
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "sweep-left", None).await;
+    insert_client(&db.pool, "sweep-right", None).await;
+    let plan_id = Uuid::new_v4();
+    // Fixed historical UTC midnight makes the real route valid indefinitely.
+    let day = 1_577_836_800_i64;
+    let start = day + 30;
+    let end = start + 86_400;
+    sqlx::query(
+        "INSERT INTO tunnel_plans (id, name, kind, left_client_id, right_client_id, input, plan)
+        VALUES ($1, 'sweep-plan', 'wireguard', 'sweep-left', 'sweep-right', '{}', '{}')",
+    )
+    .bind(plan_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_observation_series (
+        plan_id, topology_identity_hash, plan_name, interface_name, client_id,
+        peer_client_id, endpoint_side, address_family, target)
+        SELECT $1, 'sweep-identity-' || logical, 'physical-label-' || physical,
+               'sweep-' || logical, 'sweep-left', 'sweep-right', 'left', 'ipv4',
+               'target-' || physical
+        FROM generate_series(1, 8) logical CROSS JOIN generate_series(1, 2) physical",
+    )
+    .bind(plan_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        WITH points AS (
+            SELECT s.id, 60 AS secs, minute * 60 AS offset_secs, 1 AS health,
+                   minute * 60 + 10 AS latest
+            FROM network_observation_series s CROSS JOIN generate_series(-1440, 1439) minute
+            WHERE minute < 0 OR (split_part(s.interface_name, '-', 2)::integer <= 6
+                AND NOT (s.interface_name = 'sweep-6' AND minute BETWEEN 480 AND 959))
+            UNION ALL
+            SELECT s.id, p.secs, p.offset_secs, p.health, p.latest
+            FROM network_observation_series s JOIN (VALUES
+                (7, 0, 60, 1, 10), (7, 0, 300, 1, 280),
+                (7, 600, 60, 0, 655), (7, 600, 60, 1, 610),
+                (7, 600, 300, 1, 880), (7, 1200, 60, 1, 1210),
+                (7, 1800, 60, 1, 1810),
+                (8, 1200, 60, 1, 1210), (8, 1200, 60, 0, 1240)
+            ) p(logical, offset_secs, secs, health, latest)
+              ON s.interface_name = 'sweep-' || p.logical
+        )
+        INSERT INTO network_observation_rollups (
+            series_id, bucket_secs, bucket_start, health_state, sample_count,
+            transmitted_total, transmitted_sample_count, received_total, received_sample_count,
+            latency_sample_count, latency_mdev_sample_count, packet_loss_sum_ratio,
+            packet_loss_sample_count, packet_loss_min_ratio, packet_loss_max_ratio,
+            latest_observation_id, latest_stale_after_secs, latest_healthy,
+            latest_transmitted, latest_received, latest_packet_loss_ratio,
+            latest_observed_at, latest_received_at)
+        SELECT id, secs, to_timestamp($1 + offset_secs), health, 1,
+               3, 1, health * 3, 1, 0, 0, 1 - health, 1, 1 - health, 1 - health,
+               md5('sweep-' || id || '-' || secs || '-' || offset_secs || '-' || health)::uuid,
+               180, health = 1, 3, health * 3, 1 - health,
+               to_timestamp($1 + latest), to_timestamp($1 + latest)
+        FROM points
+        -- Deterministic shuffled heap, not physical insertion order correlated
+        -- with the series/time index that masked the deployed generic plan.
+        ORDER BY md5(id || '-' || secs || '-' || offset_secs || '-' || health)
+        "#,
+    )
+    .bind(day)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO network_observations (
+            id, client_id, kind, source, plan_id, topology_identity_hash,
+            plan_name, interface_name, peer_client_id, healthy, latency_avg_ms,
+            observed_at, received_at)
+        SELECT md5('sweep-manual-' || logical || '-' || offset_secs || '-' || label)::uuid,
+               'sweep-left', 'tunnel_reachability', 'manual', $1,
+               'sweep-identity-' || logical, label, 'sweep-' || logical, 'sweep-right',
+               healthy, latency, to_timestamp($2 + offset_secs), to_timestamp($2 + offset_secs)
+        FROM (
+            SELECT 6 AS logical, minute * 60 + 30 AS offset_secs,
+                   'manual-dense' AS label, FALSE AS healthy, 17.0 AS latency
+            FROM generate_series(1200, 1439) minute
+            UNION ALL VALUES (7, 1050, 'manual-a', TRUE, 7.0),
+                             (7, 1050, 'manual-z', TRUE, 11.0),
+                             (8, 1200, 'manual-unknown', NULL, NULL)
+        ) point
+        "#,
+    )
+    .bind(plan_id)
+    .bind(day)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let physical: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, interface_name, plan_name FROM network_observation_series WHERE target = 'target-1'")
+        .fetch_all(&db.pool).await.unwrap();
+    let mut pending = Vec::new();
+    for (logical, offset) in (1200..1440)
+        .map(|minute| (6, minute * 60 + 20))
+        .chain([(7, 659), (7, 1859)])
+    {
+        let (series_id, _, label) = physical
+            .iter()
+            .find(|(_, interface, _)| interface == &format!("sweep-{logical}"))
+            .unwrap();
+        pending.push((
+            Uuid::new_v4(),
+            *series_id,
+            logical,
+            day + offset,
+            label.clone(),
+        ));
+    }
+    let sample_id = Uuid::new_v4();
+    let payload = json!({"tunnel_reachability": pending.iter().map(|(id, _, _, _, _)| json!({
+        "id": id, "healthy": false, "latency_avg_ms": 13.0,
+        "packet_loss_ratio": 1.0, "reason": "sweep-pending-only"
+    })).collect::<Vec<_>>()});
+    sqlx::query(
+        "INSERT INTO telemetry_samples (
+        id, client_id, observed_at, cpu_cores, cpu_load_1, cpu_load_5, cpu_load_15,
+        memory_total_bytes, memory_available_bytes, disk_total_bytes, disk_available_bytes,
+        tcp_sockets, udp_sockets, payload, accepted_seq, accepted_at, source_gateway_id,
+        source_gateway_session_id, source_process_incarnation_id, source_telemetry_seq,
+        reported_observed_unix)
+        VALUES ($1, 'sweep-left', to_timestamp($2), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                $3, 1, to_timestamp($2), 'sweep-gateway', $4, $5, 1, $2)",
+    )
+    .bind(sample_id)
+    .bind(end)
+    .bind(payload)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let locators = pending
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (id, series, _, at, label))| {
+            json!({
+                "id": id, "series": series, "ordinal": ordinal + 1, "at": at, "label": label,
+            })
+        })
+        .collect::<Vec<_>>();
+    sqlx::query("INSERT INTO network_observations (id, source, automatic_series_id,
+        automatic_sample_id, automatic_payload_ordinal, plan_name, observed_at, received_at)
+        SELECT point.id, 'automatic', point.series, $1, point.ordinal, point.label,
+               to_timestamp(point.at), to_timestamp(point.at)
+        FROM jsonb_to_recordset($2) point(id uuid, series bigint, ordinal bigint, at bigint, label text)")
+        .bind(sample_id).bind(json!(locators)).execute(&db.pool).await.unwrap();
+    sqlx::raw_sql(
+        "UPDATE telemetry_projection_heads SET accepted_seq = 1, projected_seq = 1,
+        accepted_at = now(), projected_at = now() WHERE client_id = 'sweep-left';
+        ANALYZE clients; ANALYZE tunnel_plans; ANALYZE network_observation_series;
+        ANALYZE network_observation_rollups; ANALYZE network_observations;
+        ANALYZE telemetry_samples; ANALYZE telemetry_projection_heads;
+        ANALYZE telemetry_minute_materialization_heads;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let retained_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM network_observation_rollups")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let boundary_fragments: i64 = sqlx::query_scalar(
+        "SELECT max(fragments)::bigint FROM (
+            SELECT count(*) AS fragments FROM network_observation_rollups
+            GROUP BY series_id, bucket_start) point",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let fixture_rows = sqlx::query(
+        "SELECT split_part(s.interface_name, '-', 2)::integer AS logical,
+        0::integer AS family, extract(epoch FROM r.bucket_start)::bigint AS bucket,
+        r.bucket_secs::bigint AS secs, extract(epoch FROM r.latest_observed_at)::bigint AS latest,
+        r.health_state = 1 AS healthy, s.plan_name AS label, NULL::double precision AS latency,
+        r.packet_loss_sum_ratio AS loss
+        FROM network_observation_rollups r JOIN network_observation_series s ON s.id = r.series_id
+        WHERE r.bucket_start <= to_timestamp($2)
+          AND r.bucket_start + make_interval(secs => r.bucket_secs) > to_timestamp($1)
+        UNION ALL
+        SELECT split_part(interface_name, '-', 2)::integer, 2,
+               extract(epoch FROM observed_at)::bigint, NULL::bigint,
+               extract(epoch FROM observed_at)::bigint, healthy, plan_name,
+               latency_avg_ms, packet_loss_ratio
+        FROM network_observations WHERE source = 'manual'
+          AND observed_at >= to_timestamp($1) AND observed_at <= to_timestamp($2)",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let mut points = fixture_rows
+        .iter()
+        .map(|row| Point {
+            logical: row.get::<i32, _>("logical") as usize,
+            family: row.get::<i32, _>("family") as u8,
+            bucket: row.get("bucket"),
+            secs: row.get("secs"),
+            latest: row.get("latest"),
+            healthy: row.get("healthy"),
+            label: row.get("label"),
+            latency: row.get("latency"),
+            loss: row.get("loss"),
+        })
+        .collect::<Vec<_>>();
+    points.extend(pending.iter().map(|(_, _, logical, at, label)| Point {
+        logical: *logical,
+        family: 1,
+        bucket: at / 60 * 60,
+        secs: Some(60),
+        latest: *at,
+        healthy: Some(false),
+        label: label.clone(),
+        latency: Some(13.0),
+        loss: Some(1.0),
+    }));
+    let manual_rows = points.iter().filter(|point| point.family == 2).count() as i64;
+
+    let query = crate::repository_network_observations::NETWORK_OBSERVATION_TRENDS_QUERY;
+    let signature = "(bigint, bigint, uuid[], text, text, text, text, text, boolean, bigint)";
+    let mut default_coordinates = BTreeSet::new();
+    for (limit, health, pending_only) in [
+        (10_000_i64, None, false),
+        (64, None, false),
+        (64, Some("healthy"), false),
+        (64, Some("unhealthy"), false),
+        (64, Some("unknown"), false),
+        // Two pending logical series: enough slots to hydrate essentially all
+        // pending minutes without letting a large unused output budget hide
+        // quadratic pending-fragment hydration behind the event-work bound.
+        (2 * pending.len() as i64, None, true),
+    ] {
+        let eligible = points
+            .iter()
+            .filter(|p| {
+                (!pending_only || p.family == 1)
+                    && match health {
+                        Some("healthy") => p.healthy == Some(true),
+                        Some("unhealthy") => p.healthy == Some(false),
+                        Some("unknown") => p.healthy.is_none(),
+                        _ => true,
+                    }
+            })
+            .collect::<Vec<_>>();
+        let expected = reference_coordinates(&db.pool, &eligible, limit).await;
+        if limit == 10_000 && !pending_only {
+            default_coordinates = expected.clone();
+        }
+        if limit == 64 && health.is_none() {
+            // The same timestamp has a minute and a five-minute coordinate.
+            // Successor and predecessor tie orders deliberately choose both.
+            assert!(expected.contains(&(7, day + 600, Some(60))));
+            assert!(expected.contains(&(7, day + 600, Some(300))));
+            assert!(expected.contains(&(7, day + 1050, None)));
+            assert!(expected.contains(&(8, day + 1200, None)));
+            assert!(expected.contains(&(8, day + 1200, Some(60))));
+        }
+        let health_argument = health.map_or_else(|| "NULL".to_owned(), |h| format!("'{h}'"));
+        let search_argument = if pending_only {
+            "'sweep-pending-only'"
+        } else {
+            "NULL"
+        };
+        let arguments = format!(
+            "({start}, {end}, ARRAY[]::uuid[], NULL, NULL, NULL,
+            {health_argument}, {search_argument}, TRUE, {limit})"
+        );
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            let mut tx = db.pool.begin().await.unwrap();
+            sqlx::query(&format!("SET LOCAL plan_cache_mode = '{mode}'"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(&format!("PREPARE sweep_work {signature} AS {query}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            if limit == 10_000 || pending_only {
+                let explain: Value = sqlx::query_scalar(&format!(
+                    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE sweep_work{arguments}"
+                ))
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+                let plan = &explain[0]["Plan"];
+                let retained = explain_relation_examined_rows(plan, "network_observation_rollups");
+                // At most five retained input passes: presence, two endpoints,
+                // and two disjoint directions. Two physical variants × two
+                // health rows bound hydration by 4L. Inclusive index bounds
+                // can reread one timestamp per direction; its actual fixture
+                // fanout is measured above. EXPLAIN rounds per-loop averages,
+                // adding at most another 2 directions × 2 variants × L.
+                let retained_bound =
+                    (5 * retained_rows + (4 * boundary_fragments + 8) * limit) as f64;
+                assert!(retained <= retained_bound, "{mode}, pending_only={pending_only}: retained {retained} > {retained_bound}: {explain}");
+                let manual = explain_relation_examined_rows(plan, "network_observations");
+                // One manual discovery pass plus selected duplicate hydration;
+                // allow both base/index scans and the pending locator pass.
+                let manual_bound = (4 * (manual_rows + pending.len() as i64) + 4 * limit) as f64;
+                assert!(
+                    manual <= manual_bound,
+                    "{mode}: manual/locator {manual} > {manual_bound}: {explain}"
+                );
+                // The physical fanout is two. Two retained directions and two
+                // hydration sources may expand 8L physical IDs in total. Two
+                // event directions per unindexed source and two boundary
+                // markers per target allow another 8L, plus one paired pending
+                // expansion and the sixteen physical catalog entries. This
+                // rejects re-expanding every pending array for every target;
+                // it does not prescribe a particular index or CTE name.
+                let expanded = expanded_function_rows(plan);
+                let expanded_bound = (16 * limit + 4 * (pending.len() as i64 + 16)) as f64;
+                assert!(
+                    expanded <= expanded_bound,
+                    "{mode}: expanded {expanded} > {expanded_bound}: {explain}"
+                );
+                // Six source/direction candidates per target and each narrow
+                // input may be consumed by discovery, candidate construction,
+                // selection, and hydration. Bound these four linear phases,
+                // not particular CTE names or an observed plan's stage count.
+                // The pending-only case keeps this bound proportional to its
+                // coordinates, so a full pending scan per hydrated point fails.
+                let intermediate = intermediate_scan_rows(plan);
+                let intermediate_bound =
+                    (4 * (manual_rows + pending.len() as i64 + 6 * limit + 8 + 16)) as f64;
+                assert!(
+                    intermediate <= intermediate_bound,
+                    "{mode}: intermediate {intermediate} > {intermediate_bound}: {explain}"
+                );
+                eprintln!("trend bins: mode={mode}, pending_only={pending_only}, retained={retained}, manual={manual}, expanded={expanded}, intermediate={intermediate}, elapsed_ms={}, temp_read_blocks={}, temp_written_blocks={}",
+                    explain[0]["Execution Time"], plan["Temp Read Blocks"], plan["Temp Written Blocks"]);
+            }
+            sqlx::query(&format!(
+                "PREPARE sweep_values {signature} AS SELECT to_jsonb(trend) FROM ({query}) trend"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            let rows: Vec<Value> = sqlx::query_scalar(&format!("EXECUTE sweep_values{arguments}"))
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+            assert_rows(&rows, &eligible, &expected, plan_id);
+            sqlx::raw_sql("DEALLOCATE sweep_work; DEALLOCATE sweep_values;")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    }
+
+    let (_, headers) = postgres_operator_session(&db.repo, "trend-sweep-admin").await;
+    let router = crate::routes::build_router(postgres_app_state(&db));
+    let began = Instant::now();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/network/observation-trends?window=1d&end_unix={end}"
+                ))
+                .header(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap().clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    eprintln!(
+        "trend bins HTTP: elapsed_ms={}, body_bytes={}",
+        began.elapsed().as_millis(),
+        body.len()
+    );
+    let response: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    let route_coordinates = response
+        .iter()
+        .map(|row| {
+            (
+                row["interface_name"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("sweep-")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                crate::util::parse_timestamp_unix(row["bucket_start"].as_str().unwrap()).unwrap()
+                    as i64,
+                row["bucket_secs"].as_i64(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(route_coordinates, default_coordinates);
+    assert_eq!(response.len(), route_coordinates.len());
     db.cleanup().await;
 }
 

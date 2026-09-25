@@ -875,12 +875,13 @@ manual_points AS NOT MATERIALIZED (
         )
       )
 ),
-manual_series AS MATERIALIZED (
+manual_coordinates AS MATERIALIZED (
     -- Manual job evidence has no persistent series catalogue. This exact
     -- distinct pass is deliberately isolated from high-volume automatic
     -- telemetry; arbitrary reason substring matching cannot be index-seeked
-    -- without changing the schema or its matching semantics. The same pass
-    -- owns manual endpoints: observed_at is both bucket and latest timestamp.
+    -- without changing the schema or its matching semantics. Reuse its narrow
+    -- coordinates for catalogue bounds and interior selection; duplicate manual
+    -- observations are still all hydrated at the selected timestamp.
     SELECT
         point.kind,
         point.plan_id,
@@ -888,11 +889,11 @@ manual_series AS MATERIALIZED (
         point.interface_name,
         point.client_id,
         point.peer_client_id,
-        min(point.bucket_start) AS oldest_manual_bucket_start,
-        max(point.bucket_start) AS latest_manual_bucket_start
+        point.bucket_start
     FROM manual_points point
     GROUP BY point.kind, point.plan_id, point.topology_identity_hash,
-             point.interface_name, point.client_id, point.peer_client_id
+             point.interface_name, point.client_id, point.peer_client_id,
+             point.bucket_start
 ),
 pending_samples AS MATERIALIZED (
     SELECT sample.id, sample.payload
@@ -1069,8 +1070,7 @@ series_sources AS (
         series.peer_client_id,
         series.id AS automatic_series_id,
         FALSE AS has_manual,
-        NULL::timestamptz AS oldest_manual_bucket_start,
-        NULL::timestamptz AS latest_manual_bucket_start
+        NULL::timestamptz AS manual_bucket_start
     FROM automatic_physical_series series
     UNION ALL
     SELECT
@@ -1082,9 +1082,8 @@ series_sources AS (
         manual.peer_client_id,
         NULL::bigint AS automatic_series_id,
         TRUE AS has_manual,
-        manual.oldest_manual_bucket_start,
-        manual.latest_manual_bucket_start
-    FROM manual_series manual
+        manual.bucket_start AS manual_bucket_start
+    FROM manual_coordinates manual
 ),
 series_identity_catalog AS (
     SELECT
@@ -1100,15 +1099,21 @@ series_identity_catalog AS (
             ARRAY[]::bigint[]
         ) AS automatic_series_ids,
         bool_or(source.has_manual) AS has_manual,
-        min(source.oldest_manual_bucket_start) AS oldest_manual_bucket_start,
-        max(source.latest_manual_bucket_start) AS latest_manual_bucket_start
+        -- Carry the already discovered narrow manual coordinates with their
+        -- catalogue owner; rematching two unindexed identity catalogues can
+        -- otherwise become a quadratic nested loop in a generic plan.
+        array_agg(source.manual_bucket_start)
+            FILTER (WHERE source.manual_bucket_start IS NOT NULL)
+            AS manual_bucket_starts,
+        min(source.manual_bucket_start) AS oldest_manual_bucket_start,
+        max(source.manual_bucket_start) AS latest_manual_bucket_start
     FROM series_sources source
     GROUP BY source.kind, source.plan_id, source.topology_identity_hash,
              source.interface_name, source.client_id, source.peer_client_id
 ),
 pending_coordinates AS MATERIALIZED (
-    -- Pending fragments have no persistent index. Cache only paired coordinate
-    -- arrays per logical series, so each seek avoids scanning other series.
+    -- Pending fragments have no persistent index. Cache paired coordinates per
+    -- logical owner for endpoint bounds and the one-pass interior event stream.
     -- Identical ordering in both aggregates keeps their timestamps aligned.
     SELECT kind, plan_id, topology_identity_hash,
            interface_name, client_id, peer_client_id,
@@ -1295,9 +1300,11 @@ endpoint_coordinates AS (
     FROM budgeted_series series
     WHERE series.series_budget >= 2
 ),
-interior_targets AS (
-    SELECT series.*,
-           slot.slot,
+interior_targets AS MATERIALIZED (
+    -- Keep the target grid narrow: identity labels and pending arrays belong to
+    -- the catalogue, not to every sampling slot.
+    SELECT series.series_ordinal, series.series_budget, slot.slot,
+           series.oldest_bucket_start, series.latest_bucket_start,
            series.oldest_bucket_start
              + (series.latest_bucket_start - series.oldest_bucket_start)
                * ((slot.slot - 1)::double precision
@@ -1305,126 +1312,160 @@ interior_targets AS (
     FROM budgeted_series series
     JOIN slot_numbers slot ON slot.slot < series.series_budget
 ),
-interior_coordinates AS (
-    SELECT target.series_ordinal,
-           nearest.bucket_start,
-           nearest.bucket_secs
+interior_target_bins AS MATERIALIZED (
+    SELECT target.series_ordinal, target.series_budget, target.slot, target.target_at,
+           lag(target.target_at, 1, target.oldest_bucket_start) OVER target_order
+               AS before_lower,
+           lead(target.target_at, 1, target.latest_bucket_start) OVER target_order
+               AS after_upper
     FROM interior_targets target
-    CROSS JOIN LATERAL (
-        SELECT candidate.*
-        FROM (
-            SELECT retained_before.*
-            FROM (
-                SELECT retained.*
-                FROM unnest(target.retained_series_ids) physical(series_id)
-                CROSS JOIN LATERAL (
-                    SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
-                    FROM retained_fragments point
-                    WHERE point.physical_series_id = physical.series_id
-                      AND point.bucket_start <= target.target_at
-                    ORDER BY point.bucket_start DESC,
-                             point.latest_observed_at DESC,
-                             point.bucket_secs DESC
-                    LIMIT 1
-                ) retained
-                ORDER BY retained.bucket_start DESC,
-                         retained.latest_observed_at DESC,
-                         retained.bucket_secs DESC
-                LIMIT 1
-            ) retained_before
-            UNION ALL
-            SELECT retained_after.*
-            FROM (
-                SELECT retained.*
-                FROM unnest(target.retained_series_ids) physical(series_id)
-                CROSS JOIN LATERAL (
-                    SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
-                    FROM retained_fragments point
-                    WHERE point.physical_series_id = physical.series_id
-                      AND point.bucket_start >= target.target_at
-                    ORDER BY point.bucket_start, point.bucket_secs,
-                             point.latest_observed_at
-                    LIMIT 1
-                ) retained
-                ORDER BY retained.bucket_start, retained.bucket_secs,
-                         retained.latest_observed_at
-                LIMIT 1
-            ) retained_after
-            UNION ALL
-            SELECT pending.*
-            FROM (
-                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
-                FROM (
-                    SELECT coordinate.bucket_start, 60::integer AS bucket_secs,
-                           coordinate.latest_observed_at
-                    FROM unnest(target.pending_bucket_starts,
-                                target.pending_latest_observed_ats)
-                        coordinate(bucket_start, latest_observed_at)
-                ) point
-                WHERE point.bucket_start <= target.target_at
-                ORDER BY point.bucket_start DESC,
-                         point.latest_observed_at DESC,
-                         point.bucket_secs DESC
-                LIMIT 1
-            ) pending
-            UNION ALL
-            SELECT pending.*
-            FROM (
-                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
-                FROM (
-                    SELECT coordinate.bucket_start, 60::integer AS bucket_secs,
-                           coordinate.latest_observed_at
-                    FROM unnest(target.pending_bucket_starts,
-                                target.pending_latest_observed_ats)
-                        coordinate(bucket_start, latest_observed_at)
-                ) point
-                WHERE point.bucket_start >= target.target_at
-                ORDER BY point.bucket_start, point.bucket_secs,
-                         point.latest_observed_at
-                LIMIT 1
-            ) pending
-            UNION ALL
-            SELECT manual.*
-            FROM (
-                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
-                FROM manual_points point
-                WHERE target.has_manual
-                  AND point.kind = target.kind
-                  AND point.plan_id = target.plan_id
-                  AND point.topology_identity_hash
-                        = target.topology_identity_hash
-                  AND point.interface_name = target.interface_name
-                  AND point.client_id = target.client_id
-                  AND point.peer_client_id = target.peer_client_id
-                  AND point.bucket_start <= target.target_at
-                ORDER BY point.bucket_start DESC,
-                         point.latest_observed_at DESC
-                LIMIT 1
-            ) manual
-            UNION ALL
-            SELECT manual.*
-            FROM (
-                SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
-                FROM manual_points point
-                WHERE target.has_manual
-                  AND point.kind = target.kind
-                  AND point.plan_id = target.plan_id
-                  AND point.topology_identity_hash
-                        = target.topology_identity_hash
-                  AND point.interface_name = target.interface_name
-                  AND point.client_id = target.client_id
-                  AND point.peer_client_id = target.peer_client_id
-                  AND point.bucket_start >= target.target_at
-                ORDER BY point.bucket_start, point.latest_observed_at
-                LIMIT 1
-            ) manual
-        ) candidate
-        ORDER BY
-            abs(extract(epoch FROM (bucket_start - target.target_at))),
-            bucket_start DESC, latest_observed_at DESC,
-            bucket_secs DESC NULLS LAST
+    WINDOW target_order AS (PARTITION BY series_ordinal ORDER BY slot)
+),
+retained_bin_candidates AS (
+    -- Before bins are [oldest, first target], then (previous target, target].
+    -- Both bounds are index conditions even when a generic plan chooses a
+    -- bitmap scan. The strict boundary filter can reread only one timestamp,
+    -- bounded by seven resolutions times two health fragments per physical ID.
+    SELECT target.series_ordinal, target.slot, target.target_at AS event_at,
+           0::integer AS source_family, -1::integer AS direction,
+           TRUE AS is_target, point.bucket_start, point.bucket_secs,
+           point.latest_observed_at
+    FROM interior_target_bins target
+    JOIN budgeted_series series USING (series_ordinal)
+    LEFT JOIN LATERAL (
+        SELECT retained.*
+        FROM unnest(series.retained_series_ids) physical(series_id)
+        CROSS JOIN LATERAL (
+            SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
+            FROM retained_fragments point
+            WHERE point.physical_series_id = physical.series_id
+              AND point.bucket_start <= target.target_at
+              AND point.bucket_start >= target.before_lower
+              AND (target.slot = 2 OR point.bucket_start > target.before_lower)
+            ORDER BY point.bucket_start DESC, point.latest_observed_at DESC,
+                     point.bucket_secs DESC
+            LIMIT 1
+        ) retained
+        ORDER BY retained.bucket_start DESC, retained.latest_observed_at DESC,
+                 retained.bucket_secs DESC
         LIMIT 1
-    ) nearest
+    ) point ON TRUE
+    UNION ALL
+    -- After bins are [target, next target), with an inclusive final endpoint.
+    -- Empty bins remain target events so the next nonempty candidate can carry
+    -- backward without another historical range probe.
+    SELECT target.series_ordinal, target.slot, target.target_at,
+           0::integer, 1::integer, TRUE,
+           point.bucket_start, point.bucket_secs, point.latest_observed_at
+    FROM interior_target_bins target
+    JOIN budgeted_series series USING (series_ordinal)
+    LEFT JOIN LATERAL (
+        SELECT retained.*
+        FROM unnest(series.retained_series_ids) physical(series_id)
+        CROSS JOIN LATERAL (
+            SELECT point.bucket_start, point.bucket_secs, point.latest_observed_at
+            FROM retained_fragments point
+            WHERE point.physical_series_id = physical.series_id
+              AND point.bucket_start >= target.target_at
+              AND point.bucket_start <= target.after_upper
+              AND (target.slot = target.series_budget - 1
+                   OR point.bucket_start < target.after_upper)
+            ORDER BY point.bucket_start, point.bucket_secs, point.latest_observed_at
+            LIMIT 1
+        ) retained
+        ORDER BY retained.bucket_start, retained.bucket_secs,
+                 retained.latest_observed_at
+        LIMIT 1
+    ) point ON TRUE
+),
+unindexed_coordinates AS MATERIALIZED (
+    -- Pending/manual coordinates have no seek index. Read each narrow source
+    -- once, then interleave its points and targets instead of rescanning it for
+    -- every slot. Resolution is fixed within either source (60 or NULL), so
+    -- max/min latest timestamps are the exact before/after tie winners.
+    SELECT series.series_ordinal, 1::integer AS source_family,
+           point.bucket_start, 60::integer AS bucket_secs,
+           max(point.latest_observed_at) AS before_observed_at,
+           min(point.latest_observed_at) AS after_observed_at
+    FROM budgeted_series series
+    CROSS JOIN LATERAL unnest(series.pending_bucket_starts,
+                              series.pending_latest_observed_ats)
+        point(bucket_start, latest_observed_at)
+    WHERE series.series_budget >= 3
+    GROUP BY series.series_ordinal, point.bucket_start
+    UNION ALL
+    SELECT series.series_ordinal, 2::integer, point.bucket_start,
+           NULL::integer, point.bucket_start, point.bucket_start
+    FROM budgeted_series series
+    CROSS JOIN LATERAL unnest(series.manual_bucket_starts) point(bucket_start)
+    WHERE series.series_budget >= 3
+),
+candidate_events AS (
+    SELECT * FROM retained_bin_candidates
+    UNION ALL
+    SELECT point.series_ordinal, NULL::bigint AS slot, point.bucket_start AS event_at,
+           point.source_family, direction.direction, FALSE AS is_target,
+           point.bucket_start, point.bucket_secs,
+           CASE WHEN direction.direction = -1 THEN point.before_observed_at
+                ELSE point.after_observed_at
+           END AS latest_observed_at
+    FROM unindexed_coordinates point
+    CROSS JOIN (VALUES (-1), (1)) direction(direction)
+    UNION ALL
+    SELECT target.series_ordinal, target.slot, target.target_at,
+           source.source_family, direction.direction, TRUE AS is_target,
+           NULL::timestamptz, NULL::integer, NULL::timestamptz
+    FROM interior_targets target
+    CROSS JOIN (VALUES (1), (2)) source(source_family)
+    CROSS JOIN (VALUES (-1), (1)) direction(direction)
+),
+candidate_groups AS (
+    SELECT event.*,
+           count(bucket_start) OVER (
+               PARTITION BY series_ordinal, source_family, direction
+               ORDER BY
+                   CASE WHEN direction = -1 THEN event_at END,
+                   CASE WHEN direction = 1 THEN event_at END DESC,
+                   is_target,
+                   CASE WHEN direction = -1 THEN slot END,
+                   CASE WHEN direction = 1 THEN slot END DESC
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ) AS candidate_group
+    FROM candidate_events event
+),
+carried_candidates AS (
+    -- Each group starts at one whole candidate. All fields use the same first
+    -- row: independent min/max aggregates could assemble a nonexistent tuple.
+    -- Point events precede equal-time targets in both directions; slot ordering
+    -- likewise carries through empty bins when rounded target times coincide.
+    SELECT series_ordinal, slot, event_at AS target_at,
+           first_value(bucket_start) OVER candidate_order AS bucket_start,
+           first_value(bucket_secs) OVER candidate_order AS bucket_secs,
+           first_value(latest_observed_at) OVER candidate_order AS latest_observed_at
+    FROM candidate_groups
+    WINDOW candidate_order AS (
+        PARTITION BY series_ordinal, source_family, direction, candidate_group
+        ORDER BY
+            CASE WHEN direction = -1 THEN event_at END,
+            CASE WHEN direction = 1 THEN event_at END DESC,
+            is_target,
+            CASE WHEN direction = -1 THEN slot END,
+            CASE WHEN direction = 1 THEN slot END DESC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    )
+),
+interior_coordinates AS (
+    -- Source families remain separate through carry: their after-candidate
+    -- comparisons differ. Only this final rank combines the original six
+    -- candidates using the unchanged nearest-point and tie rules.
+    SELECT DISTINCT ON (series_ordinal, slot)
+           series_ordinal, bucket_start, bucket_secs
+    FROM carried_candidates
+    WHERE slot IS NOT NULL AND bucket_start IS NOT NULL
+    ORDER BY series_ordinal, slot,
+             abs(extract(epoch FROM (bucket_start - target_at))),
+             bucket_start DESC, latest_observed_at DESC,
+             bucket_secs DESC NULLS LAST
 ),
 selected_coordinates AS MATERIALIZED (
     SELECT DISTINCT series_ordinal, bucket_start, bucket_secs
@@ -1433,6 +1474,30 @@ selected_coordinates AS MATERIALIZED (
         UNION ALL
         SELECT * FROM interior_coordinates
     ) coordinate
+),
+pending_hydration_events AS (
+    -- An unindexed pending relation must not be joined once per selected point.
+    -- Interleave fragments with selected-key markers, then propagate the exact
+    -- owner within each physical-series/minute key in one window pass. Keeping
+    -- the fragment as a record preserves every aggregate and label unchanged.
+    SELECT point.physical_series_id, point.bucket_start, point.bucket_secs,
+           NULL::bigint AS series_ordinal, point AS fragment
+    FROM pending_fragments point
+    UNION ALL
+    SELECT physical.series_id, coordinate.bucket_start, coordinate.bucket_secs,
+           coordinate.series_ordinal, NULL
+    FROM selected_coordinates coordinate
+    JOIN budgeted_series series USING (series_ordinal)
+    CROSS JOIN LATERAL unnest(series.automatic_series_ids) physical(series_id)
+    WHERE coordinate.bucket_secs = 60
+      AND series.pending_bucket_starts IS NOT NULL
+),
+selected_pending_fragments AS (
+    SELECT max(series_ordinal) OVER (
+               PARTITION BY physical_series_id, bucket_start, bucket_secs
+           ) AS series_ordinal,
+           fragment
+    FROM pending_hydration_events
 ),
 selected_fragments AS NOT MATERIALIZED (
     SELECT coordinate.series_ordinal, point.*
@@ -1471,23 +1536,12 @@ selected_fragments AS NOT MATERIALIZED (
         LIMIT 2
     ) point
     UNION ALL
-    SELECT coordinate.series_ordinal, point.*
-    FROM selected_coordinates coordinate
-    JOIN budgeted_series series USING (series_ordinal)
-    CROSS JOIN LATERAL unnest(series.automatic_series_ids)
-        physical(series_id)
-    CROSS JOIN LATERAL (
-        SELECT pending.*
-        FROM pending_fragments pending
-        WHERE coordinate.bucket_secs IS NOT NULL
-          -- Skip scans when this series has no pending fragment at the selected
-          -- coordinate, without changing the existing two-fragment bound.
-          AND coordinate.bucket_start = ANY(series.pending_bucket_starts)
-          AND pending.physical_series_id = physical.series_id
-          AND pending.bucket_start = coordinate.bucket_start
-          AND pending.bucket_secs = coordinate.bucket_secs
-        LIMIT 2
-    ) point
+    -- Grouping by physical series, minute and accepted boolean health already
+    -- guarantees the same two-fragment bound as the former lateral LIMIT 2.
+    SELECT point.series_ordinal, (point.fragment).*
+    FROM selected_pending_fragments point
+    WHERE point.series_ordinal IS NOT NULL
+      AND (point.fragment).physical_series_id IS NOT NULL
 ),
 summarized AS (
     -- The catalogue ordinal owns the complete logical identity. Aggregate its
