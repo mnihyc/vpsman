@@ -4,7 +4,7 @@ use vpsman_common::{
     TunnelPlanInput,
 };
 
-fn speed_test_plan() -> TunnelPlan {
+pub(super) fn speed_test_plan() -> TunnelPlan {
     plan_tunnel(&TunnelPlanInput {
         name: "speed-link".to_string(),
         interface_name: "tun-speed".to_string(),
@@ -147,6 +147,50 @@ fn throughput_intervals_preserve_full_mid_run_stalls_as_one_second_buckets() {
     );
     assert_eq!(intervals[1].throughput_mbps, 0.0);
     assert_eq!(intervals[2].throughput_mbps, 0.0);
+}
+
+#[test]
+fn throughput_intervals_keep_partial_bucket_bytes_before_a_stall() {
+    let mut collector = SpeedIntervalCollector::default();
+    collector.observe(Duration::from_secs(1), 125_000);
+    collector.observe(Duration::from_millis(1_900), 225_000);
+    collector.observe(Duration::from_secs(4), 250_000);
+    let intervals = collector.finish(Duration::from_secs(4), 250_000);
+
+    assert_eq!(
+        intervals
+            .iter()
+            .map(|interval| interval.bytes)
+            .collect::<Vec<_>>(),
+        vec![125_000, 100_000, 0, 25_000],
+    );
+    assert_eq!(
+        intervals.iter().map(|interval| interval.bytes).sum::<u64>(),
+        250_000
+    );
+    assert_eq!(intervals[1].throughput_mbps, 0.8);
+    assert_eq!(intervals[2].throughput_mbps, 0.0);
+    assert_eq!(intervals[3].throughput_mbps, 0.2);
+}
+
+#[test]
+fn throughput_intervals_keep_first_partial_bucket_before_recovery_or_finish() {
+    for recovery_bytes in [0, 16_000] {
+        let mut collector = SpeedIntervalCollector::default();
+        collector.observe(Duration::from_millis(900), 100_000);
+        if recovery_bytes > 0 {
+            collector.observe(Duration::from_millis(3_100), 100_000 + recovery_bytes);
+        }
+        let intervals = collector.finish(Duration::from_millis(3_100), 100_000 + recovery_bytes);
+
+        assert_eq!(
+            intervals
+                .iter()
+                .map(|interval| interval.bytes)
+                .collect::<Vec<_>>(),
+            vec![100_000, 0, recovery_bytes],
+        );
+    }
 }
 
 #[test]

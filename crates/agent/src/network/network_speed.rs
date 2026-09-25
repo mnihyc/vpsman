@@ -284,6 +284,16 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
     let intervals = intervals.finish(elapsed, bytes_received);
     let transfer_complete =
         speed_transfer_completed(input.duration, input.max_bytes, bytes_received, elapsed);
+    // Freeze the measurement before draining the sender's remaining payload.
+    // Its duration starts after it receives our ACK, so closing at our deadline
+    // can reset a still-writing peer. EOF is bounded by the command timeout and
+    // cancellation; draining must not extend the measured window or byte count.
+    while stream
+        .read(&mut buffer)
+        .await
+        .context("failed to drain speed-test stream")?
+        != 0
+    {}
     Ok(status_output(
         input,
         Some(peer_addr),
@@ -524,6 +534,7 @@ struct SpeedThroughputInterval {
 struct SpeedIntervalCollector {
     interval_started_at: Duration,
     bytes_at_interval_start: u64,
+    last_observed_bytes: u64,
     intervals: Vec<SpeedThroughputInterval>,
 }
 
@@ -534,20 +545,21 @@ impl SpeedIntervalCollector {
             if remaining < SPEED_INTERVAL_TARGET {
                 break;
             }
-            // No application read/write completed in the earlier full buckets.
-            // Preserve those observable stalls as zero and assign the newly
-            // observed bytes to the latest closed one-second bucket.
+            // Preserve bytes already observed in the open bucket before a gap.
+            // Further empty buckets stay zero; newly observed bytes retain the
+            // existing attribution to the latest closed one-second bucket.
             let closes_latest_full_bucket = remaining < SPEED_INTERVAL_TARGET * 2;
             let bytes_at_end = if closes_latest_full_bucket {
                 total_bytes
             } else {
-                self.bytes_at_interval_start
+                self.last_observed_bytes
             };
             self.push_interval(
                 self.interval_started_at + SPEED_INTERVAL_TARGET,
                 bytes_at_end,
             );
         }
+        self.last_observed_bytes = total_bytes;
     }
 
     fn finish(mut self, elapsed: Duration, total_bytes: u64) -> Vec<SpeedThroughputInterval> {
@@ -755,3 +767,7 @@ fn side_label(side: TunnelEndpointSide) -> &'static str {
 #[cfg(test)]
 #[path = "tests_network_speed.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_network_speed_transport.rs"]
+mod transport_tests;
