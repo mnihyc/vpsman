@@ -131,6 +131,13 @@
     "telemetry.tunnel"
   ],
   "cases": [
+    { "name": "comments_separate_adjacent_terms", "expression": "status:online/* note */tag:edge# ignored || untagged", "matches": ["edge", "hidden"] },
+    { "name": "comments_support_unicode_and_crlf", "expression": "# 注释\r\nstatus:online# first line\r&& tag:prod/* multiline\ncomment */", "matches": ["edge"] },
+    { "name": "comments_inside_lists_and_between_operators", "expression": "status/* field */in/* list */[online,/* value */stale] && !/* not */tag:prod", "matches": ["core", "hidden"] },
+    { "name": "comments_are_not_nested", "expression": "/* outer /* opener */tag:prod", "matches": ["edge"] },
+    { "name": "comment_markers_in_quoted_values", "expression": "name != \"Edge#/* note */One\" && name != 'Core#/* note */One'", "matches": ["edge", "core", "untagged", "hidden"] },
+    { "name": "comment_markers_in_inline_quoted_values", "expression": "!name:\"Edge#/* note */One\"", "matches": ["edge", "core", "untagged", "hidden"] },
+    { "name": "comment_markers_in_regex_values", "expression": "vps.tag in [/^edge(?:#|\\/\\*|\\*\\/)?$/]/* comment */", "matches": ["edge", "hidden"] },
     { "name": "bare_wildcard_selects_all_vps", "expression": "*", "matches": ["edge", "core", "untagged", "hidden"] },
     { "name": "bare_id_glob_matches_id", "expression": "edge-*", "matches": ["edge"] },
     { "name": "precedence_or_after_and", "expression": "provider:alpha || provider:beta && status:stale", "matches": ["edge", "core"] },
@@ -150,5 +157,12 @@
     { "name": "advertised_webhook_event_suggestions", "expression": "interval.30sec && interval.1min && interval.5min && interval.1h && server.on_start && vps.status.online && vps.status.become_offline && vps.tag_changed && job.created && job.status:completed && job.status:failed && job.status.become_failed && job.type:shell && job.target.status:online && schedule.due && schedule.job_finished && schedule.failed && alert.triggered && alert.severity:critical && alert.category:network && telemetry.rollup && telemetry.network_rate && telemetry.tunnel", "matches": ["edge"] },
     { "name": "event_object_fields", "expression": "job.status = running && alert.severity = critical", "matches": ["edge"] },
     { "name": "canonical_alert_lifecycle_field", "expression": "alert.lifecycle_state = triggered", "matches": ["edge"] }
+  ],
+  "invalid_expressions": [
+    { "expression": "# comment", "error_contains": "expression is empty" },
+    { "expression": "/* comment */", "error_contains": "expression is empty" },
+    { "expression": "# line\r\n/* block */", "error_contains": "expression is empty" },
+    { "expression": "/*", "error_contains": "unterminated block comment" },
+    { "expression": "status:online /* unfinished *", "error_contains": "unterminated block comment" }
   ]
 }

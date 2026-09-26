@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn generated_dashboard_selectors_preserve_comment_markers_in_tag_values() {
+    for (tag, prefix) in [
+        ("provider:alpha#one", "provider:alpha"),
+        ("provider:alpha/*note*/", "provider:alpha"),
+        ("country:US#test", "country:US"),
+        ("country:US/*note*/", "country:US"),
+        ("group#one", "group"),
+        ("group/*note*/", "group"),
+        (r#"group#"\quoted"#, "group"),
+    ] {
+        let context = |value: &str| {
+            vpsman_common::ExpressionContext::for_vps(vpsman_common::VpsMetadata::new(
+                "id",
+                "name",
+                "online",
+                vec![value.to_string()],
+            ))
+        };
+        let selector = tag_query(tag);
+        assert!(
+            vpsman_common::parse_and_match_expression(&selector, &context(tag)).unwrap(),
+            "selector {selector} must preserve tag {tag}"
+        );
+        assert!(
+            !vpsman_common::parse_and_match_expression(&selector, &context(prefix)).unwrap(),
+            "selector {selector} must not truncate to {prefix}"
+        );
+    }
+}
+
+#[test]
 fn scoped_all_start_distinguishes_ready_empty_from_initializing() {
     assert_eq!(
         dashboard_telemetry_start_or_initializing(DashboardTelemetryStart {

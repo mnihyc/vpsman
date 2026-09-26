@@ -1,15 +1,17 @@
+import type { AuthSession } from "./authSession";
 import {
   ApiUnauthorizedError,
   apiErrorFromResponse,
-  apiFetch,
-  buildAuthHeaders,
+  assertResponseSessionCurrent,
+  authenticatedApiFetch,
+  verifyResponseSessionCurrent,
 } from "./api";
 import { bytesToHex, createSha256Accumulator } from "./fileTransfer";
 
 export type ArtifactDownloadMode = "browser-download" | "stream-to-file";
 
 export type VerifiedArtifactDownloadRequest = {
-  apiToken: string;
+  apiToken: AuthSession | null;
   expectedSha256Hex?: string | null;
   expectedSizeBytes?: number | null;
   fileName: string;
@@ -28,9 +30,7 @@ type SaveFilePickerWindow = Window & {
 };
 
 export async function downloadVerifiedArtifact(request: VerifiedArtifactDownloadRequest): Promise<void> {
-  const response = await apiFetch(request.path, {
-    headers: buildAuthHeaders(request.apiToken),
-  });
+  const response = await authenticatedApiFetch(request.path, request.apiToken);
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }
@@ -76,11 +76,15 @@ async function streamResponseToFile(
     throw new Error("Stream-to-file artifact download requires File System Access API support");
   }
   const handle = await picker({ suggestedName: fileName });
+  await verifyResponseSessionCurrent(response);
   const writable = await handle.createWritable();
   try {
+    assertResponseSessionCurrent(response);
     await readVerifiedResponse(response, expectedSha256Hex, expectedSizeBytes, async (chunk) => {
+      assertResponseSessionCurrent(response);
       await writable.write(chunk);
     });
+    await verifyResponseSessionCurrent(response);
     await writable.close();
   } catch (error) {
     if (writable.abort) {
@@ -100,6 +104,7 @@ async function streamResponseToBrowserDownload(
   await readVerifiedResponse(response, expectedSha256Hex, expectedSizeBytes, async (chunk) => {
     chunks.push(chunk);
   });
+  await verifyResponseSessionCurrent(response);
   saveBrowserDownload(concatenateChunks(chunks, expectedSizeBytes), fileName);
 }
 
@@ -113,22 +118,33 @@ async function readVerifiedResponse(
   let receivedBytes = 0;
   if (!response.body) {
     const bytes = new Uint8Array(await response.arrayBuffer());
+    assertResponseSessionCurrent(response);
     hasher.update(bytes);
     receivedBytes = bytes.byteLength;
     await onChunk(bytes);
   } else {
     const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        assertResponseSessionCurrent(response);
+        if (done) {
+          break;
+        }
+        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+        hasher.update(chunk);
+        receivedBytes += chunk.byteLength;
+        await onChunk(chunk);
       }
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      hasher.update(chunk);
-      receivedBytes += chunk.byteLength;
-      await onChunk(chunk);
+    } catch (error) {
+      await reader.cancel(error).catch(() => undefined);
+      await verifyResponseSessionCurrent(response);
+      throw error;
+    } finally {
+      reader.releaseLock();
     }
   }
+  await verifyResponseSessionCurrent(response);
   if (receivedBytes !== expectedSizeBytes) {
     throw new Error(`Artifact byte count mismatch: got ${receivedBytes}, expected ${expectedSizeBytes}`);
   }

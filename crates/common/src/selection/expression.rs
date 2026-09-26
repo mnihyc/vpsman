@@ -167,6 +167,9 @@ enum TokenKind {
 pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
+        if !input.trim().is_empty() {
+            return Err("expression is empty".to_string());
+        }
         return Ok(None);
     }
     let mut parser = Parser {
@@ -352,6 +355,30 @@ fn tokenize(input: &str) -> Result<Vec<TokenKind>, String> {
             continue;
         }
         match character {
+            '#' => {
+                while index < chars.len() && !matches!(chars[index].1, '\r' | '\n') {
+                    index += 1;
+                }
+                continue;
+            }
+            '/' if chars.get(index + 1).is_some_and(|(_, next)| *next == '*') => {
+                let start = chars[index].0;
+                index += 2;
+                // Comments are non-nesting and are token separators, never text
+                // concatenation. Quoted values and regexes use their own readers.
+                while index + 1 < chars.len()
+                    && !(chars[index].1 == '*' && chars[index + 1].1 == '/')
+                {
+                    index += 1;
+                }
+                if index + 1 >= chars.len() {
+                    return Err(format!(
+                        "unterminated block comment starting at byte {start}"
+                    ));
+                }
+                index += 2;
+                continue;
+            }
             '(' => {
                 tokens.push(TokenKind::LeftParen);
                 index += 1;
@@ -499,6 +526,8 @@ fn read_word(
             continue;
         }
         if current.is_whitespace()
+            || current == '#'
+            || (current == '/' && chars.get(cursor + 1).is_some_and(|(_, next)| *next == '*'))
             || matches!(
                 current,
                 '(' | ')' | '[' | ']' | ',' | '=' | '!' | '<' | '>' | '&' | '|' | '~'

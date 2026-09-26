@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiGet, isApiUnauthorized } from "../api";
 import {
-  ACCESS_TOKEN_STORAGE_KEY,
-  REFRESH_TOKEN_STORAGE_KEY,
-} from "../constants";
-import { apiGet, apiPost, isApiUnauthorized } from "../api";
+  getCurrentAuthSession, getSessionOperator, hasStoredAuthSession,
+  initializeAuthSession, installAuthSession, logoutAuthSession,
+  readCurrentSessionCredentials, readSessionCredentials, renewAuthSession, subscribeAuthSession,
+  subscribeAuthRefreshError, subscribeSessionAuthority,
+  subscribeSessionCredentials, type AuthSession,
+} from "../authSession";
 import {
   type HomeSnapshotRecord,
   unavailableSnapshotSource,
@@ -40,25 +43,6 @@ const FLEET_FULL_RECONCILE_MS = 60_000;
 
 function documentIsHidden(): boolean {
   return typeof document !== "undefined" && document.hidden;
-}
-
-function readStoredToken(key: string): string {
-  if (typeof window === "undefined") {
-    return "";
-  }
-  return window.localStorage.getItem(key) ?? "";
-}
-
-function readStoredAccessToken(): string {
-  return readStoredToken(ACCESS_TOKEN_STORAGE_KEY);
-}
-
-function readStoredRefreshToken(): string {
-  return readStoredToken(REFRESH_TOKEN_STORAGE_KEY);
-}
-
-function hasStoredAuthSession(): boolean {
-  return Boolean(readStoredAccessToken() || readStoredRefreshToken());
 }
 
 function routeOwnsLiveJobHistory(view: ActiveView, subpage: string): boolean {
@@ -279,18 +263,9 @@ function topologyProjectionSourcesForRoute(
   return [];
 }
 
-function persistAuthSession(auth: AuthResponse): void {
-  window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, auth.access_token);
-  window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, auth.refresh_token);
-}
-
-function clearStoredAuthSession(): void {
-  window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-  window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-}
-
 export function useDashboardData(activeView: ActiveView, activeSubpage: string) {
-  const [apiToken, setApiToken] = useState(() => readStoredAccessToken());
+  const [apiToken, setApiToken] = useState<AuthSession | null>(() => getCurrentAuthSession());
+  const activeSessionRef = useRef(apiToken);
   const [authRequired, setAuthRequired] = useState(
     () => !hasStoredAuthSession(),
   );
@@ -313,8 +288,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   const jobDetailsInvalidationGenerationRef = useRef(0);
   const homeSnapshotGenerationRef = useRef(0);
   const homeSnapshotStartedKeyRef = useRef("");
-  const homeVisitRef = useRef({ token: "", active: false, sequence: 0 });
-  const routeVisitRef = useRef({ token: "", route: "", sequence: 0 });
+  const homeVisitRef = useRef<{ token: AuthSession | null; active: boolean; sequence: number }>({ token: null, active: false, sequence: 0 });
+  const routeVisitRef = useRef<{ token: AuthSession | null; route: string; sequence: number }>({ token: null, route: "", sequence: 0 });
   const [homeSnapshotSettledKey, setHomeSnapshotSettledKey] = useState("");
   const [homeSnapshotPendingKey, setHomeSnapshotPendingKey] = useState("");
   const [homeMonitoringCards, setHomeMonitoringCards] = useState<
@@ -335,7 +310,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   const hiddenOperatorProfileRefreshPendingRef = useRef(false);
   const routeHydrationKeyRef = useRef("");
   const suiteConfigHydrationKeyRef = useRef("");
-  const globalProfileHydrationTokenRef = useRef("");
+  const globalProfileHydrationTokenRef = useRef<AuthSession | null>(null);
+  const currentOperatorRef = useRef<AuthResponse["operator"] | null>(null);
   const hiddenJobDetailIdsRef = useRef(new Set<string>());
   const hiddenJobHistoryEventsRef = useRef(
     new Map<
@@ -359,7 +335,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   }
   const homeVisitKey =
     apiToken && activeView === "Home"
-      ? `${apiToken}:${homeVisitRef.current.sequence}`
+      ? `${apiToken.epoch}:${homeVisitRef.current.sequence}`
       : "";
   const homeSnapshotOwnsVisit = Boolean(homeVisitKey);
   const activeRouteKey = `${activeView}\u0000${activeSubpage}`;
@@ -374,7 +350,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     };
   }
   const routeVisitKey = apiToken
-    ? `${apiToken}\u0000${routeVisitRef.current.sequence}`
+    ? `${apiToken.epoch}\u0000${routeVisitRef.current.sequence}`
     : "";
 
   useEffect(() => {
@@ -382,48 +358,74 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     activeSubpageRef.current = activeSubpage;
   }, [activeSubpage, activeView]);
 
-  const forceAuthRequired = useCallback(() => {
+  const adoptSession = useCallback((session: AuthSession | null) => {
+    if (activeSessionRef.current === session) return;
+    activeSessionRef.current = session;
     authGenerationRef.current += 1;
     refreshAuthRef.current = null;
     clearDashboardDataRef.current();
-    clearStoredAuthSession();
     setAuthRefreshError(null);
     setLogoutWarning(null);
-    setWsState("auth required");
-    setApiToken("");
-    setAuthRequired(true);
+    setWsState(session ? "connecting" : "auth required");
+    setApiToken(session);
+    setAuthRequired(!session);
+    const operator = session ? getSessionOperator(session) : null;
+    if (operator) setAuthenticatedOperatorRef.current(operator);
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = subscribeAuthSession(adoptSession);
+    const unsubscribeError = subscribeAuthRefreshError(setAuthRefreshError);
+    let disposed = false;
+    void initializeAuthSession().then(() => {
+      if (!disposed) {
+        const session = getCurrentAuthSession();
+        adoptSession(session);
+        // An asynchronous empty store must also settle the null -> null case.
+        setAuthRequired(!session);
+      }
+    }).catch((error) => {
+      if (!disposed) {
+        setAuthRefreshError(error instanceof Error ? error.message : "Session initialization failed.");
+        if (!getCurrentAuthSession()) setAuthRequired(true);
+      }
+    });
+    return () => { disposed = true; unsubscribe(); unsubscribeError(); };
+  }, [adoptSession]);
+
+  useEffect(() => {
+    if (!apiToken) return;
+    return subscribeSessionAuthority(apiToken, () => {
+      const operator = getSessionOperator(apiToken);
+      const previous = currentOperatorRef.current;
+      if (operator && (!previous || previous.id !== operator.id || previous.role !== operator.role ||
+          previous.status !== operator.status ||
+          [...previous.scopes].sort().join("\0") !== [...operator.scopes].sort().join("\0"))) {
+        setAuthenticatedOperatorRef.current(operator);
+      }
+    });
+  }, [apiToken]);
 
   const refreshStoredAuth = useCallback(() => {
     if (refreshAuthRef.current) {
       return refreshAuthRef.current;
     }
-    const refreshToken = readStoredRefreshToken();
-    if (!refreshToken) {
-      forceAuthRequired();
+    const session = getCurrentAuthSession();
+    const credentials = session ? readSessionCredentials(session) : null;
+    if (!session || !credentials) {
+      adoptSession(session);
       return Promise.resolve();
     }
     const authGeneration = authGenerationRef.current;
     setAuthRefreshError(null);
-    const request = apiPost<AuthResponse>("/api/v1/auth/refresh", "", {
-      refresh_token: refreshToken,
-    })
-      .then((auth) => {
-        if (authGeneration !== authGenerationRef.current) {
-          return;
-        }
-        persistAuthSession(auth);
-        setAuthRefreshError(null);
-        setAuthenticatedOperatorRef.current(auth.operator);
-        setApiToken(auth.access_token);
-        setAuthRequired(false);
-      })
+    const request = renewAuthSession(session, credentials.revision, credentials.attempt, true)
+      .then(() => { setAuthRefreshError(null); })
       .catch((error) => {
         if (authGeneration !== authGenerationRef.current) {
           return;
         }
-        if (isApiUnauthorized(error)) {
-          forceAuthRequired();
+        if (getCurrentAuthSession() !== session) {
+          adoptSession(getCurrentAuthSession());
           return;
         }
         setAuthRefreshError(
@@ -440,12 +442,13 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     const trackedRequest = request;
     refreshAuthRef.current = trackedRequest;
     return trackedRequest;
-  }, [forceAuthRequired]);
+  }, [adoptSession]);
 
   const requireAuth = useCallback(() => {
-    void refreshStoredAuth();
-  }, [refreshStoredAuth]);
+    adoptSession(getCurrentAuthSession());
+  }, [adoptSession]);
   const access = useAccessData(apiToken, requireAuth);
+  currentOperatorRef.current = access.operator;
   setAuthenticatedOperatorRef.current = access.setAuthenticatedOperator;
   const activeAccessProjectionSources = accessProjectionSourcesForRoute(
     activeView,
@@ -528,8 +531,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   const clearDashboardData = useCallback(() => {
     homeSnapshotGenerationRef.current += 1;
     homeSnapshotStartedKeyRef.current = "";
-    homeVisitRef.current = { token: "", active: false, sequence: 0 };
-    routeVisitRef.current = { token: "", route: "", sequence: 0 };
+    homeVisitRef.current = { token: null, active: false, sequence: 0 };
+    routeVisitRef.current = { token: null, route: "", sequence: 0 };
     setHomeSnapshotSettledKey("");
     setHomeSnapshotPendingKey("");
     setHomeMonitoringCards(null);
@@ -542,7 +545,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     hiddenOperatorProfileRefreshPendingRef.current = false;
     routeHydrationKeyRef.current = "";
     suiteConfigHydrationKeyRef.current = "";
-    globalProfileHydrationTokenRef.current = "";
+    globalProfileHydrationTokenRef.current = null;
     hiddenJobDetailIdsRef.current.clear();
     hiddenJobHistoryEventsRef.current.clear();
     hiddenResolvedJobEffectsRef.current.clear();
@@ -926,12 +929,6 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   ]);
 
   useEffect(() => {
-    if (!apiToken && hasStoredAuthSession()) {
-      void refreshStoredAuth();
-    }
-  }, [apiToken, refreshStoredAuth]);
-
-  useEffect(() => {
     if (
       !apiToken ||
       !documentVisible ||
@@ -959,10 +956,10 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     const requestIsCurrent = () => {
       return (
         generation === homeSnapshotGenerationRef.current &&
-        readStoredAccessToken() === apiToken &&
+        getCurrentAuthSession() === apiToken &&
         activeViewRef.current === "Home" &&
         homeVisitRef.current.token === apiToken &&
-        `${apiToken}:${homeVisitRef.current.sequence}` === homeVisitKey
+        `${apiToken.epoch}:${homeVisitRef.current.sequence}` === homeVisitKey
       );
     };
     const params = dashboardPreferencesToParams(
@@ -1094,7 +1091,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
       activeView === "System" ||
       (activeView === "Audit" && activeSubpage === "sessions");
     if (!apiToken) {
-      globalProfileHydrationTokenRef.current = "";
+      globalProfileHydrationTokenRef.current = null;
       return;
     }
     if (access.operator) {
@@ -1494,40 +1491,47 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     let hasConnected = false;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const connect = () => {
-      if (disposed) {
+      const credentials = readSessionCredentials(apiToken);
+      if (disposed || !credentials?.accessToken) {
         return;
       }
       setWsState(reconnectAttempt === 0 ? "connecting" : "reconnecting");
-      socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-      socket.addEventListener("open", () => {
-        if (disposed) {
-          socket?.close();
-          return;
-        }
-        const recovering = hasConnected;
-        hasConnected = true;
-        reconnectAttempt = 0;
-        socket?.send(JSON.stringify({ type: "auth", access_token: apiToken }));
-        setWsState("connected");
-        if (recovering) {
-          if (documentIsHidden()) {
-            hiddenFleetRefreshPendingRef.current = true;
-            hiddenTerminalRefreshPendingRef.current = true;
-          } else {
-            void fleet.loadFleetTelemetry(true);
-            if (
-              jobProjectionSourcesForRoute(
-                activeViewRef.current,
-                activeSubpageRef.current,
-              ).includes("terminalSessions")
-            ) {
-              void jobs.loadTerminalSessions();
+      const connection = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      socket = connection;
+      socket.addEventListener("open", async () => {
+        try {
+          const credentials = await readCurrentSessionCredentials(apiToken);
+          if (disposed || socket !== connection) {
+            connection.close();
+            return;
+          }
+          const recovering = hasConnected;
+          hasConnected = true;
+          reconnectAttempt = 0;
+          connection.send(JSON.stringify({ type: "auth", access_token: credentials.accessToken }));
+          setWsState("connected");
+          if (recovering) {
+            if (documentIsHidden()) {
+              hiddenFleetRefreshPendingRef.current = true;
+              hiddenTerminalRefreshPendingRef.current = true;
+            } else {
+              void fleet.loadFleetTelemetry(true);
+              if (
+                jobProjectionSourcesForRoute(
+                  activeViewRef.current,
+                  activeSubpageRef.current,
+                ).includes("terminalSessions")
+              ) {
+                void jobs.loadTerminalSessions();
+              }
             }
           }
+        } catch {
+          if (!disposed && socket === connection) connection.close();
         }
       });
       socket.addEventListener("close", () => {
-        if (disposed) {
+        if (disposed || socket !== connection) {
           return;
         }
         setWsState("reconnecting");
@@ -1541,12 +1545,12 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
         reconnectTimer = window.setTimeout(connect, delay);
       });
       socket.addEventListener("error", () => {
-        if (!disposed) {
+        if (!disposed && socket === connection) {
           setWsState("reconnecting");
         }
       });
       socket.addEventListener("message", (message) => {
-        if (disposed) {
+        if (disposed || socket !== connection) {
           return;
         }
         const event = parseWsEvent(message.data);
@@ -1775,12 +1779,23 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
       });
     };
     connect();
+    const unsubscribeCredentials = subscribeSessionCredentials(apiToken, () => {
+      const previous = socket;
+      socket = null;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      previous?.close();
+      connect();
+    });
     return () => {
       disposed = true;
+      unsubscribeCredentials();
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
       }
-      if (socket?.readyState === WebSocket.OPEN) {
+      if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
         socket.close();
       }
     };
@@ -1803,43 +1818,24 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   ]);
 
   const handleAuth = useCallback(
-    async (auth: AuthResponse) => {
-      authGenerationRef.current += 1;
-      refreshAuthRef.current = null;
-      clearDashboardData();
-      persistAuthSession(auth);
-      setAuthRefreshError(null);
-      setLogoutWarning(null);
-      access.setAuthenticatedOperator(auth.operator);
-      setWsState("connecting");
-      setApiToken(auth.access_token);
-      setAuthRequired(false);
+    async (auth: AuthResponse, expectedBoundary?: string) => {
+      const session = await installAuthSession(auth, expectedBoundary);
+      adoptSession(session);
     },
-    [access.setAuthenticatedOperator, clearDashboardData],
+    [adoptSession],
   );
 
   const clearSession = useCallback(() => {
-    const logoutToken = readStoredAccessToken() || apiToken;
-    authGenerationRef.current += 1;
-    const logoutGeneration = authGenerationRef.current;
-    refreshAuthRef.current = null;
-    clearDashboardData();
-    clearStoredAuthSession();
-    setAuthRefreshError(null);
-    setLogoutWarning(null);
-    setWsState("auth required");
-    setApiToken("");
-    setAuthRequired(true);
-    if (logoutToken) {
-      void apiPost<void>("/api/v1/auth/logout", logoutToken, {}).catch(() => {
-        if (authGenerationRef.current === logoutGeneration) {
+    if (apiToken) {
+      void logoutAuthSession(apiToken).catch(() => {
+        if (!getCurrentAuthSession()) {
           setLogoutWarning(
             "Signed out locally, but the server could not revoke this session. It may remain active until it expires; sign in again to review Audit > Sessions when the API is available.",
           );
         }
       });
     }
-  }, [apiToken, clearDashboardData]);
+  }, [apiToken]);
 
   return {
     accessError: activeAccessError,
@@ -2016,7 +2012,6 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     webhookRuleDeliveriesTruncated: fleet.webhookRuleDeliveriesTruncated,
     lastLiveEvent,
     jobDetailsInvalidation,
-    terminalAccessToken: apiToken,
     loadAudits: audit.loadAudits,
     loadAuditLogs: audit.loadAuditLogs,
     loadAuditEvent: audit.loadAuditEvent,

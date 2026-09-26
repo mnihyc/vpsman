@@ -1,3 +1,4 @@
+import type { AuthSession } from "./authSession";
 import {
   Suspense,
   useCallback,
@@ -163,7 +164,7 @@ function persistPrivilegeGrant(grant: PrivilegeGrant | null): void {
 }
 
 async function verifyPrivilegeMaterial(
-  apiToken: string,
+  apiToken: AuthSession | null,
   operatorId: string,
   material: PrivilegeMaterial,
 ): Promise<DerivedPrivilegeMaterial> {
@@ -914,6 +915,11 @@ export function App() {
     apiToken: dashboard.apiToken,
     operatorId: dashboard.operator?.id ?? null,
   });
+  const privilegeSessionRef = useRef(dashboard.apiToken);
+  const privilegeSessionChanged = Boolean(
+    privilegeSessionRef.current &&
+      privilegeSessionRef.current !== dashboard.apiToken,
+  );
   privilegeAuthContextRef.current = {
     apiToken: dashboard.apiToken,
     operatorId: dashboard.operator?.id ?? null,
@@ -921,6 +927,7 @@ export function App() {
   const privilegeMaterial =
     privilegeGrant &&
     dashboard.apiToken &&
+    !privilegeSessionChanged &&
     dashboard.operator?.id === privilegeGrant.operatorId
       ? privilegeGrant.material
       : null;
@@ -954,7 +961,7 @@ export function App() {
         const current = privilegeAuthContextRef.current;
         return (
           privilegeOperationGenerationRef.current === generation &&
-          Boolean(current.apiToken) &&
+          current.apiToken === apiToken &&
           current.operatorId === operatorId
         );
       };
@@ -997,6 +1004,14 @@ export function App() {
     }
   }, [storedPrivilegeGrant.clearInvalidRecord]);
   useEffect(() => {
+    const previousSession = privilegeSessionRef.current;
+    privilegeSessionRef.current = dashboard.apiToken;
+    if (previousSession && previousSession !== dashboard.apiToken) {
+      clearPrivilegeMaterial();
+      setPrivilegeUnlockOpen(false);
+    }
+  }, [clearPrivilegeMaterial, dashboard.apiToken]);
+  useEffect(() => {
     if (!dashboard.apiToken && dashboard.authRequired) {
       clearPrivilegeMaterial();
       setPrivilegeUnlockOpen(false);
@@ -1014,7 +1029,12 @@ export function App() {
   }, [clearPrivilegeMaterial, dashboard.operator, privilegeGrant]);
   useEffect(() => {
     const stored = storedPrivilegeGrant.grant;
-    if (!stored || !dashboard.apiToken || !dashboard.operator?.id) {
+    if (
+      privilegeSessionChanged ||
+      !stored ||
+      !dashboard.apiToken ||
+      !dashboard.operator?.id
+    ) {
       return undefined;
     }
     if (stored.operatorId !== dashboard.operator.id) {
@@ -1027,7 +1047,7 @@ export function App() {
       return undefined;
     }
     let disposed = false;
-    const restoreKey = `${stored.operatorId}:${stored.material.superKeyHex}`;
+    const restoreKey = `${dashboard.apiToken.epoch}:${stored.operatorId}:${stored.material.superKeyHex}`;
     let restore = privilegeRestoreInFlightRef.current;
     if (!restore || restore.key !== restoreKey) {
       restore = {
@@ -1084,6 +1104,7 @@ export function App() {
   }, [
     dashboard.apiToken,
     dashboard.operator?.id,
+    privilegeSessionChanged,
     setPrivilegeMaterial,
     storedPrivilegeGrant.grant,
   ]);
@@ -2693,7 +2714,7 @@ export function App() {
   function renderRemoteOperationsPanel(panelSubpage: string) {
     return (
       <RemoteOperationsPanel
-        accessToken={dashboard.terminalAccessToken}
+        authSession={dashboard.apiToken}
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
         jobs={dashboard.jobs}
@@ -3452,7 +3473,7 @@ export function App() {
         <AuthPanel
           apiError={dashboard.apiError}
           onAuth={dashboard.handleAuth}
-          sessionNotice={dashboard.logoutWarning}
+          sessionNotice={dashboard.logoutWarning ?? dashboard.authRefreshError}
         />
       </main>
     );
@@ -3460,6 +3481,7 @@ export function App() {
 
   return (
     <PanelDisplayProvider
+      key={dashboard.apiToken?.epoch}
       value={{
         preferences: operatorPreferences,
         preferencesError: dashboard.preferencesError,

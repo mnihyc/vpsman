@@ -1,3 +1,4 @@
+import type { AuthSession } from "../../authSession";
 import {
   Ban,
   Clock3,
@@ -160,7 +161,7 @@ export function SharedViewsPanel({
   requestsEnabled,
 }: {
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   initialSelectorExpression?: string;
   onInitialSelectorConsumed?: () => void;
   requestsEnabled: boolean;
@@ -212,10 +213,7 @@ export function SharedViewsPanel({
   const shareListReadConsumerRef = useRef(
     new LatestReadConsumer<MonitoringShareView[]>(),
   );
-  const loadSharesRef = useRef<() => Promise<boolean>>(() =>
-    Promise.resolve(false),
-  );
-  const loadedApiTokenRef = useRef<string | null>(null);
+  const loadedApiTokenRef = useRef<AuthSession | null>(null);
   const authoritativeTargetRevisions = useRef(
     new Map<string, MonitoringShareRevisionView>(),
   );
@@ -307,13 +305,6 @@ export function SharedViewsPanel({
       }
     }
   }, [apiToken]);
-  loadSharesRef.current = loadShares;
-
-  function reconcileShareListAfterTokenRotation() {
-    if (!currentApiTokenRef.current) return;
-    void loadSharesRef.current();
-  }
-
   const refreshShares = useCallback(async (): Promise<boolean> => {
     const loaded = await loadShares();
     if (loaded) {
@@ -659,12 +650,6 @@ export function SharedViewsPanel({
         } satisfies UpdateMonitoringShareRequest,
       );
       if (currentApiTokenRef.current !== apiToken) {
-        if (response.applied) {
-          reconcileShareListAfterTokenRotation();
-          setEditReview(null);
-          setEditDraft(null);
-          setEditingShare(null);
-        }
         return;
       }
       if (!response.applied || !response.share) {
@@ -747,10 +732,6 @@ export function SharedViewsPanel({
         review.request,
       );
       if (currentApiTokenRef.current !== apiToken) {
-        reconcileShareListAfterTokenRotation();
-        setStatusFilter("active");
-        setReview(null);
-        setDrawerOpen(false);
         return;
       }
       const createdShare = {
@@ -816,8 +797,6 @@ export function SharedViewsPanel({
         );
       }
       if (currentApiTokenRef.current !== apiToken) {
-        reconcileShareListAfterTokenRotation();
-        setPendingAction(null);
         return;
       }
       const reconcileList = invalidateShareListAfterMutation();
@@ -911,10 +890,6 @@ export function SharedViewsPanel({
         } satisfies BulkUpdateMonitoringShareTargetsRequest,
       );
       if (currentApiTokenRef.current !== apiToken) {
-        if (response.applied) {
-          reconcileShareListAfterTokenRotation();
-          setTargetUpdateReview(null);
-        }
         return;
       }
       const selectedShareIds = new Set(

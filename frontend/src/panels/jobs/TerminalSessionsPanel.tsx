@@ -1,3 +1,4 @@
+import type { AuthSession } from "../../authSession";
 import {
   Copy,
   Download,
@@ -95,7 +96,7 @@ type ModalSiblingState = {
 export function TerminalSessionsPanel({
   agents,
   jobs,
-  accessToken,
+  authSession,
   clientLabel,
   initialTargetClientId,
   initialTargetRequestId,
@@ -113,7 +114,7 @@ export function TerminalSessionsPanel({
 }: {
   agents: AgentView[];
   jobs: JobHistoryRecord[];
-  accessToken: string;
+  authSession: AuthSession | null;
   clientLabel: (clientId: string) => string;
   initialTargetClientId?: string | null;
   initialTargetRequestId?: string | null;
@@ -233,7 +234,7 @@ export function TerminalSessionsPanel({
       1)
     : 1;
   const terminalSocket = useTerminalSessionSocket({
-    accessToken,
+    authSession,
     clientId: followedSession?.client_id ?? null,
     enabled: followingLive,
     fromSeq: streamFromSeq,

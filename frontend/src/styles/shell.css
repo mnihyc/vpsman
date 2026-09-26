@@ -784,13 +784,34 @@ nav {
   line-height: 22px;
 }
 
-.searchExpressionInput.previewing.hasTokens .searchExpressionEditor {
+.searchExpressionInput.previewing.hasTokens:not(.multiline) .searchExpressionEditor {
   position: absolute;
   inset: 0;
   width: 100%;
   z-index: 1;
   opacity: 0;
   pointer-events: auto;
+}
+
+.searchExpressionInput.multiline {
+  height: auto;
+  align-items: flex-start;
+}
+
+.searchExpressionInput.multiline .searchExpressionEditor {
+  height: 72px;
+  min-height: 24px;
+  resize: vertical;
+  overflow-y: auto;
+  white-space: pre;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.searchExpressionComment {
+  color: var(--muted);
+  font-style: italic;
 }
 
 .searchExpressionPreview {

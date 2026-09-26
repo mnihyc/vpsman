@@ -150,6 +150,58 @@ fn parser_honors_precedence_implicit_and_and_not() {
 }
 
 #[test]
+fn expression_comments_preserve_strings_regexes_and_boolean_semantics() {
+    let context = vps();
+    assert!(matches(
+        "/* 注释 with # and operators && || */status:online/* separate */tag:edge# ignored || tag:test\r\n&& !tag:test",
+        &context
+    ));
+    assert!(matches(
+        "status/* field */in/* list */[stale,/* value */online]# line end\r&& tag:prod",
+        &context
+    ));
+    assert!(!matches("status:online/* separator */tag:test", &context));
+    assert!(matches("/* outer /* not nested */status:online", &context));
+    assert!(!matches("sta/* no concatenation */tus = online", &context));
+
+    let literal_context = ExpressionContext::for_vps(VpsMetadata::new(
+        "literal-id",
+        "edge#/*literal*/",
+        "online",
+        vec!["prod#/*literal*/".to_string()],
+    ));
+    for input in [
+        r#"name:"edge#/*literal*/"/* comment */"#,
+        r#"name = 'edge#/*literal*/'# comment"#,
+        r#"vps.tag in [/^prod#\/\*literal\*\/$/]/* comment */"#,
+    ] {
+        assert!(matches(input, &literal_context), "input {input}");
+    }
+}
+
+#[test]
+fn expression_comments_cannot_turn_nonempty_input_into_match_all() {
+    assert!(parse_expression(" \r\n\t").unwrap().is_none());
+    for input in ["# comment", "/* comment */", "# line\r\n/* block */"] {
+        assert_eq!(parse_expression(input).unwrap_err(), "expression is empty");
+        assert!(parse_and_match_expression(input, &vps()).is_err());
+    }
+    for input in ["/*", "/* unfinished", "status:online /* incomplete *"] {
+        assert!(
+            parse_expression(input)
+                .unwrap_err()
+                .contains("unterminated block comment"),
+            "input {input}"
+        );
+    }
+    assert_eq!(
+        parse_expression("tag:é /* open").unwrap_err(),
+        "unterminated block comment starting at byte 7"
+    );
+    assert!(parse_expression("status:online && # missing operand").is_err());
+}
+
+#[test]
 fn equality_inequality_and_aliases_match_inventory_fields() {
     let context = vps();
     assert!(matches(r#"status = "online""#, &context));
@@ -332,6 +384,14 @@ fn shared_expression_fixture_cases_match() {
         parse_expression(suggestion)
             .unwrap_or_else(|error| panic!("suggestion {suggestion}: parse failed: {error}"))
             .expect("fixture suggestion expression");
+    }
+    for case in fixture["invalid_expressions"].as_array().unwrap() {
+        let input = case["expression"].as_str().unwrap();
+        let error = parse_expression(input).unwrap_err();
+        assert!(
+            error.contains(case["error_contains"].as_str().unwrap()),
+            "invalid fixture {input}: {error}"
+        );
     }
 }
 

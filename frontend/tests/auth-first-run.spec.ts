@@ -16,6 +16,40 @@ async function mockBootstrapStatus(
   });
 }
 
+for (const bootstrapRequired of [false, true]) {
+  test(`blocks ${bootstrapRequired ? "bootstrap" : "sign-in"} before posting credentials when browser session locks are unavailable`, async ({ page }) => {
+    let credentialPosts = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        /\/api\/v1\/auth\/(?:login|bootstrap)$/.test(new URL(request.url()).pathname)
+      ) credentialPosts += 1;
+    });
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+    });
+    await mockBootstrapStatus(page, bootstrapRequired);
+    await page.route(/\/api\/v1\/auth\/(?:login|bootstrap)$/, (route) =>
+      route.fulfill({ status: 400, json: { error: "unexpected_credentials_post" } }),
+    );
+    await page.goto("/");
+    const submitLabel = bootstrapRequired ? "Create first operator" : "Sign in";
+    await expect(page.getByRole("heading", { name: submitLabel })).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText(/HTTPS|localhost/);
+    await page.getByLabel("Username").fill("operator");
+    await page.getByLabel("Password").fill("correct-horse-battery-staple");
+    await expect(page.getByRole("button", { name: submitLabel })).toBeDisabled();
+    // Exercise the handler as well as the disabled button: Enter or a scripted
+    // form submission must not bypass the environment gate.
+    await page.getByLabel("Operator authentication").evaluate((form) => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve())));
+    expect(credentialPosts).toBe(0);
+    await expect(page.getByRole("alert")).toContainText(/Web Locks|browser/);
+  });
+}
+
 test("first-run auth screen creates the first operator without a bootstrap mode tab", async ({
   page,
 }) => {

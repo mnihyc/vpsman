@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, apiPostPreview, isApiUnauthorized } from "../api";
 import { emptySummary } from "../constants";
@@ -146,7 +147,7 @@ type FleetSnapshotRecord = {
   webhook_rule_deliveries_truncated?: boolean;
 };
 
-export function useFleetData(apiToken: string, onUnauthorized: () => void) {
+export function useFleetData(apiToken: AuthSession | null, onUnauthorized: () => void) {
   const apiTokenRef = useRef(apiToken);
   const fleetFullGeneration = useRef(0);
   const fleetCoreGeneration = useRef(0);
@@ -160,11 +161,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const webhookRuleListGeneration = useRef(0);
   const webhookDeliveryListGeneration = useRef(0);
   const fleetTelemetryInFlight = useRef<{
-    token: string;
+    token: AuthSession | null;
     promise: Promise<void>;
   } | null>(null);
   const fleetFullInFlight = useRef<{
-    token: string;
+    token: AuthSession | null;
     promise: Promise<void>;
   } | null>(null);
   const fleetFullRefreshPending = useRef(false);
@@ -2181,7 +2182,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const clearFleet = useCallback(() => {
-    apiTokenRef.current = "";
+    apiTokenRef.current = null;
     fleetFullGeneration.current += 1;
     fleetCoreGeneration.current += 1;
     fleetTelemetryGeneration.current += 1;

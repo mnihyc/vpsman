@@ -7764,6 +7764,26 @@ fn tokenize_policy_condition(expression: &str) -> Result<Vec<PolicyConditionToke
             continue;
         }
         match ch {
+            '#' => {
+                while index < chars.len() && !matches!(chars[index].1, '\r' | '\n') {
+                    index += 1;
+                }
+            }
+            '/' if chars.get(index + 1).is_some_and(|(_, next)| *next == '*') => {
+                index += 2;
+                // Match the shared selector grammar: first closing delimiter
+                // wins; an ordinary slash still means arithmetic division.
+                while index + 1 < chars.len()
+                    && !(chars[index].1 == '*' && chars[index + 1].1 == '/')
+                {
+                    index += 1;
+                }
+                anyhow::ensure!(
+                    index + 1 < chars.len(),
+                    "unterminated block comment starting at byte {byte_index}"
+                );
+                index += 2;
+            }
             '(' => {
                 tokens.push(PolicyConditionToken::LeftParen);
                 index += 1;

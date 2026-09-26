@@ -2167,6 +2167,10 @@ test("clears browser-local console selections without deleting session or privil
     page.getByRole("heading", { name: "Operator preferences" }),
   ).toBeVisible();
   await page.getByRole("button", { name: /Browser state/ }).click();
+  const priorAuthHint = await page.evaluate(() =>
+    JSON.parse(window.localStorage.getItem("vpsman.authSession.v1") ?? "null"),
+  );
+  expect(priorAuthHint).toMatchObject({ epoch: expect.any(String), status: "active" });
   const reloaded = page.waitForEvent("load");
   await page.getByRole("button", { name: "Clear local selections" }).click();
   await reloaded;
@@ -2180,6 +2184,7 @@ test("clears browser-local console selections without deleting session or privil
 
   const storage = await page.evaluate(() => ({
     accessToken: window.localStorage.getItem("vpsman.accessToken"),
+    authSession: JSON.parse(window.localStorage.getItem("vpsman.authSession.v1") ?? "null"),
     dashboardPreferences: window.localStorage.getItem(
       "vpsman.dashboardPreferences",
     ),
@@ -2196,14 +2201,16 @@ test("clears browser-local console selections without deleting session or privil
     ? JSON.parse(storage.privilegeGrant)
     : null;
   expect(storage).toMatchObject({
-    accessToken:
-      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    accessToken: null,
+    authSession: priorAuthHint,
     dashboardPreferences: null,
     grid: null,
     privilegeVault: "preserved-privilege",
-    refreshToken:
-      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    refreshToken: null,
   });
+  expect(storage.authSession).toEqual(priorAuthHint);
+  expect(storage.authSession).not.toHaveProperty("accessToken");
+  expect(storage.authSession).not.toHaveProperty("refreshToken");
   expect(sidebarSubpanels).toMatchObject({
     defaultMode: "active",
     state: {},

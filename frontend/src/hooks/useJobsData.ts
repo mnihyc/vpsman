@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiDelete,
@@ -87,7 +88,7 @@ type HomeJobsHydrationFence = {
 };
 
 export function useJobsData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
   onFleetChanged: () => Promise<void>,
   onAuditChanged: () => Promise<void>,
@@ -2030,7 +2031,7 @@ export function useJobsData(
     commandTemplateMutationGeneration.current += 1;
     jobApprovalMutationGeneration.current += 1;
     jobRolloutMutationGeneration.current += 1;
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     clearProjectionOverlay(jobHistoryOverlay.current);
     clearProjectionOverlay(terminalSessionsOverlay.current);
     for (const consumer of terminalSessionReadConsumers.current.values()) {

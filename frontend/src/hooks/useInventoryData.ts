@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiDelete,
@@ -51,7 +52,7 @@ import type {
 import { retainMutationSuccessAfterRefresh } from "../utils";
 
 export function useInventoryData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
   onAgentTagsChanged: (response: TagMutationResponse) => void,
 ) {
@@ -119,11 +120,11 @@ export function useInventoryData(
   const runtimeConfigApplyLoadConsumer = useRef(new LatestReadConsumer());
   const loadConfigurationPresetsInFlight = useRef<{
     request: Promise<void>;
-    token: string;
+    token: AuthSession | null;
   } | null>(null);
   const loadConfigurationSourcesInFlight = useRef<{
     request: Promise<void>;
-    token: string;
+    token: AuthSession | null;
   } | null>(null);
   const tagOrderLoadGeneration = useRef(0);
   const patchGeneratorLoadGeneration = useRef(0);
@@ -930,7 +931,7 @@ export function useInventoryData(
     tagOrderMutationGeneration.current += 1;
     loadConfigurationPresetsInFlight.current = null;
     loadConfigurationSourcesInFlight.current = null;
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     tagOrderSourceAvailable.current = false;
     patchGeneratorSourceAvailable.current = false;
     tagOrderSourceError.current = null;

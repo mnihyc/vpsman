@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { readCanonicalAuthSession } from "./support/authSessionStorage";
 import { terminalSessions } from "./support/jobSessionFixtures";
 import {
   lockPrivilegeFromVault,
@@ -179,7 +180,7 @@ test("uses retained session actions and sends exact xterm input without creating
     page.getByRole("menuitem", { name: "Stop follow", exact: true }),
   ).toHaveCount(0);
   await activate(page.getByRole("menuitem", { name: "Follow", exact: true }));
-  await activate(grid.getByText("Seq 1-3 retained, next 4").first());
+  await grid.getByText("Seq 1-3 retained, next 4").first().click();
   await expect(page.getByText("Opened by")).toBeVisible();
   await expect(page.getByText("Not reported by terminal API").first()).toBeVisible();
   await openTerminalActionMenu(page, closedTerminalRow);
@@ -238,7 +239,7 @@ test("uses retained session actions and sends exact xterm input without creating
   await expect(sessionContext).toContainText(
     `Last input seq ${terminalSessions[0].last_input_seq + acceptedInputFrameCount}`,
   );
-  await page.evaluate(() => {
+  const notifyTerminalProjection = (terminalSeq: number | null) => page.evaluate((terminalSeq) => {
     const socket = (
       window as typeof window & {
         __vpsmanTestWebSockets: Array<EventTarget & { url: string }>;
@@ -253,14 +254,16 @@ test("uses retained session actions and sends exact xterm input without creating
           job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
           client_id: "agent-sfo-01",
           session_id: "61616161-2222-4333-8444-555555555555",
-          terminal_seq: null,
+          terminal_seq: terminalSeq,
           done: false,
         }),
       }),
     );
-  });
+  }, terminalSeq);
+  // Numbered PTY chunks and keyboard controls stay on the terminal socket.
+  await notifyTerminalProjection(4);
   await page.waitForTimeout(250);
-  const hotPathFetches = await page.evaluate(() =>
+  const hotPathFetches = () => page.evaluate(() =>
     (
       (
         window as typeof window & {
@@ -281,7 +284,14 @@ test("uses retained session actions and sends exact xterm input without creating
       );
     }),
   );
-  expect(hotPathFetches).toEqual([]);
+  expect(await hotPathFetches()).toEqual([]);
+  // Null sequence means initial/final lifecycle projection, not a PTY chunk.
+  // It refreshes exactly this session, without a fleet, job, or audit reload.
+  await notifyTerminalProjection(null);
+  await expect.poll(hotPathFetches).toEqual([{
+    method: "GET",
+    url: `/api/v1/terminal-sessions?client_id=agent-sfo-01&session_id=${terminalSessions[0].session_id}&limit=1`,
+  }]);
   const controls = await terminalControlRequests(page);
   expect(JSON.stringify(controls)).not.toContain("local-super-password");
   expect(JSON.stringify(controls)).not.toContain("privilege_assertion");
@@ -303,6 +313,96 @@ test("uses retained session actions and sends exact xterm input without creating
   ).toBe(0);
 });
 
+test("renews terminal transport without replacing the renderer or replaying controls", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "terminal keyboard continuity is covered on desktop");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Terminal");
+  await invokeTerminalAction(page, activeTerminalRow, "Attach");
+  const focused = page.getByRole("dialog", { name: "Focused terminal workspace" });
+  const terminalInput = focused.locator(".xterm-helper-textarea");
+  await expect(terminalInput).toBeFocused();
+  await expect(page.getByLabel("Terminal transcript availability")).toContainText("Live terminal connected");
+
+  const session = await readCanonicalAuthSession(page);
+  expect(session?.operator).toMatchObject({ id: expect.any(String), role: expect.any(String) });
+  const operator = await page.evaluate(async (session) => {
+    const state = window as typeof window & {
+      __vpsmanGateTerminalInputAcks: () => void;
+      __renewalTerminalRenderer?: Element | null;
+      __renewalTerminalFrames?: Array<Record<string, unknown>>;
+    };
+    state.__renewalTerminalRenderer = document.querySelector('[aria-label="Focused terminal workspace"] .xterm');
+    state.__renewalTerminalFrames = [];
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      if (this.url.includes("/ws/terminal/")) {
+        state.__renewalTerminalFrames!.push(JSON.parse(String(data)));
+      }
+      return originalSend.call(this, data);
+    };
+    state.__vpsmanGateTerminalInputAcks();
+    const originalFetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      if (
+        url.pathname === "/api/v1/terminal-sessions" &&
+        headers.get("Authorization") === `Bearer ${session.accessToken}`
+      ) {
+        return new Response(JSON.stringify({ error: "access_token_expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return originalFetch(input, init);
+    };
+    return session.operator;
+  }, session!);
+  expect(operator).toMatchObject({ id: expect.any(String), role: expect.any(String) });
+  await page.keyboard.type("unacknowledged-input");
+  await expect.poll(() => terminalInputText(page)).toContain("unacknowledged-input");
+  const controlsBefore = await terminalControlRequests(page);
+  const rotatedAccessToken = "c".repeat(64);
+  await page.route("**/api/v1/auth/refresh", (route) => route.fulfill({
+    json: {
+      access_token: rotatedAccessToken,
+      refresh_token: "d".repeat(64),
+      expires_in_secs: 900,
+      refresh_expires_in_secs: 1209600,
+      token_type: "Bearer",
+      operator,
+    },
+  }));
+  await activate(page.locator(".terminalSessionsPanel > .sectionHeader").getByRole("button", { name: "Refresh", exact: true, includeHidden: true }));
+  await expect.poll(() => page.evaluate(() => {
+    const state = window as typeof window & {
+      __renewalTerminalFrames?: Array<Record<string, unknown>>;
+    };
+    return state.__renewalTerminalFrames!.filter((frame) => frame.type === "auth");
+  })).toEqual([{ access_token: rotatedAccessToken, from_seq: 4, type: "auth" }]);
+  await expect(page.getByLabel("Terminal transcript availability")).toContainText("Live terminal connected");
+  await expect(terminalInput).toBeFocused();
+  expect(await terminalControlRequests(page)).toEqual(controlsBefore);
+  const continuity = await page.evaluate(() => {
+    const state = window as typeof window & {
+      __renewalTerminalRenderer?: Element | null;
+      __renewalTerminalFrames?: Array<Record<string, unknown>>;
+    };
+    return {
+      sameRenderer: state.__renewalTerminalRenderer === document.querySelector('[aria-label="Focused terminal workspace"] .xterm'),
+      authFrames: state.__renewalTerminalFrames!.filter((frame) => frame.type === "auth"),
+    };
+  });
+  expect(continuity.sameRenderer).toBe(true);
+  expect(continuity.authFrames).toEqual([{ access_token: rotatedAccessToken, from_seq: 4, type: "auth" }]);
+  await activate(focused.getByRole("button", { name: "Exit focused terminal view" }));
+  const panel = page.locator(".terminalSessionsPanel");
+  await expect(panel.getByLabel("Durable terminal replay status")).toContainText("3 chunks, 40 B");
+  await activate(panel.getByRole("button", { name: "Copy transcript" }));
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("durable replay line 1\nprompt$ € ready\n");
+});
+
 test("keeps explicit stop after switching followed terminals", async ({
   page,
 }, testInfo) => {
@@ -313,6 +413,10 @@ test("keeps explicit stop after switching followed terminals", async ({
 
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
+  // This fixture makes the newer FRA session open, so it is followed initially.
+  // Follow SFO first to make FRA an actual switching target, not an assumed one.
+  await invokeTerminalAction(page, activeTerminalRow, "Follow");
+  await expect(page.locator(".terminalActiveHeader")).toContainText("61616161");
   await invokeTerminalAction(page, closedTerminalRow, "Follow");
   await invokeTerminalAction(page, closedTerminalRow, "Stop follow");
   await expect(page.getByText("Not following", { exact: true })).toBeVisible();

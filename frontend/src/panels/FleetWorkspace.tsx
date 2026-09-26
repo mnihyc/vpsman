@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import {
   useCallback,
   useEffect,
@@ -39,6 +40,7 @@ import {
 } from "lucide-react";
 import { NumberedTextarea } from "../components/NumberedTextarea";
 import { EventExpressionEditor } from "../components/EventExpressionEditor";
+import { ExpressionCodeEditor } from "../components/ExpressionCodeEditor";
 import { agentDisplayState } from "../agentDisplayState";
 import {
   buildBulkJobProgress,
@@ -405,7 +407,7 @@ export function FleetWorkspace({
 }: {
   activeSubpage: string;
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   apiError: string | null;
   canManageAlertPolicies: boolean;
   fleetCoreEvidenceAvailable: boolean;
@@ -2531,7 +2533,7 @@ function FleetInstanceDetail({
   wsState,
 }: {
   agent: AgentView;
-  apiToken: string;
+  apiToken: AuthSession | null;
   configurationSources: ConfigurationSourceView[];
   lastLiveEvent: string;
   currentPolicyAlerts: PolicyAlertRecord[];
@@ -7369,18 +7371,20 @@ export function FleetAlertPolicyManager({
                           <ConsoleField
                             label="Trigger condition expression"
                             className="fieldFull"
-                            labelTitle="The selected evidence source defines available fields and types. Operators include >, >=, <, <=, =, !=, in, arithmetic, &&, ||, !, and parentheses."
+                            labelTitle="The selected evidence source defines available fields and types. Operators include >, >=, <, <=, =, !=, in, arithmetic, &&, ||, !, and parentheses. Comments: # to end of line or /* block */."
                           >
-                            <NumberedTextarea
-                              aria-label="Rule Trigger condition expression"
+                            <ExpressionCodeEditor
+                              ariaLabel="Rule Trigger condition expression"
+                              className="policyConditionCodeMirror"
+                              mode={draft.rule_kind === "metric" ? "metric" : "search"}
                               placeholder={
                                 source?.example ?? "evidence.status = failed"
                               }
                               value={draft.trigger_condition_expression}
-                              onChange={(event) =>
+                              onChange={(value) =>
                                 updateRuleDraft(draft.localId, {
                                   trigger_condition_expression:
-                                    event.target.value,
+                                    value,
                                 })
                               }
                             />
@@ -7446,14 +7450,16 @@ export function FleetAlertPolicyManager({
                               label="Resolve condition expression (optional)"
                               labelTitle="Leave blank for the exact inverse of Trigger. Supply a separate expression for hysteresis, such as triggering above 90% and resolving below 75%."
                             >
-                              <NumberedTextarea
-                                aria-label="Rule Resolve condition expression"
+                              <ExpressionCodeEditor
+                                ariaLabel="Rule Resolve condition expression"
+                                className="policyConditionCodeMirror"
+                                mode={draft.rule_kind === "metric" ? "metric" : "search"}
                                 placeholder="blank = Trigger condition is conclusively false"
                                 value={draft.resolve_condition_expression}
-                                onChange={(event) =>
+                                onChange={(value) =>
                                   updateRuleDraft(draft.localId, {
                                     resolve_condition_expression:
-                                      event.target.value,
+                                      value,
                                   })
                                 }
                               />
@@ -9620,6 +9626,8 @@ function webhookRuleDraftValidationMessage({
 }): string | null {
   if (!name.trim()) return "Rule name is required";
   if (!expression.trim()) return "Expression is required";
+  const expressionParse = parseSearchExpression(expression);
+  if (expressionParse.error) return expressionParse.error;
   if (!target.trim()) return "Target URL is required";
   try {
     const parsed = new URL(target.trim());

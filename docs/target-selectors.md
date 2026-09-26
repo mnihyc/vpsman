@@ -110,6 +110,27 @@ vps.status = stale && tag:edge
 interval.30sec && tag:edge && !(status = offline)
 ```
 
+### Comments
+
+Use `#` for a comment through the end of the line, or `/* ... */` for a
+single-line or multiline block comment. Comments act as whitespace between
+tokens; block comments end at the first `*/` and do not nest. An unfinished
+block or an expression containing only comments is invalid.
+
+```text
+# Notify for either lifecycle edge of this rule.
+(alert.triggered || alert.resolved)
+  && policy_rule.id = "RULE_UUID" /* Copy the full rule ID from Alerts. */
+```
+
+This syntax also applies to webhook and schedule event expressions and Alert
+Policy conditions, including metric arithmetic. Ordinary `/` in a metric
+condition remains division. Comment markers inside quoted values or regex
+list members remain literal; quote data containing `#` or `/*`, for example
+`name:"edge#1"`. Keep line breaks after `#` comments when copying an expression.
+Comments do not change required event anchors, available fields, or target
+review rules.
+
 ## Predicates
 
 Comparisons:

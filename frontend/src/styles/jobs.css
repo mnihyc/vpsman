@@ -4858,10 +4858,37 @@
   max-height: 50vh;
 }
 
+.policyConditionCodeMirror .cm-scroller {
+  min-height: 60px;
+  max-height: 160px;
+}
+
 .eventExpressionCodeMirror .cm-gutters {
   background: var(--surface-subtle);
   color: var(--muted);
   border-color: var(--border);
+}
+
+.eventExpressionCodeMirror .expressionSyntaxComment {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.eventExpressionCodeMirror .expressionSyntaxString {
+  color: var(--success-text);
+}
+
+.eventExpressionCodeMirror .expressionSyntaxField {
+  color: var(--primary);
+}
+
+.eventExpressionCodeMirror .expressionSyntaxOperator {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.eventExpressionCodeMirror .expressionSyntaxNumber {
+  color: var(--warning-text);
 }
 
 .eventExpressionDescriptions {

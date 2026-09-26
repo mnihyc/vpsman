@@ -1708,7 +1708,8 @@ pub(crate) fn configuration_source_selector(
     let selector = selector.map(str::trim).filter(|value| !value.is_empty());
     let tag_selector = selector_expression_from_targets(&[], tags);
     match (selector, tag_selector.is_empty()) {
-        (Some(selector), false) => Ok(format!("({selector}) || ({tag_selector})")),
+        // End a possible trailing # comment before adding expression syntax.
+        (Some(selector), false) => Ok(format!("({selector}\n) || ({tag_selector}\n)")),
         (Some(selector), true) => Ok(selector.to_string()),
         (None, false) => Ok(tag_selector),
         (None, true) => Ok(String::new()),

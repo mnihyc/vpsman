@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
@@ -104,7 +105,7 @@ type VpsDetailRecordBounds = {
 type VpsDetailPanelProps = {
   agent: AgentView | null;
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   apiError: string | null;
   audits: AuditLogRecord[];
   backupArtifacts: BackupArtifactRecord[];

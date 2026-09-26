@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiGet,
@@ -19,7 +20,7 @@ import type {
 } from "../types";
 
 export function usePortForwardingData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
   onAdapterBindingsChanged: () => Promise<void>,
@@ -179,7 +180,7 @@ export function usePortForwardingData(
   const clearPortForwarding = useCallback(() => {
     portForwardLoadGeneration.current += 1;
     portForwardLoadConsumer.current.discardPending(null);
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     setPortForwardRules([]);
     setPortForwardError(null);
     setPortForwardLoading(false);

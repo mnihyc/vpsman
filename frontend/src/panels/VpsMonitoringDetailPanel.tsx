@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "../api";
@@ -95,7 +96,7 @@ export function VpsMonitoringDetailPanel({
   clientId,
   section: forcedSection,
 }: {
-  apiToken: string;
+  apiToken: AuthSession | null;
   clientId: string;
   section?: MonitoringSection;
 }) {

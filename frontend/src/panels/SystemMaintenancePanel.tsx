@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { RefreshCw, Target } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiPost, buildListPath } from "../api";
@@ -120,7 +121,7 @@ export function SystemMaintenancePanel({
 }: {
   activeSubpage: string;
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   jobs: ServerJobRecord[];
   jobsError: string | null;
   jobsLoading: boolean;
@@ -213,7 +214,7 @@ function StaleSelectorMaintenancePanel({
   requestsEnabled,
 }: {
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   onOpenPrivilegeUnlock: () => void;
   onRefreshSchedules: () => Promise<void>;
   onResolveManyTargets: (
@@ -238,7 +239,7 @@ function StaleSelectorMaintenancePanel({
   const [review, setReview] = useState<SelectorUpdateReview | null>(null);
   const feedbackRef = useRef<HTMLDivElement | null>(null);
   const previousFeedbackRef = useRef<string | null>(null);
-  const loadedApiTokenRef = useRef<string | null>(null);
+  const loadedApiTokenRef = useRef<AuthSession | null>(null);
   const resourceLoadGenerationRef = useRef(0);
   const resourceApiTokenRef = useRef(apiToken);
   if (resourceApiTokenRef.current !== apiToken) {
@@ -1006,7 +1007,7 @@ function staleSelectorRows(
   );
 }
 
-async function loadAllSchedules(apiToken: string): Promise<ScheduleRecord[]> {
+async function loadAllSchedules(apiToken: AuthSession | null): Promise<ScheduleRecord[]> {
   const schedules: ScheduleRecord[] = [];
   for (let page = 0; page < MAX_SELECTOR_PAGES; page += 1) {
     const records = await apiGet<ScheduleRecord[]>(
@@ -1029,7 +1030,7 @@ async function loadAllSchedules(apiToken: string): Promise<ScheduleRecord[]> {
 }
 
 async function loadAllMonitoringShares(
-  apiToken: string,
+  apiToken: AuthSession | null,
 ): Promise<MonitoringShareView[]> {
   const shares: MonitoringShareView[] = [];
   for (let page = 0; page < MAX_SELECTOR_PAGES; page += 1) {

@@ -719,20 +719,33 @@ fn schedule_privilege_assertion(
 pub(crate) fn selector_expression_from_targets(clients: &[String], tags: &[String]) -> String {
     clients
         .iter()
-        .map(|client_id| format!("id:{client_id}"))
+        .map(|client_id| format!("id:{}", quote_selector_value(client_id)))
         .chain(tags.iter().map(|tag| selector_token_from_tag_argument(tag)))
         .collect::<Vec<_>>()
-        .join(" || ")
+        .join("\n|| ")
 }
 
 fn selector_token_from_tag_argument(value: &str) -> String {
+    // Namespaced arguments are authored selector syntax, not generated data.
     if matches!(
         value.split_once(':').map(|(namespace, _)| namespace),
         Some("id" | "name" | "tag" | "provider" | "country" | "region" | "status")
     ) {
+        return value.to_string();
+    }
+    format!("tag:{}", quote_selector_value(value))
+}
+
+fn quote_selector_value(value: &str) -> String {
+    if !value.is_empty()
+        && !value.contains("/*")
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || "()[],=!<>|&~\"'#".contains(character))
+    {
         value.to_string()
     } else {
-        format!("tag:{value}")
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     }
 }
 

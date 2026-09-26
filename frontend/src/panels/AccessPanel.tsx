@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import {
   useEffect,
   useId,
@@ -182,7 +183,7 @@ function clipboardFailureMessage(error: unknown): string {
 
 type AccessPanelProps = {
   activeSubpage: string;
-  apiToken: string;
+  apiToken: AuthSession | null;
   error: string | null;
   gatewaySessions: GatewaySessionRecord[];
   initialIdentityWorkflow: "register" | null;

@@ -476,7 +476,7 @@ fn rejects_invalid_inventory_commands() {
             &["edge".to_string()]
         )
         .unwrap(),
-        "(provider:alpha && country:US) || (tag:edge)"
+        "(provider:alpha && country:US\n) || (tag:edge\n)"
     );
     assert_eq!(
         crate::commands_inventory::configuration_source_preview_target_ids(&serde_json::json!({
@@ -561,6 +561,32 @@ fn rejects_invalid_inventory_commands() {
             .is_err()
     );
     assert!(parse_vty_inventory_command("telemetry-tunnels --limit=0").is_err());
+}
+
+#[test]
+fn configuration_source_selector_preserves_trailing_line_comments() {
+    use vpsman_common::{parse_and_match_expression, ExpressionContext, VpsMetadata};
+
+    let authored = "tag:edge # keep the primary scope";
+    let selector = crate::commands_inventory::configuration_source_selector(
+        Some(authored),
+        &["core".to_string()],
+    )
+    .unwrap();
+    for (tag, expected) in [("edge", true), ("core", true), ("other", false)] {
+        let context = ExpressionContext::for_vps(VpsMetadata {
+            tags: vec![tag.to_string()],
+            ..VpsMetadata::default()
+        });
+        assert_eq!(
+            parse_and_match_expression(&selector, &context).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        crate::commands_inventory::configuration_source_selector(Some(authored), &[]).unwrap(),
+        authored
+    );
 }
 
 #[test]

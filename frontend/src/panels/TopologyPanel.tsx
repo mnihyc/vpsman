@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -269,8 +270,12 @@ export function TopologyPanel({
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, clientNames);
   const loadedSubpageKeyRef = useRef<string | null>(null);
-  const subpageVisitRef = useRef({
-    apiToken: "",
+  const subpageVisitRef = useRef<{
+    apiToken: AuthSession | null;
+    sequence: number;
+    subpage: string;
+  }>({
+    apiToken: null,
     sequence: 0,
     subpage: "",
   });
@@ -284,7 +289,7 @@ export function TopologyPanel({
       subpage: activeSubpage,
     };
   }
-  const subpageVisitKey = `${apiToken}\u0000${subpageVisitRef.current.sequence}`;
+  const subpageVisitKey = `${apiToken?.epoch ?? ""}\u0000${subpageVisitRef.current.sequence}`;
 
   useEffect(() => {
     if (!requestsEnabled) return;
@@ -742,7 +747,7 @@ function TunnelPlansWorkspace({
   tunnelPlans,
 }: {
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: "available" | "loading" | "unavailable";
   error: string | null;
@@ -2663,7 +2668,7 @@ function TunnelPlanComposer({
   networkAdapterDefinitions,
 }: {
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: "available" | "loading" | "unavailable";
   existingPlans: TunnelPlanRecord[];
@@ -6597,7 +6602,7 @@ type TopologyPanelProps = {
   activeSubpage: string;
   requestsEnabled: boolean;
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: "available" | "loading" | "unavailable";
   error: string | null;

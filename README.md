@@ -65,7 +65,7 @@ UIs. `vpsman` targets a different operating model:
 ```text
 Browser / vpsctl
       |
-      | HTTPS or private HTTP
+      | Browser: HTTPS or localhost HTTP; vpsctl: HTTPS or private HTTP
       v
 vpsman-api  <---->  PostgreSQL  <---->  vpsman-worker
       |
@@ -73,6 +73,11 @@ vpsman-api  <---->  PostgreSQL  <---->  vpsman-worker
       v
 vpsman-gateway  <==== raw TCP + Noise ====>  vpsman-agent on each VPS
 ```
+
+Authenticated browser access requires HTTPS or localhost (including loopback
+`127.0.0.1`) and a browser supporting Web Locks and IndexedDB for shared session
+renewal across tabs. Plain HTTP on a LAN or remote VPS address cannot sign in.
+This browser requirement does not change CLI access or private service HTTP.
 
 Core packages:
 
@@ -131,6 +136,9 @@ Open `http://127.0.0.1:5173` after first start. When no operator exists, the
 console shows **Create first operator** and creates the initial admin session
 directly in the browser. After any operator exists, the same page becomes the
 normal **Sign in** screen.
+
+For remote browser access, put the console behind an HTTPS reverse proxy; use
+the loopback URL above for local development or an SSH-forwarded connection.
 
 By default:
 

@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiDelete,
@@ -68,7 +69,7 @@ const TOPOLOGY_SOURCE_LABELS: Record<TopologySource, string> = {
 };
 
 export function useTopologyData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
   onRuntimeConfigChanged: () => Promise<void>,
@@ -854,7 +855,7 @@ export function useTopologyData(
   );
 
   const clearTopology = useCallback(() => {
-    apiTokenRef.current = "";
+    apiTokenRef.current = null;
     for (const source of TOPOLOGY_SOURCE_ORDER) {
       topologyLoadGenerations.current[source] += 1;
       topologyLoadConsumers.current[source].discardPending();

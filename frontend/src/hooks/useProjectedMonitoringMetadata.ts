@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useEffect, useState } from "react";
 import { apiGet } from "../api";
 import { selectorExpressionForClientIds } from "../searchExpression";
@@ -14,12 +15,12 @@ type ProjectedMonitoringMetadata = {
 };
 
 export function useProjectedMonitoringMetadata(
-  apiToken: string,
+  apiToken: AuthSession | null,
   clientId: string | null | undefined,
   fallbackProductName: string | null = null,
 ): ProjectedMonitoringMetadata {
   const [projection, setProjection] = useState<{
-    apiToken: string;
+    apiToken: AuthSession | null;
     card: MonitoringCardView | null;
     clientId: string;
     failed: boolean;

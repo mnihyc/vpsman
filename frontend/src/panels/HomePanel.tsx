@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
@@ -52,7 +53,7 @@ import { HomeTelemetryPanel } from "./HomeTelemetryPanel";
 type HomePanelProps = {
   agents: AgentView[];
   allAgents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   auditLogs: AuditLogRecord[];
   backupArtifacts: BackupArtifactRecord[];
   backups: BackupRequestRecord[];

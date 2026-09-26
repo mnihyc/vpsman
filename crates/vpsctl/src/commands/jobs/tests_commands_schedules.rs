@@ -1,4 +1,122 @@
 use super::*;
+use vpsman_common::{parse_and_match_expression, ExpressionContext, VpsMetadata};
+
+#[test]
+fn target_selector_literals_cannot_become_comments_or_another_target() {
+    for literal in [
+        "edge#note",
+        "edge/*note*/",
+        "edge/*unfinished",
+        "edge\"#\\note",
+    ] {
+        let selector =
+            selector_expression_from_targets(&[literal.to_string(), "core".to_string()], &[]);
+        let context = |id: &str| {
+            ExpressionContext::for_vps(VpsMetadata {
+                id: id.to_string(),
+                ..VpsMetadata::default()
+            })
+        };
+        assert!(parse_and_match_expression(&selector, &context(literal)).unwrap());
+        assert!(parse_and_match_expression(&selector, &context("core")).unwrap());
+        assert!(!parse_and_match_expression(&selector, &context("edge")).unwrap());
+
+        for prefix in [
+            "",
+            "tag:",
+            "provider:",
+            "country:",
+            "region:",
+            "name:",
+            "id:",
+        ] {
+            // Bare tags are literal data; namespaced arguments are authored
+            // selector syntax and must quote their literal values explicitly.
+            let argument = if prefix.is_empty() {
+                literal.to_string()
+            } else {
+                format!("{prefix}{}", quote_selector_value(literal))
+            };
+            let selector = selector_expression_from_targets(&[], &[argument]);
+            let context = |value: &str| {
+                ExpressionContext::for_vps(VpsMetadata {
+                    id: value.to_string(),
+                    display_name: value.to_string(),
+                    tags: vec![
+                        value.to_string(),
+                        format!("provider:{value}"),
+                        format!("country:{value}"),
+                        format!("region:{value}"),
+                    ],
+                    ..VpsMetadata::default()
+                })
+            };
+            assert!(
+                parse_and_match_expression(&selector, &context(literal)).unwrap(),
+                "{selector}"
+            );
+            assert!(
+                !parse_and_match_expression(&selector, &context("edge")).unwrap(),
+                "{selector}"
+            );
+        }
+    }
+}
+
+#[test]
+fn target_selector_preserves_namespaced_quoted_segments_and_compound_syntax() {
+    let authored = "name:Edge\" One\" && !tag:excluded # Keep the authored condition";
+    let selector =
+        selector_expression_from_targets(&[], &[authored.to_string(), "tag:core".to_string()]);
+    assert_eq!(selector_token_from_tag_argument(authored), authored);
+    for (name, tags, expected) in [
+        ("Edge One", vec![], true),
+        ("Edge One", vec!["excluded".to_string()], false),
+        ("Other", vec!["core".to_string()], true),
+        ("Edge\" One\"", vec![], false),
+    ] {
+        let context = ExpressionContext::for_vps(VpsMetadata {
+            display_name: name.to_string(),
+            tags,
+            ..VpsMetadata::default()
+        });
+        assert_eq!(
+            parse_and_match_expression(&selector, &context).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn target_selector_preserves_explicit_quoted_tokens_and_following_targets() {
+    let selector = selector_expression_from_targets(
+        &[],
+        &["name:\"Edge#1\" # note".to_string(), "tag:core".to_string()],
+    );
+    for (name, tags, expected) in [
+        ("Edge#1", vec![], true),
+        ("Other", vec!["core".to_string()], true),
+        ("Edge", vec![], false),
+    ] {
+        let context = ExpressionContext::for_vps(VpsMetadata {
+            display_name: name.to_string(),
+            tags,
+            ..VpsMetadata::default()
+        });
+        assert_eq!(
+            parse_and_match_expression(&selector, &context).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        selector_token_from_tag_argument("provider:alpha"),
+        "provider:alpha"
+    );
+    assert_eq!(
+        selector_token_from_tag_argument("pool:edge"),
+        "tag:pool:edge"
+    );
+}
 
 fn base_options(trigger_kind: ScheduleTriggerKindArg) -> ScheduleDefinitionOptions {
     ScheduleDefinitionOptions {

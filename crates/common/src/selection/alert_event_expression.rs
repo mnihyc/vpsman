@@ -175,6 +175,26 @@ mod tests {
     }
 
     #[test]
+    fn alert_event_expression_comments_preserve_required_lifecycle_anchors() {
+        let expression = parse_and_validate_alert_event_expression(
+            "# schedule lifecycle\n/* comment */alert.triggered && /* filter */alert.severity:critical",
+        )
+        .unwrap();
+        assert_eq!(
+            alert_event_expression_anchor_kinds(&expression),
+            (true, false)
+        );
+        for input in [
+            "/* alert.triggered */",
+            "# alert.triggered",
+            "/* alert.triggered */alert.severity:critical",
+            "alert.triggered /* unfinished",
+        ] {
+            assert!(parse_and_validate_alert_event_expression(input).is_err());
+        }
+    }
+
+    #[test]
     fn alert_event_expression_reports_every_positive_edge_anchor() {
         let expression = parse_and_validate_alert_event_expression(
             "(alert.triggered && alert.severity:critical) || (alert.resolved && !alert.triggered)",

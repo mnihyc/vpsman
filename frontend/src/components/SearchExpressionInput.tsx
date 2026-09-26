@@ -16,6 +16,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { NumberedTextarea } from "./NumberedTextarea";
 import type { AgentView, VpsRuleValueRecord } from "../types";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
@@ -58,6 +59,7 @@ type SearchExpressionInputProps = {
 };
 
 type DisplayToken = SearchToken;
+type ExpressionTextControl = HTMLInputElement | HTMLTextAreaElement;
 
 export function SearchExpressionInput({
   agents,
@@ -78,7 +80,7 @@ export function SearchExpressionInput({
 }: SearchExpressionInputProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const vpsRuleSearch = useVpsRuleSearchContext();
-  const editorRef = useRef<HTMLInputElement | null>(null);
+  const editorRef = useRef<ExpressionTextControl | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -97,7 +99,11 @@ export function SearchExpressionInput({
   const ruleEvidenceUnavailable =
     referencesVpsRules && !vpsRuleSearch.available;
   const displayTokens = useMemo(() => tokenizeForDisplay(value), [value]);
-  const hasTokens = displayTokens.some((token) => token.kind === "term");
+  // Native text inputs discard line breaks. Keep pasted multiline expressions
+  // in a textarea so a # comment cannot consume the next condition on edit.
+  const multiline = /[\r\n]/.test(value);
+  const EditorElement = multiline ? NumberedTextarea : "input";
+  const hasTokens = !parsed.error && displayTokens.some((token) => token.kind === "term");
   const completingVpsRules = shouldSuppressVpsRuleCompletionError(
     value,
     caretIndex,
@@ -172,6 +178,13 @@ export function SearchExpressionInput({
     autocompleteVisible && activeSuggestion
       ? `${autocompleteId}-option-${activeSuggestionIndex}`
       : undefined;
+
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    if (!focused || !editor || document.activeElement === editor) return;
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(caretIndex, caretIndex);
+  }, [multiline]);
 
   useEffect(() => {
     if (!focused && !autocompleteOpen) {
@@ -321,7 +334,7 @@ export function SearchExpressionInput({
     return () => container.removeEventListener("wheel", handleWheel);
   }, []);
 
-  function bindEditor(element: HTMLInputElement | null) {
+  function bindEditor(element: ExpressionTextControl | null) {
     editorRef.current = element;
     assignRef(inputRef, element);
   }
@@ -343,7 +356,7 @@ export function SearchExpressionInput({
     }, 0);
   }
 
-  function syncInputCaret(editor: HTMLInputElement) {
+  function syncInputCaret(editor: ExpressionTextControl) {
     const nextCaretIndex = Math.min(
       editor.selectionStart ?? editor.value.length,
       editor.value.length,
@@ -352,9 +365,9 @@ export function SearchExpressionInput({
     scrollCaretIndexIntoView(editor, nextCaretIndex);
   }
 
-  function commitInputValue(event: ChangeEvent<HTMLInputElement>) {
+  function commitInputValue(event: ChangeEvent<ExpressionTextControl>) {
     const editor = event.currentTarget;
-    const nextValue = cleanEditorText(editor.value);
+    const nextValue = editor.value;
     const nextCaretIndex = Math.min(
       editor.selectionStart ?? nextValue.length,
       nextValue.length,
@@ -368,7 +381,7 @@ export function SearchExpressionInput({
     }
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+  function handleKeyDown(event: KeyboardEvent<ExpressionTextControl>) {
     if (
       !event.altKey &&
       !event.ctrlKey &&
@@ -399,6 +412,7 @@ export function SearchExpressionInput({
       }
     }
     if (event.key === "Enter") {
+      if (multiline && (!autocompleteVisible || event.shiftKey)) return;
       event.preventDefault();
       if (
         autocompleteVisible &&
@@ -420,17 +434,13 @@ export function SearchExpressionInput({
     }
   }
 
-  function handlePaste(event: ClipboardEvent<HTMLInputElement>) {
+  function handlePaste(event: ClipboardEvent<ExpressionTextControl>) {
     event.preventDefault();
     const editor = event.currentTarget;
     const start = editor.selectionStart ?? value.length;
     const end = editor.selectionEnd ?? start;
-    const pastedText = cleanEditorText(
-      event.clipboardData.getData("text/plain"),
-    );
-    const nextValue = cleanEditorText(
-      `${value.slice(0, start)}${pastedText}${value.slice(end)}`,
-    );
+    const pastedText = event.clipboardData.getData("text/plain");
+    const nextValue = `${value.slice(0, start)}${pastedText}${value.slice(end)}`;
     const nextCaretIndex = Math.min(
       start + pastedText.length,
       nextValue.length,
@@ -445,12 +455,12 @@ export function SearchExpressionInput({
     focusInputAt(nextCaretIndex);
   }
 
-  function handlePointerUpdate(event: MouseEvent<HTMLInputElement>) {
+  function handlePointerUpdate(event: MouseEvent<ExpressionTextControl>) {
     const editor = event.currentTarget;
     window.setTimeout(() => syncInputCaret(editor), 0);
   }
 
-  function handleSelectionUpdate(event: SyntheticEvent<HTMLInputElement>) {
+  function handleSelectionUpdate(event: SyntheticEvent<ExpressionTextControl>) {
     syncInputCaret(event.currentTarget);
   }
 
@@ -469,7 +479,7 @@ export function SearchExpressionInput({
   return (
     <div
       aria-disabled={disabled}
-      className={`searchExpressionInput ${className} ${verification} ${focused ? "editing" : "previewing"} ${
+      className={`searchExpressionInput ${className} ${verification} ${multiline ? "multiline" : ""} ${focused ? "editing" : "previewing"} ${
         hasTokens ? "hasTokens" : "empty"
       } ${disabled ? "disabled" : ""}`.trim()}
       ref={containerRef}
@@ -485,7 +495,7 @@ export function SearchExpressionInput({
     >
       <Search size={16} />
       <div className="searchExpressionBody">
-        {!focused && hasTokens && (
+        {!focused && !multiline && hasTokens && (
           <div
             className="searchExpressionPreview"
             ref={previewRef}
@@ -500,7 +510,7 @@ export function SearchExpressionInput({
             ))}
           </div>
         )}
-        <input
+        <EditorElement
           aria-activedescendant={activeSuggestionId}
           aria-autocomplete="list"
           aria-controls={autocompleteId}
@@ -551,9 +561,10 @@ export function SearchExpressionInput({
           placeholder={placeholder}
           ref={bindEditor}
           role="combobox"
+          rows={multiline ? 3 : undefined}
           spellCheck={false}
           tabIndex={0}
-          type="text"
+          type={multiline ? undefined : "text"}
           value={value}
         />
       </div>
@@ -644,6 +655,9 @@ function SearchExpressionTokenView({
   token: DisplayToken;
 }) {
   const vpsRuleSearch = useVpsRuleSearchContext();
+  if (token.kind === "comment") {
+    return <span className="searchExpressionComment">{token.raw}</span>;
+  }
   if (token.kind !== "term") {
     return <span className="searchExpressionOperator">{token.raw}</span>;
   }
@@ -766,7 +780,20 @@ function buildCompletion(
   vpsRuleEvidenceAvailable: boolean,
 ): CompletionState {
   const boundedCaret = Math.max(0, Math.min(caretIndex, value.length));
-  const ruleScope = vpsRuleCompletionScope(value, boundedCaret);
+  const comments = tokenizeSearchExpression(value, true).tokens.filter((token) => token.kind === "comment");
+  const inComment = comments.some((token) =>
+    token.start < boundedCaret &&
+    (boundedCaret < token.end || (boundedCaret === token.end &&
+      (token.raw.startsWith("#") || !token.raw.endsWith("*/")))),
+  );
+  if (inComment) {
+    return { end: boundedCaret, filtered: [], fragment: "", start: boundedCaret, ruleScoped: false };
+  }
+  const precedingComments = comments.filter((token) => token.end <= boundedCaret);
+  const lastCommentEnd = precedingComments[precedingComments.length - 1]?.end ?? 0;
+  const completionValue = value.slice(lastCommentEnd);
+  const completionCaret = boundedCaret - lastCommentEnd;
+  const ruleScope = vpsRuleCompletionScope(completionValue, completionCaret);
   if (ruleScope) {
     return {
       end: boundedCaret,
@@ -777,10 +804,12 @@ function buildCompletion(
       ),
       fragment: ruleScope.fragment,
       ruleScoped: true,
-      start: ruleScope.start,
+      start: lastCommentEnd + ruleScope.start,
     };
   }
-  const { fragment, start } = completionFragment(value, boundedCaret);
+  const fragmentResult = completionFragment(completionValue, completionCaret);
+  const { fragment } = fragmentResult;
+  const start = lastCommentEnd + fragmentResult.start;
   const normalized = fragment.toLocaleLowerCase();
   const namespaceSeparator = normalized.indexOf(":");
   const allSuggestions = uniqueCompletionOptions([
@@ -1162,9 +1191,7 @@ function applyCompletion(
 ): string {
   const suffix = value.slice(completion.end);
   const separator = suffix && !/^\s/.test(suffix) ? " " : "";
-  return cleanEditorText(
-    `${value.slice(0, completion.start)}${suggestion.value}${separator}${suffix}`,
-  );
+  return `${value.slice(0, completion.start)}${suggestion.value}${separator}${suffix}`;
 }
 
 function suggestionMatchesFragment(
@@ -1329,7 +1356,7 @@ function uniqueParseableSuggestions(values: string[]): string[] {
 }
 
 function isSimpleNamespacedTag(tag: string): boolean {
-  return /^[^\s()[\],=!<>|&~"']+:[^\s()[\],=!<>|&~"']+$/.test(tag);
+  return /^[^\s()[\],=!<>|&~"'#]+:[^\s()[\],=!<>|&~"'#]+$/.test(tag) && !tag.includes("/*");
 }
 
 function agentDetail(agent: AgentView, source: "ID" | "Name"): string {
@@ -1391,7 +1418,7 @@ function agentListTitle(agents: AgentView[]): string {
 }
 
 function tokenizeForDisplay(input: string): DisplayToken[] {
-  const parsed = tokenizeSearchExpression(input);
+  const parsed = tokenizeSearchExpression(input, true);
   if (!parsed.error) {
     return parsed.tokens;
   }
@@ -1478,15 +1505,8 @@ function createTermToken(
   };
 }
 
-function cleanEditorText(text: string): string {
-  return text
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trimStart();
-}
-
 function scrollCaretIndexIntoView(
-  editor: HTMLInputElement,
+  editor: ExpressionTextControl,
   caretIndex: number,
 ) {
   const maxScrollLeft = editor.scrollWidth - editor.clientWidth;

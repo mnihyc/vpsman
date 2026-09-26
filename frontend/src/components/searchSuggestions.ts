@@ -1,6 +1,7 @@
 import {
   filterBySearchExpression,
   parseSearchExpression,
+  tokenizeSearchExpression,
   type SearchFields,
 } from "../searchExpression";
 
@@ -124,7 +125,14 @@ function addSearchValueSuggestion(suggestions: Set<string>, value: string) {
   if (/^[\W_]+$/.test(trimmed)) {
     return;
   }
-  suggestions.add(trimmed);
+  // These candidates come from table data, not authored expression snippets.
+  // Literal # and /* text must not turn the rest of a value into a comment.
+  const hasComment = tokenizeSearchExpression(trimmed, true).tokens.some(
+    (token) => token.kind === "comment",
+  );
+  // Bare quoted search terms are not part of this grammar. Omit these generic
+  // candidates; field-aware selector suggestions quote their values instead.
+  if (!hasComment) suggestions.add(trimmed);
 }
 
 function collectNamespacedTerm(

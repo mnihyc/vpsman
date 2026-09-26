@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import {
@@ -16,7 +17,7 @@ import type {
 export type SystemDashboardWindow = DashboardWindow;
 export type SystemDashboardPointDensity = "compact" | "balanced" | "dense";
 
-export function useSystemData(apiToken: string, onUnauthorized: () => void) {
+export function useSystemData(apiToken: AuthSession | null, onUnauthorized: () => void) {
   const [systemDashboard, setSystemDashboard] = useState<SystemDashboardRecord | null>(null);
   const [systemDashboardLoading, setSystemDashboardLoading] = useState(false);
   const [systemDashboardError, setSystemDashboardError] = useState<string | null>(null);
@@ -176,7 +177,7 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
   const clearSystem = useCallback(() => {
     systemDashboardLoadGeneration.current += 1;
     suiteConfigLoadGeneration.current += 1;
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     setSystemDashboard(null);
     setSystemDashboardLoading(false);
     setSystemDashboardError(null);

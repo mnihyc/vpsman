@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiGet,
@@ -96,7 +97,7 @@ function settledSourceFailure(
 }
 
 export function useBackupsData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
 ) {
@@ -252,7 +253,7 @@ export function useBackupsData(
     setMigrationLinks([]);
     setBackupsError("Operator login required");
     setBackupsLoading(false);
-    apiTokenRef.current = "";
+    apiTokenRef.current = null;
     onUnauthorized();
   }, [onUnauthorized]);
 
@@ -1288,7 +1289,7 @@ export function useBackupsData(
   );
 
   const clearBackups = useCallback(() => {
-    apiTokenRef.current = "";
+    apiTokenRef.current = null;
     backupsLoadOperationGeneration.current += 1;
     const generations = backupProjectionGenerationsRef.current;
     generations.artifacts += 1;

@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import { apiGet, isApiUnauthorized, LatestReadConsumer } from "../api";
 import { DEFAULT_MONITORING_REFRESH_INTERVAL_SECS } from "../constants";
@@ -33,7 +34,7 @@ const defaultDashboardPreferences: DashboardPreferences = {
 };
 
 export function useDashboardOverviewData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
 ) {
   const [dashboardOverview, setDashboardOverview] =
@@ -184,7 +185,7 @@ export function useDashboardOverviewData(
   const clearDashboardOverview = useCallback(() => {
     loadSequence.current += 1;
     loadConsumer.current.discardPending();
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     dashboardOverviewRef.current = null;
     setDashboardOverview(null);
     setDashboardOverviewError(null);

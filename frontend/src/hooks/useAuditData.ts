@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiGet,
@@ -21,7 +22,7 @@ import type {
   HistoryRetentionPruneResponse,
 } from "../types";
 
-export function useAuditData(apiToken: string, onUnauthorized: () => void) {
+export function useAuditData(apiToken: AuthSession | null, onUnauthorized: () => void) {
   const [audits, setAudits] = useState<AuditLogRecord[]>([]);
   const [auditsTruncated, setAuditsTruncated] = useState(false);
   const [historyRetentionPolicies, setHistoryRetentionPolicies] = useState<
@@ -73,7 +74,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
       auditLog: null,
       retentionPolicies: null,
     };
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     onUnauthorized();
     setAuditEvidenceAvailable(false);
     setAudits([]);
@@ -444,7 +445,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     };
     historyExportLoadGeneration.current += 1;
     historyPruneMutationGeneration.current += 1;
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     setAudits([]);
     setAuditsTruncated(false);
     setHistoryRetentionPolicies([]);

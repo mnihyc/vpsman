@@ -1,7 +1,8 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { basicSetup, EditorView } from "codemirror";
+import { useId, useRef, useState, type ReactNode } from "react";
+import type { EditorView } from "codemirror";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { parseSearchExpression } from "../searchExpression";
+import { ExpressionCodeEditor } from "./ExpressionCodeEditor";
 
 /** Multiline event authoring; the existing expression grammar remains the owner. */
 export function EventExpressionEditor({
@@ -19,49 +20,11 @@ export function EventExpressionEditor({
   descriptions: ReactNode;
   validationError?: string | null;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
   const [expanded, setExpanded] = useState(false);
   const [snippet, setSnippet] = useState("");
   const helpId = useId();
   const error = validationError ?? parseSearchExpression(value).error;
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const view = new EditorView({
-      doc: value,
-      parent: containerRef.current,
-      extensions: [
-        basicSetup,
-        EditorView.lineWrapping,
-        EditorView.contentAttributes.of({
-          "aria-label": ariaLabel,
-          "aria-multiline": "true",
-          "aria-describedby": helpId,
-        }),
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            onChangeRef.current(update.state.doc.toString());
-          }
-        }),
-      ],
-    });
-    viewRef.current = view;
-    return () => {
-      view.destroy();
-      viewRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view || view.state.doc.toString() === value) return;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: value },
-    });
-  }, [value]);
 
   function insertSnippet() {
     const view = viewRef.current;
@@ -103,12 +66,19 @@ export function EventExpressionEditor({
           {expanded ? "Compact" : "Expand"}
         </button>
       </div>
-      <div className="eventExpressionCodeMirror" ref={containerRef} />
+      <ExpressionCodeEditor
+        ariaLabel={ariaLabel}
+        describedBy={helpId}
+        editorRef={viewRef}
+        onChange={onChange}
+        value={value}
+      />
       <small className={error ? "status warn" : "mutedText"} id={helpId}>
-        {error ?? "Enter inserts a new line · && means AND · || means OR · parentheses group conditions"}
+        {error ?? "Enter inserts a new line · && means AND · || means OR · # line comments · /* block comments */"}
       </small>
       <details className="eventExpressionDescriptions">
         <summary>Descriptions</summary>
+        <p>Comments act as whitespace: <code># comment</code> runs to the end of the line; <code>/* comment */</code> can span lines and does not nest. Comment markers inside quoted values or regexes remain literal. An expression must contain a condition, not just comments.</p>
         {descriptions}
       </details>
     </div>

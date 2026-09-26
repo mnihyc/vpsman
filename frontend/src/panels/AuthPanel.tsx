@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
 import { apiErrorFromResponse, apiFetch, apiJsonFromResponse } from "../api";
+import { authSessionEnvironmentError, captureAuthBoundary } from "../authSession";
 import type { AuthResponse } from "../types";
 
 type AuthMode = "checking" | "login" | "bootstrap";
@@ -15,7 +16,7 @@ export function AuthPanel({
   sessionNotice,
 }: {
   apiError: string | null;
-  onAuth: (auth: AuthResponse) => Promise<void>;
+  onAuth: (auth: AuthResponse, expectedBoundary?: string) => Promise<void>;
   sessionNotice: string | null;
 }) {
   const [mode, setMode] = useState<AuthMode>("checking");
@@ -31,8 +32,13 @@ export function AuthPanel({
   const isChecking = mode === "checking";
   const submitLabel = isBootstrap ? "Create first operator" : "Sign in";
   const pendingLabel = isBootstrap ? "Creating" : "Signing in";
+  const environmentError = authSessionEnvironmentError();
+  const visibleError = environmentError ?? error;
   const submitDisabled =
+    Boolean(environmentError) ||
     isChecking || pending || !username || password.length < 12;
+  const submitDisabledReason =
+    environmentError ?? authSubmitDisabledReason(mode, pending, username, password);
 
   useEffect(() => {
     let canceled = false;
@@ -80,12 +86,18 @@ export function AuthPanel({
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const environmentError = authSessionEnvironmentError();
+    if (environmentError) {
+      setError(environmentError);
+      return;
+    }
     if (mode === "checking" || pendingRef.current) {
       return;
     }
     pendingRef.current = true;
     setPending(true);
     setError(null);
+    const expectedBoundary = captureAuthBoundary();
     try {
       const body: Record<string, string> = { username, password };
       if (mode === "login" && totpCode.trim()) {
@@ -110,6 +122,7 @@ export function AuthPanel({
           response,
           `${mode === "login" ? "POST /api/v1/auth/login" : "POST /api/v1/auth/bootstrap"}`,
         ),
+        expectedBoundary,
       );
       setPassword("");
       setTotpCode("");
@@ -169,14 +182,14 @@ export function AuthPanel({
             {sessionNotice}
           </div>
         ) : null}
-        {error ? (
+        {visibleError ? (
           <div
             aria-live="polite"
             className="authNotice"
             id="operator-access-status"
             role="alert"
           >
-            {error}
+            {visibleError}
           </div>
         ) : (
           <span className="visuallyHidden" id="operator-access-status">
@@ -236,27 +249,19 @@ export function AuthPanel({
         <button
           aria-describedby="auth-submit-requirements"
           className="wideAction"
-          data-tooltip-disabled-reason={authSubmitDisabledReason(
-            mode,
-            pending,
-            username,
-            password,
-          )}
+          data-tooltip-disabled-reason={submitDisabledReason}
           disabled={submitDisabled}
-          title={
-            submitDisabled
-              ? authSubmitDisabledReason(mode, pending, username, password)
-              : undefined
-          }
+          title={submitDisabled ? submitDisabledReason : undefined}
           type="submit"
         >
           <KeyRound size={18} />
           <span>{pending ? pendingLabel : submitLabel}</span>
         </button>
         <span className="visuallyHidden" id="auth-submit-requirements">
-          {mode === "bootstrap"
-            ? "First operator creation needs a username and a password of at least 12 characters."
-            : "Sign in needs a username and a password of at least 12 characters."}
+          {environmentError ??
+            (mode === "bootstrap"
+              ? "First operator creation needs a username and a password of at least 12 characters."
+              : "Sign in needs a username and a password of at least 12 characters.")}
         </span>
       </form>
     </section>

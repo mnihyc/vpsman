@@ -1,4 +1,24 @@
 import type { JsonValue } from "./types";
+import { AuthSessionEndedError, getCurrentAuthSession, readCurrentSessionCredentials, renewAuthSession, type AuthSession } from "./authSession";
+
+const responseSessions = new WeakMap<Response, AuthSession>();
+
+export function assertResponseSessionCurrent(response: Response): void {
+  const session = responseSessions.get(response);
+  if (session && getCurrentAuthSession() !== session) throw new ApiUnauthorizedError();
+}
+
+/** Fence completed bodies against committed cross-tab logout/account changes. */
+export async function verifyResponseSessionCurrent(response: Response): Promise<void> {
+  const session = responseSessions.get(response);
+  if (!session) return;
+  try {
+    await readCurrentSessionCredentials(session);
+  } catch (error) {
+    if (error instanceof AuthSessionEndedError) throw new ApiUnauthorizedError();
+    throw error;
+  }
+}
 
 export class ApiUnauthorizedError extends Error {
   constructor() {
@@ -10,7 +30,7 @@ export class ApiUnauthorizedError extends Error {
 }
 
 export class ApiTransportError extends Error {
-  constructor(browserDetail: string | null = null) {
+  constructor(browserDetail: string | null = null, readonly transient = false) {
     const detail = browserDetail ? ` Browser reported: ${browserDetail}.` : "";
     super(
       `The control plane did not return a readable response.${detail} Check API availability, TLS, reverse-proxy routing, and same-origin/CORS configuration before retrying. No success is assumed.`,
@@ -157,19 +177,6 @@ function apiErrorGuidance(status: number, code: string): string {
   }
 }
 
-export function buildAuthHeaders(apiToken: string): HeadersInit | undefined {
-  return apiToken ? { Authorization: `Bearer ${apiToken}` } : undefined;
-}
-
-export function buildJsonHeaders(apiToken: string): HeadersInit {
-  return apiToken
-    ? {
-        Authorization: `Bearer ${apiToken}`,
-        "Content-Type": "application/json",
-      }
-    : { "Content-Type": "application/json" };
-}
-
 export type ListQueryParams = {
   dir?: "asc" | "desc";
   limit?: number;
@@ -196,18 +203,16 @@ const PREVIEW_POST_RETRY_DELAYS_MS = [
 
 async function fetchGetWithTransientRetry(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
 ): Promise<Response> {
   let transportAttempt = 0;
   for (;;) {
     try {
-      return await fetch(path, {
-        headers: buildAuthHeaders(apiToken),
-      });
+      return await authenticatedApiFetch(path, apiToken);
     } catch (error) {
       const delay = GET_RETRY_DELAYS_MS[transportAttempt];
-      if (delay === undefined || !isTransientFetchFailure(error)) {
-        throw apiTransportError(error);
+      if (delay === undefined || !(error instanceof ApiTransportError && error.transient)) {
+        throw error;
       }
       transportAttempt += 1;
       await wait(delay);
@@ -217,21 +222,21 @@ async function fetchGetWithTransientRetry(
 
 async function fetchPreviewPostWithTransientRetry(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
   body: unknown,
 ): Promise<Response> {
   const serializedBody = JSON.stringify(body);
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await fetch(path, {
+      return await authenticatedApiFetch(path, apiToken, {
         method: "POST",
-        headers: buildJsonHeaders(apiToken),
+        headers: { "Content-Type": "application/json" },
         body: serializedBody,
-      });
+      }, true);
     } catch (error) {
       const delay = PREVIEW_POST_RETRY_DELAYS_MS[attempt];
-      if (delay === undefined || !isTransientFetchFailure(error)) {
-        throw apiTransportError(error);
+      if (delay === undefined || !(error instanceof ApiTransportError && error.transient)) {
+        throw error;
       }
       await wait(delay);
     }
@@ -260,6 +265,54 @@ export async function apiFetch(
   }
 }
 
+/** Credential recovery belongs to transport, not the component lifetime. */
+export async function authenticatedApiFetch(
+  input: RequestInfo | URL,
+  session: AuthSession | null,
+  init: RequestInit = {},
+  safeAuthRetry = ["GET", "HEAD"].includes(init.method ?? "GET"),
+): Promise<Response> {
+  if (!session) return apiFetch(input, init);
+  try {
+    let credentials = await readCurrentSessionCredentials(session);
+    if (!credentials.accessToken) {
+      await renewAuthSession(session, credentials.revision, credentials.attempt);
+      credentials = await readCurrentSessionCredentials(session);
+    }
+    const send = async (accessToken: string) => {
+      if (getCurrentAuthSession() !== session) throw new AuthSessionEndedError();
+      const headers = new Headers(init.headers);
+      headers.set("Authorization", `Bearer ${accessToken}`);
+      let response: Response;
+      try {
+        response = await apiFetch(input, { ...init, headers });
+      } finally {
+        // Includes network errors and bodyless responses, not only JSON reads.
+        await readCurrentSessionCredentials(session);
+      }
+      responseSessions.set(response, session);
+      return response;
+    };
+    let response = await send(credentials.accessToken);
+    if (response.status !== 401) return response;
+    await renewAuthSession(session, credentials.revision, credentials.attempt);
+    if (!safeAuthRetry) {
+      throw new Error("The request was rejected while credentials changed. Your session has recovered; review and retry the action. It was not automatically resubmitted.");
+    }
+    const renewed = await readCurrentSessionCredentials(session);
+    response = await send(renewed.accessToken);
+    if (response.status === 401) {
+      // One recovery cannot become an unbounded renewal loop. Only refresh's
+      // authoritative rejection ends the login, not an individual API error.
+      throw await apiErrorFromResponse(response);
+    }
+    return response;
+  } catch (error) {
+    if (error instanceof AuthSessionEndedError) throw new ApiUnauthorizedError();
+    throw error;
+  }
+}
+
 function apiTransportError(error: unknown): ApiTransportError {
   if (error instanceof ApiTransportError) {
     return error;
@@ -268,19 +321,19 @@ function apiTransportError(error: unknown): ApiTransportError {
     error instanceof Error && error.message.trim()
       ? error.message.trim().replace(/\s+/g, " ").slice(0, 160)
       : null;
-  return new ApiTransportError(browserDetail);
+  return new ApiTransportError(browserDetail, isTransientFetchFailure(error));
 }
 
 export async function apiPost<T = JsonValue>(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
   body: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  const response = await apiFetch(path, {
+  const response = await authenticatedApiFetch(path, apiToken, {
     signal,
     method: "POST",
-    headers: buildJsonHeaders(apiToken),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (response.status === 401) {
@@ -297,7 +350,7 @@ export async function apiPost<T = JsonValue>(
 
 export async function apiPostPreview<T = JsonValue>(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
   body: unknown,
 ): Promise<T> {
   const response = await fetchPreviewPostWithTransientRetry(
@@ -319,12 +372,12 @@ export async function apiPostPreview<T = JsonValue>(
 
 export async function apiPut<T = JsonValue>(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
   body: unknown,
 ): Promise<T> {
-  const response = await apiFetch(path, {
+  const response = await authenticatedApiFetch(path, apiToken, {
     method: "PUT",
-    headers: buildJsonHeaders(apiToken),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (response.status === 401) {
@@ -338,15 +391,12 @@ export async function apiPut<T = JsonValue>(
 
 export async function apiPostBinary<T = JsonValue>(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
   body: Blob,
   headers: HeadersInit,
 ): Promise<T> {
   const requestHeaders = new Headers(headers);
-  if (apiToken) {
-    requestHeaders.set("Authorization", `Bearer ${apiToken}`);
-  }
-  const response = await apiFetch(path, {
+  const response = await authenticatedApiFetch(path, apiToken, {
     method: "POST",
     headers: requestHeaders,
     body,
@@ -362,7 +412,7 @@ export async function apiPostBinary<T = JsonValue>(
 
 export async function apiGet<T = JsonValue>(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
 ): Promise<T> {
   const response = await fetchGetWithTransientRetry(path, apiToken);
   if (response.status === 401) {
@@ -376,7 +426,7 @@ export async function apiGet<T = JsonValue>(
 
 export async function apiGetBlob(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
 ): Promise<Blob> {
   const response = await fetchGetWithTransientRetry(path, apiToken);
   if (response.status === 401) {
@@ -385,20 +435,22 @@ export async function apiGetBlob(
   if (!response.ok) {
     throw await apiErrorFromResponse(response);
   }
-  return await response.blob();
+  try {
+    return await response.blob();
+  } finally {
+    await verifyResponseSessionCurrent(response);
+  }
 }
 
 export async function apiDelete<T = JsonValue>(
   path: string,
-  apiToken: string,
+  apiToken: AuthSession | null,
   body?: unknown,
 ): Promise<T> {
-  const response = await apiFetch(path, {
+  const response = await authenticatedApiFetch(path, apiToken, {
     method: "DELETE",
     headers:
-      body === undefined
-        ? buildAuthHeaders(apiToken)
-        : buildJsonHeaders(apiToken),
+      body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (response.status === 401) {
@@ -452,6 +504,7 @@ export async function apiErrorFromResponse(
     code = `http_${response.status}`;
     detail = `The server returned an unreadable error body${browserErrorDetail(error)}`;
   }
+  await verifyResponseSessionCurrent(response);
   if (!detail && code === `http_${response.status}`) {
     detail =
       response.statusText.trim() ||
@@ -480,13 +533,17 @@ export async function apiJsonFromResponse<T>(
   response: Response,
   requestLabel: string,
 ): Promise<T> {
+  let value: T;
   try {
-    return (await response.json()) as T;
+    value = (await response.json()) as T;
   } catch (error) {
+    await verifyResponseSessionCurrent(response);
     throw new Error(
       `The control plane reported HTTP ${response.status} for ${requestLabel}, but returned unreadable JSON${browserErrorDetail(error)}. Current state cannot be inferred from this response; refresh it and inspect reverse-proxy or API logs before repeating any mutation.`,
     );
   }
+  await verifyResponseSessionCurrent(response);
+  return value;
 }
 
 function browserErrorDetail(error: unknown): string {

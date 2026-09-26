@@ -13,6 +13,7 @@ import { formatLowerBoundCount } from "../../constants";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
 import {
   agentsMatchingExpression,
+  quoteSelectorValue,
   VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
   vpsRuleSearchUnavailable,
 } from "../../searchExpression";
@@ -530,19 +531,21 @@ function latestRunForTemplate(
   );
 }
 
-function selectorForTemplateScope(template: CommandTemplateRecord): string {
+export function selectorForTemplateScope(
+  template: Pick<CommandTemplateRecord, "scope_kind" | "scope_value">,
+): string {
   const value = template.scope_value?.trim() ?? "";
   if (template.scope_kind === "global" || !value) {
     return "";
   }
   if (template.scope_kind === "provider") {
-    return value.startsWith("provider:") ? value : `provider:${value}`;
+    return `provider:${quoteSelectorValue(value.replace(/^provider:/, ""))}`;
   }
   if (template.scope_kind === "tag") {
-    return value.startsWith("tag:") ? value : `tag:${value}`;
+    return `tag:${quoteSelectorValue(value.replace(/^tag:/, ""))}`;
   }
   if (template.scope_kind === "client") {
-    return value.startsWith("id:") ? value : `id:${value}`;
+    return `id:${quoteSelectorValue(value.replace(/^id:/, ""))}`;
   }
   return value;
 }

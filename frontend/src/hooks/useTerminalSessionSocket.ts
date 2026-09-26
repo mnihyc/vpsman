@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  readCurrentSessionCredentials,
+  readSessionCredentials,
+  subscribeSessionCredentials,
+  type AuthSession,
+} from "../authSession";
 import { MAX_TERMINAL_INPUT_BYTES } from "../generated/protocolContracts";
 import type {
   TerminalControlAck,
@@ -67,13 +73,13 @@ type TerminalServerFrame =
     };
 
 export function useTerminalSessionSocket({
-  accessToken,
+  authSession,
   clientId,
   enabled,
   fromSeq,
   sessionId,
 }: {
-  accessToken: string;
+  authSession: AuthSession | null;
   clientId: string | null;
   enabled: boolean;
   fromSeq: number;
@@ -100,6 +106,7 @@ export function useTerminalSessionSocket({
   const replayUntilSeqRef = useRef(nextSeqRef.current);
   const outputDecoderRef = useRef(new TextDecoder());
   const streamSessionKeyRef = useRef<string | null>(null);
+  const streamAuthSessionRef = useRef<AuthSession | null>(null);
 
   const rejectPendingControls = useCallback((message: string) => {
     const error = new Error(message);
@@ -294,7 +301,7 @@ export function useTerminalSessionSocket({
   );
 
   useEffect(() => {
-    if (!enabled || !accessToken || !clientId || !sessionId || !sessionKey) {
+    if (!enabled || !authSession || !clientId || !sessionId || !sessionKey) {
       setConnectionState("idle");
       setFeedback(null);
       setSessionState(null);
@@ -307,11 +314,14 @@ export function useTerminalSessionSocket({
     let reconnectAttempt = 0;
     let reconnectTimer: number | null = null;
     let socket: WebSocket | null = null;
-    const continuingSession = streamSessionKeyRef.current === sessionKey;
+    const continuingSession =
+      streamSessionKeyRef.current === sessionKey &&
+      streamAuthSessionRef.current === authSession;
     const initialFromSeq = continuingSession
       ? nextSeqRef.current
       : Math.max(1, Math.trunc(fromSeq));
     streamSessionKeyRef.current = sessionKey;
+    streamAuthSessionRef.current = authSession;
     if (!continuingSession) {
       nextSeqRef.current = initialFromSeq;
       outputDecoderRef.current = new TextDecoder();
@@ -336,7 +346,7 @@ export function useTerminalSessionSocket({
     }
 
     const scheduleReconnect = () => {
-      if (disposed || closeQueuedRef.current) {
+      if (disposed || closeQueuedRef.current || !readSessionCredentials(authSession)) {
         return;
       }
       const delay = Math.min(
@@ -525,7 +535,7 @@ export function useTerminalSessionSocket({
     };
 
     const connect = () => {
-      if (disposed) {
+      if (disposed || !readSessionCredentials(authSession)) {
         return;
       }
       if (reconnectTimer !== null) {
@@ -535,32 +545,35 @@ export function useTerminalSessionSocket({
       readyRef.current = false;
       setConnectionState(reconnectAttempt === 0 ? "connecting" : "reconnecting");
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(
+      const connectedSocket = new WebSocket(
         `${protocol}//${window.location.host}/ws/terminal/${encodeURIComponent(clientId)}/${encodeURIComponent(sessionId)}`,
       );
+      socket = connectedSocket;
       socketRef.current = socket;
-      socket.addEventListener("open", () => {
-        if (disposed || !socket) {
-          socket?.close();
-          return;
-        }
+      socket.addEventListener("open", async () => {
         try {
-          socket.send(
+          const credentials = await readCurrentSessionCredentials(authSession);
+          if (disposed || socket !== connectedSocket || !credentials) {
+            connectedSocket.close();
+            return;
+          }
+          connectedSocket.send(
             JSON.stringify({
-              access_token: accessToken,
+              access_token: credentials.accessToken,
               from_seq: nextSeqRef.current,
               type: "auth",
             }),
           );
         } catch {
+          if (disposed || socket !== connectedSocket) return;
           setFeedback(
             "Terminal stream authentication could not be sent. Input remains disabled while it reconnects.",
           );
-          socket.close();
+          connectedSocket.close();
         }
       });
       socket.addEventListener("message", (event) => {
-        if (disposed) {
+        if (disposed || socket !== connectedSocket) {
           return;
         }
         const frame = parseServerFrame(event.data);
@@ -573,14 +586,14 @@ export function useTerminalSessionSocket({
         handleFrame(frame);
       });
       socket.addEventListener("error", () => {
-        if (!disposed) {
+        if (!disposed && socket === connectedSocket) {
           setFeedback(
             "Terminal stream connection failed. Input is disabled while it reconnects.",
           );
         }
       });
       socket.addEventListener("close", () => {
-        if (disposed) {
+        if (disposed || socket !== connectedSocket) {
           return;
         }
         readyRef.current = false;
@@ -596,9 +609,37 @@ export function useTerminalSessionSocket({
       });
     };
 
+    // Credential rotation changes the transport, not the selected stream or its
+    // contiguous output cursor. Controls with uncertain acknowledgement are
+    // rejected and never replayed on the replacement socket.
+    const unsubscribeCredentials = subscribeSessionCredentials(authSession, () => {
+      if (disposed) return;
+      const previousSocket = socket;
+      socket = null;
+      socketRef.current = null;
+      readyRef.current = false;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      rejectPendingControls(
+        "Terminal authentication changed before this control was acknowledged. It was not retried.",
+      );
+      previousSocket?.close();
+      if (!readSessionCredentials(authSession)) {
+        setConnectionState("closed");
+        setSnapshot(null);
+        setSessionState(null);
+        setSessionRecord(null);
+        streamAuthSessionRef.current = null;
+        return;
+      }
+      if (!closeQueuedRef.current) connect();
+    });
     connect();
     return () => {
       disposed = true;
+      unsubscribeCredentials();
       readyRef.current = false;
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
@@ -617,7 +658,7 @@ export function useTerminalSessionSocket({
       }
     };
   }, [
-    accessToken,
+    authSession,
     clientId,
     enabled,
     fromSeq,

@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiDelete,
@@ -27,7 +28,7 @@ import type {
 } from "../types";
 
 export function useSchedulesData(
-  apiToken: string,
+  apiToken: AuthSession | null,
   onUnauthorized: () => void,
   onAuditChanged: () => Promise<void>,
 ) {
@@ -264,7 +265,7 @@ export function useSchedulesData(
 
   const clearSchedules = useCallback(() => {
     schedulesLoadGeneration.current += 1;
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     setSchedules([]);
     setSchedulesTruncated(false);
     setSchedulesError(null);

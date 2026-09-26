@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import {
   useEffect,
   useLayoutEffect,
@@ -68,7 +69,7 @@ type ConsoleShellProps = {
     truncated: boolean;
     warning: number;
   };
-  apiToken: string;
+  apiToken: AuthSession | null;
   authRefreshError: string | null;
   children: ReactNode;
   commandItems: CommandPaletteItem[];

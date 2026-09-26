@@ -931,7 +931,7 @@ fn build_available_filters(agents: &[AgentView]) -> DashboardAvailableFiltersVie
             .map(|(value, count)| DashboardFilterOptionView {
                 kind: "provider".to_string(),
                 label: format!("provider:{value}"),
-                query: format!("provider:{value}"),
+                query: tag_query(&format!("provider:{value}")),
                 value,
                 count,
             })
@@ -941,7 +941,7 @@ fn build_available_filters(agents: &[AgentView]) -> DashboardAvailableFiltersVie
             .map(|(value, count)| DashboardFilterOptionView {
                 kind: "country".to_string(),
                 label: format!("country:{value}"),
-                query: format!("country:{value}"),
+                query: tag_query(&format!("country:{value}")),
                 value,
                 count,
             })
@@ -2115,10 +2115,18 @@ fn tag_kind(tag: &str) -> &'static str {
 }
 
 fn tag_query(tag: &str) -> String {
-    if tag.starts_with("provider:") || tag.starts_with("country:") {
-        tag.to_string()
+    let (namespace, value) = if let Some(value) = tag.strip_prefix("provider:") {
+        ("provider", value)
+    } else if let Some(value) = tag.strip_prefix("country:") {
+        ("country", value)
     } else {
-        format!("tag:{tag}")
+        ("tag", tag)
+    };
+    if value.contains('#') || value.contains("/*") {
+        let value = value.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("{namespace}:\"{value}\"")
+    } else {
+        format!("{namespace}:{value}")
     }
 }
 

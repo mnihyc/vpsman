@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { Activity, Gauge, Link2, Search, Server } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -60,7 +61,7 @@ import {
 
 type FleetMonitorPanelProps = {
   agents: AgentView[];
-  apiToken?: string;
+  apiToken?: AuthSession | null;
   apiError?: string | null;
   ariaLabel?: string;
   description?: string;
@@ -133,7 +134,7 @@ const monitoringCardsReadConsumer = new LatestReadConsumer<void>();
 
 export function FleetMonitorPanel({
   agents,
-  apiToken = "",
+  apiToken = null,
   apiError = null,
   ariaLabel = "VPS monitor cards",
   description = "VPS health cards for scanning state, resources, network, and alerts. Open a card for canonical VPS detail.",
@@ -202,7 +203,7 @@ export function FleetMonitorPanel({
   );
   const [monitoringError, setMonitoringError] = useState<string | null>(null);
   const [monitoringSettledToken, setMonitoringSettledToken] = useState<
-    string | null
+    AuthSession | null
   >(null);
   const hiddenMonitoringRefreshPendingRef = useRef(false);
   const monitoringLoading =

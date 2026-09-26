@@ -1,3 +1,4 @@
+import type { AuthSession } from "../../authSession";
 import {
   Pencil,
   Plus,
@@ -125,7 +126,7 @@ export function PingTargetsPanel({
   requestsEnabled,
 }: {
   agents: AgentView[];
-  apiToken: string;
+  apiToken: AuthSession | null;
   requestsEnabled: boolean;
   onResolveTargets: (
     selection: JobTargetSelection,
@@ -166,7 +167,7 @@ export function PingTargetsPanel({
   const editorFeedbackRef = useRef<HTMLDivElement | null>(null);
   const currentApiTokenRef = useRef(apiToken);
   currentApiTokenRef.current = apiToken;
-  const loadedApiTokenRef = useRef<string | null>(null);
+  const loadedApiTokenRef = useRef<AuthSession | null>(null);
   const loadGenerationRef = useRef(0);
   // Full-list GETs have one browser-local consumer. Mutation responses own
   // their committed rows immediately; generations prevent an older GET from
@@ -175,9 +176,6 @@ export function PingTargetsPanel({
   const targetListReadConsumerRef = useRef(
     new LatestReadConsumer<PingTargetView[]>(),
   );
-  const refreshTargetsRef = useRef<
-    (options?: RefreshTargetsOptions) => Promise<string | null>
-  >(() => Promise.resolve(null));
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -357,24 +355,12 @@ export function PingTargetsPanel({
       }
     }
   }
-  refreshTargetsRef.current = refreshTargets;
-
-  function reconcileTargetListAfterTokenRotation() {
-    if (!currentApiTokenRef.current) return;
-    void refreshTargetsRef.current({
-      refreshExpandedDetail: false,
-      resetAuxiliaryState: false,
-    });
-  }
-
   async function awaitTokenOwnedResponse<T>(
     request: Promise<T>,
-    onStaleSuccess?: () => void,
   ): Promise<T | null> {
     try {
       const response = await request;
       if (currentApiTokenRef.current !== apiToken) {
-        onStaleSuccess?.();
         return null;
       }
       return response;
@@ -536,7 +522,6 @@ export function PingTargetsPanel({
               apiToken,
               saveReview.request,
             ),
-        reconcileTargetListAfterTokenRotation,
       );
       if (!response) return;
       const returnedTarget = response.target.target;
@@ -633,7 +618,6 @@ export function PingTargetsPanel({
             confirmed: true,
           },
         ),
-        reconcileTargetListAfterTokenRotation,
       );
       if (!response) return;
       invalidateTargetListAfterMutation();
@@ -678,7 +662,6 @@ export function PingTargetsPanel({
           apiToken,
           request,
         ),
-        reconcileTargetListAfterTokenRotation,
       );
       if (!response) return;
       invalidateTargetListAfterMutation();
@@ -725,7 +708,6 @@ export function PingTargetsPanel({
           apiToken,
           request,
         ),
-        reconcileTargetListAfterTokenRotation,
       );
       if (!response) return;
       const preservedTarget = {
@@ -771,7 +753,6 @@ export function PingTargetsPanel({
         apiPut<
           { target_id: string; display_order: number; display_color: string }[]
         >("/api/v1/ping-targets/display", apiToken, { targets: draft }),
-        reconcileTargetListAfterTokenRotation,
       );
       // The manager is keyed to the session. A completed old-session write must
       // not publish into a different operator's draft or target list.
@@ -1108,7 +1089,7 @@ export function PingTargetsPanel({
           }
         />
         <PingTargetDisplayManager
-          key={apiToken}
+          key={apiToken?.epoch}
           targets={targets}
           disabled={loading || pending || reviewPending || !requestsEnabled}
           onSave={saveDisplay}

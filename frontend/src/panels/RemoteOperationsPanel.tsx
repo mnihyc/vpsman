@@ -1,3 +1,4 @@
+import type { AuthSession } from "../authSession";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { ConsoleDetailPanel } from "../components/ConsoleDetailPanel";
 import { ActionFeedback } from "../components/ActionFeedback";
@@ -110,7 +111,7 @@ type RemoteOperationsSubpage =
   | "storage";
 
 export function RemoteOperationsPanel({
-  accessToken,
+  authSession,
   activeSubpage,
   agents,
   commandTemplates,
@@ -160,7 +161,7 @@ export function RemoteOperationsPanel({
   terminalSessionsTruncated,
   transferTargetIntent,
 }: {
-  accessToken: string;
+  authSession: AuthSession | null;
   activeSubpage: string;
   agents: AgentView[];
   jobs: JobHistoryRecord[];
@@ -647,7 +648,7 @@ export function RemoteOperationsPanel({
         {remoteSubpage === "terminal" && (
           <div className="jobConsoleStack">
             <TerminalSessionsPanel
-              accessToken={accessToken}
+              authSession={authSession}
               agents={agents}
               jobs={jobs}
               clientLabel={clientLabel}

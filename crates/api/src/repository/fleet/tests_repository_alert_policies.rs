@@ -17,7 +17,8 @@ use super::{
     derive_cycle_usage, evaluate_rule_for_client, known_stream_is_admitted,
     metric_policy_expression_truth, network_rate_selector_spec_from_rule, next_policy_rule_state,
     parse_billing_cycle, parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
-    parse_port_speed, parse_traffic_selector, parse_traffic_selector_list, parse_vps_rule_value,
+    parse_policy_trigger_condition_expression, parse_port_speed, parse_traffic_selector,
+    parse_traffic_selector_list, parse_vps_rule_value, policy_condition_uses_traffic,
     policy_identifier_value, policy_state_is_alert_eligible, projected_traffic_frontier_from_usage,
     projected_traffic_streams, resolve_network_rate_interface_selection,
     traffic_accounting_for_client, traffic_accounting_for_client_with_freshness,
@@ -281,6 +282,70 @@ fn metric_policy_runtime_uses_arithmetic_kleene_truth() {
     assert_eq!(
         metric_policy_expression_truth("cpu.utilization_ratio > 0.5", &evidence, false).unwrap(),
         ExpressionTruth::Unknown
+    );
+}
+
+#[test]
+fn metric_policy_comments_preserve_arithmetic_and_evidence_dependencies() {
+    let evidence = json!({
+        "cpu": {"utilization_ratio": 0.91},
+        "traffic": {"cycle_percent": 82.0}
+    });
+    for expression in [
+        "/* percentage */cpu.utilization_ratio/* percent */*100/2 >= 45# threshold\n&& traffic.cycle_percent > 80",
+        "cpu.utilization_ratio / /* divisor */ 2 >= 0.45# CR line end\r&& traffic.cycle_percent > 80",
+        "/* outer /* not nested */cpu.utilization_ratio > 0.9",
+    ] {
+        assert_eq!(
+            metric_policy_expression_truth(expression, &evidence, true).unwrap(),
+            ExpressionTruth::True,
+            "expression {expression}"
+        );
+    }
+    assert!(!policy_condition_uses_traffic(
+        "cpu.utilization_ratio > 0.9 # traffic.cycle_percent > 80\n/* traffic.cycle_percent */"
+    )
+    .unwrap());
+    assert!(
+        policy_condition_uses_traffic("/* cpu */traffic.cycle_percent/* boundary */> 80").unwrap()
+    );
+    assert_eq!(
+        metric_policy_expression_truth(
+            "cpu.utilization_ratio > 0.95/* still false */",
+            &evidence,
+            true,
+        )
+        .unwrap(),
+        ExpressionTruth::False
+    );
+    assert_eq!(
+        metric_policy_expression_truth(
+            "memory.available_ratio < 0.1 /* still absent */",
+            &evidence,
+            true,
+        )
+        .unwrap(),
+        ExpressionTruth::Unknown
+    );
+}
+
+#[test]
+fn metric_policy_rejects_empty_and_unterminated_comments() {
+    for expression in ["# comment", "/* comment */", "# line\r\n/* block */"] {
+        let error = parse_policy_trigger_condition_expression(expression)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("condition expression is empty"));
+    }
+    for expression in ["/*", "cpu.utilization_ratio > 0.9 /* unfinished *"] {
+        let error = parse_policy_trigger_condition_expression(expression)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unterminated block comment"));
+    }
+    assert!(parse_policy_trigger_condition_expression("1/* separator */0 > 5").is_err());
+    assert!(
+        parse_policy_trigger_condition_expression("cpu.utilization_ratio > # missing").is_err()
     );
 }
 

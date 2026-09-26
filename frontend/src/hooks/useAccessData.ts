@@ -1,3 +1,9 @@
+import {
+  getCurrentAuthSession,
+  getSessionOperator,
+  rememberSessionOperator,
+  type AuthSession,
+} from "../authSession";
 import { useCallback, useRef, useState } from "react";
 import {
   apiGet,
@@ -88,8 +94,10 @@ function emptyAccessProjectionFailures(): AccessProjectionFailures {
   };
 }
 
-export function useAccessData(apiToken: string, onUnauthorized: () => void) {
-  const [operator, setOperator] = useState<OperatorView | null>(null);
+export function useAccessData(apiToken: AuthSession | null, onUnauthorized: () => void) {
+  const [operator, setOperator] = useState<OperatorView | null>(() =>
+    apiToken ? getSessionOperator(apiToken) : null,
+  );
   const [operators, setOperators] = useState<OperatorView[]>([]);
   const [operatorSessions, setOperatorSessions] = useState<
     OperatorSessionRecord[]
@@ -150,6 +158,32 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       formatAccessProjectionFailures(accessProjectionFailures.current),
     );
   }, []);
+
+  const rememberValidatedOperator = useCallback(
+    (nextOperator: OperatorView) => {
+      if (
+        !apiToken ||
+        currentApiToken.current !== apiToken ||
+        getCurrentAuthSession() !== apiToken
+      ) return;
+      const profileGeneration = accessProjectionGenerations.current.profile;
+      // This only binds the first validated identity after legacy import. The
+      // manager never replaces an operator already supplied by renewal.
+      void rememberSessionOperator(apiToken, nextOperator).catch((error) => {
+        if (
+          currentApiToken.current !== apiToken ||
+          getCurrentAuthSession() !== apiToken ||
+          accessProjectionGenerations.current.profile !== profileGeneration
+        ) return;
+        accessProjectionFailures.current.profile = accessSourceFailure(
+          "Operator session identity",
+          error,
+        );
+        publishAccessSourceErrors();
+      });
+    },
+    [apiToken, publishAccessSourceErrors],
+  );
 
   const trackAccessSourceLoad = useCallback(
     async <T,>(
@@ -534,6 +568,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       );
       accessProjectionFailures.current.profile = null;
       publishAccessSourceErrors();
+      rememberValidatedOperator(nextOperator);
     } catch (error) {
       if (
         accessProjectionGenerations.current.profile !== generation ||
@@ -560,7 +595,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         setAccessLoading(false);
       }
     }
-  }, [apiToken, onUnauthorized, publishAccessSourceErrors]);
+  }, [apiToken, onUnauthorized, publishAccessSourceErrors, rememberValidatedOperator]);
 
   const loadCurrentOperatorProfile = useCallback(
     () =>
@@ -607,6 +642,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
                 existing.id === nextOperator.id ? nextOperator : existing,
               ),
         );
+        rememberValidatedOperator(nextOperator);
       }
       accessProjectionFailures.current.profile = error;
       publishAccessSourceErrors();
@@ -616,7 +652,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         setAccessLoading(false);
       }
     },
-    [apiToken, publishAccessSourceErrors],
+    [apiToken, publishAccessSourceErrors, rememberValidatedOperator],
   );
 
   const loadCurrentOperatorSources = useCallback(
@@ -658,6 +694,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             ),
       );
       accessProjectionFailures.current.profile = null;
+      rememberValidatedOperator(nextOperator);
       // Start each aggregate source under its own current revision. A mutation
       // that lands while these requests are active advances only its affected
       // projection; unaffected aggregate results still commit.
@@ -920,6 +957,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       apiToken,
       onUnauthorized,
       publishAccessSourceErrors,
+      rememberValidatedOperator,
       trackAccessSourceLoad,
     ],
   );
@@ -1581,7 +1619,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
 
   const clearOperator = useCallback(() => {
     preferencesMutationGeneration.current += 1;
-    currentApiToken.current = "";
+    currentApiToken.current = null;
     resetAccessRecords();
   }, []);
 

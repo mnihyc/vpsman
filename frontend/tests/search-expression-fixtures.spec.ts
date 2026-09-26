@@ -72,6 +72,7 @@ type ExpressionFixture = {
   cases: FixtureCase[];
   contexts: Record<string, FixtureContext>;
   parseable_suggestions?: string[];
+  invalid_expressions?: Array<{ expression: string; error_contains: string }>;
 };
 
 const fixturePath = resolve(
@@ -81,6 +82,15 @@ const fixturePath = resolve(
 const fixture = JSON.parse(
   readFileSync(fixturePath, "utf8"),
 ) as ExpressionFixture;
+
+test("shared invalid expression fixtures reject comments without conditions", () => {
+  for (const testCase of fixture.invalid_expressions ?? []) {
+    expect(
+      parseSearchExpression(testCase.expression).error?.toLowerCase(),
+      testCase.expression,
+    ).toContain(testCase.error_contains.toLowerCase());
+  }
+});
 
 type VpsRuleFixture = {
   contexts: Record<
@@ -457,7 +467,7 @@ test("selector chip help describes that predicate rather than the full expressio
   expect(title).not.toContain("202 (core-fra-01; online)");
 });
 
-test("webhook expression autocomplete values are accepted event predicates", () => {
+test("webhook expression autocomplete values accept events and immutable event fields", () => {
   for (const suggestion of WEBHOOK_EXPRESSION_SUGGESTIONS) {
     const parsed = parseSearchExpression(suggestion);
     expect(parsed.error, suggestion).toBeNull();
@@ -465,6 +475,11 @@ test("webhook expression autocomplete values are accepted event predicates", () 
       evaluateSearchExpression(parsed.expression, {
         all: [],
         events: [suggestion.toLocaleLowerCase()],
+        fields: {
+          "event.kind": ["job.status", "job.target.status"],
+          "job.source_schedule_id": ["SCHEDULE_UUID"],
+          "policy_rule.id": ["RULE_UUID"],
+        },
       }),
       suggestion,
     ).toBe(true);

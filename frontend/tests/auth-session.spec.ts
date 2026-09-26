@@ -1,5 +1,6 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { expectPrivilegeVerifiedForViewport } from "./support/consoleNavigation";
+import { readCanonicalAuthSession } from "./support/authSessionStorage";
 import { NETWORK_OBSERVATION_FIELDS } from "../src/networkEvidence";
 
 const accessToken = "a".repeat(64);
@@ -128,6 +129,99 @@ test("keeps ordinary bearer login authenticated across browser reload", async ({
   ).toHaveCount(0);
 });
 
+test("shares one single-use renewal across two tabs and does not renew on tab switches", async ({ page, context }) => {
+  // Headless Chrome does not consistently hide background pages. Drive the
+  // browser visibility signal deterministically; all resulting reads and
+  // renewal requests still originate from the normal application handlers.
+  await context.addInitScript(() => {
+    let hidden = false;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => hidden ? "hidden" : "visible",
+    });
+    (window as typeof window & { __authTestSetHidden: (value: boolean) => void }).__authTestSetHidden = (value) => {
+      if (hidden === value) return;
+      hidden = value;
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+  });
+  const setHidden = (tab: Page, hidden: boolean) => tab.evaluate((value) => {
+    (window as typeof window & { __authTestSetHidden: (value: boolean) => void }).__authTestSetHidden(value);
+  }, hidden);
+  const authMock = await installAuthSessionApiMock(context);
+  let releaseRefresh!: () => void;
+  const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const refreshTokens: string[] = [];
+  await context.route("**/api/v1/auth/refresh", async (route) => {
+    const token = route.request().postDataJSON().refresh_token as string;
+    refreshTokens.push(token);
+    await refreshGate;
+    const auth = authMock.rotate(token);
+    await route.fulfill({ status: auth ? 200 : 401, json: auth ?? { error: "invalid_refresh_token" } });
+  });
+  const challengedTabs = new Set<Page>();
+  const recoveredTabs = new Set<Page>();
+  context.on("response", (response) => {
+    const request = response.request();
+    if (request.method() !== "GET" || !new URL(request.url()).pathname.startsWith("/api/")) return;
+    if (response.status() === 401) challengedTabs.add(request.frame().page());
+    if (response.status() === 200 && request.headers().authorization === `Bearer ${rotatedAccessToken}`) {
+      recoveredTabs.add(request.frame().page());
+    }
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Username").fill("session-admin");
+  await page.getByLabel("Password").fill("session-password-123");
+  const firstSnapshot = page.waitForResponse("**/api/v1/home/snapshot**");
+  await activate(page.getByRole("button", { name: "Sign in" }));
+  await firstSnapshot;
+  await expectAuthenticatedConsoleShell(page);
+  await expect(page.getByTitle("Refresh dashboard telemetry", { exact: true })).toBeEnabled();
+  const originalEpoch = await page.evaluate(() => JSON.parse(localStorage.getItem("vpsman.authSession.v1")!).epoch);
+  const secondTab = await context.newPage();
+  const secondSnapshot = secondTab.waitForResponse("**/api/v1/home/snapshot**");
+  await secondTab.goto("/");
+  await secondSnapshot;
+  await expectAuthenticatedConsoleShell(secondTab);
+  await expect(secondTab.getByTitle("Refresh dashboard telemetry", { exact: true })).toBeEnabled();
+  await Promise.all([setHidden(page, true), setHidden(secondTab, true)]);
+  authMock.expireAccess();
+  await Promise.all([setHidden(page, false), setHidden(secondTab, false)]);
+  try {
+    await expect.poll(() => challengedTabs.size).toBe(2);
+    await expect.poll(() => refreshTokens.length).toBe(1);
+  } finally {
+    releaseRefresh();
+  }
+  await expect.poll(() => recoveredTabs.size).toBe(2);
+  expect(refreshTokens).toEqual([refreshToken]);
+  for (const tab of [page, secondTab]) {
+    await expectAuthenticatedConsoleShell(tab);
+    expect(await readSessionStorage(tab)).toEqual({ access: rotatedAccessToken, refresh: rotatedRefreshToken });
+    expect(await tab.evaluate(() => JSON.parse(localStorage.getItem("vpsman.authSession.v1")!).epoch)).toBe(originalEpoch);
+  }
+
+  // Resume each tab after rotation and wait for its real catch-up GET. Merely
+  // observing shared storage would not prove that its transport adopted it.
+  for (const tab of [page, secondTab, page]) {
+    const other = tab === page ? secondTab : page;
+    await Promise.all([setHidden(other, true), setHidden(tab, true)]);
+    const resumedRead = tab.waitForResponse((response) =>
+      new URL(response.url()).pathname === "/api/v1/fleet/snapshot" &&
+      response.status() === 200 &&
+      response.request().headers().authorization === `Bearer ${rotatedAccessToken}`,
+    );
+    await tab.bringToFront();
+    await setHidden(tab, false);
+    await resumedRead;
+    await expectAuthenticatedConsoleShell(tab);
+    expect(refreshTokens).toEqual([refreshToken]);
+  }
+  await secondTab.close();
+});
+
 test("refreshes a stored session before returning to sign in", async ({
   page,
 }) => {
@@ -143,6 +237,10 @@ test("refreshes a stored session before returning to sign in", async ({
   await page.goto("/");
   await expectAuthenticatedConsoleShell(page);
 
+  await expect.poll(() => readSessionStorage(page)).toEqual({
+    access: rotatedAccessToken,
+    refresh: rotatedRefreshToken,
+  });
   const storage = await readSessionStorage(page);
   expect(storage.access).toBe(rotatedAccessToken);
   expect(storage.refresh).toBe(rotatedRefreshToken);
@@ -163,7 +261,7 @@ test("keeps a stored session visible and retryable when refresh is temporarily u
     },
     { access: expiredAccessToken, refresh: refreshToken },
   );
-  await installAuthSessionApiMock(page);
+  const authMock = await installAuthSessionApiMock(page);
   await page.unroute("**/api/v1/auth/refresh");
   await page.route("**/api/v1/auth/refresh", async (route) => {
     if (!refreshAvailable) {
@@ -174,23 +272,11 @@ test("keeps a stored session visible and retryable when refresh is temporarily u
       });
       return;
     }
+    const auth = authMock.rotate(route.request().postDataJSON().refresh_token);
     await route.fulfill({
       contentType: "application/json",
-      json: {
-        access_token: rotatedAccessToken,
-        expires_in_secs: 900,
-        operator: {
-          id: "99999999-aaaa-4bbb-8ccc-000000000001",
-          preferences,
-          role: "admin",
-          scopes: ["*"],
-          totp_enabled: false,
-          username: "session-admin",
-        },
-        refresh_expires_in_secs: 1209600,
-        refresh_token: rotatedRefreshToken,
-        token_type: "Bearer",
-      },
+      json: auth ?? { error: "invalid_refresh_token" },
+      status: auth ? 200 : 401,
     });
   });
 
@@ -331,8 +417,39 @@ test("sign out clears local authentication when server revocation fails", async 
 });
 
 async function installAuthSessionApiMock(
-  page: import("@playwright/test").Page,
+  page: Page | BrowserContext,
 ) {
+  let currentAccess: string | null = accessToken;
+  let currentRefresh: string | null = refreshToken;
+  let rotation = 0;
+  const operator = {
+    id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    preferences,
+    role: "admin",
+    scopes: ["*"],
+    totp_enabled: false,
+    username: "session-admin",
+  };
+  const authResponse = () => ({
+    access_token: currentAccess,
+    expires_in_secs: 900,
+    operator,
+    refresh_expires_in_secs: 1209600,
+    refresh_token: currentRefresh,
+    token_type: "Bearer",
+  });
+  function isAuthorized(request: import("@playwright/test").Request): boolean {
+    return currentAccess !== null && request.headers().authorization === `Bearer ${currentAccess}`;
+  }
+  function rotate(token: unknown) {
+    if (!currentRefresh || token !== currentRefresh) return null;
+    // Each accepted rotation consumes the old pair. Deterministic subsequent
+    // pairs let tests detect reuse without depending on wall-clock expiry.
+    rotation += 1;
+    currentAccess = rotation === 1 ? rotatedAccessToken : (rotation * 2).toString(16).padStart(64, "0");
+    currentRefresh = rotation === 1 ? rotatedRefreshToken : (rotation * 2 + 1).toString(16).padStart(64, "0");
+    return authResponse();
+  }
   await page.routeWebSocket("**/ws", () => undefined);
   await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
     await route.fulfill({
@@ -341,26 +458,20 @@ async function installAuthSessionApiMock(
     });
   });
   await page.route("**/api/v1/auth/login", async (route) => {
+    currentAccess = accessToken;
+    currentRefresh = refreshToken;
     await route.fulfill({
       contentType: "application/json",
-      json: {
-        access_token: accessToken,
-        expires_in_secs: 900,
-        operator: {
-          id: "99999999-aaaa-4bbb-8ccc-000000000001",
-          preferences,
-          role: "admin",
-          scopes: ["*"],
-          totp_enabled: false,
-          username: "session-admin",
-        },
-        refresh_expires_in_secs: 1209600,
-        refresh_token: refreshToken,
-        token_type: "Bearer",
-      },
+      json: authResponse(),
     });
   });
   await page.route("**/api/v1/auth/logout", async (route) => {
+    if (!isAuthorized(route.request())) {
+      await route.fulfill({ status: 401, json: { error: "missing_bearer_token" } });
+      return;
+    }
+    currentAccess = null;
+    currentRefresh = null;
     await route.fulfill({ status: 204 });
   });
   await page.route("**/api/v1/auth/privilege/verify", async (route) => {
@@ -381,8 +492,8 @@ async function installAuthSessionApiMock(
     const body = (await route.request().postDataJSON()) as {
       refresh_token?: string;
     };
-    const validRefreshTokens = new Set([refreshToken, rotatedRefreshToken]);
-    if (!body.refresh_token || !validRefreshTokens.has(body.refresh_token)) {
+    const auth = rotate(body.refresh_token);
+    if (!auth) {
       await route.fulfill({
         contentType: "application/json",
         json: { error: "invalid_refresh_token" },
@@ -392,21 +503,7 @@ async function installAuthSessionApiMock(
     }
     await route.fulfill({
       contentType: "application/json",
-      json: {
-        access_token: rotatedAccessToken,
-        expires_in_secs: 900,
-        operator: {
-          id: "99999999-aaaa-4bbb-8ccc-000000000001",
-          preferences,
-          role: "admin",
-          scopes: ["*"],
-          totp_enabled: false,
-          username: "session-admin",
-        },
-        refresh_expires_in_secs: 1209600,
-        refresh_token: rotatedRefreshToken,
-        token_type: "Bearer",
-      },
+      json: auth,
     });
   });
   await page.route("**/api/v1/home/snapshot**", async (route) => {
@@ -777,18 +874,27 @@ async function installAuthSessionApiMock(
       });
     });
   }
-}
-
-function isAuthorized(request: import("@playwright/test").Request): boolean {
-  return (
-    request.headers().authorization === `Bearer ${accessToken}` ||
-    request.headers().authorization === `Bearer ${rotatedAccessToken}`
-  );
+  return { rotate, expireAccess: () => { currentAccess = null; } };
 }
 
 async function readSessionStorage(page: import("@playwright/test").Page) {
-  return page.evaluate(() => ({
-    access: window.localStorage.getItem("vpsman.accessToken"),
-    refresh: window.localStorage.getItem("vpsman.refreshToken"),
-  }));
+  const session = await readCanonicalAuthSession(page);
+  const storage = await page.evaluate(() => {
+    const raw = window.localStorage.getItem("vpsman.authSession.v1");
+    return {
+      hint: raw ? JSON.parse(raw) : null,
+      legacyAccess: window.localStorage.getItem("vpsman.accessToken"),
+      legacyRefresh: window.localStorage.getItem("vpsman.refreshToken"),
+    };
+  });
+  expect(storage.legacyAccess).toBeNull();
+  expect(storage.legacyRefresh).toBeNull();
+  if (storage.hint) {
+    expect(storage.hint).not.toHaveProperty("accessToken");
+    expect(storage.hint).not.toHaveProperty("refreshToken");
+  }
+  return {
+    access: session?.status === "active" ? session.accessToken : null,
+    refresh: session?.status === "active" ? session.refreshToken : null,
+  };
 }

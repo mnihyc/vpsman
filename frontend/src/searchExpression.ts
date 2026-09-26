@@ -40,6 +40,7 @@ export type SearchToken = {
   end: number;
   kind:
     | "and"
+    | "comment"
     | "comma"
     | "in"
     | "left_bracket"
@@ -87,6 +88,9 @@ export function parseSearchExpression(input: string): SearchParseResult {
     };
   }
   if (tokenResult.tokens.length === 0) {
+    if (input.trim()) {
+      return { expression: null, error: "Expression is empty", tokens: [] };
+    }
     return { expression: null, error: null, tokens: [] };
   }
   const parser = new Parser(tokenResult.tokens);
@@ -116,7 +120,7 @@ export function parseSearchExpression(input: string): SearchParseResult {
   return { expression, error: null, tokens: tokenResult.tokens };
 }
 
-export function tokenizeSearchExpression(input: string): {
+export function tokenizeSearchExpression(input: string, includeComments = false): {
   error: string | null;
   tokens: SearchToken[];
 } {
@@ -126,6 +130,15 @@ export function tokenizeSearchExpression(input: string): {
     const char = input[index];
     if (/\s/.test(char)) {
       index += 1;
+      continue;
+    }
+    const comment = readExpressionComment(input, index);
+    if (comment) {
+      if (includeComments) {
+        tokens.push(token("comment", input.slice(index, comment.end), index, comment.end));
+      }
+      if (comment.error) return { error: comment.error, tokens };
+      index = comment.end;
       continue;
     }
     const simple = simpleTokenKind(char);
@@ -181,6 +194,9 @@ export function tokenizeSearchExpression(input: string): {
     if (char === '"' || char === "'") {
       const quoted = readQuoted(input, index, char);
       if (quoted.error) {
+        if (includeComments) {
+          tokens.push(token("string", input.slice(index), index, quoted.end, quoted.value));
+        }
         return { error: quoted.error, tokens };
       }
       tokens.push(
@@ -198,6 +214,9 @@ export function tokenizeSearchExpression(input: string): {
     if (char === "/") {
       const regex = readRegex(input, index);
       if (regex.error) {
+        if (includeComments) {
+          tokens.push(token("regex", input.slice(index, regex.end), index, regex.end, regex.value));
+        }
         return { error: regex.error, tokens };
       }
       tokens.push(
@@ -215,6 +234,9 @@ export function tokenizeSearchExpression(input: string): {
     const start = index;
     const term = readTerm(input, index);
     if (term.error) {
+      if (includeComments) {
+        tokens.push(token("term", term.raw, index, term.end, term.value));
+      }
       return { error: term.error, tokens };
     }
     index = term.end;
@@ -241,6 +263,23 @@ export function tokenizeSearchExpression(input: string): {
     tokens.push(token("term", raw, start, index, term.value));
   }
   return { error: null, tokens };
+}
+
+/** Only call at a token boundary, outside a quoted value or regex. */
+export function readExpressionComment(input: string, start: number): {
+  end: number;
+  error: string | null;
+} | null {
+  if (input[start] === "#") {
+    let end = start + 1;
+    while (end < input.length && !/[\r\n]/.test(input[end])) end += 1;
+    return { end, error: null };
+  }
+  if (!input.startsWith("/*", start)) return null;
+  const close = input.indexOf("*/", start + 2);
+  return close < 0
+    ? { end: input.length, error: "Unterminated block comment" }
+    : { end: close + 2, error: null };
 }
 
 export function evaluateSearchExpression(
@@ -440,12 +479,12 @@ export function selectorExpressionForClientIds(clientIds: string[]): string {
   return Array.from(
     new Set(clientIds.map((clientId) => clientId.trim()).filter(Boolean)),
   )
-    .map((clientId) => `id:${clientId}`)
+    .map((clientId) => `id:${quoteSelectorValue(clientId)}`)
     .join(" || ");
 }
 
 export function quoteSelectorValue(value: string): string {
-  if (/^[^\s()[\],=!<>|&~"']+$/.test(value)) {
+  if (/^[^\s()[\],=!<>|&~"'#]+$/.test(value) && !value.includes("/*")) {
     return value;
   }
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -1173,7 +1212,7 @@ function readTerm(
   let value = "";
   for (let index = start; index < input.length; index += 1) {
     const char = input[index];
-    if (!quote && isTermDelimiter(char)) {
+    if (!quote && (isTermDelimiter(char) || char === "#" || input.startsWith("/*", index))) {
       return { end: index, error: null, raw, value };
     }
     raw += char;
