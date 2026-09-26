@@ -10732,8 +10732,9 @@ export function WebhookRuleManager({
                 </label>
               </ConsoleField>
               <ConsoleField
+                className="webhookCooldownField"
                 label="Cooldown seconds"
-                hint="Minimum seconds between new automatic deliveries for this rule. Use 0 to report every distinct job completion. Retries are controlled separately."
+                labelTitle="Minimum seconds between new automatic deliveries for this rule. Use 0 to report every distinct job completion. Retries are controlled separately."
               >
                 <input
                   aria-label="Webhook cooldown seconds"

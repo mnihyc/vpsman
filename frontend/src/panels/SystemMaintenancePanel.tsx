@@ -721,10 +721,12 @@ function StaleSelectorMaintenancePanel({
       <div className="scheduleExecutionPolicy selectorMaintenancePolicy">
         <Target size={16} />
         <span>
-          Schedules include backup policies. Ping assignments and shared-view
-          targets each update transactionally; schedules keep their native
-          per-schedule review and audit boundary. Approval records remain
-          immutable evidence and never appear here.
+          Review and update saved VPS target lists for schedules (including
+          backup policies), Ping targets, and active shared views. Up-to-date
+          target lists are hidden. Review changes together; each schedule updates
+          independently, while Ping targets and shared views each update as a
+          separate all-or-nothing batch. Existing approval records are not
+          listed or changed here.
         </span>
       </div>
       <ConsoleDataGrid

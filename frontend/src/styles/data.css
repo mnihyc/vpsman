@@ -1656,6 +1656,14 @@
   max-width: min(100%, 360px);
 }
 
+.webhookCooldownField > .fieldLabelWithHelp {
+  width: 100%;
+}
+
+.webhookCooldownField .fieldHelpPopover {
+  max-width: 100%;
+}
+
 .webhookRuleGrid .wideField,
 .webhookRuleGrid .numberedTextarea {
   grid-column: 1 / -1;
