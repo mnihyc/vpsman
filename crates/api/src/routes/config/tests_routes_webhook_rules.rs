@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn webhook_management_also_requires_jobs_read() {
+    let error = require_webhook_jobs_scope(&[
+        "integrations:read".to_string(),
+        "integrations:write".to_string(),
+    ])
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "operator_scope_insufficient");
+    require_webhook_jobs_scope(&[SCOPE_JOBS_READ.to_string()]).unwrap();
+}
+
+#[test]
+fn webhook_output_preview_errors_are_actionable_request_errors() {
+    for code in [
+        "webhook_rule_output_event_required",
+        "webhook_rule_preview_event_not_found",
+    ] {
+        for error in [
+            webhook_rule_preview_error(anyhow::anyhow!(code)),
+            webhook_delivery_error(anyhow::anyhow!(code)),
+        ] {
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, code);
+            assert!(error.public_message.as_deref().unwrap().contains("event"));
+        }
+    }
+}
+
+#[test]
 fn webhook_rule_bulk_review_is_confirmed_unique_and_timestamped() {
     let id = uuid::Uuid::new_v4();
     let valid: WebhookRuleBulkRequest = serde_json::from_value(serde_json::json!({

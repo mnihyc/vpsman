@@ -460,7 +460,7 @@ async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
         2
     );
     let result =
-        webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap();
     assert_eq!(result, 2);
@@ -541,7 +541,7 @@ async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
     assert_eq!(permanent_failure_audits, 3);
 
     assert_eq!(
-        webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(),)
+        webhook_rules::process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         0

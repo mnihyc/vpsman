@@ -57,6 +57,7 @@ export type SchedulePrivilegeIntentInput = {
   selectorExpression: string;
   resolvedTargets: string[];
   triggerKind: "cron" | "event";
+  runOn: "triggered_only" | "all_at_once";
   cronExpr: string | null;
   timezone: string | null;
   eventExpression: string | null;
@@ -426,7 +427,7 @@ export function canonicalSchedulePrivilegeIntent(
   input: SchedulePrivilegeIntentInput,
 ): string {
   const entries: Array<[string, JsonValue]> = [
-    ["version", 2],
+    ["version", 3],
     ["action", input.action],
     ["schedule_id", input.scheduleId ?? null],
     ["definition_revision", input.definitionRevision ?? null],
@@ -436,6 +437,7 @@ export function canonicalSchedulePrivilegeIntent(
     ["selector_expression", input.selectorExpression.trim()],
     ["resolved_targets", [...input.resolvedTargets].sort()],
     ["trigger_kind", input.triggerKind],
+    ["run_on", input.runOn],
     ["cron_expr", input.cronExpr?.trim() ?? null],
     ["timezone", input.timezone],
     ["event_expression", input.eventExpression?.trim() ?? null],

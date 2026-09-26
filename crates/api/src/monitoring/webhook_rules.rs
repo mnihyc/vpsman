@@ -7,11 +7,11 @@ use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, is_webhook_rule_delivery_process_status, payload_hash,
-    render_template_with_limit, VpsRuleContext, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
-    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
-    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    render_template_with_options, template_referenced_paths, TemplateRenderOptions, VpsRuleContext,
+    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
-use vpsman_server_core::operator_is_active_authorized;
+use vpsman_server_core::{enrich_webhook_job_output_context, operator_is_active_authorized};
 
 use crate::{
     model::{AgentView, AuthContext},
@@ -20,11 +20,13 @@ use crate::{
         WebhookRuleDryRunRequest, WebhookRuleDryRunView, WebhookRuleProcessRequest,
         WebhookRuleView,
     },
+    repository::Repository,
     repository_webhook_rules::{dry_run_webhook_delivery, webhook_rule_revision_hash},
     security::{operator_has_scope, SCOPE_CONFIG_READ},
     selector_expression::{agent_expression_context, parse_selector_expression},
     state::AppState,
     unix_now,
+    util::parse_timestamp_unix,
 };
 
 const WEBHOOK_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
@@ -61,7 +63,112 @@ const EVENT_DELIVERY_ROOTS: [&str; 8] = [
 
 type HmacSha256 = Hmac<Sha256>;
 
+struct WebhookPreviewEvent {
+    kind: String,
+    event_id: String,
+    predicates: Vec<String>,
+    payload: Value,
+    subject_client_ids: Vec<String>,
+    occurred_at_unix: u64,
+    retained: bool,
+}
+
 impl AppState {
+    async fn webhook_preview_event(
+        &self,
+        event_kind: &str,
+        requested_event_id: Option<&str>,
+        event_id: String,
+    ) -> Result<WebhookPreviewEvent> {
+        if let Some(requested_event_id) = requested_event_id.map(str::trim) {
+            if let Some(event) = self
+                .repo
+                .webhook_event_by_identity(event_kind, requested_event_id)
+                .await?
+            {
+                return Ok(WebhookPreviewEvent {
+                    kind: event.kind,
+                    event_id: event.event_id,
+                    predicates: event.event_predicates,
+                    payload: event.payload,
+                    subject_client_ids: event.subject_client_ids,
+                    occurred_at_unix: parse_timestamp_unix(&event.occurred_at)
+                        .context("retained webhook event timestamp is invalid")?,
+                    retained: true,
+                });
+            }
+            if matches!(event_kind, "job.status" | "job.target.status") {
+                anyhow::bail!("webhook_rule_preview_event_not_found");
+            }
+        }
+        // Existing manual interval and non-output test events may use an
+        // explicitly reviewed synthetic identity without a retained source.
+        Ok(WebhookPreviewEvent {
+            kind: event_kind.to_string(),
+            event_id,
+            predicates: vec![event_kind.to_string()],
+            payload: Value::Null,
+            subject_client_ids: Vec::new(),
+            occurred_at_unix: unix_now(),
+            retained: false,
+        })
+    }
+
+    async fn webhook_candidate_for_preview(
+        &self,
+        rule: &WebhookRuleView,
+        event: &WebhookPreviewEvent,
+        mut agents: Vec<AgentView>,
+        rules_by_client: &HashMap<String, VpsRuleContext>,
+        actor_id: Option<Uuid>,
+    ) -> Result<Option<WebhookRuleDeliveryCandidate>> {
+        if !event.subject_client_ids.is_empty() {
+            let subjects = event
+                .subject_client_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            agents.retain(|agent| subjects.contains(agent.id.as_str()));
+        }
+        let Some(mut candidate) = webhook_candidate_payload_for_event_with_vps_rules(
+            rule,
+            &event.kind,
+            &event.event_id,
+            &event.predicates,
+            &event.payload,
+            event.occurred_at_unix,
+            agents,
+            rules_by_client,
+            actor_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        let message = if webhook_template_uses_job_output(&rule.body_template)? {
+            require_retained_output_preview_event(event)?;
+            let mut render_context = candidate.payload.clone();
+            match &self.repo {
+                Repository::Postgres(pool) => {
+                    let mut connection = pool.acquire().await?;
+                    enrich_webhook_job_output_context(
+                        &mut connection,
+                        &mut render_context,
+                        &rule.body_template,
+                        self.backup_object_store.as_ref(),
+                    )
+                    .await?;
+                }
+            }
+            render_message_from_payload(rule, &render_context)?
+        } else {
+            render_message_from_payload(rule, &candidate.payload)?
+        };
+        // The expanded output is render-local. Only the operator's rendered
+        // message is stored; fixed event roots never acquire raw output.
+        finish_webhook_candidate_message(&mut candidate, message);
+        Ok(Some(candidate))
+    }
+
     pub(crate) async fn dry_run_webhook_rule(
         &self,
         request: &WebhookRuleDryRunRequest,
@@ -88,6 +195,16 @@ impl AppState {
             .event_id
             .clone()
             .unwrap_or_else(|| format!("{}:{}", request.event_kind.trim(), unix_now()));
+        let event = self
+            .webhook_preview_event(
+                request.event_kind.trim(),
+                request.event_id.as_deref(),
+                event_id,
+            )
+            .await?;
+        if webhook_template_uses_job_output(&rule.body_template)? {
+            require_retained_output_preview_event(&event)?;
+        }
         let agents = self.repo.list_agents().await?;
         let expression = parse_selector_expression(&rule.expression)
             .map_err(|error| anyhow::anyhow!("invalid webhook rule expression: {error}"))?
@@ -97,19 +214,20 @@ impl AppState {
         } else {
             HashMap::new()
         };
-        let candidate = webhook_candidate_for_rule_with_vps_rules(
-            &rule,
-            request.event_kind.trim(),
-            &event_id,
-            agents,
-            &rules_by_client,
-            Some(operator.operator.id),
-        )?;
+        let candidate = self
+            .webhook_candidate_for_preview(
+                &rule,
+                &event,
+                agents,
+                &rules_by_client,
+                Some(operator.operator.id),
+            )
+            .await?;
         let Some(candidate) = candidate else {
             return Ok(WebhookRuleDryRunView {
                 rendered_message: String::new(),
                 matched_vps: Vec::new(),
-                payload_context: empty_payload_context(&rule, request.event_kind.trim(), &event_id),
+                payload_context: empty_payload_context(&rule, &event.kind, &event.event_id),
                 validation_errors: Vec::new(),
                 delivery: None,
             });
@@ -155,6 +273,16 @@ impl AppState {
                 .list_webhook_rules(request.limit.unwrap_or(100).clamp(1, 1000), Some(true))
                 .await?
         };
+        let event = self
+            .webhook_preview_event(event_kind, request.event_id.as_deref(), event_id.clone())
+            .await?;
+        if request.rule_id.is_some() {
+            if let Some(rule) = rules.first() {
+                if webhook_template_uses_job_output(&rule.body_template)? {
+                    require_retained_output_preview_event(&event)?;
+                }
+            }
+        }
         let agents = self.repo.list_agents().await?;
         let uses_vps_rules = rules.iter().any(|rule| {
             parse_selector_expression(&rule.expression)
@@ -175,14 +303,16 @@ impl AppState {
         };
         let mut candidates = Vec::new();
         for rule in rules {
-            if let Some(candidate) = webhook_candidate_for_rule_with_vps_rules(
-                &rule,
-                event_kind,
-                &event_id,
-                agents.clone(),
-                &rules_by_client,
-                Some(operator.operator.id),
-            )? {
+            if let Some(candidate) = self
+                .webhook_candidate_for_preview(
+                    &rule,
+                    &event,
+                    agents.clone(),
+                    &rules_by_client,
+                    Some(operator.operator.id),
+                )
+                .await?
+            {
                 candidates.push(candidate);
             }
         }
@@ -272,7 +402,8 @@ impl AppState {
                 delivery.id == delivery_id,
                 "webhook_rule_process_claim_mismatch"
             );
-            if !self.repo.webhook_rule_enabled(delivery.rule_id).await? {
+            let rule = self.repo.webhook_rule_by_id(delivery.rule_id).await?;
+            if !rule.as_ref().is_some_and(|rule| rule.enabled) {
                 let canceled = self
                     .repo
                     .cancel_claimed_webhook_rule_delivery(
@@ -287,9 +418,14 @@ impl AppState {
                 processed.push(canceled);
                 continue;
             }
+            // The queued actor and current rule owner must still be allowed
+            // to send the frozen message, regardless of later template edits.
             let actor_authorized = self
                 .webhook_delivery_actor_authorized(delivery.actor_id)
-                .await?;
+                .await?
+                && self
+                    .webhook_delivery_actor_authorized(rule.as_ref().and_then(|rule| rule.actor_id))
+                    .await?;
             let (result, eligibility_revision) = if actor_authorized {
                 let send_eligibility = self
                     .repo
@@ -385,7 +521,7 @@ impl AppState {
             &operator.role,
             &operator.scopes,
             "operator",
-            &["integrations:write"],
+            &["integrations:write", "jobs:read"],
         ))
     }
 }
@@ -396,6 +532,24 @@ fn optional_trimmed(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn webhook_template_uses_job_output(template: &str) -> Result<bool> {
+    Ok(template_referenced_paths(template)?
+        .iter()
+        .any(|path| path == "job.output" || path.starts_with("job.output.")))
+}
+
+fn require_retained_output_preview_event(event: &WebhookPreviewEvent) -> Result<()> {
+    anyhow::ensure!(event.retained, "webhook_rule_output_event_required");
+    // A retained non-job event remains a valid context for a mixed-event
+    // template. The shared loader leaves its absent job root untouched.
+    Ok(())
+}
+
+fn finish_webhook_candidate_message(candidate: &mut WebhookRuleDeliveryCandidate, message: String) {
+    candidate.payload["message"] = Value::String(message.clone());
+    candidate.message = message;
 }
 
 fn webhook_dispatch_preview_hash(
@@ -421,6 +575,10 @@ fn webhook_dispatch_preview_hash(
                 "target": candidate.target,
                 "dedupe_key": candidate.dedupe_key,
                 "rule_revision_hash": candidate.rule_revision_hash,
+                // Retained job output can change or expire after preview.
+                // Bind commit to the rendered job message actually reviewed.
+                "job_message_hash": candidate.payload.get("job")
+                    .map(|_| payload_hash(candidate.message.as_bytes())),
                 "matched_vps": candidate.matched_vps.iter().map(|agent| json!({
                     "id": agent.id,
                     "display_name": agent.display_name,
@@ -478,6 +636,7 @@ pub(crate) fn webhook_candidate_for_rule(
     )
 }
 
+#[cfg(test)]
 fn webhook_candidate_for_rule_with_vps_rules(
     rule: &WebhookRuleView,
     event_kind: &str,
@@ -520,12 +679,43 @@ pub(crate) fn webhook_candidate_for_event(
     )
 }
 
+#[cfg(test)]
 fn webhook_candidate_for_event_with_vps_rules(
     rule: &WebhookRuleView,
     event_kind: &str,
     event_id: &str,
     event_predicates: &[String],
     event_payload: &Value,
+    agents: Vec<AgentView>,
+    rules_by_client: &HashMap<String, VpsRuleContext>,
+    actor_id: Option<Uuid>,
+) -> Result<Option<WebhookRuleDeliveryCandidate>> {
+    let Some(mut candidate) = webhook_candidate_payload_for_event_with_vps_rules(
+        rule,
+        event_kind,
+        event_id,
+        event_predicates,
+        event_payload,
+        unix_now(),
+        agents,
+        rules_by_client,
+        actor_id,
+    )?
+    else {
+        return Ok(None);
+    };
+    let message = render_message_from_payload(rule, &candidate.payload)?;
+    finish_webhook_candidate_message(&mut candidate, message);
+    Ok(Some(candidate))
+}
+
+fn webhook_candidate_payload_for_event_with_vps_rules(
+    rule: &WebhookRuleView,
+    event_kind: &str,
+    event_id: &str,
+    event_predicates: &[String],
+    event_payload: &Value,
+    occurred_at_unix: u64,
     agents: Vec<AgentView>,
     rules_by_client: &HashMap<String, VpsRuleContext>,
     actor_id: Option<Uuid>,
@@ -577,7 +767,7 @@ fn webhook_candidate_for_event_with_vps_rules(
             "kind": event_kind,
             "id": event_id,
             "predicates": event_predicates,
-            "occurred_at_unix": unix_now(),
+            "occurred_at_unix": occurred_at_unix,
         },
         "query": {
             "expression": &rule.expression,
@@ -587,10 +777,6 @@ fn webhook_candidate_for_event_with_vps_rules(
         "matched_vps": &matched_vps,
     });
     merge_event_payload_roots(&mut payload, event_payload);
-    let message = render_message_from_payload(rule, &payload)?;
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("message".to_string(), Value::String(message.clone()));
-    }
     let dedupe_fingerprint = json!({
         "rule_id": rule.id,
         "event_id": event_id,
@@ -606,7 +792,7 @@ fn webhook_candidate_for_event_with_vps_rules(
         dedupe_key: format!("webhook-rule:{}", &hash[..32]),
         payload,
         matched_vps,
-        message,
+        message: String::new(),
         rule_revision_hash,
         signing_secret: rule.signing_secret.clone(),
         cooldown_until_unix: (unix_now() as i64).saturating_add(rule.cooldown_secs),
@@ -688,8 +874,16 @@ fn render_message_from_payload(rule: &WebhookRuleView, payload: &Value) -> Resul
             .map_or(0, Vec::len);
         return Ok(default_webhook_message(&rule.name, matched_vps_count));
     }
-    render_template_with_limit(&rule.body_template, payload, 16 * 1024)
-        .map_err(|error| anyhow::anyhow!("webhook template render failed: {error}"))
+    render_template_with_options(
+        &rule.body_template,
+        payload,
+        TemplateRenderOptions {
+            max_message_bytes: 16 * 1024,
+            max_substitution_bytes: Some(4096),
+            literal_object_paths: &["job.output"],
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("webhook template render failed: {error}"))
 }
 
 fn merge_event_payload_roots(payload: &mut Value, event_payload: &Value) {

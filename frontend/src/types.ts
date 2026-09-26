@@ -2093,12 +2093,14 @@ export type JobOutputComparisonRowRecord = {
 };
 
 export type ScheduleTriggerKind = "cron" | "event";
+export type ScheduleRunOn = "triggered_only" | "all_at_once";
 
 export type ScheduleRecord = {
   id: string;
   name: string;
   enabled: boolean;
   trigger_kind: ScheduleTriggerKind;
+  run_on: ScheduleRunOn;
   definition_revision: number;
   command_type: string;
   operation: JobOperation | null;
@@ -3475,6 +3477,7 @@ export type CreateScheduleRequest = {
   selector_expression: string;
   target_client_ids: string[];
   trigger_kind: ScheduleTriggerKind;
+  run_on: ScheduleRunOn;
   cron_expr: string | null;
   timezone: "UTC" | null;
   event_expression: string | null;

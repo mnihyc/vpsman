@@ -204,6 +204,7 @@ const SCHEDULE_CREATE_USAGE: &str = concat!(
     "<cron_mon> <cron_dow> <command> [schedule policy flags] <target ...> --confirmed\n",
     "       schedule-event-create <name> <alert-expression> ",
     "[--event-argv-template <element>]... [--max-failures <1-100>] ",
+    "[--run-on triggered-only|all-at-once] ",
     "[--disabled] <target ...> --confirmed\n",
     "       event example: alert.triggered&&alert.category:traffic\n",
     "       enter the VTY event expression as one token (no spaces around && or ||)\n",

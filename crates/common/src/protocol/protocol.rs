@@ -1988,6 +1988,7 @@ pub fn schedule_privilege_intent_fields() -> &'static [&'static str] {
         "selector_expression",
         "resolved_targets",
         "trigger_kind",
+        "run_on",
         "cron_expr",
         "timezone",
         "event_expression",
@@ -2067,6 +2068,7 @@ pub struct SchedulePrivilegeIntent<'a> {
     selector_expression: &'a str,
     resolved_targets: Vec<&'a str>,
     trigger_kind: &'a str,
+    run_on: &'a str,
     cron_expr: Option<&'a str>,
     timezone: Option<&'a str>,
     event_expression: Option<&'a str>,
@@ -2082,7 +2084,7 @@ pub struct SchedulePrivilegeIntent<'a> {
 impl<'a> SchedulePrivilegeIntent<'a> {
     pub fn new(input: SchedulePrivilegeIntentInput<'a>) -> Self {
         Self {
-            version: 2,
+            version: 3,
             action: input.action,
             schedule_id: input.schedule_id,
             definition_revision: input.definition_revision,
@@ -2092,6 +2094,7 @@ impl<'a> SchedulePrivilegeIntent<'a> {
             selector_expression: input.selector_expression.trim(),
             resolved_targets: sorted_str_refs(input.resolved_targets),
             trigger_kind: input.trigger_kind,
+            run_on: input.run_on,
             cron_expr: input.cron_expr.map(str::trim),
             timezone: input.timezone,
             event_expression: input.event_expression.map(str::trim),
@@ -2116,6 +2119,7 @@ pub struct SchedulePrivilegeIntentInput<'a> {
     pub selector_expression: &'a str,
     pub resolved_targets: &'a [String],
     pub trigger_kind: &'a str,
+    pub run_on: &'a str,
     pub cron_expr: Option<&'a str>,
     pub timezone: Option<&'a str>,
     pub event_expression: Option<&'a str>,

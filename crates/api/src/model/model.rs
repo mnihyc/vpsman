@@ -1242,6 +1242,7 @@ pub(crate) struct CreateScheduleRequest {
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) run_on: Option<ScheduleRunOn>,
     pub(crate) cron_expr: Option<String>,
     pub(crate) timezone: Option<String>,
     pub(crate) event_expression: Option<String>,
@@ -1271,6 +1272,7 @@ pub(crate) struct UpdateScheduleRequest {
     pub(crate) expected_target_client_ids: Vec<String>,
     pub(crate) expected_definition_revision: i64,
     pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) run_on: Option<ScheduleRunOn>,
     pub(crate) cron_expr: Option<String>,
     pub(crate) timezone: Option<String>,
     pub(crate) event_expression: Option<String>,
@@ -1358,6 +1360,7 @@ pub(crate) struct ScheduleView {
     pub(crate) name: String,
     pub(crate) enabled: bool,
     pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) run_on: ScheduleRunOn,
     pub(crate) definition_revision: i64,
     pub(crate) command_type: String,
     pub(crate) operation: Option<JobCommand>,
@@ -1391,6 +1394,31 @@ pub(crate) struct ScheduleView {
 pub(crate) enum ScheduleTriggerKind {
     Cron,
     Event,
+}
+
+impl ScheduleTriggerKind {
+    pub(crate) fn default_run_on(self) -> ScheduleRunOn {
+        match self {
+            Self::Cron => ScheduleRunOn::AllAtOnce,
+            Self::Event => ScheduleRunOn::TriggeredOnly,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ScheduleRunOn {
+    AllAtOnce,
+    TriggeredOnly,
+}
+
+impl ScheduleRunOn {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AllAtOnce => "all_at_once",
+            Self::TriggeredOnly => "triggered_only",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

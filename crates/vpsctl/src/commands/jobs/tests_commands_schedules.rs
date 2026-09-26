@@ -4,6 +4,7 @@ fn base_options(trigger_kind: ScheduleTriggerKindArg) -> ScheduleDefinitionOptio
     ScheduleDefinitionOptions {
         name: "traffic guard".to_string(),
         trigger_kind,
+        run_on: None,
         command: None,
         argv: Vec::new(),
         pty: false,
@@ -27,6 +28,7 @@ fn cron_definition_preserves_the_existing_defaults() {
     let definition = ScheduleDefinition::from_options(options).unwrap();
 
     assert_eq!(definition.trigger_kind, ScheduleTriggerKindArg::Cron);
+    assert_eq!(definition.run_on, ScheduleRunOnArg::AllAtOnce);
     assert!(matches!(
         definition.operation,
         Some(JobCommand::Shell { ref argv, pty: false })
@@ -52,6 +54,7 @@ fn event_definition_uses_nullable_cron_shape_and_default_noop() {
     let definition = ScheduleDefinition::from_options(options).unwrap();
 
     assert_eq!(definition.trigger_kind, ScheduleTriggerKindArg::Event);
+    assert_eq!(definition.run_on, ScheduleRunOnArg::TriggeredOnly);
     assert!(definition.operation.is_none());
     assert!(definition.event_argv_template.is_none());
     assert!(definition.cron_expr.is_none());
@@ -89,6 +92,22 @@ fn trigger_specific_options_cannot_leak_across_schedule_kinds() {
     let mut cron = base_options(ScheduleTriggerKindArg::Cron);
     cron.command = Some("/bin/true".to_string());
     cron.event_expression = Some("alert.triggered".to_string());
+    assert!(ScheduleDefinition::from_options(cron).is_err());
+}
+
+#[test]
+fn event_run_on_can_explicitly_include_all_reviewed_targets_but_cron_cannot_narrow_to_subjects() {
+    let mut event = base_options(ScheduleTriggerKindArg::Event);
+    event.event_expression = Some("alert.triggered".to_string());
+    event.run_on = Some(ScheduleRunOnArg::AllAtOnce);
+    assert_eq!(
+        ScheduleDefinition::from_options(event).unwrap().run_on,
+        ScheduleRunOnArg::AllAtOnce
+    );
+
+    let mut cron = base_options(ScheduleTriggerKindArg::Cron);
+    cron.command = Some("/bin/true".to_string());
+    cron.run_on = Some(ScheduleRunOnArg::TriggeredOnly);
     assert!(ScheduleDefinition::from_options(cron).is_err());
 }
 

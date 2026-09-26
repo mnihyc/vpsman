@@ -15,6 +15,7 @@ import {
   Bell,
   Boxes,
   Clock3,
+  Copy,
   DatabaseBackup,
   Eye,
   FileCog,
@@ -37,6 +38,7 @@ import {
   X,
 } from "lucide-react";
 import { NumberedTextarea } from "../components/NumberedTextarea";
+import { EventExpressionEditor } from "../components/EventExpressionEditor";
 import { agentDisplayState } from "../agentDisplayState";
 import {
   buildBulkJobProgress,
@@ -5153,6 +5155,43 @@ function policyActiveSummary(policy: FleetAlertPolicyRecord): string {
   return `${total} · ${breakdown.join(" / ")}`;
 }
 
+function CopyablePolicyId({ label, value }: { label: string; value: string }) {
+  const [copyMessage, setCopyMessage] = useState<string | null>(null);
+
+  async function copy() {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is unavailable");
+      }
+      await navigator.clipboard.writeText(value);
+      setCopyMessage(`${label} copied`);
+    } catch {
+      setCopyMessage("Copy failed; select the ID and copy it manually");
+    }
+  }
+
+  return (
+    <span className="policyIdentifier">
+      <code>{value}</code>
+      <button
+        aria-label={`Copy ${label}`}
+        className="iconButton"
+        onClick={(event) => {
+          event.stopPropagation();
+          void copy();
+        }}
+        title={copyMessage ?? `Copy ${label}`}
+        type="button"
+      >
+        <Copy size={13} />
+      </button>
+      <span className="srOnly" role="status">
+        {copyMessage}
+      </span>
+    </span>
+  );
+}
+
 function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
   return (
     <div className="policyDetailStack">
@@ -5163,7 +5202,7 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
         </span>
         <span>
           <strong>ID</strong>
-          <span className="monoValue">{policy.id}</span>
+          <CopyablePolicyId label="policy ID" value={policy.id} />
         </span>
         <span>
           <strong>Selector</strong>
@@ -5230,6 +5269,7 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
                 {rule.system_seed_key ? "System default" : "User rule"}
               </ConsoleStatusBadge>
             </div>
+            <CopyablePolicyId label={`rule ID for ${rule.name}`} value={rule.id} />
             <dl>
               <div>
                 <dt>Evidence</dt>
@@ -7052,6 +7092,9 @@ export function FleetAlertPolicyManager({
             reviewPrompt={policySaveReviewPrompt}
             title={editingId ? "Edit alert policy" : "Create alert policy"}
           >
+            {editingId ? (
+              <CopyablePolicyId label="policy ID" value={editingId} />
+            ) : null}
             {focusedEditor ? (
               <PolicyMatchSummary
                 enabled={enabled}
@@ -7221,6 +7264,12 @@ export function FleetAlertPolicyManager({
                           </button>
                         </div>
                       </div>
+                      {draft.id ? (
+                        <CopyablePolicyId
+                          label={`rule ID for ${draft.name}`}
+                          value={draft.id}
+                        />
+                      ) : null}
                       <div className="consoleFormGrid policyRuleIdentityGrid">
                         <ConsoleField label="Rule">
                           <input
@@ -10684,7 +10733,7 @@ export function WebhookRuleManager({
               </ConsoleField>
               <ConsoleField
                 label="Cooldown seconds"
-                hint="Minimum seconds between new automatic deliveries for this rule. Retries are controlled separately."
+                hint="Minimum seconds between new automatic deliveries for this rule. Use 0 to report every distinct job completion. Retries are controlled separately."
               >
                 <input
                   aria-label="Webhook cooldown seconds"
@@ -10700,14 +10749,19 @@ export function WebhookRuleManager({
                 className="fieldFull"
                 hint="Every Alert Policy emits only generic alert.triggered and alert.resolved lifecycle edges. Trigger and Resolve meta conditions suppress raw flaps before these edges exist; Persisting and Unknown emit no edge."
               >
-                <SearchExpressionInput
-                  agents={agents}
+                <EventExpressionEditor
                   ariaLabel="Webhook expression"
-                  className="targetExpressionBar"
                   onChange={setExpression}
-                  placeholder="alert.triggered && alert.category:traffic"
                   suggestions={WEBHOOK_EXPRESSION_SUGGESTIONS}
                   value={expression}
+                  descriptions={<>
+                    <p>Match the durable event kind, then narrow by immutable event fields. Newlines are whitespace; use <code>&amp;&amp;</code>, <code>||</code> and parentheses to combine conditions.</p>
+                    <p>For one notification per scheduled job completion: <code>event.kind = "job.status" &amp;&amp; job.source_schedule_id = "SCHEDULE_UUID"</code>. Find the full UUID in Automation → Schedules → details; Actions → Copy schedule IDs copies selected IDs. Set cooldown to 0 to keep distinct completions.</p>
+                    <p>For per-VPS results instead, use <code>event.kind = "job.target.status"</code> with the same schedule filter. These events contain the target status and exit code. In the body, <code>{"{job.output.stdout}"}</code> and <code>{"{job.output.stderr}"}</code> are that VPS’s retained stream strings. Whole-job events expose each stream as a JSON object keyed by VPS ID; use a path such as <code>{"{job.output.stdout.v-123}"}</code> for one VPS.</p>
+                    <p>For a target event, <code>{'{job.output.stdout.split("\\n").last.substr(0,200)}'}</code> selects up to 200 characters from the final line. Helpers run on the full retained value; only the final substitution is limited to 4 KiB, with <code>...[XX bytes remaining]</code> when shortened. The complete message still has a 16 KiB limit.</p>
+                    <p>For alert notifications: <code>(alert.triggered || alert.resolved) &amp;&amp; policy_rule.id = "RULE_UUID"</code>. Copy the rule UUID from Alerts → policy details or Edit. Persisting and Unknown emit no edge.</p>
+                    <p>For an output preview, copy the full job UUID from Jobs → History → details, select <code>job.status</code>, and enter <code>job:JOB_UUID:status:completed</code> as the event ID (replace <code>completed</code> with the job’s actual status). This selects a retained event; Test does not dispatch a job. Delivery retries reuse the captured message and event identity.</p>
+                  </>}
                 />
               </ConsoleField>
               <ConsoleField
@@ -10774,7 +10828,11 @@ export function WebhookRuleManager({
                   onChange={(event) => setWebhookEventKind(event.target.value)}
                 />
               </ConsoleField>
-              <ConsoleField label="Preview event id">
+              <ConsoleField
+                label="Preview event id"
+                className="fieldWide"
+                hint="Output previews need a retained job event ID. See Expression → Descriptions for the format."
+              >
                 <input
                   aria-label="Webhook event id"
                   value={eventId}
@@ -10793,7 +10851,7 @@ export function WebhookRuleManager({
                 label="Body template"
                 labelTitle="Template used to render the webhook message field."
                 className="fieldFull"
-                hint="Renders the message field in the fixed webhook JSON envelope. The starter body renders the matching conditional branch and includes full alert lifecycle context; edit it directly. Available roots include vps, matched_vps, event, rule, alert, policy, policy_rule, and traffic."
+                hint="Renders the message field in the fixed webhook JSON envelope. Roots include vps, matched_vps, event, rule, alert, policy, policy_rule, traffic, schedule, and job. Retained job.output.stdout/stderr is loaded only when referenced. Each substitution is limited to 4 KiB after helpers run. Webhook access requires jobs:read."
               >
                 <WebhookTemplateEditor
                   value={bodyTemplate}

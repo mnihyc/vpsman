@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use super::{Args, Command};
-use crate::commands_schedules::ScheduleTriggerKindArg;
+use crate::commands_schedules::{ScheduleRunOnArg, ScheduleTriggerKindArg};
 
 const TYPED_ALERT_RULE_JSON: &str = r#"{"name":"offline","enabled":true,"rule_kind":"state","evidence_source":"agent.status","correlation_mode":"natural_key","trigger_condition_expression":"evidence.status = offline","resolve_condition_expression":"evidence.status = online","resolve_meta_condition":{"kind":"sustained","seconds":60},"severity":"critical","category":"agent_status","title_template":"Agent offline","detail_template":"{subject.display_name} is offline"}"#;
 
@@ -112,6 +112,7 @@ fn schedule_create_preserves_cron_defaults_without_compatibility_flags() {
                 panic!("expected schedule-create command");
             };
             assert_eq!(request.trigger_kind, ScheduleTriggerKindArg::Cron);
+            assert_eq!(request.run_on, None);
             assert_eq!(request.command.as_deref(), Some("/bin/true"));
             assert!(request.cron_expr.is_none());
             assert!(request.catch_up_policy.is_none());
@@ -133,6 +134,8 @@ fn schedule_create_accepts_an_explicit_alert_event_shape() {
                 "traffic-limit",
                 "--trigger-kind",
                 "event",
+                "--run-on",
+                "all-at-once",
                 "--event-expression",
                 "alert.triggered && alert.category:traffic",
                 "--event-argv-template",
@@ -150,6 +153,7 @@ fn schedule_create_accepts_an_explicit_alert_event_shape() {
                 panic!("expected schedule-create command");
             };
             assert_eq!(request.trigger_kind, ScheduleTriggerKindArg::Event);
+            assert_eq!(request.run_on, Some(ScheduleRunOnArg::AllAtOnce));
             assert!(request.command.is_none());
             assert_eq!(
                 request.event_argv_template,

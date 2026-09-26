@@ -473,9 +473,13 @@ async fn postgres_event_owner_executes_without_periodic_maintenance() {
         return;
     };
     assert_eq!(
-        process_webhook_event_materialization_work(&db.pool, WebhookRuleWorkerConfig::default())
-            .await
-            .unwrap(),
+        process_webhook_event_materialization_work(
+            &db.pool,
+            WebhookRuleWorkerConfig::default(),
+            None
+        )
+        .await
+        .unwrap(),
         WebhookRuleWorkerRun::default()
     );
     db.cleanup().await;
@@ -1923,13 +1927,13 @@ async fn postgres_generic_alert_resolution_materializes_once_for_an_explicit_ret
     .unwrap());
 
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
     );
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         0
@@ -1995,7 +1999,7 @@ async fn postgres_subjectless_interval_excludes_retained_subjects_loaded_for_oth
     .unwrap());
 
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
@@ -2067,7 +2071,7 @@ async fn postgres_subjectless_generic_alert_edges_do_not_borrow_fleet_subjects()
     .await
     .unwrap());
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
@@ -2111,7 +2115,7 @@ async fn postgres_subjectless_generic_alert_edges_do_not_borrow_fleet_subjects()
     .await
     .unwrap());
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
@@ -2185,7 +2189,7 @@ async fn postgres_suspended_client_alert_trigger_materializes_neutral_cancellati
     .unwrap());
 
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
@@ -2307,7 +2311,7 @@ async fn postgres_alert_materialization_does_not_own_client_lifecycle_rows() {
     assert_eq!(
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default()),
+            process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None),
         )
         .await
         .expect("webhook materialization blocked on a client lifecycle producer")
@@ -2423,7 +2427,7 @@ async fn postgres_unsuspend_never_resurrects_a_pre_suspension_alert_trigger() {
     .unwrap();
 
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
@@ -2669,13 +2673,13 @@ async fn postgres_permanent_failures_remain_delivery_and_audit_evidence_only() {
     .unwrap());
 
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         1
     );
     assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
+        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
             .await
             .unwrap(),
         0
@@ -3583,6 +3587,282 @@ async fn insert_webhook_test_client(pool: &PgPool, client_id: &str, status: &str
     .execute(pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_webhook_job_output_is_lazy_scoped_frozen_and_owner_authorized() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["output-a", "output-b"] {
+        insert_webhook_test_client(&db.pool, client_id, "online", false).await;
+    }
+    let owner = Uuid::new_v4();
+    let source_actor = Uuid::new_v4();
+    for actor in [owner, source_actor] {
+        sqlx::query(
+            "INSERT INTO operators (id, username, password_hash, role, scopes) VALUES ($1,$2,'test','operator','[\"integrations:write\",\"jobs:read\"]'::jsonb)",
+        )
+        .bind(actor)
+        .bind(actor.to_string())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id,command_type,status,target_count,payload_hash,request_fingerprint) VALUES ($1,'shell','completed',2,$2,$2)",
+    )
+    .bind(job_id)
+    .bind("a".repeat(64))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let stderr = format!("warning retained{}\nafter-four-kib", "x".repeat(16 * 1024));
+    for (client, chunks) in [
+        (
+            "output-a",
+            vec![("stdout", "mitigation ok"), ("stderr", stderr.as_str())],
+        ),
+        ("output-b", vec![("stdout", "other target secret")]),
+    ] {
+        sqlx::query("INSERT INTO job_targets (job_id,client_id,status) VALUES ($1,$2,'completed')")
+            .bind(job_id)
+            .bind(client)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for (seq, (stream, data)) in chunks.into_iter().enumerate() {
+            sqlx::query("INSERT INTO job_outputs (job_id,client_id,seq,stream,data) VALUES ($1,$2,$3,$4,$5)")
+                .bind(job_id)
+                .bind(client)
+                .bind(i32::try_from(seq).unwrap())
+                .bind(stream)
+                .bind(data.as_bytes())
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+    }
+    let object_store_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.tmp")
+        .join(format!("webhook-output-{}", Uuid::new_v4()));
+    let object_store = BackupObjectStore::filesystem(object_store_dir.clone()).unwrap();
+    let object_key = format!("job-output/{job_id}/stderr");
+    object_store
+        .put_new(&object_key, stderr.as_bytes())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE job_outputs SET storage='object_store',object_key=$2,data_sha256_hex=$3,data_size_bytes=$4,data=$5 WHERE job_id=$1 AND client_id='output-a' AND seq=1")
+        .bind(job_id).bind(&object_key).bind(payload_hash(stderr.as_bytes()))
+        .bind(stderr.len() as i64).bind(b"warning retained".as_slice())
+        .execute(&db.pool).await.unwrap();
+    let rule_id =
+        insert_webhook_test_rule(&db.pool, "job-output", "event.kind = \"job.target.status\"")
+            .await;
+    sqlx::query("UPDATE webhook_rules SET actor_id=$2,body_template='{job.status}' WHERE id=$1")
+        .bind(rule_id)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let payload = json!({
+        "event": {"kind": "job.target.status"},
+        "job": {"id": job_id, "status": "completed", "target": {"client_id": "output-a"}}
+    });
+    let subjects = vec!["output-a".to_string()];
+    let config = WebhookRuleWorkerConfig::default();
+    insert_webhook_event(
+        &db.pool,
+        "job.target.status",
+        "no-output",
+        &["job.target.status"],
+        &subjects,
+        payload.clone(),
+    )
+    .await
+    .unwrap();
+    // Any output read would block behind this lock. Non-referencing templates
+    // must complete without waiting for the output relation.
+    let mut output_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE job_outputs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *output_lock)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            process_webhook_events(&db.pool, config, None)
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        1
+    );
+    output_lock.rollback().await.unwrap();
+
+    sqlx::query("UPDATE webhook_rules SET body_template=$2 WHERE id=$1")
+        .bind(rule_id)
+        .bind("Result: {job.output.stdout}\n{job.output.stderr}\nTail: {job.output.stderr.split(\"\\n\").join(\"|\").substr(16400)}")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    insert_webhook_event(
+        &db.pool,
+        "job.target.status",
+        "with-output",
+        &["job.target.status"],
+        &subjects,
+        payload.clone(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE webhook_events SET actor_id=$1")
+        .bind(source_actor)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        process_webhook_events(&db.pool, config, Some(&object_store))
+            .await
+            .unwrap(),
+        1
+    );
+    let (captured, message): (SqlJson<Value>, String) = sqlx::query_as(
+        "SELECT payload,message FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_id='with-output'",
+    ).bind(rule_id).fetch_one(&db.pool).await.unwrap();
+    assert!(message.contains("mitigation ok"));
+    assert!(message.contains("warning retained"));
+    assert!(message.contains("...["));
+    assert!(message.contains(" bytes remaining]"));
+    assert!(message.ends_with("Tail: |after-four-kib"));
+    assert!(!message.contains("[output-a stdout]"));
+    assert!(!message.contains("other target secret"));
+    assert_eq!(captured.0["job"], payload["job"]);
+    assert_eq!(captured.0["message"], message);
+    let raw: SqlJson<Value> =
+        sqlx::query_scalar("SELECT payload FROM webhook_events WHERE event_id='with-output'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(raw.0, payload);
+
+    // Replaying after output changes must retain the first queued message and
+    // must not reacquire the output relation.
+    sqlx::query("UPDATE job_outputs SET data=convert_to('later output','UTF8') WHERE job_id=$1")
+        .bind(job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE webhook_events SET processed_at=NULL WHERE event_id='with-output'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    insert_webhook_event(
+        &db.pool,
+        "job.created",
+        "unmatched-output",
+        &["job.created"],
+        &subjects,
+        json!({"event": {"kind": "job.created"}, "job": payload["job"]}),
+    )
+    .await
+    .unwrap();
+    let mut output_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE job_outputs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *output_lock)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            process_webhook_events(&db.pool, config, None)
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        0
+    );
+    output_lock.rollback().await.unwrap();
+    let replay: SqlJson<Value> = sqlx::query_scalar(
+        "SELECT payload FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_id='with-output'",
+    )
+    .bind(rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(replay, captured);
+
+    // An authorized event actor cannot lend permission to a revoked rule owner
+    // or to an ownerless legacy rule.
+    sqlx::query("UPDATE operators SET scopes='[\"integrations:write\"]'::jsonb WHERE id=$1")
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for event_id in ["revoked-owner", "missing-owner"] {
+        if event_id == "missing-owner" {
+            sqlx::query("UPDATE webhook_rules SET actor_id=NULL WHERE id=$1")
+                .bind(rule_id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        insert_webhook_event(
+            &db.pool,
+            "job.target.status",
+            event_id,
+            &["job.target.status"],
+            &subjects,
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE webhook_events SET actor_id=$1 WHERE event_id=$2")
+            .bind(source_actor)
+            .bind(event_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            process_webhook_events(&db.pool, config, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let (status, error): (String, String) = sqlx::query_as(
+            "SELECT status,error FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_id=$2",
+        )
+        .bind(rule_id)
+        .bind(event_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "permanently_failed");
+        assert_eq!(error, "actor_authority_revoked");
+    }
+    // Removing the reference cannot bypass send-time checks for a previously
+    // rendered excerpt; the plain delivery requires jobs:read as well.
+    sqlx::query("UPDATE webhook_rules SET actor_id=$2,body_template='plain' WHERE id=$1")
+        .bind(rule_id)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let run = process_due_webhook_deliveries(&db.pool, config)
+        .await
+        .unwrap();
+    assert_eq!((run.processed, run.delivered, run.failed), (2, 0, 2));
+    let after: SqlJson<Value> = sqlx::query_scalar(
+        "SELECT payload FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_id='with-output'",
+    )
+    .bind(rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(after, captured);
+    db.cleanup().await;
+    std::fs::remove_dir_all(object_store_dir).unwrap();
 }
 
 async fn insert_webhook_test_rule(pool: &PgPool, name: &str, expression: &str) -> Uuid {

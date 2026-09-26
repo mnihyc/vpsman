@@ -656,15 +656,30 @@ Raw predicates such as `vps.status.become_offline`, `job.status:failed`,
 logic in an Alert Policy so Sustained, Count, hysteresis, Unknown, and automatic
 resolution are applied once and consistently.
 
-The event expression gates a source edge; it never retargets the job. The
-schedule always dispatches its separately reviewed fixed target snapshot. One
-or many matched evidence subjects still create one job for that schedule and
-edge. Subjectless alerts evaluate once in alert/event context.
+The event expression gates a source edge. **Run on** controls which reviewed
+targets receive the job:
+
+- **Triggered only** (the alert-event default) intersects the edge's immutable
+  VPS subjects with the separately reviewed target snapshot. Unreviewed VPSs
+  are never enrolled automatically; use **Update targets** after reviewing
+  selector membership changes. A subjectless edge or empty intersection is
+  recorded as skipped, with no job and no fallback to all targets.
+- **All at once** dispatches the complete reviewed snapshot, including for a
+  subjectless edge. Use this explicitly for controller-based automation.
+
+Either mode creates at most one job per schedule and edge, not one job per
+subject. Cron schedules always use All at once. API `run_on` values are
+`triggered_only` and `all_at_once`; CLI/VTY use `--run-on triggered-only` or
+`--run-on all-at-once`. An omitted create value follows the trigger-kind
+default; an omitted update value preserves the saved mode unless the trigger
+kind changes. The upgrade changes existing alert-event definitions to
+Triggered only and rearms them prospectively; cron definitions are unchanged.
+Previously accepted receipts retain their captured mode and targets.
 
 Event schedules are prospective. Create, edit, enable, target refresh, and
 defer establish a new arm fence; older and deferred-window edges do not replay.
 Once an edge is accepted under a locked definition, later edits do not rewrite
-its captured targets, template, actor, or revision. Each accepted Triggered and
+its captured mode, reviewed/effective targets, template, actor, or revision. Each accepted Triggered and
 Resolved edge produces at most one job. If both match before dispatch, the
 Resolved job waits for the same schedule's Triggered job to finish. It never
 waits on another schedule. A Resolve-only definition can run without a matching
@@ -870,8 +885,8 @@ nor fakes a reset.
 
 For example, let rule ID
 `6fddf19d-0000-4000-8000-000000000001` identify only this limiter policy.
-Create one Schedule whose fixed target snapshot is a reviewed controller VPS
-and whose two OR branches select both edges of only that rule:
+Create one Schedule whose reviewed targets contain the VPSs covered by the
+policy. Keep **Run on: Triggered only**, and select both edges of only that rule:
 
 ```text
 Event expression:
@@ -887,13 +902,13 @@ Event argv:
 ["/usr/local/sbin/vpsman-traffic-limit", "{event.kind}", "{alert.target_id}", "10mbit"]
 ```
 
-The example assumes that idempotent helper is installed on the controller;
+The example assumes that idempotent helper is installed on each reviewed VPS;
 vpsman does not supply it. The helper maps `alert.triggered` to apply and
 `alert.resolved` to remove. Because one saved Schedule accepts the paired
-edges, its Resolve job waits for its Trigger job to finish. If mitigation runs
-on each affected VPS instead, use a separate fixed-target Schedule per VPS and
-also compare `alert.target_id` to that VPS ID in both OR branches. A Schedule
-never dynamically replaces its reviewed targets with the alert subject.
+edges, its Resolve job waits for its Trigger job to finish. Each edge runs only
+on its originating reviewed VPS. If the helper instead controls other VPSs
+remotely, select only that reviewed controller and explicitly choose **All at
+once**. Keep both edges in the same Schedule to retain their ordering.
 
 #### Job failure occurrence with elapsed auto-resolution
 
@@ -961,6 +976,15 @@ Webhooks may match alert lifecycle edges directly, or match the resulting
 `schedule.due` and `schedule.job_finished` events as shown above when a saved
 Alert-event Schedule should own the condition. These are complementary choices;
 the latter avoids duplicating the schedule's alert expression in the webhook.
+
+Use `{job.output.stdout}` and `{job.output.stderr}` for retained job output.
+For `job.target.status` these are strings; whole-job events use JSON objects
+keyed by VPS ID (for example, `{job.output.stdout.v-123}`). Helpers such as
+`.split("\n")`, `.join(", ")`, and `.substr(0,200)` run before each substitution’s
+4 KiB limit; shortened values end with `...[XX bytes remaining]`. Stored streams
+are unchanged, and the complete message retains its 16 KiB limit. Webhook access
+requires `jobs:read` plus the existing integration scopes. Output previews select
+a retained event; expired output is unavailable and retries reuse the captured message.
 
 Recommended alert rules:
 

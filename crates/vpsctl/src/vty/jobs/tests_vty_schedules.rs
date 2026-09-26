@@ -54,9 +54,30 @@ fn parses_explicit_alert_event_schedule_options() {
 fn event_schedule_options_default_to_the_documented_noop() {
     let options = parse_vty_event_schedule_create_options(&["tag:edge", "--confirmed"]).unwrap();
     assert!(options.event_argv_template.is_empty());
+    assert_eq!(
+        options.run_on,
+        crate::commands_schedules::ScheduleRunOnArg::TriggeredOnly
+    );
     assert_eq!(options.max_failures, 3);
     assert!(
         parse_vty_event_schedule_create_options(&["--catch-up-policy=run_once", "tag:edge"])
             .is_err()
     );
+}
+
+#[test]
+fn event_schedule_run_on_accepts_only_explicit_modes() {
+    for tokens in [
+        vec!["--run-on", "all-at-once"],
+        vec!["--run-on=all-at-once"],
+    ] {
+        assert_eq!(
+            parse_vty_event_schedule_create_options(&tokens)
+                .unwrap()
+                .run_on,
+            crate::commands_schedules::ScheduleRunOnArg::AllAtOnce
+        );
+    }
+    assert!(parse_vty_event_schedule_create_options(&["--run-on"]).is_err());
+    assert!(parse_vty_event_schedule_create_options(&["--run-on=all"]).is_err());
 }

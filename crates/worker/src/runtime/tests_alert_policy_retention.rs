@@ -1435,13 +1435,13 @@ async fn insert_terminal_schedule_receipt(
             event_kind, event_id, episode_id, trigger_generation, edge_ordinal,
             status, source_occurred_at, source_payload_hash,
             matched_subject_client_ids, fixed_target_client_ids, causation_id,
-            job_id, dispatched_at, created_at, updated_at
+            job_id, dispatched_at, created_at, updated_at, effective_target_client_ids
         ) VALUES (
             $1, $2, 1, $3, $4, 'alert.triggered', $5, $6, 1, 1,
             'dispatched', now() - interval '10 days', $7,
             ARRAY[]::text[], ARRAY[]::text[], $8, $9,
             now() - interval '9 days', now() - interval '10 days',
-            now() - interval '9 days'
+            now() - interval '9 days', ARRAY[]::text[]
         )
         "#,
     )

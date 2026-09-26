@@ -648,6 +648,31 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn webhook_event_by_identity(
+        &self,
+        event_kind: &str,
+        event_id: &str,
+    ) -> Result<Option<WebhookEventRow>> {
+        match self {
+            Self::Postgres(pool) => sqlx::query(
+                r#"
+                    SELECT id, kind, event_id, event_predicates, subject_client_ids,
+                           payload, occurred_at::text AS occurred_at, actor_id
+                    FROM webhook_events
+                    WHERE kind = $1 AND event_id = $2
+                    ORDER BY occurred_at DESC
+                    LIMIT 1
+                    "#,
+            )
+            .bind(event_kind)
+            .bind(event_id)
+            .fetch_optional(pool)
+            .await?
+            .map(webhook_event_from_row)
+            .transpose(),
+        }
+    }
+
     pub(crate) async fn rotate_webhook_delivery_history(
         &self,
         request: &WebhookDeliveryRotationRequest,
@@ -786,25 +811,6 @@ impl Repository {
                 .fetch_optional(pool)
                 .await?;
                 row.map(webhook_delivery_from_row).transpose()
-            }
-        }
-    }
-
-    pub(crate) async fn webhook_rule_enabled(&self, rule_id: Uuid) -> Result<bool> {
-        match self {
-            Self::Postgres(pool) => {
-                let enabled = sqlx::query_scalar::<_, bool>(
-                    r#"
-                    SELECT enabled
-                    FROM webhook_rules
-                    WHERE id = $1
-                    "#,
-                )
-                .bind(rule_id)
-                .fetch_optional(pool)
-                .await?
-                .unwrap_or(false);
-                Ok(enabled)
             }
         }
     }

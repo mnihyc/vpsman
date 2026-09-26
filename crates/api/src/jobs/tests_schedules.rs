@@ -3,7 +3,7 @@ use vpsman_common::{GatewayPrivilegeVerificationBatchItemResult, JobCommand};
 use crate::{
     model::{
         BulkUpdateScheduleTargetsItemRequest, BulkUpdateScheduleTargetsRequest,
-        CreateScheduleRequest, ScheduleTriggerKind, UpdateScheduleRequest,
+        CreateScheduleRequest, ScheduleRunOn, ScheduleTriggerKind, UpdateScheduleRequest,
     },
     repository_schedules::{ScheduleSnapshotExpectation, ScheduleTargetBatchUpdate},
     routes_schedules::{
@@ -24,6 +24,7 @@ fn shell_schedule_request(name: &str, enabled: bool) -> CreateScheduleRequest {
         selector_expression: "tag:edge".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         trigger_kind: ScheduleTriggerKind::Cron,
+        run_on: None,
         cron_expr: Some("0 * * * *".to_string()),
         timezone: Some("UTC".to_string()),
         event_expression: None,
@@ -49,6 +50,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         selector_expression: "".to_string(),
         target_client_ids: Vec::new(),
         trigger_kind: ScheduleTriggerKind::Cron,
+        run_on: None,
         cron_expr: Some("*/5 * * * *".to_string()),
         timezone: Some("UTC".to_string()),
         event_expression: None,
@@ -139,6 +141,40 @@ fn schedule_validation_rejects_agent_lifecycle_commands() {
 }
 
 #[test]
+fn schedule_run_on_defaults_are_trigger_specific_and_cron_rejects_subject_mode() {
+    let mut request = shell_schedule_request("run-on", true);
+    assert_eq!(
+        request.trigger_kind.default_run_on(),
+        ScheduleRunOn::AllAtOnce
+    );
+    request.run_on = Some(ScheduleRunOn::TriggeredOnly);
+    assert_eq!(
+        validate_schedule_request(&request).unwrap_err().code,
+        "schedule_run_on_invalid_for_cron"
+    );
+    request.trigger_kind = ScheduleTriggerKind::Event;
+    request.operation = None;
+    request.cron_expr = None;
+    request.timezone = None;
+    request.catch_up_policy = None;
+    request.catch_up_limit = None;
+    request.retry_delay_secs = None;
+    request.event_expression = Some("alert.triggered || alert.resolved".to_string());
+    assert_eq!(
+        request.trigger_kind.default_run_on(),
+        ScheduleRunOn::TriggeredOnly
+    );
+    for run_on in [
+        None,
+        Some(ScheduleRunOn::TriggeredOnly),
+        Some(ScheduleRunOn::AllAtOnce),
+    ] {
+        request.run_on = run_on;
+        validate_schedule_request(&request).unwrap();
+    }
+}
+
+#[test]
 fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
     let request = UpdateScheduleRequest {
         name: "legacy-cadence-repair".to_string(),
@@ -153,6 +189,7 @@ fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
         expected_target_client_ids: vec!["client-a".to_string()],
         expected_definition_revision: 1,
         trigger_kind: ScheduleTriggerKind::Cron,
+        run_on: None,
         cron_expr: Some("0 0 31 2 *".to_string()),
         timezone: Some("UTC".to_string()),
         event_expression: None,

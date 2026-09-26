@@ -6300,6 +6300,31 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
 }
 
+.policyIdentifier {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.policyIdentifier > code {
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.policyIdentifier > .iconButton {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+}
+
 .policyRuleProvenance {
   display: grid;
   gap: 9px;

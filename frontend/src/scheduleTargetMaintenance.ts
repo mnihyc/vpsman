@@ -46,6 +46,7 @@ export async function buildScheduleTargetUpdatePrivilegeAssertion({
       selectorExpression,
       resolvedTargets: targetClientIds,
       triggerKind: schedule.trigger_kind,
+      runOn: schedule.run_on,
       cronExpr: schedule.cron_expr,
       timezone: schedule.timezone,
       eventExpression: schedule.event_expression,

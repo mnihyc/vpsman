@@ -1885,17 +1885,23 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await activate(
     webhookRules.getByRole("button", { name: "Create rule" }).first(),
   );
-  const webhookExpression = webhooks.getByRole("combobox", {
+  const webhookExpression = webhooks.getByRole("textbox", {
     name: "Webhook expression",
+    exact: true,
   });
   await webhookExpression.click();
   await webhookExpression.fill("");
-  await page.keyboard.type("alert.");
-  await expect(
-    page.getByRole("option", { name: /^alert\.triggered$/ }),
-  ).toBeVisible();
-  await page.keyboard.press("Enter");
-  await expect(webhookExpression).toHaveValue("alert.triggered");
+  const webhookSnippet = webhooks.getByRole("combobox", {
+    name: "Webhook expression snippet",
+  });
+  await webhookSnippet.selectOption("alert.triggered");
+  await expect(webhookSnippet).toHaveValue("alert.triggered");
+  await activate(
+    webhooks
+      .locator(".eventExpressionEditor")
+      .getByRole("button", { name: "Insert", exact: true }),
+  );
+  await expect(webhookExpression).toHaveText("alert.triggered");
   await activate(webhooks.getByLabel("Close detail panel"));
 
   await activate(webhookRules.getByRole("button", { name: "Send test" }));
@@ -6605,7 +6611,7 @@ test("updates only a schedule's frozen targets through the table action", async 
   expect(resolveManyRequests).toHaveLength(1);
   expect(resolveManyRequests[0]?.items).toHaveLength(1);
 
-  await expect(grid).toContainText("1 fixed VPS");
+  await expect(grid).toContainText("1 reviewed VPS");
   await expect
     .poll(() =>
       page.evaluate(
@@ -6851,7 +6857,7 @@ test(
     expect(saved?.body.target_client_ids).toHaveLength(2);
 
     const grid = page.getByLabel("Schedule records data grid");
-    await expect(grid).toContainText("2 fixed VPSs");
+    await expect(grid).toContainText("2 reviewed VPSs");
     await grid
       .locator(".gridToolbarActions")
       .getByRole("button", { name: "Actions", exact: true })
@@ -8233,7 +8239,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(page.getByText("0 * * * * · UTC")).toBeVisible();
   const schedulesGrid = page.getByLabel("Schedule records data grid");
   await expect(page.getByLabel("Schedule execution policy")).toContainText(
-    "Enabled schedules dispatch jobs from their saved target snapshot",
+    "Enabled schedules dispatch within their reviewed target scope",
   );
   await activate(
     schedulesGrid
@@ -8308,8 +8314,9 @@ test(
     await page.getByRole("radio", { name: /Alert event/ }).check();
     await expect(page.getByLabel("Schedule cron expression")).toHaveCount(0);
     await expect(
-      page.getByLabel("Schedule alert event expression"),
+      page.getByRole("textbox", { name: "Schedule alert event expression", exact: true }),
     ).toBeVisible();
+    await expect(page.getByLabel("Schedule run on", { exact: true })).toHaveValue("triggered_only");
     await expect(page.getByText("No raw-event flapping")).toBeVisible();
     await expect(page.getByText("Default no-op · /bin/true")).toBeVisible();
     await expect(page.getByLabel("Alert event argv elements")).toContainText(
@@ -8405,6 +8412,7 @@ test(
       cron_expr: null,
       enabled: true,
       event_expression: "alert.triggered && alert.category:traffic",
+      run_on: "triggered_only",
       max_failures: 3,
       name: "traffic mitigation",
       operation: null,

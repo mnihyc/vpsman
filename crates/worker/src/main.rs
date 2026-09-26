@@ -1853,8 +1853,12 @@ async fn main() -> Result<()> {
         let alert_notifications =
             process_alert_notification_work(&pool, runtime_config.alert_notification_config, true)
                 .await?;
-        let webhook_rules =
-            process_webhook_rules(&pool, runtime_config.webhook_rule_config).await?;
+        let webhook_rules = process_webhook_rules(
+            &pool,
+            runtime_config.webhook_rule_config,
+            Some(&runtime_config.backup_object_store),
+        )
+        .await?;
         let alert_policy_retention =
             process_alert_policy_retention(&pool, runtime_config.alert_policy_retention_config)
                 .await?;
@@ -2361,8 +2365,12 @@ async fn run_webhook_event_materialization_lane(
     loop {
         let (runtime_config, _) =
             wait_for_worker_cycle_or_hint(&mut runtime_config_rx, &mut hint_rx).await?;
-        match process_webhook_event_materialization_work(&pool, runtime_config.webhook_rule_config)
-            .await
+        match process_webhook_event_materialization_work(
+            &pool,
+            runtime_config.webhook_rule_config,
+            Some(&runtime_config.backup_object_store),
+        )
+        .await
         {
             Ok(run) => {
                 if run.materialized > 0 {

@@ -9,6 +9,95 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 
+const textLayoutProperties = [
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "line-height",
+  "letter-spacing",
+  "word-spacing",
+  "tab-size",
+  "text-indent",
+  "text-transform",
+  "white-space",
+  "overflow-wrap",
+  "word-break",
+] as const;
+
+const pendingGeometry = new Map<
+  HTMLTextAreaElement,
+  { gutter: HTMLDivElement; mirror: HTMLDivElement }
+>();
+let geometryFrame = 0;
+
+function flushGeometry() {
+  geometryFrame = 0;
+  // Mounting many editors must not alternate a layout write and forced layout
+  // read for each field. Keep the same native measurements, grouped by phase.
+  const fields = [...pendingGeometry]
+    .filter(([textarea]) => textarea.isConnected)
+    .map(([textarea, { gutter, mirror }]) => {
+      const computed = getComputedStyle(textarea);
+      return {
+        textarea,
+        gutter,
+        mirror,
+        computed,
+        fontSize: computed.fontSize,
+        inset: parseFloat(computed.paddingRight),
+        typography: textLayoutProperties.map(
+          (property) => [property, computed.getPropertyValue(property)] as const,
+        ),
+      };
+    });
+  pendingGeometry.clear();
+
+  // Mirror only text layout. Browser wrapping determines logical line heights.
+  for (const field of fields) {
+    for (const [property, value] of field.typography) {
+      field.mirror.style.setProperty(property, value);
+    }
+    field.gutter.style.fontSize = field.fontSize;
+  }
+  const widths = fields.map((field) => ({
+    ...field,
+    gutterWidth: field.gutter.getBoundingClientRect().width,
+  }));
+  for (const { textarea, gutterWidth, inset } of widths) {
+    // Existing fields have symmetric horizontal padding. Preserve that inset.
+    textarea.style.paddingLeft = `${gutterWidth + inset}px`;
+  }
+  const geometry = widths.map((field) => {
+    const { textarea, computed, gutterWidth, inset } = field;
+    // clientWidth rounds to an integer. Preserve the CSS width's fraction to
+    // keep wrapping boundaries identical between the textarea and its mirror.
+    const viewportWidth =
+      parseFloat(computed.width) - textarea.offsetWidth + textarea.clientWidth;
+    return {
+      ...field,
+      top: textarea.offsetTop + parseFloat(computed.borderTopWidth),
+      left: textarea.offsetLeft + parseFloat(computed.borderLeftWidth),
+      height: textarea.clientHeight,
+      borderTopLeftRadius: computed.borderTopLeftRadius,
+      borderBottomLeftRadius: computed.borderBottomLeftRadius,
+      mirrorWidth: Math.max(0, viewportWidth - gutterWidth - 2 * inset),
+      mirrorTop: computed.paddingTop,
+      scrollTop: textarea.scrollTop,
+    };
+  });
+  for (const field of geometry) {
+    field.gutter.style.top = `${field.top}px`;
+    field.gutter.style.left = `${field.left}px`;
+    field.gutter.style.height = `${field.height}px`;
+    field.gutter.style.borderTopLeftRadius = field.borderTopLeftRadius;
+    field.gutter.style.borderBottomLeftRadius = field.borderBottomLeftRadius;
+    field.mirror.style.width = `${field.mirrorWidth}px`;
+    field.mirror.style.top = field.mirrorTop;
+    field.mirror.style.transform = `translateY(${-field.scrollTop}px)`;
+  }
+}
+
 /** A native textarea with a gutter for logical lines, not soft-wrapped rows. */
 export const NumberedTextarea = forwardRef<
   HTMLTextAreaElement,
@@ -37,45 +126,9 @@ export const NumberedTextarea = forwardRef<
     const mirror = mirrorRef.current;
     if (!textarea || !gutter || !mirror) return;
 
-    const computed = getComputedStyle(textarea);
-    // Mirror only text layout. Browser wrapping then determines each logical
-    // line's height without measuring or guessing character widths per line.
-    for (const property of [
-      "font-family",
-      "font-size",
-      "font-weight",
-      "font-style",
-      "line-height",
-      "letter-spacing",
-      "word-spacing",
-      "tab-size",
-      "text-indent",
-      "text-transform",
-      "white-space",
-      "overflow-wrap",
-      "word-break",
-    ]) {
-      mirror.style.setProperty(property, computed.getPropertyValue(property));
-    }
-    gutter.style.fontSize = computed.fontSize;
-    const gutterWidth = gutter.getBoundingClientRect().width;
-    // Existing form fields use symmetric horizontal padding. Keep that text
-    // inset after reserving the gutter, leaving all other native styles intact.
-    const inset = parseFloat(computed.paddingRight);
-    textarea.style.paddingLeft = `${gutterWidth + inset}px`;
-    gutter.style.top = `${textarea.offsetTop + parseFloat(computed.borderTopWidth)}px`;
-    gutter.style.left = `${textarea.offsetLeft + parseFloat(computed.borderLeftWidth)}px`;
-    gutter.style.height = `${textarea.clientHeight}px`;
-    gutter.style.borderTopLeftRadius = computed.borderTopLeftRadius;
-    gutter.style.borderBottomLeftRadius = computed.borderBottomLeftRadius;
-    // clientWidth rounds to an integer. Retain the CSS width's fractional part
-    // or a word at a wrapping boundary can shift subsequent gutter numbers.
-    const viewportWidth =
-      parseFloat(computed.width) - textarea.offsetWidth + textarea.clientWidth;
-    mirror.style.width = `${Math.max(0, viewportWidth - gutterWidth - 2 * inset)}px`;
-    mirror.style.top = computed.paddingTop;
-    syncScroll();
-  }, [syncScroll]);
+    pendingGeometry.set(textarea, { gutter, mirror });
+    if (!geometryFrame) geometryFrame = requestAnimationFrame(flushGeometry);
+  }, []);
 
   // Also runs after controlled edits are normalized/rejected by their owner.
   useLayoutEffect(syncGeometry);
@@ -94,6 +147,11 @@ export const NumberedTextarea = forwardRef<
     const form = textarea.form;
     form?.addEventListener("reset", onReset);
     return () => {
+      pendingGeometry.delete(textarea);
+      if (!pendingGeometry.size) {
+        cancelAnimationFrame(geometryFrame);
+        geometryFrame = 0;
+      }
       observer.disconnect();
       window.removeEventListener("resize", syncGeometry);
       form?.removeEventListener("reset", onReset);

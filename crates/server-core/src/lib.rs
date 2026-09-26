@@ -8,6 +8,8 @@ use vpsman_common::{
 mod client_suppression;
 #[path = "runtime/traffic_terminal_retention.rs"]
 mod traffic_terminal_retention;
+#[path = "runtime/webhook_job_output.rs"]
+mod webhook_job_output;
 #[path = "runtime/webhook_target.rs"]
 mod webhook_target;
 
@@ -17,6 +19,7 @@ pub use traffic_terminal_retention::{
     traffic_terminal_retention_cutoff_unix, traffic_terminal_retention_has_remaining_work,
     TrafficTerminalRetentionPage,
 };
+pub use webhook_job_output::enrich_webhook_job_output_context;
 pub use webhook_target::{
     prepare_webhook_target, validate_webhook_target, PreparedWebhookTarget,
     DEVELOPMENT_LOOPBACK_WEBHOOKS_ENV,

@@ -7,7 +7,7 @@ use crate::{
     model_fleet_snapshot::{FleetSnapshotQuery, FleetSnapshotResponse, FleetSnapshotSource},
     security::{
         operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
-        SCOPE_INTEGRATIONS_READ,
+        SCOPE_INTEGRATIONS_READ, SCOPE_JOBS_READ,
     },
     state::AppState,
     unix_now,
@@ -422,6 +422,7 @@ async fn load_full_sources(
     let backups_read = operator_has_scope(scopes, SCOPE_BACKUPS_READ);
     let config_read = operator_has_scope(scopes, SCOPE_CONFIG_READ);
     let integrations_read = operator_has_scope(scopes, SCOPE_INTEGRATIONS_READ);
+    let webhook_read = integrations_read && operator_has_scope(scopes, SCOPE_JOBS_READ);
     let vps_rule_values = if config_read {
         context.vps_rule_values.clone().unwrap_or_else(|| {
             FleetSnapshotSource::unavailable("fleet_snapshot_vps_rule_values_unavailable")
@@ -495,12 +496,12 @@ async fn load_full_sources(
         ),
         load_source(
             "webhook_rules",
-            integrations_read,
+            webhook_read,
             state.repo.list_all_webhook_rules(),
         ),
         load_bounded_source(
             "webhook_rule_deliveries",
-            integrations_read,
+            webhook_read,
             state
                 .repo
                 .list_webhook_rule_deliveries(FLEET_DETAIL_LIMIT + 1, None, None, None,),

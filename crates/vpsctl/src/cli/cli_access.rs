@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
-use crate::commands_schedules::ScheduleTriggerKindArg;
+use crate::commands_schedules::{ScheduleRunOnArg, ScheduleTriggerKindArg};
 
 #[derive(Debug, Args)]
 pub(crate) struct BootstrapCommand {
@@ -681,7 +681,7 @@ pub(crate) struct BulkResolveCommand {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  vpsctl schedule-create --name hourly --command /bin/true --tags edge --confirmed\n  vpsctl schedule-create --name traffic-guard --trigger-kind event --event-expression 'alert.triggered && alert.category:traffic' --event-argv-template /usr/local/bin/limit-traffic --event-argv-template '{event.kind}' --event-argv-template '{alert.target_id}' --tags edge --confirmed\n\nOmit every --event-argv-template to dispatch the safe /bin/true no-op. Use a separate alert.resolved expression when recovery needs a different fixed argv program. The Schedule web UI provides authoritative per-edge server preview before saving."
+    after_help = "Examples:\n  vpsctl schedule-create --name hourly --command /bin/true --tags edge --confirmed\n  vpsctl schedule-create --name traffic-guard --trigger-kind event --event-expression '(alert.triggered || alert.resolved) && alert.category:traffic' --event-argv-template /usr/local/bin/limit-traffic --event-argv-template '{event.kind}' --event-argv-template '{alert.target_id}' --tags edge --confirmed\n\nEvent schedules default to --run-on triggered-only: immutable alert subjects intersected with reviewed targets. Use --run-on all-at-once for a reviewed controller. Omit every --event-argv-template to dispatch the safe /bin/true no-op. Keep both lifecycle edges in one schedule and branch on event.kind in the helper when recovery must wait for mitigation. The Schedule web UI provides authoritative per-edge server preview before saving."
 )]
 pub(crate) struct ScheduleCreateCommand {
     #[arg(
@@ -691,6 +691,12 @@ pub(crate) struct ScheduleCreateCommand {
         help = "Dispatch by five-field cron cadence or by a policy-owned alert lifecycle edge"
     )]
     pub(crate) trigger_kind: ScheduleTriggerKindArg,
+    #[arg(
+        long,
+        value_enum,
+        help = "Run on matching alert subjects (event default) or all reviewed targets (cron default)"
+    )]
+    pub(crate) run_on: Option<ScheduleRunOnArg>,
     #[arg(
         long,
         help = "Cron schedule executable or command label; omit for event schedules"
@@ -755,6 +761,12 @@ pub(crate) struct ScheduleUpdateCommand {
         help = "Dispatch by five-field cron cadence or by a policy-owned alert lifecycle edge"
     )]
     pub(crate) trigger_kind: ScheduleTriggerKindArg,
+    #[arg(
+        long,
+        value_enum,
+        help = "Run on matching alert subjects or all reviewed targets; omission preserves the saved mode when trigger kind is unchanged"
+    )]
+    pub(crate) run_on: Option<ScheduleRunOnArg>,
     #[arg(long)]
     pub(crate) schedule_id: String,
     #[arg(long)]

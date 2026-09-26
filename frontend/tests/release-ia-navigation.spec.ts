@@ -5053,7 +5053,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
   const schedulesGrid = page.getByLabel("Schedule records data grid");
   const schedulePolicy = page.getByLabel("Schedule execution policy");
   await expect(schedulePolicy).toContainText(
-    "Enabled schedules dispatch jobs from their saved target snapshot after either a UTC cron time or a policy-confirmed alert lifecycle edge",
+    "Enabled schedules dispatch within their reviewed target scope after either a UTC cron time or a policy-confirmed alert lifecycle edge",
   );
   await expect(schedulePolicy).toContainText(
     "Alert schedules consume only Triggered and Resolved edges",
@@ -6201,9 +6201,9 @@ test("observability webhook rule editor retains registry and navigation context"
   const bodyTemplateEditor = editor.getByRole("textbox", {
     name: "Webhook body template",
   });
-  await expect(editor.getByLabel("Webhook expression")).toHaveValue(
-    "alert.triggered",
-  );
+  await expect(
+    editor.getByRole("textbox", { name: "Webhook expression", exact: true }),
+  ).toHaveText("alert.triggered");
   await expect(bodyTemplateEditor).toBeVisible();
   await expect(bodyTemplateEditor).toContainText("[if alert.triggered]");
   await expect(bodyTemplateEditor).toContainText("🚨 ALERT TRIGGERED");
@@ -6250,7 +6250,7 @@ test("observability webhook rule editor retains registry and navigation context"
   expect(bottomTemplateText).toContain("ℹ️ EVENT");
   expect(bottomTemplateText).toContain("[endif]");
   await expect(editor).toContainText(
-    "The starter body renders the matching conditional branch and includes full alert lifecycle context",
+    "Retained job.output.stdout/stderr is loaded only when referenced. Each substitution is limited to 4 KiB after helpers run.",
   );
   const cooldown = editor.getByLabel("Webhook cooldown seconds");
   await expect(cooldown).toHaveAttribute("min", "0");
@@ -6260,7 +6260,7 @@ test("observability webhook rule editor retains registry and navigation context"
     .fill("fixture-webhook-secret");
   await editor.getByLabel("Webhook rule name").fill("edge-status-webhook");
   await editor
-    .getByLabel("Webhook expression")
+    .getByRole("textbox", { name: "Webhook expression", exact: true })
     .fill("alert.triggered && alert.category:agent_status");
   await editor
     .getByLabel("Webhook target")

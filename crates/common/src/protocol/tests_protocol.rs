@@ -1231,7 +1231,7 @@ fn job_privilege_intent_binds_rollout_policy_hash() {
 }
 
 #[test]
-fn schedule_privilege_intent_fields_match_canonical_v2_payload() {
+fn schedule_privilege_intent_fields_match_canonical_v3_payload() {
     let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
     let intent = canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
         action: "schedule.update",
@@ -1243,6 +1243,7 @@ fn schedule_privilege_intent_fields_match_canonical_v2_payload() {
         selector_expression: " tag:edge ",
         resolved_targets: &resolved_targets,
         trigger_kind: "event",
+        run_on: "triggered_only",
         cron_expr: None,
         timezone: None,
         event_expression: Some(" alert.triggered "),
@@ -1269,6 +1270,7 @@ fn schedule_privilege_intent_fields_match_canonical_v2_payload() {
             "selector_expression",
             "resolved_targets",
             "trigger_kind",
+            "run_on",
             "cron_expr",
             "timezone",
             "event_expression",
@@ -1283,7 +1285,7 @@ fn schedule_privilege_intent_fields_match_canonical_v2_payload() {
     );
     assert_eq!(
         intent,
-        r#"{"version":2,"action":"schedule.update","schedule_id":"schedule-a","definition_revision":7,"name":"Alert handler","command_type":"shell_argv","operation_payload_hash":"ab","selector_expression":"tag:edge","resolved_targets":["client-a","client-b"],"trigger_kind":"event","cron_expr":null,"timezone":null,"event_expression":"alert.triggered","enabled":true,"catch_up_policy":null,"catch_up_limit":null,"retry_delay_secs":null,"max_failures":3,"deferred_until":null,"deleted":false}"#
+        r#"{"version":3,"action":"schedule.update","schedule_id":"schedule-a","definition_revision":7,"name":"Alert handler","command_type":"shell_argv","operation_payload_hash":"ab","selector_expression":"tag:edge","resolved_targets":["client-a","client-b"],"trigger_kind":"event","run_on":"triggered_only","cron_expr":null,"timezone":null,"event_expression":"alert.triggered","enabled":true,"catch_up_policy":null,"catch_up_limit":null,"retry_delay_secs":null,"max_failures":3,"deferred_until":null,"deleted":false}"#
     );
 }
 

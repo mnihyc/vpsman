@@ -27,6 +27,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import { NumberedTextarea } from "../components/NumberedTextarea";
+import { EventExpressionEditor } from "../components/EventExpressionEditor";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -74,6 +75,7 @@ import type {
   JobOperation,
   SchedulePrivilegeMutationRequest,
   ScheduleRecord,
+  ScheduleRunOn,
   ScheduleTriggerKind,
   UpdateScheduleRequest,
 } from "../types";
@@ -220,6 +222,7 @@ export function SchedulesPanel({
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [commandText, setCommandText] = useState("");
   const [triggerKind, setTriggerKind] = useState<ScheduleTriggerKind>("cron");
+  const [runOn, setRunOn] = useState<ScheduleRunOn>("triggered_only");
   const [cronExpr, setCronExpr] = useState("0 * * * *");
   const [eventExpression, setEventExpression] = useState("alert.triggered");
   const [enabled, setEnabled] = useState(false);
@@ -464,8 +467,14 @@ export function SchedulesPanel({
         "-",
     },
     {
-      label: "Fixed targets",
+      label: "Reviewed targets",
       value: `${pendingScheduleSnapshot?.targetClientIds.length ?? selectedTargetCount} resolved and saved`,
+    },
+    {
+      label: "Run on",
+      value: (pendingScheduleSnapshot?.runOn ?? (triggerKind === "event" ? runOn : "all_at_once")) === "triggered_only"
+        ? "Triggered only · alerting VPS within reviewed targets"
+        : "All at once · entire reviewed target list",
     },
     {
       label: "Target preview",
@@ -644,12 +653,10 @@ export function SchedulesPanel({
           return (
             <span className="historyPrimary">
               <strong>
-                {countPhrase(fixedIds.length, "fixed VPS", "fixed VPSs")}
+                {countPhrase(fixedIds.length, "reviewed VPS", "reviewed VPSs")}
               </strong>
               <small className="mutedText">
-                {schedule.selector_expression.trim()
-                  ? "audit selector retained"
-                  : "no audit selector"}
+                {schedule.run_on === "triggered_only" ? "Triggered only" : "All at once"}
               </small>
             </span>
           );
@@ -881,6 +888,7 @@ export function SchedulesPanel({
           selectorExpression: snapshot.selectorExpression,
           resolvedTargets: snapshot.targetClientIds,
           triggerKind: snapshot.triggerKind,
+          runOn: snapshot.runOn,
           cronExpr: snapshot.cronExpr,
           timezone: snapshot.triggerKind === "cron" ? "UTC" : null,
           eventExpression: snapshot.eventExpression,
@@ -901,6 +909,7 @@ export function SchedulesPanel({
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.targetClientIds,
         trigger_kind: snapshot.triggerKind,
+        run_on: snapshot.runOn,
         cron_expr: snapshot.triggerKind === "cron" ? snapshot.cronExpr : null,
         timezone: snapshot.triggerKind === "cron" ? "UTC" : null,
         event_expression:
@@ -943,6 +952,7 @@ export function SchedulesPanel({
     setSelectedTemplateId("");
     setCommandText("");
     setTriggerKind("cron");
+    setRunOn("triggered_only");
     setCronExpr("0 * * * *");
     setEventExpression("alert.triggered");
     setEnabled(false);
@@ -973,6 +983,7 @@ export function SchedulesPanel({
           : commandTypeForApi(operationForPrivilege),
       selectorExpression: selector,
       triggerKind,
+      runOn: triggerKind === "event" ? runOn : "all_at_once" as ScheduleRunOn,
       cronExpr: triggerKind === "cron" ? cronExpr.trim() : null,
       eventExpression: triggerKind === "event" ? eventExpression.trim() : null,
       enabled,
@@ -1092,6 +1103,7 @@ export function SchedulesPanel({
           : "",
     );
     setTriggerKind(schedule.trigger_kind);
+    setRunOn(schedule.trigger_kind === "event" ? schedule.run_on : "triggered_only");
     setCronExpr(schedule.cron_expr ?? "0 * * * *");
     setEventExpression(schedule.event_expression ?? "alert.triggered");
     setEnabled(schedule.enabled);
@@ -1403,6 +1415,7 @@ export function SchedulesPanel({
         selectorExpression: selectorExpressionForIntent,
         resolvedTargets: targetIds,
         triggerKind: schedule.trigger_kind,
+        runOn: schedule.run_on,
         cronExpr: schedule.cron_expr,
         timezone: schedule.timezone,
         eventExpression: schedule.event_expression,
@@ -1524,7 +1537,7 @@ export function SchedulesPanel({
           : `${scheduleOperationSummary(action.schedule)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
       },
       {
-        label: "Fixed targets",
+        label: "Reviewed targets",
         value: `${vpsCountLabel(fixedTargetIds(action.schedule).length)} saved`,
       },
       {
@@ -1579,6 +1592,7 @@ export function SchedulesPanel({
     selectedTemplateId,
     selectorExpression,
     triggerKind,
+    runOn,
   ]);
 
   const scheduleActions: ConsoleDataGridAction<ScheduleRecord>[] = [
@@ -1758,9 +1772,11 @@ export function SchedulesPanel({
         >
           <BellRing size={16} />
           <span>
-            Enabled schedules dispatch jobs from their saved target snapshot
+            Enabled schedules dispatch within their reviewed target scope
             after either a UTC cron time or a policy-confirmed alert lifecycle
-            edge. Alert schedules consume only <strong>Triggered</strong> and{" "}
+            edge. <strong>Triggered only</strong> selects the alerting VPS;
+            <strong> All at once</strong> selects the entire reviewed list.
+            Alert schedules consume only <strong>Triggered</strong> and{" "}
             <strong>Resolved</strong> edges—never raw status or telemetry flaps.
             Use <strong>Run now</strong> on cron schedules for one manual
             dispatch; alert schedules require a real edge and render its exact
@@ -2031,6 +2047,27 @@ export function SchedulesPanel({
                 </label>
               </div>
             </fieldset>
+            {triggerKind === "event" && (
+              <label>
+                <ScheduleFieldLabel
+                  label="Run on"
+                  help="The reviewed target list is the eligible scope. Triggered only runs on the VPS named by the matching Triggered or Resolved alert edge, within that scope. All at once runs on the entire reviewed list for each matching edge. Update targets refreshes the eligible scope from its saved selector."
+                />
+                <select
+                  aria-label="Schedule run on"
+                  value={runOn}
+                  onChange={(event) => setRunOn(event.target.value as ScheduleRunOn)}
+                >
+                  <option value="triggered_only">Triggered only</option>
+                  <option value="all_at_once">All at once</option>
+                </select>
+                <small>
+                  {runOn === "triggered_only"
+                    ? "Only the alerting VPS within reviewed targets, for both Triggered and Resolved. No matching VPS means no job."
+                    : "Every reviewed VPS, once per matching alert edge."}
+                </small>
+              </label>
+            )}
             <label>
               <span>Template</span>
               <select
@@ -2179,9 +2216,10 @@ export function SchedulesPanel({
                   validationError={eventArgvTemplateError}
                 />
                 <small className="mutedText">
-                  Alert-event jobs use the same reviewed fixed target snapshot
-                  as cron jobs. The alert subject filters the edge; it never
-                  silently replaces dispatch targets. Vpsman does not infer a
+                  {runOn === "triggered_only"
+                    ? "The matching alert's VPS must belong to the reviewed target list; unrelated VPSs never receive this job. "
+                    : "Each matching alert edge dispatches to the entire reviewed target list. "}
+                  Vpsman does not infer a
                   shell: it passes the rendered argv directly, and the selected
                   executable defines how each argument is interpreted.
                 </small>
@@ -2282,20 +2320,18 @@ export function SchedulesPanel({
                     schedule sees an edge.
                   </span>
                 </div>
-                <SearchExpressionInput
+                <EventExpressionEditor
                   ariaLabel="Schedule alert event expression"
-                  className="targetExpressionBar"
-                  metaDescription="Every OR branch must include alert.triggered or alert.resolved. Other fields may only filter immutable alert, policy, rule, or event metadata."
                   onChange={setEventExpression}
-                  placeholder="alert.triggered && alert.category:traffic"
-                  showVerificationMessage
                   suggestions={SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS}
                   value={eventExpression}
-                  verification={eventExpressionError ? "invalid" : "valid"}
-                  verificationMessage={
-                    eventExpressionError ??
-                    "Policy lifecycle edge · prospective · one job per edge"
-                  }
+                  validationError={eventExpressionError}
+                  descriptions={<>
+                    <p>Each OR branch must contain <code>alert.triggered</code> or <code>alert.resolved</code>. Other fields filter the immutable event. Persisting and Unknown do not emit new edges.</p>
+                    <p>For paired mitigation and recovery, use one schedule: <code>(alert.triggered || alert.resolved) &amp;&amp; policy_rule.id = "RULE_UUID"</code>. Copy the rule UUID from Alerts → policy details or Edit. The same schedule waits for its triggering job to finish before dispatching recovery.</p>
+                    <p>To match only condition recovery, use <code>alert.triggered || (alert.resolved &amp;&amp; alert.resolution_reason = "condition_recovered")</code>, grouped with your rule filter. Blank policy Resolve uses this recovery reason; explicit Resolve expressions use <code>recovery_expression_matched</code>.</p>
+                    <p>Run on controls dispatch scope. Update targets re-resolves the saved selector and requires review. Existing alert episodes and events before arming are not replayed.</p>
+                  </>}
                 />
                 <div
                   aria-label="Alert event expression examples"
@@ -2461,7 +2497,7 @@ export function SchedulesPanel({
                   >
                     One job per edge
                   </span>
-                  <span className="targetChip">Fixed targets</span>
+                  <span className="targetChip">{runOn === "triggered_only" ? "Triggered only" : "All at once"}</span>
                   <span
                     className="targetChip"
                     title="Direct schedule, job, backup, and capability ancestry is tracked and cyclic dispatch fails closed. Indirect effects of a shell command on later agent or telemetry state cannot currently be correlated."
@@ -2541,10 +2577,10 @@ export function SchedulesPanel({
                     ? eventArgvTemplateSummary(eventArgvTemplate)
                     : (selectedTemplate?.name ??
                       operationSummary(scheduleOperation))
-              } on ${vpsCountLabel(
+              } within ${vpsCountLabel(
                 pendingScheduleSnapshot?.targetClientIds.length ??
                   selectedTargetCount,
-              )}. The resolved target list is saved as a fixed snapshot; the selector is retained for audit and the table's manual Update targets action.`}
+              )} reviewed. ${confirmationTriggerKind === "event" ? "Run on determines whether each matching edge targets only its alerting VPS or the whole list. " : "Cron runs on the entire reviewed list. "}Update targets refreshes this eligible scope from the saved selector.`}
               error={actionError}
               items={confirmationItems}
               onCancel={() => {
@@ -2789,6 +2825,7 @@ type ScheduleDraftSnapshot = {
   selectorExpression: string;
   targetClientIds: string[];
   triggerKind: ScheduleTriggerKind;
+  runOn: ScheduleRunOn;
   cronExpr: string | null;
   eventExpression: string | null;
   eventTemplatePreview: EventScheduleTemplatePreviewResponse | null;
@@ -3303,6 +3340,11 @@ function ScheduleExpandedDetail({
   return (
     <div className="consoleInlineDetailGrid scheduleExpandedDetail">
       <span>
+        <strong>Schedule UUID</strong>
+        <code className="scheduleIdentifier">{schedule.id}</code>
+        <button className="secondaryAction compactAction" type="button" onClick={() => void copyText(schedule.id)}>Copy schedule UUID</button>
+      </span>
+      <span>
         <strong>Operation</strong>
         <span
           title={operationEvidenceTitle(
@@ -3322,11 +3364,12 @@ function ScheduleExpandedDetail({
       </span>
       <span>
         <strong>Targets</strong>
+        <span>Run on: {schedule.run_on === "triggered_only" ? "Triggered only" : "All at once"}</span>
         <span>
           {countPhrase(
             fixedTargetIds(schedule).length,
-            "fixed VPS",
-            "fixed VPSs",
+            "reviewed VPS",
+            "reviewed VPSs",
           )}
         </span>
         <span>

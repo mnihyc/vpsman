@@ -3464,6 +3464,7 @@ const schedules = [
     ],
     operation: { argv: ["uptime"], pty: false, type: "shell" },
     retry_delay_secs: 300,
+    run_on: "all_at_once",
     selector_expression: "id:agent-sfo-01 || provider:alpha",
     target_client_ids: ["agent-sfo-01", "agent-fra-02"],
     timezone: "UTC",
@@ -5338,6 +5339,9 @@ export async function installConsoleApiMock(
           schedule.trigger_kind === "event" ? "event" : "cron";
         return {
           trigger_kind: triggerKind,
+          run_on:
+            schedule.run_on ??
+            (triggerKind === "event" ? "triggered_only" : "all_at_once"),
           definition_revision: schedule.definition_revision ?? 1,
           catch_up_limit:
             triggerKind === "event" ? null : (schedule.catch_up_limit ?? 1),
@@ -10620,6 +10624,7 @@ export async function installConsoleApiMock(
             name?: string;
             operation?: Record<string, unknown> | null;
             retry_delay_secs?: number | null;
+            run_on?: "triggered_only" | "all_at_once";
             selector_expression?: string;
             target_client_ids?: string[];
             timezone?: string | null;
@@ -10630,6 +10635,7 @@ export async function installConsoleApiMock(
             triggerKind === "cron" ? (request.cron_expr ?? "0 * * * *") : null;
           const schedule = normalizeScheduleRecord({
             trigger_kind: triggerKind,
+            run_on: request.run_on,
             catch_up_limit:
               triggerKind === "cron" ? (request.catch_up_limit ?? 1) : null,
             catch_up_policy:
@@ -10755,14 +10761,23 @@ export async function installConsoleApiMock(
             name?: string;
             operation?: Record<string, unknown> | null;
             retry_delay_secs?: number | null;
+            run_on?: "triggered_only" | "all_at_once";
             selector_expression?: string;
             target_client_ids?: string[];
             timezone?: string | null;
             trigger_kind?: "cron" | "event";
           };
           const triggerKind = request.trigger_kind ?? schedule.trigger_kind;
+          const runOn =
+            request.run_on ??
+            (triggerKind === schedule.trigger_kind
+              ? schedule.run_on
+              : triggerKind === "event"
+                ? "triggered_only"
+                : "all_at_once");
           Object.assign(schedule, {
             trigger_kind: triggerKind,
+            run_on: runOn,
             definition_revision: Number(schedule.definition_revision) + 1,
             catch_up_limit:
               triggerKind === "event"

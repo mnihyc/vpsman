@@ -696,6 +696,7 @@ fn backup_policy_schedule_input(request: &CreateBackupPolicyRequest) -> Schedule
         selector_expression: request.selector_expression.clone(),
         target_client_ids: request.target_client_ids.clone(),
         trigger_kind: crate::model::ScheduleTriggerKind::Cron,
+        run_on: crate::model::ScheduleRunOn::AllAtOnce,
         cron_expr: Some(request.cron_expr.clone()),
         timezone: Some(request.timezone.clone()),
         event_expression: None,

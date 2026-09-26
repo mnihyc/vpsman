@@ -130,6 +130,7 @@ impl Repository {
                         name,
                         enabled,
                         trigger_kind,
+                        run_on,
                         definition_revision,
                         operation,
                         event_argv_template,
@@ -198,6 +199,9 @@ impl Repository {
         request: CreateScheduleRequest,
         operator: &AuthContext,
     ) -> Result<ScheduleView> {
+        let run_on = request
+            .run_on
+            .unwrap_or_else(|| request.trigger_kind.default_run_on());
         let CreateScheduleRequest {
             name,
             operation,
@@ -223,6 +227,7 @@ impl Repository {
                 selector_expression,
                 target_client_ids,
                 trigger_kind,
+                run_on,
                 cron_expr,
                 timezone,
                 event_expression,
@@ -754,6 +759,7 @@ pub(crate) struct ScheduleCreateInput {
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) run_on: ScheduleRunOn,
     pub(crate) cron_expr: Option<String>,
     pub(crate) timezone: Option<String>,
     pub(crate) event_expression: Option<String>,
@@ -793,6 +799,7 @@ struct ScheduleRowParts {
     name: String,
     enabled: bool,
     trigger_kind: ScheduleTriggerKind,
+    run_on: ScheduleRunOn,
     definition_revision: i64,
     operation: Option<JobCommand>,
     event_argv_template: Option<Vec<String>>,
@@ -842,6 +849,7 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> Result<ScheduleView> {
         name: parts.name,
         enabled: parts.enabled,
         trigger_kind: parts.trigger_kind,
+        run_on: parts.run_on,
         definition_revision: parts.definition_revision,
         command_type,
         operation: parts.operation,
@@ -879,6 +887,7 @@ fn schedule_select_sql(where_clause: &str) -> String {
             name,
             enabled,
             trigger_kind,
+            run_on,
             definition_revision,
             operation,
             event_argv_template,
@@ -912,6 +921,11 @@ fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView
         "event" => ScheduleTriggerKind::Event,
         other => anyhow::bail!("invalid_schedule_trigger_kind:{other}"),
     };
+    let run_on = match row.try_get::<String, _>("run_on")?.as_str() {
+        "all_at_once" => ScheduleRunOn::AllAtOnce,
+        "triggered_only" => ScheduleRunOn::TriggeredOnly,
+        other => anyhow::bail!("invalid_schedule_run_on:{other}"),
+    };
     let event_argv_template = row
         .try_get::<Option<SqlJson<Vec<String>>>, _>("event_argv_template")?
         .map(|value| value.0);
@@ -925,6 +939,7 @@ fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView
         name: row.try_get("name")?,
         enabled: row.try_get("enabled")?,
         trigger_kind,
+        run_on,
         definition_revision: row.try_get("definition_revision")?,
         operation,
         event_argv_template,
@@ -1003,18 +1018,21 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
             retry_delay_secs,
             max_failures,
             next_run_at,
-            event_armed_at
+            event_armed_at,
+            run_on
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             $11, $12, $13, $14, $15, $16, to_timestamp($17),
-            CASE WHEN $5 = 'event' THEN clock_timestamp() ELSE NULL END
+            CASE WHEN $5 = 'event' THEN clock_timestamp() ELSE NULL END,
+            $18
         )
         RETURNING
             id,
             name,
             enabled,
             trigger_kind,
+            run_on,
             definition_revision,
             operation,
             event_argv_template,
@@ -1055,6 +1073,7 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
     .bind(request.retry_delay_secs)
     .bind(request.max_failures)
     .bind(next_run_unix)
+    .bind(request.run_on.as_str())
     .fetch_one(&mut **tx)
     .await?;
     let schedule = schedule_from_postgres_row(row)?;
@@ -1107,6 +1126,7 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
             name = $3,
             enabled = $4,
             trigger_kind = $5,
+            run_on = $19,
             operation = $6,
             event_argv_template = $7,
             selector_expression = $8,
@@ -1147,6 +1167,7 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
     .bind(request.max_failures)
     .bind(next_run_unix)
     .bind(request.expected_definition_revision)
+    .bind(request.run_on.as_str())
     .execute(&mut **tx)
     .await?;
     anyhow::ensure!(
@@ -1356,6 +1377,7 @@ fn schedule_audit_metadata(
         "selector_expression": &schedule.selector_expression,
         "target_client_ids": &schedule.target_client_ids,
         "target_count": schedule.target_client_ids.len(),
+        "run_on": schedule.run_on,
         "cron_expr": &schedule.cron_expr,
         "timezone": &schedule.timezone,
         "next_runs": &schedule.next_runs,

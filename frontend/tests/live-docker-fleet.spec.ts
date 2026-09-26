@@ -824,10 +824,9 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     .getByLabel("Webhook target")
     .fill("http://127.0.0.1:9/vpsman/docker-fleet");
   await detail.getByLabel("Webhook cooldown seconds").fill("60");
-  await fillSearchExpression(
-    detail.getByLabel("Webhook expression"),
-    'interval.30sec && vps.tag = "role:edge"',
-  );
+  await detail
+    .getByRole("textbox", { name: "Webhook expression", exact: true })
+    .fill('interval.30sec && vps.tag = "role:edge"');
   await fillWebhookTemplate(
     detail,
     "{rule.name} {event.kind} count={matched_vps.length} [for v in matched_vps]{v.display_name} [endfor]",

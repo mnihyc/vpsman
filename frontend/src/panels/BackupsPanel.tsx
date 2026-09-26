@@ -1085,6 +1085,7 @@ export function BackupsPanel({
               selectorExpression,
               resolvedTargets: targetClientIds,
               triggerKind: "cron",
+              runOn: "all_at_once",
               cronExpr: policyCronExpr.trim(),
               timezone: "UTC",
               eventExpression: null,

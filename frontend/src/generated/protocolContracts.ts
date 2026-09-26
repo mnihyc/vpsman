@@ -652,6 +652,7 @@ export const SCHEDULE_PRIVILEGE_INTENT_FIELDS = [
   "selector_expression",
   "resolved_targets",
   "trigger_kind",
+  "run_on",
   "cron_expr",
   "timezone",
   "event_expression",

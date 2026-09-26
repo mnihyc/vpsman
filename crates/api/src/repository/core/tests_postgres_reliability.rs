@@ -3388,6 +3388,103 @@ async fn postgres_occurrence_count_windows_use_db_acceptance_not_source_clock() 
 }
 
 #[tokio::test]
+async fn postgres_tagged_quota_policy_emits_only_originating_vps_trigger_and_reset_edges() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let tag_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tags (id,name,display_order) VALUES ($1,'quota-managed',0)")
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for client_id in ["quota-above", "quota-below"] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+        sqlx::query("INSERT INTO client_tags (client_id,tag_id) VALUES ($1,$2)")
+            .bind(client_id)
+            .bind(tag_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let rule_id = insert_typed_policy_rule_fixture(
+        &db.pool,
+        "quota-above",
+        "metric",
+        "telemetry.combined",
+        "natural_key",
+        "traffic.quota.total > 0 && traffic.cycle.total >= traffic.quota.total * 0.7",
+        None,
+        None,
+        None,
+        "traffic",
+    )
+    .await;
+    sqlx::query("UPDATE policy_groups SET selector_expression='tag:quota-managed' WHERE id=(SELECT group_id FROM policy_rules WHERE id=$1)")
+        .bind(rule_id).execute(&db.pool).await.unwrap();
+
+    // These are accepted combined-evidence facts, not preconstructed alert
+    // edges. Accounting supplies the post-reset cycle value; the production
+    // evaluator owns threshold comparison, scope, episode and lifecycle edges.
+    for (event_id, client_id, cycle_total) in [
+        ("quota-below-1", "quota-below", 690),
+        ("quota-above-baseline", "quota-above", 690),
+        ("quota-above-1", "quota-above", 710),
+        ("quota-above-2", "quota-above", 720),
+        ("quota-reset-1", "quota-above", 10),
+        ("quota-reset-2", "quota-above", 20),
+        ("quota-below-2", "quota-below", 695),
+    ] {
+        let observed_at = Utc::now();
+        record_test_policy_fact(&db.pool, crate::repository_policy_lifecycle::PolicyEvidenceFact {
+            source_kind: "telemetry.combined".to_string(),
+            source_event_id: event_id.to_string(),
+            fact_kind: AlertPolicyRuleKind::Metric,
+            natural_key: client_id.to_string(),
+            confirmation_bucket_key: client_id.to_string(),
+            subject_client_id: Some(client_id.to_string()),
+            target_kind: "client".to_string(),
+            target_id: client_id.to_string(),
+            source_status: "complete".to_string(),
+            complete: true,
+            subject_snapshot: json!({}),
+            payload: json!({"traffic":{"state":"ok","quota":{"total":1000},"cycle":{"total":cycle_total}}}),
+            observed_at,
+            state_started_at: Some(observed_at),
+            causation_id: None,
+            schedule_lineage: Vec::new(),
+        }).await;
+    }
+    let edges: Vec<(String, Vec<String>, SqlJson<Value>)> = sqlx::query_as(
+        "SELECT edge_kind,subject_client_ids,payload FROM alert_lifecycle_events WHERE payload->'policy_rule'->>'id'=$1 ORDER BY event_seq",
+    ).bind(rule_id.to_string()).fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        edges.len(),
+        2,
+        "repeated high/low samples do not duplicate lifecycle edges"
+    );
+    for (edge, expected_kind) in edges.iter().zip(["alert.triggered", "alert.resolved"]) {
+        assert_eq!(edge.0, expected_kind);
+        assert_eq!(edge.1, vec!["quota-above"]);
+        assert_eq!(edge.2 .0["event"]["kind"], expected_kind);
+        assert_eq!(edge.2 .0["alert"]["target_id"], "quota-above");
+        assert_eq!(edge.2 .0["alert"]["client_id"], "quota-above");
+        assert_eq!(edge.2 .0["policy_rule"]["id"], rule_id.to_string());
+    }
+    assert_eq!(
+        edges[0].2 .0["alert"]["episode_id"],
+        edges[1].2 .0["alert"]["episode_id"]
+    );
+    assert_eq!(edges[0].2 .0["evidence"]["traffic"]["cycle"]["total"], 710);
+    assert_eq!(edges[1].2 .0["evidence"]["traffic"]["cycle"]["total"], 10);
+    assert_eq!(
+        edges[1].2 .0["alert"]["resolution_reason"],
+        "condition_recovered"
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_metric_sustained_requires_fresh_revisions_at_both_boundaries() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -9025,6 +9122,89 @@ async fn postgres_schedule_query_without_limit_returns_all_rows() {
 }
 
 #[tokio::test]
+async fn postgres_schedule_run_on_defaults_and_edits_preserve_reviewed_targets() {
+    use crate::model::ScheduleRunOn;
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "run-on-a", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let cron = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("cron-run-on", "run-on-a"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(cron.run_on, ScheduleRunOn::AllAtOnce);
+
+    let mut request = postgres_shell_schedule_request("event-run-on", "run-on-a");
+    request.trigger_kind = ScheduleTriggerKind::Event;
+    request.operation = None;
+    request.cron_expr = None;
+    request.timezone = None;
+    request.catch_up_policy = None;
+    request.catch_up_limit = None;
+    request.retry_delay_secs = None;
+    request.event_expression = Some("alert.triggered || alert.resolved".to_string());
+    let event = db.repo.create_schedule(request, &operator).await.unwrap();
+    assert_eq!(event.run_on, ScheduleRunOn::TriggeredOnly);
+    assert_eq!(
+        db.repo.schedule_by_id(event.id).await.unwrap().run_on,
+        event.run_on
+    );
+
+    let revised = db
+        .repo
+        .update_schedule_record(
+            event.id,
+            crate::repository_schedules::ScheduleCreateInput {
+                name: event.name.clone(),
+                operation: None,
+                event_argv_template: event.event_argv_template.clone(),
+                selector_expression: event.selector_expression.clone(),
+                target_client_ids: event.target_client_ids.clone(),
+                trigger_kind: event.trigger_kind,
+                run_on: ScheduleRunOn::AllAtOnce,
+                cron_expr: None,
+                timezone: None,
+                event_expression: event.event_expression.clone(),
+                enabled: event.enabled,
+                catch_up_policy: None,
+                catch_up_limit: None,
+                retry_delay_secs: None,
+                max_failures: event.max_failures,
+                expected_definition_revision: Some(event.definition_revision),
+            },
+            Some(&crate::repository_schedules::ScheduleSnapshotExpectation {
+                selector_expression: event.selector_expression.clone(),
+                target_client_ids: event.target_client_ids.clone(),
+                definition_revision: event.definition_revision,
+            }),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(revised.run_on, ScheduleRunOn::AllAtOnce);
+    assert_eq!(revised.definition_revision, event.definition_revision + 1);
+    assert_eq!(revised.target_client_ids, event.target_client_ids);
+    assert!(db
+        .repo
+        .query_schedules(&ListQuery::default())
+        .await
+        .unwrap()
+        .iter()
+        .any(|item| item.id == revised.id && item.run_on == ScheduleRunOn::AllAtOnce));
+    let audited: String = sqlx::query_scalar(
+        "SELECT metadata->>'run_on' FROM audit_logs WHERE action = 'schedule.updated' AND metadata->>'schedule_id' = $1 ORDER BY created_at DESC LIMIT 1",
+    ).bind(event.id.to_string()).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(audited, "all_at_once");
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -9055,6 +9235,7 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
                 selector_expression: schedule.selector_expression.clone(),
                 target_client_ids: schedule.target_client_ids.clone(),
                 trigger_kind: schedule.trigger_kind,
+                run_on: schedule.run_on,
                 cron_expr: schedule.cron_expr.clone(),
                 timezone: schedule.timezone.clone(),
                 event_expression: schedule.event_expression.clone(),
@@ -9088,6 +9269,7 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
                 selector_expression: "id:replacement".to_string(),
                 target_client_ids: preserved.target_client_ids.clone(),
                 trigger_kind: preserved.trigger_kind,
+                run_on: preserved.run_on,
                 cron_expr: preserved.cron_expr.clone(),
                 timezone: preserved.timezone.clone(),
                 event_expression: preserved.event_expression.clone(),
@@ -9134,6 +9316,7 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
                 selector_expression: empty.selector_expression.clone(),
                 target_client_ids: Vec::new(),
                 trigger_kind: empty.trigger_kind,
+                run_on: empty.run_on,
                 cron_expr: empty.cron_expr.clone(),
                 timezone: empty.timezone.clone(),
                 event_expression: empty.event_expression.clone(),
@@ -9233,6 +9416,388 @@ async fn postgres_bulk_schedule_target_updates_preserve_order_and_isolate_stale_
     .unwrap();
     assert_eq!(audit_count, 1);
 
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_webhook_output_preview_uses_retained_events_and_freezes_rendered_message() {
+    use crate::model_webhook_rules::{WebhookEventCandidate, WebhookRuleDryRunRequest};
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client in ["output-a", "output-b", "output-unrelated"] {
+        insert_client(&db.pool, client, None).await;
+    }
+    let (operator, _) = postgres_operator_session(&db.repo, "webhook-output-admin").await;
+    let state = postgres_app_state(&db);
+    let job_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO jobs (id,command_type,status,target_count,payload_hash,request_fingerprint) VALUES ($1,'shell','completed',2,$2,$2)")
+        .bind(job_id).bind("a".repeat(64)).execute(&db.pool).await.unwrap();
+    for (client, text) in [
+        ("output-a", "limit applied"),
+        ("output-b", "second target result"),
+    ] {
+        sqlx::query("INSERT INTO job_targets (job_id,client_id,status) VALUES ($1,$2,'completed')")
+            .bind(job_id)
+            .bind(client)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO job_outputs (job_id,client_id,seq,stream,data) VALUES ($1,$2,0,'stdout',$3)")
+            .bind(job_id).bind(client).bind(text.as_bytes()).execute(&db.pool).await.unwrap();
+    }
+    let event_id = format!("job:{job_id}:status:completed");
+    let retained = db.repo.record_webhook_event(WebhookEventCandidate {
+        kind: "job.status".to_string(),
+        event_id: event_id.clone(),
+        event_predicates: vec!["job.status".to_string()],
+        subject_client_ids: vec!["output-a".to_string(), "output-b".to_string()],
+        payload: json!({"event": {"kind": "job.status"}, "job": {"id": job_id, "status": "completed"}}),
+        actor_id: Some(operator.operator.id),
+    }).await.unwrap();
+    let mut request: WebhookRuleDryRunRequest = serde_json::from_value(json!({
+        "expression": "event.kind = \"job.status\" && job.status = completed",
+        "event_kind": "job.status", "event_id": event_id,
+        "body_template": "{job.id}\n{job.output}", "cooldown_secs": 0,
+    }))
+    .unwrap();
+    let preview = state
+        .dry_run_webhook_rule(&request, &operator)
+        .await
+        .unwrap();
+    let whole_output: Value =
+        serde_json::from_str(preview.rendered_message.split_once('\n').unwrap().1).unwrap();
+    assert_eq!(whole_output["stdout"]["output-a"], "limit applied");
+    assert_eq!(whole_output["stdout"]["output-b"], "second target result");
+    assert!(whole_output["stderr"].is_object());
+    assert_eq!(
+        preview.matched_vps.len(),
+        2,
+        "real event subjects exclude unrelated VPSs"
+    );
+    assert!(preview.payload_context["job"].get("output").is_none());
+    assert_eq!(
+        preview.payload_context["event"]["occurred_at_unix"],
+        crate::util::parse_timestamp_unix(&retained.occurred_at).unwrap()
+    );
+
+    request.event_id = None;
+    assert!(state
+        .dry_run_webhook_rule(&request, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("webhook_rule_output_event_required"));
+    request.event_id = Some("missing-event".to_string());
+    assert!(state
+        .dry_run_webhook_rule(&request, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("webhook_rule_preview_event_not_found"));
+    request.event_id = Some(event_id.clone());
+    request.body_template = "{job.status}".to_string();
+    let mut output_lock = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE job_outputs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *output_lock)
+        .await
+        .unwrap();
+    let metadata_preview = tokio::time::timeout(
+        Duration::from_secs(2),
+        state.dry_run_webhook_rule(&request, &operator),
+    )
+    .await
+    .expect("a metadata-only template must not read locked output storage")
+    .unwrap();
+    assert_eq!(metadata_preview.rendered_message, "completed");
+    output_lock.rollback().await.unwrap();
+
+    let long_stderr = format!("{}stderr-tail", "x".repeat(6000));
+    sqlx::query("INSERT INTO job_outputs (job_id,client_id,seq,stream,data) VALUES ($1,'output-a',1,'stderr',$2)")
+        .bind(job_id).bind(long_stderr.as_bytes()).execute(&db.pool).await.unwrap();
+
+    let target_event_id = format!("job:{job_id}:target:output-a:completed");
+    db.repo
+        .record_webhook_event(WebhookEventCandidate {
+            kind: "job.target.status".to_string(),
+            event_id: target_event_id.clone(),
+            event_predicates: vec!["job.target.status".to_string()],
+            subject_client_ids: vec!["output-a".to_string()],
+            payload: json!({"event": {"kind": "job.target.status"}, "job": {
+                "id": job_id, "status": "completed", "target": {"client_id": "output-a"}
+            }}),
+            actor_id: Some(operator.operator.id),
+        })
+        .await
+        .unwrap();
+    request.event_kind = "job.target.status".to_string();
+    request.event_id = Some(target_event_id);
+    request.expression = "event.kind = \"job.target.status\"".to_string();
+    request.body_template = "{job.output.stdout}\n{job.output.stderr.substr(6000)}".to_string();
+    let target_preview = state
+        .dry_run_webhook_rule(&request, &operator)
+        .await
+        .unwrap();
+    assert_eq!(
+        target_preview.rendered_message,
+        "limit applied\nstderr-tail"
+    );
+    assert_eq!(target_preview.matched_vps.len(), 1);
+    request.body_template = "{job.output.stderr}".to_string();
+    let capped = state
+        .dry_run_webhook_rule(&request, &operator)
+        .await
+        .unwrap();
+    assert!(capped.rendered_message.len() <= 4096);
+    assert!(capped.rendered_message.ends_with(" bytes remaining]"));
+    assert!(!capped.rendered_message.contains("stderr-tail"));
+
+    let alert_event_id = format!("alert:{}", Uuid::new_v4());
+    db.repo.record_webhook_event(WebhookEventCandidate {
+        kind: "alert.triggered".to_string(), event_id: alert_event_id.clone(),
+        event_predicates: vec!["alert.triggered".to_string()],
+        subject_client_ids: vec!["output-a".to_string()],
+        payload: json!({"event": {"kind": "alert.triggered"}, "alert": {"title": "Quota warning"}}),
+        actor_id: Some(operator.operator.id),
+    }).await.unwrap();
+    request.event_kind = "alert.triggered".to_string();
+    request.event_id = Some(alert_event_id);
+    request.expression = "event.kind = \"alert.triggered\"".to_string();
+    request.body_template =
+        "[if event.kind = \"job.status\"]{job.output}[else]{alert.title}[endif]".to_string();
+    let alert_preview = state
+        .dry_run_webhook_rule(&request, &operator)
+        .await
+        .unwrap();
+    assert_eq!(alert_preview.rendered_message, "Quota warning");
+    assert!(alert_preview.payload_context.get("job").is_none());
+
+    let rule = db
+        .repo
+        .upsert_webhook_rule(
+            &serde_json::from_value(json!({
+            "name": "retained-job-output", "enabled": true,
+            "expression": "event.kind = \"job.status\"",
+                    "target": "https://hooks.acme.com/result",
+                    "body_template": "{job.output.stdout}\n{job.output.stderr.output-a.substr(6000)}",
+                    "cooldown_secs": 0, "confirmed": true,
+                }))
+            .unwrap(),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let mut dispatch = WebhookRuleDispatchRequest {
+        rule_id: Some(rule.id),
+        event_kind: "job.status".to_string(),
+        event_id: Some(event_id),
+        limit: Some(1),
+        dry_run: Some(true),
+        preview_hash: None,
+        confirmed: false,
+    };
+    let initial = state
+        .dispatch_webhook_rules(&dispatch, &operator)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO job_outputs (job_id,client_id,seq,stream,data) VALUES ($1,'output-a',2,'stderr',$2)")
+        .bind(job_id).bind(b"late warning".as_slice()).execute(&db.pool).await.unwrap();
+    dispatch.dry_run = Some(false);
+    dispatch.confirmed = true;
+    dispatch.preview_hash = initial[0].review_preview_hash.clone();
+    assert!(state
+        .dispatch_webhook_rules(&dispatch, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("webhook_rule_dispatch_preview_hash_mismatch"));
+    dispatch.dry_run = Some(true);
+    let refreshed = state
+        .dispatch_webhook_rules(&dispatch, &operator)
+        .await
+        .unwrap();
+    dispatch.dry_run = Some(false);
+    dispatch.preview_hash = refreshed[0].review_preview_hash.clone();
+    let queued = state
+        .dispatch_webhook_rules(&dispatch, &operator)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1);
+    assert!(queued[0].message.contains("late warning"));
+    assert!(queued[0].payload["job"].get("output").is_none());
+    sqlx::query("DELETE FROM job_outputs WHERE job_id=$1")
+        .bind(job_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let frozen = db
+        .repo
+        .list_webhook_rule_deliveries(10, Some(rule.id), None, None)
+        .await
+        .unwrap();
+    assert_eq!(frozen[0].message, queued[0].message);
+    assert_eq!(frozen[0].payload, queued[0].payload);
+
+    // A still-authorized queued actor cannot bypass the current owner's
+    // missing output permission by changing the saved template afterward.
+    let unprivileged_owner = Uuid::new_v4();
+    sqlx::query("INSERT INTO operators (id,username,password_hash,role,scopes) VALUES ($1,'webhook-no-output-owner','unused','operator','[\"integrations:write\"]'::jsonb)")
+        .bind(unprivileged_owner).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE webhook_rules SET actor_id=$2,body_template='{job.status}' WHERE id=$1")
+        .bind(rule.id)
+        .bind(unprivileged_owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mut process: crate::model_webhook_rules::WebhookRuleProcessRequest =
+        serde_json::from_value(json!({"dry_run":true})).unwrap();
+    let review = state
+        .process_webhook_rule_deliveries(&process, &operator)
+        .await
+        .unwrap();
+    process.dry_run = Some(false);
+    process.confirmed = true;
+    process.preview_hash = review[0].review_preview_hash.clone();
+    let denied = state
+        .process_webhook_rule_deliveries(&process, &operator)
+        .await
+        .unwrap();
+    assert_eq!(denied[0].status, "permanently_failed");
+    assert_eq!(denied[0].error.as_deref(), Some("actor_authority_revoked"));
+    assert_eq!(denied[0].payload, queued[0].payload);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_webhook_management_and_snapshot_require_jobs_read() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let (operator, headers) = postgres_operator_session(&db.repo, "webhook-scope-admin").await;
+    sqlx::query("UPDATE operators SET scopes=$2 WHERE id=$1")
+        .bind(operator.operator.id)
+        .bind(SqlJson(json!([
+            "fleet:read",
+            "integrations:read",
+            "integrations:write"
+        ])))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let router = crate::routes::build_router(postgres_app_state(&db));
+    let delete_path = format!("/api/v1/webhook-rules/{}", Uuid::nil());
+    for (method, path, body) in [
+        ("GET", "/api/v1/webhook-rules", json!({})),
+        (
+            "POST",
+            "/api/v1/webhook-rules",
+            json!({"name":"test", "expression":"interval.30sec", "target":"https://hooks.acme.com/test"}),
+        ),
+        (
+            "POST",
+            "/api/v1/webhook-rules/bulk-mutate",
+            json!({"action":"disable", "items":[]}),
+        ),
+        (
+            "DELETE",
+            delete_path.as_str(),
+            json!({"reviewed_name":"test"}),
+        ),
+        (
+            "POST",
+            "/api/v1/webhook-rules/dry-run",
+            json!({"expression":"interval.30sec"}),
+        ),
+        (
+            "POST",
+            "/api/v1/webhook-rules/dispatch",
+            json!({"dry_run":true}),
+        ),
+        ("GET", "/api/v1/webhook-deliveries", json!({})),
+        (
+            "POST",
+            "/api/v1/webhook-deliveries/process",
+            json!({"dry_run":true}),
+        ),
+        ("POST", "/api/v1/webhook-deliveries/rotate", json!({})),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"], "operator_scope_insufficient", "{path}");
+    }
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/fleet/snapshot?mode=full")
+                .header(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    for source in ["webhook_rules", "webhook_rule_deliveries"] {
+        assert!(snapshot[source]["data"].is_null());
+        assert_eq!(snapshot[source]["error"], "operator_scope_insufficient");
+    }
+    assert!(snapshot["fleet_alert_notification_channels"]["data"].is_array());
+    assert!(snapshot["fleet_alert_notifications"]["data"].is_array());
+
+    // Read-only integrations access remains enough for previews once jobs:read is present.
+    sqlx::query("UPDATE operators SET scopes=$2 WHERE id=$1")
+        .bind(operator.operator.id)
+        .bind(SqlJson(json!(["integrations:read", "jobs:read"])))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for path in ["/api/v1/webhook-rules", "/api/v1/webhook-deliveries"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook-rules/dry-run")
+                .header(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"expression":"interval.30sec"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     db.cleanup().await;
 }
 
@@ -12045,6 +12610,9 @@ async fn postgres_persisted_invalid_schedule_cadences_remain_visible_and_repaira
                 selector_expression: repair.selector_expression,
                 target_client_ids: repair.target_client_ids,
                 trigger_kind: repair.trigger_kind,
+                run_on: repair
+                    .run_on
+                    .unwrap_or_else(|| repair.trigger_kind.default_run_on()),
                 cron_expr: repair.cron_expr,
                 timezone: repair.timezone,
                 event_expression: repair.event_expression,
@@ -12164,6 +12732,9 @@ async fn postgres_malformed_schedule_operation_is_listable_isolated_and_repairab
                 selector_expression: repair.selector_expression,
                 target_client_ids: repair.target_client_ids,
                 trigger_kind: repair.trigger_kind,
+                run_on: repair
+                    .run_on
+                    .unwrap_or_else(|| repair.trigger_kind.default_run_on()),
                 cron_expr: repair.cron_expr,
                 timezone: repair.timezone,
                 event_expression: repair.event_expression,
@@ -12313,6 +12884,7 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
                     selector_expression: "id:atomic-a".to_string(),
                     target_client_ids: vec!["atomic-a".to_string()],
                     trigger_kind: ScheduleTriggerKind::Cron,
+                    run_on: crate::model::ScheduleRunOn::AllAtOnce,
                     cron_expr: Some("30 * * * *".to_string()),
                     timezone: Some("UTC".to_string()),
                     event_expression: None,
@@ -41330,6 +41902,7 @@ fn postgres_shell_schedule_request(name: &str, client_id: &str) -> CreateSchedul
         selector_expression: String::new(),
         target_client_ids: vec![client_id.to_string()],
         trigger_kind: ScheduleTriggerKind::Cron,
+        run_on: None,
         cron_expr: Some("0 * * * *".to_string()),
         timezone: Some("UTC".to_string()),
         event_expression: None,
@@ -45617,6 +46190,165 @@ async fn postgres_control_timeout_terminal_event_updates_schedule_and_webhooks()
         .await
     );
     assert_eq!(processed_terminal_event_count(&db.pool, job_id).await, 2);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_schedule_completion_events_survive_order_fences_edits_and_concurrent_retries() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "scheduled-completion-client";
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let cron = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("ordered-completion", client_id),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let mut event_request = postgres_shell_schedule_request("captured-completion", client_id);
+    event_request.trigger_kind = ScheduleTriggerKind::Event;
+    event_request.operation = None;
+    event_request.cron_expr = None;
+    event_request.timezone = None;
+    event_request.catch_up_policy = None;
+    event_request.catch_up_limit = None;
+    event_request.retry_delay_secs = None;
+    event_request.event_expression = Some("alert.triggered".to_string());
+    let event_schedule = db
+        .repo
+        .create_schedule(event_request, &operator)
+        .await
+        .unwrap();
+    let older_job = Uuid::new_v4();
+    let newer_job = Uuid::new_v4();
+    let edited_job = Uuid::new_v4();
+    for (job_id, schedule_id, seconds_ago) in [
+        (older_job, cron.id, 120),
+        (newer_job, cron.id, 60),
+        (edited_job, event_schedule.id, 30),
+    ] {
+        insert_job_target_with_operation(
+            &db.pool,
+            job_id,
+            client_id,
+            JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
+            "shell",
+            Some(schedule_id),
+            "completed",
+            true,
+            Some(Uuid::new_v4()),
+            30,
+            false,
+        )
+        .await;
+        sqlx::query("UPDATE jobs SET status='completed',completed_at=now()-($2 * interval '1 second') WHERE id=$1")
+            .bind(job_id).bind(seconds_ago as f64).execute(&db.pool).await.unwrap();
+    }
+    db.repo
+        .record_job_terminal_side_effects(newer_job, JOB_STATUS_COMPLETED)
+        .await
+        .unwrap();
+    let (first, retry) = tokio::join!(
+        db.repo
+            .record_job_terminal_side_effects(older_job, JOB_STATUS_COMPLETED),
+        db.repo
+            .record_job_terminal_side_effects(older_job, JOB_STATUS_COMPLETED),
+    );
+    first.unwrap();
+    retry.unwrap();
+    assert_eq!(
+        schedule_outcome_row(&db.pool, cron.id).await,
+        (0, "completed".to_string(), Some(newer_job))
+    );
+
+    let rule_id = insert_typed_policy_rule_fixture(
+        &db.pool,
+        client_id,
+        "metric",
+        "telemetry.combined",
+        "natural_key",
+        "cpu.utilization_ratio >= 0.9",
+        None,
+        None,
+        None,
+        "resource",
+    )
+    .await;
+    record_test_metric_fact(&db.pool, client_id, "completion-trigger", 0.95).await;
+    sqlx::query(
+        r#"
+        INSERT INTO schedule_event_receipts (
+            id,schedule_id,definition_revision,schedule_name,event_seq,event_kind,event_id,
+            episode_id,trigger_generation,edge_ordinal,status,source_occurred_at,
+            source_payload_hash,matched_subject_client_ids,fixed_target_client_ids,
+            effective_target_client_ids,run_on,causation_id,job_id,dispatched_at
+        )
+        SELECT $1,schedule.id,schedule.definition_revision,schedule.name,
+               event.event_seq,event.edge_kind,event.event_id,event.episode_id,
+               event.trigger_generation,1,'dispatched',event.occurred_at,repeat('a',64),
+               event.subject_client_ids,schedule.target_client_ids,event.subject_client_ids,
+               schedule.run_on,event.id,$3,clock_timestamp()
+        FROM schedules schedule CROSS JOIN alert_lifecycle_events event
+        WHERE schedule.id=$2 AND event.payload->'policy_rule'->>'id'=$4
+          AND event.edge_kind='alert.triggered'
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(event_schedule.id)
+    .bind(edited_job)
+    .bind(rule_id.to_string())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE schedules SET name='edited-completion',definition_revision=definition_revision+1,event_armed_at=clock_timestamp() WHERE id=$1")
+        .bind(event_schedule.id).execute(&db.pool).await.unwrap();
+    let (first, retry) = tokio::join!(
+        db.repo
+            .record_job_terminal_side_effects(edited_job, JOB_STATUS_COMPLETED),
+        db.repo
+            .record_job_terminal_side_effects(edited_job, JOB_STATUS_COMPLETED),
+    );
+    first.unwrap();
+    retry.unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (Option<Uuid>, i32)>(
+            "SELECT last_job_id,failure_count FROM schedules WHERE id=$1",
+        )
+        .bind(event_schedule.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (None, 0)
+    );
+    for (job_id, schedule_id, expected_name) in [
+        (older_job, cron.id, "ordered-completion"),
+        (newer_job, cron.id, "ordered-completion"),
+        (edited_job, event_schedule.id, "captured-completion"),
+    ] {
+        let event_id = format!("schedule:{schedule_id}:job:{job_id}:finished");
+        assert_eq!(
+            webhook_event_count(&db.pool, "schedule.job_finished", &event_id).await,
+            1
+        );
+        let payload: SqlJson<Value> = sqlx::query_scalar(
+            "SELECT payload FROM webhook_events WHERE kind='schedule.job_finished' AND event_id=$1",
+        )
+        .bind(&event_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(payload.0["schedule"]["name"], expected_name);
+        assert_eq!(payload.0["schedule"]["last_job_id"], job_id.to_string());
+        assert_eq!(payload.0["job"]["status"], "completed");
+        assert_eq!(payload.0["job"]["target_ids"], json!([client_id]));
+    }
     db.cleanup().await;
 }
 

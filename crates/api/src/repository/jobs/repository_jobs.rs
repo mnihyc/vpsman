@@ -5310,15 +5310,40 @@ impl Repository {
                 .transpose()?
             }
         };
-        let Some(schedule_outcome) = schedule_outcome else {
+        // The mutable schedule summary intentionally ignores old definitions and
+        // out-of-order completions. A job's terminal event is independent of that
+        // fence: every completed scheduled job still needs its own durable event.
+        let schedule_name = if let Some(outcome) = schedule_outcome.as_ref() {
+            Some(outcome.schedule_name.clone())
+        } else {
+            match self {
+                Self::Postgres(pool) => {
+                    sqlx::query_scalar::<_, String>(
+                        r#"
+                    SELECT COALESCE(
+                        (SELECT receipt.schedule_name
+                         FROM schedule_event_receipts receipt WHERE receipt.job_id = $2),
+                        schedule.name
+                    )
+                    FROM schedules schedule WHERE schedule.id = $1
+                    "#,
+                    )
+                    .bind(schedule_id)
+                    .bind(job_id)
+                    .fetch_optional(pool)
+                    .await?
+                }
+            }
+        };
+        let Some(schedule_name) = schedule_name else {
             return Ok(());
         };
         let mut predicates = vec![
             "schedule.job_finished".to_string(),
-            format!("schedule.id:{}", schedule_outcome.schedule_id),
-            format!("schedule.name:{}", schedule_outcome.schedule_name),
-            format!("job.status:{}", schedule_outcome.status),
-            format!("job.status.become_{}", schedule_outcome.status),
+            format!("schedule.id:{schedule_id}"),
+            format!("schedule.name:{schedule_name}"),
+            format!("job.status:{status}"),
+            format!("job.status.become_{status}"),
             format!("job.type:{}", summary.command_type),
         ];
         predicates.sort();
@@ -5336,11 +5361,11 @@ impl Repository {
                     "predicates": &predicates,
                 },
                 "schedule": {
-                    "id": schedule_outcome.schedule_id,
-                    "name": &schedule_outcome.schedule_name,
-                    "last_job_id": schedule_outcome.job_id,
-                    "last_job_status": &schedule_outcome.status,
-                    "last_job_error": &schedule_outcome.error,
+                    "id": schedule_id,
+                    "name": &schedule_name,
+                    "last_job_id": job_id,
+                    "last_job_status": status,
+                    "last_job_error": &outcome_error,
                 },
                 "job": {
                     "id": job_id,
@@ -5355,8 +5380,10 @@ impl Repository {
             }),
         })
         .await?;
-        self.record_schedule_job_failure_visibility(&summary, &schedule_outcome)
-            .await?;
+        if let Some(schedule_outcome) = schedule_outcome {
+            self.record_schedule_job_failure_visibility(&summary, &schedule_outcome)
+                .await?;
+        }
         Ok(())
     }
 

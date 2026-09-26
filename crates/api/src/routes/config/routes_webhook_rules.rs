@@ -18,7 +18,7 @@ use crate::{
     repository_webhook_rules::validate_webhook_rule_target,
     security::{
         operator_has_scope, require_vps_rule_selector_scope, SCOPE_CONFIG_READ,
-        SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
+        SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE, SCOPE_JOBS_READ,
     },
     selector_expression::parse_selector_expression,
     state::AppState,
@@ -36,9 +36,10 @@ pub(crate) async fn list_webhook_rules(
     headers: HeaderMap,
     Query(query): Query<WebhookRuleQuery>,
 ) -> Result<Json<Vec<WebhookRuleView>>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_query(&query)?;
     Ok(Json(
         state
@@ -60,6 +61,7 @@ pub(crate) async fn upsert_webhook_rule(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_request(&request)?;
     let expression = parse_selector_expression(&request.expression)
         .map_err(|_| ApiError::bad_request("webhook_rule_expression_invalid"))?
@@ -82,6 +84,7 @@ pub(crate) async fn bulk_mutate_webhook_rules(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_bulk_request(&request)?;
     Ok(Json(
         state
@@ -116,6 +119,7 @@ pub(crate) async fn delete_webhook_rule(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
             "webhook_rule_delete_confirmation_required",
@@ -181,6 +185,7 @@ pub(crate) async fn dry_run_webhook_rule(
     let operator = state
         .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_dry_run_request(&request)?;
     let expression = parse_selector_expression(&request.expression)
         .map_err(|_| ApiError::bad_request("webhook_rule_expression_invalid"))?
@@ -190,10 +195,7 @@ pub(crate) async fn dry_run_webhook_rule(
         state
             .dry_run_webhook_rule(&request, &operator)
             .await
-            .map_err(ApiError::internal_mapper(
-                "webhook_rule_dry_run_failed",
-                "The webhook-rule dry run could not be completed.",
-            ))?,
+            .map_err(webhook_rule_preview_error)?,
     ))
 }
 
@@ -205,6 +207,7 @@ pub(crate) async fn dispatch_webhook_rules(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_dispatch_request(&request)?;
     Ok(Json(
         state
@@ -219,9 +222,10 @@ pub(crate) async fn rotate_webhook_delivery_history(
     headers: HeaderMap,
     Json(request): Json<WebhookDeliveryRotationRequest>,
 ) -> Result<Json<WebhookDeliveryRotationResponse>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_delivery_rotation_request(&request)?;
     Ok(Json(
         state
@@ -237,9 +241,10 @@ pub(crate) async fn list_webhook_rule_deliveries(
     headers: HeaderMap,
     Query(query): Query<WebhookRuleDeliveryQuery>,
 ) -> Result<Json<Vec<WebhookRuleDeliveryView>>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_delivery_query(&query)?;
     Ok(Json(
         state
@@ -266,6 +271,7 @@ pub(crate) async fn process_webhook_rule_deliveries(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_webhook_jobs_scope(&operator.operator.scopes)?;
     validate_webhook_rule_process_request(&request)?;
     Ok(Json(
         state
@@ -275,7 +281,46 @@ pub(crate) async fn process_webhook_rule_deliveries(
     ))
 }
 
+fn require_webhook_jobs_scope(scopes: &[String]) -> Result<(), ApiError> {
+    if !operator_has_scope(scopes, SCOPE_JOBS_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    Ok(())
+}
+
+fn webhook_preview_request_error(error: &anyhow::Error) -> Option<ApiError> {
+    let message = error.to_string();
+    for (code, explanation) in [
+        (
+            "webhook_rule_output_event_required",
+            "To preview job output, select a retained job event by entering its event kind and event ID. No output is invented for a synthetic test event.",
+        ),
+        (
+            "webhook_rule_preview_event_not_found",
+            "The selected job event is not retained. Check both its event kind and event ID, or choose another retained job event.",
+        ),
+    ] {
+        if message.contains(code) {
+            return Some(ApiError::bad_request_with_message(code, explanation));
+        }
+    }
+    None
+}
+
+fn webhook_rule_preview_error(error: anyhow::Error) -> ApiError {
+    webhook_preview_request_error(&error).unwrap_or_else(|| {
+        ApiError::internal(
+            "webhook_rule_dry_run_failed",
+            "The webhook-rule dry run could not be completed.",
+            error,
+        )
+    })
+}
+
 fn webhook_delivery_error(error: anyhow::Error) -> ApiError {
+    if let Some(error) = webhook_preview_request_error(&error) {
+        return error;
+    }
     let message = error.to_string();
     if message.contains("webhook_rule_not_found") {
         return ApiError::not_found("webhook_rule_not_found");

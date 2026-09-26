@@ -22,8 +22,8 @@ use crate::{
         DeferScheduleRequest, EventScheduleTemplateEdgePreview,
         EventScheduleTemplateElementPreview, EventScheduleTemplatePreviewContext,
         EventScheduleTemplatePreviewResponse, ListQuery, PreviewEventScheduleTemplateRequest,
-        SchedulePrivilegeMutationRequest, ScheduleTriggerKind, ScheduleView, UpdateScheduleRequest,
-        UpdateScheduleTargetsRequest,
+        SchedulePrivilegeMutationRequest, ScheduleRunOn, ScheduleTriggerKind, ScheduleView,
+        UpdateScheduleRequest, UpdateScheduleTargetsRequest,
     },
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
     repository::Repository,
@@ -330,6 +330,13 @@ pub(crate) async fn update_schedule(
         .await
         .map_err(map_schedule_lookup_error)?;
     require_schedule_snapshot(&current, &expectation)?;
+    if request.run_on.is_none() {
+        request.run_on = Some(if request.trigger_kind == current.trigger_kind {
+            current.run_on
+        } else {
+            request.trigger_kind.default_run_on()
+        });
+    }
     let selector_unchanged =
         request.selector_expression.trim() == expectation.selector_expression.trim();
     if selector_unchanged {
@@ -1062,6 +1069,9 @@ fn validate_schedule_definition(
     }
     match request.trigger_kind {
         ScheduleTriggerKind::Cron => {
+            if request.run_on != ScheduleRunOn::AllAtOnce {
+                return Err(ApiError::bad_request("schedule_run_on_invalid_for_cron"));
+            }
             if request.event_expression.is_some() || request.event_argv_template.is_some() {
                 return Err(ApiError::bad_request("schedule_trigger_shape_invalid"));
             }
@@ -1242,6 +1252,7 @@ async fn verify_schedule_privilege_for_definition(
             ScheduleTriggerKind::Cron => "cron",
             ScheduleTriggerKind::Event => "event",
         },
+        run_on: request.run_on.as_str(),
         cron_expr: request.cron_expr,
         timezone: request.timezone,
         event_expression: request.event_expression,
@@ -1314,6 +1325,7 @@ fn stored_schedule_privilege_intent<'a>(
             ScheduleTriggerKind::Cron => "cron",
             ScheduleTriggerKind::Event => "event",
         },
+        run_on: schedule.run_on.as_str(),
         cron_expr: schedule.cron_expr.as_deref(),
         timezone: schedule.timezone.as_deref(),
         event_expression: schedule.event_expression.as_deref(),
@@ -1448,6 +1460,7 @@ struct ScheduleDefinitionRef<'a> {
     selector_expression: &'a str,
     target_client_ids: &'a [String],
     trigger_kind: ScheduleTriggerKind,
+    run_on: ScheduleRunOn,
     definition_revision: Option<i64>,
     cron_expr: Option<&'a str>,
     timezone: Option<&'a str>,
@@ -1468,6 +1481,9 @@ impl<'a> ScheduleDefinitionRef<'a> {
             selector_expression: &request.selector_expression,
             target_client_ids: &request.target_client_ids,
             trigger_kind: request.trigger_kind,
+            run_on: request
+                .run_on
+                .unwrap_or_else(|| request.trigger_kind.default_run_on()),
             definition_revision: None,
             cron_expr: request.cron_expr.as_deref(),
             timezone: request.timezone.as_deref(),
@@ -1488,6 +1504,9 @@ impl<'a> ScheduleDefinitionRef<'a> {
             selector_expression: &request.selector_expression,
             target_client_ids: &request.target_client_ids,
             trigger_kind: request.trigger_kind,
+            run_on: request
+                .run_on
+                .unwrap_or_else(|| request.trigger_kind.default_run_on()),
             definition_revision: Some(request.expected_definition_revision),
             cron_expr: request.cron_expr.as_deref(),
             timezone: request.timezone.as_deref(),
@@ -1510,6 +1529,9 @@ impl From<UpdateScheduleRequest> for crate::repository_schedules::ScheduleCreate
             selector_expression: request.selector_expression,
             target_client_ids: request.target_client_ids,
             trigger_kind: request.trigger_kind,
+            run_on: request
+                .run_on
+                .unwrap_or_else(|| request.trigger_kind.default_run_on()),
             cron_expr: request.cron_expr,
             timezone: request.timezone,
             event_expression: request.event_expression,

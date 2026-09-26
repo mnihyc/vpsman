@@ -623,6 +623,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     definition: commands_schedules::ScheduleDefinitionOptions {
                         name: command.name,
                         trigger_kind: command.trigger_kind,
+                        run_on: command.run_on,
                         command: command.command,
                         argv: command.argv,
                         pty: command.pty,
@@ -652,6 +653,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     definition: commands_schedules::ScheduleDefinitionOptions {
                         name: command.name,
                         trigger_kind: command.trigger_kind,
+                        run_on: command.run_on,
                         command: command.command,
                         argv: command.argv,
                         pty: command.pty,

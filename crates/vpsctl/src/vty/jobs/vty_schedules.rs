@@ -4,7 +4,9 @@ use vpsman_common::{
 };
 
 use crate::{
-    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
+    commands_schedules::{
+        resolve_schedule_target_ids, selector_expression_from_targets, ScheduleRunOnArg,
+    },
     http::http_post_json,
     privilege::{build_privilege_for_schedule, SchedulePrivilegePayload, SchedulePrivilegeRequest},
     vty_jobs::{VtyJobSelection, VtyPrivilegeContext},
@@ -55,6 +57,7 @@ pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) 
             selector_expression: &selector_expression,
             resolved_targets: &target_ids,
             trigger_kind: "cron",
+            run_on: "all_at_once",
             cron_expr: Some(request.cron_expr),
             timezone: Some("UTC"),
             event_expression: None,
@@ -81,6 +84,7 @@ pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) 
             "selector_expression": selector_expression,
             "target_client_ids": target_ids,
             "trigger_kind": "cron",
+            "run_on": "all_at_once",
             "cron_expr": request.cron_expr,
             "timezone": "UTC",
             "event_expression": null,
@@ -150,6 +154,7 @@ pub(crate) fn submit_vty_event_schedule_create(
             selector_expression: &selector_expression,
             resolved_targets: &target_ids,
             trigger_kind: "event",
+            run_on: request.options.run_on.as_str(),
             cron_expr: None,
             timezone: None,
             event_expression: Some(request.event_expression),
@@ -176,6 +181,7 @@ pub(crate) fn submit_vty_event_schedule_create(
             "selector_expression": selector_expression,
             "target_client_ids": target_ids,
             "trigger_kind": "event",
+            "run_on": request.options.run_on,
             "cron_expr": null,
             "timezone": null,
             "event_expression": request.event_expression,
@@ -319,6 +325,7 @@ pub(crate) fn parse_vty_schedule_create_options(
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct VtyEventScheduleCreateOptions {
+    pub(crate) run_on: ScheduleRunOnArg,
     pub(crate) event_argv_template: Vec<String>,
     pub(crate) max_failures: i32,
     pub(crate) disabled: bool,
@@ -329,6 +336,7 @@ pub(crate) struct VtyEventScheduleCreateOptions {
 impl Default for VtyEventScheduleCreateOptions {
     fn default() -> Self {
         Self {
+            run_on: ScheduleRunOnArg::TriggeredOnly,
             event_argv_template: Vec::new(),
             max_failures: 3,
             disabled: false,
@@ -345,6 +353,16 @@ pub(crate) fn parse_vty_event_schedule_create_options(
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
+            "--run-on" => {
+                options.run_on = parse_event_run_on(
+                    tokens.get(index + 1).context("--run-on requires a value")?,
+                )?;
+                index += 2;
+            }
+            value if value.starts_with("--run-on=") => {
+                options.run_on = parse_event_run_on(value.trim_start_matches("--run-on="))?;
+                index += 1;
+            }
             "--event-argv-template" => {
                 options.event_argv_template.push(
                     tokens
@@ -405,6 +423,14 @@ pub(crate) fn parse_vty_event_schedule_create_options(
     .map_err(anyhow::Error::msg)
     .context("invalid event argv template; use the Schedule web UI for per-edge server preview")?;
     Ok(options)
+}
+
+fn parse_event_run_on(value: &str) -> Result<ScheduleRunOnArg> {
+    match value {
+        "triggered-only" => Ok(ScheduleRunOnArg::TriggeredOnly),
+        "all-at-once" => Ok(ScheduleRunOnArg::AllAtOnce),
+        _ => anyhow::bail!("--run-on must be triggered-only or all-at-once"),
+    }
 }
 
 fn validate_schedule_policy(

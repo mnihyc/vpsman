@@ -2,6 +2,7 @@ use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, PgPool, Postgres, Row, Transaction};
+use std::collections::HashSet;
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -47,6 +48,7 @@ struct EventSchedule {
     name: String,
     definition_revision: i64,
     event_expression: String,
+    run_on: String,
     event_argv_template: Option<Vec<String>>,
     target_client_ids: Vec<String>,
 }
@@ -56,6 +58,25 @@ enum LineageDecision {
     Dispatch(Vec<Uuid>),
     Cycle,
     Overflow,
+}
+
+fn effective_event_targets(
+    run_on: &str,
+    reviewed_targets: &[String],
+    subject_client_ids: &[String],
+) -> Result<Vec<String>> {
+    ensure!(
+        matches!(run_on, "triggered_only" | "all_at_once"),
+        "schedule_run_on_invalid"
+    );
+    let subjects = subject_client_ids.iter().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    Ok(reviewed_targets
+        .iter()
+        .filter(|target| run_on == "all_at_once" || subjects.contains(target))
+        .filter(|target| seen.insert(*target))
+        .cloned()
+        .collect())
 }
 
 pub(crate) async fn process_alert_event_schedules(
@@ -328,6 +349,13 @@ async fn ingest_lifecycle_event_in_tx(
         }
 
         let source_payload_hash = payload_hash(&encode_json(&event.payload)?);
+        // Accept target ownership with the immutable lifecycle edge. A later
+        // schedule edit, tag change or dispatch retry cannot widen this set.
+        let effective_targets = effective_event_targets(
+            &schedule.run_on,
+            &schedule.target_client_ids,
+            &event.subject_client_ids,
+        )?;
         let causation_id = event.causation_id.unwrap_or(event.id);
         let lineage = extend_schedule_lineage(&event.schedule_lineage, schedule.id);
         let (status, status_reason, dispatched_lineage, operation, operation_hash, error) =
@@ -348,6 +376,18 @@ async fn ingest_lifecycle_event_in_tx(
                     None,
                     None,
                 ),
+                LineageDecision::Dispatch(dispatched_lineage)
+                    if schedule.run_on == "triggered_only" && effective_targets.is_empty() =>
+                {
+                    (
+                        "skipped",
+                        Some("no_matching_alert_subjects"),
+                        dispatched_lineage,
+                        None,
+                        None,
+                        None,
+                    )
+                }
                 LineageDecision::Dispatch(dispatched_lineage) => {
                     let template_context = template_context_for_lifecycle_event(event, &schedule);
                     match render_alert_event_job_command(
@@ -384,13 +424,13 @@ async fn ingest_lifecycle_event_in_tx(
                 matched_subject_client_ids, fixed_target_client_ids, causation_id,
                 source_schedule_lineage, dispatched_schedule_lineage,
                 rendered_operation, rendered_operation_hash, error,
-                actor_id, schedule_name
+                actor_id, schedule_name, run_on, effective_target_client_ids
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8,
                 CASE WHEN $5 = 'alert.triggered' THEN 1 ELSE 2 END,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22
+                $21, $22, $23, $24
             )
             ON CONFLICT (schedule_id, event_kind, event_id) DO NOTHING
             RETURNING id
@@ -418,6 +458,8 @@ async fn ingest_lifecycle_event_in_tx(
         .bind(error.as_deref().map(truncate_error))
         .bind(schedule.actor_id)
         .bind(&schedule.name)
+        .bind(&schedule.run_on)
+        .bind(&effective_targets)
         .fetch_optional(&mut **tx)
         .await?;
         let Some(receipt_id) = inserted else {
@@ -454,6 +496,7 @@ async fn ingest_lifecycle_event_in_tx(
             operation_hash.as_deref(),
             causation_id,
             &dispatched_lineage,
+            &effective_targets,
         )
         .await?;
     }
@@ -469,7 +512,7 @@ async fn load_eligible_event_schedules(
         r#"
         SELECT
             id, actor_id, name, definition_revision, event_expression,
-            event_argv_template, target_client_ids
+            event_argv_template, target_client_ids, run_on
         FROM schedules
         WHERE trigger_kind = 'event'
           AND enabled = TRUE
@@ -502,6 +545,7 @@ async fn load_eligible_event_schedules(
                 name: row.try_get("name")?,
                 definition_revision: row.try_get("definition_revision")?,
                 event_expression: row.try_get("event_expression")?,
+                run_on: row.try_get("run_on")?,
                 event_argv_template: row
                     .try_get::<Option<SqlJson<Vec<String>>>, _>("event_argv_template")?
                     .map(|value| value.0),
@@ -518,7 +562,7 @@ async fn dispatch_alert_event_receipt(
 ) -> Result<bool> {
     let Some(snapshot) = sqlx::query(
         r#"
-        SELECT schedule_id, fixed_target_client_ids
+        SELECT schedule_id, run_on, effective_target_client_ids
         FROM schedule_event_receipts
         WHERE id = $1 AND status = 'pending'
         "#,
@@ -530,7 +574,8 @@ async fn dispatch_alert_event_receipt(
         return Ok(false);
     };
     let snapshot_schedule_id: Uuid = snapshot.try_get("schedule_id")?;
-    let snapshot_targets: Vec<String> = snapshot.try_get("fixed_target_client_ids")?;
+    let snapshot_run_on: String = snapshot.try_get("run_on")?;
+    let snapshot_targets: Vec<String> = snapshot.try_get("effective_target_client_ids")?;
 
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -552,7 +597,8 @@ async fn dispatch_alert_event_receipt(
             receipt.source_payload_hash,
             receipt.causation_id,
             receipt.dispatched_schedule_lineage,
-            receipt.fixed_target_client_ids,
+            receipt.run_on,
+            receipt.effective_target_client_ids,
             receipt.rendered_operation,
             receipt.rendered_operation_hash,
             receipt.actor_id,
@@ -581,9 +627,12 @@ async fn dispatch_alert_event_receipt(
     let schedule_id: Uuid = row.try_get("schedule_id")?;
     let receipt_revision: i64 = row.try_get("receipt_definition_revision")?;
     let schedule_name: String = row.try_get("schedule_name")?;
-    let frozen_targets: Vec<String> = row.try_get("fixed_target_client_ids")?;
+    let run_on: String = row.try_get("run_on")?;
+    let frozen_targets: Vec<String> = row.try_get("effective_target_client_ids")?;
     ensure!(
-        schedule_id == snapshot_schedule_id && frozen_targets == snapshot_targets,
+        schedule_id == snapshot_schedule_id
+            && run_on == snapshot_run_on
+            && frozen_targets == snapshot_targets,
         "schedule_event_receipt_snapshot_changed"
     );
 
@@ -836,6 +885,8 @@ async fn dispatch_alert_event_receipt(
         "schedule_id": schedule_id,
         "schedule_name": &schedule.name,
         "definition_revision": receipt_revision,
+        "run_on": run_on,
+        "effective_target_client_ids": &schedule.target_client_ids,
         "job_id": job_id,
         "event_kind": event_kind,
         "event_id": &schedule.materialization.source_event_id,
@@ -1235,6 +1286,7 @@ async fn audit_receipt_created_in_tx(
     rendered_operation_hash: Option<&str>,
     causation_id: Uuid,
     dispatched_lineage: &[Uuid],
+    effective_targets: &[String],
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -1269,6 +1321,8 @@ async fn audit_receipt_created_in_tx(
         "dispatched_schedule_lineage": dispatched_lineage,
         "matched_subject_client_ids": event.subject_client_ids,
         "fixed_target_client_ids": schedule.target_client_ids,
+        "run_on": schedule.run_on,
+        "effective_target_client_ids": effective_targets,
     }))
     .execute(&mut **tx)
     .await?;
@@ -1302,6 +1356,624 @@ mod tests {
     use crate::test_support::PgWorkerTestDb;
 
     use super::*;
+
+    #[test]
+    fn event_run_on_intersects_only_immutable_subjects_and_reviewed_targets() {
+        let reviewed = vec![
+            "edge-b".to_string(),
+            "edge-a".to_string(),
+            "edge-a".to_string(),
+        ];
+        let subjects = vec!["edge-a".to_string(), "outside-review".to_string()];
+        assert_eq!(
+            effective_event_targets("triggered_only", &reviewed, &subjects).unwrap(),
+            vec!["edge-a".to_string()]
+        );
+        assert_eq!(
+            effective_event_targets("all_at_once", &reviewed, &subjects).unwrap(),
+            vec!["edge-b".to_string(), "edge-a".to_string()]
+        );
+        assert!(effective_event_targets("triggered_only", &reviewed, &[])
+            .unwrap()
+            .is_empty());
+        assert!(effective_event_targets("triggered_only", &[], &subjects)
+            .unwrap()
+            .is_empty());
+        assert!(effective_event_targets("invalid", &reviewed, &subjects).is_err());
+    }
+
+    #[tokio::test]
+    async fn postgres_run_on_migration_rearms_definitions_but_preserves_accepted_work() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        for client_id in ["legacy-a", "legacy-b"] {
+            insert_event_target(&db.pool, client_id).await;
+        }
+        let actor_id = insert_event_schedule_actor(&db.pool).await;
+        let schedule_id = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered || alert.resolved",
+            None,
+            &["legacy-a", "legacy-b"],
+            3,
+        )
+        .await;
+        let cron_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO schedules (
+                id, actor_id, name, operation, selector_expression,
+                target_client_ids, next_run_at, failure_count, last_error
+            ) VALUES ($1, $2, 'unchanged-cron', $3, 'id:legacy-a',
+                      ARRAY['legacy-a'], now(), 1, 'cron-error')
+            "#,
+        )
+        .bind(cron_id)
+        .bind(actor_id)
+        .bind(SqlJson(
+            json!({"type":"shell", "argv":["/bin/true"], "pty":false}),
+        ))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let episode_id = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, episode_id).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        let trigger_receipt = receipt_id(&db.pool, schedule_id, "alert.triggered").await;
+        let resolve_receipt = receipt_id(&db.pool, schedule_id, "alert.resolved").await;
+        let config =
+            ScheduleDispatchConfig::new(60, vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS, false);
+        assert!(
+            dispatch_alert_event_receipt(&db.pool, trigger_receipt, &config)
+                .await
+                .unwrap()
+        );
+        let trigger_job: Uuid =
+            sqlx::query_scalar("SELECT job_id FROM schedule_event_receipts WHERE id=$1")
+                .bind(trigger_receipt)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let armed_before: DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE schedules SET failure_count=2, last_error='legacy-error' WHERE id=$1 RETURNING event_armed_at",
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+        // Recreate only the preceding schema shape in this isolated test DB,
+        // then exercise the actual additive migration on saved accepted work.
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::raw_sql(
+            r#"
+            ALTER TABLE schedules DROP COLUMN run_on;
+            ALTER TABLE schedule_event_receipts
+                DROP COLUMN run_on, DROP COLUMN effective_target_client_ids;
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0022_schedule_run_on.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let schedule = sqlx::query(
+            "SELECT run_on, definition_revision, event_armed_at, failure_count, last_error FROM schedules WHERE id=$1",
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            schedule.try_get::<String, _>("run_on").unwrap(),
+            "triggered_only"
+        );
+        assert_eq!(
+            schedule.try_get::<i64, _>("definition_revision").unwrap(),
+            2
+        );
+        assert!(
+            schedule
+                .try_get::<DateTime<Utc>, _>("event_armed_at")
+                .unwrap()
+                >= armed_before
+        );
+        assert_eq!(schedule.try_get::<i32, _>("failure_count").unwrap(), 0);
+        assert_eq!(
+            schedule.try_get::<Option<String>, _>("last_error").unwrap(),
+            None
+        );
+        let cron: (String, i64, i32, Option<String>) = sqlx::query_as(
+            "SELECT run_on, definition_revision, failure_count, last_error FROM schedules WHERE id=$1",
+        )
+        .bind(cron_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            cron,
+            (
+                "all_at_once".to_string(),
+                1,
+                1,
+                Some("cron-error".to_string())
+            )
+        );
+        let saved = sqlx::query(
+            "SELECT run_on, definition_revision, fixed_target_client_ids, effective_target_client_ids, job_id FROM schedule_event_receipts WHERE schedule_id=$1 ORDER BY event_seq",
+        )
+        .bind(schedule_id)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(saved.len(), 2);
+        for row in &saved {
+            assert_eq!(row.try_get::<String, _>("run_on").unwrap(), "all_at_once");
+            assert_eq!(row.try_get::<i64, _>("definition_revision").unwrap(), 1);
+            assert_eq!(
+                row.try_get::<Vec<String>, _>("effective_target_client_ids")
+                    .unwrap(),
+                row.try_get::<Vec<String>, _>("fixed_target_client_ids")
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            saved[0].try_get::<Option<Uuid>, _>("job_id").unwrap(),
+            Some(trigger_job)
+        );
+        assert_eq!(saved[1].try_get::<Option<Uuid>, _>("job_id").unwrap(), None);
+        sqlx::query(
+            "UPDATE jobs SET completed_at=clock_timestamp(), status='completed' WHERE id=$1",
+        )
+        .bind(trigger_job)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            dispatch_alert_event_receipt(&db.pool, resolve_receipt, &config)
+                .await
+                .unwrap()
+        );
+        let targets: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT target.client_id FROM job_targets target
+            JOIN schedule_event_receipts receipt ON receipt.job_id=target.job_id
+            WHERE receipt.id=$1 ORDER BY target.client_id
+            "#,
+        )
+        .bind(resolve_receipt)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(targets, vec!["legacy-a", "legacy-b"]);
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_event_run_on_freezes_subject_targets_and_preserves_recovery_order() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        for client_id in ["run-on-a", "run-on-b", "outside-review"] {
+            insert_event_target(&db.pool, client_id).await;
+        }
+        let actor_id = insert_event_schedule_actor(&db.pool).await;
+        let triggered_only = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered || alert.resolved",
+            None,
+            &["run-on-a", "run-on-b"],
+            3,
+        )
+        .await;
+        sqlx::query("UPDATE schedules SET run_on='triggered_only' WHERE id=$1")
+            .bind(triggered_only)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let all_at_once = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered || alert.resolved",
+            None,
+            &["run-on-a", "run-on-b"],
+            3,
+        )
+        .await;
+        let episode_id = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, episode_id).await;
+        sqlx::query(
+            r#"
+            UPDATE alert_lifecycle_events
+            SET subject_client_ids=ARRAY['run-on-a','outside-review'],
+                payload=jsonb_set(payload, '{alert,client_id}', '"run-on-b"'::jsonb)
+            WHERE episode_id=$1
+            "#,
+        )
+        .bind(episode_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        for (schedule_id, mode, expected) in [
+            (triggered_only, "triggered_only", vec!["run-on-a"]),
+            (all_at_once, "all_at_once", vec!["run-on-a", "run-on-b"]),
+        ] {
+            let rows = sqlx::query(
+                r#"
+                SELECT run_on, fixed_target_client_ids, effective_target_client_ids
+                FROM schedule_event_receipts WHERE schedule_id=$1 ORDER BY event_seq
+                "#,
+            )
+            .bind(schedule_id)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.try_get::<String, _>("run_on").unwrap(), mode);
+                assert_eq!(
+                    row.try_get::<Vec<String>, _>("fixed_target_client_ids")
+                        .unwrap(),
+                    vec!["run-on-a", "run-on-b"]
+                );
+                assert_eq!(
+                    row.try_get::<Vec<String>, _>("effective_target_client_ids")
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+
+        // Acceptance owns the mode and target set, even across a later edit.
+        sqlx::query(
+            r#"
+            UPDATE schedules SET run_on='all_at_once', target_client_ids=ARRAY['run-on-b'],
+                definition_revision=definition_revision+1, event_armed_at=clock_timestamp()
+            WHERE id=$1
+            "#,
+        )
+        .bind(triggered_only)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let config =
+            ScheduleDispatchConfig::new(60, vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS, false);
+        let trigger_receipt = receipt_id(&db.pool, triggered_only, "alert.triggered").await;
+        let resolve_receipt = receipt_id(&db.pool, triggered_only, "alert.resolved").await;
+        assert!(
+            dispatch_alert_event_receipt(&db.pool, trigger_receipt, &config)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !dispatch_alert_event_receipt(&db.pool, resolve_receipt, &config)
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "UPDATE jobs SET completed_at=clock_timestamp(), status='completed' WHERE id=(SELECT job_id FROM schedule_event_receipts WHERE id=$1)",
+        )
+        .bind(trigger_receipt)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            dispatch_alert_event_receipt(&db.pool, resolve_receipt, &config)
+                .await
+                .unwrap()
+        );
+        let all_trigger = receipt_id(&db.pool, all_at_once, "alert.triggered").await;
+        assert!(dispatch_alert_event_receipt(&db.pool, all_trigger, &config)
+            .await
+            .unwrap());
+        for (receipt_id, expected) in [
+            (trigger_receipt, vec!["run-on-a"]),
+            (resolve_receipt, vec!["run-on-a"]),
+            (all_trigger, vec!["run-on-a", "run-on-b"]),
+        ] {
+            let targets: Vec<String> = sqlx::query_scalar(
+                r#"
+                SELECT target.client_id FROM job_targets target
+                JOIN schedule_event_receipts receipt ON receipt.job_id=target.job_id
+                WHERE receipt.id=$1 ORDER BY target.client_id
+                "#,
+            )
+            .bind(receipt_id)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(targets, expected);
+        }
+
+        // The API completion tests own terminal-event production. Feed that
+        // payload contract for these real receipt-owned jobs through the real
+        // webhook materializer, without claiming cross-process agent execution.
+        sqlx::query(
+            "UPDATE operators SET scopes=scopes || '[\"jobs:read\",\"integrations:write\"]'::jsonb WHERE id=$1",
+        )
+        .bind(actor_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let http_listener = if matches!(
+            std::env::var(vpsman_server_core::DEVELOPMENT_LOOPBACK_WEBHOOKS_ENV).as_deref(),
+            Ok("1" | "true")
+        ) {
+            Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
+        } else {
+            None
+        };
+        let webhook_target = http_listener
+            .as_ref()
+            .map(|listener| format!("http://{}/run-on-results", listener.local_addr().unwrap()))
+            .unwrap_or_else(|| "https://hooks.example.invalid/run-on-results".to_string());
+        let rule_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_rules (
+                id, name, enabled, expression, target, body_template, cooldown_secs, actor_id
+            ) VALUES ($1, 'run-on-results', TRUE, $2,
+                $4,
+                '{job.id}: {job.status} [for v in matched_vps]{v.id}[endfor] stdout={job.output.stdout} stderr={job.output.stderr}', 0, $3)
+            "#,
+        )
+        .bind(rule_id)
+        .bind(format!(
+            "event.kind = \"schedule.job_finished\" && job.source_schedule_id = \"{triggered_only}\""
+        ))
+        .bind(actor_id)
+        .bind(webhook_target)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        for (receipt_id, status) in [(trigger_receipt, "completed"), (resolve_receipt, "failed")] {
+            let job = sqlx::query(
+                r#"
+                UPDATE jobs SET status=$2, completed_at=clock_timestamp()
+                WHERE id=(SELECT job_id FROM schedule_event_receipts WHERE id=$1)
+                RETURNING id, command_type, privileged, payload_hash, target_count
+                "#,
+            )
+            .bind(receipt_id)
+            .bind(status)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            let job_id: Uuid = job.get("id");
+            for (seq, stream) in [(0, "stdout"), (1, "stderr")] {
+                sqlx::query(
+                    "INSERT INTO job_outputs (job_id,client_id,seq,stream,data) VALUES ($1,'run-on-a',$2,$3,$4)",
+                )
+                .bind(job_id)
+                .bind(seq)
+                .bind(stream)
+                .bind(format!("{status} {stream}").as_bytes())
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            }
+            let event_id = format!("schedule:{triggered_only}:job:{job_id}:finished");
+            let targets = vec!["run-on-a".to_string()];
+            crate::webhook_rules::insert_webhook_event(
+                &db.pool,
+                "schedule.job_finished",
+                &event_id,
+                &["schedule.job_finished"],
+                &targets,
+                json!({
+                    "event": { "kind": "schedule.job_finished", "id": event_id },
+                    "schedule": {
+                        "id": triggered_only,
+                        "name": "run-on-results",
+                        "last_job_id": job_id,
+                        "last_job_status": status,
+                        "last_job_error": (status == "failed").then_some("failed"),
+                    },
+                    "job": {
+                        "id": job_id,
+                        "status": status,
+                        "type": job.get::<String, _>("command_type"),
+                        "privileged": job.get::<bool, _>("privileged"),
+                        "payload_hash": job.get::<String, _>("payload_hash"),
+                        "source_schedule_id": triggered_only,
+                        "target_count": job.get::<i32, _>("target_count"),
+                        "target_ids": targets,
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let webhook_config = crate::webhook_rules::WebhookRuleWorkerConfig::default();
+        assert_eq!(
+            crate::webhook_rules::process_webhook_events(&db.pool, webhook_config, None)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            crate::webhook_rules::process_webhook_events(&db.pool, webhook_config, None)
+                .await
+                .unwrap(),
+            0
+        );
+        let deliveries = sqlx::query(
+            "SELECT payload, matched_vps, message, status FROM webhook_rule_deliveries WHERE rule_id=$1 ORDER BY payload->'job'->>'status'",
+        )
+        .bind(rule_id)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(deliveries.len(), 2);
+        for (delivery, expected_status) in deliveries.iter().zip(["completed", "failed"]) {
+            let payload: SqlJson<Value> = delivery.get("payload");
+            let matched: SqlJson<Value> = delivery.get("matched_vps");
+            assert_eq!(delivery.get::<String, _>("status"), "queued");
+            assert_eq!(payload.0["job"]["status"], expected_status);
+            assert_eq!(
+                payload.0["job"]["source_schedule_id"],
+                json!(triggered_only)
+            );
+            assert_eq!(payload.0["job"]["target_ids"], json!(["run-on-a"]));
+            assert!(payload.0["job"].get("output").is_none());
+            assert_eq!(matched.0.as_array().unwrap().len(), 1);
+            assert_eq!(matched.0[0]["id"], "run-on-a");
+            assert_eq!(
+                delivery.get::<String, _>("message"),
+                format!(
+                    "{}: {expected_status} run-on-a stdout={{\"run-on-a\":\"{expected_status} stdout\"}} stderr={{\"run-on-a\":\"{expected_status} stderr\"}}",
+                    payload.0["job"]["id"].as_str().unwrap()
+                )
+            );
+        }
+        if let Some(listener) = http_listener {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let receiver = tokio::spawn(async move {
+                let mut received = Vec::<Value>::new();
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    let (header_len, content_len) = loop {
+                        let count = stream.read(&mut chunk).await.unwrap();
+                        assert!(count > 0, "webhook closed before its HTTP headers");
+                        request.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]);
+                            let content_len = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().unwrap())
+                                })
+                                .expect("reqwest JSON delivery supplies Content-Length");
+                            break (end + 4, content_len);
+                        }
+                    };
+                    while request.len() < header_len + content_len {
+                        let count = stream.read(&mut chunk).await.unwrap();
+                        assert!(count > 0, "webhook closed before its complete body");
+                        request.extend_from_slice(&chunk[..count]);
+                    }
+                    received.push(
+                        serde_json::from_slice(&request[header_len..header_len + content_len])
+                            .unwrap(),
+                    );
+                    stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                }
+                received
+            });
+            let sent =
+                crate::webhook_rules::process_due_webhook_deliveries(&db.pool, webhook_config)
+                    .await
+                    .unwrap();
+            assert_eq!((sent.processed, sent.delivered, sent.failed), (2, 2, 0));
+            let mut received = tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut expected = deliveries
+                .iter()
+                .map(|row| row.get::<SqlJson<Value>, _>("payload").0)
+                .collect::<Vec<_>>();
+            for values in [&mut received, &mut expected] {
+                values.sort_by_key(|payload| payload["job"]["id"].as_str().unwrap().to_string());
+            }
+            assert_eq!(received, expected, "HTTP sends the fixed queued envelopes");
+        } else {
+            eprintln!("HTTP phase requires VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1; durable materialization was verified");
+        }
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_triggered_only_empty_subject_intersection_records_skip_without_job() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_event_target(&db.pool, "reviewed-only").await;
+        let actor_id = insert_event_schedule_actor(&db.pool).await;
+        let schedule_id = insert_event_schedule(
+            &db.pool,
+            actor_id,
+            "alert.triggered || alert.resolved",
+            // Rendering must not create a failure for a targetless edge.
+            Some(vec![
+                "/bin/echo".to_string(),
+                "{alert.client_id}".to_string(),
+            ]),
+            &["reviewed-only"],
+            3,
+        )
+        .await;
+        sqlx::query("UPDATE schedules SET run_on='triggered_only' WHERE id=$1")
+            .bind(schedule_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for subjects in [Vec::<String>::new(), vec!["not-reviewed".to_string()]] {
+            let episode_id = insert_resolved_test_episode(&db.pool).await;
+            insert_lifecycle_pair(&db.pool, episode_id).await;
+            sqlx::query(
+                "UPDATE alert_lifecycle_events SET subject_client_ids=$2 WHERE episode_id=$1",
+            )
+            .bind(episode_id)
+            .bind(subjects)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        let config =
+            ScheduleDispatchConfig::new(60, vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS, false);
+        assert_eq!(
+            process_alert_event_schedules(&db.pool, 10, &config)
+                .await
+                .unwrap(),
+            0
+        );
+        let receipts = sqlx::query(
+            r#"
+            SELECT status, status_reason, job_id, effective_target_client_ids, error
+            FROM schedule_event_receipts WHERE schedule_id=$1
+            "#,
+        )
+        .bind(schedule_id)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(receipts.len(), 4);
+        for receipt in receipts {
+            assert_eq!(receipt.try_get::<String, _>("status").unwrap(), "skipped");
+            assert_eq!(
+                receipt.try_get::<String, _>("status_reason").unwrap(),
+                "no_matching_alert_subjects"
+            );
+            assert_eq!(receipt.try_get::<Option<Uuid>, _>("job_id").unwrap(), None);
+            assert!(receipt
+                .try_get::<Vec<String>, _>("effective_target_client_ids")
+                .unwrap()
+                .is_empty());
+            assert_eq!(receipt.try_get::<Option<String>, _>("error").unwrap(), None);
+        }
+        let failures: i32 = sqlx::query_scalar("SELECT failure_count FROM schedules WHERE id=$1")
+            .bind(schedule_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(failures, 0);
+        db.cleanup().await;
+    }
 
     fn event_context() -> Value {
         json!({
@@ -2568,11 +3240,11 @@ mod tests {
                 target_client_ids, cron_expr, timezone, next_run_at,
                 catch_up_policy, catch_up_limit, retry_delay_secs, max_failures,
                 trigger_kind, event_expression, event_argv_template,
-                definition_revision, event_armed_at
+                definition_revision, event_armed_at, run_on
             )
             VALUES (
                 $1, $2, $3, TRUE, NULL, 'id:*', $4, NULL, NULL, NULL,
-                NULL, NULL, NULL, $5, 'event', $6, $7, 1, now()
+                NULL, NULL, NULL, $5, 'event', $6, $7, 1, now(), 'all_at_once'
             )
             "#,
         )

@@ -834,6 +834,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             selector_expression: &selector_expression,
             resolved_targets: &target_client_ids,
             trigger_kind: "cron",
+            run_on: "all_at_once",
             cron_expr: Some(&request.cron_expr),
             timezone: Some("UTC"),
             event_expression: None,

@@ -413,6 +413,7 @@ pub(crate) fn backup_policy_upsert(
             selector_expression: &selector_expression,
             resolved_targets: &target_ids,
             trigger_kind: "cron",
+            run_on: "all_at_once",
             cron_expr: Some(&options.cron_expr),
             timezone: Some("UTC"),
             event_expression: None,

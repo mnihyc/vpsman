@@ -1,6 +1,40 @@
 use super::*;
 use vpsman_common::AgentCapabilitySnapshot;
 
+#[test]
+fn webhook_output_dependency_is_parsed_and_requires_a_retained_event() {
+    for template in ["{job.output}", "[if job.output != \"\"]retained[endif]"] {
+        assert!(webhook_template_uses_job_output(template).unwrap());
+    }
+    for template in [
+        "{job.status}",
+        "{# {job.output} #}{job.id}",
+        "[if job.output]VPS literal predicate[endif]",
+    ] {
+        assert!(!webhook_template_uses_job_output(template).unwrap());
+    }
+    let mut event = WebhookPreviewEvent {
+        kind: "job.status".to_string(),
+        event_id: "preview".to_string(),
+        predicates: vec!["job.status".to_string()],
+        payload: json!({"job": {"id": Uuid::new_v4()}}),
+        subject_client_ids: vec![],
+        occurred_at_unix: 1,
+        retained: false,
+    };
+    assert_eq!(
+        require_retained_output_preview_event(&event)
+            .unwrap_err()
+            .to_string(),
+        "webhook_rule_output_event_required"
+    );
+    event.retained = true;
+    require_retained_output_preview_event(&event).unwrap();
+    event.kind = "alert.triggered".to_string();
+    event.payload = json!({"alert": {"title": "Quota warning"}});
+    require_retained_output_preview_event(&event).unwrap();
+}
+
 fn agent(id: &str, tags: &[&str]) -> AgentView {
     AgentView {
         id: id.to_string(),
@@ -48,6 +82,19 @@ fn webhook_candidate_aggregates_matched_vps_and_renders_template() {
     assert_eq!(candidate.matched_vps.len(), 1);
     assert_eq!(candidate.message, "edge-online interval.30sec edge-a");
     assert_eq!(candidate.signing_secret.as_deref(), Some("secret"));
+
+    // Webhook limits apply to every final substitution, not just job output.
+    let mut rule = rule;
+    rule.body_template = "{event.id}".to_string();
+    let context = json!({"event": {"id": format!("{}tail", "x".repeat(6000))}});
+    let capped = render_message_from_payload(&rule, &context).unwrap();
+    assert!(capped.len() <= 4096);
+    assert!(capped.ends_with(" bytes remaining]"));
+    rule.body_template = "{event.id.substr(6000)}".to_string();
+    assert_eq!(
+        render_message_from_payload(&rule, &context).unwrap(),
+        "tail"
+    );
 }
 
 #[test]

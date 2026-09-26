@@ -2379,6 +2379,21 @@ export function App() {
   }
 
   function renderWebhooksPanel() {
+    const scopes = new Set(dashboard.operator?.scopes ?? []);
+    if (!scopes.has("*") && !scopes.has("jobs:read")) {
+      return (
+        <section className="workspace singleColumn">
+          <div className="fleetPanel">
+            <h2>Event webhooks</h2>
+            <p className="mutedText">
+              Webhook rules and delivery history require jobs:read alongside
+              the existing integration permissions, because messages can include
+              retained job output. Ask an administrator to update your scopes.
+            </p>
+          </div>
+        </section>
+      );
+    }
     return (
       <WebhooksPanel
         agents={dashboard.agents}

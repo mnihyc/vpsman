@@ -31,6 +31,10 @@ export const DURABLE_EVENT_EXPRESSION_SUGGESTIONS: string[] = [
   "vps.tag_changed",
   "schedule.due",
   "schedule.job_finished",
+  'event.kind = "job.status"',
+  'event.kind = "job.target.status"',
+  'job.source_schedule_id = "SCHEDULE_UUID"',
+  'policy_rule.id = "RULE_UUID"',
   "schedule.failed",
   "telemetry.rollup",
   "telemetry.network_rate",
@@ -53,6 +57,8 @@ export const SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS: string[] = [
   ...ALERT_CATEGORY_SUGGESTIONS,
   "alert.record_kind = condition",
   "alert.record_kind = event",
+  'policy_rule.id = "RULE_UUID"',
+  'alert.resolution_reason = "condition_recovered"',
 ];
 
 const SCHEDULE_ALERT_IMMUTABLE_FIELDS = new Set<string>(
@@ -69,6 +75,11 @@ export type ScheduleEventExpressionExample = {
 
 export const SCHEDULE_EVENT_EXPRESSION_EXAMPLES: readonly ScheduleEventExpressionExample[] =
   [
+    {
+      label: "Traffic mitigation and recovery",
+      expression: '(alert.triggered || (alert.resolved && alert.resolution_reason = "condition_recovered")) && alert.category:traffic',
+      detail: "One schedule orders mitigation and recovery. Add the policy rule UUID to narrow this to your quota rule; blank policy Resolve uses condition_recovered.",
+    },
     {
       label: "Traffic alert triggered",
       expression: "alert.triggered && alert.category:traffic",

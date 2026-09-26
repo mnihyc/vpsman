@@ -26,6 +26,30 @@ impl ScheduleTriggerKindArg {
             Self::Event => "event",
         }
     }
+
+    fn default_run_on(self) -> ScheduleRunOnArg {
+        match self {
+            Self::Cron => ScheduleRunOnArg::AllAtOnce,
+            Self::Event => ScheduleRunOnArg::TriggeredOnly,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ScheduleRunOnArg {
+    #[default]
+    AllAtOnce,
+    TriggeredOnly,
+}
+
+impl ScheduleRunOnArg {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AllAtOnce => "all_at_once",
+            Self::TriggeredOnly => "triggered_only",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +58,9 @@ struct ScheduleRecord {
     name: String,
     enabled: bool,
     trigger_kind: ScheduleTriggerKindArg,
+    // Legacy responses predate subject-scoped execution and used all reviewed targets.
+    #[serde(default)]
+    run_on: ScheduleRunOnArg,
     definition_revision: i64,
     command_type: String,
     operation_payload_hash: String,
@@ -58,6 +85,7 @@ pub(crate) struct SavedScheduleTargetSnapshot {
 pub(crate) struct ScheduleDefinitionOptions {
     pub(crate) name: String,
     pub(crate) trigger_kind: ScheduleTriggerKindArg,
+    pub(crate) run_on: Option<ScheduleRunOnArg>,
     pub(crate) command: Option<String>,
     pub(crate) argv: Vec<String>,
     pub(crate) pty: bool,
@@ -91,6 +119,7 @@ pub(crate) struct ScheduleUpdateOptions {
 struct ScheduleDefinition {
     name: String,
     trigger_kind: ScheduleTriggerKindArg,
+    run_on: ScheduleRunOnArg,
     operation: Option<JobCommand>,
     event_argv_template: Option<Vec<String>>,
     cron_expr: Option<String>,
@@ -113,8 +142,15 @@ impl ScheduleDefinition {
             (1..=100).contains(&options.max_failures),
             "--max-failures must be between 1 and 100"
         );
+        let run_on = options
+            .run_on
+            .unwrap_or_else(|| options.trigger_kind.default_run_on());
         match options.trigger_kind {
             ScheduleTriggerKindArg::Cron => {
+                anyhow::ensure!(
+                    run_on == ScheduleRunOnArg::AllAtOnce,
+                    "cron schedules require --run-on all-at-once"
+                );
                 anyhow::ensure!(
                     options.event_expression.is_none() && options.event_argv_template.is_empty(),
                     "cron schedules do not accept --event-expression or --event-argv-template"
@@ -152,6 +188,7 @@ impl ScheduleDefinition {
                 Ok(Self {
                     name: options.name,
                     trigger_kind: options.trigger_kind,
+                    run_on,
                     operation: Some(operation),
                     event_argv_template: None,
                     cron_expr: Some(cron_expr),
@@ -198,6 +235,7 @@ impl ScheduleDefinition {
                 Ok(Self {
                     name: options.name,
                     trigger_kind: options.trigger_kind,
+                    run_on,
                     operation: None,
                     event_argv_template,
                     cron_expr: None,
@@ -270,6 +308,7 @@ pub(crate) fn schedule_create(
         selector_expression: &selector_expression,
         resolved_targets: &target_ids,
         trigger_kind: definition.trigger_kind.as_str(),
+        run_on: definition.run_on.as_str(),
         cron_expr: definition.cron_expr.as_deref(),
         timezone: definition.timezone.as_deref(),
         event_expression: definition.event_expression.as_deref(),
@@ -294,6 +333,7 @@ pub(crate) fn schedule_create(
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
                 "trigger_kind": definition.trigger_kind,
+                "run_on": definition.run_on,
                 "cron_expr": definition.cron_expr,
                 "timezone": definition.timezone,
                 "event_expression": definition.event_expression,
@@ -313,16 +353,21 @@ pub(crate) fn schedule_create(
 pub(crate) fn schedule_update(
     api_url: &str,
     token: Option<&str>,
-    options: ScheduleUpdateOptions,
+    mut options: ScheduleUpdateOptions,
 ) -> Result<()> {
     anyhow::ensure!(options.confirmed, "schedule-update requires --confirmed");
+    let current = schedule_by_id(api_url, token, &options.schedule_id)?;
+    if options.definition.run_on.is_none()
+        && options.definition.trigger_kind == current.trigger_kind
+    {
+        options.definition.run_on = Some(current.run_on);
+    }
     let definition = ScheduleDefinition::from_options(options.definition)?;
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     anyhow::ensure!(
         !selector_expression.is_empty(),
         "schedule-update requires at least one target selector"
     );
-    let current = schedule_by_id(api_url, token, &options.schedule_id)?;
     let target_ids = if current.selector_expression.trim() == selector_expression.trim() {
         current.target_client_ids.clone()
     } else {
@@ -338,6 +383,7 @@ pub(crate) fn schedule_update(
         selector_expression: &selector_expression,
         resolved_targets: &target_ids,
         trigger_kind: definition.trigger_kind.as_str(),
+        run_on: definition.run_on.as_str(),
         cron_expr: definition.cron_expr.as_deref(),
         timezone: definition.timezone.as_deref(),
         event_expression: definition.event_expression.as_deref(),
@@ -365,6 +411,7 @@ pub(crate) fn schedule_update(
                 "expected_target_client_ids": current.target_client_ids,
                 "expected_definition_revision": current.definition_revision,
                 "trigger_kind": definition.trigger_kind,
+                "run_on": definition.run_on,
                 "cron_expr": definition.cron_expr,
                 "timezone": definition.timezone,
                 "event_expression": definition.event_expression,
@@ -647,6 +694,7 @@ fn schedule_privilege_for_record(
         selector_expression: &schedule.selector_expression,
         resolved_targets,
         trigger_kind: schedule.trigger_kind.as_str(),
+        run_on: schedule.run_on.as_str(),
         cron_expr: schedule.cron_expr.as_deref(),
         timezone: schedule.timezone.as_deref(),
         event_expression: schedule.event_expression.as_deref(),

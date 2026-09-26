@@ -4810,6 +4810,82 @@
   color: var(--text);
 }
 
+.eventExpressionEditor {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.scheduleIdentifier {
+  overflow-wrap: anywhere;
+}
+
+.eventExpressionToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.eventExpressionToolbar select {
+  flex: 1 1 180px;
+  min-width: 0;
+  width: 0;
+}
+
+.eventExpressionCodeMirror {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.eventExpressionCodeMirror .cm-editor {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.eventExpressionCodeMirror .cm-scroller {
+  font-family: var(--font-mono);
+  min-height: 96px;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.eventExpressionEditor.expanded .cm-scroller {
+  min-height: 240px;
+  max-height: 50vh;
+}
+
+.eventExpressionCodeMirror .cm-gutters {
+  background: var(--surface-subtle);
+  color: var(--muted);
+  border-color: var(--border);
+}
+
+.eventExpressionDescriptions {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.eventExpressionDescriptions summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.eventExpressionDescriptions p {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.eventExpressionDescriptions code {
+  color: var(--text-secondary);
+}
+
 .scheduleTriggerFieldset {
   display: grid;
   gap: 8px;

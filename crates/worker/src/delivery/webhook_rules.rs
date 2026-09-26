@@ -11,16 +11,17 @@ use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, expression_references_vps_rules,
     ordinal_admission_mask_has_exact_shape, parse_expression, parse_vps_rule_value, payload_hash,
-    projected_telemetry_tunnel_identity, render_template_with_limit, validate_template,
-    AgentMetrics, Expression, ExpressionContext, NetworkInterfacePolicy, NetworkInterfaceSource,
-    ProjectedTelemetryTunnelIdentity, VpsMetadata, VpsRuleContext,
-    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    projected_telemetry_tunnel_identity, render_template_with_options, template_referenced_paths,
+    validate_template, AgentMetrics, Expression, ExpressionContext, NetworkInterfacePolicy,
+    NetworkInterfaceSource, ProjectedTelemetryTunnelIdentity, TemplateRenderOptions, VpsMetadata,
+    VpsRuleContext, VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_SELECTORS,
     WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
-use vpsman_server_core::prepare_webhook_target;
+use vpsman_object_store::BackupObjectStore;
+use vpsman_server_core::{enrich_webhook_job_output_context, prepare_webhook_target};
 
-use crate::actor_authority::actor_authorized;
+use crate::actor_authority::{actor_authorized, actor_authorized_in_tx};
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
 const MAX_AUDIT_DELIVERY_ROWS: usize = 100;
@@ -30,6 +31,7 @@ const WEBHOOK_SIGNATURE_HEADER: &str = "X-Vpsman-Webhook-Signature";
 const WEBHOOK_DELIVERY_HEADER: &str = "X-Vpsman-Webhook-Delivery";
 const WEBHOOK_EVENT_HEADER: &str = "X-Vpsman-Webhook-Event";
 const RULE_CONFIGURATION_EVENT_KIND: &str = "webhook.rule_configuration";
+const WEBHOOK_REQUIRED_SCOPES: &[&str] = &["integrations:write", "jobs:read"];
 const EVENT_EXPRESSION_ROOTS: [&str; 9] = [
     "server",
     "job",
@@ -236,9 +238,10 @@ struct PrunedDelivery {
 pub(crate) async fn process_webhook_rules(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
+    object_store: Option<&BackupObjectStore>,
 ) -> Result<WebhookRuleWorkerRun> {
     let mut run = process_webhook_periodic_maintenance(pool, config).await?;
-    let events = process_webhook_event_materialization_work(pool, config).await?;
+    let events = process_webhook_event_materialization_work(pool, config, object_store).await?;
     let telemetry = process_telemetry_webhook_materialization_work(pool, config, &[]).await?;
     let deliveries = process_due_webhook_deliveries(pool, config).await?;
     run.materialized = run
@@ -307,11 +310,12 @@ pub(crate) async fn process_telemetry_webhook_materialization_work(
 pub(crate) async fn process_webhook_event_materialization_work(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
+    object_store: Option<&BackupObjectStore>,
 ) -> Result<WebhookRuleWorkerRun> {
     let mut run = WebhookRuleWorkerRun::default();
     loop {
         project_alert_lifecycle_events(pool, config.materialize_limit).await?;
-        let events = process_webhook_events(pool, config).await?;
+        let events = process_webhook_events(pool, config, object_store).await?;
         run.materialized = run.materialized.saturating_add(events);
         if !webhook_event_materialization_pending(pool).await? {
             return Ok(run);
@@ -1548,7 +1552,11 @@ async fn process_telemetry_projection_events(
 
     for event in events {
         for (rule, expression) in &validated_rules {
-            match event_candidate_for_validated_rule(rule, expression, &event, &vps_rows) {
+            match event_candidate_for_validated_rule_in_tx(
+                &mut tx, rule, expression, &event, &vps_rows, None,
+            )
+            .await
+            {
                 Ok(Some(candidate)) => {
                     if insert_delivery_candidate(&mut tx, &candidate).await? {
                         inserted += 1;
@@ -1794,6 +1802,7 @@ fn telemetry_sum_u64(values: impl Iterator<Item = u64>) -> i64 {
 pub(crate) async fn process_webhook_events(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
+    object_store: Option<&BackupObjectStore>,
 ) -> Result<usize> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -1854,7 +1863,16 @@ pub(crate) async fn process_webhook_events(
     for row in rows {
         let event = event_from_row(row)?;
         for (rule, expression) in &validated_rules {
-            match event_candidate_for_validated_rule(rule, expression, &event, &vps_rows) {
+            match event_candidate_for_validated_rule_in_tx(
+                &mut tx,
+                rule,
+                expression,
+                &event,
+                &vps_rows,
+                object_store,
+            )
+            .await
+            {
                 Ok(Some(candidate)) => {
                     if insert_delivery_candidate(&mut tx, &candidate).await? {
                         inserted += 1;
@@ -1911,7 +1929,76 @@ fn event_candidate_for_rule(
     event_candidate_for_validated_rule(rule, &expression, event, vps_rows)
 }
 
+#[cfg(test)]
 fn event_candidate_for_validated_rule(
+    rule: &RuleRow,
+    expression: &Expression,
+    event: &EventRow,
+    vps_rows: &[VpsRow],
+) -> Result<Option<DeliveryCandidate>> {
+    let Some(mut candidate) = unrendered_event_candidate(rule, expression, event, vps_rows)? else {
+        return Ok(None);
+    };
+    let message = render_message(rule, &candidate.payload)?;
+    set_candidate_message(&mut candidate, message);
+    Ok(Some(candidate))
+}
+
+fn set_candidate_message(candidate: &mut DeliveryCandidate, message: String) {
+    candidate.payload["message"] = Value::String(message.clone());
+    candidate.message = message;
+}
+
+async fn event_candidate_for_validated_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    rule: &RuleRow,
+    expression: &Expression,
+    event: &EventRow,
+    vps_rows: &[VpsRow],
+    object_store: Option<&BackupObjectStore>,
+) -> Result<Option<DeliveryCandidate>> {
+    let Some(mut candidate) = unrendered_event_candidate(rule, expression, event, vps_rows)? else {
+        return Ok(None);
+    };
+    let needs_job_output = template_referenced_paths(&rule.body_template)?
+        .iter()
+        .any(|path| path == "job.output" || path.starts_with("job.output."));
+    let message = if needs_job_output {
+        // A replay must not reread live output or replace the already captured
+        // message. Final insertion still owns the existing dedupe/cooldown fence.
+        let already_materialized: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_id=$2)",
+        )
+        .bind(rule.id)
+        .bind(&event.event_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if already_materialized {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            actor_authorized_in_tx(tx, rule.actor_id, "operator", WEBHOOK_REQUIRED_SCOPES).await?,
+            "actor_authority_revoked"
+        );
+        // Output is render-only: the immutable source roots and fixed delivery
+        // envelope remain unchanged, including after an eventual HTTP retry.
+        let mut render_context = candidate.payload.clone();
+        enrich_webhook_job_output_context(
+            tx,
+            &mut render_context,
+            &rule.body_template,
+            object_store,
+        )
+        .await?;
+        render_message(rule, &render_context)?
+    } else {
+        render_message(rule, &candidate.payload)?
+    };
+    set_candidate_message(&mut candidate, message);
+    Ok(Some(candidate))
+}
+
+fn unrendered_event_candidate(
     rule: &RuleRow,
     expression: &Expression,
     event: &EventRow,
@@ -1975,10 +2062,6 @@ fn event_candidate_for_validated_rule(
         "matched_vps": &matched_vps,
     });
     merge_event_payload_roots(&mut payload, &event.payload);
-    let message = render_message(rule, &payload)?;
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("message".to_string(), Value::String(message.clone()));
-    }
     let dedupe_fingerprint = json!({
         "rule_id": rule.id,
         "event_id": &event.event_id,
@@ -1995,7 +2078,7 @@ fn event_candidate_for_validated_rule(
         dedupe_key: format!("webhook-rule:{}", &hash[..32]),
         payload,
         matched_vps,
-        message,
+        message: String::new(),
         occurred_at_unix: event.occurred_at_unix,
         cooldown_until_unix: event.occurred_at_unix.saturating_add(rule.cooldown_secs),
     }))
@@ -2662,8 +2745,19 @@ async fn process_queued_deliveries(
             continue;
         }
         let eligibility_revision = send_eligibility.revision;
+        let rule_actor_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT actor_id FROM webhook_rules WHERE id=$1")
+                .bind(delivery.rule_id)
+                .fetch_optional(pool)
+                .await?
+                .flatten();
+        // Both the captured delivery actor and current saved-rule owner must
+        // remain authorized. Editing a template cannot make a queued output
+        // excerpt bypass the owner's permission recheck.
         let actor_authorized =
-            actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"]).await?;
+            actor_authorized(pool, delivery.actor_id, "operator", WEBHOOK_REQUIRED_SCOPES).await?
+                && actor_authorized(pool, rule_actor_id, "operator", WEBHOOK_REQUIRED_SCOPES)
+                    .await?;
         let result = if actor_authorized {
             deliver_webhook(&delivery, config.webhook_timeout_secs).await
         } else {
@@ -3136,8 +3230,16 @@ fn render_message(rule: &RuleRow, payload: &Value) -> Result<String> {
             .map_or(0, Vec::len);
         return Ok(default_webhook_message(&rule.name, matched_vps_count));
     }
-    render_template_with_limit(&rule.body_template, payload, 16 * 1024)
-        .map_err(|error| anyhow::anyhow!("webhook template render failed: {error}"))
+    render_template_with_options(
+        &rule.body_template,
+        payload,
+        TemplateRenderOptions {
+            max_message_bytes: 16 * 1024,
+            max_substitution_bytes: Some(4096),
+            literal_object_paths: &["job.output"],
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("webhook template render failed: {error}"))
 }
 
 #[cfg(test)]

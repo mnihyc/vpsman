@@ -1560,7 +1560,7 @@ async function navigateAndScreenshot(
     ).toBeVisible();
     await editor.getByLabel("Webhook rule name").fill("edge-status-webhook");
     await editor
-      .getByLabel("Webhook expression")
+      .getByRole("textbox", { name: "Webhook expression", exact: true })
       .fill("alert.triggered && alert.category:agent_status");
     await editor
       .getByLabel("Webhook target")

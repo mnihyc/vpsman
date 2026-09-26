@@ -272,17 +272,25 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     page.getByText("Event webhook rules", { exact: true }).first(),
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Create rule" }).first());
-  await openExpressionMenu(
-    page.locator("main"),
-    "Webhook expression",
-    "alert.",
-    /^alert\.triggered$/,
+  const webhookExpression = page.getByRole("textbox", {
+    name: "Webhook expression",
+    exact: true,
+  });
+  await webhookExpression.fill("");
+  await page
+    .getByRole("combobox", { name: "Webhook expression snippet" })
+    .selectOption("alert.triggered");
+  await activate(
+    page
+      .locator(".eventExpressionEditor")
+      .getByRole("button", { name: "Insert", exact: true }),
   );
+  await expect(webhookExpression).toHaveText("alert.triggered");
   await capture(
     page,
     outputDir,
     manifest,
-    "observability-webhook-expression-event-search",
+    "observability-webhook-expression-event-snippet",
   );
 
   await openConsoleSubpage(page, "Jobs", "Dispatch");

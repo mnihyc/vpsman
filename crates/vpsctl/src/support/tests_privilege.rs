@@ -68,6 +68,7 @@ fn builds_schedule_privilege_assertion_for_resolved_targets() {
             selector_expression: "id:client-a",
             resolved_targets: &clients,
             trigger_kind: "cron",
+            run_on: "all_at_once",
             cron_expr: Some("0 3 * * *"),
             timezone: Some("UTC"),
             event_expression: None,
@@ -109,6 +110,7 @@ fn builds_event_schedule_privilege_from_the_unrendered_template() {
             selector_expression: "id:client-a",
             resolved_targets: &clients,
             trigger_kind: "event",
+            run_on: "triggered_only",
             cron_expr: None,
             timezone: None,
             event_expression: Some("alert.triggered && alert.category:traffic"),
@@ -139,6 +141,7 @@ fn builds_event_schedule_privilege_from_the_unrendered_template() {
         selector_expression: "id:client-a",
         resolved_targets: &clients,
         trigger_kind: "event",
+        run_on: "triggered_only",
         cron_expr: None,
         timezone: None,
         event_expression: Some("alert.triggered && alert.category:traffic"),
@@ -160,4 +163,17 @@ fn builds_event_schedule_privilege_from_the_unrendered_template() {
         &mut PrivilegeAssertionReplayCache::default(),
     )
     .is_ok());
+    let widened_intent = intent.replace(
+        "\"run_on\":\"triggered_only\"",
+        "\"run_on\":\"all_at_once\"",
+    );
+    assert_ne!(widened_intent, intent);
+    assert!(verify_privilege_assertion(
+        &verifier_key,
+        &widened_intent,
+        &assertion,
+        assertion.issued_unix,
+        &mut PrivilegeAssertionReplayCache::default(),
+    )
+    .is_err());
 }
