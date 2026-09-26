@@ -7,7 +7,8 @@ use sqlx::{postgres::PgRow, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 use vpsman_common::{
     alert_policy_state_source_event_id, alert_policy_state_source_revision_event_id,
-    tunnel_runtime_evidence_identity_hash, tunnel_topology_identity_hash, RuntimeTunnelManager,
+    tunnel_runtime_evidence_identity_hash_with_adapter, tunnel_topology_identity_hash,
+    RuntimeTunnelManager,
 };
 
 use crate::{
@@ -1503,13 +1504,21 @@ async fn load_postgres_tunnel_probes_for_clients_in_tx(
 
     let plan_rows = sqlx::query(
         r#"
-        SELECT id, name, revision, left_client_id, right_client_id, plan,
-               builtin_credentials,
-               operational_alert_runtime_boundary_at::text AS runtime_boundary_at
-        FROM tunnel_plans
-        WHERE enabled AND deleted_at IS NULL
-          AND (left_client_id = ANY($1::text[]) OR right_client_id = ANY($1::text[]))
-        ORDER BY id
+        SELECT p.id, p.name, p.revision, p.left_client_id, p.right_client_id, p.plan,
+               p.builtin_credentials,
+               p.operational_alert_runtime_boundary_at::text AS runtime_boundary_at,
+               left_adapter.definition AS left_adapter_definition,
+               right_adapter.definition AS right_adapter_definition
+        FROM tunnel_plans p
+        LEFT JOIN network_adapter_definitions left_adapter
+          ON left_adapter.id = NULLIF(p.plan #>> '{runtime_control,left_adapter_template_id}', '')::uuid
+         AND left_adapter.adapter_kind = 'runtime_tunnel'
+        LEFT JOIN network_adapter_definitions right_adapter
+          ON right_adapter.id = NULLIF(p.plan #>> '{runtime_control,right_adapter_template_id}', '')::uuid
+         AND right_adapter.adapter_kind = 'runtime_tunnel'
+        WHERE p.enabled AND p.deleted_at IS NULL
+          AND (p.left_client_id = ANY($1::text[]) OR p.right_client_id = ANY($1::text[]))
+        ORDER BY p.id
         "#,
     )
     .bind(client_ids)
@@ -1537,6 +1546,20 @@ async fn load_postgres_tunnel_probes_for_clients_in_tx(
             })
             .transpose()?;
         let runtime_boundary_at: String = row.try_get("runtime_boundary_at")?;
+        let adapter_hashes = ["left_adapter_definition", "right_adapter_definition"].map(
+            |column| -> Result<Option<String>> {
+                row.try_get::<Option<Value>, _>(column)?
+                    .map(|definition| {
+                        serde_json::to_vec(&definition)
+                            .map(|bytes| vpsman_common::payload_hash(&bytes))
+                    })
+                    .transpose()
+                    .map_err(Into::into)
+            },
+        );
+        let [left_adapter_hash, right_adapter_hash] = adapter_hashes;
+        let left_adapter_hash = left_adapter_hash?;
+        let right_adapter_hash = right_adapter_hash?;
         for (side, client_id, peer_client_id) in [
             ("left", left.as_str(), right.as_str()),
             ("right", right.as_str(), left.as_str()),
@@ -1562,6 +1585,11 @@ async fn load_postgres_tunnel_probes_for_clients_in_tx(
                 &name,
                 &plan,
                 credential_generation,
+                if side == "left" {
+                    left_adapter_hash.as_deref()
+                } else {
+                    right_adapter_hash.as_deref()
+                },
                 &runtime_boundary_at,
                 side,
                 client_id,
@@ -1586,6 +1614,7 @@ fn append_postgres_tunnel_endpoint_probes(
     plan_name: &str,
     plan: &vpsman_common::TunnelPlan,
     credential_generation: Option<u64>,
+    adapter_definition_hash: Option<&str>,
     runtime_boundary_at: &str,
     side: &str,
     client_id: &str,
@@ -1599,7 +1628,12 @@ fn append_postgres_tunnel_endpoint_probes(
 ) {
     let expected_topology_identity_hash = tunnel_topology_identity_hash(plan_id, plan);
     let expected_runtime_evidence_identity_hash =
-        tunnel_runtime_evidence_identity_hash(plan_id, plan, credential_generation);
+        tunnel_runtime_evidence_identity_hash_with_adapter(
+            plan_id,
+            plan,
+            credential_generation,
+            adapter_definition_hash,
+        );
     let exact_identity = tunnel.is_some_and(|tunnel| {
         tunnel.runtime_evidence_identity_hash.as_deref()
             == Some(expected_runtime_evidence_identity_hash.as_str())
@@ -1751,6 +1785,91 @@ fn append_postgres_tunnel_endpoint_probes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_adapter_content_change_rejects_late_old_telemetry() {
+        let plan_id = Uuid::new_v4();
+        let mut plan: vpsman_common::TunnelPlan = serde_json::from_value(json!({
+            "name": "adapter test", "interface_name": "gre-test", "kind": "gre",
+            "runtime_control": {"manager": "custom_adapter"},
+            "left_client_id": "edge-a", "right_client_id": "edge-b",
+            "left_remote_underlay": "198.51.100.1", "right_remote_underlay": "198.51.100.2",
+            "left_tunnel_address": "10.1.0.0", "right_tunnel_address": "10.1.0.1",
+            "tunnel_prefix_len": 31, "bandwidth_mbps": 100, "conflicts": []
+        }))
+        .unwrap();
+        let old_hash = vpsman_common::payload_hash(b"old executable definition");
+        let new_hash = vpsman_common::payload_hash(b"new executable definition");
+        let mut telemetry = PostgresTunnelEvidence {
+            client_id: "edge-a".into(),
+            interface: "gre-test".into(),
+            observed_at: "2026-01-01T00:10:00Z".into(),
+            accepted_at: "2026-01-01T00:10:01Z".into(),
+            plan_id: Some(plan_id),
+            topology_identity_hash: Some(tunnel_topology_identity_hash(plan_id, &plan)),
+            runtime_evidence_identity_hash: Some(
+                tunnel_runtime_evidence_identity_hash_with_adapter(
+                    plan_id,
+                    &plan,
+                    None,
+                    Some(&old_hash),
+                ),
+            ),
+            endpoint_side: Some("left".into()),
+            traffic_source: Some("interface".into()),
+            traffic_status: Some("ok".into()),
+            traffic_reason: None,
+            traffic_checked_unix: Some(42),
+            adapter_health: Some(json!({"success": true, "checked_unix": 42})),
+        };
+        let probes =
+            |plan: &vpsman_common::TunnelPlan, telemetry: &PostgresTunnelEvidence, hash: &str| {
+                let mut snapshot = OperationalSnapshot::default();
+                append_postgres_tunnel_endpoint_probes(
+                    &mut snapshot,
+                    plan_id,
+                    1,
+                    &plan.name,
+                    plan,
+                    None,
+                    Some(hash),
+                    "2026-01-01T00:05:00Z",
+                    "left",
+                    "edge-a",
+                    "edge-b",
+                    "Edge A",
+                    &[],
+                    "online",
+                    None,
+                    Some(telemetry),
+                    TunnelEvidenceMode::Exact,
+                );
+                snapshot.conditions
+            };
+        assert!(probes(&plan, &telemetry, &old_hash)
+            .iter()
+            .all(|probe| probe.state == ProbeState::Healthy));
+        let stale = probes(&plan, &telemetry, &new_hash);
+        assert_eq!(stale.len(), 2);
+        assert!(stale.iter().all(|probe| probe.state == ProbeState::Unknown));
+        assert!(stale
+            .iter()
+            .all(|probe| probe.source.evidence["topology_identity_validation"] == "unavailable"));
+        telemetry.runtime_evidence_identity_hash =
+            Some(tunnel_runtime_evidence_identity_hash_with_adapter(
+                plan_id,
+                &plan,
+                None,
+                Some(&new_hash),
+            ));
+        assert!(probes(&plan, &telemetry, &new_hash)
+            .iter()
+            .all(|probe| probe.state == ProbeState::Healthy));
+        plan.name = "renamed display metadata".into();
+        assert!(probes(&plan, &telemetry, &new_hash)
+            .iter()
+            .all(|probe| probe.state == ProbeState::Healthy));
+    }
 
     #[test]
     fn state_source_identity_ignores_subject_and_presentation_metadata() {

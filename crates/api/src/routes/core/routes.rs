@@ -1,6 +1,6 @@
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 
@@ -46,7 +46,8 @@ use crate::{
         delete_configuration_preset, delete_network_adapter_definition, effective_agent_config,
         list_configuration_presets, list_configuration_sources, list_network_adapter_definitions,
         preview_configuration_preset, preview_configuration_source_override,
-        update_configuration_preset, update_network_adapter_definition,
+        preview_network_adapter_definition, update_configuration_preset,
+        update_network_adapter_definition, update_network_adapter_metadata,
     },
     routes_dashboard::dashboard_overview,
     routes_file_transfers::{
@@ -507,6 +508,14 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/network-adapter-definitions/{definition_id}",
             put(update_network_adapter_definition).delete(delete_network_adapter_definition),
+        )
+        .route(
+            "/api/v1/network-adapter-definitions/{definition_id}/preview",
+            post(preview_network_adapter_definition),
+        )
+        .route(
+            "/api/v1/network-adapter-definitions/{definition_id}/metadata",
+            patch(update_network_adapter_metadata),
         )
         .route(
             "/api/v1/runtime-config/clients/{client_id}/workspace",

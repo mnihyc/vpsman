@@ -1059,6 +1059,55 @@ fn runtime_evidence_identity_tracks_runtime_policy_and_credential_generation() {
 }
 
 #[test]
+fn runtime_evidence_identity_binds_only_the_resolved_custom_endpoint_definition() {
+    let plan_id = TEST_PLAN_ID;
+    let mut plan = plan_tunnel(&plan_input(
+        TunnelKind::Gre,
+        RuntimeTunnelManager::CustomAdapter,
+    ))
+    .unwrap();
+    let definition_hash = |argv: &[&str]| {
+        crate::payload_hash(
+            &serde_json::to_vec(&serde_json::json!({"startup_command": {"argv": argv}})).unwrap(),
+        )
+    };
+    let left_hash = definition_hash(&["/bin/old-start"]);
+    let right_hash = definition_hash(&["/bin/right-start"]);
+    let changed_left_hash = definition_hash(&["/bin/new-start"]);
+    let identity = |plan: &TunnelPlan, hash: Option<&str>| {
+        tunnel_runtime_evidence_identity_hash_with_adapter(plan_id, plan, None, hash)
+    };
+    let left_identity = identity(&plan, Some(&left_hash));
+    let right_identity = identity(&plan, Some(&right_hash));
+    assert_ne!(left_identity, right_identity);
+    assert_ne!(left_identity, identity(&plan, Some(&changed_left_hash)));
+    assert_eq!(right_identity, identity(&plan, Some(&right_hash)));
+    assert_eq!(
+        identity(&plan, None),
+        tunnel_runtime_evidence_identity_hash(plan_id, &plan, None)
+    );
+    let topology_identity = tunnel_topology_identity_hash(plan_id, &plan);
+    plan.name = "display-only rename".to_string();
+    assert_eq!(left_identity, identity(&plan, Some(&left_hash)));
+    assert_eq!(
+        topology_identity,
+        tunnel_topology_identity_hash(plan_id, &plan)
+    );
+
+    for manager in [
+        RuntimeTunnelManager::AgentBuiltin,
+        RuntimeTunnelManager::ExternalObserved,
+    ] {
+        plan.runtime_control.manager = manager;
+        assert_eq!(
+            identity(&plan, Some(&changed_left_hash)),
+            tunnel_runtime_evidence_identity_hash(plan_id, &plan, None),
+            "non-custom identity bytes must not churn"
+        );
+    }
+}
+
+#[test]
 fn topology_identity_changes_with_endpoint_underlay_or_primary_family() {
     let plan_id = "00000000-0000-4000-8000-000000000001".parse().unwrap();
     let plan = plan_tunnel(&plan_input(

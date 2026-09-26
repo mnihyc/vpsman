@@ -98,3 +98,28 @@ pub fn tunnel_runtime_evidence_identity_hash(
     .expect("runtime evidence identity payload serializes");
     crate::payload_hash(&payload)
 }
+
+/// Bind a custom endpoint's runtime evidence to its resolved executable definition.
+/// Display metadata is excluded from the supplied definition hash. Endpoints
+/// without a resolved custom adapter retain the established identity bytes.
+pub fn tunnel_runtime_evidence_identity_hash_with_adapter(
+    plan_id: uuid::Uuid,
+    plan: &TunnelPlan,
+    credential_generation: Option<u64>,
+    adapter_definition_hash: Option<&str>,
+) -> String {
+    let runtime_identity =
+        tunnel_runtime_evidence_identity_hash(plan_id, plan, credential_generation);
+    let Some(adapter_definition_hash) = adapter_definition_hash
+        .filter(|_| plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter)
+    else {
+        return runtime_identity;
+    };
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "schema": 2,
+        "runtime_identity": runtime_identity,
+        "adapter_definition_hash": adapter_definition_hash,
+    }))
+    .expect("resolved runtime evidence identity payload serializes");
+    crate::payload_hash(&payload)
+}

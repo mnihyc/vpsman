@@ -532,44 +532,6 @@ impl Repository {
             .filter(|state| state.pending_status.is_some()))
     }
 
-    pub(crate) async fn promote_runtime_config_apply_from_agent_hash(
-        &self,
-        client_id: &str,
-        content_hash: &str,
-    ) -> Result<()> {
-        match self {
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    UPDATE client_runtime_config_apply_state
-                    SET
-                        applied_version = pending_version,
-                        applied_content_hash = pending_content_hash,
-                        applied_config = pending_config,
-                        applied_job_id = pending_job_id,
-                        applied_at = now(),
-                        pending_version = NULL,
-                        pending_content_hash = NULL,
-                        pending_config = NULL,
-                        pending_job_id = NULL,
-                        pending_reason = NULL,
-                        pending_status = NULL,
-                        pending_error = NULL,
-                        pending_updated_at = NULL,
-                        updated_at = now()
-                    WHERE client_id = $1
-                      AND lower(pending_content_hash) = lower($2)
-                    "#,
-                )
-                .bind(client_id)
-                .bind(content_hash)
-                .execute(pool)
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) async fn record_runtime_config_apply_terminal_for_target_status(
         &self,
         job_id: Uuid,

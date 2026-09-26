@@ -2105,6 +2105,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     setTunnelPlanEnabled: topology.setTunnelPlanEnabled,
     updateTunnelConnectionAssessment: topology.updateTunnelConnectionAssessment,
     updateNetworkAdapterDefinition: topology.updateNetworkAdapterDefinition,
+    previewNetworkAdapterDefinition: topology.previewNetworkAdapterDefinition,
+    updateNetworkAdapterDetails: topology.updateNetworkAdapterDetails,
     updateTunnelPlanOspfCost: topology.updateTunnelPlanOspfCost,
     updateTunnelPlan: topology.updateTunnelPlan,
     networkObservations: topology.networkObservations,

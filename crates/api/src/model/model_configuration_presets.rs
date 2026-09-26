@@ -247,3 +247,43 @@ pub(crate) struct UpsertNetworkAdapterDefinitionRequest {
     pub(crate) description: Option<String>,
     pub(crate) definition: serde_json::Value,
 }
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UpdateNetworkAdapterDefinitionRequest {
+    #[serde(flatten)]
+    pub(crate) candidate: UpsertNetworkAdapterDefinitionRequest,
+    pub(crate) review_hash: String,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateNetworkAdapterMetadataRequest {
+    pub(crate) expected_updated_at: String,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NetworkAdapterAffectedResourceView {
+    pub(crate) kind: String,
+    pub(crate) resource_id: Uuid,
+    pub(crate) resource_name: String,
+    pub(crate) client_ids: Vec<String>,
+    pub(crate) enabled: bool,
+    pub(crate) cleanup_pending: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NetworkAdapterPreviewResponse {
+    pub(crate) review_hash: String,
+    pub(crate) change_kind: String,
+    pub(crate) affected_resources: Vec<NetworkAdapterAffectedResourceView>,
+    pub(crate) target_client_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct NetworkAdapterMutationResponse {
+    pub(crate) definition: NetworkAdapterDefinitionView,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
+}

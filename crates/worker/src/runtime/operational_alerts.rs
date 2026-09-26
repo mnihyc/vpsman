@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
-    alert_policy_state_source_event_id, tunnel_runtime_evidence_identity_hash,
+    alert_policy_state_source_event_id, tunnel_runtime_evidence_identity_hash_with_adapter,
     tunnel_topology_identity_hash, RuntimeTunnelManager, TunnelBuiltinCredentials, TunnelPlan,
 };
 
@@ -292,12 +292,20 @@ async fn load_tunnel_unknown_probes(
     let tags = serde_json::from_value::<Vec<String>>(identity.try_get("tags")?).unwrap_or_default();
     let plan_rows = sqlx::query(
         r#"
-        SELECT id, name, revision, left_client_id, right_client_id, plan,
-               builtin_credentials, operational_alert_runtime_boundary_at
-        FROM tunnel_plans
-        WHERE enabled AND deleted_at IS NULL
-          AND (left_client_id = $1 OR right_client_id = $1)
-        ORDER BY id
+        SELECT p.id, p.name, p.revision, p.left_client_id, p.right_client_id, p.plan,
+               p.builtin_credentials, p.operational_alert_runtime_boundary_at,
+               CASE WHEN p.left_client_id = $1 THEN left_adapter.definition
+                    ELSE right_adapter.definition END AS adapter_definition
+        FROM tunnel_plans p
+        LEFT JOIN network_adapter_definitions left_adapter
+          ON left_adapter.id = NULLIF(p.plan #>> '{runtime_control,left_adapter_template_id}', '')::uuid
+         AND left_adapter.adapter_kind = 'runtime_tunnel'
+        LEFT JOIN network_adapter_definitions right_adapter
+          ON right_adapter.id = NULLIF(p.plan #>> '{runtime_control,right_adapter_template_id}', '')::uuid
+         AND right_adapter.adapter_kind = 'runtime_tunnel'
+        WHERE p.enabled AND p.deleted_at IS NULL
+          AND (p.left_client_id = $1 OR p.right_client_id = $1)
+        ORDER BY p.id
         "#,
     )
     .bind(client_id)
@@ -330,8 +338,18 @@ async fn load_tunnel_unknown_probes(
             ("right", left_client_id.as_str())
         };
         let topology_identity_hash = tunnel_topology_identity_hash(plan_id, &plan);
-        let runtime_evidence_identity_hash =
-            tunnel_runtime_evidence_identity_hash(plan_id, &plan, credential_generation);
+        let adapter_definition_hash = row
+            .try_get::<Option<Value>, _>("adapter_definition")?
+            .map(|definition| {
+                serde_json::to_vec(&definition).map(|bytes| vpsman_common::payload_hash(&bytes))
+            })
+            .transpose()?;
+        let runtime_evidence_identity_hash = tunnel_runtime_evidence_identity_hash_with_adapter(
+            plan_id,
+            &plan,
+            credential_generation,
+            adapter_definition_hash.as_deref(),
+        );
         let base_evidence = json!({
             "subject": {
                 "client_id": client_id,

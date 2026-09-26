@@ -389,6 +389,21 @@ export async function apiPut<T = JsonValue>(
   return await apiJsonFromResponse<T>(response, `PUT ${path}`);
 }
 
+export async function apiPatch<T = JsonValue>(
+  path: string,
+  apiToken: AuthSession | null,
+  body: unknown,
+): Promise<T> {
+  const response = await authenticatedApiFetch(path, apiToken, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (response.status === 401) throw new ApiUnauthorizedError();
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return await apiJsonFromResponse<T>(response, `PATCH ${path}`);
+}
+
 export async function apiPostBinary<T = JsonValue>(
   path: string,
   apiToken: AuthSession | null,

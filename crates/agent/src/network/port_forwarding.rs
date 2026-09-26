@@ -71,9 +71,15 @@ enum PortForwardingWork {
     Reconcile {
         config: AgentPortForwardingConfig,
         require_table_access: bool,
+        force_reapply: bool,
+        clear_cleanup_failures: bool,
         previous_native_ids: Vec<uuid::Uuid>,
         cancel_token: CommandCancelToken,
         reply: oneshot::Sender<Result<PortForwardRuntimeSnapshot>>,
+    },
+    AdoptDesired {
+        config: AgentPortForwardingConfig,
+        reply: oneshot::Sender<Result<()>>,
     },
     Inspect {
         config: AgentPortForwardingConfig,
@@ -137,6 +143,8 @@ impl PortForwardingConsumerHandle {
         &self,
         config: &AgentPortForwardingConfig,
         require_table_access: bool,
+        force_reapply: bool,
+        clear_cleanup_failures: bool,
         previous_native_ids: Vec<uuid::Uuid>,
         cancel_token: CommandCancelToken,
     ) -> Result<PortForwardRuntimeSnapshot> {
@@ -146,6 +154,8 @@ impl PortForwardingConsumerHandle {
             .send(PortForwardingWork::Reconcile {
                 config: config.clone(),
                 require_table_access,
+                force_reapply,
+                clear_cleanup_failures,
                 previous_native_ids,
                 cancel_token,
                 reply,
@@ -171,6 +181,21 @@ impl PortForwardingConsumerHandle {
         response
             .await
             .context("port-forwarding consumer stopped before inspection response")
+    }
+
+    /// Finalize accepted desired state after canceled work, without executing commands.
+    pub(crate) async fn adopt_desired(&self, config: &AgentPortForwardingConfig) -> Result<()> {
+        self.cancel_background_observation();
+        let (reply, response) = oneshot::channel();
+        self.work_tx
+            .send(PortForwardingWork::AdoptDesired {
+                config: config.clone(),
+                reply,
+            })
+            .map_err(|_| anyhow::anyhow!("port-forwarding consumer is unavailable"))?;
+        response
+            .await
+            .context("port-forwarding consumer stopped before desired-state adoption")?
     }
 
     fn cancel_background_observation(&self) {
@@ -256,13 +281,21 @@ impl PortForwardingConsumer {
             PortForwardingWork::Reconcile {
                 config,
                 require_table_access,
+                force_reapply,
+                clear_cleanup_failures,
                 previous_native_ids,
                 cancel_token,
                 reply,
             } => {
                 self.native_owners.extend(previous_native_ids);
                 let result = self
-                    .reconcile(&config, require_table_access, cancel_token)
+                    .reconcile(
+                        &config,
+                        require_table_access,
+                        force_reapply,
+                        clear_cleanup_failures,
+                        cancel_token,
+                    )
                     .await;
                 if let Ok(snapshot) = &result {
                     self.published.send_replace(snapshot.clone());
@@ -276,6 +309,9 @@ impl PortForwardingConsumer {
                     .await;
                 self.published.send_replace(snapshot.clone());
                 let _ = reply.send(snapshot);
+            }
+            PortForwardingWork::AdoptDesired { config, reply } => {
+                let _ = reply.send(self.adopt_desired(&config).await);
             }
             PortForwardingWork::Observe {
                 config,
@@ -318,12 +354,19 @@ impl PortForwardingConsumer {
         &mut self,
         config: &AgentPortForwardingConfig,
         require_table_access: bool,
+        force_reapply: bool,
+        clear_cleanup_failures: bool,
         cancel_token: CommandCancelToken,
     ) -> Result<PortForwardRuntimeSnapshot> {
         validate_port_forwarding_config(config)
             .map_err(|error| anyhow::anyhow!("invalid port-forwarding desired state: {error}"))?;
-        cancel_token.check("port_forwarding")?;
+        if cancel_token.is_canceled() {
+            self.adopt_desired(config).await?;
+            cancel_token.check("port_forwarding")?;
+        }
         self.inventory.load().await?;
+        let native_repair_ids =
+            native_repair_candidates(self.active_config.as_ref(), config, clear_cleanup_failures);
         self.active_config = Some(config.clone());
         self.inventory
             .synchronize_cleanup_requests(&config.cleanup_rules)
@@ -331,14 +374,13 @@ impl PortForwardingConsumer {
         let (_, mut custom_stats) = self
             .inventory
             .remove_replaced(config, cancel_token.clone())
-            .await;
+            .await?;
         cancel_token.check("port_forwarding")?;
-        let blocked = custom_stats
+        let cleanup_failed = custom_stats
             .iter()
             .map(|stat| stat.rule_id)
             .collect::<BTreeSet<_>>();
         let mut native = native_config(config);
-        native.rules.retain(|rule| !blocked.contains(&rule.id));
         native.desired_hash = native_hash(&native.rules);
         let native_result = if custom_ownership_context(config)
             && !require_table_access
@@ -352,7 +394,6 @@ impl PortForwardingConsumer {
             self.reconcile_native(&native, require_table_access, cancel_token.clone())
                 .await
         };
-        let native_failed = native_result.is_err();
         let mut snapshot = match native_result {
             Ok(snapshot) => snapshot,
             Err(error) => failed_snapshot(
@@ -362,28 +403,52 @@ impl PortForwardingConsumer {
                 &error.to_string(),
             ),
         };
+        self.inventory
+            .confirm_native_repairs(&snapshot, &native_repair_ids, &cleanup_failed)
+            .await?;
+        let mut unchanged_custom = config.clone();
+        unchanged_custom.rules.clear();
         for rule in config
             .rules
             .iter()
             .filter(|rule| rule.mode == PortForwardMode::CustomAdapter)
         {
             cancel_token.check("port_forwarding")?;
-            if blocked.contains(&rule.id) {
+            if !force_reapply && self.inventory.owns_desired(rule) {
+                unchanged_custom.rules.push(rule.clone());
                 continue;
             }
-            if native_failed && self.native_owners.contains(&rule.id) {
-                custom_stats.push(adapters::error_stat(
-                    rule,
-                    "previous_native_cleanup_failed",
-                    "the previous native forwarding rule could not be removed",
-                ));
-            } else {
-                custom_stats.push(self.inventory.apply(rule, cancel_token.clone()).await);
-            }
+            // Automatic recovery may re-run Apply, but cannot certify an
+            // operator repaired residue from an earlier failed cleanup.
+            custom_stats.push(
+                if cleanup_failed.contains(&rule.id)
+                    || (!clear_cleanup_failures && self.inventory.owns_desired(rule))
+                {
+                    self.inventory
+                        .apply_with_cleanup_report(rule, cancel_token.clone(), true)
+                        .await
+                } else {
+                    self.inventory.apply(rule, cancel_token.clone()).await
+                },
+            );
         }
+        custom_stats.extend(
+            self.inventory
+                .inspect(&unchanged_custom, cancel_token)
+                .await,
+        );
         attach_native_stats(&native, &mut snapshot);
         snapshot.removed_rules = self.inventory.removed_rules();
+        custom_stats.extend(self.inventory.cleanup_failures(config));
         Ok(merge_snapshot(config, &native, snapshot, custom_stats))
+    }
+
+    async fn adopt_desired(&mut self, config: &AgentPortForwardingConfig) -> Result<()> {
+        validate_port_forwarding_config(config)
+            .map_err(|error| anyhow::anyhow!("invalid port-forwarding desired state: {error}"))?;
+        self.inventory.adopt_desired(config).await?;
+        self.active_config = Some(config.clone());
+        Ok(())
     }
 
     async fn inspect(
@@ -623,6 +688,25 @@ impl PortForwardingConsumer {
             }
         }
     }
+}
+
+fn native_repair_candidates(
+    previous: Option<&AgentPortForwardingConfig>,
+    desired: &AgentPortForwardingConfig,
+    explicit_reapply: bool,
+) -> BTreeSet<uuid::Uuid> {
+    desired
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.mode != PortForwardMode::CustomAdapter
+                && (explicit_reapply
+                    || previous.is_some_and(|previous| {
+                        !previous.rules.iter().any(|old| old.id == rule.id)
+                    }))
+        })
+        .map(|rule| rule.id)
+        .collect()
 }
 
 fn native_config(config: &AgentPortForwardingConfig) -> AgentPortForwardingConfig {

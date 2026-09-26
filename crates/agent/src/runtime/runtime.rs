@@ -225,6 +225,8 @@ async fn run_agent_with_ledger(
                     .rules
                     .iter()
                     .any(|rule| rule.mode != vpsman_common::PortForwardMode::CustomAdapter),
+                true,
+                false,
                 config
                     .network
                     .port_forwarding
@@ -1347,7 +1349,7 @@ async fn reconcile_configured_runtime_tunnels_with_previous(
     trigger: &'static str,
     cancel_token: CommandCancelToken,
     previous: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
-    blocked: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
+    unchanged: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
 ) -> serde_json::Value {
     let total = config.network.runtime_status_telemetry_plans.len();
     let mut summaries = Vec::with_capacity(total);
@@ -1359,12 +1361,12 @@ async fn reconcile_configured_runtime_tunnels_with_previous(
     let mut hook_failures = 0_u64;
 
     for telemetry_plan in &config.network.runtime_status_telemetry_plans {
-        if blocked
+        if unchanged
             .iter()
-            .any(|stale| runtime_tunnel_endpoint_conflicts(stale, telemetry_plan))
+            .any(|old| runtime_tunnel_snapshots_match(old, telemetry_plan))
         {
-            failed += 1;
-            summaries.push(runtime_reconcile_summary(trigger, telemetry_plan.plan_id.as_deref(), serde_json::json!({"type":"runtime_tunnel_reconcile", "status":"failed", "reason":"previous_endpoint_removal_failed", "plan":telemetry_plan.plan.name, "interface":telemetry_plan.plan.interface_name, "side":endpoint_side_name(telemetry_plan.endpoint_side), "manager":telemetry_plan.plan.runtime_control.manager}), None));
+            converged += 1;
+            summaries.push(runtime_reconcile_summary(trigger, telemetry_plan.plan_id.as_deref(), serde_json::json!({"type":"runtime_tunnel_reconcile", "status":"unchanged", "plan":telemetry_plan.plan.name, "interface":telemetry_plan.plan.interface_name, "side":endpoint_side_name(telemetry_plan.endpoint_side), "manager":telemetry_plan.plan.runtime_control.manager}), None));
             continue;
         }
         if let Err(error) = cancel_token.check("runtime_config_sync") {
@@ -1490,21 +1492,18 @@ async fn apply_runtime_config_sync_owned(
     cancel_token: CommandCancelToken,
     port_forwarding_consumer: &PortForwardingConsumerHandle,
 ) -> Result<RuntimeConfigSyncResult> {
-    anyhow::ensure!(
-        runtime_config.version == desired_version,
-        "runtime config version mismatch"
-    );
-    let mut candidate_config = config.clone();
-    runtime_config.apply_to_agent_config(&mut candidate_config);
+    let candidate_config = runtime_config_candidate(config, runtime_config, desired_version)?;
     let previous_tunnels = config.network.runtime_status_telemetry_plans.clone();
     let previous_port_forwarding = config.network.port_forwarding.clone();
     let desired_tunnels = candidate_config
         .network
         .runtime_status_telemetry_plans
         .clone();
-    let tunnels_changed = previous_tunnels != desired_tunnels;
-    let port_forwarding_changed =
-        previous_port_forwarding != candidate_config.network.port_forwarding;
+    let tunnels_changed = !runtime_tunnel_snapshot_sets_match(&previous_tunnels, &desired_tunnels);
+    let port_forwarding_changed = !port_forwarding_snapshots_match(
+        &previous_port_forwarding,
+        &candidate_config.network.port_forwarding,
+    );
     let reconcile_scope = runtime_config_reconcile_scope_from_reason(reason);
     let port_forwarding_reapply =
         reconcile_scope.includes(RuntimeConfigReconcileResource::PortForwarding);
@@ -1537,6 +1536,11 @@ async fn apply_runtime_config_sync_owned(
             .reconcile(
                 &candidate_config.network.port_forwarding,
                 require_table_access,
+                port_forwarding_reapply,
+                matches!(
+                    reason,
+                    "port_forward_table_reapply" | "port_forward_bulk_reapply"
+                ),
                 previous_port_forwarding
                     .rules
                     .iter()
@@ -1580,7 +1584,6 @@ async fn apply_runtime_config_sync_owned(
         .collect::<Vec<_>>();
 
     let mut removals = Vec::with_capacity(stale_tunnels.len());
-    let mut blocked_tunnels = Vec::new();
     for stale in &stale_tunnels {
         cancel_token.check("runtime_config_sync")?;
         match execute_runtime_tunnel_remove_report_cancelable(
@@ -1619,11 +1622,6 @@ async fn apply_runtime_config_sync_owned(
                 Some(error.to_string()),
             )),
         }
-        if removals.last().is_some_and(|report| {
-            !matches!(report["status"].as_str(), Some("removed" | "observed_only"))
-        }) {
-            blocked_tunnels.push(stale.clone());
-        }
     }
 
     cancel_token.check("runtime_config_sync")?;
@@ -1633,7 +1631,11 @@ async fn apply_runtime_config_sync_owned(
             "runtime_config_sync",
             cancel_token.clone(),
             &previous_tunnels,
-            &blocked_tunnels,
+            if tunnel_reapply {
+                &[]
+            } else {
+                &previous_tunnels
+            },
         )
         .await
     } else {
@@ -1655,18 +1657,12 @@ async fn apply_runtime_config_sync_owned(
     } else {
         "applied"
     };
-    let (applied_config, accepted_scope) = accepted_config_after_network_sync(
-        config,
-        &candidate_config,
-        status == "applied",
-        tunnels_changed,
-        port_forwarding_changed,
-        removal_failed || reconcile_failed,
-        port_forwarding_failed,
-    );
-    let accepted_runtime_config = applied_config
-        .as_ref()
-        .map(|config| AgentRuntimeConfig::from_agent_config(desired_version, config));
+    // Desired state belongs to the operator, not to command success. Keep the
+    // newest configuration even when cleanup or Apply fails, so Disable stays
+    // disabled and a later Enable never replays obsolete cleanup commands.
+    let applied_config = Some(candidate_config.clone());
+    let accepted_scope = "full";
+    let accepted_runtime_config = Some(runtime_config.clone());
     let hook_failures = reconcile["hook_failures"].as_u64().unwrap_or_default()
         + removals
             .iter()
@@ -1704,6 +1700,25 @@ async fn apply_runtime_config_sync_owned(
         accepted_runtime_config,
         fully_applied: status == "applied",
     })
+}
+
+fn runtime_config_candidate(
+    config: &AgentConfig,
+    runtime_config: &AgentRuntimeConfig,
+    desired_version: u64,
+) -> Result<AgentConfig> {
+    ensure!(
+        runtime_config.version == desired_version,
+        "runtime config version mismatch"
+    );
+    let mut candidate = config.clone();
+    runtime_config.apply_to_agent_config(&mut candidate);
+    validate_agent_config_shape(&candidate)
+        .map_err(anyhow::Error::msg)
+        .context("invalid runtime config candidate")?;
+    // Version/protocol/authorization fences still precede execution. A failed
+    // command is not grounds to reject an otherwise valid desired document.
+    Ok(candidate)
 }
 
 #[cfg(test)]
@@ -1774,44 +1789,6 @@ fn port_forwarding_snapshot_requires_reconnect_sync(snapshot: &PortForwardRuntim
     }
 }
 
-fn accepted_config_after_network_sync(
-    current: &AgentConfig,
-    candidate: &AgentConfig,
-    fully_applied: bool,
-    tunnels_changed: bool,
-    port_forwarding_changed: bool,
-    tunnel_failed: bool,
-    port_forwarding_failed: bool,
-) -> (Option<AgentConfig>, &'static str) {
-    if fully_applied {
-        return (Some(candidate.clone()), "full");
-    }
-    let mut partial = current.clone();
-    let mut accepted_tunnels = false;
-    let mut accepted_port_forwarding = false;
-    if tunnels_changed && !tunnel_failed {
-        let previous_port_forwarding = partial.network.port_forwarding.clone();
-        partial.network = candidate.network.clone();
-        if port_forwarding_failed {
-            partial.network.port_forwarding = previous_port_forwarding;
-        }
-        accepted_tunnels = true;
-    }
-    if port_forwarding_changed && !port_forwarding_failed {
-        partial.network.port_forwarding = candidate.network.port_forwarding.clone();
-        accepted_port_forwarding = true;
-    }
-    if partial == *current {
-        (None, "none")
-    } else if accepted_port_forwarding && !accepted_tunnels {
-        (Some(partial), "port_forwarding")
-    } else if accepted_tunnels && !accepted_port_forwarding {
-        (Some(partial), "tunnels")
-    } else {
-        (Some(partial), "network")
-    }
-}
-
 fn runtime_tunnel_identity_matches(
     left: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
     right: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
@@ -1829,21 +1806,72 @@ fn runtime_tunnel_identity_matches(
         && left.plan.tunnel_prefix_len == right.plan.tunnel_prefix_len
         && left.plan.ipv4_tunnel == right.plan.ipv4_tunnel
         && left.plan.ipv6_tunnel == right.plan.ipv6_tunnel
-        && left.runtime_adapter == right.runtime_adapter
+        && runtime_adapter_execution_matches(
+            left.runtime_adapter.as_ref(),
+            right.runtime_adapter.as_ref(),
+        )
         && runtime_tunnel_control_identity_matches(
             &left.plan.runtime_control,
             &right.plan.runtime_control,
         )
 }
 
-fn runtime_tunnel_endpoint_conflicts(
+fn runtime_tunnel_snapshots_match(
     left: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
     right: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
 ) -> bool {
-    (left.plan_id.is_some()
-        && left.plan_id == right.plan_id
-        && left.endpoint_side == right.endpoint_side)
-        || left.plan.interface_name == right.plan.interface_name
+    let mut left = left.clone();
+    let mut right = right.clone();
+    if let Some(adapter) = &mut left.runtime_adapter {
+        adapter.definition_name.clear();
+    }
+    if let Some(adapter) = &mut right.runtime_adapter {
+        adapter.definition_name.clear();
+    }
+    left == right
+}
+
+fn runtime_adapter_execution_matches(
+    left: Option<&vpsman_common::RuntimeTunnelAdapterCommands>,
+    right: Option<&vpsman_common::RuntimeTunnelAdapterCommands>,
+) -> bool {
+    let strip_name = |adapter: &vpsman_common::RuntimeTunnelAdapterCommands| {
+        let mut adapter = adapter.clone();
+        adapter.definition_name.clear();
+        adapter
+    };
+    left.map(strip_name) == right.map(strip_name)
+}
+
+fn runtime_tunnel_snapshot_sets_match(
+    left: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
+    right: &[vpsman_common::AgentRuntimeStatusTelemetryPlan],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|old| {
+            right
+                .iter()
+                .any(|new| runtime_tunnel_snapshots_match(old, new))
+        })
+}
+
+fn port_forwarding_snapshots_match(
+    left: &vpsman_common::AgentPortForwardingConfig,
+    right: &vpsman_common::AgentPortForwardingConfig,
+) -> bool {
+    let normalize = |config: &vpsman_common::AgentPortForwardingConfig| {
+        let mut config = config.clone();
+        // The document hash still covers display labels on the wire. Compare
+        // executable content here without changing that protocol contract.
+        config.desired_hash.clear();
+        for rule in &mut config.rules {
+            if let Some(adapter) = &mut rule.adapter {
+                adapter.definition_name.clear();
+            }
+        }
+        config
+    };
+    normalize(left) == normalize(right)
 }
 
 fn runtime_tunnel_underlay_identity_matches(
@@ -2903,6 +2931,8 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let command_task = if let Some((desired_version, reason, runtime_config)) = runtime_sync {
         let runtime_config_reconcile_scope = runtime_config_reconcile_scope_from_reason(&reason);
         tokio::spawn(async move {
+            let accepted_on_failure =
+                runtime_config_candidate(&task_config, &runtime_config, desired_version).ok();
             let result = time::timeout(
                 Duration::from_secs(max_timeout_secs.max(1)),
                 run_cancelable(
@@ -2920,7 +2950,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 ),
             )
             .await;
-            let (result, config_update, runtime_config_update, runtime_config_fully_applied) =
+            let (mut result, config_update, runtime_config_update, runtime_config_fully_applied) =
                 match result {
                     Ok(Ok(sync)) => (
                         Ok(sync.outputs),
@@ -2928,17 +2958,42 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                         sync.accepted_runtime_config,
                         sync.fully_applied,
                     ),
-                    Ok(Err(error)) => (Err(error), None, None, false),
+                    Ok(Err(error)) => (
+                        Err(error),
+                        accepted_on_failure.clone(),
+                        accepted_on_failure.as_ref().map(|_| runtime_config.clone()),
+                        false,
+                    ),
                     Err(error) => {
                         task_cancel_token.cancel("runtime_config_sync_timeout".to_string());
                         (
                             Err(anyhow::anyhow!("runtime config sync timed out: {error}")),
-                            None,
-                            None,
+                            accepted_on_failure.clone(),
+                            accepted_on_failure.as_ref().map(|_| runtime_config.clone()),
                             false,
                         )
                     }
                 };
+            if !runtime_config_fully_applied {
+                if let Some(candidate) = &config_update {
+                    // Cancellation can stop the execution future before the consumer
+                    // sees the document. Serialize adoption behind canceled work so
+                    // subsequent inspection cannot execute an obsolete adapter.
+                    if let Err(error) = task_port_forwarding
+                        .adopt_desired(&candidate.network.port_forwarding)
+                        .await
+                    {
+                        result = Err(match result {
+                            Err(execution_error) => anyhow::anyhow!(
+                                "{execution_error:#}; forwarding desired-state adoption failed: {error:#}"
+                            ),
+                            Ok(_) => anyhow::anyhow!(
+                                "forwarding desired-state adoption failed: {error:#}"
+                            ),
+                        });
+                    }
+                }
+            }
             let _ = event_tx
                 .send(CommandExecutionEvent::Finished(Box::new(
                     CommandExecutionResult {

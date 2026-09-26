@@ -24,6 +24,7 @@ import type {
   JobRolloutRecord,
   MonitoringCardView,
   NetworkAdapterDefinitionRecord,
+  NetworkAdapterPreviewResponse,
   OperatorAuthEventRecord,
   ScheduleRecord,
   TagMutationResponse,
@@ -4479,6 +4480,13 @@ export async function installConsoleApiMock(
           ...record,
           definition: structuredClone(record.definition),
         }));
+      const networkAdapterReviews = new Map<string, {
+        definition_id: string;
+        updated_at: string;
+        candidate: unknown;
+        preview: NetworkAdapterPreviewResponse;
+      }>();
+      let networkAdapterReviewSequence = 0;
       const deletedAgentIds = new Set<string>();
       const deletedTunnelPlanIds = new Set<string>();
       const uptimeSourceWindow = window as typeof window & {
@@ -4671,6 +4679,37 @@ export async function installConsoleApiMock(
             !deletedAgentIds.has(plan.left_client_id) &&
             !deletedAgentIds.has(plan.right_client_id),
         );
+      const adapterAffectedResources = (definition: NetworkAdapterDefinitionRecord): NetworkAdapterPreviewResponse["affected_resources"] => {
+        if (definition.adapter_kind === "port_forward") {
+          return mutablePortForwardRules
+            .filter((rule) => rule.adapter_definition_id === definition.id &&
+              (!rule.deleted_at || (!rule.removal_confirmed_at && !rule.forgotten_at)))
+            .map((rule) => ({
+              kind: "port_forward",
+              resource_id: rule.id,
+              resource_name: rule.name,
+              client_ids: [rule.client_id],
+              enabled: rule.enabled && !rule.deleted_at,
+              cleanup_pending: Boolean(rule.deleted_at && !rule.removal_confirmed_at),
+            }));
+        }
+        return visibleTunnelPlans().flatMap((plan) => {
+          const config = asFixtureRecord(definition.adapter_kind === "routing_cost"
+            ? plan.plan.ospf : asFixtureRecord(plan.plan)?.runtime_control);
+          const clientIds = [
+            config?.left_adapter_template_id === definition.id ? plan.left_client_id : null,
+            config?.right_adapter_template_id === definition.id ? plan.right_client_id : null,
+          ].filter((id): id is string => id !== null);
+          return clientIds.length ? [{
+            kind: definition.adapter_kind,
+            resource_id: plan.id,
+            resource_name: plan.name,
+            client_ids: clientIds,
+            enabled: plan.enabled,
+            cleanup_pending: false,
+          }] : [];
+        });
+      };
       const visibleTopologyGraph = () => {
         const visiblePlanIds = new Set(
           visibleTunnelPlans().map((plan) => plan.id),
@@ -9616,6 +9655,55 @@ export async function installConsoleApiMock(
           mutableNetworkAdapterDefinitions.push(created);
           return jsonResponse(created);
         }
+        const networkAdapterReviewMatch = pathname.match(
+          /^\/api\/v1\/network-adapter-definitions\/([^/]+)\/preview$/,
+        );
+        if (networkAdapterReviewMatch && method === "POST") {
+          const definitionId = decodeURIComponent(networkAdapterReviewMatch[1]);
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const definition = mutableNetworkAdapterDefinitions.find((record) => record.id === definitionId);
+          if (!definition) return jsonResponse({ error: "network_adapter_not_found" }, 404);
+          const affected = adapterAffectedResources(definition);
+          const preview: NetworkAdapterPreviewResponse = {
+            review_hash: (++networkAdapterReviewSequence).toString(16).padStart(64, "0"),
+            change_kind: JSON.stringify(body.definition) !== JSON.stringify(definition.definition)
+              ? "commands" : body.name !== definition.name || body.description !== definition.description
+                ? "metadata" : "unchanged",
+            affected_resources: affected,
+            target_client_ids: [...new Set(affected.filter((resource) => resource.enabled || resource.cleanup_pending)
+              .flatMap((resource) => resource.client_ids))].sort(),
+          };
+          networkAdapterReviews.set(preview.review_hash, {
+            definition_id: definitionId,
+            updated_at: definition.updated_at,
+            candidate: body,
+            preview,
+          });
+          requests.networkAdapterMutations.push({ action: "preview", body, definition_id: definitionId });
+          return jsonResponse(preview);
+        }
+        const networkAdapterMetadataMatch = pathname.match(
+          /^\/api\/v1\/network-adapter-definitions\/([^/]+)\/metadata$/,
+        );
+        if (networkAdapterMetadataMatch && method === "PATCH") {
+          const definitionId = decodeURIComponent(networkAdapterMetadataMatch[1]);
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          const definition = mutableNetworkAdapterDefinitions.find((record) => record.id === definitionId);
+          if (!definition) return jsonResponse({ error: "network_adapter_not_found" }, 404);
+          if (body.expected_updated_at !== definition.updated_at) {
+            return jsonResponse({ error: "review_stale" }, 409);
+          }
+          if (Object.keys(body).some((key) => !["expected_updated_at", "name", "description"].includes(key))) {
+            return jsonResponse({ error: "metadata_payload_contains_commands" }, 400);
+          }
+          requests.networkAdapterMutations.push({ action: "metadata", body, definition_id: definitionId });
+          Object.assign(definition, {
+            name: String(body.name),
+            description: body.description ?? null,
+            updated_at: new Date(Date.parse(definition.updated_at) + 1000).toISOString(),
+          });
+          return jsonResponse(definition);
+        }
         const networkAdapterMatch = pathname.match(
           /^\/api\/v1\/network-adapter-definitions\/([^/]+)$/,
         );
@@ -9627,6 +9715,16 @@ export async function installConsoleApiMock(
           );
           if (!definition) {
             return jsonResponse({ error: "network_adapter_not_found" }, 404);
+          }
+          const review = networkAdapterReviews.get(String(body.review_hash));
+          const { review_hash: _reviewHash, privilege_assertion: assertion, ...candidate } = body;
+          if (!review || review.definition_id !== definitionId ||
+              review.updated_at !== definition.updated_at ||
+              JSON.stringify(review.candidate) !== JSON.stringify(candidate)) {
+            return jsonResponse({ error: "review_stale" }, 409);
+          }
+          if (review.preview.change_kind === "commands" && !assertion) {
+            return jsonResponse({ error: "privilege_assertion_required" }, 403);
           }
           requests.networkAdapterMutations.push({
             action: "update",
@@ -9643,12 +9741,24 @@ export async function installConsoleApiMock(
             description:
               typeof body.description === "string" ? body.description : null,
             name: String(body.name ?? definition.name),
-            updated_at: "2026-06-02T10:09:00Z",
+            updated_at: new Date(Date.parse(definition.updated_at) + 1000).toISOString(),
           });
-          return jsonResponse(definition);
+          return jsonResponse({
+            definition,
+            sync: definition.adapter_kind === "routing_cost" ? [] : review.preview.target_client_ids.map((clientId) => ({
+              client_id: clientId,
+              error: null,
+              job_id: null,
+              status: "queued",
+            })),
+          });
         }
         if (networkAdapterMatch && method === "DELETE") {
           const definitionId = decodeURIComponent(networkAdapterMatch[1]);
+          const definition = mutableNetworkAdapterDefinitions.find((record) => record.id === definitionId);
+          if (definition && adapterAffectedResources(definition).length) {
+            return jsonResponse({ error: "network_adapter_referenced" }, 409);
+          }
           requests.networkAdapterMutations.push({
             action: "delete",
             definition_id: definitionId,

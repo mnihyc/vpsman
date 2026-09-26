@@ -27,6 +27,9 @@ use crate::{
 const MAX_ARGV_ITEMS: usize = 32;
 const MAX_ARG_BYTES: usize = 4096;
 
+#[path = "repository_network_adapter_mutations.rs"]
+mod adapter_mutations;
+
 struct SystemConfigurationPreset {
     id: &'static str,
     behavior: &'static str,
@@ -1338,73 +1341,9 @@ impl Repository {
         id: Uuid,
         request: &UpsertNetworkAdapterDefinitionRequest,
         operator: &AuthContext,
-    ) -> Result<NetworkAdapterDefinitionView> {
-        validate_network_adapter_definition(request)?;
-        match self {
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                lock_postgres_definition_lifecycles_in_tx(
-                    &mut tx,
-                    &[
-                        format!("network-adapter:{id}"),
-                        format!(
-                            "network-adapter-name:{}:{}",
-                            request.adapter_kind,
-                            request.name.trim()
-                        ),
-                    ],
-                )
-                .await?;
-                let current_kind = sqlx::query_scalar::<_, String>(
-                    r#"
-                    SELECT adapter_kind
-                    FROM network_adapter_definitions
-                    WHERE id = $1
-                    FOR UPDATE
-                    "#,
-                )
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .context("network_adapter_definition_not_found")?;
-                anyhow::ensure!(
-                    current_kind == request.adapter_kind,
-                    "network_adapter_definition_kind_immutable"
-                );
-                let in_use = postgres_network_references_adapter(&mut tx, id).await?;
-                anyhow::ensure!(!in_use, "network_adapter_definition_in_use");
-                let row = sqlx::query(
-                    r#"
-                    UPDATE network_adapter_definitions
-                    SET name = $2, description = $3,
-                        definition = $4, updated_at = now()
-                    WHERE id = $1
-                    RETURNING id, adapter_kind, name, description, definition,
-                              created_at::text AS created_at, updated_at::text AS updated_at,
-                              0::bigint AS port_forward_rule_count
-                    "#,
-                )
-                .bind(id)
-                .bind(request.name.trim())
-                .bind(normalized_description(request.description.as_deref()))
-                .bind(sqlx::types::Json(&request.definition))
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(network_adapter_database_error)?
-                .context("network_adapter_definition_not_found")?;
-                let definition = network_adapter_definition_from_row(row)?;
-                insert_configuration_audit_in_tx(
-                    &mut tx,
-                    "network_adapter_definition.updated",
-                    &format!("network_adapter_definition:{id}"),
-                    network_adapter_audit_metadata(&definition),
-                    operator,
-                )
-                .await?;
-                tx.commit().await?;
-                Ok(definition)
-            }
-        }
+        review_hash: &str,
+    ) -> Result<crate::model::NetworkAdapterMutationResponse> {
+        adapter_mutations::update_reviewed_adapter(self, id, request, operator, review_hash).await
     }
 
     pub(crate) async fn delete_network_adapter_definition(

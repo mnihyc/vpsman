@@ -12,6 +12,26 @@ async fn postgres_offline_transition_records_neutral_policy_evidence() {
     insert_lifecycle_client(&db.pool, "edge-offline", "online", true).await;
     insert_lifecycle_client(&db.pool, "edge-peer", "online", false).await;
 
+    let left_adapter_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+    let right_adapter_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+    let adapter_definition = |program: &str| {
+        json!({
+            "manager": "custom_adapter", "contract_version": 1,
+            "startup_command": {"argv": [program]},
+            "cleanup_command": {"argv": ["/bin/true"]},
+            "status_command": {"argv": ["/bin/true"]}
+        })
+    };
+    let left_definition = adapter_definition("/bin/left-start");
+    let right_definition = adapter_definition("/bin/right-start");
+    for (id, definition) in [
+        (left_adapter_id, &left_definition),
+        (right_adapter_id, &right_definition),
+    ] {
+        sqlx::query("INSERT INTO network_adapter_definitions (id, adapter_kind, name, definition) VALUES ($1, 'runtime_tunnel', $2, $3)")
+            .bind(id).bind(id.to_string()).bind(SqlJson(definition)).execute(&db.pool).await.unwrap();
+    }
+
     let plan_id = Uuid::new_v4();
     let input = vpsman_common::TunnelPlanInput {
         name: "offline-test-tunnel".to_string(),
@@ -65,8 +85,19 @@ async fn postgres_offline_transition_records_neutral_policy_evidence() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let runtime_identity =
-        vpsman_common::tunnel_runtime_evidence_identity_hash(plan_id, &plan, None);
+    let content_hash =
+        |definition: &Value| vpsman_common::payload_hash(&serde_json::to_vec(definition).unwrap());
+    let runtime_identity = vpsman_common::tunnel_runtime_evidence_identity_hash_with_adapter(
+        plan_id,
+        &plan,
+        None,
+        Some(&content_hash(&left_definition)),
+    );
+    sqlx::query("UPDATE network_adapter_definitions SET name = 'Renamed metadata' WHERE id = $1")
+        .bind(left_adapter_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
 
     assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 1);
     let agent_status = sqlx::query(
@@ -411,7 +442,61 @@ async fn postgres_offline_transition_records_neutral_policy_evidence() {
         "every worker-owned state fact must durably own pending evaluation"
     );
 
+    // Each unavailable endpoint keeps the same identity as API composition;
+    // changing the peer's executable definition must not alter this endpoint.
+    let right_identity = vpsman_common::tunnel_runtime_evidence_identity_hash_with_adapter(
+        plan_id,
+        &plan,
+        None,
+        Some(&content_hash(&right_definition)),
+    );
+    assert_ne!(runtime_identity, right_identity);
+    assert_offline_tunnel_identity(
+        &db.pool,
+        "edge-peer",
+        &format!("{plan_id}:{right_identity}:right"),
+    )
+    .await;
+
+    let changed_definition = adapter_definition("/bin/replacement-start");
+    sqlx::query("UPDATE network_adapter_definitions SET definition = $2 WHERE id = $1")
+        .bind(left_adapter_id)
+        .bind(SqlJson(&changed_definition))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let changed_identity = vpsman_common::tunnel_runtime_evidence_identity_hash_with_adapter(
+        plan_id,
+        &plan,
+        None,
+        Some(&content_hash(&changed_definition)),
+    );
+    assert_ne!(runtime_identity, changed_identity);
+    assert_offline_tunnel_identity(
+        &db.pool,
+        "edge-offline",
+        &format!("{plan_id}:{changed_identity}:left"),
+    )
+    .await;
+
     db.cleanup().await;
+}
+
+async fn assert_offline_tunnel_identity(pool: &PgPool, client_id: &str, natural_key: &str) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE clients SET status = 'offline' WHERE id = $1")
+        .bind(client_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    reconcile_agent_status_transition_in_tx(&mut tx, client_id, "offline")
+        .await
+        .unwrap();
+    let evidence_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM alert_policy_evidence WHERE natural_key = $1 AND source_kind IN ('tunnel.adapter', 'tunnel.traffic') AND completeness = 'unknown'",
+    ).bind(natural_key).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(evidence_count, 2);
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]

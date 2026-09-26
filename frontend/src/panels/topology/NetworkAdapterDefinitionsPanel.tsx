@@ -3,6 +3,8 @@ import { Pencil, Plus, Trash2 } from "lucide-react";
 import { NumberedTextarea } from "../../components/NumberedTextarea";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
+import { buildPrivilegeAssertion, canonicalDbPrivilegeIntent, type PrivilegeMaterial } from "../../privilege";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -12,17 +14,39 @@ import { ConsoleActionDrawer } from "../../components/ConsoleLayout";
 import { scrollIntoViewWithMotion } from "../../motion";
 import type {
   JsonValue,
+  AgentView,
   NetworkAdapterDefinitionRecord,
+  NetworkAdapterMutationResponse,
+  NetworkAdapterPreviewResponse,
   NetworkAdapterKind,
   TunnelPlanRecord,
   UpsertNetworkAdapterDefinitionRequest,
+  UpdateNetworkAdapterDefinitionRequest,
+  UpdateNetworkAdapterDetailsRequest,
 } from "../../types";
 import { formatTime, runPanelAction } from "../../utils";
 
 type EditorState =
   | { mode: "create"; kind: NetworkAdapterKind }
-  | { mode: "edit"; definition: NetworkAdapterDefinitionRecord }
+  | { mode: "details" | "commands"; definition: NetworkAdapterDefinitionRecord }
   | null;
+
+export type NetworkAdapterReviewControls = {
+  agents: AgentView[];
+  onPreview: (id: string, request: UpsertNetworkAdapterDefinitionRequest) => Promise<NetworkAdapterPreviewResponse>;
+  onUpdateDetails: (id: string, request: UpdateNetworkAdapterDetailsRequest) => Promise<NetworkAdapterDefinitionRecord>;
+  onOpenPrivilegeUnlock: () => void;
+  onOpenJobHistory?: () => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
+};
+
+type CommandReview = {
+  id: string;
+  request: UpsertNetworkAdapterDefinitionRequest;
+  preview: NetworkAdapterPreviewResponse;
+  endpoints: Record<string, { label: string; online: boolean }>;
+};
 
 export function NetworkAdapterDefinitionsPanel({
   definitions,
@@ -34,6 +58,7 @@ export function NetworkAdapterDefinitionsPanel({
   onInitialKindConsumed,
   onEditorClosed,
   onUpdate,
+  reviewControls,
   tunnelPlans,
 }: {
   definitions: NetworkAdapterDefinitionRecord[];
@@ -45,11 +70,12 @@ export function NetworkAdapterDefinitionsPanel({
   ) => Promise<NetworkAdapterDefinitionRecord>;
   onDelete: (definitionId: string) => Promise<void>;
   onInitialKindConsumed: () => void;
-  onEditorClosed?: () => void;
+  onEditorClosed?: (message?: string, hasDispatch?: boolean) => void;
   onUpdate: (
     definitionId: string,
-    request: UpsertNetworkAdapterDefinitionRequest,
-  ) => Promise<NetworkAdapterDefinitionRecord>;
+    request: UpdateNetworkAdapterDefinitionRequest,
+  ) => Promise<NetworkAdapterMutationResponse>;
+  reviewControls: NetworkAdapterReviewControls;
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const [editor, setEditor] = useState<EditorState>(null);
@@ -64,6 +90,9 @@ export function NetworkAdapterDefinitionsPanel({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [review, setReview] = useState<CommandReview | null>(null);
+  const [hasDispatch, setHasDispatch] = useState(false);
+  const draftRevision = useRef(0);
   const registryFeedbackRef = useRef<HTMLDivElement | null>(null);
   const editorFeedbackRef = useRef<HTMLDivElement | null>(null);
   const registryFeedbackMessage = editor === null ? (error ?? feedback) : null;
@@ -93,6 +122,8 @@ export function NetworkAdapterDefinitionsPanel({
   }, [editor, error]);
 
   function changeEditorDraft(change: () => void) {
+    draftRevision.current += 1;
+    setReview(null);
     setError(null);
     change();
   }
@@ -105,11 +136,13 @@ export function NetworkAdapterDefinitionsPanel({
 
   useEffect(() => {
     if (!editorRequest) return;
-    if (editorRequest.mode === "edit") openEdit(editorRequest.definition);
-    else openCreate(editorRequest.kind);
+    if (editorRequest.mode === "create") openCreate(editorRequest.kind);
+    else openEdit(editorRequest.definition, editorRequest.mode);
   }, [editorRequest]);
 
   function openCreate(adapterKind: NetworkAdapterKind) {
+    draftRevision.current += 1;
+    setReview(null);
     setKind(adapterKind);
     setName("");
     setDescription("");
@@ -119,14 +152,16 @@ export function NetworkAdapterDefinitionsPanel({
     setEditor({ mode: "create", kind: adapterKind });
   }
 
-  function openEdit(record: NetworkAdapterDefinitionRecord) {
+  function openEdit(record: NetworkAdapterDefinitionRecord, mode: "details" | "commands") {
+    draftRevision.current += 1;
+    setReview(null);
     setKind(record.adapter_kind);
     setName(record.name);
     setDescription(record.description ?? "");
     setDefinition(asObject(record.definition));
     setError(null);
     setFeedback(null);
-    setEditor({ mode: "edit", definition: record });
+    setEditor({ mode, definition: record });
   }
 
   async function save(event: FormEvent) {
@@ -134,23 +169,92 @@ export function NetworkAdapterDefinitionsPanel({
     setFeedback(null);
     await runPanelAction(setPending, setError, async () => {
       if (!name.trim()) throw new Error("Adapter name is required");
+      if (editor?.mode === "details") {
+        await reviewControls.onUpdateDetails(editor.definition.id, {
+          expected_updated_at: editor.definition.updated_at,
+          name: name.trim(),
+          description: description.trim() || null,
+        });
+        const message = `Saved details for ${name.trim()}. Commands and running resources are unchanged.`;
+        setFeedback(message);
+        setHasDispatch(false);
+        setEditor(null);
+        onEditorClosed?.(message);
+        return;
+      }
       const definitionError = validateAdapterDefinition(kind, definition);
       if (definitionError) throw new Error(definitionError);
       const request: UpsertNetworkAdapterDefinitionRequest = {
         adapter_kind: kind,
-        name: name.trim(),
-        description: description.trim() || null,
+        name: editor?.mode === "commands"
+          ? (definitions.find((record) => record.id === editor.definition.id) ?? editor.definition).name
+          : name.trim(),
+        description: editor?.mode === "commands"
+          ? (definitions.find((record) => record.id === editor.definition.id) ?? editor.definition).description
+          : description.trim() || null,
         definition,
       };
-      if (editor?.mode === "edit") {
-        await onUpdate(editor.definition.id, request);
-        setFeedback(`Updated ${name.trim()}`);
+      if (editor?.mode === "commands") {
+        const revision = draftRevision.current;
+        const preview = await reviewControls.onPreview(editor.definition.id, request);
+        if (draftRevision.current !== revision) return;
+        if (preview.change_kind !== "commands") {
+          setFeedback("No command changes. No restart or runtime job is needed.");
+          return;
+        }
+        setReview({
+          id: editor.definition.id,
+          request,
+          preview,
+          endpoints: Object.fromEntries(preview.affected_resources.flatMap((resource) =>
+            resource.client_ids.map((id) => {
+              const agent = reviewControls.agents.find((candidate) => candidate.id === id);
+              return [id, {
+                label: `${agent?.display_name || id} (${id}) — ${agent?.status ?? "unknown"}`,
+                online: agent?.status === "online",
+              }];
+            }),
+          )),
+        });
+        return;
       } else {
         await onCreate(request);
         setFeedback(`Created ${name.trim()}`);
       }
       setEditor(null);
       onEditorClosed?.();
+    });
+  }
+
+  async function applyCommands() {
+    if (!review || !reviewControls.privilegeMaterial) return;
+    const snapshot = review;
+    await runPanelAction(setPending, setError, async () => {
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: "network_adapter_definition.update",
+          target: `network_adapter_definition:${snapshot.id}`,
+          confirmed: true,
+          payloadHash: snapshot.preview.review_hash,
+          resolvedTargets: snapshot.preview.target_client_ids,
+        }),
+        privilegeMaterial: reviewControls.privilegeMaterial!,
+      });
+      const response = await onUpdate(snapshot.id, {
+        ...snapshot.request,
+        review_hash: snapshot.preview.review_hash,
+        privilege_assertion: privilegeAssertion,
+      });
+      const message = snapshot.request.adapter_kind === "routing_cost"
+        ? "Saved routing adapter commands. Refresh and review routing status before applying a cost; no tunnel cleanup or immediate cost update was queued."
+        : response.sync.length
+        ? `Saved adapter commands. ${response.sync.map((item) => `${item.client_id}: ${item.status}${item.error ? ` — ${item.error}` : ""}`).join("; ")}. Queued work is not confirmation of application; inspect Jobs for outcomes.`
+        : "Saved adapter commands. No active runtime targets were queued; disabled bindings remain disabled.";
+      setReview(null);
+      setEditor(null);
+      setFeedback(message);
+      setHasDispatch(response.sync.length > 0);
+      onEditorClosed?.(message, response.sync.length > 0);
     });
   }
 
@@ -209,15 +313,18 @@ export function NetworkAdapterDefinitionsPanel({
   >(
     () => [
       {
-        label: "Edit",
+        label: "Edit details",
         icon: <Pencil size={14} />,
-        onSelect: (rows) => openEdit(rows[0]),
-        disabled: (rows) =>
-          rows.length !== 1 || adapterUseCount(rows[0], tunnelPlans) > 0,
-        description: (rows) =>
-          rows.length === 1 && adapterUseCount(rows[0], tunnelPlans) > 0
-            ? `Used by ${adapterUseCount(rows[0], tunnelPlans)} bindings; create a replacement and change each binding explicitly.`
-            : "Edit this unreferenced adapter definition.",
+        onSelect: (rows) => openEdit(rows[0], "details"),
+        disabled: (rows) => rows.length !== 1,
+        description: () => "Edit name and description without changing commands or restarting resources.",
+      },
+      {
+        label: "Edit commands",
+        icon: <Pencil size={14} />,
+        onSelect: (rows) => openEdit(rows[0], "commands"),
+        disabled: (rows) => rows.length !== 1,
+        description: () => "Review command changes and affected resources before privileged application.",
       },
       {
         label: "Delete",
@@ -259,8 +366,11 @@ export function NetworkAdapterDefinitionsPanel({
             className="localActionFeedback"
             message={registryFeedbackMessage}
             ref={registryFeedbackRef}
-            tone={error ? "danger" : "success"}
+            tone={error ? "danger" : hasDispatch ? "info" : "success"}
           />
+          {hasDispatch && reviewControls.onOpenJobHistory && (
+            <button className="secondaryAction compactAction" type="button" onClick={reviewControls.onOpenJobHistory}>View jobs</button>
+          )}
           <ConsoleDataGrid
             actions={actions}
             columns={columns}
@@ -356,16 +466,20 @@ export function NetworkAdapterDefinitionsPanel({
       )}
 
       <ConsoleActionDrawer
-        description="The agent invokes these exact absolute commands; vpsman does not install or modify them."
+        description={editor?.mode === "details"
+          ? "Name and description only. Saving details does not run commands or restart resources."
+          : "The agent invokes these exact absolute commands; vpsman does not install or modify them."}
         onClose={() => {
+          draftRevision.current += 1;
+          setReview(null);
           setError(null);
           setEditor(null);
           onEditorClosed?.();
         }}
         open={editor !== null}
         title={
-          editor?.mode === "edit"
-            ? `Edit ${editor.definition.name}`
+          editor && editor.mode !== "create"
+            ? `Edit ${editor.mode}: ${editor.definition.name}`
             : `New ${adapterKindLabel(kind).toLowerCase()}`
         }
       >
@@ -378,7 +492,7 @@ export function NetworkAdapterDefinitionsPanel({
           <div className="formRow">
             <label
               title={
-                editor?.mode === "edit"
+                editor?.mode !== "create"
                   ? "Adapter purpose is immutable after creation; create another definition for a different purpose"
                   : "Choose whether this adapter manages a tunnel runtime, routing cost, or port forwarding"
               }
@@ -387,7 +501,7 @@ export function NetworkAdapterDefinitionsPanel({
               <select
                 aria-label="Adapter purpose"
                 data-tooltip-disabled-reason="Adapter purpose is immutable after creation; create another definition for a different purpose."
-                disabled={editor?.mode === "edit" || editorOnly}
+                disabled={editor?.mode !== "create" || editorOnly}
                 onChange={(event) => {
                   const nextKind = event.target.value as NetworkAdapterKind;
                   changeEditorDraft(() => {
@@ -406,10 +520,13 @@ export function NetworkAdapterDefinitionsPanel({
               <span>Name</span>
               <input
                 aria-label="Adapter definition name"
+                readOnly={editor?.mode === "commands"}
                 onChange={(event) =>
                   changeEditorDraft(() => setName(event.target.value))
                 }
-                value={name}
+                value={editor?.mode === "commands"
+                  ? (definitions.find((record) => record.id === editor.definition.id) ?? editor.definition).name
+                  : name}
               />
             </label>
           </div>
@@ -417,23 +534,27 @@ export function NetworkAdapterDefinitionsPanel({
             <span>Description</span>
             <input
               aria-label="Adapter definition description"
+              readOnly={editor?.mode === "commands"}
               onChange={(event) =>
                 changeEditorDraft(() => setDescription(event.target.value))
               }
-              value={description}
+              value={editor?.mode === "commands"
+                ? (definitions.find((record) => record.id === editor.definition.id) ?? editor.definition).description ?? ""
+                : description}
             />
           </label>
-          <AdapterCommandFields
+          {editor?.mode !== "details" && <AdapterCommandFields
             definition={definition}
             kind={kind}
             onChange={(nextDefinition) =>
               changeEditorDraft(() => setDefinition(nextDefinition))
             }
-          />
-          <details>
+          />}
+          {editor?.mode !== "details" && <details>
             <summary>Advanced contract preview</summary>
             <pre>{JSON.stringify(definition, null, 2)}</pre>
-          </details>
+          </details>}
+          {editor && feedback && <ActionFeedback message={feedback} tone="info" />}
           <button
             className="primaryAction"
             disabled={pending || !name.trim()}
@@ -442,18 +563,79 @@ export function NetworkAdapterDefinitionsPanel({
                 ? "Wait for the current adapter definition operation to finish"
                 : !name.trim()
                   ? "Enter an adapter definition name before saving"
-                  : editor?.mode === "edit"
-                    ? "Save the reviewed adapter contract changes"
+                  : editor?.mode === "commands"
+                    ? "Preview the exact changed commands and affected resources"
+                    : editor?.mode === "details"
+                      ? "Save name and description without changing commands or runtime resources"
                     : "Create this adapter definition"
             }
             type="submit"
           >
-            {editor?.mode === "edit"
-              ? "Save adapter definition"
+            {editor?.mode === "details"
+              ? "Save details"
+              : editor?.mode === "commands"
+                ? "Review changes"
               : "Create adapter definition"}
           </button>
         </form>
       </ConsoleActionDrawer>
+      <ConfirmationPrompt
+        confirmDisabled={!reviewControls.privilegeMaterial}
+        confirmLabel="Apply adapter changes"
+        detail={review?.request.adapter_kind === "routing_cost"
+          ? "Save the reviewed routing-cost contract. Existing OSPF status/review and automatic cost workflows use the new commands; this does not clean up tunnels or immediately apply a cost."
+          : "Each affected agent attempts cleanup with its old commands, installs the latest definition, then starts enabled resources with the new commands. Expect downtime. Cleanup or startup failure does not roll back the definition; inspect the job and repair any residue. Offline agents adopt changes on reconnect. Disabled bindings stay disabled."}
+        error={error}
+        items={review ? [
+          { label: "Adapter", value: review.request.name },
+          { label: "Purpose", value: adapterKindLabel(review.request.adapter_kind) },
+        ] : []}
+        onCancel={() => setReview(null)}
+        onConfirm={() => void applyCommands()}
+        open={review !== null}
+        pending={pending}
+        title="Review adapter command changes"
+        tone="warning"
+      >
+        {review && (
+          <div
+            aria-label="Affected adapter resources"
+            className="configurationReviewList"
+            role="group"
+            tabIndex={0}
+          >
+            <strong>Affected resources</strong>
+            {review.preview.affected_resources.length
+              ? review.preview.affected_resources.map((resource) => (
+                <span key={`${resource.kind}:${resource.resource_id}`}>
+                  <strong>{resource.resource_name}</strong>
+                  <span>
+                    {adapterKindLabel(resource.kind)}; {resource.enabled ? "enabled" : "disabled"}
+                    {resource.cleanup_pending ? "; cleanup pending" : ""}
+                  </span>
+                  <span>{resource.client_ids.map((id) => {
+                    const endpoint = review.endpoints[id];
+                    const waiting = resource.kind !== "routing_cost" &&
+                      (resource.enabled || resource.cleanup_pending) && !endpoint?.online;
+                    return `${endpoint?.label ?? id}${waiting ? "; waiting for agent" : ""}`;
+                  }).join("; ")}</span>
+                </span>
+              ))
+              : <span>No bindings; no runtime resources will be restarted.</span>}
+          </div>
+        )}
+        {review && !reviewControls.privilegeMaterial && (
+          <PrivilegeVaultBox
+            labelPrefix="Adapter commands"
+            lastPayloadHash={review.preview.review_hash}
+            onOpenUnlock={reviewControls.onOpenPrivilegeUnlock}
+            onPrivilegeMaterialChange={reviewControls.setPrivilegeMaterial}
+            privilegeMaterial={reviewControls.privilegeMaterial}
+            showVaultClear={false}
+            usePrivilegeLabel="Unlock adapter apply"
+          />
+        )}
+      </ConfirmationPrompt>
     </section>
   );
 }

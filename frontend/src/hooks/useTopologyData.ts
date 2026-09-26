@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   apiDelete,
   apiGet,
+  apiPatch,
   apiPost,
   apiPut,
   isApiUnauthorized,
@@ -18,6 +19,10 @@ import type {
   ClearTunnelPlanEvidenceResponse,
   CreateTunnelPlanRequest,
   NetworkAdapterDefinitionRecord,
+  NetworkAdapterMutationResponse,
+  NetworkAdapterPreviewResponse,
+  UpdateNetworkAdapterDefinitionRequest,
+  UpdateNetworkAdapterDetailsRequest,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
@@ -566,9 +571,9 @@ export function useTopologyData(
   const updateNetworkAdapterDefinition = useCallback(
     async (
       adapterId: string,
-      request: UpsertNetworkAdapterDefinitionRequest,
+      request: UpdateNetworkAdapterDefinitionRequest,
     ) => {
-      const response = await apiPut<NetworkAdapterDefinitionRecord>(
+      const response = await apiPut<NetworkAdapterMutationResponse>(
         `/api/v1/network-adapter-definitions/${encodeURIComponent(adapterId)}`,
         apiToken,
         request,
@@ -583,6 +588,31 @@ export function useTopologyData(
       return response;
     },
     [apiToken, loadNetworkAdapterDefinitions, loadTunnelPlans, onAuditChanged],
+  );
+
+  const previewNetworkAdapterDefinition = useCallback(
+    (adapterId: string, request: UpsertNetworkAdapterDefinitionRequest) =>
+      apiPost<NetworkAdapterPreviewResponse>(
+        `/api/v1/network-adapter-definitions/${encodeURIComponent(adapterId)}/preview`,
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const updateNetworkAdapterDetails = useCallback(
+    async (adapterId: string, request: UpdateNetworkAdapterDetailsRequest) => {
+      const response = await apiPatch<NetworkAdapterDefinitionRecord>(
+        `/api/v1/network-adapter-definitions/${encodeURIComponent(adapterId)}/metadata`,
+        apiToken,
+        request,
+      );
+      await retainMutationSuccessAfterRefresh(() =>
+        Promise.all([loadNetworkAdapterDefinitions(), onAuditChanged()]).then(() => undefined),
+      );
+      return response;
+    },
+    [apiToken, loadNetworkAdapterDefinitions, onAuditChanged],
   );
 
   const deleteNetworkAdapterDefinition = useCallback(
@@ -907,6 +937,8 @@ export function useTopologyData(
     setTunnelPlanEnabled,
     updateTunnelConnectionAssessment,
     updateNetworkAdapterDefinition,
+    previewNetworkAdapterDefinition,
+    updateNetworkAdapterDetails,
     updateTunnelPlanOspfCost,
     updateTunnelPlan,
     topologyError,

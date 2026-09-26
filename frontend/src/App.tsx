@@ -2882,6 +2882,15 @@ export function App() {
     return (
       <div className="workspace singleColumn">
         <TopologyPanel
+          adapterReviewControls={{
+            agents: dashboard.agents,
+            onPreview: dashboard.previewNetworkAdapterDefinition,
+            onUpdateDetails: dashboard.updateNetworkAdapterDetails,
+            onOpenPrivilegeUnlock: openPrivilegeUnlock,
+            onOpenJobHistory: () => selectView("Jobs", "history"),
+            privilegeMaterial,
+            setPrivilegeMaterial,
+          }}
           activeSubpage={panelSubpage}
           requestsEnabled={dashboard.documentVisible}
           agents={dashboard.agents}

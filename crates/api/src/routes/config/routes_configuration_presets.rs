@@ -16,9 +16,11 @@ use crate::{
         ConfigurationPresetPreviewView, ConfigurationPresetQuery, ConfigurationPresetView,
         ConfigurationSourceQuery, ConfigurationSourceView, CreateConfigurationPresetRequest,
         EffectiveAgentConfigQuery, EffectiveAgentConfigView, NetworkAdapterDefinitionQuery,
-        NetworkAdapterDefinitionView, PreviewConfigurationPresetRequest,
+        NetworkAdapterDefinitionView, NetworkAdapterMutationResponse,
+        NetworkAdapterPreviewResponse, PreviewConfigurationPresetRequest,
         PreviewConfigurationSourceOverrideRequest, UpdateConfigurationPresetRequest,
-        UpdateConfigurationPresetResponse, UpsertNetworkAdapterDefinitionRequest,
+        UpdateConfigurationPresetResponse, UpdateNetworkAdapterDefinitionRequest,
+        UpdateNetworkAdapterMetadataRequest, UpsertNetworkAdapterDefinitionRequest,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_configuration_presets::{
@@ -423,32 +425,80 @@ pub(crate) async fn update_network_adapter_definition(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(definition_id): Path<Uuid>,
+    Json(request): Json<UpdateNetworkAdapterDefinitionRequest>,
+) -> Result<Json<NetworkAdapterMutationResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    let preview = state
+        .repo
+        .preview_network_adapter_definition(definition_id, &request.candidate)
+        .await
+        .map_err(network_adapter_error)?;
+    if request.review_hash != preview.review_hash {
+        return Err(ApiError::conflict("network_adapter_review_stale"));
+    }
+    if preview.change_kind == "commands" {
+        let target = format!("network_adapter_definition:{definition_id}");
+        let intent = DbPrivilegeIntent::new(
+            "network_adapter_definition.update",
+            &target,
+            None,
+            &preview.target_client_ids,
+            true,
+            Some(&preview.review_hash),
+        );
+        verify_privilege_intent(&state, &intent, request.privilege_assertion).await?;
+    }
+    // Rechecked again under the repository's mutation lock after privilege
+    // verification: neither candidate bytes nor reviewed bindings can drift.
+    let saved = state
+        .repo
+        .update_network_adapter_definition(
+            definition_id,
+            &request.candidate,
+            &operator,
+            &request.review_hash,
+        )
+        .await
+        .map_err(network_adapter_error)?;
+    Ok(Json(saved))
+}
+
+pub(crate) async fn preview_network_adapter_definition(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(definition_id): Path<Uuid>,
     Json(request): Json<UpsertNetworkAdapterDefinitionRequest>,
+) -> Result<Json<NetworkAdapterPreviewResponse>, ApiError> {
+    state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    Ok(Json(
+        state
+            .repo
+            .preview_network_adapter_definition(definition_id, &request)
+            .await
+            .map_err(network_adapter_error)?,
+    ))
+}
+
+pub(crate) async fn update_network_adapter_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(definition_id): Path<Uuid>,
+    Json(request): Json<UpdateNetworkAdapterMetadataRequest>,
 ) -> Result<Json<NetworkAdapterDefinitionView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
-    validate_network_adapter_definition(&request).map_err(network_adapter_error)?;
-    let existing = state
-        .repo
-        .network_adapter_definition_by_id(definition_id, None)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "network_adapter_definition_unavailable",
-            "The network adapter definition could not be loaded.",
-        ))?
-        .ok_or_else(|| ApiError::not_found("network_adapter_definition_not_found"))?;
-    if existing.adapter_kind != request.adapter_kind {
-        return Err(ApiError::conflict(
-            "network_adapter_definition_kind_immutable",
-        ));
-    }
-    let saved = state
-        .repo
-        .update_network_adapter_definition(definition_id, &request, &operator)
-        .await
-        .map_err(network_adapter_error)?;
-    Ok(Json(saved))
+    Ok(Json(
+        state
+            .repo
+            .update_network_adapter_metadata(definition_id, &request, &operator)
+            .await
+            .map_err(network_adapter_error)?,
+    ))
 }
 
 pub(crate) async fn delete_network_adapter_definition(
@@ -758,7 +808,13 @@ fn configuration_preset_error(error: anyhow::Error) -> ApiError {
 
 fn network_adapter_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
-    if message.contains("network_adapter_definition_in_use") {
+    if message.contains("network_adapter_review_stale") {
+        ApiError::conflict("network_adapter_review_stale")
+    } else if message.contains("network_adapter_review_required") {
+        ApiError::conflict("network_adapter_review_required")
+    } else if message.contains("network_adapter_traffic_limit_required_by_binding") {
+        ApiError::conflict("network_adapter_traffic_limit_required_by_binding")
+    } else if message.contains("network_adapter_definition_in_use") {
         ApiError::conflict("network_adapter_definition_in_use")
     } else if message.contains("network_adapter_definition_kind_immutable") {
         ApiError::conflict("network_adapter_definition_kind_immutable")

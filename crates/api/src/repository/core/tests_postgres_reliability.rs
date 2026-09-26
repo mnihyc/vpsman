@@ -1,3 +1,5 @@
+#[path = "tests_postgres_network_adapter_mutations.rs"]
+mod network_adapter_mutations;
 #[path = "tests_postgres_subnet_allocation.rs"]
 mod subnet_allocation;
 
@@ -6958,7 +6960,7 @@ async fn postgres_runtime_config_current_ack_respects_newer_pending_attempts() {
         .bind(&hash_a)
         .bind(SqlJson(applied_config))
         .bind(pending_status.map(|_| pending_version))
-        .bind(pending_hash)
+        .bind(pending_hash.as_deref())
         .bind(pending_config.map(SqlJson))
         .bind(pending_status.map(|_| job_id))
         .bind(pending_status.map(|_| "queued"))
@@ -7032,6 +7034,31 @@ async fn postgres_runtime_config_current_ack_respects_newer_pending_attempts() {
             },
             "{case}",
         );
+        if let Some(pending_status) = pending_status {
+            // Matching desired content acknowledges reconciliation work, not
+            // host convergence. Only the job's successful terminal event applies it.
+            let pending: (Option<String>, Option<String>, i64) = sqlx::query_as(
+                "SELECT pending_status, pending_error, applied_version FROM client_runtime_config_apply_state WHERE client_id = $1",
+            ).bind(&client_id).fetch_one(&db.pool).await.unwrap();
+            assert_eq!(pending.0.as_deref(), Some(pending_status));
+            if pending_status == "failed" {
+                assert!(pending.1.as_deref().unwrap().contains("partial mutation"));
+            }
+            assert_eq!(pending.2, applied_version);
+            db.repo
+                .record_runtime_config_apply_terminal_for_target_status(
+                    job_id,
+                    &client_id,
+                    "completed",
+                    None,
+                )
+                .await
+                .unwrap();
+            let converged: (Option<String>, Option<String>, i64) = sqlx::query_as(
+                "SELECT pending_status, pending_error, applied_version FROM client_runtime_config_apply_state WHERE client_id = $1",
+            ).bind(&client_id).fetch_one(&db.pool).await.unwrap();
+            assert_eq!(converged, (None, None, pending_version));
+        }
     }
     db.cleanup().await;
 }
@@ -37783,11 +37810,11 @@ async fn postgres_port_forward_modes_preserve_native_and_adapter_ownership() {
     assert_eq!(definitions[0].port_forward_rule_count, 2);
     assert!(db
         .repo
-        .update_network_adapter_definition(adapter.id, &adapter_request, &operator)
+        .update_network_adapter_definition(adapter.id, &adapter_request, &operator, "")
         .await
         .unwrap_err()
         .to_string()
-        .contains("in_use"));
+        .contains("review_required"));
     assert!(db
         .repo
         .delete_network_adapter_definition(adapter.id, &operator)
@@ -38115,12 +38142,12 @@ async fn postgres_port_forward_modes_gate_capabilities_and_preserve_cleanup_acro
     assert_eq!(config.rules[0].mode, PortForwardMode::Dnat);
     assert!(
         db.repo
-            .update_network_adapter_definition(owned_definition.id, &owned_request, &operator)
+            .update_network_adapter_definition(owned_definition.id, &owned_request, &operator, "")
             .await
             .unwrap_err()
             .to_string()
-            .contains("in_use"),
-        "an unresolved previous adapter remains immutable after a mode switch"
+            .contains("review_required"),
+        "an unresolved previous adapter still requires an explicit reviewed update"
     );
     assert_eq!(
         config.schema_version, 2,

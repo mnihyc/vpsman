@@ -10,7 +10,7 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
-    tunnel_runtime_evidence_identity_hash, tunnel_topology_identity_hash,
+    tunnel_runtime_evidence_identity_hash_with_adapter, tunnel_topology_identity_hash,
     validate_agent_config_shape, AgentConfig, AgentNetworkConfig, AgentPingTarget,
     AgentPortForwardingConfig, AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan, JobCommand,
     RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelAdapterCommands,
@@ -340,10 +340,9 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
     if !reconcile_scope.requires_reconcile()
         && desired_content_hash.eq_ignore_ascii_case(current_content_hash.trim())
     {
-        state
-            .repo
-            .promote_runtime_config_apply_from_agent_hash(client_id, &desired_content_hash)
-            .await?;
+        // A matching hash proves desired configuration adoption only. Cleanup
+        // or startup may still have failed, or its terminal result be in flight.
+        // Only the job's terminal success may establish applied convergence.
         return Ok(Vec::new());
     }
     if let Some(pending) = state
@@ -722,10 +721,13 @@ fn apply_enabled_tunnel_plans(
             .push(AgentRuntimeStatusTelemetryPlan {
                 plan_id: Some(plan.id.to_string()),
                 topology_identity_hash: tunnel_topology_identity_hash(plan.id, &plan.plan),
-                runtime_evidence_identity_hash: tunnel_runtime_evidence_identity_hash(
+                runtime_evidence_identity_hash: tunnel_runtime_evidence_identity_hash_with_adapter(
                     plan.id,
                     &plan.plan,
                     builtin_credential_generation,
+                    runtime_adapter
+                        .as_ref()
+                        .map(|adapter| adapter.definition_hash.as_str()),
                 ),
                 endpoint_side,
                 plan: plan.plan.clone(),

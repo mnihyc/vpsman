@@ -8,6 +8,7 @@ import {
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
   openConsoleSubpage,
+  unlockPrivilegeFromTop,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
 
@@ -217,16 +218,16 @@ test("custom adapters are reusable in the forwarding drawer and work independent
     editor.getByLabel("Port-forward adapter definition"),
   ).toHaveValue("36363636-3636-4636-8636-363636363636");
   await editor
-    .getByRole("button", { name: "Edit adapter", exact: true })
+    .getByRole("button", { name: "Edit details", exact: true })
     .click();
-  const editDrawer = page.getByLabel("Edit Local service manager", {
+  const editDrawer = page.getByLabel("Edit details: Local service manager", {
     exact: true,
   });
   await expect(editDrawer.getByLabel("Adapter definition name")).toHaveValue(
     "Local service manager",
   );
   await editDrawer
-    .getByRole("button", { name: "Close Edit Local service manager" })
+    .getByRole("button", { name: "Close Edit details: Local service manager" })
     .click();
   await editor.getByLabel("Target IP or hostname").fill("localhost");
   await editor.getByRole("button", { name: "Resolve", exact: true }).click();
@@ -285,8 +286,29 @@ test("custom adapters are reusable in the forwarding drawer and work independent
     editor.getByLabel("Port-forward adapter definition"),
   ).toHaveValue("36363636-3636-4636-8636-363636363636");
   await expect(
-    editor.getByRole("button", { name: "Edit adapter", exact: true }),
-  ).toBeDisabled();
+    editor.getByRole("button", { name: "Edit details", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    editor.getByRole("button", { name: "Edit commands", exact: true }),
+  ).toBeEnabled();
+  await unlockPrivilegeFromTop(page);
+  const ruleNameDraft = await editor.getByLabel("Name", { exact: true }).inputValue();
+  await editor.getByRole("button", { name: "Edit commands", exact: true }).click();
+  const commandDrawer = page.getByRole("complementary", { name: "Edit commands: Local service manager" });
+  const applyCommand = commandDrawer.getByLabel("Apply adapter command", { exact: true });
+  await applyCommand.fill(`${await applyCommand.inputValue()}\n--replacement`);
+  await commandDrawer.getByRole("button", { name: "Review changes", exact: true }).click();
+  const adapterReview = page.getByLabel("Review adapter command changes", { exact: true });
+  await expect(adapterReview).toContainText("Local application adapter");
+  await expect(adapterReview).toContainText("agent-nyc-03");
+  await expect(adapterReview).toContainText("waiting for agent");
+  await expect(adapterReview).toContainText("Cleanup or startup failure does not roll back the definition");
+  await adapterReview.getByRole("button", { name: "Apply adapter changes", exact: true }).click();
+  await expect(commandDrawer).toBeHidden();
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue(ruleNameDraft);
+  await expect(editor).toContainText("agent-nyc-03: queued");
+  await expect(editor).toContainText("Queued work is not confirmation of application");
+  await expect(page.getByRole("button", { name: "View adapter jobs", exact: true })).toBeVisible();
   await editor.getByLabel("Target IP or hostname").fill("");
   await expect(editor.getByLabel("Target IP or hostname")).toHaveValue("");
   await expect(editor.locator(".portMappingPreview")).toContainText(

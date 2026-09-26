@@ -4014,6 +4014,36 @@ export type UpsertNetworkAdapterDefinitionRequest = {
   definition: JsonValue;
 };
 
+export type NetworkAdapterPreviewResponse = {
+  review_hash: string;
+  change_kind: "metadata" | "commands" | "unchanged";
+  affected_resources: Array<{
+    kind: NetworkAdapterKind;
+    resource_id: string;
+    resource_name: string;
+    client_ids: string[];
+    enabled: boolean;
+    cleanup_pending: boolean;
+  }>;
+  target_client_ids: string[];
+};
+
+export type UpdateNetworkAdapterDefinitionRequest = UpsertNetworkAdapterDefinitionRequest & {
+  review_hash: string;
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type UpdateNetworkAdapterDetailsRequest = {
+  expected_updated_at: string;
+  name: string;
+  description: string | null;
+};
+
+export type NetworkAdapterMutationResponse = {
+  definition: NetworkAdapterDefinitionRecord;
+  sync: RuntimeConfigDispatchRecord[];
+};
+
 export type ConfigurationPresetRecord = {
   id: string;
   behavior: ConfigurationBehavior;

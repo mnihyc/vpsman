@@ -1022,12 +1022,40 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
     assert_eq!(report["tunnels"][0]["interface"], "tunlr");
 }
 
+fn runtime_sync_test_base() -> AgentConfig {
+    let mut config = AgentConfig::default();
+    config.noise.client_private_key_hex = Some("11".repeat(32));
+    config.noise.server_public_key_hex = Some("22".repeat(32));
+    config
+}
+
+#[tokio::test]
+async fn runtime_config_sync_rejects_invalid_desired_hash_before_adoption() {
+    let base = runtime_sync_test_base();
+    let mut desired = AgentRuntimeConfig::from_agent_config(1, &base);
+    assert!(runtime_config_candidate(&base, &desired, 1).is_ok());
+    desired.network.port_forwarding.desired_hash = "0".repeat(64);
+    let error = runtime_config_candidate(&base, &desired, 1).unwrap_err();
+    assert!(format!("{error:#}").contains("network_port_forwarding_invalid"));
+    let result = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &base,
+        &desired,
+        1,
+        "network_adapter_definition_updated",
+        CommandCancelToken::default(),
+    )
+    .await;
+    assert!(format!("{:#}", result.unwrap_err()).contains("network_port_forwarding_invalid"));
+    assert!(base.network.port_forwarding.desired_hash.is_empty());
+}
+
 #[tokio::test]
 async fn runtime_config_sync_returns_applied_candidate_without_mutating_source() {
     let base = AgentConfig {
         client_id: "client-a".to_string(),
         telemetry_interval_secs: 15,
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let desired = AgentRuntimeConfig {
         version: 9,
@@ -1194,32 +1222,6 @@ fn reconnect_reconciles_only_repairable_owned_table_states() {
     ));
 }
 
-#[test]
-fn successful_forwarding_is_retained_when_an_independent_tunnel_change_fails() {
-    let current = AgentConfig::default();
-    let mut candidate = current.clone();
-    candidate.network.port_forwarding.desired_hash = "new-forwarding-state".to_string();
-    candidate
-        .network
-        .runtime_status_telemetry_plans
-        .push(runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
-            "203.0.113.20",
-            "10.255.0.0",
-            "10.255.0.1",
-        )));
-
-    let (accepted, scope) =
-        accepted_config_after_network_sync(&current, &candidate, false, true, true, true, false);
-
-    let accepted = accepted.expect("successful forwarding should be retained");
-    assert_eq!(scope, "port_forwarding");
-    assert_eq!(
-        accepted.network.port_forwarding.desired_hash,
-        "new-forwarding-state"
-    );
-    assert!(accepted.network.runtime_status_telemetry_plans.is_empty());
-}
-
 #[tokio::test]
 async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
     let plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
@@ -1238,7 +1240,7 @@ async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
             runtime_status_telemetry_plans: vec![plan],
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(10, &base);
     desired.telemetry_interval_secs = 30;
@@ -1286,7 +1288,7 @@ fn fou_type_changes_use_the_existing_remove_then_recreate_identity_boundary() {
         let mut changed = baseline.clone();
         changed.plan.runtime_control.fou.tunnel_kind = kind;
         assert!(!runtime_tunnel_identity_matches(&baseline, &changed));
-        assert!(runtime_tunnel_endpoint_conflicts(&baseline, &changed));
+        assert!(!runtime_tunnel_snapshots_match(&baseline, &changed));
     }
 }
 
@@ -1459,7 +1461,7 @@ async fn runtime_config_sync_recreates_tunnel_when_plan_identity_changes() {
             runtime_status_telemetry_plans: vec![old_plan],
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(12, &base);
     desired.network.runtime_status_telemetry_plans = vec![new_plan];
@@ -1507,15 +1509,199 @@ fn runtime_hook_sync_config() -> AgentConfig {
         network: vpsman_common::AgentNetworkConfig {
             apply_enabled: true,
             runtime_reconcile_enabled: true,
-            root_dir: format!(".tmp/runtime-sync-hooks-{}", uuid::Uuid::new_v4()),
+            root_dir: std::env::current_dir()
+                .unwrap()
+                .join(format!(".tmp/runtime-sync-hooks-{}", uuid::Uuid::new_v4()))
+                .to_string_lossy()
+                .into_owned(),
             runtime_ip_argv: vec!["/bin/true".to_string()],
             runtime_tc_argv: vec!["/bin/true".to_string()],
             runtime_unprivileged_mutation_policy:
                 vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
             ..Default::default()
         },
-        ..Default::default()
+        ..runtime_sync_test_base()
     }
+}
+
+fn logged_adapter_command(
+    log: &Path,
+    label: &str,
+    exit: i32,
+) -> vpsman_common::RuntimeTunnelCommand {
+    vpsman_common::RuntimeTunnelCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s\\n' \"$2\" >> \"$1\"; exit \"$3\"".into(),
+            "adapter-test".into(),
+            log.to_string_lossy().into(),
+            label.into(),
+            exit.to_string(),
+        ],
+        max_timeout_secs: 5,
+        max_output_bytes: 4096,
+    }
+}
+
+#[tokio::test]
+async fn adapter_update_and_disable_failures_keep_latest_configuration_and_allow_enable() {
+    let mut base = runtime_hook_sync_config();
+    let root = PathBuf::from(&base.network.root_dir);
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    let log = std::fs::canonicalize(&root)
+        .unwrap()
+        .join("adapter-actions");
+    let mut plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+        "203.0.113.20",
+        "10.255.0.0",
+        "10.255.0.1",
+    ));
+    plan.plan.runtime_control.manager = vpsman_common::RuntimeTunnelManager::CustomAdapter;
+    plan.plan.runtime_control.left_adapter_definition_id =
+        Some("11111111-1111-4111-8111-111111111111".into());
+    plan.plan.runtime_control.right_adapter_definition_id =
+        Some("22222222-2222-4222-8222-222222222222".into());
+    plan.runtime_adapter = Some(vpsman_common::RuntimeTunnelAdapterCommands {
+        definition_id: "11111111-1111-4111-8111-111111111111".into(),
+        definition_name: "old label".into(),
+        definition_hash: "ab".repeat(32),
+        startup: Some(logged_adapter_command(&log, "old-start", 0)),
+        stop: None,
+        cleanup: Some(logged_adapter_command(&log, "old-cleanup", 1)),
+        restart: None,
+        status: runtime_hook_command("/bin/true"),
+        traffic_limit_apply: None,
+    });
+    let mut unaffected = plan.clone();
+    unaffected.plan_id = Some("unaffected-plan".into());
+    unaffected.plan.interface_name = "tun-other".into();
+    unaffected.runtime_adapter.as_mut().unwrap().startup =
+        Some(logged_adapter_command(&log, "unaffected-start", 1));
+    base.network.runtime_status_telemetry_plans = vec![plan, unaffected];
+    let mut desired = AgentRuntimeConfig::from_agent_config(30, &base);
+    let adapter = desired.network.runtime_status_telemetry_plans[0]
+        .runtime_adapter
+        .as_mut()
+        .unwrap();
+    adapter.definition_hash = "cd".repeat(32);
+    adapter.startup = Some(logged_adapter_command(&log, "new-start", 0));
+    adapter.cleanup = Some(logged_adapter_command(&log, "new-cleanup", 1));
+
+    let changed = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &base,
+        &desired,
+        30,
+        "network_adapter_definition_updated",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&changed.outputs[0].data).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["reconcile"]["tunnels"][0]["status"], "converged");
+    assert_eq!(report["reconcile"]["tunnels"][1]["status"], "unchanged");
+    assert!(!changed.fully_applied);
+    assert_eq!(changed.accepted_runtime_config.as_ref(), Some(&desired));
+    let accepted = changed.applied_config.unwrap();
+    let no_op = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &accepted,
+        &desired,
+        30,
+        "network_adapter_definition_updated",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(no_op.outputs[0].exit_code, Some(0));
+    assert_eq!(
+        tokio::fs::read_to_string(&log).await.unwrap(),
+        "old-cleanup\nnew-start\n"
+    );
+
+    let mut disabled = desired.clone();
+    disabled.version = 31;
+    disabled.network.runtime_status_telemetry_plans.remove(0);
+    let stopped = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &accepted,
+        &disabled,
+        31,
+        "test-disable",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    assert!(!stopped.fully_applied);
+    assert_eq!(stopped.accepted_runtime_config.as_ref(), Some(&disabled));
+    let disabled_config = stopped.applied_config.unwrap();
+    desired.version = 32;
+    let enabled = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &disabled_config,
+        &desired,
+        32,
+        "test-enable",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    assert!(enabled.fully_applied);
+    assert_eq!(
+        tokio::fs::read_to_string(&log).await.unwrap(),
+        "old-cleanup\nnew-start\nnew-cleanup\nnew-start\n"
+    );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn adapter_label_edit_does_not_restart_tunnel() {
+    let mut base = runtime_hook_sync_config();
+    let mut plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+        "203.0.113.20",
+        "10.255.0.0",
+        "10.255.0.1",
+    ));
+    plan.plan.runtime_control.manager = vpsman_common::RuntimeTunnelManager::CustomAdapter;
+    plan.plan.runtime_control.left_adapter_definition_id =
+        Some("11111111-1111-4111-8111-111111111111".into());
+    plan.plan.runtime_control.right_adapter_definition_id =
+        Some("22222222-2222-4222-8222-222222222222".into());
+    plan.runtime_adapter = Some(vpsman_common::RuntimeTunnelAdapterCommands {
+        definition_id: "11111111-1111-4111-8111-111111111111".into(),
+        definition_name: "before".into(),
+        definition_hash: "ab".repeat(32),
+        startup: Some(runtime_hook_command("/bin/false")),
+        stop: Some(runtime_hook_command("/bin/false")),
+        cleanup: None,
+        restart: None,
+        status: runtime_hook_command("/bin/false"),
+        traffic_limit_apply: None,
+    });
+    base.network.runtime_status_telemetry_plans = vec![plan];
+    let old = AgentRuntimeConfig::from_agent_config(1, &base);
+    let mut renamed = old.clone();
+    renamed.version = 2;
+    renamed.network.runtime_status_telemetry_plans[0]
+        .runtime_adapter
+        .as_mut()
+        .unwrap()
+        .definition_name = "after".into();
+    let result = apply_runtime_config_sync(
+        uuid::Uuid::new_v4(),
+        &base,
+        &renamed,
+        2,
+        "unrelated_source_edit",
+        CommandCancelToken::default(),
+    )
+    .await
+    .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+    assert_eq!(report["reconcile"]["status"], "unchanged");
+    assert_eq!(report["removed_tunnel_count"], 0);
 }
 
 #[tokio::test]
@@ -1567,7 +1753,7 @@ async fn runtime_config_sync_accepts_native_success_and_exposes_post_hook_failur
 }
 
 #[tokio::test]
-async fn failed_shutdown_hook_blocks_its_replacement_not_unrelated_endpoints() {
+async fn failed_shutdown_hook_reports_failure_but_adopts_and_attempts_replacements() {
     let mut base = runtime_hook_sync_config();
     let mut old = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
     old.runtime_control.hooks.left.pre_shutdown = Some(runtime_hook_command("/bin/false"));
@@ -1599,16 +1785,15 @@ async fn failed_shutdown_hook_blocks_its_replacement_not_unrelated_endpoints() {
     .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
     assert!(!result.fully_applied);
-    assert!(result.applied_config.is_none());
+    assert_eq!(result.accepted_runtime_config.as_ref(), Some(&desired));
     assert_eq!(body["removals"][0]["reason"], "lifecycle_pre_hook_failed");
-    assert_eq!(
-        body["reconcile"]["tunnels"][0]["reason"],
-        "previous_endpoint_removal_failed"
-    );
-    assert!(body["reconcile"]["tunnels"][0]["hook_results"]
-        .as_array()
+    // Apply is attempted, but this fixture's surviving native interface has no
+    // inspectable ownership. Preserve that real native guard, not the former
+    // blanket cleanup-failure barrier.
+    assert!(body["reconcile"]["tunnels"][0]["error"]
+        .as_str()
         .unwrap()
-        .is_empty());
+        .contains("failed to parse existing runtime tunnel inspect JSON"));
     assert_eq!(body["reconcile"]["tunnels"][1]["status"], "converged");
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -1654,7 +1839,7 @@ async fn runtime_config_sync_removes_omitted_tunnel_plan() {
             runtime_status_telemetry_plans: vec![plan],
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(13, &base);
     desired.network.runtime_status_telemetry_plans.clear();
@@ -1686,7 +1871,7 @@ async fn runtime_config_sync_removes_omitted_tunnel_plan() {
 }
 
 #[tokio::test]
-async fn runtime_config_sync_preserves_omitted_plan_when_cleanup_is_blocked() {
+async fn runtime_config_sync_keeps_disable_when_cleanup_fails() {
     let plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
         "203.0.113.20",
         "10.255.0.0",
@@ -1700,7 +1885,7 @@ async fn runtime_config_sync_preserves_omitted_plan_when_cleanup_is_blocked() {
             runtime_status_telemetry_plans: vec![plan],
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(14, &base);
     desired.network.runtime_status_telemetry_plans.clear();
@@ -1721,7 +1906,14 @@ async fn runtime_config_sync_preserves_omitted_plan_when_cleanup_is_blocked() {
     assert_eq!(body["status"], "failed");
     assert_eq!(body["removals"][0]["status"], "skipped");
     assert_eq!(body["removals"][0]["reason"], "runtime_reconcile_disabled");
-    assert!(result.applied_config.is_none());
+    assert!(!result.fully_applied);
+    assert!(result
+        .applied_config
+        .unwrap()
+        .network
+        .runtime_status_telemetry_plans
+        .is_empty());
+    assert_eq!(result.accepted_runtime_config.as_ref(), Some(&desired));
 }
 
 #[tokio::test]
@@ -1736,7 +1928,7 @@ async fn runtime_config_sync_stops_observing_without_a_mutation_gate() {
             runtime_status_telemetry_plans: vec![runtime_sync_test_telemetry_plan(plan)],
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(15, &base);
     desired.network.runtime_status_telemetry_plans.clear();
@@ -1807,7 +1999,7 @@ async fn runtime_config_sync_blocks_status_only_adapter_removal() {
             runtime_status_telemetry_plans: vec![telemetry_plan],
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(14, &base);
     desired.network.runtime_status_telemetry_plans.clear();
@@ -1829,11 +2021,17 @@ async fn runtime_config_sync_blocks_status_only_adapter_removal() {
     assert_eq!(body["removed_tunnel_count"], 1);
     assert_eq!(body["removals"][0]["plan_id"], "plan-a");
     assert_eq!(body["removals"][0]["status"], "remove_unavailable");
-    assert!(result.applied_config.is_none());
+    assert!(result
+        .applied_config
+        .unwrap()
+        .network
+        .runtime_status_telemetry_plans
+        .is_empty());
+    assert_eq!(result.accepted_runtime_config.as_ref(), Some(&desired));
 }
 
 #[tokio::test]
-async fn runtime_config_sync_failure_does_not_return_config_update() {
+async fn runtime_config_sync_failure_accepts_new_config_without_claiming_convergence() {
     let root =
         std::env::temp_dir().join(format!("vpsman-runtime-sync-fail-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&root).await.unwrap();
@@ -1881,7 +2079,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
                 vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
             ..Default::default()
         },
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let mut desired = AgentRuntimeConfig {
         version: 10,
@@ -1916,16 +2114,18 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
 
     assert_eq!(base.telemetry_interval_secs, 15);
     assert_eq!(result.outputs[0].exit_code, Some(1));
-    assert!(result.applied_config.is_none());
+    assert!(result.applied_config.is_some());
+    assert_eq!(result.accepted_runtime_config.as_ref(), Some(&desired));
+    assert!(!result.fully_applied);
 }
 
 #[tokio::test]
-async fn runtime_config_sync_cancel_returns_no_config_update() {
+async fn runtime_config_sync_cancel_reports_cancellation() {
     let token = CommandCancelToken::default();
     token.cancel("operator requested cancellation".to_string());
     let base = AgentConfig {
         client_id: "client-a".to_string(),
-        ..AgentConfig::default()
+        ..runtime_sync_test_base()
     };
     let desired = AgentRuntimeConfig {
         version: 11,

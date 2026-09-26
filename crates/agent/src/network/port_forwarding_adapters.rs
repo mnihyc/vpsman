@@ -18,6 +18,8 @@ struct OwnedRule {
 struct InventoryRecord {
     owned: BTreeMap<Uuid, OwnedRule>,
     removed_rules: BTreeMap<Uuid, i64>,
+    #[serde(default)]
+    cleanup_failures: BTreeMap<Uuid, PortForwardRuleRuntimeStat>,
 }
 
 pub(super) struct AdapterInventory {
@@ -26,6 +28,7 @@ pub(super) struct AdapterInventory {
     loaded: bool,
     owned: BTreeMap<Uuid, OwnedRule>,
     removed_rules: BTreeMap<Uuid, i64>,
+    cleanup_failures: BTreeMap<Uuid, PortForwardRuleRuntimeStat>,
     cleanup_requests: BTreeMap<Uuid, i64>,
 }
 
@@ -37,6 +40,7 @@ impl AdapterInventory {
             loaded: false,
             owned: BTreeMap::new(),
             removed_rules: BTreeMap::new(),
+            cleanup_failures: BTreeMap::new(),
             cleanup_requests: BTreeMap::new(),
         }
     }
@@ -61,6 +65,7 @@ impl AdapterInventory {
         };
         self.owned = record.owned;
         self.removed_rules = record.removed_rules;
+        self.cleanup_failures = record.cleanup_failures;
         self.root = Some(root);
         self.loaded = true;
         Ok(())
@@ -70,6 +75,7 @@ impl AdapterInventory {
         &mut self,
         owned: BTreeMap<Uuid, OwnedRule>,
         removed_rules: BTreeMap<Uuid, i64>,
+        cleanup_failures: BTreeMap<Uuid, PortForwardRuleRuntimeStat>,
     ) -> Result<()> {
         let root = self
             .root
@@ -79,6 +85,7 @@ impl AdapterInventory {
         let record = InventoryRecord {
             owned,
             removed_rules,
+            cleanup_failures,
         };
         write_private_file_atomically_async(
             &root.join("ownership.json"),
@@ -87,6 +94,7 @@ impl AdapterInventory {
         .await?;
         self.owned = record.owned;
         self.removed_rules = record.removed_rules;
+        self.cleanup_failures = record.cleanup_failures;
         Ok(())
     }
 
@@ -98,16 +106,19 @@ impl AdapterInventory {
             .iter()
             .map(|rule| (rule.rule_id, rule.revision))
             .collect();
-        // Ownership is committed before every Apply and removed only after verified
-        // absence. An absent owner therefore also covers a never-applied rule.
+        // A retired failed owner is not proof of absence. Keep that report separate
+        // from executable ownership and never turn it into a removal receipt.
         let receipts = self
             .cleanup_requests
             .iter()
-            .filter(|(id, _)| !self.owned.contains_key(id))
+            .filter(|(id, _)| {
+                !self.owned.contains_key(id) && !self.cleanup_failures.contains_key(id)
+            })
             .map(|(id, revision)| (*id, *revision))
             .collect::<BTreeMap<_, _>>();
         if receipts != self.removed_rules {
-            self.store(self.owned.clone(), receipts).await?;
+            self.store(self.owned.clone(), receipts, self.cleanup_failures.clone())
+                .await?;
         }
         Ok(())
     }
@@ -126,11 +137,56 @@ impl AdapterInventory {
         self.owned.contains_key(&id)
     }
 
+    pub(super) fn owns_desired(&self, rule: &PortForwardRule) -> bool {
+        self.owned
+            .get(&rule.id)
+            .is_some_and(|entry| rule_execution_matches(&entry.rule, rule))
+    }
+
+    /// Persist acceptance only: skipped cleanup is failure evidence, never a
+    /// removal receipt, and only the newest executable snapshot may survive.
+    pub(super) async fn adopt_desired(&mut self, config: &AgentPortForwardingConfig) -> Result<()> {
+        self.load().await?;
+        self.synchronize_cleanup_requests(&config.cleanup_rules)
+            .await?;
+        let canceled = CommandCancelToken::default();
+        canceled.cancel("desired state accepted after interrupted forwarding work".into());
+        self.remove_replaced(config, canceled).await?;
+        let mut owners = self.owned.clone();
+        let mut receipts = self.removed_rules.clone();
+        let mut failures = self.cleanup_failures.clone();
+        for rule in config
+            .rules
+            .iter()
+            .filter(|rule| rule.mode == PortForwardMode::CustomAdapter)
+        {
+            let already_owned = self.owns_desired(rule);
+            if !already_owned {
+                failures.entry(rule.id).or_insert_with(|| {
+                    error_stat(
+                        rule,
+                        "adapter_apply_incomplete",
+                        "newest desired adapter accepted without completed Apply",
+                    )
+                });
+            }
+            owners.insert(
+                rule.id,
+                OwnedRule {
+                    client_id: self.client_id.clone(),
+                    rule: rule.clone(),
+                },
+            );
+            receipts.remove(&rule.id);
+        }
+        self.store(owners, receipts, failures).await
+    }
+
     pub(super) async fn remove_replaced(
         &mut self,
         config: &AgentPortForwardingConfig,
         cancel: CommandCancelToken,
-    ) -> (Vec<Uuid>, Vec<PortForwardRuleRuntimeStat>) {
+    ) -> Result<(Vec<Uuid>, Vec<PortForwardRuleRuntimeStat>)> {
         let stale = self
             .owned
             .values()
@@ -146,20 +202,34 @@ impl AdapterInventory {
         let mut removed = Vec::new();
         let mut failed = Vec::new();
         for entry in stale {
-            if cancel.is_canceled() {
-                break;
-            }
-            match self.remove(&entry, cancel.clone()).await {
+            let result = if cancel.is_canceled() {
+                Err(anyhow::anyhow!("adapter cleanup canceled before removal"))
+            } else {
+                self.remove(&entry, cancel.clone()).await
+            };
+            match result {
                 Ok(()) => removed.push(entry.rule.id),
-                Err(error) => failed.push(cleanup_error_stat(
-                    config,
-                    &entry.rule,
-                    "adapter_remove_failed",
-                    &error.to_string(),
-                )),
+                Err(error) => {
+                    let report = cleanup_error_stat(
+                        config,
+                        &entry.rule,
+                        "adapter_remove_failed",
+                        &error.to_string(),
+                    );
+                    let mut owners = self.owned.clone();
+                    owners.remove(&entry.rule.id);
+                    let mut receipts = self.removed_rules.clone();
+                    receipts.remove(&entry.rule.id);
+                    let mut failures = self.cleanup_failures.clone();
+                    failures.insert(entry.rule.id, report.clone());
+                    // The desired transition proceeds even after cleanup failure.
+                    // Retain diagnostics, never obsolete executable commands.
+                    self.store(owners, receipts, failures).await?;
+                    failed.push(report);
+                }
             }
         }
-        (removed, failed)
+        Ok((removed, failed))
     }
 
     async fn remove(&mut self, entry: &OwnedRule, cancel: CommandCancelToken) -> Result<()> {
@@ -181,13 +251,24 @@ impl AdapterInventory {
         if let Some(revision) = self.cleanup_requests.get(&entry.rule.id) {
             receipts.insert(entry.rule.id, *revision);
         }
-        self.store(remaining, receipts).await
+        let mut failures = self.cleanup_failures.clone();
+        failures.remove(&entry.rule.id);
+        self.store(remaining, receipts, failures).await
     }
 
     pub(super) async fn apply(
         &mut self,
         rule: &PortForwardRule,
         cancel: CommandCancelToken,
+    ) -> PortForwardRuleRuntimeStat {
+        self.apply_with_cleanup_report(rule, cancel, false).await
+    }
+
+    pub(super) async fn apply_with_cleanup_report(
+        &mut self,
+        rule: &PortForwardRule,
+        cancel: CommandCancelToken,
+        preserve_cleanup_failure: bool,
     ) -> PortForwardRuleRuntimeStat {
         let entry = OwnedRule {
             client_id: self.client_id.clone(),
@@ -202,7 +283,8 @@ impl AdapterInventory {
             owners.insert(rule.id, entry.clone());
             let mut receipts = self.removed_rules.clone();
             receipts.remove(&rule.id);
-            self.store(owners, receipts).await?;
+            self.store(owners, receipts, self.cleanup_failures.clone())
+                .await?;
             run(&adapter.apply, &entry, cancel.clone(), "apply").await?;
             let status = observe(&entry, cancel).await?;
             anyhow::ensure!(
@@ -210,12 +292,45 @@ impl AdapterInventory {
                 "adapter apply verification: {}",
                 status.description()
             );
+            // The same transition's new Apply cannot erase a failed cleanup of
+            // old resources. A later explicit successful Apply may clear it.
+            if !preserve_cleanup_failure && self.cleanup_failures.contains_key(&rule.id) {
+                let mut failures = self.cleanup_failures.clone();
+                failures.remove(&rule.id);
+                self.store(self.owned.clone(), self.removed_rules.clone(), failures)
+                    .await?;
+            }
             Ok::<_, anyhow::Error>(())
         }
         .await;
         match result {
             Ok(()) => runtime_stat(rule, PortForwardRuntimeStatus::Applied),
-            Err(error) => error_stat(rule, "adapter_apply_failed", &error.to_string()),
+            Err(error) => {
+                let Some(cleanup) = self.cleanup_failures.get(&rule.id) else {
+                    return error_stat(rule, "adapter_apply_failed", &error.to_string());
+                };
+                let message = format!(
+                    "{}; newest adapter apply failed: {error}",
+                    cleanup
+                        .error_message
+                        .as_deref()
+                        .unwrap_or("previous cleanup failed"),
+                );
+                let report = error_stat(rule, "adapter_cleanup_and_apply_failed", &message);
+                let mut failures = self.cleanup_failures.clone();
+                failures.insert(rule.id, report.clone());
+                if let Err(persist_error) = self
+                    .store(self.owned.clone(), self.removed_rules.clone(), failures)
+                    .await
+                {
+                    return error_stat(
+                        rule,
+                        "adapter_inventory_failed",
+                        &format!("{message}; failed to save diagnostics: {persist_error}"),
+                    );
+                }
+                report
+            }
         }
     }
 
@@ -274,24 +389,56 @@ impl AdapterInventory {
         &self,
         config: &AgentPortForwardingConfig,
     ) -> Vec<PortForwardRuleRuntimeStat> {
-        self.owned
-            .values()
-            .filter(|entry| {
-                !config.rules.iter().any(|rule| {
-                    rule.id == entry.rule.id
-                        && rule.mode == PortForwardMode::CustomAdapter
-                        && same_adapter(rule, &entry.rule)
-                })
+        let mut reports = self.cleanup_failures.clone();
+        for report in reports.values_mut() {
+            if let Some(rule) = config.rules.iter().find(|rule| rule.id == report.rule_id) {
+                report.revision = rule.revision;
+                report.mode = rule.mode;
+            } else if let Some(request) = config
+                .cleanup_rules
+                .iter()
+                .find(|rule| rule.rule_id == report.rule_id)
+            {
+                report.revision = request.revision;
+            }
+        }
+        for entry in self.owned.values().filter(|entry| {
+            !config.rules.iter().any(|rule| {
+                rule.id == entry.rule.id
+                    && rule.mode == PortForwardMode::CustomAdapter
+                    && same_adapter(rule, &entry.rule)
             })
-            .map(|entry| {
+        }) {
+            reports.entry(entry.rule.id).or_insert_with(|| {
                 cleanup_error_stat(
                     config,
                     &entry.rule,
                     "adapter_cleanup_pending",
                     "saved adapter ownership still requires removal",
                 )
-            })
-            .collect()
+            });
+        }
+        reports.into_values().collect()
+    }
+
+    pub(super) async fn confirm_native_repairs(
+        &mut self,
+        snapshot: &PortForwardRuntimeSnapshot,
+        repair_ids: &BTreeSet<Uuid>,
+        failed_in_transition: &BTreeSet<Uuid>,
+    ) -> Result<()> {
+        if snapshot.status != PortForwardRuntimeStatus::Applied {
+            return Ok(());
+        }
+        let mut failures = self.cleanup_failures.clone();
+        failures.retain(|id, _| !repair_ids.contains(id) || failed_in_transition.contains(id));
+        if failures.len() != self.cleanup_failures.len() {
+            // As with a later custom Apply, explicit native repair retires
+            // report-only diagnostics, never a cleanup failure from this job.
+            self.store(self.owned.clone(), self.removed_rules.clone(), failures)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -303,6 +450,17 @@ fn same_adapter(left: &PortForwardRule, right: &PortForwardRule) -> bool {
             .adapter
             .as_ref()
             .map(|adapter| (adapter.definition_id, &adapter.definition_hash))
+}
+
+fn rule_execution_matches(left: &PortForwardRule, right: &PortForwardRule) -> bool {
+    let normalize = |rule: &PortForwardRule| {
+        let mut rule = rule.clone();
+        if let Some(adapter) = &mut rule.adapter {
+            adapter.definition_name.clear();
+        }
+        rule
+    };
+    normalize(left) == normalize(right)
 }
 
 fn cleanup_error_stat(

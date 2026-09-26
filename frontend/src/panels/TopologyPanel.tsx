@@ -148,7 +148,7 @@ import { TopologyGraphPanel } from "./topology/TopologyGraphPanel";
 import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestControls";
 import { TopologyOspfUpdateControls } from "./topology/TopologyOspfUpdateControls";
 import { PortForwardingPanel } from "./topology/PortForwardingPanel";
-import { NetworkAdapterDefinitionsPanel } from "./topology/NetworkAdapterDefinitionsPanel";
+import { NetworkAdapterDefinitionsPanel, type NetworkAdapterReviewControls } from "./topology/NetworkAdapterDefinitionsPanel";
 import { TunnelAdvancedFields, type PreviewTunnelPlan } from "./topology/TunnelAdvancedFields";
 import {
   tunnelAdvancedFromRuntime,
@@ -185,6 +185,7 @@ const DEFAULT_OSPF_POLICY: OspfCostPolicy = {
 };
 
 export function TopologyPanel({
+  adapterReviewControls,
   activeSubpage,
   requestsEnabled,
   agents,
@@ -356,6 +357,7 @@ export function TopologyPanel({
     );
     return (
       <PortForwardingPanel
+        adapterReviewControls={adapterReviewControls}
         adapterDefinitions={networkAdapterDefinitions}
         agents={agents}
         canForget={operator?.role === "admin" && hasNetworkWriteScope}
@@ -504,6 +506,7 @@ export function TopologyPanel({
 
   return (
     <TunnelPlansWorkspace
+      adapterReviewControls={adapterReviewControls}
       agents={agents}
       apiToken={apiToken}
       configurationSources={configurationSources}
@@ -714,6 +717,7 @@ function NetworkOverview({
 }
 
 function TunnelPlansWorkspace({
+  adapterReviewControls,
   agents,
   apiToken,
   configurationSources,
@@ -746,6 +750,7 @@ function TunnelPlansWorkspace({
   tunnelPlanCorruptions,
   tunnelPlans,
 }: {
+  adapterReviewControls: NetworkAdapterReviewControls;
   agents: AgentView[];
   apiToken: AuthSession | null;
   configurationSources: ConfigurationSourceView[];
@@ -798,8 +803,8 @@ function TunnelPlansWorkspace({
   ) => Promise<TunnelPlanMutationResponse>;
   onUpdateNetworkAdapterDefinition: (
     definitionId: string,
-    request: UpsertNetworkAdapterDefinitionRequest,
-  ) => Promise<NetworkAdapterDefinitionRecord>;
+    request: import("../types").UpdateNetworkAdapterDefinitionRequest,
+  ) => Promise<import("../types").NetworkAdapterMutationResponse>;
   networkAdapterDefinitions: NetworkAdapterDefinitionRecord[];
   topologyGraph: TopologyGraph;
   tunnelPlanCorruptions: import("../types").TunnelPlanCorruptRecord[];
@@ -1803,7 +1808,7 @@ function TunnelPlansWorkspace({
               ? "Push the current enabled declaration to both endpoints again without changing its revision or runtime ownership."
               : lifecycleSnapshot?.enabled
                 ? `Enable these declared plans and push their exact desired state to both endpoints.${lifecycleIncludesOspf ? " OSPF control resumes as unverified; existing external daemon costs remain unchanged until a verified update." : ""}`
-                : `Disable these plans and push runtime config that removes their managed state from both endpoints. External observed plans are no longer observed.${lifecycleIncludesOspf ? " OSPF control stops; existing external daemon costs are not reverted." : ""}`
+                : `Disable these plans and push runtime config that removes their managed state from both endpoints. They remain disabled if cleanup fails; inspect the job and repair host residue before enabling again. External observed plans are no longer observed.${lifecycleIncludesOspf ? " OSPF control stops; existing external daemon costs are not reverted." : ""}`
         }
         items={
           lifecycleSnapshot
@@ -1971,6 +1976,7 @@ function TunnelPlansWorkspace({
         tone="danger"
       />
       <NetworkAdapterDefinitionsPanel
+        reviewControls={adapterReviewControls}
         definitions={networkAdapterDefinitions}
         initialKind={initialAdapterKind}
         onCreate={onCreateNetworkAdapterDefinition}
@@ -6598,6 +6604,7 @@ type ClearEvidenceSnapshot = {
 };
 
 type TopologyPanelProps = {
+  adapterReviewControls: NetworkAdapterReviewControls;
   onPreviewTunnelPlan: PreviewTunnelPlan;
   activeSubpage: string;
   requestsEnabled: boolean;
@@ -6708,8 +6715,8 @@ type TopologyPanelProps = {
   ) => Promise<TunnelPlanMutationResponse>;
   onUpdateNetworkAdapterDefinition: (
     definitionId: string,
-    request: UpsertNetworkAdapterDefinitionRequest,
-  ) => Promise<NetworkAdapterDefinitionRecord>;
+    request: import("../types").UpdateNetworkAdapterDefinitionRequest,
+  ) => Promise<import("../types").NetworkAdapterMutationResponse>;
   operator: OperatorView | null;
   ospfRecommendations: NetworkOspfRecommendationRecord[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];

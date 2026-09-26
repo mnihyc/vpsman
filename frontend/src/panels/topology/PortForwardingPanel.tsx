@@ -31,7 +31,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
-import { NetworkAdapterDefinitionsPanel } from "./NetworkAdapterDefinitionsPanel";
+import { NetworkAdapterDefinitionsPanel, type NetworkAdapterReviewControls } from "./NetworkAdapterDefinitionsPanel";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
   formatPortMappings,
@@ -59,6 +59,7 @@ import type {
 import { dispatchFailureReason, formatCompactTime, shortId } from "../../utils";
 
 type PortForwardingPanelProps = {
+  adapterReviewControls: NetworkAdapterReviewControls;
   adapterDefinitions: NetworkAdapterDefinitionRecord[];
   agents: AgentView[];
   canForget: boolean;
@@ -78,8 +79,8 @@ type PortForwardingPanelProps = {
   ) => Promise<NetworkAdapterDefinitionRecord>;
   onUpdateAdapter: (
     id: string,
-    request: UpsertNetworkAdapterDefinitionRequest,
-  ) => Promise<NetworkAdapterDefinitionRecord>;
+    request: import("../../types").UpdateNetworkAdapterDefinitionRequest,
+  ) => Promise<import("../../types").NetworkAdapterMutationResponse>;
   onDeleteAdapter: (id: string) => Promise<void>;
   onLoad: () => Promise<string | null>;
   onLoadAdapters: () => Promise<void>;
@@ -161,6 +162,7 @@ const EMPTY_DRAFT: EditorDraft = {
 const MAX_RULE_NAME_BYTES = 128;
 
 export function PortForwardingPanel({
+  adapterReviewControls,
   adapterDefinitions,
   agents,
   canForget,
@@ -188,9 +190,10 @@ export function PortForwardingPanel({
   );
   const [adapterEditor, setAdapterEditor] = useState<
     | { mode: "create"; kind: "port_forward" }
-    | { mode: "edit"; definition: NetworkAdapterDefinitionRecord }
+    | { mode: "details" | "commands"; definition: NetworkAdapterDefinitionRecord }
     | null
   >(null);
+  const [adapterDispatchPending, setAdapterDispatchPending] = useState(false);
   const [pending, setPending] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [forgetReason, setForgetReason] = useState("");
@@ -1203,8 +1206,8 @@ export function PortForwardingPanel({
           onCreateAdapter={() =>
             setAdapterEditor({ mode: "create", kind: "port_forward" })
           }
-          onEditAdapter={(definition) =>
-            setAdapterEditor({ mode: "edit", definition })
+          onEditAdapter={(definition, mode) =>
+            setAdapterEditor({ mode, definition })
           }
           onResolveHostname={onResolveHostname}
           onSubmit={submitEditor}
@@ -1215,12 +1218,19 @@ export function PortForwardingPanel({
 
       {adapterEditor && (
         <NetworkAdapterDefinitionsPanel
+          reviewControls={adapterReviewControls}
           definitions={adapterDefinitions}
           editorOnly
           editorRequest={adapterEditor}
           initialKind={null}
           onInitialKindConsumed={consumeAdapterKind}
-          onEditorClosed={() => setAdapterEditor(null)}
+          onEditorClosed={(message, hasDispatch) => {
+            setAdapterEditor(null);
+            if (message) {
+              setFeedback({ anchor: "editor", message, tone: "info" });
+              setAdapterDispatchPending(Boolean(hasDispatch));
+            }
+          }}
           onCreate={async (request) => {
             const definition = await onCreateAdapter(request);
             setEditor((current) =>
@@ -1240,6 +1250,10 @@ export function PortForwardingPanel({
           onDelete={onDeleteAdapter}
           tunnelPlans={[]}
         />
+      )}
+
+      {adapterDispatchPending && adapterReviewControls.onOpenJobHistory && (
+        <button className="secondaryAction compactAction" type="button" onClick={adapterReviewControls.onOpenJobHistory}>View adapter jobs</button>
       )}
 
       <ConfirmationPrompt
@@ -1323,7 +1337,7 @@ const PortForwardEditor = forwardRef<
     onChange: (changes: Partial<EditorDraft>) => void;
     onClose: () => void;
     onCreateAdapter: () => void;
-    onEditAdapter: (definition: NetworkAdapterDefinitionRecord) => void;
+    onEditAdapter: (definition: NetworkAdapterDefinitionRecord, mode: "details" | "commands") => void;
     onResolveHostname: (
       hostname: string,
       mode?: PortForwardMode,
@@ -1761,24 +1775,15 @@ const PortForwardEditor = forwardRef<
               >
                 <CirclePlus size={14} /> Create adapter
               </button>
-              <button
-                className="secondaryAction compactAction"
-                disabled={
-                  pending ||
-                  !selectedAdapter ||
-                  (selectedAdapter.port_forward_rule_count ?? 0) > 0
-                }
-                onClick={() =>
-                  selectedAdapter && onEditAdapter(selectedAdapter)
-                }
-                title={
-                  (selectedAdapter?.port_forward_rule_count ?? 0) > 0
-                    ? "This adapter is bound to forwarding rules; create a replacement and change each binding explicitly."
-                    : "Edit the selected reusable adapter definition"
-                }
-                type="button"
-              >
-                <Pencil size={14} /> Edit adapter
+              <button className="secondaryAction compactAction" disabled={pending || !selectedAdapter}
+                onClick={() => selectedAdapter && onEditAdapter(selectedAdapter, "details")}
+                title="Edit name and description without restarting resources" type="button">
+                <Pencil size={14} /> Edit details
+              </button>
+              <button className="secondaryAction compactAction" disabled={pending || !selectedAdapter}
+                onClick={() => selectedAdapter && onEditAdapter(selectedAdapter, "commands")}
+                title="Review command changes and affected forwarding rules" type="button">
+                <Pencil size={14} /> Edit commands
               </button>
             </div>
             <small>
@@ -2305,12 +2310,13 @@ function confirmationLabel(state: ConfirmationState | null) {
 
 function confirmationDetail(state: ConfirmationState | null) {
   if (!state) return "Review the current action.";
+  const disableDetail = " Desired state stays disabled if cleanup fails; inspect the job and repair host residue before enabling again.";
   if (state.kind === "save") {
     if (
       state.draft.mode === "custom_adapter" ||
       state.editing?.mode === "custom_adapter"
     )
-      return "This saves desired state and reconciles the VPS. Adapter changes run sequentially and are verified by Status. A mode or adapter change removes the previous rule owner before activating its replacement.";
+      return `This saves desired state and reconciles the VPS. Adapter changes run sequentially and are verified by Status. A mode or adapter change attempts previous-owner cleanup, then attempts the replacement even if cleanup fails; inspect Jobs and repair any residue.${state.editing?.enabled && !state.draft.enabled ? disableDetail : ""}`;
     return "This saves desired state and replaces the VPS's vpsman-owned native forwarding table atomically. Claimed ports take precedence over conventional Docker or system DNAT for new connections.";
   }
   if (state.kind === "single" && state.operation === "delete") {
@@ -2335,7 +2341,9 @@ function confirmationDetail(state: ConfirmationState | null) {
     }
   }
   if (state.kind === "bulk")
-    return `This applies one ${state.action} decision to ${state.rules.length} exact rule revisions and reconciles each affected VPS once.`;
+    return `This applies one ${state.action} decision to ${state.rules.length} exact rule revisions and reconciles each affected VPS once.${state.action === "disable" ? disableDetail : ""}`;
+  if (state.kind === "single" && state.operation === "disable")
+    return `This saves disabled desired state and queues reconciliation for the VPS.${disableDetail}`;
   return "This updates desired state and queues reconciliation for the affected VPS. Native changes are atomic; custom adapter operations are verified separately.";
 }
 
