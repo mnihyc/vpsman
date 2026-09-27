@@ -5274,6 +5274,14 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
             <CopyablePolicyId label={`rule ID for ${rule.name}`} value={rule.id} />
             <dl>
               <div>
+                <dt>State</dt>
+                <dd>
+                  <ConsoleStatusBadge tone={rule.enabled ? "ok" : "warning"}>
+                    {rule.enabled ? "enabled" : "disabled"}
+                  </ConsoleStatusBadge>
+                </dd>
+              </div>
+              <div>
                 <dt>Evidence</dt>
                 <dd>{policyEvidenceSourceLabel(rule.evidence_source)}</dd>
               </div>

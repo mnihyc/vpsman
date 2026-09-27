@@ -1424,7 +1424,7 @@ function PublicTrafficRow({
           aria-valuemin={0}
           aria-valuenow={fill}
           aria-valuetext={formatPercent(quotaPercent)}
-          className={`vpsMonitorMetricTrack${problem || quotaPercent >= 90 ? " warning" : ""}`}
+          className={`vpsMonitorMetricTrack${problem || quotaPercent >= 80 ? " warning" : ""}`}
           role="meter"
         >
           <span style={{ width: `${fill}%` }} />

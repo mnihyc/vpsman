@@ -2562,6 +2562,7 @@ test(
       "76",
     );
     await expect(traffic.locator(".unlimitedTrafficTrack")).toHaveCount(0);
+    await expect(traffic.locator('[role="meter"]')).not.toHaveClass(/warning/);
 
     await page
       .getByRole("button", { name: "Comfortable", exact: true })
@@ -2660,6 +2661,11 @@ test(
     );
     await expect(traffic).not.toContainText("No reset");
     await expect(traffic).not.toContainText("Reset time unavailable");
+    await expect(traffic.locator('[role="meter"]')).toHaveAttribute(
+      "aria-valuenow",
+      "80.33",
+    );
+    await expect(traffic.locator('[role="meter"]')).toHaveClass(/warning/);
   },
 );
 
@@ -3806,6 +3812,11 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   );
   const belowDetail = page.locator(".consoleDetailPanel");
   await expect(belowDetail).toContainText("edge-resource-policy");
+  await expect(
+    belowDetail
+      .getByLabel("Alert policy rule provenance")
+      .getByText("enabled", { exact: true }),
+  ).toBeVisible();
   await expect(belowDetail).toContainText("traffic.cycle.total");
   await expect(belowDetail).toContainText("traffic.quota.total * 0.8");
   await expect(belowDetail).toContainText("inverse Trigger");
@@ -3824,6 +3835,11 @@ test("keeps fleet alert policy actions selection-scoped", async ({
     await defaultPolicyRow.getByLabel("Expand Policy groups row").click();
     const defaultPolicyDetail = grid.locator(".gridExpandedRow");
     await expect(defaultPolicyDetail).toContainText("System default");
+    await expect(
+      defaultPolicyDetail
+        .getByLabel("Alert policy rule provenance")
+        .getByText("enabled", { exact: true }),
+    ).toBeVisible();
     await expect(defaultPolicyDetail).toContainText("default.agent.offline");
     await expect(defaultPolicyDetail).toContainText("after evidence #40");
     await defaultPolicyRow.getByLabel("Collapse Policy groups row").click();
@@ -3861,7 +3877,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   );
   await expect(
     editor.getByLabel("Rule Trigger condition expression"),
-  ).toHaveValue("traffic.cycle.total >= traffic.quota.total * 0.8");
+  ).toHaveText("traffic.cycle.total >= traffic.quota.total * 0.8");
   await expect(editor).toContainText("Trigger condition");
   await expect(editor).toContainText("Resolve condition");
   await expect(

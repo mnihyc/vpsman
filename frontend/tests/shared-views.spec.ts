@@ -1696,7 +1696,7 @@ test("public monitoring identifies the most-used finite directional traffic quot
   await expect(cycle).not.toContainText("Unlimited");
 });
 
-test("public monitoring uses warning color above ninety percent without changing status", async ({
+test("public monitoring uses warning color at eighty percent without changing status", async ({
   page,
 }) => {
   await installPublicMonitoringApiMock(page, { nearQuota: true });
@@ -1707,7 +1707,7 @@ test("public monitoring uses warning color above ninety percent without changing
   });
   const traffic = card.locator(".publicMonitoringTraffic");
   const track = traffic.locator(".vpsMonitorMetricTrack");
-  await expect(traffic).toContainText("95.0%");
+  await expect(traffic).toContainText("80.0%");
   await expect(traffic.locator(".exceptionEvidence")).toHaveCount(0);
   await expect(track).toHaveClass(/warning/);
   await expect(track.locator(":scope > span")).toHaveCSS(
@@ -2691,11 +2691,11 @@ async function installPublicMonitoringApiMock(
     card.traffic.tx_bytes = 1_000;
   }
   if (nearQuota && card.traffic) {
-    card.traffic.cycle_percent = 95;
+    card.traffic.cycle_percent = 80;
     card.traffic.quota_total_bytes = 12_000;
-    card.traffic.rx_bytes = 7_600;
-    card.traffic.total_bytes = 11_400;
-    card.traffic.tx_bytes = 3_800;
+    card.traffic.rx_bytes = 6_400;
+    card.traffic.total_bytes = 9_600;
+    card.traffic.tx_bytes = 3_200;
   }
   if (directionalUnlimited && card.traffic) {
     delete card.traffic.cycle_percent;

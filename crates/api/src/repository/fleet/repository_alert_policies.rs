@@ -7045,7 +7045,7 @@ fn validate_name(value: &str, max_bytes: usize, field: &str) -> Result<()> {
     anyhow::ensure!(value.len() <= max_bytes, "{field} is too long");
     anyhow::ensure!(
         value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-' | b':')
+            byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-' | b':' | b'%')
         }),
         "{field} contains unsupported characters"
     );

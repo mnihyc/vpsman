@@ -1563,7 +1563,7 @@ export function VpsMonitorCard({
               ? undefined
               : `${quotaPercent.toFixed(1)} percent`
           }
-          className={`vpsMonitorTrafficTrack${quotaState === "unlimited" ? " unlimitedTrafficTrack" : quotaPercent === null ? " missing" : ""}${trafficWarning > 0 || (quotaPercent !== null && quotaPercent >= 90) ? " warning" : ""}`}
+          className={`vpsMonitorTrafficTrack${quotaState === "unlimited" ? " unlimitedTrafficTrack" : quotaPercent === null ? " missing" : ""}${trafficWarning > 0 || (quotaPercent !== null && quotaPercent >= 80) ? " warning" : ""}`}
           role={quotaPercent === null ? undefined : "meter"}
         >
           <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />

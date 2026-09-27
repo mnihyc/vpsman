@@ -8,6 +8,7 @@ use vpsman_common::{
 
 use crate::model_alert_policies::{
     AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
+    CreateFleetAlertPolicyRequest,
 };
 
 use super::{
@@ -23,18 +24,67 @@ use super::{
     projected_traffic_streams, resolve_network_rate_interface_selection,
     traffic_accounting_for_client, traffic_accounting_for_client_with_freshness,
     traffic_accounting_for_client_with_selector_override, traffic_cycle_starts_for_clients,
-    validate_billing_rule_group, NetworkInterfaceInventory, NetworkRateSelectorReference,
-    NetworkRateSelectorSpec, PolicyEvaluation, PolicyEvaluationPage, PolicyRuleRecord,
-    PolicyRuleRequest, PolicyRuleStateRecord, ProjectedTrafficAccountingContext,
+    validate_billing_rule_group, validate_policy_group_request, NetworkInterfaceInventory,
+    NetworkRateSelectorReference, NetworkRateSelectorSpec, PolicyEvaluation, PolicyEvaluationPage,
+    PolicyRuleRecord, PolicyRuleRequest, PolicyRuleStateRecord, ProjectedTrafficAccountingContext,
     ProjectedTrafficAccountingFrontier, ProjectedTrafficCounter, ProjectedTrafficCounterOverlay,
     TelemetryRollupView, TrafficCounterRollupRecord, TrafficCounterSampleRecord,
     TrafficCounterStreamUsage, TrafficFreshnessBoundary, TrafficHistoryStream,
-    TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
-    POLICY_DUE_MAINTENANCE_PAGE, POLICY_EVIDENCE_MAINTENANCE_PAGE, POLICY_SCOPE_MAINTENANCE_PAGE,
-    VPS_RULE_KEY_NETWORK_INTERFACES, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
-    VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    TrafficStreamRequest, VpsRuleValueRecord, MAX_POLICY_NAME_BYTES, MAX_RULE_NAME_BYTES,
+    NO_RESET_TRAFFIC_START_UNIX, POLICY_DUE_MAINTENANCE_PAGE, POLICY_EVIDENCE_MAINTENANCE_PAGE,
+    POLICY_SCOPE_MAINTENANCE_PAGE, VPS_RULE_KEY_NETWORK_INTERFACES,
+    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
+
+#[test]
+fn policy_and_rule_percentage_names_remain_editable_with_existing_limits() {
+    let mut request: CreateFleetAlertPolicyRequest = serde_json::from_value(json!({
+        "name": "Traffic 80% alerts",
+        "selector_expression": "*",
+        "confirmed": true,
+        "rules": [{
+            "name": "Traffic cycle above 80%",
+            "rule_kind": "metric",
+            "evidence_source": "telemetry.combined",
+            "correlation_mode": "natural_key",
+            "trigger_condition_expression": "traffic.cycle_percent >= 80",
+            "severity": "warning",
+            "category": "traffic",
+            "title_template": "Traffic quota threshold reached",
+            "detail_template": "{subject.display_name} matched {policy_rule.name}"
+        }]
+    }))
+    .unwrap();
+    validate_policy_group_request(&request, true, true).unwrap();
+
+    for (is_rule, max_bytes, field) in [
+        (false, MAX_POLICY_NAME_BYTES, "fleet alert policy name"),
+        (true, MAX_RULE_NAME_BYTES, "fleet alert policy rule name"),
+    ] {
+        let set_name = |request: &mut CreateFleetAlertPolicyRequest, name: String| {
+            if is_rule {
+                request.rules[0].name = name;
+            } else {
+                request.name = name;
+            }
+        };
+        set_name(&mut request, format!("{}%", "a".repeat(max_bytes - 1)));
+        validate_policy_group_request(&request, true, true).unwrap();
+        for invalid in [
+            " ".to_string(),
+            format!("{}%", "a".repeat(max_bytes)),
+            "Traffic\n80%".to_string(),
+            "Traffic\t80%".to_string(),
+            "Traffic\0 80%".to_string(),
+        ] {
+            set_name(&mut request, invalid);
+            let error = validate_policy_group_request(&request, true, true).unwrap_err();
+            assert!(error.to_string().starts_with(field), "{error}");
+        }
+        set_name(&mut request, "Traffic 80%".to_string());
+    }
+}
 
 fn projected_counter_overlay(
     observed_unix: i64,
