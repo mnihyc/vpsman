@@ -661,6 +661,7 @@ export const SCHEDULE_PRIVILEGE_INTENT_FIELDS = [
   "catch_up_limit",
   "retry_delay_secs",
   "max_failures",
+  "max_timeout_secs",
   "deferred_until",
   "deleted",
 ] as const;

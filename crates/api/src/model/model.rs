@@ -1235,6 +1235,7 @@ pub(crate) struct TelemetryTunnelQuery {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateScheduleRequest {
+    pub(crate) max_timeout_secs: Option<u64>,
     pub(crate) name: String,
     pub(crate) operation: Option<JobCommand>,
     pub(crate) event_argv_template: Option<Vec<String>>,
@@ -1262,6 +1263,7 @@ pub(crate) struct CreateScheduleRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateScheduleRequest {
+    pub(crate) max_timeout_secs: Option<u64>,
     pub(crate) name: String,
     pub(crate) operation: Option<JobCommand>,
     pub(crate) event_argv_template: Option<Vec<String>>,
@@ -1356,6 +1358,7 @@ pub(crate) struct BulkUpdateScheduleTargetsResponse {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ScheduleView {
+    pub(crate) max_timeout_secs: Option<u64>,
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) enabled: bool,

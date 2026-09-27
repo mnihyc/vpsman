@@ -43,6 +43,7 @@ struct LifecycleEvent {
 
 #[derive(Clone, Debug)]
 struct EventSchedule {
+    max_timeout_secs: Option<u64>,
     id: Uuid,
     actor_id: Option<Uuid>,
     name: String,
@@ -424,13 +425,14 @@ async fn ingest_lifecycle_event_in_tx(
                 matched_subject_client_ids, fixed_target_client_ids, causation_id,
                 source_schedule_lineage, dispatched_schedule_lineage,
                 rendered_operation, rendered_operation_hash, error,
-                actor_id, schedule_name, run_on, effective_target_client_ids
+                actor_id, schedule_name, run_on, effective_target_client_ids,
+                max_timeout_secs
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8,
                 CASE WHEN $5 = 'alert.triggered' THEN 1 ELSE 2 END,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22, $23, $24
+                $21, $22, $23, $24, $25
             )
             ON CONFLICT (schedule_id, event_kind, event_id) DO NOTHING
             RETURNING id
@@ -460,6 +462,7 @@ async fn ingest_lifecycle_event_in_tx(
         .bind(&schedule.name)
         .bind(&schedule.run_on)
         .bind(&effective_targets)
+        .bind(schedule.max_timeout_secs.map(|value| value as i64))
         .fetch_optional(&mut **tx)
         .await?;
         let Some(receipt_id) = inserted else {
@@ -512,7 +515,7 @@ async fn load_eligible_event_schedules(
         r#"
         SELECT
             id, actor_id, name, definition_revision, event_expression,
-            event_argv_template, target_client_ids, run_on
+            event_argv_template, target_client_ids, run_on, max_timeout_secs
         FROM schedules
         WHERE trigger_kind = 'event'
           AND enabled = TRUE
@@ -540,6 +543,9 @@ async fn load_eligible_event_schedules(
     rows.into_iter()
         .map(|row| {
             Ok(EventSchedule {
+                max_timeout_secs: row
+                    .try_get::<Option<i64>, _>("max_timeout_secs")?
+                    .map(|value| value as u64),
                 id: row.try_get("id")?,
                 actor_id: row.try_get("actor_id")?,
                 name: row.try_get("name")?,
@@ -605,6 +611,7 @@ async fn dispatch_alert_event_receipt(
             operator.username AS actor_username,
             operator.role AS actor_role,
             receipt.schedule_name,
+            receipt.max_timeout_secs,
             schedule.max_failures,
             schedule.failure_count,
             schedule.last_error
@@ -818,6 +825,9 @@ async fn dispatch_alert_event_receipt(
     }
     let job_id = Uuid::new_v4();
     let schedule = DueSchedule {
+        max_timeout_secs: row
+            .try_get::<Option<i64>, _>("max_timeout_secs")?
+            .map(|value| value as u64),
         id: schedule_id,
         actor_id,
         actor_username: row.try_get("actor_username")?,
@@ -2933,6 +2943,54 @@ mod tests {
             audit_row.try_get::<String, _>("schedule_name").unwrap(),
             original_schedule_name
         );
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_schedule_timeout_receipt_freezes_override_and_keeps_null_default() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        let actor = insert_event_schedule_actor(&db.pool).await;
+        let overridden =
+            insert_event_schedule(&db.pool, actor, "alert.triggered", None, &[], 3).await;
+        let inherited =
+            insert_event_schedule(&db.pool, actor, "alert.triggered", None, &[], 3).await;
+        sqlx::query("UPDATE schedules SET max_timeout_secs=120 WHERE id=$1")
+            .bind(overridden)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let episode_id = insert_resolved_test_episode(&db.pool).await;
+        insert_lifecycle_pair(&db.pool, episode_id).await;
+        ingest_alert_lifecycle_events(&db.pool, 10).await.unwrap();
+        // Both accepted receipts must retain their original timeout choice.
+        sqlx::query("UPDATE schedules SET max_timeout_secs=300, definition_revision=definition_revision+1 WHERE id=ANY($1)")
+            .bind(vec![overridden, inherited]).execute(&db.pool).await.unwrap();
+        for (schedule_id, frozen, expected) in [
+            (overridden, Some(120_i64), 120_i64),
+            (inherited, None, 60_i64),
+        ] {
+            let receipt = receipt_id(&db.pool, schedule_id, "alert.triggered").await;
+            let stored: Option<i64> = sqlx::query_scalar(
+                "SELECT max_timeout_secs FROM schedule_event_receipts WHERE id=$1",
+            )
+            .bind(receipt)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(stored, frozen);
+            assert!(dispatch_alert_event_receipt(
+                &db.pool,
+                receipt,
+                &ScheduleDispatchConfig::new(60, 3_600, false)
+            )
+            .await
+            .unwrap());
+            let effective: i64 = sqlx::query_scalar("SELECT job.max_timeout_secs FROM jobs job JOIN schedule_event_receipts receipt ON receipt.job_id=job.id WHERE receipt.id=$1")
+                .bind(receipt).fetch_one(&db.pool).await.unwrap();
+            assert_eq!(effective, expected);
+        }
         db.cleanup().await;
     }
 

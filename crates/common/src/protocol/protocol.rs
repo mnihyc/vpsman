@@ -1997,6 +1997,7 @@ pub fn schedule_privilege_intent_fields() -> &'static [&'static str] {
         "catch_up_limit",
         "retry_delay_secs",
         "max_failures",
+        "max_timeout_secs",
         "deferred_until",
         "deleted",
     ]
@@ -2077,6 +2078,8 @@ pub struct SchedulePrivilegeIntent<'a> {
     catch_up_limit: Option<i32>,
     retry_delay_secs: Option<i64>,
     max_failures: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_timeout_secs: Option<u64>,
     deferred_until: Option<&'a str>,
     deleted: bool,
 }
@@ -2103,6 +2106,7 @@ impl<'a> SchedulePrivilegeIntent<'a> {
             catch_up_limit: input.catch_up_limit,
             retry_delay_secs: input.retry_delay_secs,
             max_failures: input.max_failures,
+            max_timeout_secs: input.max_timeout_secs,
             deferred_until: input.deferred_until,
             deleted: input.deleted,
         }
@@ -2128,6 +2132,7 @@ pub struct SchedulePrivilegeIntentInput<'a> {
     pub catch_up_limit: Option<i32>,
     pub retry_delay_secs: Option<i64>,
     pub max_failures: i32,
+    pub max_timeout_secs: Option<u64>,
     pub deferred_until: Option<&'a str>,
     pub deleted: bool,
 }

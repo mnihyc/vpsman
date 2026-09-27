@@ -135,6 +135,35 @@ fn base_options(trigger_kind: ScheduleTriggerKindArg) -> ScheduleDefinitionOptio
         catch_up_limit: None,
         retry_delay_secs: None,
         max_failures: 3,
+        max_timeout_secs: None,
+    }
+}
+
+#[test]
+fn schedule_timeout_override_preserves_defaults_and_existing_bounds() {
+    for trigger in [ScheduleTriggerKindArg::Cron, ScheduleTriggerKindArg::Event] {
+        for (requested, expected) in [(None, None), (Some(0), Some(1)), (Some(120), Some(120))] {
+            let mut options = base_options(trigger);
+            match trigger {
+                ScheduleTriggerKindArg::Cron => options.command = Some("/bin/true".to_string()),
+                ScheduleTriggerKindArg::Event => {
+                    options.event_expression = Some("alert.triggered".to_string())
+                }
+            }
+            options.max_timeout_secs = requested;
+            assert_eq!(
+                ScheduleDefinition::from_options(options)
+                    .unwrap()
+                    .max_timeout_secs,
+                expected
+            );
+        }
+        let mut options = base_options(trigger);
+        options.max_timeout_secs = Some(vpsman_common::MAX_CONFIGURABLE_JOB_TIMEOUT_SECS + 1);
+        assert!(ScheduleDefinition::from_options(options)
+            .unwrap_err()
+            .to_string()
+            .contains("--max-timeout-secs"));
     }
 }
 
@@ -157,6 +186,7 @@ fn cron_definition_preserves_the_existing_defaults() {
     assert_eq!(definition.catch_up_policy.as_deref(), Some("skip_missed"));
     assert_eq!(definition.catch_up_limit, Some(1));
     assert_eq!(definition.retry_delay_secs, Some(300));
+    assert_eq!(definition.max_timeout_secs, None);
     assert!(definition.event_expression.is_none());
     assert!(definition.event_argv_template.is_none());
 }

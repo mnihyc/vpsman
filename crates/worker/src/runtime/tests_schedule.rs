@@ -55,6 +55,7 @@ fn schedule_with_policy(policy: &str, limit: i32) -> DueSchedule {
         catch_up_limit: limit,
         retry_delay_secs: 300,
         max_failures: 3,
+        max_timeout_secs: None,
         failure_count: 0,
         last_error: None,
         materialization: ScheduleMaterializationContext::default(),
@@ -877,6 +878,53 @@ async fn postgres_due_schedule_materializes_canonical_command_hash_and_operation
         encode_json(&stored_operation.0).unwrap(),
         encode_json(&expected_operation).unwrap()
     );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_schedule_timeout_override_default_and_lowered_cap_reach_jobs() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    insert_worker_client(&db.pool, "timeout-a", "online", false).await;
+    // The explicit override may exceed the schedule default, but never the
+    // global cap at dispatch (which administrators can lower after saving).
+    for (name, requested, cap, expected) in [
+        ("inherited-timeout", None, 3_600, 60),
+        ("explicit-timeout", Some(120_i64), 3_600, 120),
+        ("lowered-timeout-cap", Some(120_i64), 90, 90),
+    ] {
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            name,
+            serde_json::json!({"type":"shell", "argv":["/bin/true"], "pty":false}),
+            &["timeout-a"],
+        )
+        .await;
+        sqlx::query("UPDATE schedules SET max_timeout_secs=$2 WHERE id=$1")
+            .bind(schedule_id)
+            .bind(requested)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            process_due_schedule(
+                &db.pool,
+                schedule_id,
+                &ScheduleDispatchConfig::new(60, cap, false)
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        let timeout: i64 =
+            sqlx::query_scalar("SELECT max_timeout_secs FROM jobs WHERE source_schedule_id=$1")
+                .bind(schedule_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(timeout, expected);
+    }
     db.cleanup().await;
 }
 

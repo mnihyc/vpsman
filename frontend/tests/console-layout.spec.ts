@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { createHash } from "node:crypto";
 import {
   backupId,
   installConsoleApiMock,
@@ -8348,6 +8349,7 @@ test(
 
     await page.getByLabel("Schedule name").fill("traffic mitigation");
     await page.getByLabel("Schedule target expression").fill("country:US");
+    await page.getByLabel("Max timeout seconds").fill("120");
     const argv = page.getByLabel("Schedule job argv");
     await argv.fill("[IF alert.triggered]");
     await expect(
@@ -8418,7 +8420,13 @@ test(
     await expect(prompt).toContainText(
       "alert.triggered] warning traffic · Edge traffic policy / 80% quota sustained",
     );
-    await expect(prompt).toContainText("777777777777 → 888888888888");
+    const templateHash = createHash("sha256")
+      .update(JSON.stringify(JSON.parse(await savedArgv.innerText())))
+      .digest("hex");
+    const renderedHash = createHash("sha256")
+      .update(JSON.stringify({ type: "shell", argv: JSON.parse(await renderedArgv.innerText()), pty: false }))
+      .digest("hex");
+    await expect(prompt).toContainText(`${templateHash.slice(0, 12)} → ${renderedHash.slice(0, 12)}`);
     await activate(prompt.getByRole("button", { name: "Save schedule" }));
 
     const request = await page.evaluate(() => {
@@ -8437,6 +8445,7 @@ test(
       event_expression: "alert.triggered && alert.category:traffic",
       run_on: "triggered_only",
       max_failures: 3,
+      max_timeout_secs: 120,
       name: "traffic mitigation",
       operation: null,
       retry_delay_secs: null,
@@ -8463,6 +8472,15 @@ test(
       event_expression: "alert.triggered && alert.category:traffic",
       event_argv_template: request?.event_argv_template,
     });
+    const verification = await page.evaluate(() => (
+      window as unknown as {
+        __vpsmanTestRequests: { schedulePrivilegeChecks: unknown[] };
+      }
+    ).__vpsmanTestRequests.schedulePrivilegeChecks.at(-1));
+    expect(verification).toMatchObject({
+      approved: true,
+      intent: { command_type: "shell", operation_payload_hash: templateHash, max_timeout_secs: 120 },
+    });
 
     const grid = page.getByLabel("Schedule records data grid");
     await expect(grid).toContainText("Alert lifecycle edge");
@@ -8479,6 +8497,89 @@ test(
     await expect(
       page.getByRole("menuitem", { name: "Review run now", exact: true }),
     ).toBeDisabled();
+  },
+);
+
+test(
+  "signs a multiline alert-event create and default-noop update against the API contract",
+  { tag: "@alert-event-schedule" },
+  async ({ page }) => {
+    const eventExpression = '(alert.triggered || alert.resolved) && policy_rule.id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3" # Default rule: Traffic cycle above 80% (may subject to change)';
+    const script = '# quota management\n/usr/local/bin/quota-limit "$1"\n';
+    const template = ["/bin/sh", "-eu", "-c", script, "--", "{event.kind}"];
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Automation", "Schedules");
+    await activate(page.getByRole("button", { name: "Expand Create schedule" }));
+    await page.getByRole("radio", { name: /Alert event/ }).check();
+    await page.getByLabel("Schedule name").fill("quota lifecycle");
+    await page.getByLabel("Schedule target expression").fill("id:agent-sfo-01");
+    await page.getByRole("textbox", { name: "Schedule alert event expression", exact: true }).fill(eventExpression);
+    await page.getByLabel("Schedule job argv").fill(`/bin/sh -eu -c '${script}' -- '{event.kind}'`);
+    await page.getByLabel("Max timeout seconds").fill("120");
+    await activate(page.getByRole("button", { name: "Review save", exact: true }));
+    const createPrompt = page.getByRole("region", { name: "Confirm schedule", exact: true });
+    await expect(createPrompt).toContainText("Triggered rendered argv");
+    await expect(createPrompt).toContainText("Resolved rendered argv");
+    await activate(createPrompt.getByRole("button", { name: "Save schedule", exact: true }));
+    await expect(createPrompt).toBeHidden();
+    const created = await page.evaluate(() => {
+      const requests = (window as unknown as {
+        __vpsmanTestRequests: { schedules: unknown[]; schedulePrivilegeChecks: unknown[] };
+      }).__vpsmanTestRequests;
+      return { request: requests.schedules.at(-1), verification: requests.schedulePrivilegeChecks.at(-1) };
+    });
+    expect(created.request).toMatchObject({ event_expression: eventExpression, event_argv_template: template, max_timeout_secs: 120 });
+    expect(created.verification).toMatchObject({
+      approved: true,
+      intent: {
+        action: "schedule.create",
+        command_type: "shell",
+        operation_payload_hash: createHash("sha256").update(JSON.stringify(template)).digest("hex"),
+        event_expression: eventExpression,
+        max_timeout_secs: 120,
+      },
+    });
+    const tamperedStatus = await page.evaluate(async () => {
+      const requests = (window as unknown as {
+        __vpsmanTestRequests: { schedules: Array<Record<string, unknown>> };
+      }).__vpsmanTestRequests;
+      const response = await fetch("/api/v1/schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...requests.schedules.at(-1), max_timeout_secs: 121 }),
+      });
+      return response.status;
+    });
+    expect(tamperedStatus).toBe(403);
+
+    await selectGridRow(page, "Schedule records", "52525252-6161-4717-8abc-defdefdefdef");
+    await runGridAction(page, "Schedule records", "Edit");
+    await expect(page.getByLabel("Max timeout seconds")).toHaveValue("120");
+    await page.getByLabel("Schedule job argv").fill("");
+    await page.getByLabel("Max timeout seconds").fill("");
+    await activate(page.getByRole("button", { name: "Review update", exact: true }));
+    const updatePrompt = page.getByRole("region", { name: "Confirm schedule update", exact: true });
+    await activate(updatePrompt.getByRole("button", { name: "Update schedule", exact: true }));
+    await expect(updatePrompt).toBeHidden();
+    const updated = await page.evaluate(() => {
+      const requests = (window as unknown as {
+        __vpsmanTestRequests: {
+          scheduleActions: Array<{ body: Record<string, unknown>; method: string }>;
+          schedulePrivilegeChecks: Array<{ approved: boolean; intent: Record<string, unknown> }>;
+        };
+      }).__vpsmanTestRequests;
+      return { request: requests.scheduleActions.findLast((item) => item.method === "PUT")?.body, verification: requests.schedulePrivilegeChecks.at(-1) };
+    });
+    expect(updated.request).toMatchObject({ event_expression: eventExpression, event_argv_template: null, max_timeout_secs: null });
+    expect(updated.verification).toMatchObject({
+      approved: true,
+      intent: {
+        action: "schedule.update",
+        command_type: "shell",
+        operation_payload_hash: createHash("sha256").update(JSON.stringify(["/bin/true"])).digest("hex"),
+      },
+    });
+    expect(updated.verification?.intent).not.toHaveProperty("max_timeout_secs");
   },
 );
 

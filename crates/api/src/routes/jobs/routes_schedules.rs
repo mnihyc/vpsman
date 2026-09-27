@@ -31,7 +31,7 @@ use crate::{
         next_cron_runs, ScheduleSnapshotExpectation, ScheduleTargetBatchUpdate,
         ScheduleTargetBatchUpdateResult,
     },
-    routes_jobs::create_job_from_saved_schedule,
+    routes_jobs::{create_job_from_saved_schedule, effective_job_max_timeout_secs},
     security::{operator_has_scope, require_vps_rule_selector_scope, SCOPE_SCHEDULES_READ},
     selector_expression::parse_selector_expression,
     state::AppState,
@@ -101,6 +101,10 @@ pub(crate) async fn create_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     require_event_schedule_read_scopes(&operator.operator.scopes, request.trigger_kind)?;
+    request.max_timeout_secs = request
+        .max_timeout_secs
+        .map(|value| effective_job_max_timeout_secs(Some(value), state.max_job_timeout_secs()))
+        .transpose()?;
     validate_schedule_request(&request)?;
     if let Some(expression) = parse_selector_expression(&request.selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
@@ -313,6 +317,10 @@ pub(crate) async fn update_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     require_event_schedule_read_scopes(&operator.operator.scopes, request.trigger_kind)?;
+    request.max_timeout_secs = request
+        .max_timeout_secs
+        .map(|value| effective_job_max_timeout_secs(Some(value), state.max_job_timeout_secs()))
+        .transpose()?;
     validate_update_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids =
@@ -902,7 +910,12 @@ pub(crate) async fn apply_schedule_now(
         command: String::new(),
         argv: Vec::new(),
         operation: Some(operation),
-        max_timeout_secs: Some(state.schedule_apply_now_max_timeout_secs()),
+        max_timeout_secs: Some(
+            schedule
+                .max_timeout_secs
+                .unwrap_or_else(|| state.schedule_apply_now_max_timeout_secs())
+                .clamp(1, state.max_job_timeout_secs()),
+        ),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -1054,6 +1067,12 @@ fn validate_schedule_definition(
     }
     if request.name.len() > 120 {
         return Err(ApiError::bad_request("schedule_name_too_long"));
+    }
+    if let Some(value) = request.max_timeout_secs {
+        effective_job_max_timeout_secs(
+            Some(value),
+            vpsman_common::MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+        )?;
     }
     if allow_empty_targets {
         normalized_target_client_ids_allow_empty(request.target_client_ids)?;
@@ -1261,6 +1280,7 @@ async fn verify_schedule_privilege_for_definition(
         catch_up_limit: request.catch_up_limit,
         retry_delay_secs: request.retry_delay_secs,
         max_failures: request.max_failures,
+        max_timeout_secs: request.max_timeout_secs,
         deferred_until,
         deleted,
     });
@@ -1334,6 +1354,7 @@ fn stored_schedule_privilege_intent<'a>(
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,
         max_failures: schedule.max_failures,
+        max_timeout_secs: schedule.max_timeout_secs,
         deferred_until,
         deleted,
     })
@@ -1454,6 +1475,7 @@ pub(crate) async fn require_selector_target_snapshot(
 }
 
 struct ScheduleDefinitionRef<'a> {
+    max_timeout_secs: Option<u64>,
     name: &'a str,
     operation: Option<&'a vpsman_common::JobCommand>,
     event_argv_template: Option<&'a [String]>,
@@ -1493,6 +1515,7 @@ impl<'a> ScheduleDefinitionRef<'a> {
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
+            max_timeout_secs: request.max_timeout_secs,
         }
     }
 
@@ -1516,6 +1539,7 @@ impl<'a> ScheduleDefinitionRef<'a> {
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
+            max_timeout_secs: request.max_timeout_secs,
         }
     }
 }
@@ -1540,6 +1564,7 @@ impl From<UpdateScheduleRequest> for crate::repository_schedules::ScheduleCreate
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
+            max_timeout_secs: request.max_timeout_secs,
             expected_definition_revision: Some(request.expected_definition_revision),
         }
     }

@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { createHash } from "node:crypto";
 import {
   configurationPresets,
   configurationSources,
@@ -4202,6 +4203,17 @@ export async function installConsoleApiMock(
     vpsRuleValuesAdditional?: VpsRuleValueRecord[];
   } = {},
 ) {
+  const privilegeSalt = Buffer.from("00112233445566778899aabbccddeeff", "hex");
+  const privilegeSaltLength = Buffer.alloc(8);
+  privilegeSaltLength.writeBigUInt64BE(BigInt(privilegeSalt.length));
+  const schedulePrivilegeVerifierKey = Array.from(
+    createHash("sha256")
+      .update("vpsman-super-key-v1")
+      .update(privilegeSaltLength)
+      .update(privilegeSalt)
+      .update("local-super-password")
+      .digest(),
+  );
   const saturatedFleetAlertEvents = Array.from(
     { length: options.fleetAlertEventReviewSaturatedCount ?? 201 },
     (_, index) => {
@@ -4336,6 +4348,7 @@ export async function installConsoleApiMock(
       operatorScopesOverrideFixture,
       privilegeVerificationDelayMsFixture,
       privilegeVerificationFailureFixture,
+      schedulePrivilegeVerifierKeyFixture,
       processSupervisorInventoryFixture,
       schedulesFixture,
       storedAuthSessionFixture,
@@ -4778,6 +4791,7 @@ export async function installConsoleApiMock(
         restorePlans: [] as unknown[],
         scheduleActions: [] as unknown[],
         scheduleEventPreviews: [] as unknown[],
+        schedulePrivilegeChecks: [] as unknown[],
         schedules: [] as unknown[],
         suiteConfigs: [] as unknown[],
         suiteConfigReads: 0,
@@ -5389,11 +5403,13 @@ export async function installConsoleApiMock(
               ? null
               : (schedule.catch_up_policy ?? "run_once"),
           command_type:
-            schedule.command_type ??
-            commandTypeForOperation(
-              schedule.operation as Record<string, unknown> | undefined,
-            ) ??
-            "shell_argv",
+            triggerKind === "event"
+              ? "shell"
+              : schedule.command_type ??
+                commandTypeForOperation(
+                  schedule.operation as Record<string, unknown> | undefined,
+                ) ??
+                "shell_argv",
           created_at: schedule.created_at ?? "2026-06-02T10:00:00Z",
           cron_expr:
             triggerKind === "event"
@@ -5417,6 +5433,7 @@ export async function installConsoleApiMock(
           last_error: schedule.last_error ?? null,
           last_run_at: schedule.last_run_at ?? null,
           max_failures: schedule.max_failures ?? 3,
+          max_timeout_secs: schedule.max_timeout_secs ?? null,
           name: schedule.name ?? "scheduled-job",
           next_run_at:
             triggerKind === "event"
@@ -5646,6 +5663,81 @@ export async function installConsoleApiMock(
         return Array.from(new Uint8Array(digest), (byte) =>
           byte.toString(16).padStart(2, "0"),
         ).join("");
+      };
+      const verifyEventSchedulePrivilege = async (
+        request: Record<string, unknown>,
+        scheduleId: string | null,
+      ) => {
+        // Reconstruct API-owned canonical fields independently of the UI signer.
+        const intent = {
+          version: 3,
+          action: scheduleId ? "schedule.update" : "schedule.create",
+          schedule_id: scheduleId,
+          definition_revision: scheduleId ? request.expected_definition_revision : null,
+          name: String(request.name).trim(),
+          command_type: "shell",
+          operation_payload_hash: await sha256HexForText(
+            JSON.stringify(request.event_argv_template ?? ["/bin/true"]),
+          ),
+          selector_expression: String(request.selector_expression).trim(),
+          resolved_targets: [...(request.target_client_ids as string[])].sort(),
+          trigger_kind: "event",
+          run_on: request.run_on,
+          cron_expr: request.cron_expr ?? null,
+          timezone: request.timezone ?? null,
+          event_expression: String(request.event_expression).trim(),
+          enabled: request.enabled,
+          catch_up_policy: request.catch_up_policy ?? null,
+          catch_up_limit: request.catch_up_limit ?? null,
+          retry_delay_secs: request.retry_delay_secs ?? null,
+          max_failures: request.max_failures,
+          ...(request.max_timeout_secs == null
+            ? {}
+            : { max_timeout_secs: request.max_timeout_secs }),
+          deferred_until: null,
+          deleted: false,
+        };
+        const assertion = request.privilege_assertion as {
+          assertion_hex?: string;
+          nonce_hex?: string;
+          issued_unix?: number;
+          expires_unix?: number;
+        } | undefined;
+        let approved = false;
+        if (
+          /^[0-9a-f]{64}$/.test(assertion?.assertion_hex ?? "") &&
+          /^[0-9a-f]{32}$/.test(assertion?.nonce_hex ?? "") &&
+          Number.isSafeInteger(assertion?.issued_unix) &&
+          Number.isSafeInteger(assertion?.expires_unix)
+        ) {
+          const bytesFromHex = (hex: string) => Uint8Array.from(
+            hex.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16),
+          );
+          const timestamps = new Uint8Array(16);
+          const timestampView = new DataView(timestamps.buffer);
+          timestampView.setBigUint64(0, BigInt(assertion!.issued_unix!));
+          timestampView.setBigUint64(8, BigInt(assertion!.expires_unix!));
+          const intentHash = await sha256HexForText(JSON.stringify(intent));
+          const key = await crypto.subtle.importKey(
+            "raw",
+            Uint8Array.from(schedulePrivilegeVerifierKeyFixture),
+            { name: "HMAC", hash: "SHA-256" },
+            false,
+            ["verify"],
+          );
+          approved = await crypto.subtle.verify(
+            "HMAC",
+            key,
+            bytesFromHex(assertion!.assertion_hex!),
+            Uint8Array.from([
+              ...new TextEncoder().encode("vpsman-gateway-privilege-assertion-v1" + intentHash),
+              ...bytesFromHex(assertion!.nonce_hex!),
+              ...timestamps,
+            ]),
+          );
+        }
+        requests.schedulePrivilegeChecks.push({ approved, intent });
+        return approved;
       };
       const valueMatches = (
         value: string,
@@ -10673,7 +10765,7 @@ export async function installConsoleApiMock(
               ? ["alert.resolved"]
               : []),
           ];
-          const previews = eventKinds.map((eventKind) => {
+          const previews = await Promise.all(eventKinds.map(async (eventKind) => {
             const contextValues: Record<string, string> = {
               "alert.category": "traffic",
               "alert.id": "fixture-alert-episode-01",
@@ -10710,13 +10802,15 @@ export async function installConsoleApiMock(
                 template,
               })),
               rendered_argv: renderedArgv,
-              rendered_hash: "8".repeat(64),
+              rendered_hash: await sha256HexForText(JSON.stringify({
+                type: "shell", argv: renderedArgv, pty: false,
+              })),
             };
-          });
+          }));
           return jsonResponse({
             previews,
             template_argv: templateArgv,
-            template_hash: "7".repeat(64),
+            template_hash: await sha256HexForText(JSON.stringify(templateArgv)),
             uses_default_noop: body.event_argv_template == null,
           });
         }
@@ -10741,6 +10835,9 @@ export async function installConsoleApiMock(
             trigger_kind?: "cron" | "event";
           };
           const triggerKind = request.trigger_kind ?? "cron";
+          if (triggerKind === "event" && !await verifyEventSchedulePrivilege(body as Record<string, unknown>, null)) {
+            return jsonResponse({ error: "privilege_verification_failed" }, 403);
+          }
           const cronExpr =
             triggerKind === "cron" ? (request.cron_expr ?? "0 * * * *") : null;
           const schedule = normalizeScheduleRecord({
@@ -10753,7 +10850,9 @@ export async function installConsoleApiMock(
                 ? (request.catch_up_policy ?? "run_once")
                 : null,
             command_type:
-              commandTypeForOperation(request.operation) ?? "shell_argv",
+              triggerKind === "event"
+                ? "shell"
+                : commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             cron_expr: cronExpr,
             event_argv_template: request.event_argv_template ?? null,
@@ -10766,6 +10865,7 @@ export async function installConsoleApiMock(
             last_error: null,
             last_run_at: null,
             max_failures: request.max_failures ?? 3,
+            max_timeout_secs: (body as Record<string, unknown>).max_timeout_secs ?? null,
             name: request.name ?? "scheduled-job",
             next_run_at: triggerKind === "cron" ? "2026-06-02T11:04:00Z" : null,
             next_runs:
@@ -10786,6 +10886,9 @@ export async function installConsoleApiMock(
                     pty: false,
                     type: "shell",
                   }),
+            operation_payload_hash: triggerKind === "event"
+              ? await sha256HexForText(JSON.stringify(request.event_argv_template ?? ["/bin/true"]))
+              : undefined,
             retry_delay_secs:
               triggerKind === "cron" ? (request.retry_delay_secs ?? 300) : null,
             selector_expression: request.selector_expression ?? "id:*",
@@ -10878,6 +10981,9 @@ export async function installConsoleApiMock(
             trigger_kind?: "cron" | "event";
           };
           const triggerKind = request.trigger_kind ?? schedule.trigger_kind;
+          if (triggerKind === "event" && !await verifyEventSchedulePrivilege(body as Record<string, unknown>, scheduleMatch[1])) {
+            return jsonResponse({ error: "privilege_verification_failed" }, 403);
+          }
           const runOn =
             request.run_on ??
             (triggerKind === schedule.trigger_kind
@@ -10903,7 +11009,7 @@ export async function installConsoleApiMock(
                   : schedule.catch_up_policy,
             command_type:
               triggerKind === "event"
-                ? "shell_argv"
+                ? "shell"
                 : (commandTypeForOperation(request.operation) ??
                   schedule.command_type),
             cron_expr:
@@ -10928,6 +11034,7 @@ export async function installConsoleApiMock(
               triggerKind === "event" ? "2026-06-02T10:05:00Z" : null,
             enabled: request.enabled ?? schedule.enabled,
             max_failures: request.max_failures ?? schedule.max_failures,
+            max_timeout_secs: (body as Record<string, unknown>).max_timeout_secs ?? null,
             name: request.name ?? schedule.name,
             operation:
               triggerKind === "event"
@@ -10935,6 +11042,9 @@ export async function installConsoleApiMock(
                 : "operation" in request
                   ? request.operation
                   : schedule.operation,
+            operation_payload_hash: triggerKind === "event"
+              ? await sha256HexForText(JSON.stringify(request.event_argv_template ?? ["/bin/true"]))
+              : undefined,
             retry_delay_secs:
               triggerKind === "event"
                 ? null
@@ -13243,6 +13353,7 @@ export async function installConsoleApiMock(
         options.privilegeVerificationDelayMs ?? 0,
       privilegeVerificationFailureFixture:
         options.privilegeVerificationFailure ?? null,
+      schedulePrivilegeVerifierKeyFixture: schedulePrivilegeVerifierKey,
       processSupervisorInventoryFixture: processSupervisorInventory,
       schedulesFixture: options.schedulesOverride ?? schedules,
       storedAuthSessionFixture: options.storedAuthSession ?? false,

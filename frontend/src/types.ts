@@ -2119,6 +2119,7 @@ export type ScheduleRecord = {
   catch_up_limit: number | null;
   retry_delay_secs: number | null;
   max_failures: number;
+  max_timeout_secs?: number | null;
   failure_count: number;
   last_error: string | null;
   next_run_at: string | null;
@@ -3486,6 +3487,7 @@ export type CreateScheduleRequest = {
   catch_up_limit: number | null;
   retry_delay_secs: number | null;
   max_failures: number;
+  max_timeout_secs?: number | null;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };

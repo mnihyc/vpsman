@@ -32,6 +32,7 @@ pub(crate) struct SchedulePrivilegeRequest<'a> {
     pub(crate) catch_up_limit: Option<i32>,
     pub(crate) retry_delay_secs: Option<i64>,
     pub(crate) max_failures: i32,
+    pub(crate) max_timeout_secs: Option<u64>,
     pub(crate) deferred_until: Option<&'a str>,
     pub(crate) deleted: bool,
 }
@@ -188,6 +189,7 @@ pub(crate) fn build_privilege_for_schedule(
         catch_up_limit: request.catch_up_limit,
         retry_delay_secs: request.retry_delay_secs,
         max_failures: request.max_failures,
+        max_timeout_secs: request.max_timeout_secs,
         deferred_until: request.deferred_until,
         deleted: request.deleted,
     })?;

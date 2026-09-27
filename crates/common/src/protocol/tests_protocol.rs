@@ -1233,29 +1233,40 @@ fn job_privilege_intent_binds_rollout_policy_hash() {
 #[test]
 fn schedule_privilege_intent_fields_match_canonical_v3_payload() {
     let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
-    let intent = canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
-        action: "schedule.update",
-        schedule_id: Some("schedule-a"),
-        definition_revision: Some(7),
-        name: " Alert handler ",
-        command_type: "shell_argv",
-        operation_payload_hash: "ab",
-        selector_expression: " tag:edge ",
-        resolved_targets: &resolved_targets,
-        trigger_kind: "event",
-        run_on: "triggered_only",
-        cron_expr: None,
-        timezone: None,
-        event_expression: Some(" alert.triggered "),
-        enabled: true,
-        catch_up_policy: None,
-        catch_up_limit: None,
-        retry_delay_secs: None,
-        max_failures: 3,
-        deferred_until: None,
-        deleted: false,
-    })
-    .unwrap();
+    let build_intent = |max_timeout_secs| {
+        canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
+            action: "schedule.update",
+            schedule_id: Some("schedule-a"),
+            definition_revision: Some(7),
+            name: " Alert handler ",
+            command_type: "shell",
+            operation_payload_hash: "ab",
+            selector_expression: " tag:edge ",
+            resolved_targets: &resolved_targets,
+            trigger_kind: "event",
+            run_on: "triggered_only",
+            cron_expr: None,
+            timezone: None,
+            event_expression: Some(" alert.triggered "),
+            enabled: true,
+            catch_up_policy: None,
+            catch_up_limit: None,
+            retry_delay_secs: None,
+            max_failures: 3,
+            max_timeout_secs,
+            deferred_until: None,
+            deleted: false,
+        })
+        .unwrap()
+    };
+    let intent = build_intent(None);
+    assert_eq!(
+        build_intent(Some(120)),
+        intent.replace(
+            "\"max_failures\":3,",
+            "\"max_failures\":3,\"max_timeout_secs\":120,"
+        )
+    );
 
     assert_eq!(
         schedule_privilege_intent_fields(),
@@ -1279,13 +1290,14 @@ fn schedule_privilege_intent_fields_match_canonical_v3_payload() {
             "catch_up_limit",
             "retry_delay_secs",
             "max_failures",
+            "max_timeout_secs",
             "deferred_until",
             "deleted",
         ]
     );
     assert_eq!(
         intent,
-        r#"{"version":3,"action":"schedule.update","schedule_id":"schedule-a","definition_revision":7,"name":"Alert handler","command_type":"shell_argv","operation_payload_hash":"ab","selector_expression":"tag:edge","resolved_targets":["client-a","client-b"],"trigger_kind":"event","run_on":"triggered_only","cron_expr":null,"timezone":null,"event_expression":"alert.triggered","enabled":true,"catch_up_policy":null,"catch_up_limit":null,"retry_delay_secs":null,"max_failures":3,"deferred_until":null,"deleted":false}"#
+        r#"{"version":3,"action":"schedule.update","schedule_id":"schedule-a","definition_revision":7,"name":"Alert handler","command_type":"shell","operation_payload_hash":"ab","selector_expression":"tag:edge","resolved_targets":["client-a","client-b"],"trigger_kind":"event","run_on":"triggered_only","cron_expr":null,"timezone":null,"event_expression":"alert.triggered","enabled":true,"catch_up_policy":null,"catch_up_limit":null,"retry_delay_secs":null,"max_failures":3,"deferred_until":null,"deleted":false}"#
     );
 }
 

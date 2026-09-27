@@ -686,6 +686,11 @@ pub(crate) struct BulkResolveCommand {
 pub(crate) struct ScheduleCreateCommand {
     #[arg(
         long,
+        help = "Maximum runtime per job in seconds; omit for the configured schedule default"
+    )]
+    pub(crate) max_timeout_secs: Option<u64>,
+    #[arg(
+        long,
         value_enum,
         default_value = "cron",
         help = "Dispatch by five-field cron cadence or by a policy-owned alert lifecycle edge"
@@ -754,6 +759,11 @@ pub(crate) struct ScheduleCreateCommand {
     after_help = "Event updates require --trigger-kind event and the complete replacement definition. The command fetches and submits the current definition revision, so concurrent changes fail closed. Use the Schedule web UI when you need authoritative per-edge server preview before saving."
 )]
 pub(crate) struct ScheduleUpdateCommand {
+    #[arg(
+        long,
+        help = "Maximum runtime per job in seconds; omit to use the configured schedule default"
+    )]
+    pub(crate) max_timeout_secs: Option<u64>,
     #[arg(
         long,
         value_enum,

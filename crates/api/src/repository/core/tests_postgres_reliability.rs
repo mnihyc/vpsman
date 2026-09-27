@@ -1,5 +1,7 @@
 #[path = "tests_postgres_network_adapter_mutations.rs"]
 mod network_adapter_mutations;
+#[path = "tests_postgres_schedule_timeout.rs"]
+mod schedule_timeout;
 #[path = "tests_postgres_subnet_allocation.rs"]
 mod subnet_allocation;
 
@@ -9188,6 +9190,7 @@ async fn postgres_schedule_run_on_defaults_and_edits_preserve_reviewed_targets()
         .update_schedule_record(
             event.id,
             crate::repository_schedules::ScheduleCreateInput {
+                max_timeout_secs: None,
                 name: event.name.clone(),
                 operation: None,
                 event_argv_template: event.event_argv_template.clone(),
@@ -9256,6 +9259,7 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
         .update_schedule_record(
             schedule.id,
             crate::repository_schedules::ScheduleCreateInput {
+                max_timeout_secs: None,
                 name: "frozen-targets-renamed".to_string(),
                 operation: schedule.operation.clone(),
                 event_argv_template: schedule.event_argv_template.clone(),
@@ -9290,6 +9294,7 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
         .update_schedule_record(
             schedule.id,
             crate::repository_schedules::ScheduleCreateInput {
+                max_timeout_secs: None,
                 name: preserved.name.clone(),
                 operation: preserved.operation.clone(),
                 event_argv_template: preserved.event_argv_template.clone(),
@@ -9337,6 +9342,7 @@ async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
         .update_schedule_record(
             schedule.id,
             crate::repository_schedules::ScheduleCreateInput {
+                max_timeout_secs: None,
                 name: "frozen-targets-empty".to_string(),
                 operation: empty.operation.clone(),
                 event_argv_template: empty.event_argv_template.clone(),
@@ -12631,6 +12637,7 @@ async fn postgres_persisted_invalid_schedule_cadences_remain_visible_and_repaira
         .update_schedule_record(
             impossible.id,
             crate::repository_schedules::ScheduleCreateInput {
+                max_timeout_secs: None,
                 name: repair.name,
                 operation: repair.operation,
                 event_argv_template: repair.event_argv_template,
@@ -12753,6 +12760,7 @@ async fn postgres_malformed_schedule_operation_is_listable_isolated_and_repairab
         .update_schedule_record(
             malformed.id,
             crate::repository_schedules::ScheduleCreateInput {
+                max_timeout_secs: None,
                 name: repair.name,
                 operation: repair.operation,
                 event_argv_template: repair.event_argv_template,
@@ -12902,6 +12910,7 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
             .update_schedule_record(
                 schedule.id,
                 crate::repository_schedules::ScheduleCreateInput {
+                    max_timeout_secs: None,
                     name: "atomic-updated-schedule".to_string(),
                     operation: Some(JobCommand::Shell {
                         argv: vec!["/usr/bin/uptime".to_string()],
@@ -41916,6 +41925,7 @@ async fn receive_job_finished(
 
 fn postgres_shell_schedule_request(name: &str, client_id: &str) -> CreateScheduleRequest {
     CreateScheduleRequest {
+        max_timeout_secs: None,
         name: name.to_string(),
         operation: Some(JobCommand::Shell {
             argv: vec![

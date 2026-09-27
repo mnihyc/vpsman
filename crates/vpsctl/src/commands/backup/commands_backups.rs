@@ -422,6 +422,7 @@ pub(crate) fn backup_policy_upsert(
             catch_up_limit: Some(options.catch_up_limit),
             retry_delay_secs: Some(options.retry_delay_secs),
             max_failures: options.max_failures,
+            max_timeout_secs: None,
             deferred_until: None,
             deleted: false,
         },

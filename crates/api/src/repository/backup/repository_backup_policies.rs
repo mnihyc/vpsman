@@ -125,12 +125,14 @@ impl Repository {
         let (schedule, metadata) = match self {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                if backup_policy_schedule_by_id_postgres_in_tx(&mut tx, schedule_id)
-                    .await?
-                    .is_none()
-                {
+                let Some(current_schedule) =
+                    backup_policy_schedule_by_id_postgres_in_tx(&mut tx, schedule_id).await?
+                else {
                     return Ok(None);
-                }
+                };
+                // Backup-policy edits do not own the Schedule execution override.
+                // The revision fence below prevents copying a concurrent edit.
+                schedule_request.max_timeout_secs = current_schedule.max_timeout_secs;
                 let schedule = update_schedule_record_postgres_in_tx(
                     &mut tx,
                     schedule_id,
@@ -705,6 +707,7 @@ fn backup_policy_schedule_input(request: &CreateBackupPolicyRequest) -> Schedule
         catch_up_limit: Some(request.catch_up_limit),
         retry_delay_secs: Some(request.retry_delay_secs),
         max_failures: request.max_failures,
+        max_timeout_secs: None,
         expected_definition_revision: None,
     }
 }

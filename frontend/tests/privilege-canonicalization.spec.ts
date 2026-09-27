@@ -2,16 +2,141 @@ import { expect, test } from "@playwright/test";
 import { createHash, createHmac } from "node:crypto";
 import { PRIVILEGE_OPERATION_GOLDEN_VECTORS } from "../src/generated/protocolContracts";
 import {
+  alertEventArgvTemplateHashHex,
   agentIdentityPayloadHashHex,
+  buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
   canonicalJobPrivilegeIntent,
   canonicalDbPrivilegeIntent,
   canonicalOperationJson,
+  canonicalSchedulePrivilegeIntent,
+  operationPayloadHashHex,
   parseCommandArgv,
   rolloutPolicyHashHex,
   textPayloadHashHex,
+  type PrivilegeAssertion,
+  type SchedulePrivilegeIntentInput,
 } from "../src/privilege";
 import type { JobOperation } from "../src/types";
+
+function assertionHexForIntent(
+  intent: string,
+  assertion: PrivilegeAssertion,
+  superKeyHex: string,
+): string {
+  const timestamps = Buffer.alloc(16);
+  timestamps.writeBigUInt64BE(BigInt(assertion.issued_unix), 0);
+  timestamps.writeBigUInt64BE(BigInt(assertion.expires_unix), 8);
+  return createHmac("sha256", Buffer.from(superKeyHex, "hex"))
+    .update("vpsman-gateway-privilege-assertion-v1")
+    .update(createHash("sha256").update(intent).digest("hex"))
+    .update(Buffer.from(assertion.nonce_hex, "hex"))
+    .update(timestamps)
+    .digest("hex");
+}
+
+test("event schedule create and update assertions bind API template bytes and optional timeout", async () => {
+  const superKeyHex = "11".repeat(32);
+  const eventExpression = '(alert.triggered || alert.resolved) && policy_rule.id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3" # Default rule: Traffic cycle above 80% (may subject to change)';
+  const templates = [
+    null,
+    ["/bin/sh", "-eu", "-c", '# quota management\n/usr/local/bin/quota-limit "$1"\n', "--", "{event.kind}"],
+  ];
+  for (const action of ["schedule.create", "schedule.update"]) {
+    for (const template of templates) {
+      for (const maxTimeoutSecs of [undefined, null, 120]) {
+        const templateHash = createHash("sha256")
+          .update(JSON.stringify(template ?? ["/bin/true"]))
+          .digest("hex");
+        const input: SchedulePrivilegeIntentInput = {
+          action,
+          scheduleId: action === "schedule.update" ? "schedule-id" : null,
+          definitionRevision: action === "schedule.update" ? 2 : null,
+          name: " Traffic quota automation ",
+          commandType: "shell",
+          operationPayloadHash: await alertEventArgvTemplateHashHex(template),
+          selectorExpression: " tag:quota ",
+          resolvedTargets: ["client-7", "client-6", "client-5", "client-4", "client-3", "client-2", "client-1"],
+          triggerKind: "event",
+          runOn: "triggered_only",
+          cronExpr: null,
+          timezone: null,
+          eventExpression,
+          enabled: true,
+          catchUpPolicy: null,
+          catchUpLimit: null,
+          retryDelaySecs: null,
+          maxFailures: 3,
+          maxTimeoutSecs,
+          deferredUntil: null,
+          deleted: false,
+        };
+        // Independently reconstruct the Rust API intent, including its exact
+        // field order. Neither the helper nor preview data supplies this hash.
+        const apiIntent = {
+          version: 3,
+          action,
+          schedule_id: input.scheduleId,
+          definition_revision: input.definitionRevision,
+          name: "Traffic quota automation",
+          command_type: "shell",
+          operation_payload_hash: templateHash,
+          selector_expression: "tag:quota",
+          resolved_targets: [...input.resolvedTargets].sort(),
+          trigger_kind: "event",
+          run_on: "triggered_only",
+          cron_expr: null,
+          timezone: null,
+          event_expression: eventExpression,
+          enabled: true,
+          catch_up_policy: null,
+          catch_up_limit: null,
+          retry_delay_secs: null,
+          max_failures: 3,
+          ...(maxTimeoutSecs == null ? {} : { max_timeout_secs: maxTimeoutSecs }),
+          deferred_until: null,
+          deleted: false,
+        };
+        const intent = canonicalSchedulePrivilegeIntent(input);
+        expect(intent).toBe(JSON.stringify(apiIntent));
+        expect(input.operationPayloadHash).toBe(templateHash);
+        const assertion = await buildPrivilegeAssertion({
+          intent,
+          privilegeMaterial: { superKeyHex },
+        });
+        expect(assertion.assertion_hex).toBe(
+          assertionHexForIntent(JSON.stringify(apiIntent), assertion, superKeyHex),
+        );
+
+        const wrappedOperationHash = await operationPayloadHashHex({
+          type: "shell", argv: template ?? ["/bin/true"], pty: false,
+        });
+        for (const mutation of [
+          { command_type: "shell_argv" },
+          { operation_payload_hash: wrappedOperationHash },
+          { event_expression: "alert.triggered" },
+          { run_on: "all_at_once" },
+          { resolved_targets: ["client-1"] },
+          { max_timeout_secs: 121 },
+        ]) {
+          expect(assertion.assertion_hex).not.toBe(
+            assertionHexForIntent(JSON.stringify({ ...apiIntent, ...mutation }), assertion, superKeyHex),
+          );
+        }
+      }
+    }
+  }
+});
+
+test("default event argv hashes like an explicit no-op while cron hashing stays an operation", async () => {
+  const defaultHash = await alertEventArgvTemplateHashHex(null);
+  expect(await alertEventArgvTemplateHashHex(undefined)).toBe(defaultHash);
+  expect(await alertEventArgvTemplateHashHex(["/bin/true"])).toBe(defaultHash);
+  const operation: JobOperation = { type: "shell", argv: ["/bin/true"], pty: false };
+  const cronHash = await operationPayloadHashHex(operation);
+  expect(cronHash).toBe(createHash("sha256").update(canonicalOperationJson(operation)).digest("hex"));
+  expect(cronHash).not.toBe(defaultHash);
+});
 
 test("frontend operation canonicalization matches Rust-generated golden vectors", () => {
   const commandTypes = new Set(PRIVILEGE_OPERATION_GOLDEN_VECTORS.map((vector) => vector.command_type));

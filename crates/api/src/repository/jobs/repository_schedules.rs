@@ -144,6 +144,7 @@ impl Repository {
                         catch_up_limit,
                         retry_delay_secs,
                         max_failures,
+                        max_timeout_secs,
                         failure_count,
                         last_error,
                         next_run_at::text AS next_run_at,
@@ -217,6 +218,7 @@ impl Repository {
             catch_up_limit,
             retry_delay_secs,
             max_failures,
+            max_timeout_secs,
             ..
         } = request;
         self.create_schedule_record(
@@ -236,6 +238,7 @@ impl Repository {
                 catch_up_limit,
                 retry_delay_secs,
                 max_failures,
+                max_timeout_secs,
                 expected_definition_revision: None,
             },
             operator,
@@ -753,6 +756,7 @@ impl Repository {
 }
 
 pub(crate) struct ScheduleCreateInput {
+    pub(crate) max_timeout_secs: Option<u64>,
     pub(crate) name: String,
     pub(crate) operation: Option<vpsman_common::JobCommand>,
     pub(crate) event_argv_template: Option<Vec<String>>,
@@ -795,6 +799,7 @@ pub(crate) enum ScheduleTargetBatchUpdateResult {
 }
 
 struct ScheduleRowParts {
+    max_timeout_secs: Option<u64>,
     id: Uuid,
     name: String,
     enabled: bool,
@@ -845,6 +850,7 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> Result<ScheduleView> {
         (ScheduleTriggerKind::Event, _) => (Vec::new(), None),
     };
     Ok(ScheduleView {
+        max_timeout_secs: parts.max_timeout_secs,
         id: parts.id,
         name: parts.name,
         enabled: parts.enabled,
@@ -901,6 +907,7 @@ fn schedule_select_sql(where_clause: &str) -> String {
             catch_up_limit,
             retry_delay_secs,
             max_failures,
+            max_timeout_secs,
             failure_count,
             last_error,
             next_run_at::text AS next_run_at,
@@ -955,6 +962,9 @@ fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView
         catch_up_limit: row.try_get("catch_up_limit")?,
         retry_delay_secs: row.try_get("retry_delay_secs")?,
         max_failures: row.try_get("max_failures")?,
+        max_timeout_secs: row
+            .try_get::<Option<i64>, _>("max_timeout_secs")?
+            .map(|value| value as u64),
         failure_count: row.try_get("failure_count")?,
         last_error: row.try_get("last_error")?,
         next_run_at: row.try_get("next_run_at")?,
@@ -1019,13 +1029,14 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
             max_failures,
             next_run_at,
             event_armed_at,
-            run_on
+            run_on,
+            max_timeout_secs
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             $11, $12, $13, $14, $15, $16, to_timestamp($17),
             CASE WHEN $5 = 'event' THEN clock_timestamp() ELSE NULL END,
-            $18
+            $18, $19
         )
         RETURNING
             id,
@@ -1046,6 +1057,7 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
             catch_up_limit,
             retry_delay_secs,
             max_failures,
+            max_timeout_secs,
             failure_count,
             last_error,
             next_run_at::text AS next_run_at,
@@ -1074,6 +1086,7 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
     .bind(request.max_failures)
     .bind(next_run_unix)
     .bind(request.run_on.as_str())
+    .bind(request.max_timeout_secs.map(|value| value as i64))
     .fetch_one(&mut **tx)
     .await?;
     let schedule = schedule_from_postgres_row(row)?;
@@ -1127,6 +1140,7 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
             enabled = $4,
             trigger_kind = $5,
             run_on = $19,
+            max_timeout_secs = $20,
             operation = $6,
             event_argv_template = $7,
             selector_expression = $8,
@@ -1168,6 +1182,7 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
     .bind(next_run_unix)
     .bind(request.expected_definition_revision)
     .bind(request.run_on.as_str())
+    .bind(request.max_timeout_secs.map(|value| value as i64))
     .execute(&mut **tx)
     .await?;
     anyhow::ensure!(
@@ -1386,6 +1401,7 @@ fn schedule_audit_metadata(
         "catch_up_limit": schedule.catch_up_limit,
         "retry_delay_secs": schedule.retry_delay_secs,
         "max_failures": schedule.max_failures,
+        "max_timeout_secs": schedule.max_timeout_secs,
         "enabled": schedule.enabled,
         "deferred_until": schedule.deferred_until,
         "deleted_at": schedule.deleted_at,

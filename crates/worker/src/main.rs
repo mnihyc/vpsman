@@ -4639,6 +4639,7 @@ async fn process_due_schedule(
             catch_up_limit,
             retry_delay_secs,
             max_failures,
+            max_timeout_secs,
             failure_count,
             last_error
         FROM schedules
@@ -4701,6 +4702,9 @@ async fn process_due_schedule(
             catch_up_limit: row.try_get("catch_up_limit")?,
             retry_delay_secs: row.try_get("retry_delay_secs")?,
             max_failures: row.try_get("max_failures")?,
+            max_timeout_secs: row
+                .try_get::<Option<i64>, _>("max_timeout_secs")?
+                .map(|value| value as u64),
             failure_count: row.try_get("failure_count")?,
             last_error: row.try_get("last_error")?,
             materialization: ScheduleMaterializationContext::default(),
@@ -4747,6 +4751,7 @@ async fn process_due_schedule(
 }
 
 struct DueSchedule {
+    max_timeout_secs: Option<u64>,
     id: Uuid,
     actor_id: Option<Uuid>,
     actor_username: Option<String>,
@@ -4855,7 +4860,9 @@ async fn materialize_due_schedule(
     let target_availability = load_schedule_target_capabilities(tx, &targets).await?;
     let available_targets = available_schedule_targets(&targets, &target_availability);
     let max_timeout_secs = effective_schedule_max_timeout_secs(
-        dispatch_config.max_timeout_secs,
+        schedule
+            .max_timeout_secs
+            .unwrap_or(dispatch_config.max_timeout_secs),
         dispatch_config.max_job_timeout_secs,
         &available_targets,
         &target_availability.capabilities,

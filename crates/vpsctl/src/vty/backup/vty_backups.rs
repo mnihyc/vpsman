@@ -843,6 +843,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             catch_up_limit: Some(request.catch_up_limit),
             retry_delay_secs: Some(request.retry_delay_secs),
             max_failures: request.max_failures,
+            max_timeout_secs: None,
             deferred_until: None,
             deleted: false,
         },

@@ -73,6 +73,7 @@ struct ScheduleRecord {
     catch_up_limit: Option<i32>,
     retry_delay_secs: Option<i64>,
     max_failures: i32,
+    max_timeout_secs: Option<u64>,
     deferred_until: Option<String>,
 }
 
@@ -98,6 +99,7 @@ pub(crate) struct ScheduleDefinitionOptions {
     pub(crate) catch_up_limit: Option<i32>,
     pub(crate) retry_delay_secs: Option<i64>,
     pub(crate) max_failures: i32,
+    pub(crate) max_timeout_secs: Option<u64>,
 }
 
 pub(crate) struct ScheduleCreateOptions {
@@ -130,6 +132,7 @@ struct ScheduleDefinition {
     catch_up_limit: Option<i32>,
     retry_delay_secs: Option<i64>,
     max_failures: i32,
+    max_timeout_secs: Option<u64>,
 }
 
 impl ScheduleDefinition {
@@ -145,6 +148,13 @@ impl ScheduleDefinition {
         let run_on = options
             .run_on
             .unwrap_or_else(|| options.trigger_kind.default_run_on());
+        anyhow::ensure!(
+            options
+                .max_timeout_secs
+                .is_none_or(|value| value <= vpsman_common::MAX_CONFIGURABLE_JOB_TIMEOUT_SECS),
+            "--max-timeout-secs exceeds the maximum configurable job timeout"
+        );
+        let max_timeout_secs = options.max_timeout_secs.map(|value| value.max(1));
         match options.trigger_kind {
             ScheduleTriggerKindArg::Cron => {
                 anyhow::ensure!(
@@ -199,6 +209,7 @@ impl ScheduleDefinition {
                     catch_up_limit: Some(catch_up_limit),
                     retry_delay_secs: Some(retry_delay_secs),
                     max_failures: options.max_failures,
+                    max_timeout_secs,
                 })
             }
             ScheduleTriggerKindArg::Event => {
@@ -246,6 +257,7 @@ impl ScheduleDefinition {
                     catch_up_limit: None,
                     retry_delay_secs: None,
                     max_failures: options.max_failures,
+                    max_timeout_secs,
                 })
             }
         }
@@ -317,6 +329,7 @@ pub(crate) fn schedule_create(
         catch_up_limit: definition.catch_up_limit,
         retry_delay_secs: definition.retry_delay_secs,
         max_failures: definition.max_failures,
+        max_timeout_secs: definition.max_timeout_secs,
         deferred_until: None,
         deleted: false,
     })?;
@@ -342,6 +355,7 @@ pub(crate) fn schedule_create(
                 "catch_up_limit": definition.catch_up_limit,
                 "retry_delay_secs": definition.retry_delay_secs,
                 "max_failures": definition.max_failures,
+                "max_timeout_secs": definition.max_timeout_secs,
                 "confirmed": options.confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
@@ -392,6 +406,7 @@ pub(crate) fn schedule_update(
         catch_up_limit: definition.catch_up_limit,
         retry_delay_secs: definition.retry_delay_secs,
         max_failures: definition.max_failures,
+        max_timeout_secs: definition.max_timeout_secs,
         deferred_until: None,
         deleted: false,
     })?;
@@ -420,6 +435,7 @@ pub(crate) fn schedule_update(
                 "catch_up_limit": definition.catch_up_limit,
                 "retry_delay_secs": definition.retry_delay_secs,
                 "max_failures": definition.max_failures,
+                "max_timeout_secs": definition.max_timeout_secs,
                 "confirmed": options.confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
@@ -703,6 +719,7 @@ fn schedule_privilege_for_record(
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,
         max_failures: schedule.max_failures,
+        max_timeout_secs: schedule.max_timeout_secs,
         deferred_until,
         deleted,
     })

@@ -4388,20 +4388,6 @@
   min-width: 0;
 }
 
-@media (max-width: 640px) {
-  .privilegeGateBox[aria-label="Schedule lifecycle privilege gate"] {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: start;
-  }
-
-  .privilegeGateBox[aria-label="Schedule lifecycle privilege gate"] button {
-    grid-column: 1 / -1;
-    justify-content: center;
-    width: 100%;
-  }
-}
-
 .structuredDefinitionForm {
   display: grid;
   align-content: start;

@@ -1,4 +1,5 @@
 import {
+  alertEventArgvTemplateHashHex,
   buildPrivilegeAssertion,
   canonicalSchedulePrivilegeIntent,
   operationPayloadHashHex,
@@ -17,19 +18,13 @@ export async function buildScheduleTargetUpdatePrivilegeAssertion({
   selectorExpression: string;
   targetClientIds: string[];
 }) {
-  const privilegeOperation =
-    schedule.trigger_kind === "event"
-      ? {
-          type: "shell" as const,
-          argv: schedule.event_argv_template ?? ["/bin/true"],
-          pty: false,
-        }
-      : schedule.operation;
   const operationHash =
     schedule.operation_payload_hash?.trim() ||
-    (privilegeOperation
-      ? await operationPayloadHashHex(privilegeOperation)
-      : "");
+    (schedule.trigger_kind === "event"
+      ? await alertEventArgvTemplateHashHex(schedule.event_argv_template)
+      : schedule.operation
+        ? await operationPayloadHashHex(schedule.operation)
+        : "");
   if (!operationHash) {
     throw new Error(
       `${schedule.name}: saved operation evidence is unavailable`,
@@ -55,6 +50,7 @@ export async function buildScheduleTargetUpdatePrivilegeAssertion({
       catchUpLimit: schedule.catch_up_limit,
       retryDelaySecs: schedule.retry_delay_secs,
       maxFailures: schedule.max_failures,
+      maxTimeoutSecs: schedule.max_timeout_secs,
       deferredUntil: schedule.deferred_until,
       deleted: false,
     }),

@@ -77,6 +77,7 @@ fn builds_schedule_privilege_assertion_for_resolved_targets() {
             catch_up_limit: Some(1),
             retry_delay_secs: Some(60),
             max_failures: 3,
+            max_timeout_secs: None,
             deferred_until: None,
             deleted: false,
         },
@@ -119,6 +120,7 @@ fn builds_event_schedule_privilege_from_the_unrendered_template() {
             catch_up_limit: None,
             retry_delay_secs: None,
             max_failures: 3,
+            max_timeout_secs: Some(120),
             deferred_until: None,
             deleted: false,
         },
@@ -150,6 +152,7 @@ fn builds_event_schedule_privilege_from_the_unrendered_template() {
         catch_up_limit: None,
         retry_delay_secs: None,
         max_failures: 3,
+        max_timeout_secs: Some(120),
         deferred_until: None,
         deleted: false,
     })
@@ -171,6 +174,17 @@ fn builds_event_schedule_privilege_from_the_unrendered_template() {
     assert!(verify_privilege_assertion(
         &verifier_key,
         &widened_intent,
+        &assertion,
+        assertion.issued_unix,
+        &mut PrivilegeAssertionReplayCache::default(),
+    )
+    .is_err());
+
+    let changed_timeout = intent.replace("\"max_timeout_secs\":120", "\"max_timeout_secs\":121");
+    assert_ne!(changed_timeout, intent);
+    assert!(verify_privilege_assertion(
+        &verifier_key,
+        &changed_timeout,
         &assertion,
         assertion.issued_unix,
         &mut PrivilegeAssertionReplayCache::default(),

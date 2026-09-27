@@ -61,13 +61,17 @@ function dispatchTargetScopeSummary(
 export function DispatchOptions({
   setMaxTimeoutSecs,
   maxTimeoutSecs,
+  placeholder = "Default max job timeout (3600s)",
+  help,
 }: {
   setMaxTimeoutSecs: (value: string) => void;
   maxTimeoutSecs: string;
+  placeholder?: string;
+  help?: string;
 }) {
   return (
     <div className="dispatchControls">
-      <label>
+      <label title={help}>
         <span>Max timeout</span>
         <input
           aria-label="Max timeout seconds"
@@ -92,7 +96,7 @@ export function DispatchOptions({
             }
           }}
           pattern="[0-9]*"
-          placeholder="Default max job timeout (3600s)"
+          placeholder={placeholder}
           type="text"
           value={maxTimeoutSecs}
         />

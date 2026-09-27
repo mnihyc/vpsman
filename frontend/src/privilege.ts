@@ -66,6 +66,7 @@ export type SchedulePrivilegeIntentInput = {
   catchUpLimit: number | null;
   retryDelaySecs: number | null;
   maxFailures: number;
+  maxTimeoutSecs?: number | null;
   deferredUntil?: string | null;
   deleted: boolean;
 };
@@ -285,6 +286,14 @@ export async function operationPayloadHashHex(
   return sha256Hex(operationPayloadBytes(operation));
 }
 
+export async function alertEventArgvTemplateHashHex(
+  template: readonly string[] | null | undefined,
+): Promise<string> {
+  // Match alert_event_argv_template_hash: authorize the stored template argv,
+  // not a shell operation wrapper or a preview rendered for one lifecycle edge.
+  return sha256Hex(encoder.encode(JSON.stringify(template ?? ["/bin/true"])));
+}
+
 export async function rolloutPolicyHashHex(
   rollout: JobRolloutPolicy | null | undefined,
 ): Promise<string | null> {
@@ -426,7 +435,7 @@ export function canonicalJobPrivilegeIntent(
 export function canonicalSchedulePrivilegeIntent(
   input: SchedulePrivilegeIntentInput,
 ): string {
-  const entries: Array<[string, JsonValue]> = [
+  const entries: Array<[string, JsonValue | undefined]> = [
     ["version", 3],
     ["action", input.action],
     ["schedule_id", input.scheduleId ?? null],
@@ -446,6 +455,7 @@ export function canonicalSchedulePrivilegeIntent(
     ["catch_up_limit", input.catchUpLimit],
     ["retry_delay_secs", input.retryDelaySecs],
     ["max_failures", input.maxFailures],
+    ["max_timeout_secs", input.maxTimeoutSecs ?? undefined],
     ["deferred_until", input.deferredUntil ?? null],
     ["deleted", input.deleted],
   ];

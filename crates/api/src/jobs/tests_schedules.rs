@@ -33,6 +33,7 @@ fn shell_schedule_request(name: &str, enabled: bool) -> CreateScheduleRequest {
         catch_up_limit: Some(3),
         retry_delay_secs: Some(120),
         max_failures: 5,
+        max_timeout_secs: None,
         privilege_assertion: None,
         confirmed: true,
     }
@@ -59,6 +60,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         catch_up_limit: Some(1),
         retry_delay_secs: Some(300),
         max_failures: 3,
+        max_timeout_secs: None,
         privilege_assertion: None,
         confirmed: true,
     };
@@ -125,6 +127,19 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
+fn schedule_timeout_uses_existing_job_bounds_and_optional_default() {
+    let mut request = shell_schedule_request("timeout", false);
+    validate_schedule_request(&request).unwrap();
+    request.max_timeout_secs = Some(vpsman_common::MAX_CONFIGURABLE_JOB_TIMEOUT_SECS);
+    validate_schedule_request(&request).unwrap();
+    request.max_timeout_secs = Some(vpsman_common::MAX_CONFIGURABLE_JOB_TIMEOUT_SECS + 1);
+    assert_eq!(
+        validate_schedule_request(&request).unwrap_err().code,
+        "max_timeout_exceeds_configured_job_max"
     );
 }
 
@@ -198,6 +213,7 @@ fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
         catch_up_limit: Some(1),
         retry_delay_secs: Some(300),
         max_failures: 3,
+        max_timeout_secs: None,
         privilege_assertion: None,
         confirmed: true,
     };

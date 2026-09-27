@@ -21,7 +21,6 @@ import {
   PowerOff,
   RefreshCcw,
   Save,
-  ShieldCheck,
   Target,
   Trash2,
   WandSparkles,
@@ -38,6 +37,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ArgvInspector } from "../components/ExactPayloadInspector";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import {
+  alertEventArgvTemplateHashHex,
   buildPrivilegeAssertion,
   canonicalSchedulePrivilegeIntent,
   operationPayloadHashHex,
@@ -86,6 +86,8 @@ import {
   shortId,
 } from "../utils";
 import { LocalTargetPreview } from "./TargetImpactPreview";
+import { DispatchOptions } from "./JobDispatchControls";
+import { parseOptionalJobMaxTimeoutSecs } from "../jobMaxTimeout";
 import { buildScheduleTargetUpdatePrivilegeAssertion } from "../scheduleTargetMaintenance";
 import { scrollIntoViewWithMotion } from "../motion";
 import {
@@ -230,6 +232,7 @@ export function SchedulesPanel({
   const [catchUpLimit, setCatchUpLimit] = useState(1);
   const [retryDelaySecs, setRetryDelaySecs] = useState(300);
   const [maxFailures, setMaxFailures] = useState(3);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState("");
   const [selectorExpression, setSelectorExpression] = useState(() =>
     readLocalString(SCHEDULE_SELECTOR_STORAGE_KEY, ""),
   );
@@ -501,6 +504,14 @@ export function SchedulesPanel({
           : triggerKind === "event"
             ? eventArgvTemplateSummary(eventArgvTemplate)
             : operationSummary(scheduleOperation),
+    },
+    {
+      label: "Max timeout",
+      value: scheduleTimeoutLabel(
+        pendingScheduleSnapshot
+          ? pendingScheduleSnapshot.maxTimeoutSecs
+          : parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs),
+      ),
     },
     {
       label: "Trigger",
@@ -872,9 +883,12 @@ export function SchedulesPanel({
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is required");
       }
-      const operationHash = await operationPayloadHashHex(
-        scheduleSnapshotPrivilegeOperation(snapshot),
-      );
+      const operationHash =
+        snapshot.triggerKind === "event"
+          ? await alertEventArgvTemplateHashHex(snapshot.eventArgvTemplate)
+          : await operationPayloadHashHex(
+              scheduleSnapshotPrivilegeOperation(snapshot),
+            );
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalSchedulePrivilegeIntent({
           action: snapshot.editingScheduleId
@@ -897,6 +911,7 @@ export function SchedulesPanel({
           catchUpLimit: snapshot.catchUpLimit,
           retryDelaySecs: snapshot.retryDelaySecs,
           maxFailures: snapshot.maxFailures,
+          maxTimeoutSecs: snapshot.maxTimeoutSecs,
           deferredUntil: null,
           deleted: false,
         }),
@@ -919,6 +934,7 @@ export function SchedulesPanel({
         catch_up_limit: snapshot.catchUpLimit,
         retry_delay_secs: snapshot.retryDelaySecs,
         max_failures: snapshot.maxFailures,
+        max_timeout_secs: snapshot.maxTimeoutSecs,
         confirmed: true,
         privilege_assertion: privilegeAssertion,
       };
@@ -960,6 +976,7 @@ export function SchedulesPanel({
     setCatchUpLimit(1);
     setRetryDelaySecs(300);
     setMaxFailures(3);
+    setMaxTimeoutSecs("");
     setSelectorExpression("");
     setEditingScheduleId(null);
     setConfirmationOpen(false);
@@ -979,7 +996,7 @@ export function SchedulesPanel({
       eventArgvTemplate: triggerKind === "event" ? eventArgvTemplate : null,
       commandType:
         triggerKind === "event"
-          ? "shell_argv"
+          ? "shell"
           : commandTypeForApi(operationForPrivilege),
       selectorExpression: selector,
       triggerKind,
@@ -995,6 +1012,7 @@ export function SchedulesPanel({
           ? null
           : clampInteger(retryDelaySecs, 1, 86_400),
       maxFailures: clampInteger(maxFailures, 1, 100),
+      maxTimeoutSecs: parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs) ?? null,
       nextRun: triggerKind === "cron" ? (nextRuns[0] ?? null) : null,
       selectedTemplateName: selectedTemplate?.name ?? null,
     };
@@ -1111,6 +1129,9 @@ export function SchedulesPanel({
     setCatchUpLimit(schedule.catch_up_limit ?? 1);
     setRetryDelaySecs(schedule.retry_delay_secs ?? 300);
     setMaxFailures(schedule.max_failures);
+    setMaxTimeoutSecs(
+      schedule.max_timeout_secs == null ? "" : String(schedule.max_timeout_secs),
+    );
     setSelectorExpression(schedule.selector_expression);
     setComposerRevealRequest((current) => current + 1);
   }
@@ -1398,9 +1419,11 @@ export function SchedulesPanel({
     const privilegeOperation = schedulePrivilegeOperation(schedule);
     const operationHash =
       schedule.operation_payload_hash?.trim() ||
-      (privilegeOperation
-        ? await operationPayloadHashHex(privilegeOperation)
-        : "");
+      (schedule.trigger_kind === "event"
+        ? await alertEventArgvTemplateHashHex(schedule.event_argv_template)
+        : privilegeOperation
+          ? await operationPayloadHashHex(privilegeOperation)
+          : "");
     if (!operationHash) {
       throw new Error("Schedule operation evidence is unavailable");
     }
@@ -1424,6 +1447,7 @@ export function SchedulesPanel({
         catchUpLimit: schedule.catch_up_limit,
         retryDelaySecs: schedule.retry_delay_secs,
         maxFailures: schedule.max_failures,
+        maxTimeoutSecs: schedule.max_timeout_secs,
         deferredUntil,
         deleted,
       }),
@@ -1537,6 +1561,10 @@ export function SchedulesPanel({
           : `${scheduleOperationSummary(action.schedule)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
       },
       {
+        label: "Max timeout",
+        value: scheduleTimeoutLabel(action.schedule.max_timeout_secs),
+      },
+      {
         label: "Reviewed targets",
         value: `${vpsCountLabel(fixedTargetIds(action.schedule).length)} saved`,
       },
@@ -1587,6 +1615,7 @@ export function SchedulesPanel({
     eventExpression,
     invalidateReviewGeneration,
     maxFailures,
+    maxTimeoutSecs,
     name,
     retryDelaySecs,
     selectedTemplateId,
@@ -1846,26 +1875,6 @@ export function SchedulesPanel({
             </button>
           }
         />
-        <div
-          className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}
-          aria-label="Schedule lifecycle privilege gate"
-        >
-          <ShieldCheck size={16} />
-          <span>
-            {privilegeMaterial
-              ? "Privilege unlocked for schedule lifecycle actions"
-              : "Unlock privilege to enable apply now, target updates, enable, disable, and delete"}
-          </span>
-          {!privilegeMaterial && (
-            <button
-              className="secondaryAction compactAction"
-              onClick={onOpenPrivilegeUnlock}
-              type="button"
-            >
-              Unlock privilege
-            </button>
-          )}
-        </div>
         {deferDraft && (
           <form
             className="inlineOpsForm"
@@ -2225,6 +2234,12 @@ export function SchedulesPanel({
                 </small>
               </div>
             ) : null}
+            <DispatchOptions
+              maxTimeoutSecs={maxTimeoutSecs}
+              setMaxTimeoutSecs={setMaxTimeoutSecs}
+              placeholder="Default schedule timeout"
+              help="Maximum runtime in seconds for each dispatched job, including Run now. Leave blank to use the configured schedule default. The global maximum job timeout still applies."
+            />
             {triggerKind === "cron" && cronDirectArgv !== null ? (
               <ArgvInspector
                 ariaLabel="Cron schedule argv elements"
@@ -2834,6 +2849,7 @@ type ScheduleDraftSnapshot = {
   catchUpLimit: number | null;
   retryDelaySecs: number | null;
   maxFailures: number;
+  maxTimeoutSecs: number | null;
   nextRun: string | null;
   selectedTemplateName: string | null;
   expectedSelectorExpression: string | null;
@@ -3363,6 +3379,10 @@ function ScheduleExpandedDetail({
         </span>
       </span>
       <span>
+        <strong>Max timeout</strong>
+        <span>{scheduleTimeoutLabel(schedule.max_timeout_secs)}</span>
+      </span>
+      <span>
         <strong>Targets</strong>
         <span>Run on: {schedule.run_on === "triggered_only" ? "Triggered only" : "All at once"}</span>
         <span>
@@ -3418,6 +3438,10 @@ function ScheduleExpandedDetail({
       </span>
     </div>
   );
+}
+
+function scheduleTimeoutLabel(seconds: number | null | undefined): string {
+  return seconds == null ? "Configured schedule default" : `${seconds}s`;
 }
 
 type ScheduleRunTiming = {
