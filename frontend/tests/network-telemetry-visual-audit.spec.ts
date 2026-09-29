@@ -81,7 +81,7 @@ test("captures network telemetry placements", async ({ page }, testInfo) => {
   await expect(
     graphPanel
       .getByLabel("Topology graph legend")
-      .getByText("OSPF 22 (+8)", { exact: true }),
+      .getByText("OSPF 14", { exact: true }),
   ).toBeVisible();
   await expect(
     graphPanel.getByText("Why OSPF cost changed", { exact: true }),

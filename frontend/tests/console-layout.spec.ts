@@ -9699,7 +9699,9 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     page.getByRole("heading", { name: "Topology graph", exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("img", { name: "Topology graph" })).toBeVisible();
+  await expect(
+    page.getByRole("group", { name: "Topology graph", exact: true }),
+  ).toBeVisible();
   const graphPanel = page.locator(".topologyGraphPanel");
   await expect(
     page.getByText("2 of 2 plan endpoints shown; 1 of 1 tunnel shown"),
@@ -9709,8 +9711,15 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(graphPanel.getByLabel("Topology graph legend")).toContainText(
     "Layers",
   );
+  await expect(graphPanel).not.toContainText("disabled");
+  expect(
+    (await graphPanel.locator(".topologyGraphNode title").allTextContents()).join("\n"),
+  ).not.toContain("disabled");
   await expect(graphPanel.getByLabel("Topology graph legend")).toContainText(
-    "OSPF 22 (+8)",
+    "OSPF 14",
+  );
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText(
+    "Estimate 22 (+8)",
   );
   await expect(graphPanel.getByLabel("Topology graph legend")).toContainText(
     "12.4 ms",
@@ -9723,6 +9732,31 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   );
   await expect(graphPanel.getByText("Why OSPF cost changed")).toBeVisible();
   await expect(graphPanel.getByLabel("Topology minimap")).toHaveCount(0);
+  await expect(graphPanel.locator(".topologyGraphEdgeLabel text")).toHaveText(
+    "sfo-fra-gre · 14",
+  );
+  const tunnelEdge = graphPanel.getByRole("button", {
+    name: "Select tunnel sfo-fra-gre: OSPF 14",
+  });
+  await graphPanel.locator(".topologyGraphCanvas").scrollIntoViewIfNeeded();
+  // Straight SVG paths have a zero-width or zero-height geometry box. Click the
+  // painted path itself, away from its midpoint label, using real mouse input.
+  const edgePoint = await tunnelEdge.locator(".topologyGraphEdgeHit").evaluate((element) => {
+    const path = element as SVGPathElement;
+    const point = path.getPointAtLength(path.getTotalLength() / 4);
+    const screen = new DOMPoint(point.x, point.y).matrixTransform(path.getScreenCTM()!);
+    return { x: screen.x, y: screen.y };
+  });
+  await page.mouse.click(edgePoint.x, edgePoint.y);
+  await expect(graphPanel.locator(".topologyGraphSelectionHeader")).toContainText(
+    "Selected tunnel",
+  );
+  await expect(graphPanel.locator(".topologyNodeInspector")).toHaveCount(0);
+  const graphCost = graphPanel.locator(".topologyGraphEdgeRow [data-label=Cost]");
+  await expect(graphCost).toContainText("OSPF 14");
+  await expect(graphCost).toContainText("Estimate 22 (+8)");
+  await graphPanel.getByRole("button", { name: "Show all tunnels" }).click();
+  await expect(graphPanel.locator(".topologyNodeInspector")).toBeVisible();
   await expect(
     graphPanel.getByRole("button", { name: "Zoom in topology graph" }),
   ).toBeVisible();
@@ -9874,7 +9908,10 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await page.keyboard.press("Escape");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planGrid = page.getByLabel("Tunnel plans data grid");
-  await expect(planGrid).toContainText("22 cost");
+  await expect(planGrid).toContainText("14 cost");
+  await expect(
+    planGrid.getByTitle("Reported cost: L 14 (Verified) · R 14 (Verified)"),
+  ).toBeVisible();
   await expect(planGrid).toContainText("Reviewed · Review required");
 });
 

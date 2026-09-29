@@ -2535,6 +2535,11 @@ export type TopologyGraphEdge = {
   desired_missing_count: number;
   stale_present_count: number;
   bandwidth_mbps: number;
+  ospf_enabled: boolean;
+  left_current_ospf_cost: number | null;
+  right_current_ospf_cost: number | null;
+  left_ospf_status: string;
+  right_ospf_status: string;
   recommended_ospf_cost: number | null;
   cost_delta: number | null;
   latency_avg_ms: number | null;

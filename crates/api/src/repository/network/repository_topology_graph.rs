@@ -273,6 +273,11 @@ impl Repository {
                 desired_missing_count: evidence.desired_missing_count,
                 stale_present_count: evidence.stale_present_count,
                 bandwidth_mbps: plan.plan.bandwidth_mbps,
+                ospf_enabled: plan.plan.ospf.is_some(),
+                left_current_ospf_cost: plan.left_current_ospf_cost,
+                right_current_ospf_cost: plan.right_current_ospf_cost,
+                left_ospf_status: plan.left_ospf_status.clone(),
+                right_ospf_status: plan.right_ospf_status.clone(),
                 recommended_ospf_cost: recommendation
                     .map(|record| record.recommended_ospf_cost)
                     .or(plan.recommended_ospf_cost),

@@ -496,6 +496,9 @@ export function useTopologyData(
         commandType === "network_routing_apply"
       ) {
         await Promise.all([
+          ...(subpage === "graph"
+            ? [loadTopologyGraph(topologyGraphQuery.current)]
+            : []),
           ...(["overview", "tunnel_plans", "ospf", "evidence"].includes(subpage)
             ? [loadTunnelPlans()]
             : []),

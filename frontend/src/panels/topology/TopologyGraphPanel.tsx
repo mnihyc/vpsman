@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   GitGraph,
   Maximize2,
@@ -30,7 +37,6 @@ import {
 import type {
   AgentView,
   RuntimeConfigApplyStateRecord,
-  TopologyEdgeHealthStatus,
   TopologyGraph,
   TopologyGraphEdge,
   TopologyGraphNode,
@@ -45,6 +51,14 @@ import {
   timestampMillis,
   type VpsNameDisplayMode,
 } from "../../utils";
+import {
+  GRAPH_NODE_RADIUS,
+  GRAPH_WIDTH,
+  placeGraphLabels,
+  routeGraphEdges,
+  type GraphLabelSize,
+  type GraphPoint,
+} from "./topologyGraphLayout";
 
 type PositionedNode = TopologyGraphNode & {
   x: number;
@@ -56,7 +70,7 @@ type GraphLayout = {
   nodes: PositionedNode[];
 };
 
-type HealthFilter = "all" | "attention" | "healthy" | "unknown" | "disabled";
+type HealthFilter = "all" | "attention" | "healthy" | "unknown";
 type GraphPan = {
   x: number;
   y: number;
@@ -69,18 +83,14 @@ type GraphLegendItem = {
 };
 type NodeTunnelStats = {
   attention: number;
-  disabled: number;
   enabled: number;
   healthy: number;
-  total: number;
 };
 
 const EMPTY_NODE_TUNNEL_STATS: NodeTunnelStats = {
   attention: 0,
-  disabled: 0,
   enabled: 0,
   healthy: 0,
-  total: 0,
 };
 
 const healthFilters: { label: string; value: HealthFilter }[] = [
@@ -88,7 +98,6 @@ const healthFilters: { label: string; value: HealthFilter }[] = [
   { label: "Attention", value: "attention" },
   { label: "Healthy", value: "healthy" },
   { label: "Unknown", value: "unknown" },
-  { label: "Disabled", value: "disabled" },
 ];
 
 export function TopologyGraphPanel({
@@ -128,24 +137,57 @@ export function TopologyGraphPanel({
   );
   const [customEndAt, setCustomEndAt] = useState(defaultNetworkEvidenceEndAt);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const appliedInitialSelectionRequestRef = useRef<string | null>(null);
   const [graphZoom, setGraphZoom] = useState(1);
   const [graphPan, setGraphPan] = useState<GraphPan>({ x: 0, y: 0 });
   const [mobileGraphOpen, setMobileGraphOpen] = useState(false);
+  const [nodePositions, setNodePositions] = useState<Record<string, GraphPoint>>({});
+  const [textSizes, setTextSizes] = useState<Record<string, GraphLabelSize>>({});
+  const [canvasWidth, setCanvasWidth] = useState(GRAPH_WIDTH);
+  const [dragging, setDragging] = useState(false);
+  const canvasRef = useRef<SVGSVGElement>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    clientId?: string;
+    start: GraphPoint;
+    origin: GraphPoint;
+  } | null>(null);
   const agentById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
     [agents],
   );
+  // Every Graph surface, including counts, hover text and plan choices, shares
+  // this projection. Other pages still receive disabled plans from the API.
+  const enabledGraph = useMemo(() => {
+    const edges = graph.edges.filter((edge) => edge.enabled);
+    const endpointIds = new Set(
+      edges.flatMap((edge) => [edge.left_client_id, edge.right_client_id]),
+    );
+    return {
+      ...graph,
+      edges,
+      nodes: graph.nodes.filter((node) => endpointIds.has(node.client_id)),
+    };
+  }, [graph]);
   const filtered = useMemo(
-    () => filterGraph(graph, query, healthFilter, planFilter),
-    [graph, healthFilter, planFilter, query],
+    () => filterGraph(enabledGraph, query, healthFilter, planFilter),
+    [enabledGraph, healthFilter, planFilter, query],
   );
   const layout = useMemo(() => positionNodes(filtered.nodes), [filtered.nodes]);
-  const nodes = layout.nodes;
+  const nodes = layout.nodes.map((node) => ({
+    ...node,
+    ...boundedNodePosition(nodePositions[node.client_id] ?? node, node.client_id),
+  }));
   const nodeById = new Map(nodes.map((node) => [node.client_id, node]));
+  const routes = routeGraphEdges(filtered.edges, nodes, layout.height);
+  const edgeLabels = placeGraphLabels(routes, nodes, textSizes, layout.height);
   const nodeStatsById = buildNodeTunnelStats(filtered.edges);
-  const selectedNode =
-    selectedClientId === null
+  const selectedEdge =
+    filtered.edges.find((edge) => edge.plan_id === selectedPlanId) ?? null;
+  const selectedNode = selectedEdge
+    ? null
+    : selectedClientId === null
       ? (nodes[0] ?? null)
       : (nodes.find((node) => node.client_id === selectedClientId) ?? null);
   const selectedEdges = selectedNode
@@ -171,13 +213,53 @@ export function TopologyGraphPanel({
   const selectedDisplayState = selectedNode
     ? nodeDisplayState(selectedNode, agentById)
     : null;
-  const showEdgeLabels = filtered.edges.length <= 14 && nodes.length <= 12;
   const graphTransform = graphTransformFor(graphZoom, graphPan, layout.height);
+  // Narrow canvases must be able to zoom back to one CSS pixel per diagram unit.
+  // Preserve a chosen zoom when resizing from a narrow viewport to a wider one.
+  const maxGraphZoom = Math.max(
+    1.6,
+    graphZoom,
+    Math.ceil((GRAPH_WIDTH / canvasWidth) * 5) / 5,
+  );
   const latestTopologyEvidence = useMemo(
-    () => latestTopologyEvidenceAt(graph),
-    [graph],
+    () => latestTopologyEvidenceAt(enabledGraph),
+    [enabledGraph],
   );
   const latestTopologyEvidenceStale = isStaleEvidence(latestTopologyEvidence);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0) setCanvasWidth(entry.contentRect.width);
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [filtered.edges.length, filtered.nodes.length, mobileGraphOpen]);
+
+  useLayoutEffect(() => {
+    const sizes: Record<string, GraphLabelSize> = {};
+    canvasRef.current
+      ?.querySelectorAll<SVGGraphicsElement>("[data-graph-label]")
+      .forEach((element) => {
+        const bounds = element.getBBox();
+        if (bounds.width > 0) {
+          sizes[element.dataset.graphLabel!] = {
+            width: bounds.width,
+            height: bounds.height,
+          };
+        }
+      });
+    if (Object.keys(sizes).length === 0) return;
+    setTextSizes((current) =>
+      Object.keys(current).length === Object.keys(sizes).length &&
+      Object.entries(sizes).every(([key, size]) =>
+        current[key]?.width === size.width && current[key]?.height === size.height,
+      )
+        ? current
+        : sizes,
+    );
+  }, [filtered.edges, filtered.nodes, vpsNameDisplayMode, mobileGraphOpen]);
 
   useEffect(() => {
     if (
@@ -188,6 +270,7 @@ export function TopologyGraphPanel({
       return;
     }
     appliedInitialSelectionRequestRef.current = initialSelectionRequestId;
+    setSelectedPlanId(null);
     setSelectedClientId(initialSelectedClientId ?? null);
     onInitialSelectionConsumed?.(initialSelectionRequestId);
   }, [
@@ -202,20 +285,98 @@ export function TopologyGraphPanel({
     [filtered.edges],
   );
   const hasVisibleOspfCost = filtered.edges.some(
-    (edge) => edge.enabled && edge.recommended_ospf_cost !== null,
+    (edge) => edge.ospf_enabled,
   );
   const showMinimap = filtered.edges.length > 10 || nodes.length > 8;
   const planOptions = useMemo(
     () =>
-      graph.edges
+      enabledGraph.edges
         .map((edge) => ({ id: edge.plan_id, name: edge.plan_name }))
         .sort((left, right) => left.name.localeCompare(right.name)),
-    [graph.edges],
+    [enabledGraph.edges],
   );
   const status =
-    graph.edges.length === 0
-      ? "No topology edges"
-      : `${filtered.nodes.length} of ${graph.nodes.length} plan endpoints shown; ${filtered.edges.length} of ${graph.edges.length} ${graph.edges.length === 1 ? "tunnel" : "tunnels"} shown in ${networkEvidenceWindowLabel(evidenceWindow)}`;
+    enabledGraph.edges.length === 0
+      ? "No enabled topology edges"
+      : `${filtered.nodes.length} of ${enabledGraph.nodes.length} plan endpoints shown; ${filtered.edges.length} of ${enabledGraph.edges.length} ${enabledGraph.edges.length === 1 ? "tunnel" : "tunnels"} shown in ${networkEvidenceWindowLabel(evidenceWindow)}`;
+
+  function selectNode(clientId: string) {
+    setSelectedPlanId(null);
+    setSelectedClientId(clientId);
+  }
+
+  function boundedNodePosition(point: GraphPoint, clientId: string): GraphPoint {
+    const marginX = Math.max(
+      GRAPH_NODE_RADIUS,
+      (textSizes[`node:${clientId}`]?.width ?? 160) / 2,
+    ) + 8;
+    const marginY = GRAPH_NODE_RADIUS + 8;
+    return {
+      x: Math.max(marginX, Math.min(GRAPH_WIDTH - marginX, point.x)),
+      y: Math.max(marginY, Math.min(layout.height - marginY, point.y)),
+    };
+  }
+
+  function canvasPoint(event: ReactPointerEvent<SVGElement>): GraphPoint | null {
+    const matrix = canvasRef.current?.getScreenCTM();
+    return matrix
+      ? new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+      : null;
+  }
+
+  function startGraphDrag(
+    event: ReactPointerEvent<SVGElement>,
+    node?: PositionedNode,
+  ) {
+    if (event.button !== 0 || dragRef.current) return;
+    const point = canvasPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = {
+      pointerId: event.pointerId,
+      clientId: node?.client_id,
+      start: point,
+      origin: node ?? graphPan,
+    };
+    canvasRef.current?.setPointerCapture(event.pointerId);
+    if (node) {
+      event.currentTarget.focus();
+      selectNode(node.client_id);
+    }
+    setDragging(true);
+  }
+
+  function moveGraphDrag(event: ReactPointerEvent<SVGSVGElement>) {
+    const drag = dragRef.current;
+    const point = canvasPoint(event);
+    if (!drag || drag.pointerId !== event.pointerId || !point) return;
+    if (drag.clientId) {
+      const clientId = drag.clientId;
+      const position = boundedNodePosition(
+        {
+          x: drag.origin.x + (point.x - drag.start.x) / graphZoom,
+          y: drag.origin.y + (point.y - drag.start.y) / graphZoom,
+        },
+        clientId,
+      );
+      setNodePositions((current) => ({ ...current, [clientId]: position }));
+    } else {
+      setGraphPan({
+        x: drag.origin.x + point.x - drag.start.x,
+        y: drag.origin.y + point.y - drag.start.y,
+      });
+    }
+  }
+
+  function endGraphDrag(event: ReactPointerEvent<SVGSVGElement>) {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
 
   function evidenceQuery(
     windowOverride: MonitoringWindow = evidenceWindow,
@@ -299,7 +460,7 @@ export function TopologyGraphPanel({
           Apply custom range
         </button>
       ) : null}
-      {graph.edges.length > 0 && (
+      {enabledGraph.edges.length > 0 && (
         <div className="topologyGraphControls">
           <label className="searchControl compactSearch">
             <Search size={16} />
@@ -317,7 +478,7 @@ export function TopologyGraphPanel({
               onChange={(event) => setPlanFilter(event.target.value)}
               value={planFilter}
             >
-              <option value="">All eligible plans</option>
+              <option value="">All enabled plans</option>
               {planOptions.map((plan) => (
                 <option key={plan.id} value={plan.id}>
                   {plan.name}
@@ -344,7 +505,7 @@ export function TopologyGraphPanel({
           <div
             aria-label="Topology graph viewport"
             className="topologyGraphViewportControls"
-            title="Graph scale can be adjusted from 80% to 160%; Reset also clears panning."
+            title="Drag nodes to rearrange; drag the background to pan. Reset restores positions and zoom."
           >
             <button
               aria-label="Zoom out topology graph"
@@ -369,6 +530,7 @@ export function TopologyGraphPanel({
               onClick={() => {
                 setGraphZoom(1);
                 setGraphPan({ x: 0, y: 0 });
+                setNodePositions({});
               }}
               title="Reset graph view"
               type="button"
@@ -378,15 +540,15 @@ export function TopologyGraphPanel({
             </button>
             <button
               aria-label="Zoom in topology graph"
-              disabled={graphZoom >= 1.6}
+              disabled={graphZoom >= maxGraphZoom}
               onClick={() =>
                 setGraphZoom((current) =>
-                  Math.min(1.6, roundZoom(current + 0.2)),
+                  Math.min(maxGraphZoom, roundZoom(current + 0.2)),
                 )
               }
               title={
-                graphZoom >= 1.6
-                  ? "Topology graph is already at the maximum 160% zoom"
+                graphZoom >= maxGraphZoom
+                  ? `Topology graph is already at the maximum ${Math.round(maxGraphZoom * 100)}% zoom`
                   : "Zoom in topology graph"
               }
               type="button"
@@ -398,12 +560,12 @@ export function TopologyGraphPanel({
           </div>
         </div>
       )}
-      {graph.edges.length === 0 ? (
+      {enabledGraph.edges.length === 0 ? (
         <div className="emptyState">
           <GitGraph size={28} />
-          <strong>No saved tunnel plans</strong>
+          <strong>No enabled tunnel plans</strong>
           <span>
-            Saved plans and their explicit endpoint observations will appear
+            Enabled plans and their explicit endpoint observations will appear
             here.
           </span>
         </div>
@@ -412,7 +574,7 @@ export function TopologyGraphPanel({
           <GitGraph size={28} />
           <strong>No matching topology edges</strong>
           <span>
-            {graph.edges.length} saved tunnels remain outside the current
+            {enabledGraph.edges.length} enabled tunnels remain outside the current
             filter.
           </span>
         </div>
@@ -459,17 +621,29 @@ export function TopologyGraphPanel({
             </button>
           </div>
           <div className="topologyGraphViewport">
+            <p className="topologyGraphHelp" id="topologyGraphHelp">
+              Drag nodes to arrange; drag the background to pan. Arrow keys move
+              focused nodes. Select a node or tunnel for details below.
+            </p>
             <svg
+              aria-describedby="topologyGraphHelp"
               aria-label="Topology graph"
-              className="topologyGraphCanvas"
+              className={`topologyGraphCanvas ${dragging ? "dragging" : ""}`}
+              onPointerDown={(event) => startGraphDrag(event)}
+              onPointerMove={moveGraphDrag}
+              onPointerUp={endGraphDrag}
+              onPointerCancel={endGraphDrag}
+              onLostPointerCapture={endGraphDrag}
               preserveAspectRatio="xMidYMid meet"
-              role="img"
-              viewBox={`0 0 900 ${layout.height}`}
+              ref={canvasRef}
+              role="group"
+              viewBox={`0 0 ${GRAPH_WIDTH} ${layout.height}`}
             >
               <defs>
                 <marker
                   id="topologyArrow"
                   markerHeight="8"
+                  markerUnits="userSpaceOnUse"
                   markerWidth="8"
                   orient="auto"
                   refX="7"
@@ -482,53 +656,81 @@ export function TopologyGraphPanel({
                 </marker>
               </defs>
               <g transform={graphTransform}>
-                {filtered.edges.map((edge) => {
-                  const left = nodeById.get(edge.left_client_id);
-                  const right = nodeById.get(edge.right_client_id);
-                  if (!left || !right) {
-                    return null;
-                  }
+                {routes.map(({ edge, path }) => {
                   return (
                     <g
-                      className={`topologyGraphEdge ${effectiveEdgeHealth(edge)}`}
+                      aria-label={`Select tunnel ${edge.plan_name}: ${ospfCostSummary(edge)}`}
+                      aria-pressed={selectedEdge?.plan_id === edge.plan_id}
+                      className={`topologyGraphEdge ${edge.health} ${selectedEdge?.plan_id === edge.plan_id ? "selected" : ""}`}
+                      data-plan-id={edge.plan_id}
                       key={edge.plan_id}
+                      onClick={() => setSelectedPlanId(edge.plan_id)}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setSelectedPlanId(edge.plan_id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
                     >
                       <title>
                         {edgeHoverDetail(edge, nodeById, vpsNameDisplayMode)}
                       </title>
-                      <line
+                      <path className="topologyGraphEdgeHit" d={path} />
+                      <path
+                        className="topologyGraphEdgeLine"
+                        d={path}
                         markerEnd="url(#topologyArrow)"
-                        x1={left.x}
-                        x2={right.x}
-                        y1={left.y}
-                        y2={right.y}
                       />
-                      {showEdgeLabels && (
-                        <>
-                          <text
-                            x={(left.x + right.x) / 2}
-                            y={(left.y + right.y) / 2 - 16}
-                          >
-                            {edge.plan_name}
-                          </text>
-                          <text
-                            className="topologyGraphMetric"
-                            x={(left.x + right.x) / 2}
-                            y={(left.y + right.y) / 2 + 2}
-                          >
-                            {edgeInlineMetric(edge)}
-                          </text>
-                          {edge.recommended_ospf_cost !== null ? (
-                            <text
-                              className="topologyGraphMetric"
-                              x={(left.x + right.x) / 2}
-                              y={(left.y + right.y) / 2 + 18}
-                            >
-                              {ospfCostSummary(edge)}
-                            </text>
-                          ) : null}
-                        </>
-                      )}
+                    </g>
+                  );
+                })}
+                <g className="topologyGraphLabelLeaders" aria-hidden="true">
+                  {routes.map(({ edge }) => {
+                    const label = edgeLabels.get(edge.plan_id);
+                    return label ? (
+                      <line
+                        key={edge.plan_id}
+                        x1={label.x}
+                        y1={label.y}
+                        x2={label.anchor.x}
+                        y2={label.anchor.y}
+                      />
+                    ) : null;
+                  })}
+                </g>
+                {routes.map(({ edge }) => {
+                  const label = edgeLabels.get(edge.plan_id);
+                  return (
+                    <g
+                      className={`topologyGraphEdgeLabel ${selectedEdge?.plan_id === edge.plan_id ? "selected" : ""}`}
+                      data-plan-id={edge.plan_id}
+                      key={edge.plan_id}
+                      onClick={() => setSelectedPlanId(edge.plan_id)}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      transform={`translate(${label?.x ?? 0} ${label?.y ?? 0})`}
+                      visibility={label ? "visible" : "hidden"}
+                    >
+                      <title>
+                        {edgeHoverDetail(edge, nodeById, vpsNameDisplayMode)}
+                      </title>
+                      {label ? (
+                        <rect
+                          x={-label.width / 2}
+                          y={-label.height / 2}
+                          width={label.width}
+                          height={label.height}
+                          rx={3}
+                        />
+                      ) : null}
+                      <text
+                        data-graph-label={`edge:${edge.plan_id}`}
+                        dominantBaseline="central"
+                      >
+                        {graphEdgeLabel(edge)}
+                      </text>
                     </g>
                   );
                 })}
@@ -542,11 +744,39 @@ export function TopologyGraphPanel({
                     <g
                       aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
                       className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${expectedOffline ? "unknown" : stats.attention > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
+                      data-client-id={node.client_id}
+                      data-graph-label={`node:${node.client_id}`}
                       key={node.client_id}
-                      onClick={() => setSelectedClientId(node.client_id)}
+                      onClick={() => selectNode(node.client_id)}
+                      onPointerDown={(event) => startGraphDrag(event, node)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
-                          setSelectedClientId(node.client_id);
+                          event.preventDefault();
+                          selectNode(node.client_id);
+                        }
+                        const directions: Record<string, [number, number]> = {
+                          ArrowLeft: [-1, 0],
+                          ArrowRight: [1, 0],
+                          ArrowUp: [0, -1],
+                          ArrowDown: [0, 1],
+                        };
+                        const direction = directions[event.key];
+                        if (direction) {
+                          event.preventDefault();
+                          selectNode(node.client_id);
+                          // Ten diagram units per key; Shift allows one-unit adjustments.
+                          const step = event.shiftKey ? 1 : 10;
+                          const position = boundedNodePosition(
+                            {
+                              x: node.x + direction[0] * step,
+                              y: node.y + direction[1] * step,
+                            },
+                            node.client_id,
+                          );
+                          setNodePositions((current) => ({
+                            ...current,
+                            [node.client_id]: position,
+                          }));
                         }
                       }}
                       role="button"
@@ -560,7 +790,7 @@ export function TopologyGraphPanel({
                           stats,
                         )}
                       </title>
-                      <circle cx={node.x} cy={node.y} r="42" />
+                      <circle cx={node.x} cy={node.y} r={GRAPH_NODE_RADIUS} />
                       <text x={node.x} y={node.y - 8}>
                         {graphNodeLabel(node, vpsNameDisplayMode)}
                       </text>
@@ -589,19 +819,9 @@ export function TopologyGraphPanel({
                 className="topologyGraphMinimap"
                 viewBox={`0 0 900 ${layout.height}`}
               >
-                {filtered.edges.map((edge) => {
-                  const left = nodeById.get(edge.left_client_id);
-                  const right = nodeById.get(edge.right_client_id);
-                  return left && right ? (
-                    <line
-                      key={edge.plan_id}
-                      x1={left.x}
-                      x2={right.x}
-                      y1={left.y}
-                      y2={right.y}
-                    />
-                  ) : null;
-                })}
+                {routes.map(({ edge, path }) => (
+                  <path key={edge.plan_id} d={path} />
+                ))}
                 {nodes.map((node) => (
                   <circle
                     className={
@@ -618,7 +838,7 @@ export function TopologyGraphPanel({
               </svg>
             ) : null}
           </div>
-          {selectedClientId && !selectedNode ? (
+          {selectedClientId && !selectedNode && !selectedEdge ? (
             <div
               className="emptyState compactEmpty topologySelectionEmpty"
               role="status"
@@ -662,9 +882,7 @@ export function TopologyGraphPanel({
               </span>
               <span className="topologyMetric">
                 <strong>{selectedNodeStats.attention}</strong>
-                <small>
-                  need attention; {selectedNodeStats.disabled} disabled
-                </small>
+                <small>need attention</small>
               </span>
               <span className="topologyMetric">
                 <strong>
@@ -693,8 +911,20 @@ export function TopologyGraphPanel({
               ) : null}
             </div>
           )}
+          {selectedEdge ? (
+            <div className="topologyGraphSelectionHeader">
+              <strong>Selected tunnel</strong>
+              <button
+                className="secondaryAction compactAction"
+                onClick={() => setSelectedPlanId(null)}
+                type="button"
+              >
+                Show all tunnels
+              </button>
+            </div>
+          ) : null}
           <div className="topologyGraphSummary">
-            {filtered.edges.map((edge) => (
+            {(selectedEdge ? [selectedEdge] : filtered.edges).map((edge) => (
               <div className="topologyGraphEdgeRow" key={edge.plan_id}>
                 <span
                   className="historyPrimary topologySummaryCell"
@@ -702,16 +932,15 @@ export function TopologyGraphPanel({
                 >
                   <strong>{edge.plan_name}</strong>
                   <small>
-                    {edge.enabled
-                      ? edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)
-                      : `disabled; ${edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)}`}
+                    {edge.kind.toUpperCase()} ·{" "}
+                    {edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)}
                   </small>
                 </span>
                 <span className="topologySummaryCell" data-label="Health">
                   <span
-                    className={`status ${topologyEdgeHealthStatusBadgeClass(effectiveEdgeHealth(edge))}`}
+                    className={`status ${topologyEdgeHealthStatusBadgeClass(edge.health)}`}
                   >
-                    {humanStatus(effectiveEdgeHealth(edge))}
+                    {humanStatus(edge.health)}
                   </span>
                 </span>
                 <span className="topologyMetric" data-label="Metric">
@@ -743,10 +972,15 @@ export function TopologyGraphPanel({
                   <LatencySparkline edge={edge} />
                 ) : null}
                 <span className="topologyMetric" data-label="Cost">
-                  <strong>{ospfCostSummary(edge)}</strong>
+                  <strong title={reportedOspfCostDetail(edge)}>
+                    {ospfCostSummary(edge)}
+                  </strong>
+                  {edge.ospf_enabled ? (
+                    <small>{ospfCostEstimate(edge)}</small>
+                  ) : null}
                   <small>
                     {edge.latest_observed_at
-                      ? formatTime(edge.latest_observed_at)
+                      ? `Evidence ${formatTime(edge.latest_observed_at)}`
                       : "no observations"}
                   </small>
                 </span>
@@ -870,7 +1104,6 @@ function isStaleEvidence(value: string | null): boolean {
 }
 
 function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
-  const enabledEdges = edges.filter((edge) => edge.enabled);
   const attentionCount = edges.filter((edge) =>
     edgeMatchesHealth(edge, "attention"),
   ).length;
@@ -880,20 +1113,19 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
   const unknownCount = edges.filter((edge) =>
     edgeMatchesHealth(edge, "unknown"),
   ).length;
-  const disabledCount = edges.filter((edge) => !edge.enabled).length;
   const latestMeasuredEdge =
-    enabledEdges.find(
+    edges.find(
       (edge) =>
         typeof edge.latency_avg_ms === "number" ||
         typeof edge.throughput_avg_mbps === "number",
     ) ??
-    enabledEdges[0] ??
+    edges[0] ??
     null;
   const latestOspfEdge =
-    enabledEdges.find((edge) => edge.recommended_ospf_cost !== null) ?? null;
+    edges.find((edge) => edge.ospf_enabled) ?? null;
   const items: GraphLegendItem[] = [
     {
-      detail: `${healthyCount} healthy, ${unknownCount} unknown, ${attentionCount} attention, ${disabledCount} disabled`,
+      detail: `${healthyCount} healthy, ${unknownCount} unknown, ${attentionCount} attention`,
       label: "Layers",
       tone:
         attentionCount > 0
@@ -919,7 +1151,7 @@ function buildGraphLegendItems(edges: TopologyGraphEdge[]): GraphLegendItem[] {
   ];
   if (latestOspfEdge) {
     items.splice(1, 0, {
-      detail: `Optional OSPF uses explicit endpoint adapters; ${ospfCostReason(latestOspfEdge)}`,
+      detail: `Last reported for ${latestOspfEdge.plan_name}; ${ospfCostEstimate(latestOspfEdge)}.`,
       label: "OSPF cost",
       value: ospfCostSummary(latestOspfEdge),
     });
@@ -1027,12 +1259,6 @@ function edgeMatchesHealth(
   if (filter === "all") {
     return true;
   }
-  if (filter === "disabled") {
-    return !edge.enabled;
-  }
-  if (!edge.enabled) {
-    return false;
-  }
   if (filter === "attention") {
     return (
       edge.health === "degraded" ||
@@ -1048,12 +1274,6 @@ function edgeMatchesHealth(
   return edge.health === "unknown";
 }
 
-function effectiveEdgeHealth(
-  edge: TopologyGraphEdge,
-): TopologyEdgeHealthStatus {
-  return edge.enabled ? edge.health : "disabled";
-}
-
 function buildNodeTunnelStats(
   edges: TopologyGraphEdge[],
 ): Map<string, NodeTunnelStats> {
@@ -1063,17 +1283,12 @@ function buildNodeTunnelStats(
       const stats = statsByClientId.get(clientId) ?? {
         ...EMPTY_NODE_TUNNEL_STATS,
       };
-      stats.total += 1;
-      if (!edge.enabled) {
-        stats.disabled += 1;
-      } else {
-        stats.enabled += 1;
-        if (edgeMatchesHealth(edge, "healthy")) {
-          stats.healthy += 1;
-        }
-        if (edgeMatchesHealth(edge, "attention")) {
-          stats.attention += 1;
-        }
+      stats.enabled += 1;
+      if (edgeMatchesHealth(edge, "healthy")) {
+        stats.healthy += 1;
+      }
+      if (edgeMatchesHealth(edge, "attention")) {
+        stats.attention += 1;
       }
       statsByClientId.set(clientId, stats);
     }
@@ -1088,7 +1303,7 @@ function edgeSearchText(edge: TopologyGraphEdge): string {
     edge.interface_name,
     edge.kind,
     edge.health,
-    edge.enabled ? "enabled" : "disabled",
+    "enabled",
     edge.neighbor_state ?? "",
     edge.reachability_state ?? "",
     edge.left_reachability_state,
@@ -1143,10 +1358,21 @@ function edgeMetric(edge: TopologyGraphEdge): string {
 }
 
 function edgeInlineMetric(edge: TopologyGraphEdge): string {
-  if (!edge.enabled) {
-    return "disabled plan";
-  }
   return `${latencyLabel(edge)} / ${lossLabel(edge.packet_loss_avg_ratio)} / ${bandwidthLabel(edge)}`;
+}
+
+function graphEdgeLabel(edge: TopologyGraphEdge): string {
+  // Match the existing node label's compact length; full names remain on hover.
+  const name = edge.plan_name.length > 24
+    ? `${edge.plan_name.slice(0, 23)}…`
+    : edge.plan_name;
+  if (!edge.ospf_enabled) return name;
+  const left = edge.left_current_ospf_cost;
+  const right = edge.right_current_ospf_cost;
+  const cost = left !== null && left === right
+    ? String(left)
+    : `L${left ?? "?"}/R${right ?? "?"}`;
+  return `${name} · ${cost}`;
 }
 
 function latencyLabel(edge: TopologyGraphEdge): string {
@@ -1174,12 +1400,26 @@ function lossLabel(value: number | null): string {
 }
 
 function ospfCostSummary(edge: TopologyGraphEdge): string {
+  if (!edge.ospf_enabled) return "OSPF off";
+  const left = edge.left_current_ospf_cost;
+  const right = edge.right_current_ospf_cost;
+  return left !== null && left === right
+    ? `OSPF ${left}`
+    : `OSPF L ${left ?? "?"} / R ${right ?? "?"}`;
+}
+
+function reportedOspfCostDetail(edge: TopologyGraphEdge): string {
+  if (!edge.ospf_enabled) return "OSPF off";
+  return `Last reported OSPF cost: L ${edge.left_current_ospf_cost ?? "unknown"} (${humanStatus(edge.left_ospf_status)}) · R ${edge.right_current_ospf_cost ?? "unknown"} (${humanStatus(edge.right_ospf_status)}). L/R follow the plan's endpoint order.`;
+}
+
+function ospfCostEstimate(edge: TopologyGraphEdge): string {
   if (edge.recommended_ospf_cost === null) {
-    return "OSPF off";
+    return "No OSPF estimate";
   }
   return edge.cost_delta === null
-    ? `OSPF ${edge.recommended_ospf_cost}`
-    : `OSPF ${edge.recommended_ospf_cost} (${edge.cost_delta > 0 ? "+" : ""}${edge.cost_delta})`;
+    ? `Estimate ${edge.recommended_ospf_cost}`
+    : `Estimate ${edge.recommended_ospf_cost} (${edge.cost_delta > 0 ? "+" : ""}${edge.cost_delta})`;
 }
 
 function ospfCostReason(edge: TopologyGraphEdge): string {
@@ -1190,9 +1430,6 @@ function ospfCostReason(edge: TopologyGraphEdge): string {
 }
 
 function edgeStatusDetail(edge: TopologyGraphEdge): string {
-  if (!edge.enabled) {
-    return "disabled";
-  }
   const unavailableCount = edgeUnavailableClientIds(edge).length;
   if (unavailableCount > 0) {
     return `${unavailableCount} endpoint${unavailableCount === 1 ? "" : "s"} unavailable`;
@@ -1373,7 +1610,6 @@ function nodeHoverDetail(
     `status ${statusDetail}`,
     `${stats.healthy}/${stats.enabled} enabled tunnels healthy`,
     `${stats.attention} need attention`,
-    `${stats.disabled} disabled`,
     `region ${regionLabel(node)}`,
     node.latest_observed_at
       ? `observed ${formatTime(node.latest_observed_at)}`
@@ -1387,11 +1623,12 @@ function edgeHoverDetail(
   mode: VpsNameDisplayMode,
 ): string {
   return [
-    edge.plan_name,
+    `${edge.plan_name} · ${edge.kind.toUpperCase()}`,
     edgeEndpointLabel(edge, nodeById, mode),
     humanStatus(edge.health),
     edgeInlineMetric(edge),
-    ospfCostSummary(edge),
+    reportedOspfCostDetail(edge),
+    ...(edge.ospf_enabled ? [ospfCostEstimate(edge)] : []),
     ospfCostReason(edge),
     ...edgeAvailabilityReasons(edge).map(
       (reason) => `availability diagnostic: ${reason}`,

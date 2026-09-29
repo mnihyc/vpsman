@@ -7722,6 +7722,92 @@ async fn postgres_topology_graph_preserves_disconnected_and_revoked_endpoints() 
 }
 
 #[tokio::test]
+async fn postgres_topology_graph_reports_endpoint_ospf_costs_separately_from_estimates() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let left = "graph-cost-left";
+    let right = "graph-cost-right";
+    for client_id in [left, right] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "graph-cost".to_string();
+    input.runtime_control = Default::default();
+    input.left_client_id = left.to_string();
+    input.right_client_id = right.to_string();
+    input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.ospf = Some(TunnelOspfConfig {
+        mode: OspfControlMode::Automatic,
+        planned_latency_ms: 20.0,
+        planned_packet_loss_ratio: 0.0,
+        preference: 1.0,
+        policy: OspfCostPolicy::default(),
+        min_cost_delta: 5,
+        healthy_windows: 1,
+        left_adapter_definition_id: Some(Uuid::new_v4().to_string()),
+        right_adapter_definition_id: Some(Uuid::new_v4().to_string()),
+    });
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
+    let plan = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let end = Utc::now().timestamp() + 1;
+    let graph = db
+        .repo
+        .topology_graph(24, end - 3_600, end, &[plan.id])
+        .await
+        .unwrap();
+    let edge = &graph.edges[0];
+    assert!(edge.ospf_enabled);
+    assert!(edge.recommended_ospf_cost.is_some());
+    assert_eq!(edge.left_current_ospf_cost, None);
+    assert_eq!(edge.right_current_ospf_cost, None);
+
+    let left_job = Uuid::new_v4();
+    let right_job = Uuid::new_v4();
+    db.repo
+        .stage_tunnel_plan_ospf_jobs(
+            plan.id,
+            plan.revision,
+            None,
+            None,
+            None,
+            left_job,
+            right_job,
+            &operator,
+        )
+        .await
+        .unwrap();
+    for (side, job, cost) in [
+        (TunnelEndpointSide::Left, left_job, 14),
+        (TunnelEndpointSide::Right, right_job, 18),
+    ] {
+        db.repo
+            .record_tunnel_plan_ospf_job_result(plan.id, side, job, Some(cost), true)
+            .await
+            .unwrap();
+    }
+    // Historical measurement windows must still expose the latest reported costs.
+    let graph = db
+        .repo
+        .topology_graph(24, end - 7_200, end - 3_600, &[plan.id])
+        .await
+        .unwrap();
+    let edge = &graph.edges[0];
+    assert_eq!(edge.left_current_ospf_cost, Some(14));
+    assert_eq!(edge.right_current_ospf_cost, Some(18));
+    assert_eq!(edge.left_ospf_status, "verified");
+    assert_eq!(edge.right_ospf_status, "verified");
+    assert_eq!(edge.recommended_ospf_cost, plan.recommended_ospf_cost);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_topology_graph_latest_loss_uses_current_reachability_samples() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;

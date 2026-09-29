@@ -1347,6 +1347,20 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--canvas);
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+
+.topologyGraphCanvas.dragging,
+.topologyGraphCanvas.dragging .topologyGraphNode {
+  cursor: grabbing;
+}
+
+.topologyGraphHelp {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .topologyGraphTitleRow {
@@ -1513,31 +1527,64 @@
   color: var(--primary-text);
 }
 
-.topologyGraphEdge line {
+.topologyGraphEdgeLine {
+  fill: none;
   stroke: var(--muted);
   stroke-width: 2;
 }
 
-.topologyGraphEdge.healthy line {
+.topologyGraphEdge.healthy .topologyGraphEdgeLine {
   stroke: var(--success);
 }
 
-.topologyGraphEdge.degraded line {
+.topologyGraphEdge.degraded .topologyGraphEdgeLine {
   stroke: var(--warning-text);
   stroke-dasharray: 6 5;
 }
 
-.topologyGraphEdge.unknown line {
+.topologyGraphEdge.unknown .topologyGraphEdgeLine {
   stroke: var(--muted);
   stroke-dasharray: 3 5;
 }
 
-.topologyGraphEdge.disabled line {
-  stroke: var(--placeholder);
-  stroke-dasharray: 3 5;
+.topologyGraphEdgeHit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  cursor: pointer;
 }
 
-.topologyGraphEdge text,
+.topologyGraphEdge {
+  outline: none;
+}
+
+.topologyGraphEdge:hover .topologyGraphEdgeLine,
+.topologyGraphEdge.selected .topologyGraphEdgeLine,
+.topologyGraphEdge:focus-visible .topologyGraphEdgeLine {
+  stroke-width: 4;
+}
+
+.topologyGraphEdgeLabel rect {
+  fill: var(--canvas);
+  stroke: var(--border);
+}
+
+.topologyGraphLabelLeaders {
+  pointer-events: none;
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+
+.topologyGraphEdgeLabel {
+  cursor: pointer;
+}
+
+.topologyGraphEdgeLabel.selected rect {
+  stroke: var(--primary);
+  stroke-width: 2;
+}
+
+.topologyGraphEdgeLabel text,
 .topologyGraphNode text {
   fill: var(--text);
   font-size: 12px;
@@ -1564,7 +1611,7 @@
 }
 
 .topologyGraphNode {
-  cursor: pointer;
+  cursor: grab;
   outline: 0;
 }
 
@@ -1675,7 +1722,8 @@
   pointer-events: none;
 }
 
-.topologyGraphMinimap line {
+.topologyGraphMinimap path {
+  fill: none;
   stroke: var(--primary-border);
   stroke-width: 7;
 }
@@ -1728,6 +1776,15 @@
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.topologyGraphSelectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 0 18px;
 }
 
 .topologyGraphEdgeRow {
