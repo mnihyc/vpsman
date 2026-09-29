@@ -227,6 +227,13 @@ impl Repository {
                 &observations,
                 |observation| observation.throughput_mbps,
             );
+            let latest_packet_loss_ratio = latest_measurement_value(
+                plan.id,
+                &topology_identity_hash,
+                "tunnel_reachability",
+                &observations,
+                |observation| observation.packet_loss_ratio,
+            );
             let edge = TopologyGraphEdgeView {
                 plan_id: plan.id,
                 topology_identity_hash,
@@ -274,6 +281,7 @@ impl Repository {
                 latest_latency_avg_ms,
                 latency_series_ms: evidence.latency_series_ms,
                 packet_loss_avg_ratio: summary.packet_loss_avg_ratio,
+                latest_packet_loss_ratio,
                 throughput_avg_mbps: summary.throughput_avg_mbps,
                 latest_speed_mbps,
                 throughput_max_mbps: summary.throughput_max_mbps,

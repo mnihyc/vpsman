@@ -69,6 +69,7 @@ pub(crate) struct TopologyGraphEdgeView {
     pub(crate) latest_latency_avg_ms: Option<f64>,
     pub(crate) latency_series_ms: Vec<f64>,
     pub(crate) packet_loss_avg_ratio: Option<f64>,
+    pub(crate) latest_packet_loss_ratio: Option<f64>,
     pub(crate) throughput_avg_mbps: Option<f64>,
     pub(crate) latest_speed_mbps: Option<f64>,
     pub(crate) throughput_max_mbps: Option<f64>,

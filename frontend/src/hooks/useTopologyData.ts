@@ -496,6 +496,9 @@ export function useTopologyData(
         commandType === "network_routing_apply"
       ) {
         await Promise.all([
+          ...(["overview", "tunnel_plans", "ospf", "evidence"].includes(subpage)
+            ? [loadTunnelPlans()]
+            : []),
           ...(["network_metrics", "evidence"].includes(subpage)
             ? [loadOspfRecommendations()]
             : []),
@@ -510,6 +513,7 @@ export function useTopologyData(
       loadOspfRecommendations,
       loadOspfUpdatePlans,
       loadTopologyGraph,
+      loadTunnelPlans,
       refreshRecentNetworkObservations,
     ],
   );

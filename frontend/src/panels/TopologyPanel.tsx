@@ -1330,6 +1330,44 @@ function TunnelPlansWorkspace({
         size: 165,
       },
       {
+        id: "latest_loss",
+        header: "Loss rate",
+        headerTitle: "Latest measured packet loss in the graph range",
+        cell: (plan) => {
+          const loss = runtimeEdgeByPlan.get(plan.id)?.latest_packet_loss_ratio;
+          return (
+            <span
+              className="historyPrimary"
+              title={
+                loss == null
+                  ? "No loss measurement in graph range"
+                  : `Latest loss: ${formatNetworkMeasurement(loss * 100)}% (graph range)`
+              }
+            >
+              <strong>
+                {loss == null
+                  ? "-"
+                  : `${formatNetworkMeasurement(loss * 100)}%`}
+              </strong>
+              <small>
+                {loss == null
+                  ? "No reachability evidence"
+                  : "Latest in graph range"}
+              </small>
+            </span>
+          );
+        },
+        searchValue: (plan) => {
+          const loss = runtimeEdgeByPlan.get(plan.id)?.latest_packet_loss_ratio;
+          return loss == null ? "no loss evidence" : `${loss * 100}% packet loss`;
+        },
+        sortValue: (plan) =>
+          runtimeEdgeByPlan.get(plan.id)?.latest_packet_loss_ratio ??
+          Number.MAX_SAFE_INTEGER,
+        minSize: 145,
+        size: 165,
+      },
+      {
         id: "latest_speed",
         header: "Latest speed",
         cell: (plan) => {
@@ -1365,18 +1403,15 @@ function TunnelPlansWorkspace({
       {
         id: "ospf",
         header: "OSPF",
+        headerTitle: "Last reported OSPF cost at each endpoint",
         cell: (plan) => (
           <span className="historyPrimary">
             <strong
               title={
-                plan.plan.ospf
-                  ? `${plan.recommended_ospf_cost ?? "unknown"} cost`
-                  : "OSPF off"
+                plan.plan.ospf ? formatReportedOspfCostTitle(plan) : "OSPF off"
               }
             >
-              {plan.plan.ospf
-                ? `${plan.recommended_ospf_cost ?? "?"} cost`
-                : "Off"}
+              {plan.plan.ospf ? formatReportedOspfCost(plan) : "Off"}
             </strong>
             <small
               title={
@@ -1393,11 +1428,13 @@ function TunnelPlansWorkspace({
         ),
         searchValue: (plan) =>
           plan.plan.ospf
-            ? `${formatOspfMode(plan.plan.ospf.mode)} ${plan.ospf_status}`
+            ? `${formatPlanOspf(plan)} ${plan.left_ospf_status} ${plan.right_ospf_status}`
             : "OSPF off tunnel only",
         sortValue: (plan) =>
           plan.plan.ospf
-            ? (plan.recommended_ospf_cost ?? Number.MAX_SAFE_INTEGER)
+            ? (plan.left_current_ospf_cost ??
+              plan.right_current_ospf_cost ??
+              Number.MAX_SAFE_INTEGER)
             : Number.MAX_SAFE_INTEGER,
         size: 160,
       },
@@ -2187,6 +2224,12 @@ function TunnelPlanDetails({
           />
         ) : null}
         <PlanFact label="OSPF control" value={formatPlanOspf(plan)} />
+        {plan.plan.ospf ? (
+          <PlanFact
+            label="Configured OSPF"
+            value={formatPlanOspfConfiguration(plan)}
+          />
+        ) : null}
       </div>
       <form
         className="tunnelConnectionAssessment"
@@ -6335,7 +6378,24 @@ function wireguardEndpointModeLabel(
 function formatPlanOspf(plan: TunnelPlanRecord): string {
   const ospf = plan.plan.ospf;
   if (!ospf) return "Off";
-  return `${formatOspfMode(ospf.mode)} · cost ${plan.recommended_ospf_cost ?? "unknown"} · ${readableTelemetryToken(plan.ospf_status)}`;
+  return `${formatOspfMode(ospf.mode)} · last reported cost L ${plan.left_current_ospf_cost ?? "unknown"} / R ${plan.right_current_ospf_cost ?? "unknown"} · ${readableTelemetryToken(plan.ospf_status)}`;
+}
+
+function formatReportedOspfCost(plan: TunnelPlanRecord): string {
+  const left = plan.left_current_ospf_cost;
+  const right = plan.right_current_ospf_cost;
+  if (left != null && left === right) return `${left} cost`;
+  return `L ${left ?? "?"} / R ${right ?? "?"}`;
+}
+
+function formatReportedOspfCostTitle(plan: TunnelPlanRecord): string {
+  return `Reported cost: L ${plan.left_current_ospf_cost ?? "unknown"} (${readableTelemetryToken(plan.left_ospf_status)}) · R ${plan.right_current_ospf_cost ?? "unknown"} (${readableTelemetryToken(plan.right_ospf_status)})`;
+}
+
+function formatPlanOspfConfiguration(plan: TunnelPlanRecord): string {
+  const ospf = plan.plan.ospf;
+  if (!ospf) return "Off";
+  return `Latency ${formatNetworkMeasurement(ospf.planned_latency_ms)} ms · Loss ${formatNetworkMeasurement(ospf.planned_packet_loss_ratio * 100)}% · Preference ${ospf.preference} · Preference bias ${ospf.policy.preference_bias} · Preview cost ${plan.recommended_ospf_cost ?? "unknown"}`;
 }
 
 function formatTunnelKind(kind: TunnelKind): string {

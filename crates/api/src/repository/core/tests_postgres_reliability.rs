@@ -7693,6 +7693,7 @@ async fn postgres_topology_graph_preserves_disconnected_and_revoked_endpoints() 
             Some("probe_failed")
         );
         assert_eq!(edge.packet_loss_avg_ratio, Some(1.0));
+        assert_eq!(edge.latest_packet_loss_ratio, Some(1.0));
         assert_eq!(edge.latency_avg_ms, None);
         assert_eq!(edge.latest_latency_avg_ms, None);
         assert!(edge.latency_series_ms.is_empty());
@@ -7717,6 +7718,96 @@ async fn postgres_topology_graph_preserves_disconnected_and_revoked_endpoints() 
             );
         }
     }
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_topology_graph_latest_loss_uses_current_reachability_samples() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let left = "graph-loss-left";
+    let right = "graph-loss-right";
+    for client_id in [left, right] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "graph-loss".to_string();
+    input.runtime_control = Default::default();
+    input.left_client_id = left.to_string();
+    input.right_client_id = right.to_string();
+    input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    let plan = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let identity = crate::repository_network_observations::topology_identity_hash_for_plan(&plan);
+    let previous_identity = "previous-topology";
+    let end = Utc::now().timestamp() + 1;
+    let graph = db
+        .repo
+        .topology_graph(24, end - 3_600, end, &[plan.id])
+        .await
+        .unwrap();
+    assert_eq!(graph.edges[0].latest_packet_loss_ratio, None);
+
+    let job_id = Uuid::new_v4();
+    insert_job_target(&db.pool, job_id, right, "completed", false, None).await;
+    // Recent status, missing measurements and a previous topology must not mask
+    // the latest measured reachability loss. Zero is evidence, not missing data.
+    for (age_seconds, kind, topology, loss) in [
+        (180, "tunnel_reachability", identity.as_str(), Some(0.25)),
+        (120, "tunnel_reachability", identity.as_str(), Some(0.0)),
+        (60, "network_status", identity.as_str(), Some(0.75)),
+        (30, "tunnel_reachability", identity.as_str(), None),
+        (10, "tunnel_reachability", previous_identity, Some(1.0)),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO network_observations (
+                id, job_id, client_id, kind, source, plan_id, topology_identity_hash,
+                plan_name, interface_name, peer_client_id, endpoint_side, address_family,
+                target, stale_after_secs, packet_loss_ratio, observed_at
+            ) VALUES (
+                $1, $2, $3, $4, 'manual', $5, $6,
+                $7, $8, $9, 'right', 'ipv4', $10, 180, $11, to_timestamp($12)
+            )
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(job_id)
+        .bind(right)
+        .bind(kind)
+        .bind(plan.id)
+        .bind(topology)
+        .bind(&plan.name)
+        .bind(&plan.plan.interface_name)
+        .bind(left)
+        .bind(&input.ipv4_tunnel.as_ref().unwrap().left)
+        .bind(loss)
+        .bind((end - age_seconds) as f64)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let graph = db
+        .repo
+        .topology_graph(24, end - 3_600, end, &[plan.id])
+        .await
+        .unwrap();
+    assert_eq!(graph.edges[0].latest_packet_loss_ratio, Some(0.0));
+    assert!(graph.edges[0].packet_loss_avg_ratio.unwrap() > 0.0);
+
+    // The latest value follows the selected graph range, just like latency.
+    let graph = db
+        .repo
+        .topology_graph(24, end - 60, end, &[plan.id])
+        .await
+        .unwrap();
+    assert_eq!(graph.edges[0].latest_packet_loss_ratio, None);
     db.cleanup().await;
 }
 

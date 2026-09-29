@@ -3940,6 +3940,7 @@ const topologyGraph = {
       kind: "gre",
       latency_avg_ms: 12.4,
       latest_latency_avg_ms: 12.4,
+      latest_packet_loss_ratio: 1,
       latest_speed_mbps: 10.1,
       latency_primary_family: "ipv4",
       latency_series_ms: [13.8, 12.9, 12.4],

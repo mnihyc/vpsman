@@ -2541,6 +2541,7 @@ export type TopologyGraphEdge = {
   latest_latency_avg_ms: number | null;
   latency_series_ms: number[];
   packet_loss_avg_ratio: number | null;
+  latest_packet_loss_ratio: number | null;
   throughput_avg_mbps: number | null;
   latest_speed_mbps: number | null;
   throughput_max_mbps: number | null;
