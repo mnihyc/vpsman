@@ -29037,19 +29037,19 @@ async fn postgres_fresh_schema_has_disabled_resource_policy_starters() {
                 Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4").unwrap(),
                 "Predefined CPU utilization".to_string(),
                 false,
-                "status:online".to_string(),
+                "*".to_string(),
             ),
             (
                 Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5").unwrap(),
                 "Predefined memory availability".to_string(),
                 false,
-                "status:online".to_string(),
+                "*".to_string(),
             ),
             (
                 Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6").unwrap(),
                 "Predefined disk availability".to_string(),
                 false,
-                "status:online".to_string(),
+                "*".to_string(),
             ),
         ]
     );
