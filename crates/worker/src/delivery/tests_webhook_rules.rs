@@ -2792,37 +2792,266 @@ fn automatic_delivery_cooldown_blocks_new_events_but_not_boundary_event() {
         false,
         1_300,
         1_299,
-        "job.created"
+        "job.created",
+        300,
     ));
     assert!(!delivery_candidate_is_suppressed(
         false,
         1_300,
         1_300,
-        "job.created"
+        "job.created",
+        300,
     ));
     assert!(delivery_candidate_is_suppressed(
         true,
         0,
         1_300,
-        "job.created"
+        "job.created",
+        0,
     ));
+}
+
+#[tokio::test]
+async fn postgres_zero_webhook_cooldown_keeps_distinct_and_late_events() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let zero = insert_webhook_test_rule(
+        &db.pool,
+        "zero",
+        "job.created || alert.triggered || alert.resolved",
+    )
+    .await;
+    let positive = insert_webhook_test_rule(
+        &db.pool,
+        "positive",
+        "job.created || alert.triggered || alert.resolved",
+    )
+    .await;
+    let actor = Uuid::new_v4();
+    sqlx::query("INSERT INTO operators(id,username,password_hash,status,role,scopes) VALUES($1,'cooldown-owner','unused','active','admin','[]'::jsonb)")
+        .bind(actor).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE webhook_rules SET actor_id=$1")
+        .bind(actor)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE webhook_rules SET cooldown_secs=300 WHERE id=$1")
+        .bind(positive)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let at = Utc::now();
+    for client in ["cooldown-a", "cooldown-b", "cooldown-c"] {
+        insert_webhook_test_client(&db.pool, client, "online", false).await;
+        let mut tx = db.pool.begin().await.unwrap();
+        insert_webhook_event_at_in_tx(
+            &mut tx,
+            "job.created",
+            &format!("job:{client}"),
+            &["job.created".to_string()],
+            &[client.to_string()],
+            json!({"job":{"id":client}}),
+            at,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
+        .await
+        .unwrap();
+    for (rule, expected) in [(zero, 3_i64), (positive, 1)] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM webhook_rule_deliveries WHERE rule_id=$1")
+                .bind(rule)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, expected);
+    }
+    // A late source event is distinct work, even though its timestamp precedes
+    // an already materialized delivery. Zero means the window is disabled.
+    let mut tx = db.pool.begin().await.unwrap();
+    insert_webhook_event_at_in_tx(
+        &mut tx,
+        "job.created",
+        "job:late",
+        &["job.created".to_string()],
+        &["cooldown-a".to_string()],
+        json!({"job":{"id":"late"}}),
+        at - ChronoDuration::seconds(1),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
+        .await
+        .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM webhook_rule_deliveries WHERE rule_id=$1")
+            .bind(zero)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 4, "zero cooldown suppressed a distinct late event");
+    sqlx::query("UPDATE webhook_rules SET cooldown_secs=0 WHERE id=$1")
+        .bind(positive)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    insert_webhook_event(
+        &db.pool,
+        "job.created",
+        "job:after-off",
+        &["job.created"],
+        &["cooldown-a".to_string()],
+        json!({"job":{"id":"after-off"}}),
+    )
+    .await
+    .unwrap();
+    process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_id='job:after-off'").bind(positive).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(count, 1, "turning cooldown off must ignore the old window");
+    sqlx::query("UPDATE webhook_rules SET cooldown_secs=300 WHERE id=$1")
+        .bind(positive)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    // Lifecycle edges have their own existing exemption, independently of
+    // whether an ordinary event already opened the rule's cooldown window.
+    for kind in ["alert.triggered", "alert.resolved"] {
+        for client in ["cooldown-a", "cooldown-b", "cooldown-c"] {
+            insert_webhook_event(
+                &db.pool,
+                kind,
+                &format!("{kind}:{client}"),
+                &[kind],
+                &[client.to_string()],
+                json!({"alert":{"id":format!("episode:{client}"),"client_id":client}}),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
+        .await
+        .unwrap();
+    process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default(), None)
+        .await
+        .unwrap();
+    for rule in [zero, positive] {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_rule_deliveries WHERE rule_id=$1 AND event_kind IN ('alert.triggered','alert.resolved')").bind(rule).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(count, 6);
+    }
+    if matches!(
+        std::env::var(vpsman_server_core::DEVELOPMENT_LOOPBACK_WEBHOOKS_ENV).as_deref(),
+        Ok("1" | "true")
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let expected: Vec<SqlJson<Value>> =
+            sqlx::query_scalar("SELECT payload FROM webhook_rule_deliveries ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        let expected_count = expected.len();
+        assert_eq!(expected_count, 19);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/cooldown-proof", listener.local_addr().unwrap());
+        sqlx::query("UPDATE webhook_rules SET target=$1")
+            .bind(&target)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE webhook_rule_deliveries SET target=$1")
+            .bind(&target)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let receiver = tokio::spawn(async move {
+            let mut received = Vec::new();
+            for _ in 0..expected_count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let (start, length) = loop {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        break (end + 4, length);
+                    }
+                };
+                while bytes.len() < start + length {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                received
+                    .push(serde_json::from_slice::<Value>(&bytes[start..start + length]).unwrap());
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+            received
+        });
+        let run = process_due_webhook_deliveries(&db.pool, WebhookRuleWorkerConfig::default())
+            .await
+            .unwrap();
+        assert_eq!((run.delivered, run.failed), (expected_count, 0));
+        let received = tokio::time::timeout(Duration::from_secs(5), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        let keys = |values: Vec<Value>| {
+            values
+                .into_iter()
+                .map(|value| {
+                    (
+                        value["rule"]["id"].as_str().unwrap().to_string(),
+                        value["event"]["id"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            keys(received),
+            keys(expected.into_iter().map(|value| value.0).collect())
+        );
+    } else {
+        eprintln!("HTTP phase requires VPSMAN_DEV_ALLOW_LOOPBACK_WEBHOOKS=1");
+    }
+    db.cleanup().await;
 }
 
 #[test]
 fn alert_lifecycle_edges_bypass_rule_cooldown_but_keep_exact_dedupe() {
     for event_kind in ["alert.triggered", "alert.resolved"] {
         assert!(!delivery_candidate_is_suppressed(
-            false, 1_300, 1_100, event_kind
+            false, 1_300, 1_100, event_kind, 300,
         ));
         assert!(delivery_candidate_is_suppressed(
-            true, 1_300, 1_100, event_kind
+            true, 1_300, 1_100, event_kind, 300,
         ));
     }
     assert!(delivery_candidate_is_suppressed(
         false,
         1_300,
         1_100,
-        "job.created"
+        "job.created",
+        300,
     ));
 }
 

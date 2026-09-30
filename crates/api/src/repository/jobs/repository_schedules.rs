@@ -149,6 +149,11 @@ impl Repository {
                         last_error,
                         next_run_at::text AS next_run_at,
                         last_run_at::text AS last_run_at,
+                        last_job_id,
+                        COALESCE((SELECT status FROM jobs WHERE id=schedules.last_job_id), last_job_status) AS last_job_status,
+                        (SELECT created_at::text FROM jobs WHERE id=schedules.last_job_id) AS last_job_created_at,
+                        COALESCE((SELECT completed_at FROM jobs WHERE id=schedules.last_job_id), last_job_completed_at)::text AS last_job_completed_at,
+                        last_job_error,
                         deferred_until::text AS deferred_until,
                         deleted_at::text AS deleted_at,
                         created_at::text AS created_at,
@@ -799,6 +804,11 @@ pub(crate) enum ScheduleTargetBatchUpdateResult {
 }
 
 struct ScheduleRowParts {
+    last_job_id: Option<Uuid>,
+    last_job_status: Option<String>,
+    last_job_created_at: Option<String>,
+    last_job_completed_at: Option<String>,
+    last_job_error: Option<String>,
     max_timeout_secs: Option<u64>,
     id: Uuid,
     name: String,
@@ -850,6 +860,11 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> Result<ScheduleView> {
         (ScheduleTriggerKind::Event, _) => (Vec::new(), None),
     };
     Ok(ScheduleView {
+        last_job_id: parts.last_job_id,
+        last_job_status: parts.last_job_status,
+        last_job_created_at: parts.last_job_created_at,
+        last_job_completed_at: parts.last_job_completed_at,
+        last_job_error: parts.last_job_error,
         max_timeout_secs: parts.max_timeout_secs,
         id: parts.id,
         name: parts.name,
@@ -912,6 +927,11 @@ fn schedule_select_sql(where_clause: &str) -> String {
             last_error,
             next_run_at::text AS next_run_at,
             last_run_at::text AS last_run_at,
+            last_job_id,
+            COALESCE((SELECT status FROM jobs WHERE id=schedules.last_job_id), last_job_status) AS last_job_status,
+            (SELECT created_at::text FROM jobs WHERE id=schedules.last_job_id) AS last_job_created_at,
+            COALESCE((SELECT completed_at FROM jobs WHERE id=schedules.last_job_id), last_job_completed_at)::text AS last_job_completed_at,
+            last_job_error,
             deferred_until::text AS deferred_until,
             deleted_at::text AS deleted_at,
             created_at::text AS created_at,
@@ -942,6 +962,11 @@ fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView
     let (operation, operation_error, operation_payload_hash) =
         decode_stored_schedule_operation(operation, trigger_kind, event_argv_template.as_deref());
     schedule_view_from_row(ScheduleRowParts {
+        last_job_id: row.try_get("last_job_id")?,
+        last_job_status: row.try_get("last_job_status")?,
+        last_job_created_at: row.try_get("last_job_created_at")?,
+        last_job_completed_at: row.try_get("last_job_completed_at")?,
+        last_job_error: row.try_get("last_job_error")?,
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         enabled: row.try_get("enabled")?,
@@ -1045,6 +1070,11 @@ pub(crate) async fn create_schedule_record_postgres_in_tx(
             trigger_kind,
             run_on,
             definition_revision,
+            last_job_id,
+            last_job_status,
+            NULL::text AS last_job_created_at,
+            last_job_completed_at::text AS last_job_completed_at,
+            last_job_error,
             operation,
             event_argv_template,
             selector_expression,

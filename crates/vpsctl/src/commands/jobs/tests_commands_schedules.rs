@@ -168,6 +168,28 @@ fn schedule_timeout_override_preserves_defaults_and_existing_bounds() {
 }
 
 #[test]
+fn schedule_failure_tolerance_validation_preserves_signed_values() {
+    for trigger in [ScheduleTriggerKindArg::Cron, ScheduleTriggerKindArg::Event] {
+        for max_failures in [-2, -1, 0, 1, 100, 101] {
+            let mut options = base_options(trigger);
+            options.max_failures = max_failures;
+            match trigger {
+                ScheduleTriggerKindArg::Cron => options.command = Some("/bin/true".to_string()),
+                ScheduleTriggerKindArg::Event => {
+                    options.event_expression = Some("alert.triggered".to_string())
+                }
+            }
+            let result = ScheduleDefinition::from_options(options);
+            if (-1..=100).contains(&max_failures) {
+                assert_eq!(result.unwrap().max_failures, max_failures);
+            } else {
+                assert!(result.unwrap_err().to_string().contains("--max-failures"));
+            }
+        }
+    }
+}
+
+#[test]
 fn cron_definition_preserves_the_existing_defaults() {
     let mut options = base_options(ScheduleTriggerKindArg::Cron);
     options.command = Some("/bin/true".to_string());

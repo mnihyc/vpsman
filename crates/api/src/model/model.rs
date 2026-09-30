@@ -1358,6 +1358,11 @@ pub(crate) struct BulkUpdateScheduleTargetsResponse {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ScheduleView {
+    pub(crate) last_job_id: Option<Uuid>,
+    pub(crate) last_job_status: Option<String>,
+    pub(crate) last_job_created_at: Option<String>,
+    pub(crate) last_job_completed_at: Option<String>,
+    pub(crate) last_job_error: Option<String>,
     pub(crate) max_timeout_secs: Option<u64>,
     pub(crate) id: Uuid,
     pub(crate) name: String,
@@ -1471,7 +1476,9 @@ fn default_schedule_enabled() -> bool {
 }
 
 fn default_schedule_max_failures() -> i32 {
-    3
+    // -1 disables failure-based pausing; nonnegative values count failures
+    // tolerated before pausing on the next failure.
+    -1
 }
 
 #[derive(Debug, Deserialize)]

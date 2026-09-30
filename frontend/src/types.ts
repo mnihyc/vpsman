@@ -2096,6 +2096,11 @@ export type ScheduleTriggerKind = "cron" | "event";
 export type ScheduleRunOn = "triggered_only" | "all_at_once";
 
 export type ScheduleRecord = {
+  last_job_id?: string | null;
+  last_job_status?: GeneratedJobStatus | null;
+  last_job_created_at?: string | null;
+  last_job_completed_at?: string | null;
+  last_job_error?: string | null;
   id: string;
   name: string;
   enabled: boolean;

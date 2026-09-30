@@ -3052,7 +3052,7 @@ test("clears a single-VPS rule prefill for multi-target and empty matches", asyn
 
   await selector.fill("country:DE");
   await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("");
-  await expect(editor).toContainText(
+  await expect(editor).not.toContainText(
     "No existing VPS rules for agent-fra-02; fields remain blank",
   );
   await expect
@@ -3098,6 +3098,7 @@ test(
 
     await expect(vpsRuleTextbox(editor, "Port speed")).toHaveValue("400 Mbps");
     await expect(vpsRuleTextbox(editor, "Reset day")).toHaveValue("");
+    await expect(editor.getByText(/Loading existing VPS rules|Loaded \d+ existing/)).toHaveCount(0);
     await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("");
     await expect(vpsRuleTextbox(editor, "Interfaces / selectors")).toHaveValue(
       "",
@@ -3203,7 +3204,7 @@ test("reconciles a confirmed one-VPS unset into the prefilled fields", async ({
   await expect(
     page.locator(".vpsRulesActionFeedback.actionFeedbackSuccess"),
   ).toContainText("applied 1 VPS rule changes");
-  await expect(editor).toContainText(
+  await expect(editor).not.toContainText(
     "Loaded 3 existing rules for agent-sfo-01",
   );
   await editor.getByRole("button", { name: "Set values", exact: true }).click();
@@ -8233,6 +8234,39 @@ test(
   },
 );
 
+test("shows recorded event schedule job results without a cron run timestamp", async ({ page }, testInfo) => {
+  const cases = [
+    ["queued", "Queued"], ["running", "Running"], ["completed", "Succeeded"],
+    ["skipped", "Skipped"], ["failed", "Failed"],
+  ] as const;
+  await installConsoleApiMock(page, {
+    schedulesOverride: cases.map(([status]) => ({
+      id: `result-${status}`, name: `Event ${status}`, trigger_kind: "event",
+      last_run_at: null, last_job_id: `job-${status}`, last_job_status: status,
+      last_job_created_at: "2026-06-02T10:00:00Z",
+      last_job_completed_at: ["queued", "running"].includes(status) ? null : "2026-06-02T10:01:00Z",
+      last_job_error: status === "failed" ? "exit status 1" : null,
+      max_failures: -1, failure_count: status === "failed" ? 3 : 0,
+    })),
+  });
+  await page.goto("/");
+  await openConsoleSubpage(page, "Automation", "Schedules");
+  const grid = page.getByLabel("Schedule records data grid");
+  await expect(grid).not.toContainText("Never run");
+  await expect(grid).not.toContainText("No execution yet");
+  for (const [status, label] of cases) {
+    await expect(grid.getByText(`Event ${status}`, { exact: true })).toBeVisible();
+    await expect(grid.locator(".status").filter({ hasText: new RegExp(`^${label}$`) })).toBeVisible();
+  }
+  await expect(grid).toContainText("3 failures · automatic pause off");
+  if (!testInfo.project.name.includes("mobile")) {
+    await grid.getByRole("button", { name: /Expand Schedule records row/ }).last().click();
+    await expect(grid).toContainText("Job job-failed");
+    await expect(grid).toContainText("exit status 1");
+  }
+  await expect(grid).not.toContainText("No error reported");
+});
+
 test("creates a cron schedule from a command template with target preview", async ({
   page,
 }, testInfo) => {
@@ -8336,6 +8370,7 @@ test(
     );
 
     await page.getByRole("radio", { name: /Alert event/ }).check();
+    await expect(page.getByLabel("Schedule max failures")).toHaveValue("-1");
     await expect(page.getByLabel("Schedule cron expression")).toHaveCount(0);
     await expect(
       page.getByRole("textbox", { name: "Schedule alert event expression", exact: true }),
@@ -8391,6 +8426,7 @@ test(
       "alert.triggered && alert.category:traffic",
     );
     await expect(prompt).toContainText("Saved argv JSON");
+    await expect(prompt).toContainText("Automatic pause off");
     await expect(prompt).toContainText("Triggered rendered argv");
     const savedArgv = prompt.getByLabel("Saved argv JSON value");
     const renderedArgv = prompt.getByLabel(
@@ -8428,6 +8464,7 @@ test(
       .digest("hex");
     await expect(prompt).toContainText(`${templateHash.slice(0, 12)} → ${renderedHash.slice(0, 12)}`);
     await activate(prompt.getByRole("button", { name: "Save schedule" }));
+    await expect(prompt).toBeHidden();
 
     const request = await page.evaluate(() => {
       const requests = (
@@ -8444,7 +8481,7 @@ test(
       enabled: true,
       event_expression: "alert.triggered && alert.category:traffic",
       run_on: "triggered_only",
-      max_failures: 3,
+      max_failures: -1,
       max_timeout_secs: 120,
       name: "traffic mitigation",
       operation: null,
@@ -8497,6 +8534,29 @@ test(
     await expect(
       page.getByRole("menuitem", { name: "Review run now", exact: true }),
     ).toBeDisabled();
+    await page.keyboard.press("Escape");
+    let previousTolerance = -1;
+    for (const tolerance of [0, 2, -1]) {
+      await runGridAction(page, "Schedule records", "Edit");
+      await expect(page.getByLabel("Schedule max failures")).toHaveValue(String(previousTolerance));
+      await page.getByLabel("Schedule max failures").fill(String(tolerance));
+      await activate(page.getByRole("button", { name: "Review update", exact: true }));
+      const updatePrompt = page.getByRole("region", { name: "Confirm schedule update", exact: true });
+      await expect(updatePrompt).toContainText(tolerance === -1
+        ? "Automatic pause off"
+        : `${tolerance} tolerated; pause on failure ${tolerance + 1}`);
+      await activate(updatePrompt.getByRole("button", { name: "Update schedule", exact: true }));
+      await expect(updatePrompt).toBeHidden();
+      const saved = await page.evaluate(() => (
+        window as unknown as {
+          __vpsmanTestRequests: { schedulePrivilegeChecks: Array<{approved: boolean; intent: {max_failures: number}}> };
+        }
+      ).__vpsmanTestRequests.schedulePrivilegeChecks.at(-1));
+      expect(saved).toMatchObject({approved: true, intent: {max_failures: tolerance}});
+      previousTolerance = tolerance;
+    }
+    await runGridAction(page, "Schedule records", "Edit");
+    await expect(page.getByLabel("Schedule max failures")).toHaveValue("-1");
   },
 );
 

@@ -142,8 +142,8 @@ impl ScheduleDefinition {
             "schedule name must not be empty"
         );
         anyhow::ensure!(
-            (1..=100).contains(&options.max_failures),
-            "--max-failures must be between 1 and 100"
+            (-1..=100).contains(&options.max_failures),
+            "--max-failures must be between -1 and 100 (-1 disables automatic pausing)"
         );
         let run_on = options
             .run_on
@@ -840,8 +840,8 @@ fn validate_schedule_policy(
         "--retry-delay-secs must be between 1 and 86400"
     );
     anyhow::ensure!(
-        (1..=100).contains(&max_failures),
-        "--max-failures must be between 1 and 100"
+        (-1..=100).contains(&max_failures),
+        "--max-failures must be between -1 and 100 (-1 disables automatic pausing)"
     );
     Ok(())
 }

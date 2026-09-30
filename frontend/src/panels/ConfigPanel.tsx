@@ -3671,13 +3671,7 @@ function VpsRulesPanel({
         );
         setValuesText(serializeVpsRuleTextValues(values));
         setPrefillPending(false);
-        setPrefillFeedback({
-          message:
-            rows.length > 0
-              ? `Loaded ${rows.length} existing ${rows.length === 1 ? "rule" : "rules"} for ${singleResolvedClientId}`
-              : `No existing VPS rules for ${singleResolvedClientId}; fields remain blank`,
-          tone: "info",
-        });
+        setPrefillFeedback(null);
       })
       .catch((error) => {
         if (
@@ -3905,14 +3899,7 @@ function VpsRulesPanel({
           setUnsetKeys([]);
         }
         setValuesText(nextValuesText);
-        const refreshedCount = Object.keys(refreshedValues).length;
-        setPrefillFeedback({
-          message:
-            refreshedCount > 0
-              ? `Loaded ${refreshedCount} existing ${refreshedCount === 1 ? "rule" : "rules"} for ${reviewedSingleClientId}`
-              : `No existing VPS rules for ${reviewedSingleClientId}; fields remain blank`,
-          tone: "info",
-        });
+        setPrefillFeedback(null);
       }
     } catch (error) {
       setRuleStatus(

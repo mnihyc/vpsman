@@ -1233,7 +1233,7 @@ fn job_privilege_intent_binds_rollout_policy_hash() {
 #[test]
 fn schedule_privilege_intent_fields_match_canonical_v3_payload() {
     let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
-    let build_intent = |max_timeout_secs| {
+    let build_intent = |max_failures, max_timeout_secs| {
         canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
             action: "schedule.update",
             schedule_id: Some("schedule-a"),
@@ -1252,16 +1252,25 @@ fn schedule_privilege_intent_fields_match_canonical_v3_payload() {
             catch_up_policy: None,
             catch_up_limit: None,
             retry_delay_secs: None,
-            max_failures: 3,
+            max_failures,
             max_timeout_secs,
             deferred_until: None,
             deleted: false,
         })
         .unwrap()
     };
-    let intent = build_intent(None);
+    let intent = build_intent(3, None);
+    for max_failures in [-1, 0, 100] {
+        assert_eq!(
+            build_intent(max_failures, None),
+            intent.replace(
+                "\"max_failures\":3,",
+                &format!("\"max_failures\":{max_failures},")
+            )
+        );
+    }
     assert_eq!(
-        build_intent(Some(120)),
+        build_intent(3, Some(120)),
         intent.replace(
             "\"max_failures\":3,",
             "\"max_failures\":3,\"max_timeout_secs\":120,"

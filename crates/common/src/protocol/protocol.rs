@@ -2131,6 +2131,8 @@ pub struct SchedulePrivilegeIntentInput<'a> {
     pub catch_up_policy: Option<&'a str>,
     pub catch_up_limit: Option<i32>,
     pub retry_delay_secs: Option<i64>,
+    /// Failures tolerated before automatic pausing; -1 disables failure-based
+    /// pausing, 0 pauses on the first failure, and N >= 0 pauses on failure N + 1.
     pub max_failures: i32,
     pub max_timeout_secs: Option<u64>,
     pub deferred_until: Option<&'a str>,

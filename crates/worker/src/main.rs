@@ -5805,14 +5805,15 @@ async fn record_schedule_failure(
         r#"
         UPDATE schedules
         SET
-            failure_count = failure_count + 1,
+            -- Unlimited retries still retain a bounded INTEGER counter.
+            failure_count = LEAST(failure_count::bigint + 1, 2147483647)::integer,
             last_error = $2,
             enabled = CASE
-                WHEN failure_count + 1 >= max_failures THEN FALSE
+                WHEN max_failures >= 0 AND failure_count::bigint + 1 > max_failures THEN FALSE
                 ELSE enabled
             END,
             next_run_at = CASE
-                WHEN failure_count + 1 >= max_failures THEN next_run_at
+                WHEN max_failures >= 0 AND failure_count::bigint + 1 > max_failures THEN next_run_at
                 ELSE now() + (retry_delay_secs * interval '1 second')
             END,
             updated_at = now()

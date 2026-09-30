@@ -123,8 +123,8 @@ pub(crate) fn submit_vty_event_schedule_create(
             "invalid alert event expression; use the Schedule web UI for per-edge server preview",
         )?;
     anyhow::ensure!(
-        (1..=100).contains(&request.options.max_failures),
-        "max failures must be between 1 and 100"
+        (-1..=100).contains(&request.options.max_failures),
+        "max failures must be between -1 and 100 (-1 disables automatic pausing)"
     );
     let event_argv_template = if request.options.event_argv_template.is_empty() {
         None
@@ -215,7 +215,7 @@ impl Default for VtyScheduleCreateOptions {
             catch_up_policy: "skip_missed".to_string(),
             catch_up_limit: 1,
             retry_delay_secs: 300,
-            max_failures: 3,
+            max_failures: -1,
             disabled: false,
             confirmed: false,
             target_tokens: Vec::new(),
@@ -288,7 +288,7 @@ pub(crate) fn parse_vty_schedule_create_options(
                         .get(index + 1)
                         .context("--max-failures requires a value")?,
                     "--max-failures",
-                    1,
+                    -1,
                     100,
                 )?;
                 index += 2;
@@ -297,7 +297,7 @@ pub(crate) fn parse_vty_schedule_create_options(
                 options.max_failures = parse_bounded_i32(
                     value.trim_start_matches("--max-failures="),
                     "--max-failures",
-                    1,
+                    -1,
                     100,
                 )?;
                 index += 1;
@@ -340,7 +340,7 @@ impl Default for VtyEventScheduleCreateOptions {
         Self {
             run_on: ScheduleRunOnArg::TriggeredOnly,
             event_argv_template: Vec::new(),
-            max_failures: 3,
+            max_failures: -1,
             disabled: false,
             confirmed: false,
             target_tokens: Vec::new(),
@@ -388,7 +388,7 @@ pub(crate) fn parse_vty_event_schedule_create_options(
                         .get(index + 1)
                         .context("--max-failures requires a value")?,
                     "--max-failures",
-                    1,
+                    -1,
                     100,
                 )?;
                 index += 2;
@@ -397,7 +397,7 @@ pub(crate) fn parse_vty_event_schedule_create_options(
                 options.max_failures = parse_bounded_i32(
                     value.trim_start_matches("--max-failures="),
                     "--max-failures",
-                    1,
+                    -1,
                     100,
                 )?;
                 index += 1;
@@ -457,8 +457,8 @@ fn validate_schedule_policy(
         "retry delay must be between 1 and 86400 seconds"
     );
     anyhow::ensure!(
-        (1..=100).contains(&max_failures),
-        "max failures must be between 1 and 100"
+        (-1..=100).contains(&max_failures),
+        "max failures must be between -1 and 100 (-1 disables automatic pausing)"
     );
     Ok(())
 }

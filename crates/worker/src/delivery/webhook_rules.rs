@@ -2274,16 +2274,15 @@ async fn insert_delivery_candidate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     candidate: &DeliveryCandidate,
 ) -> Result<bool> {
-    let rule_enabled = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM webhook_rules WHERE id = $1 AND enabled = TRUE FOR UPDATE",
+    let Some(cooldown_secs) = sqlx::query_scalar::<_, i64>(
+        "SELECT cooldown_secs FROM webhook_rules WHERE id = $1 AND enabled = TRUE FOR UPDATE",
     )
     .bind(candidate.rule_id)
     .fetch_optional(&mut **tx)
     .await?
-    .is_some();
-    if !rule_enabled {
+    else {
         return Ok(false);
-    }
+    };
     let cancellation_reason =
         client_alert_trigger_materialization_cancellation_in_tx(tx, candidate).await?;
     let (duplicate, latest_cooldown_until_unix) = sqlx::query_as::<_, (bool, i64)>(
@@ -2312,6 +2311,7 @@ async fn insert_delivery_candidate(
         latest_cooldown_until_unix,
         candidate.occurred_at_unix,
         &candidate.event_kind,
+        cooldown_secs,
     ) {
         return Ok(false);
     }
@@ -2500,9 +2500,14 @@ fn delivery_candidate_is_suppressed(
     latest_cooldown_until_unix: i64,
     occurred_at_unix: i64,
     event_kind: &str,
+    cooldown_secs: i64,
 ) -> bool {
+    // Zero disables the time gate, including for late events and deliveries
+    // that were recorded before the operator turned cooldown off.
     duplicate
-        || (!alert_lifecycle_edge(event_kind) && latest_cooldown_until_unix > occurred_at_unix)
+        || (cooldown_secs > 0
+            && !alert_lifecycle_edge(event_kind)
+            && latest_cooldown_until_unix > occurred_at_unix)
 }
 
 fn alert_lifecycle_edge(event_kind: &str) -> bool {

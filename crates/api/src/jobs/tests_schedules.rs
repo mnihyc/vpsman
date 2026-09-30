@@ -123,11 +123,48 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         axum::http::StatusCode::BAD_REQUEST
     );
     request.retry_delay_secs = Some(300);
-    request.max_failures = 0;
+    request.max_failures = -2;
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
+}
+
+#[test]
+fn schedule_failure_tolerance_accepts_signed_limits_and_defaults_to_disabled_pausing() {
+    let mut request = shell_schedule_request("failure-tolerance", true);
+    for max_failures in [-1, 0, 1, 100] {
+        request.max_failures = max_failures;
+        validate_schedule_request(&request).unwrap();
+    }
+    for max_failures in [-2, 101] {
+        request.max_failures = max_failures;
+        assert_eq!(
+            validate_schedule_request(&request).unwrap_err().code,
+            "schedule_max_failures_out_of_range"
+        );
+    }
+    let mut payload = serde_json::json!({
+        "name": "failure-tolerance",
+        "operation": {"type": "shell", "argv": ["/bin/true"], "pty": false},
+        "selector_expression": "id:client-a",
+        "target_client_ids": ["client-a"],
+        "trigger_kind": "cron",
+        "cron_expr": "* * * * *",
+        "timezone": "UTC",
+        "catch_up_policy": "skip_missed",
+        "catch_up_limit": 1,
+        "retry_delay_secs": 300,
+        "confirmed": true
+    });
+    let create: CreateScheduleRequest = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(create.max_failures, -1);
+    validate_schedule_request(&create).unwrap();
+    payload["expected_selector_expression"] = serde_json::json!("id:client-a");
+    payload["expected_target_client_ids"] = serde_json::json!(["client-a"]);
+    payload["expected_definition_revision"] = serde_json::json!(1);
+    let update: UpdateScheduleRequest = serde_json::from_value(payload).unwrap();
+    assert_eq!(update.max_failures, -1);
 }
 
 #[test]

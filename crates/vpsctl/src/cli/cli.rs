@@ -903,7 +903,7 @@ pub(crate) enum Command {
         catch_up_limit: i32,
         #[arg(long, default_value_t = 300)]
         retry_delay_secs: i64,
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = -1, allow_negative_numbers = true, help = "Failures tolerated before automatic pausing; -1 disables it, 0 pauses on the first failure")]
         max_failures: i32,
         /// Retention days; required with --schedule-id.
         #[arg(long)]

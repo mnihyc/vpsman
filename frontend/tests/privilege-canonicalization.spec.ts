@@ -45,83 +45,86 @@ test("event schedule create and update assertions bind API template bytes and op
   for (const action of ["schedule.create", "schedule.update"]) {
     for (const template of templates) {
       for (const maxTimeoutSecs of [undefined, null, 120]) {
-        const templateHash = createHash("sha256")
-          .update(JSON.stringify(template ?? ["/bin/true"]))
-          .digest("hex");
-        const input: SchedulePrivilegeIntentInput = {
-          action,
-          scheduleId: action === "schedule.update" ? "schedule-id" : null,
-          definitionRevision: action === "schedule.update" ? 2 : null,
-          name: " Traffic quota automation ",
-          commandType: "shell",
-          operationPayloadHash: await alertEventArgvTemplateHashHex(template),
-          selectorExpression: " tag:quota ",
-          resolvedTargets: ["client-7", "client-6", "client-5", "client-4", "client-3", "client-2", "client-1"],
-          triggerKind: "event",
-          runOn: "triggered_only",
-          cronExpr: null,
-          timezone: null,
-          eventExpression,
-          enabled: true,
-          catchUpPolicy: null,
-          catchUpLimit: null,
-          retryDelaySecs: null,
-          maxFailures: 3,
-          maxTimeoutSecs,
-          deferredUntil: null,
-          deleted: false,
-        };
-        // Independently reconstruct the Rust API intent, including its exact
-        // field order. Neither the helper nor preview data supplies this hash.
-        const apiIntent = {
-          version: 3,
-          action,
-          schedule_id: input.scheduleId,
-          definition_revision: input.definitionRevision,
-          name: "Traffic quota automation",
-          command_type: "shell",
-          operation_payload_hash: templateHash,
-          selector_expression: "tag:quota",
-          resolved_targets: [...input.resolvedTargets].sort(),
-          trigger_kind: "event",
-          run_on: "triggered_only",
-          cron_expr: null,
-          timezone: null,
-          event_expression: eventExpression,
-          enabled: true,
-          catch_up_policy: null,
-          catch_up_limit: null,
-          retry_delay_secs: null,
-          max_failures: 3,
-          ...(maxTimeoutSecs == null ? {} : { max_timeout_secs: maxTimeoutSecs }),
-          deferred_until: null,
-          deleted: false,
-        };
-        const intent = canonicalSchedulePrivilegeIntent(input);
-        expect(intent).toBe(JSON.stringify(apiIntent));
-        expect(input.operationPayloadHash).toBe(templateHash);
-        const assertion = await buildPrivilegeAssertion({
-          intent,
-          privilegeMaterial: { superKeyHex },
-        });
-        expect(assertion.assertion_hex).toBe(
-          assertionHexForIntent(JSON.stringify(apiIntent), assertion, superKeyHex),
-        );
-
-        const wrappedOperationHash = await operationPayloadHashHex({
-          type: "shell", argv: template ?? ["/bin/true"], pty: false,
-        });
-        for (const mutation of [
-          { command_type: "shell_argv" },
-          { operation_payload_hash: wrappedOperationHash },
-          { event_expression: "alert.triggered" },
-          { run_on: "all_at_once" },
-          { resolved_targets: ["client-1"] },
-          { max_timeout_secs: 121 },
-        ]) {
-          expect(assertion.assertion_hex).not.toBe(
-            assertionHexForIntent(JSON.stringify({ ...apiIntent, ...mutation }), assertion, superKeyHex),
+        for (const maxFailures of [-1, 0, 3]) {
+          const templateHash = createHash("sha256")
+            .update(JSON.stringify(template ?? ["/bin/true"]))
+            .digest("hex");
+          const input: SchedulePrivilegeIntentInput = {
+            action,
+            scheduleId: action === "schedule.update" ? "schedule-id" : null,
+            definitionRevision: action === "schedule.update" ? 2 : null,
+            name: " Traffic quota automation ",
+            commandType: "shell",
+            operationPayloadHash: await alertEventArgvTemplateHashHex(template),
+            selectorExpression: " tag:quota ",
+            resolvedTargets: ["client-7", "client-6", "client-5", "client-4", "client-3", "client-2", "client-1"],
+            triggerKind: "event",
+            runOn: "triggered_only",
+            cronExpr: null,
+            timezone: null,
+            eventExpression,
+            enabled: true,
+            catchUpPolicy: null,
+            catchUpLimit: null,
+            retryDelaySecs: null,
+            maxFailures,
+            maxTimeoutSecs,
+            deferredUntil: null,
+            deleted: false,
+          };
+          // Independently reconstruct the Rust API intent, including its exact
+          // field order. Neither the helper nor preview data supplies this hash.
+          const apiIntent = {
+            version: 3,
+            action,
+            schedule_id: input.scheduleId,
+            definition_revision: input.definitionRevision,
+            name: "Traffic quota automation",
+            command_type: "shell",
+            operation_payload_hash: templateHash,
+            selector_expression: "tag:quota",
+            resolved_targets: [...input.resolvedTargets].sort(),
+            trigger_kind: "event",
+            run_on: "triggered_only",
+            cron_expr: null,
+            timezone: null,
+            event_expression: eventExpression,
+            enabled: true,
+            catch_up_policy: null,
+            catch_up_limit: null,
+            retry_delay_secs: null,
+            max_failures: maxFailures,
+            ...(maxTimeoutSecs == null ? {} : { max_timeout_secs: maxTimeoutSecs }),
+            deferred_until: null,
+            deleted: false,
+          };
+          const intent = canonicalSchedulePrivilegeIntent(input);
+          expect(intent).toBe(JSON.stringify(apiIntent));
+          expect(input.operationPayloadHash).toBe(templateHash);
+          const assertion = await buildPrivilegeAssertion({
+            intent,
+            privilegeMaterial: { superKeyHex },
+          });
+          expect(assertion.assertion_hex).toBe(
+            assertionHexForIntent(JSON.stringify(apiIntent), assertion, superKeyHex),
           );
+
+          const wrappedOperationHash = await operationPayloadHashHex({
+            type: "shell", argv: template ?? ["/bin/true"], pty: false,
+          });
+          for (const mutation of [
+            { command_type: "shell_argv" },
+            { operation_payload_hash: wrappedOperationHash },
+            { event_expression: "alert.triggered" },
+            { run_on: "all_at_once" },
+            { resolved_targets: ["client-1"] },
+            { max_timeout_secs: 121 },
+            { max_failures: maxFailures + 1 },
+          ]) {
+            expect(assertion.assertion_hex).not.toBe(
+              assertionHexForIntent(JSON.stringify({ ...apiIntent, ...mutation }), assertion, superKeyHex),
+            );
+          }
         }
       }
     }

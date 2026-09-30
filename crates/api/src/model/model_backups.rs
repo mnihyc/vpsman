@@ -385,5 +385,5 @@ fn backup_policy_default_retry_delay_secs() -> i64 {
 }
 
 fn backup_policy_default_max_failures() -> i32 {
-    3
+    -1
 }

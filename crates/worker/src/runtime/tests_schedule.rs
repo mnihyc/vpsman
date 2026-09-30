@@ -1,6 +1,94 @@
 use super::*;
 use crate::test_support::PgWorkerTestDb;
 
+#[tokio::test]
+async fn postgres_schedule_failure_tolerance_controls_cron_dispatch_failures() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    for tolerance in [-1, 0, 2, 100] {
+        let id = insert_worker_schedule(
+            &db.pool,
+            "failure-tolerance",
+            serde_json::json!({"type":"shell","argv":["/bin/true"],"pty":false}),
+            &[],
+        )
+        .await;
+        let initial = if tolerance == 100 { 99 } else { 0 };
+        sqlx::query("UPDATE schedules SET max_failures=$2,failure_count=$3 WHERE id=$1")
+            .bind(id)
+            .bind(tolerance)
+            .bind(initial)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let attempts = match tolerance {
+            -1 => 4,
+            100 => 2,
+            _ => tolerance + 1,
+        };
+        for attempt in 1..=attempts {
+            record_schedule_failure(&db.pool, id, 1, "dispatch failed")
+                .await
+                .unwrap();
+            let (enabled, failures, error): (bool, i32, String) = sqlx::query_as(
+                "SELECT enabled,failure_count,last_error FROM schedules WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(failures, initial + attempt);
+            assert_eq!(enabled, tolerance == -1 || failures <= tolerance);
+            assert_eq!(error, "dispatch failed");
+        }
+        // An obsolete definition cannot spend the current definition's tolerance.
+        record_schedule_failure(&db.pool, id, 2, "obsolete failure")
+            .await
+            .unwrap();
+        let error: String = sqlx::query_scalar("SELECT last_error FROM schedules WHERE id=$1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(error, "dispatch failed");
+        if tolerance == -1 {
+            sqlx::query("UPDATE schedules SET failure_count=$2 WHERE id=$1")
+                .bind(id)
+                .bind(i32::MAX)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            record_schedule_failure(&db.pool, id, 1, "dispatch failed")
+                .await
+                .unwrap();
+            let state: (bool, i32) =
+                sqlx::query_as("SELECT enabled,failure_count FROM schedules WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(state, (true, i32::MAX));
+        }
+        sqlx::query("UPDATE schedules SET enabled=FALSE WHERE id=$1")
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        record_schedule_failure(&db.pool, id, 1, "ignored while paused")
+            .await
+            .unwrap();
+        let state: (bool, String) =
+            sqlx::query_as("SELECT enabled,last_error FROM schedules WHERE id=$1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(state, (false, "dispatch failed".to_string()));
+    }
+    db.cleanup().await;
+}
+
 #[test]
 fn artifact_cleanup_worker_rejects_targets_beyond_the_reviewed_limit() {
     assert!(ensure_artifact_cleanup_target_count(MAX_ARTIFACT_CLEANUP_REVIEWED_TARGETS).is_ok());

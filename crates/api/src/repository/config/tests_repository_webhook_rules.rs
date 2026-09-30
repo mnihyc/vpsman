@@ -48,6 +48,20 @@ fn webhook_rule_request_validates_expression_and_target() {
         confirmed: true,
     };
     assert!(webhook_rule_from_request(&request, &operator()).is_ok());
+    request.cooldown_secs = None;
+    assert_eq!(
+        webhook_rule_from_request(&request, &operator())
+            .unwrap()
+            .cooldown_secs,
+        0
+    );
+    request.cooldown_secs = Some(60);
+    assert_eq!(
+        webhook_rule_from_request(&request, &operator())
+            .unwrap()
+            .cooldown_secs,
+        60
+    );
     request.expression = "status in []".to_string();
     assert!(webhook_rule_from_request(&request, &operator()).is_err());
 }

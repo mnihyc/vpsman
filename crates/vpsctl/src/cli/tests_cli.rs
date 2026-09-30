@@ -113,9 +113,40 @@ fn schedule_create_preserves_cron_defaults_without_compatibility_flags() {
             };
             assert_eq!(request.trigger_kind, ScheduleTriggerKindArg::Cron);
             assert_eq!(request.run_on, None);
+            assert_eq!(request.max_failures, -1);
             assert_eq!(request.command.as_deref(), Some("/bin/true"));
             assert!(request.cron_expr.is_none());
             assert!(request.catch_up_policy.is_none());
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}
+
+#[test]
+fn schedule_failure_tolerance_cli_accepts_signed_values_and_defaults() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            for command in ["schedule-create", "schedule-update", "backup-policy-upsert"] {
+                for value in [None, Some("-1"), Some("0"), Some("100")] {
+                    let mut args = vec!["vpsctl", command, "--name", "failure-tolerance"];
+                    if command == "schedule-update" {
+                        args.extend(["--schedule-id", "11111111-1111-4111-8111-111111111111"]);
+                    }
+                    if let Some(value) = value {
+                        args.extend(["--max-failures", value]);
+                    }
+                    let parsed = Args::try_parse_from(args).unwrap();
+                    let actual = match parsed.command {
+                        Command::ScheduleCreate(request) => request.max_failures,
+                        Command::ScheduleUpdate(request) => request.max_failures,
+                        Command::BackupPolicyUpsert { max_failures, .. } => max_failures,
+                        _ => panic!("unexpected command"),
+                    };
+                    assert_eq!(actual, value.unwrap_or("-1").parse::<i32>().unwrap());
+                }
+            }
         })
         .expect("spawn CLI parser test")
         .join()

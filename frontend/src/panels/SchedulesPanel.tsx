@@ -58,6 +58,11 @@ import {
 } from "../components/ActionFeedback";
 import { useReviewGenerationGuard } from "../hooks/useReviewGenerationGuard";
 import { formatLowerBoundCount } from "../constants";
+import { jobStatusBadgeClass } from "../jobStatusPresentation";
+import {
+  DEFAULT_SCHEDULE_MAX_FAILURES,
+  formatScheduleFailures,
+} from "../scheduleFailurePolicy";
 import type {
   AgentView,
   BulkResolveManyRequest,
@@ -231,7 +236,7 @@ export function SchedulesPanel({
   const [catchUpPolicy, setCatchUpPolicy] = useState("skip_missed");
   const [catchUpLimit, setCatchUpLimit] = useState(1);
   const [retryDelaySecs, setRetryDelaySecs] = useState(300);
-  const [maxFailures, setMaxFailures] = useState(3);
+  const [maxFailures, setMaxFailures] = useState(DEFAULT_SCHEDULE_MAX_FAILURES);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState("");
   const [selectorExpression, setSelectorExpression] = useState(() =>
     readLocalString(SCHEDULE_SELECTOR_STORAGE_KEY, ""),
@@ -514,6 +519,13 @@ export function SchedulesPanel({
       ),
     },
     {
+      label: "Failures tolerated",
+      value:
+        (pendingScheduleSnapshot?.maxFailures ?? maxFailures) === -1
+          ? "Automatic pause off"
+          : `${pendingScheduleSnapshot?.maxFailures ?? maxFailures} tolerated; pause on failure ${(pendingScheduleSnapshot?.maxFailures ?? maxFailures) + 1}`,
+    },
+    {
       label: "Trigger",
       value:
         confirmationTriggerKind === "event"
@@ -762,18 +774,20 @@ export function SchedulesPanel({
         header: "Last result",
         size: 130,
         minSize: 115,
-        sortValue: (schedule) => schedule.last_run_at ?? "",
+        sortValue: (schedule) => scheduleLastResultTime(schedule) ?? "",
         searchValue: (schedule) =>
-          `${schedule.last_run_at ?? ""} ${schedule.last_error ?? ""} ${schedule.failure_count}`,
+          `${scheduleLastResultTime(schedule) ?? ""} ${schedule.last_job_status ?? ""} ${schedule.last_job_id ?? ""} ${schedule.last_job_error ?? schedule.last_error ?? ""}`,
         cell: (schedule) => (
           <span className="historyPrimary">
             <span className={`status ${scheduleLastResultTone(schedule)}`}>
               {scheduleLastResultLabel(schedule)}
             </span>
             <small>
-              {schedule.last_run_at
-                ? formatCompactTime(schedule.last_run_at)
-                : "No execution yet"}
+              {scheduleLastResultTime(schedule)
+                ? formatCompactTime(scheduleLastResultTime(schedule)!)
+                : schedule.last_job_id
+                  ? "Job recorded"
+                  : "No execution yet"}
             </small>
           </span>
         ),
@@ -820,7 +834,10 @@ export function SchedulesPanel({
               </small>
               {schedule.failure_count > 0 && (
                 <small>
-                  {schedule.failure_count}/{schedule.max_failures} failures
+                  {formatScheduleFailures(
+                    schedule.failure_count,
+                    schedule.max_failures,
+                  )}
                 </small>
               )}
               {schedule.last_error && <small>{schedule.last_error}</small>}
@@ -975,7 +992,7 @@ export function SchedulesPanel({
     setCatchUpPolicy("skip_missed");
     setCatchUpLimit(1);
     setRetryDelaySecs(300);
-    setMaxFailures(3);
+    setMaxFailures(DEFAULT_SCHEDULE_MAX_FAILURES);
     setMaxTimeoutSecs("");
     setSelectorExpression("");
     setEditingScheduleId(null);
@@ -1011,7 +1028,7 @@ export function SchedulesPanel({
         triggerKind === "event"
           ? null
           : clampInteger(retryDelaySecs, 1, 86_400),
-      maxFailures: clampInteger(maxFailures, 1, 100),
+      maxFailures: clampInteger(maxFailures, -1, 100),
       maxTimeoutSecs: parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs) ?? null,
       nextRun: triggerKind === "cron" ? (nextRuns[0] ?? null) : null,
       selectedTemplateName: selectedTemplate?.name ?? null,
@@ -2420,19 +2437,20 @@ export function SchedulesPanel({
               )}
               <label>
                 <ScheduleFieldLabel
-                  help="Consecutive failed jobs allowed before the scheduler disables future dispatches."
-                  label="Max failures"
+                  help="-1 keeps automatic runs enabled after failures. 0 pauses on the first failure; a positive value N pauses on failure N+1. A successful run resets the count."
+                  label="Failures tolerated"
                 />
                 <input
                   aria-label="Schedule max failures"
                   max={100}
-                  min={1}
+                  min={-1}
                   onChange={(event) =>
                     setMaxFailures(Number(event.target.value))
                   }
                   type="number"
                   value={maxFailures}
                 />
+                <small>-1: never pause · 0: pause on first failure</small>
               </label>
             </div>
             <div className="targetSelector">
@@ -3284,24 +3302,37 @@ function describeSchedulePolicy(schedule: ScheduleRecord): string {
   return `Skip missed runs; ${retry}`;
 }
 
-function scheduleLastResultTone(
-  schedule: ScheduleRecord,
-): "neutral" | "ok" | "warn" {
+function scheduleLastResultTone(schedule: ScheduleRecord): string {
+  if (schedule.last_job_status) {
+    return jobStatusBadgeClass(schedule.last_job_status);
+  }
   if (schedule.last_error || schedule.failure_count > 0) {
     return "warn";
-  }
-  if (schedule.last_run_at) {
-    return "ok";
   }
   return "neutral";
 }
 
+function scheduleLastResultTime(schedule: ScheduleRecord): string | null {
+  return (
+    schedule.last_job_completed_at ??
+    schedule.last_job_created_at ??
+    schedule.last_run_at
+  );
+}
+
 function scheduleLastResultLabel(schedule: ScheduleRecord): string {
+  if (schedule.last_job_status) {
+    return schedule.last_job_status === "completed"
+      ? "Succeeded"
+      : schedule.last_job_status
+          .replace(/_/g, " ")
+          .replace(/^./, (letter) => letter.toUpperCase());
+  }
   if (schedule.last_error || schedule.failure_count > 0) {
     return "Needs review";
   }
-  if (schedule.last_run_at) {
-    return "Succeeded";
+  if (schedule.last_job_id || schedule.last_run_at) {
+    return "Dispatched";
   }
   return "Never run";
 }
@@ -3416,10 +3447,18 @@ function ScheduleExpandedDetail({
       </span>
       <span>
         <strong>Last result</strong>
+        <span>{scheduleLastResultLabel(schedule)}</span>
         <span>
-          {schedule.last_run_at ? formatTime(schedule.last_run_at) : "Never"}
+          {scheduleLastResultTime(schedule)
+            ? formatTime(scheduleLastResultTime(schedule)!)
+            : "No execution time recorded"}
         </span>
-        <span>{schedule.last_error || "No error reported"}</span>
+        {schedule.last_job_id ? (
+          <code className="scheduleIdentifier">Job {schedule.last_job_id}</code>
+        ) : null}
+        {(schedule.last_job_error || (!schedule.last_job_id && schedule.last_error)) ? (
+          <span>{schedule.last_job_error || schedule.last_error}</span>
+        ) : null}
       </span>
       <span>
         <strong>Execution policy</strong>

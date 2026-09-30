@@ -6253,6 +6253,7 @@ test("observability webhook rule editor retains registry and navigation context"
     "Retained job.output.stdout/stderr is loaded only when referenced. Each substitution is limited to 4 KiB after helpers run.",
   );
   const cooldown = editor.getByLabel("Webhook cooldown seconds");
+  await expect(cooldown).toHaveValue("0");
   await expect(cooldown).toHaveAttribute("min", "0");
   await expect(cooldown).toHaveAttribute("max", "2592000");
   await editor

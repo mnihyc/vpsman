@@ -1083,7 +1083,7 @@ fn validate_schedule_definition(
         parse_selector_expression(request.selector_expression)
             .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     }
-    if !(1..=100).contains(&request.max_failures) {
+    if !(-1..=100).contains(&request.max_failures) {
         return Err(ApiError::bad_request("schedule_max_failures_out_of_range"));
     }
     match request.trigger_kind {

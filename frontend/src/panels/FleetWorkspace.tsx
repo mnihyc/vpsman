@@ -9727,7 +9727,7 @@ export function WebhookRuleManager({
   );
   const [signingSecret, setSigningSecret] = useState("");
   const [clearSigningSecret, setClearSigningSecret] = useState(false);
-  const [cooldownSecs, setCooldownSecs] = useState("300");
+  const [cooldownSecs, setCooldownSecs] = useState("0");
   const [notes, setNotes] = useState("");
   const [eventKind, setEventKind] = useState("alert.triggered");
   const [eventId, setEventId] = useState("");
@@ -9877,7 +9877,7 @@ export function WebhookRuleManager({
     setBodyTemplate(DEFAULT_WEBHOOK_BODY_TEMPLATE);
     setSigningSecret("");
     setClearSigningSecret(false);
-    setCooldownSecs("300");
+    setCooldownSecs("0");
     setNotes("");
     setStatus(null);
   }
@@ -10494,7 +10494,7 @@ export function WebhookRuleManager({
         {
           label: "Cooldown",
           value: saveSnapshot
-            ? `${saveSnapshot.request.cooldown_secs ?? 300} seconds`
+            ? `${saveSnapshot.request.cooldown_secs ?? 0} seconds`
             : "-",
         },
         {
@@ -10750,7 +10750,7 @@ export function WebhookRuleManager({
               <ConsoleField
                 className="webhookCooldownField"
                 label="Cooldown seconds"
-                labelTitle="Minimum seconds between new automatic deliveries for this rule. Use 0 to report every distinct job completion. Retries are controlled separately."
+                labelTitle="Minimum seconds between new automatic deliveries for this rule. Default 0 reports every distinct event; alert lifecycle edges always bypass cooldown. Retries are controlled separately."
               >
                 <input
                   aria-label="Webhook cooldown seconds"

@@ -748,7 +748,7 @@ pub(crate) struct ScheduleCreateCommand {
     pub(crate) catch_up_limit: Option<i32>,
     #[arg(long, help = "Cron retry delay in seconds; defaults to 300")]
     pub(crate) retry_delay_secs: Option<i64>,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = -1, allow_negative_numbers = true, help = "Failures tolerated before automatic pausing; -1 disables it, 0 pauses on the first failure")]
     pub(crate) max_failures: i32,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
@@ -825,7 +825,7 @@ pub(crate) struct ScheduleUpdateCommand {
     pub(crate) catch_up_limit: Option<i32>,
     #[arg(long, help = "Cron retry delay in seconds; defaults to 300")]
     pub(crate) retry_delay_secs: Option<i64>,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = -1, allow_negative_numbers = true, help = "Failures tolerated before automatic pausing; -1 disables it, 0 pauses on the first failure")]
     pub(crate) max_failures: i32,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,

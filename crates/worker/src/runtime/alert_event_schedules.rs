@@ -987,10 +987,11 @@ async fn account_schedule_definition_failure_in_tx(
     let updated = sqlx::query(
         r#"
         UPDATE schedules
-        SET failure_count = failure_count + 1,
+        -- Unlimited retries still retain a bounded INTEGER counter.
+        SET failure_count = LEAST(failure_count::bigint + 1, 2147483647)::integer,
             last_error = $3,
             enabled = CASE
-                WHEN failure_count + 1 >= max_failures THEN FALSE
+                WHEN max_failures >= 0 AND failure_count::bigint + 1 > max_failures THEN FALSE
                 ELSE enabled
             END,
             updated_at = clock_timestamp()
@@ -3191,7 +3192,7 @@ mod tests {
                 "{alert.resolution_reason}".to_string(),
             ]),
             &[],
-            1,
+            0,
         )
         .await;
         insert_lifecycle_pair(&db.pool, episode_id).await;
@@ -3258,6 +3259,92 @@ mod tests {
             .try_get::<Option<String>, _>("last_error")
             .unwrap()
             .is_none());
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_schedule_failure_tolerance_controls_event_definition_failures() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        let actor = insert_event_schedule_actor(&db.pool).await;
+        for tolerance in [-1, 0, 2, 100] {
+            let id =
+                insert_event_schedule(&db.pool, actor, "alert.triggered", None, &[], tolerance)
+                    .await;
+            let initial = if tolerance == 100 { 99 } else { 0 };
+            sqlx::query("UPDATE schedules SET failure_count=$2 WHERE id=$1")
+                .bind(id)
+                .bind(initial)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            let attempts = match tolerance {
+                -1 => 4,
+                100 => 2,
+                _ => tolerance + 1,
+            };
+            for attempt in 1..=attempts {
+                let mut tx = db.pool.begin().await.unwrap();
+                assert!(
+                    account_schedule_definition_failure_in_tx(&mut tx, id, 1, "render failed")
+                        .await
+                        .unwrap()
+                );
+                tx.commit().await.unwrap();
+                let state: (bool, i32) =
+                    sqlx::query_as("SELECT enabled,failure_count FROM schedules WHERE id=$1")
+                        .bind(id)
+                        .fetch_one(&db.pool)
+                        .await
+                        .unwrap();
+                let failures = initial + attempt;
+                assert_eq!(state, (tolerance == -1 || failures <= tolerance, failures));
+            }
+            let mut tx = db.pool.begin().await.unwrap();
+            assert!(
+                !account_schedule_definition_failure_in_tx(&mut tx, id, 2, "obsolete failure")
+                    .await
+                    .unwrap()
+            );
+            tx.commit().await.unwrap();
+            if tolerance == -1 {
+                sqlx::query("UPDATE schedules SET failure_count=$2 WHERE id=$1")
+                    .bind(id)
+                    .bind(i32::MAX)
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                let mut tx = db.pool.begin().await.unwrap();
+                account_schedule_definition_failure_in_tx(&mut tx, id, 1, "render failed")
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                let state: (bool, i32) =
+                    sqlx::query_as("SELECT enabled,failure_count FROM schedules WHERE id=$1")
+                        .bind(id)
+                        .fetch_one(&db.pool)
+                        .await
+                        .unwrap();
+                assert_eq!(state, (true, i32::MAX));
+            }
+            sqlx::query("UPDATE schedules SET enabled=FALSE WHERE id=$1")
+                .bind(id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            let mut tx = db.pool.begin().await.unwrap();
+            account_schedule_definition_failure_in_tx(&mut tx, id, 1, "render failed")
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let enabled: bool = sqlx::query_scalar("SELECT enabled FROM schedules WHERE id=$1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert!(!enabled);
+        }
         db.cleanup().await;
     }
 

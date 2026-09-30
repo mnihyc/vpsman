@@ -25,7 +25,7 @@ use crate::{
     unix_now,
 };
 
-const DEFAULT_COOLDOWN_SECS: i64 = 300;
+const DEFAULT_COOLDOWN_SECS: i64 = 0;
 const MAX_COOLDOWN_SECS: i64 = 30 * 24 * 60 * 60;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_EXPRESSION_BYTES: usize = 4096;

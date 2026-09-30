@@ -1676,10 +1676,8 @@ async function navigateAndScreenshot(
       .getByLabel("VPS rules selector expression")
       .fill("id:agent-sfo-01");
     await expect(
-      page.getByText("Loaded 4 existing rules for agent-sfo-01", {
-        exact: true,
-      }),
-    ).toBeVisible({ timeout: 5_000 });
+      page.getByRole("textbox", { name: "Reset day", exact: true }),
+    ).toHaveValue("14 05:00", { timeout: 5_000 });
     await page
       .getByRole("textbox", { name: "Reset day", exact: true })
       .fill("15");

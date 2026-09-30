@@ -24,6 +24,7 @@ import {
   DEFAULT_MAX_JOB_TIMEOUT_SECS,
 } from "../jobMaxTimeout";
 import { migrationLinkStatusLabel } from "../jobStatusPresentation";
+import { DEFAULT_SCHEDULE_MAX_FAILURES } from "../scheduleFailurePolicy";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -1052,7 +1053,7 @@ export function BackupsPanel({
         const retryDelaySecs = editingPolicy
           ? editingPolicy.retry_delay_secs
           : 300;
-        const maxFailures = editingPolicy ? editingPolicy.max_failures : 3;
+        const maxFailures = editingPolicy ? editingPolicy.max_failures : DEFAULT_SCHEDULE_MAX_FAILURES;
         const request: CreateBackupPolicyRequest = {
           name: policyName.trim(),
           selector_expression: selectorExpression,

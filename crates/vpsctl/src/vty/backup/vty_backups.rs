@@ -255,7 +255,7 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
     let mut catch_up_policy = "skip_missed".to_string();
     let mut catch_up_limit = 1_i32;
     let mut retry_delay_secs = 300_i64;
-    let mut max_failures = 3_i32;
+    let mut max_failures = -1_i32;
     let mut retention_days = None;
     let mut keep_last = None;
     let mut rotation_generation = None;

@@ -16,6 +16,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { HISTORY_DETAIL_LIMIT } from "../../constants";
+import { formatScheduleFailures } from "../../scheduleFailurePolicy";
 import {
   artifactLifecycleStatusBadgeClass,
   backupRequestStatusBadgeClass,
@@ -1680,7 +1681,7 @@ function policyLastResult(policy: BackupPolicyRecord): {
   }
   if (policy.failure_count > 0) {
     return {
-      detail: `${policy.failure_count}/${policy.max_failures} failures`,
+      detail: formatScheduleFailures(policy.failure_count, policy.max_failures),
       label: "Failures",
       title: `${policy.failure_count} failure${policy.failure_count === 1 ? "" : "s"}`,
       tone: "warn",
@@ -1717,7 +1718,7 @@ function policyState(policy: BackupPolicyRecord): {
   if (!policy.enabled) {
     return { detail: "manual only", label: "Paused", tone: "neutral" };
   }
-  if (policy.failure_count >= policy.max_failures) {
+  if (policy.max_failures >= 0 && policy.failure_count > policy.max_failures) {
     return { detail: "failure limit reached", label: "Blocked", tone: "warn" };
   }
   return { detail: "runs automatically", label: "Automatic", tone: "ok" };

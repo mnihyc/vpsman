@@ -58,7 +58,7 @@ fn event_schedule_options_default_to_the_documented_noop() {
         options.run_on,
         crate::commands_schedules::ScheduleRunOnArg::TriggeredOnly
     );
-    assert_eq!(options.max_failures, 3);
+    assert_eq!(options.max_failures, -1);
     assert!(
         parse_vty_event_schedule_create_options(&["--catch-up-policy=run_once", "tag:edge"])
             .is_err()
@@ -80,4 +80,45 @@ fn event_schedule_run_on_accepts_only_explicit_modes() {
     }
     assert!(parse_vty_event_schedule_create_options(&["--run-on"]).is_err());
     assert!(parse_vty_event_schedule_create_options(&["--run-on=all"]).is_err());
+}
+
+#[test]
+fn schedule_failure_tolerance_vty_accepts_zero_and_disabled_limits() {
+    assert_eq!(
+        parse_vty_schedule_create_options(&[]).unwrap().max_failures,
+        -1
+    );
+    for value in ["-1", "0", "1", "100"] {
+        let tokens = ["--max-failures", value];
+        let expected: i32 = value.parse().unwrap();
+        assert_eq!(
+            parse_vty_schedule_create_options(&tokens)
+                .unwrap()
+                .max_failures,
+            expected
+        );
+        assert_eq!(
+            parse_vty_event_schedule_create_options(&tokens)
+                .unwrap()
+                .max_failures,
+            expected
+        );
+        let inline = format!("--max-failures={value}");
+        assert_eq!(
+            parse_vty_schedule_create_options(&[&inline])
+                .unwrap()
+                .max_failures,
+            expected
+        );
+        assert_eq!(
+            parse_vty_event_schedule_create_options(&[&inline])
+                .unwrap()
+                .max_failures,
+            expected
+        );
+    }
+    for value in ["-2", "101"] {
+        assert!(parse_vty_schedule_create_options(&["--max-failures", value]).is_err());
+        assert!(parse_vty_event_schedule_create_options(&["--max-failures", value]).is_err());
+    }
 }
