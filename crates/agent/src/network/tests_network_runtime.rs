@@ -261,6 +261,87 @@ fn iproute2_link_inspection_keeps_observed_mtu() {
 }
 
 #[test]
+fn iproute2_inspection_selects_named_interface_after_filtered_records() {
+    // iproute2 4.15 emits these unnamed placeholders for other interfaces even
+    // with `addr show dev tunab`. The first two empty addresses are loopback's.
+    let observed = serde_json::json!([
+        {"addr_info": [{}, {}]},
+        {"addr_info": []},
+        {"ifname": "unrelated", "mtu": 1500, "addr_info": []},
+        {
+            "ifname": "tunab",
+            "mtu": 1476,
+            "linkinfo": {"info_kind": "gre", "info_data": {"remote": "203.0.113.20", "ttl": 255}},
+            "addr_info": [
+                {"family": "inet", "local": "10.255.0.0", "address": "10.255.0.1", "prefixlen": 31},
+                {"family": "inet6", "local": "fd00:ffff::", "address": "fd00:ffff::1", "prefixlen": 127}
+            ]
+        }
+    ]);
+    let raw = observed.to_string();
+    let link = parse_iproute2_link_json(&raw, "tunab").unwrap();
+    assert_eq!(link.mtu, Some(1476));
+    assert_eq!(link.remote.as_deref(), Some("203.0.113.20"));
+    let addresses = parse_iproute2_addr_json(&raw, "tunab").unwrap();
+    assert!(
+        matching_existing_iproute2_address(&addresses, "10.255.0.0", "10.255.0.1", 31).is_some()
+    );
+    assert!(
+        matching_existing_iproute2_address(&addresses, "fd00:ffff::", "fd00:ffff::1", 127)
+            .is_some()
+    );
+
+    // Empty legacy placeholders still cannot satisfy the ownership checks.
+    let link = parse_iproute2_link_json(&raw, "absent").unwrap();
+    let expected_plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    let expected_endpoint =
+        render_tunnel_endpoint_config(&expected_plan, TunnelEndpointSide::Left).unwrap();
+    assert!(
+        !existing_iproute2_tunnel_mismatches(&link, &expected_plan, &expected_endpoint,)
+            .unwrap()
+            .is_empty()
+    );
+    let addresses = parse_iproute2_addr_json(&raw, "absent").unwrap();
+    assert!(
+        matching_existing_iproute2_address(&addresses, "10.255.0.0", "10.255.0.1", 31).is_none()
+    );
+
+    // A record explicitly belonging to another interface is never selected.
+    for raw in [
+        observed[3].to_string(),
+        serde_json::json!([observed[3].clone()]).to_string(),
+    ] {
+        assert!(parse_iproute2_link_json(&raw, "absent").is_err());
+        assert!(parse_iproute2_addr_json(&raw, "absent").is_err());
+    }
+
+    // Do not turn this fix into an input-shape change for existing command wrappers.
+    let mut unnamed = observed[3].clone();
+    unnamed.as_object_mut().unwrap().remove("ifname");
+    for value in [unnamed.clone(), serde_json::json!([unnamed])] {
+        let raw = value.to_string();
+        let link = parse_iproute2_link_json(&raw, "tunab").unwrap();
+        assert_eq!(link.mtu, Some(1476));
+        let addresses = parse_iproute2_addr_json(&raw, "tunab").unwrap();
+        assert!(
+            matching_existing_iproute2_address(&addresses, "10.255.0.0", "10.255.0.1", 31)
+                .is_some()
+        );
+    }
+
+    // An explicitly named interface must fail if its own addresses are wrong,
+    // even when an earlier unnamed record contains the expected addresses.
+    let foreign = serde_json::json!([
+        {"addr_info": observed[3]["addr_info"]},
+        {"ifname": "tunab", "addr_info": [{"local": "10.255.0.2", "address": "10.255.0.3", "prefixlen": 31}]}
+    ]);
+    let addresses = parse_iproute2_addr_json(&foreign.to_string(), "tunab").unwrap();
+    assert!(
+        matching_existing_iproute2_address(&addresses, "10.255.0.0", "10.255.0.1", 31).is_none()
+    );
+}
+
+#[test]
 fn iproute2_address_inspection_matches_real_peer_fields_without_relaxing_ownership() {
     for (local, peer, prefix, wrong_peer, family) in [
         ("10.255.0.0", "10.255.0.1", 31, "10.255.0.2", "inet"),

@@ -1309,6 +1309,10 @@ fn runtime_tunnel_identity_allows_in_place_policy_changes() {
     assert!(runtime_tunnel_identity_matches(&baseline, &changed_cost));
 }
 
+#[cfg(target_os = "linux")]
+#[path = "tests_runtime_tunnels_linux.rs"]
+mod tunnels_linux;
+
 #[test]
 fn runtime_tunnel_identity_detects_immutable_plan_changes() {
     let baseline = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(

@@ -1468,26 +1468,36 @@ struct ExistingIproute2Address {
     peer: Option<String>,
 }
 
+fn iproute2_interface_record<'a>(
+    value: &'a serde_json::Value,
+    interface_name: &str,
+) -> Option<&'a serde_json::Value> {
+    let records = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    // Older iproute2 versions emit unnamed placeholders before the requested
+    // interface. An explicit match must take precedence over those records.
+    records
+        .iter()
+        .find(|record| record["ifname"].as_str() == Some(interface_name))
+        // Preserve the previously accepted unnamed object/array formats. All
+        // selected records still undergo the same tunnel/address ownership checks.
+        .or_else(|| {
+            records
+                .iter()
+                .find(|record| record["ifname"].as_str().is_none())
+        })
+}
+
 fn parse_iproute2_link_json(stdout: &str, interface_name: &str) -> Result<ExistingIproute2Tunnel> {
     let value: serde_json::Value = serde_json::from_str(stdout.trim())
         .context("failed to parse existing runtime tunnel inspect JSON")?;
-    let candidates = value
-        .as_array()
-        .map(|items| items.iter().collect::<Vec<_>>())
-        .unwrap_or_else(|| vec![&value]);
-    let link = candidates
-        .into_iter()
-        .find(|candidate| {
-            candidate
-                .get("ifname")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|ifname| ifname == interface_name)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "existing runtime tunnel inspect JSON did not include interface {interface_name}"
-            )
-        })?;
+    let link = iproute2_interface_record(&value, interface_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing runtime tunnel inspect JSON did not include interface {interface_name}"
+        )
+    })?;
     let linkinfo = link.get("linkinfo").unwrap_or(link);
     let data = linkinfo.get("info_data").unwrap_or(linkinfo);
     Ok(ExistingIproute2Tunnel {
@@ -1524,23 +1534,11 @@ fn parse_iproute2_addr_json(
 ) -> Result<Vec<ExistingIproute2Address>> {
     let value: serde_json::Value = serde_json::from_str(stdout.trim())
         .context("failed to parse existing runtime tunnel address inspect JSON")?;
-    let candidates = value
-        .as_array()
-        .map(|items| items.iter().collect::<Vec<_>>())
-        .unwrap_or_else(|| vec![&value]);
-    let link = candidates
-        .into_iter()
-        .find(|candidate| {
-            candidate
-                .get("ifname")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|ifname| ifname == interface_name)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "existing runtime tunnel address inspect JSON did not include interface {interface_name}"
-            )
-        })?;
+    let link = iproute2_interface_record(&value, interface_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing runtime tunnel address inspect JSON did not include interface {interface_name}"
+        )
+    })?;
     let Some(addr_info) = link.get("addr_info").and_then(serde_json::Value::as_array) else {
         return Ok(Vec::new());
     };
