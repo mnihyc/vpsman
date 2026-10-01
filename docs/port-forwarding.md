@@ -217,7 +217,9 @@ they do not have a native NAT counter.
 Delete keeps a tombstone until the agent reports the exact current table (or no
 owned table when no rules remain). Custom deletion additionally requires
 per-rule verified removal; an absent nftables table is not custom-cleanup
-evidence. An admin may **Forget** a tombstone only for
+evidence. Native tombstones keep table inspection active even after the last
+native rule is removed, including when custom rules or cleanup requests remain.
+An admin may **Forget** a tombstone only for
 a permanently unreachable or decommissioned VPS and must provide a reason.
 Forgetting clears that VPS's cached forwarding snapshot, so any other active
 rules show Pending until fresh telemetry arrives. It does not remove any

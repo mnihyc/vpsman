@@ -40,10 +40,21 @@ import {
   type VpsNameDisplayMode,
 } from "../utils";
 
+export type SearchCompletion = {
+  start: number;
+  end: number;
+  lookup?: { field: string; prefix: string };
+  options: Array<{ value: string; label?: string; detail?: string; description?: string; continueCompletion?: boolean }>;
+};
+
+export type SearchCompletionProvider = (value: string, caretIndex: number) => SearchCompletion | null;
+
 type SearchExpressionInputProps = {
   agents?: AgentView[];
   ariaLabel: string;
   className?: string;
+  completionProvider?: SearchCompletionProvider;
+  onCompletionLookup?: (lookup: SearchCompletion["lookup"]) => void;
   disabled?: boolean;
   inputId?: string;
   inputRef?: Ref<HTMLElement>;
@@ -56,6 +67,7 @@ type SearchExpressionInputProps = {
   value: string;
   verification?: "checking" | "invalid" | "neutral" | "valid";
   verificationMessage?: string | null;
+  tooltipMessage?: string | null;
 };
 
 type DisplayToken = SearchToken;
@@ -65,6 +77,8 @@ export function SearchExpressionInput({
   agents,
   ariaLabel,
   className = "",
+  completionProvider,
+  onCompletionLookup,
   disabled = false,
   inputId,
   inputRef,
@@ -77,6 +91,7 @@ export function SearchExpressionInput({
   value,
   verification = "neutral",
   verificationMessage,
+  tooltipMessage,
 }: SearchExpressionInputProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const vpsRuleSearch = useVpsRuleSearchContext();
@@ -117,8 +132,21 @@ export function SearchExpressionInput({
       ? agentsMatchingExpression(agents, value, vpsRuleSearch)
       : [];
   const completion = useMemo(
-    () =>
-      buildCompletion(
+    () => {
+      const supplied = completionProvider?.(value, caretIndex);
+      if (supplied) {
+        return {
+          start: supplied.start, end: supplied.end,
+          lookup: supplied.lookup,
+          fragment: value.slice(supplied.start, caretIndex),
+          allowEmpty: true, ruleScoped: false,
+          filtered: supplied.options.map((option) => ({
+            ...staticCompletionOption(option.value),
+            ...option, label: option.label ?? option.value,
+          })),
+        };
+      }
+      return buildCompletion(
         value,
         caretIndex,
         agents ?? [],
@@ -127,9 +155,11 @@ export function SearchExpressionInput({
         Boolean(agents),
         vpsRuleSearch.rules,
         vpsRuleSearch.available,
-      ),
+      );
+    },
     [
       agents,
+      completionProvider,
       caretIndex,
       suggestions,
       value,
@@ -138,6 +168,11 @@ export function SearchExpressionInput({
       vpsRuleSearch.rules,
     ],
   );
+  const completionLookupRef = useRef(onCompletionLookup);
+  completionLookupRef.current = onCompletionLookup;
+  useEffect(() => {
+    completionLookupRef.current?.(focused && autocompleteOpen ? completion.lookup : undefined);
+  }, [focused, autocompleteOpen, completion.lookup?.field, completion.lookup?.prefix]);
   const visibleSuggestions = completion.filtered.slice(
     0,
     completion.ruleScoped ? 20 : 8,
@@ -161,8 +196,8 @@ export function SearchExpressionInput({
       ? "VPS rule data is unavailable or you do not have config:read access"
       : (metaDescription ?? verificationMessage ?? matchTitle ?? matchSummary);
   const showVisibleMeta = Boolean(
-    ruleEvidenceUnavailable ||
-    (visibleParseError && referencesVpsRules) ||
+    (!completionProvider && (ruleEvidenceUnavailable ||
+    (visibleParseError && referencesVpsRules))) ||
     (showMatchCount && agents) ||
     (showVerificationMessage && verificationMessage),
   );
@@ -172,7 +207,7 @@ export function SearchExpressionInput({
     focused &&
     autocompleteOpen &&
     visibleSuggestions.length > 0 &&
-    completion.fragment.trim().length > 0;
+    (completion.allowEmpty || completion.fragment.trim().length > 0);
   const activeSuggestion = visibleSuggestions[activeSuggestionIndex] ?? null;
   const activeSuggestionId =
     autocompleteVisible && activeSuggestion
@@ -483,6 +518,7 @@ export function SearchExpressionInput({
         hasTokens ? "hasTokens" : "empty"
       } ${disabled ? "disabled" : ""}`.trim()}
       ref={containerRef}
+      title={tooltipMessage ?? undefined}
       onMouseDown={(event) => {
         if (disabled) {
           return;
@@ -590,6 +626,7 @@ export function SearchExpressionInput({
                   }}
                   onMouseMove={() => setActiveSuggestionIndex(index)}
                   role="option"
+                  title={suggestion.description}
                   tabIndex={-1}
                   type="button"
                 >
@@ -672,6 +709,8 @@ function SearchExpressionTokenView({
 }
 
 type CompletionState = {
+  lookup?: SearchCompletion["lookup"];
+  allowEmpty?: boolean;
   end: number;
   filtered: CompletionOption[];
   fragment: string;
@@ -680,6 +719,7 @@ type CompletionState = {
 };
 
 type CompletionOption = {
+  description?: string;
   continueCompletion?: boolean;
   detail?: string;
   disabled?: boolean;

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn native_cleanup_intent_preserves_legacy_wire_when_absent() {
+    let legacy = serde_json::json!({"schema_version":1,"desired_hash":"","rules":[]});
+    let mut config: AgentPortForwardingConfig = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(!config.native_cleanup_pending);
+    assert_eq!(serde_json::to_value(&config).unwrap(), legacy);
+    config.native_cleanup_pending = true;
+    validate_port_forwarding_config(&config).unwrap();
+    let wire = serde_json::to_value(&config).unwrap();
+    assert_eq!(wire["native_cleanup_pending"], true);
+    assert_eq!(
+        serde_json::from_value::<AgentPortForwardingConfig>(wire).unwrap(),
+        config
+    );
+}
+
+#[test]
 fn parses_single_many_and_corresponding_ranges() {
     assert_eq!(
         pair_port_expressions("80,443,1000-1002", "8080").unwrap(),

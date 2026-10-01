@@ -92,6 +92,207 @@ fn empty_desired_state_deletes_only_the_owned_table() {
     assert_eq!(script, "delete table inet vpsman_port_forward\n");
 }
 
+#[tokio::test]
+#[ignore = "requires isolated Docker network namespace, nftables and NET_ADMIN"]
+async fn bulk_removal_reports_all_native_and_custom_cleanup() {
+    assert_eq!(
+        std::env::var("VPSMAN_PORT_FORWARD_NATIVE_TEST").as_deref(),
+        Ok("1")
+    );
+    use vpsman_common::{PortForwardAdapterCommands, PortForwardCleanupRule, RuntimeTunnelCommand};
+    let root = crate::state_dir::agent_state_dir().unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let command = |script: &str| RuntimeTunnelCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            script.into(),
+            "fixture".into(),
+            root.join("listener-{rule_id}")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        max_timeout_secs: 5,
+        max_output_bytes: 16384,
+    };
+    let (_, mut consumer) = PortForwardingConsumer::channel("bulk-removal-fixture".into());
+    for (modes, removals) in [
+        (
+            vec![
+                PortForwardMode::Dnat,
+                PortForwardMode::Redirect,
+                PortForwardMode::Dnat,
+            ],
+            vec![1, 0],
+        ),
+        (vec![PortForwardMode::CustomAdapter; 3], vec![1, 0]),
+        (
+            vec![
+                PortForwardMode::Dnat,
+                PortForwardMode::Redirect,
+                PortForwardMode::CustomAdapter,
+            ],
+            vec![0],
+        ),
+        (
+            vec![
+                PortForwardMode::CustomAdapter,
+                PortForwardMode::Dnat,
+                PortForwardMode::Redirect,
+            ],
+            vec![1, 0],
+        ),
+        (
+            vec![
+                PortForwardMode::Dnat,
+                PortForwardMode::CustomAdapter,
+                PortForwardMode::CustomAdapter,
+                PortForwardMode::Redirect,
+            ],
+            vec![1, 0],
+        ),
+    ] {
+        let mut desired = AgentPortForwardingConfig {
+            schema_version: 2,
+            ..Default::default()
+        };
+        for (index, mode) in modes.into_iter().enumerate() {
+            let mut rule = config().rules.remove(0);
+            rule.id = uuid::Uuid::new_v4();
+            rule.name = format!("bulk-{index}");
+            rule.mode = mode;
+            rule.masquerade = mode == PortForwardMode::Dnat;
+            rule.target_ip = (mode == PortForwardMode::Dnat).then(|| "192.0.2.80".parse().unwrap());
+            rule.address_family =
+                (mode == PortForwardMode::Redirect).then_some(PortForwardAddressFamily::Both);
+            rule.mappings = pair_port_expressions(&(18080 + index).to_string(), "8080").unwrap();
+            if mode == PortForwardMode::CustomAdapter {
+                rule.adapter = Some(PortForwardAdapterCommands {
+                    definition_id: uuid::Uuid::new_v4(),
+                    definition_name: "fixture".into(),
+                    definition_hash: "fixture".into(),
+                    apply: command("printf '%s' '{\"state\":\"applied\"}' > \"$1\""),
+                    remove: command("printf '%s' '{\"state\":\"absent\"}' > \"$1\""),
+                    status: command("cat \"$1\""),
+                });
+            }
+            desired.rules.push(rule);
+        }
+        desired.desired_hash = port_forwarding_desired_hash(&desired.rules);
+        let native_present = desired
+            .rules
+            .iter()
+            .any(|r| r.mode != PortForwardMode::CustomAdapter);
+        let applied = consumer
+            .reconcile(
+                &desired,
+                native_present,
+                false,
+                false,
+                CommandCancelToken::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            applied.status,
+            PortForwardRuntimeStatus::Applied,
+            "{applied:?}"
+        );
+        // Cover a single bulk deletion as well as partial removal with a survivor.
+        for retain in removals {
+            let retired = desired.rules.drain(retain..).collect::<Vec<_>>();
+            desired.native_cleanup_pending |= retired
+                .iter()
+                .any(|r| r.mode != PortForwardMode::CustomAdapter);
+            desired.cleanup_rules.extend(
+                retired
+                    .iter()
+                    .filter(|r| r.mode == PortForwardMode::CustomAdapter)
+                    .map(|r| PortForwardCleanupRule {
+                        rule_id: r.id,
+                        revision: r.revision + 1,
+                    }),
+            );
+            desired.desired_hash = native_hash(&desired.rules);
+            let removed = consumer
+                .reconcile(
+                    &desired,
+                    native_present,
+                    false,
+                    false,
+                    CommandCancelToken::default(),
+                )
+                .await
+                .unwrap();
+            for snapshot in [
+                removed,
+                consumer
+                    .inspect(&desired, 0, CommandCancelToken::default())
+                    .await,
+            ] {
+                eprintln!(
+                    "bulk cleanup: {}",
+                    serde_json::to_string(&snapshot).unwrap()
+                );
+                assert!(
+                    matches!(
+                        snapshot.status,
+                        PortForwardRuntimeStatus::Applied | PortForwardRuntimeStatus::Absent
+                    ),
+                    "{snapshot:?}"
+                );
+                for receipt in &desired.cleanup_rules {
+                    assert!(
+                        snapshot.removed_rules.contains(receipt),
+                        "missing {receipt:?}: {snapshot:?}"
+                    );
+                }
+                if native_present {
+                    assert_eq!(
+                        snapshot.native_desired_hash,
+                        Some(native_config(&desired).desired_hash)
+                    );
+                    assert_eq!(
+                        snapshot.owned_table_present,
+                        Some(
+                            desired
+                                .rules
+                                .iter()
+                                .any(|r| r.mode != PortForwardMode::CustomAdapter)
+                        )
+                    );
+                } else {
+                    assert_eq!(
+                        snapshot.owned_table_present, None,
+                        "custom-only cleanup must not inspect nftables"
+                    );
+                }
+            }
+            let (_, mut restarted) = PortForwardingConsumer::channel("bulk-removal-fixture".into());
+            restarted.probe().await;
+            let inspected = restarted
+                .inspect(&desired, 0, CommandCancelToken::default())
+                .await;
+            if desired.rules.is_empty() && native_present {
+                assert_eq!(
+                    inspected.native_desired_hash.as_deref(),
+                    Some(""),
+                    "restart must still observe native cleanup"
+                );
+                let reconciled = restarted
+                    .reconcile(&desired, false, false, false, CommandCancelToken::default())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reconciled.native_desired_hash.as_deref(),
+                    Some(""),
+                    "accepted cleanup intent must require native evidence after restart"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn normalization_ignores_handles_and_counter_values_but_not_structure() {
     let left = serde_json::json!({"nftables":[{"rule":{"handle":4,"expr":[{"counter":{"packets":1,"bytes":4}}]}}]});

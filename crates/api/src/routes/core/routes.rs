@@ -92,6 +92,7 @@ use crate::{
     routes_job_rollouts::{
         get_job_rollout, list_job_rollouts, pause_job_rollout, resume_job_rollout,
     },
+    routes_job_search::{job_search_fields, job_search_values, search_jobs},
     routes_jobs::{
         approve_job_approval, cancel_job, create_job, create_job_approval,
         get_job_approval_submitted_request, list_job_approvals, reject_job_approval,
@@ -614,6 +615,9 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/agent-update-releases/latest",
             get(latest_agent_update_release),
         )
+        .route("/api/v1/jobs/search", post(search_jobs))
+        .route("/api/v1/jobs/search/fields", get(job_search_fields))
+        .route("/api/v1/jobs/search/values", get(job_search_values))
         .route("/api/v1/jobs/{job_id}", get(get_job))
         .route(
             "/api/v1/jobs/{job_id}/request",

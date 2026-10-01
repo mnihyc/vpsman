@@ -2644,13 +2644,9 @@ export function App() {
     return (
       <JobsPanel
         activeSubpage={panelSubpage}
+        apiToken={dashboard.apiToken}
+        requestsEnabled={dashboard.documentVisible}
         agents={dashboard.agents}
-        error={combineErrors(
-          dashboard.jobsError,
-          panelSubpage === "scheduled_runs"
-            ? dashboard.schedulesError
-            : null,
-        )}
         jobApprovals={dashboard.jobApprovals}
         jobs={dashboard.jobs}
         schedules={dashboard.schedules}

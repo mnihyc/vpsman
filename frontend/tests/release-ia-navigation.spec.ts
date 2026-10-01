@@ -3671,6 +3671,7 @@ test("job terminal events update loaded history rows without replacing the page"
       listGets: 0,
     };
     trackedWindow.__vpsmanJobHistoryStress = state;
+    (window as typeof window & { __vpsmanJobHistorySearchRows?: HistoryJob[] }).__vpsmanJobHistorySearchRows = state.jobs;
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       const pathname = new URL(url, window.location.href).pathname;
@@ -3700,7 +3701,7 @@ test("job terminal events update loaded history rows without replacing the page"
 
   await openConsoleSubpage(page, "Jobs", "History");
   const jobsGrid = page.getByLabel("Job records data grid");
-  await expect(jobsGrid).toContainText("15 of 15 jobs");
+  await expect(jobsGrid).toContainText("15 matching jobs");
   await jobsGrid.getByLabel("Job records page size").selectOption("10");
   await jobsGrid.getByLabel("Job records next page").click();
   await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
@@ -3805,7 +3806,7 @@ test("job terminal events update loaded history rows without replacing the page"
       }),
     );
   }, unknownJobId);
-  await expect(jobsGrid).toContainText("16 of 16 jobs");
+  await expect(jobsGrid).toContainText("16 matching jobs");
   await expect
     .poll(() =>
       page.evaluate((jobId) => {
@@ -3873,7 +3874,7 @@ test("job terminal events update loaded history rows without replacing the page"
     }),
   });
   await historyPanel.getByRole("button", { name: "Refresh" }).click();
-  await expect(jobsGrid).toContainText("17 of 17 jobs");
+  await expect(jobsGrid).toContainText("17 matching jobs");
   await expect
     .poll(() =>
       page.evaluate(
@@ -3885,7 +3886,7 @@ test("job terminal events update loaded history rows without replacing the page"
           ).__vpsmanJobHistoryStress?.listGets ?? -1,
       ),
     )
-    .toBe(3);
+    .toBe(2);
   await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
   await expect(jobsGrid.getByTitle(manualJobId)).toHaveCount(0);
   await jobsGrid.getByLabel("Job records previous page").click();

@@ -133,6 +133,8 @@ mod repository_inventory;
 mod repository_job_outputs;
 #[path = "repository/jobs/repository_job_rollouts.rs"]
 mod repository_job_rollouts;
+#[path = "repository/jobs/repository_job_search.rs"]
+mod repository_job_search;
 #[path = "repository/jobs/repository_jobs.rs"]
 mod repository_jobs;
 #[path = "repository/access/repository_key_lifecycle.rs"]
@@ -217,6 +219,8 @@ mod routes_inventory;
 mod routes_job_history;
 #[path = "routes/jobs/routes_job_rollouts.rs"]
 mod routes_job_rollouts;
+#[path = "routes/jobs/routes_job_search.rs"]
+mod routes_job_search;
 #[path = "routes/jobs/routes_jobs.rs"]
 mod routes_jobs;
 #[path = "routes/access/routes_key_lifecycle.rs"]

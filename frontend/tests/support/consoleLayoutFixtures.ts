@@ -10042,6 +10042,61 @@ export async function installConsoleApiMock(
             target_counts: queuedTargetCounts(targetClientIds.length),
           });
         }
+        if (pathname === "/api/v1/jobs/search/fields" && method === "GET") {
+          return jsonResponse([
+            ["type","text"],["status","status"],["target","target"],["created_at","timestamp"],["duration","duration"],
+          ].map(([name,kind]) => ({
+            name,kind,scope:"job",aliases:[],description:"Search stored " + name,
+            operators: ["=","!=","in","not in"],examples:[],
+            values: name === "type" ? jobsFixture.map((job) => job.command_type)
+              : name === "status" ? ["queued","running","completed","failed","rejected"] : [],
+          })));
+        }
+        if (pathname === "/api/v1/jobs/search/values" && method === "GET") {
+          return jsonResponse([]);
+        }
+        if (pathname === "/api/v1/jobs/search" && method === "POST") {
+          // Presentation fixture only. Typed predicates, target correlation and
+          // database cursors are verified against PostgreSQL in repository tests.
+          const request = await readJsonBody(input, init) as {
+            q?: string; limit?: number; cursor?: string | null;
+            sort?: Array<{id:string;desc:boolean}>;
+          };
+          const source = (window as typeof window & {
+            __vpsmanJobHistorySearchRows?: typeof jobsFixture;
+          }).__vpsmanJobHistorySearchRows ?? jobsFixture;
+          const terms = (request.q ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+          const filtered = source.filter((job) => {
+            const text = [job.id,job.command_type,job.command_type.replace(/_/g," "),job.status,
+              job.actor_id ?? "worker automation",job.payload_hash].join(" ").toLowerCase();
+            return terms.every((term) => text.includes(term));
+          });
+          const sort = request.sort?.length ? request.sort : [{id:"age",desc:true}];
+          const keys = (job: (typeof source)[number]): Array<string | number> => sort.map((key) => {
+            if (key.id === "operation") return job.command_type;
+            if (key.id === "targets") return job.target_count;
+            if (key.id === "result") return job.status;
+            if (key.id === "startedBy") return job.actor_id ?? "worker";
+            if (key.id === "duration") return job.completed_at ? Math.max(0,Date.parse(job.completed_at)-Date.parse(job.created_at)) : -1;
+            return Date.parse(job.created_at);
+          }).concat([job.id]);
+          const compare = (left:Array<string|number>,right:Array<string|number>) => {
+            for (let index=0;index<left.length;index+=1) {
+              const a=left[index], b=right[index];
+              const order=a<b ? -1 : a>b ? 1 : 0;
+              if (order) return order * ((sort[index]?.desc ?? sort[0].desc) ? -1 : 1);
+            }
+            return 0;
+          };
+          filtered.sort((a,b) => compare(keys(a),keys(b)));
+          const after = request.cursor ? JSON.parse(atob(request.cursor)) as Array<string|number> : null;
+          const remaining = after ? filtered.filter((job) => compare(keys(job),after)>0) : filtered;
+          const rows=remaining.slice(0,request.limit ?? 12);
+          return jsonResponse({
+            rows,total:filtered.length,as_of:new Date().toISOString(),
+            next_cursor:remaining.length>rows.length ? btoa(JSON.stringify(keys(rows[rows.length-1]))) : null,
+          });
+        }
         if (pathname === "/api/v1/jobs" && method === "GET") {
           return jsonResponse(jobsFixture);
         }

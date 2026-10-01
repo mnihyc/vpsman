@@ -37,6 +37,75 @@ Target statuses are:
 - `control_timeout`: backend control deadline expired before final output.
 - `canceled`: operator cancellation completed before target completion.
 
+## Searching Job history
+
+Job history searches all retained executions on the server. The Home/CLI recent
+job list and retention policy are unchanged. Hover the search input for syntax
+help, or a dropdown suggestion for its field description. Invalid expressions
+turn the input red; the tooltip explains the error. The previous valid results
+remain explicitly labeled until the expression is corrected.
+
+Examples:
+
+```text
+type = runtime_config_sync && status in [failed, partial_success]
+type != network_routing_status && created_at >= now-24h
+target = v-11 && duration > 30s
+(status = failed || status = agent_timeout) && privileged = true
+target_result = "id = v-11 && status = failed && exit_code != 0"
+```
+
+Combine conditions with `&&`, `||`, `!` and parentheses; adjacent terms imply
+AND. Comparisons use `=`, `!=`, `<`, `<=`, `>` and `>=`, with ordered comparisons
+available for numbers, durations and timestamps. `field:value` is equality.
+Use `in [...]` or `not in [...]` for lists. Text equality is case insensitive;
+`*` and `?` are wildcards, while `%` and `_` are literal. Bare text searches job
+metadata and recorded target IDs/current VPS names. Quote text containing spaces.
+Regex list entries, such as `type in [/^network_routing_/]`, must be accepted by
+both the shared expression parser and PostgreSQL; regex matching is case sensitive.
+
+| Fields | Meaning |
+| --- | --- |
+| `type`, `status`, `id`, `target_count`, `privileged` | Stored job identity, result and authorization metadata |
+| `target` | Any recorded target ID or its current VPS name |
+| `actor_id`, `actor`, `source` | Operator ID/current username; source is `operator`, `automation` or `schedule` |
+| `schedule_id`, `schedule`, `schedule_lineage`, `causation_id` | Stored schedule/causation IDs and current schedule name |
+| `created_at`, `completed_at`, `duration`, `age`, `timeout` | Creation/completion, elapsed job time, age and configured timeout |
+| `payload_hash`, `resource_kind`, `resource_id` | Stored payload/resource metadata |
+| `target_result` | Quoted conditions that must hold for the **same** target |
+
+Within `target_result`, fields are `id`, `name`, `status`, `exit_code`, `message`,
+`started_at`, `completed_at`, `deadline_at`, `duration`, `dispatch_attempts`,
+`last_dispatch_error` and `capability_reason`. Job status and target status are
+distinct. `target_result != "..."` means no target matches that expression;
+likewise `target != v-11` requires that none of the targets match. Historical IDs
+remain searchable after a VPS is removed. Names reflect current metadata, not a
+historical name snapshot. Current operator names require administrator access;
+current schedule names require `schedules:read`. ID searches retain the normal
+`fleet:read` history permission.
+
+Durations accept `ms`, `s`, `m`, `h`, `d` and `w`; bare numbers mean seconds. Job
+duration retains its displayed meaning: completion minus creation, including
+queue time. Target duration measures completion minus target start. Incomplete
+durations are unknown: use `duration = null`, not a numeric comparison. Missing
+scalar values support `= null` and `!= null`; negating a comparison does not turn
+an unknown value into known evidence. Timestamps accept ISO timestamps with an
+offset, UTC dates, `now` and relative values such as `now-24h`.
+
+The existing column sorts and page-size control operate on the full result set.
+Continuation uses sort values plus job ID, without a deep-offset history cap.
+Each page reports an authoritative matching count. Creation/reference time is
+anchored while continuing a query, so jobs created after that boundary are
+excluded and relative ranges agree. Status remains live: an execution can leave a
+filter or move when a mutable sort value changes. Refreshing page one includes
+new arrivals. Live refresh preserves the query and selected job details.
+
+The API exposes `POST /api/v1/jobs/search` (`q`, `limit`, `sort`, `cursor`),
+`GET /api/v1/jobs/search/fields`, and `GET /api/v1/jobs/search/values`. Search
+limits bound expression complexity (16 KiB, 256 AST/list nodes, 1,024 tokens and
+64 nested groups), not retained history. Value hints return up to 20 candidates;
+searching a value never requires it to appear in that dropdown.
+
 ## Rules
 
 - The database `jobs.status` and `job_targets.status` CHECK constraints are the durable truth boundary.

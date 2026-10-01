@@ -165,7 +165,27 @@ enum TokenKind {
 }
 
 pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
+    parse_expression_with_aliases(input, true)
+}
+
+/// Reuse the expression grammar for a typed, non-VPS field catalogue. Keep
+/// names such as id/client_id distinct and treat field:value as equality.
+/// Existing fleet selectors retain their VPS/tag shorthand interpretation.
+pub fn parse_field_expression(input: &str) -> Result<Option<Expression>, String> {
+    parse_expression_with_aliases(input, false)
+}
+
+fn parse_expression_with_aliases(
+    input: &str,
+    field_aliases: bool,
+) -> Result<Option<Expression>, String> {
     let tokens = tokenize(input)?;
+    // Typed searches expand into SQL. Bound parsing before constructing the
+    // recursive AST; 1,024 tokens accommodates the caller's 256-node budget.
+    // Existing selector parsing keeps its established behavior.
+    if !field_aliases && tokens.len() > 1024 {
+        return Err("Search expression is too large (maximum 1,024 tokens).".into());
+    }
     if tokens.is_empty() {
         if !input.trim().is_empty() {
             return Err("expression is empty".to_string());
@@ -175,6 +195,8 @@ pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
     let mut parser = Parser {
         position: 0,
         tokens,
+        field_aliases,
+        depth: 0,
     };
     let expression = parser.parse_or()?;
     if parser.peek().is_some() {
@@ -619,8 +641,10 @@ fn read_regex(
 }
 
 struct Parser {
+    field_aliases: bool,
     tokens: Vec<TokenKind>,
     position: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -652,15 +676,29 @@ impl Parser {
     }
 
     fn parse_not(&mut self) -> Result<Expression, String> {
-        if self.consume_not() {
-            return Ok(Expression::Not(Box::new(self.parse_not()?)));
+        // Parentheses and unary NOT both recurse here. A typed query can use
+        // up to 64 nested groups without allowing a pasted query to exhaust
+        // the request task's stack before semantic validation runs.
+        if !self.field_aliases && self.depth >= 64 {
+            return Err("Search nesting exceeds 64 levels.".into());
         }
-        self.parse_primary()
+        self.depth += 1;
+        let result = if self.consume_not() {
+            self.parse_not()
+                .map(|inner| Expression::Not(Box::new(inner)))
+        } else {
+            self.parse_primary()
+        };
+        self.depth -= 1;
+        result
     }
 
     fn parse_primary(&mut self) -> Result<Expression, String> {
         match self.advance() {
             Some(TokenKind::Word(raw)) => self.parse_predicate(raw).map(Expression::Predicate),
+            Some(TokenKind::String(raw)) if !self.field_aliases => {
+                Ok(Expression::Predicate(Predicate::Bare(raw)))
+            }
             Some(TokenKind::LeftParen) => {
                 let expression = self.parse_or()?;
                 if !matches!(self.advance(), Some(TokenKind::RightParen)) {
@@ -681,7 +719,7 @@ impl Parser {
     fn parse_predicate(&mut self, raw: String) -> Result<Predicate, String> {
         if let Some(operator) = self.consume_comparison_operator() {
             let value = self.parse_scalar_value()?;
-            let field = canonical_field(&raw);
+            let field = self.field_name(&raw);
             return Ok(Predicate::Comparison {
                 field,
                 operator,
@@ -690,7 +728,7 @@ impl Parser {
         }
         if self.consume_in() {
             let values = self.parse_list_values()?;
-            let field = canonical_field(&raw);
+            let field = self.field_name(&raw);
             return Ok(Predicate::Membership {
                 field,
                 negated: false,
@@ -699,12 +737,25 @@ impl Parser {
         }
         if self.consume_not_in() {
             let values = self.parse_list_values()?;
-            let field = canonical_field(&raw);
+            let field = self.field_name(&raw);
             return Ok(Predicate::Membership {
                 field,
                 negated: true,
                 values,
             });
+        }
+        if !self.field_aliases {
+            if let Some((field, value)) = raw.split_once(':') {
+                if field.is_empty() || value.is_empty() {
+                    return Err("field:value requires both a field and a value".into());
+                }
+                return Ok(Predicate::Comparison {
+                    field: field.to_ascii_lowercase(),
+                    operator: ComparisonOperator::Eq,
+                    value: ScalarValue::Literal(value.into()),
+                });
+            }
+            return Ok(Predicate::Bare(raw));
         }
         if raw.eq_ignore_ascii_case("untagged") {
             return Ok(Predicate::Untagged);
@@ -734,6 +785,14 @@ impl Parser {
             }
             Some(_) => Err("comparison is missing a scalar value".to_string()),
             None => Err("comparison is missing a scalar value".to_string()),
+        }
+    }
+
+    fn field_name(&self, raw: &str) -> String {
+        if self.field_aliases {
+            canonical_field(raw)
+        } else {
+            raw.to_ascii_lowercase()
         }
     }
 

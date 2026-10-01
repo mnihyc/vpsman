@@ -15,6 +15,8 @@ import {
   X,
 } from "lucide-react";
 import { NumberedTextarea } from "../components/NumberedTextarea";
+import type { AuthSession } from "../authSession";
+import { useJobHistorySearch } from "../hooks/useJobHistorySearch";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -266,8 +268,9 @@ type OutputStreamDownloadTarget = {
 
 export function JobsPanel({
   activeSubpage,
+  apiToken,
+  requestsEnabled = true,
   agents,
-  error,
   fileTransferSources,
   fileTransferSourcesTruncated,
   jobApprovals,
@@ -309,8 +312,9 @@ export function JobsPanel({
   setPrivilegeMaterial,
 }: {
   activeSubpage: string;
+  apiToken: AuthSession | null;
+  requestsEnabled?: boolean;
   agents: AgentView[];
-  error: string | null;
   fileTransferSources: FileTransferSourceArtifactRecord[];
   fileTransferSourcesTruncated: boolean;
   jobApprovals: JobApprovalRecord[];
@@ -436,8 +440,10 @@ export function JobsPanel({
     ? activeSubpage
     : "history";
   const routeSelectedJobId = jobDetailId(activeSubpage);
-  const jobHistoryFeedbackMessage =
-    error ?? (loading ? "Refreshing command records" : null);
+  const history = useJobHistorySearch(apiToken, requestsEnabled && jobSubpage === "history", jobs, jobDetailsInvalidation);
+  const [selectedHistoryJob, setSelectedHistoryJob] = useState<JobHistoryRecord | null>(null);
+  const selectedHistoryJobRef = useRef(selectedHistoryJob);
+  selectedHistoryJobRef.current = selectedHistoryJob;
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [streamPendingKey, setStreamPendingKey] = useState<string | null>(null);
   const [fileDownloadPendingClientId, setFileDownloadPendingClientId] =
@@ -448,7 +454,7 @@ export function JobsPanel({
   const scheduleRunJobs = jobs.filter((job) =>
     job.command_type.startsWith("scheduled_"),
   );
-  const historicalJobsBanner = jobHistoryFreshnessBanner(jobs);
+  const historicalJobsBanner = jobHistoryFreshnessBanner(history.rows);
   const scheduleById = useMemo(
     () => new Map(schedules.map((schedule) => [schedule.id, schedule])),
     [schedules],
@@ -546,9 +552,20 @@ export function JobsPanel({
       (row) => row.group_id === selectedComparisonGroupId,
     );
   }, [outputComparison, selectedComparisonGroupId]);
-  const selectedJobStatus = selectedJobId
-    ? (jobs.find((job) => job.id === selectedJobId)?.status ?? null)
-    : null;
+  const knownSelectedJob = selectedJobId
+    ? jobs.find((job) => job.id === selectedJobId) ?? history.rows.find((job) => job.id === selectedJobId)
+    : undefined;
+  const selectedJob = knownSelectedJob ?? (selectedHistoryJob?.id === selectedJobId ? selectedHistoryJob : null);
+  const selectedJobStatus = selectedJob?.status ?? null;
+  useEffect(() => {
+    if (!selectedJobId) { setSelectedHistoryJob(null); return; }
+    if (knownSelectedJob) { setSelectedHistoryJob(knownSelectedJob); return; }
+    const cached = selectedHistoryJobRef.current;
+    if (cached?.id === selectedJobId && isTerminalJobStatus(cached.status)) return;
+    let current = true;
+    void onLoadJob(selectedJobId).then((job) => { if (current) setSelectedHistoryJob(job); }).catch(() => {});
+    return () => { current = false; };
+  }, [selectedJobId, knownSelectedJob, history.rows, jobs, onLoadJob]);
 
   useEffect(() => {
     setComparisonMode(preferences.bulk_output_compare_mode);
@@ -1616,24 +1633,20 @@ export function JobsPanel({
               <div className="sectionHeader">
                 <div>
                   <h2>Job history</h2>
-                  <span>Latest execution records</span>
+                  <span>Stored execution records</span>
                 </div>
                 <div className="headerActionStack">
                   <button
                     className="secondaryAction"
                     data-tooltip-disabled-reason={
-                      loading ? "Job history is already loading" : undefined
+                      history.loading ? "Job history is already loading" : undefined
                     }
-                    disabled={loading}
-                    onClick={onRefresh}
+                    disabled={history.loading}
+                    onClick={history.refresh}
                     type="button"
                   >
                     Refresh
                   </button>
-                  <ActionFeedback
-                    message={jobHistoryFeedbackMessage}
-                    tone={error ? "danger" : "progress"}
-                  />
                 </div>
               </div>
               <div
@@ -1741,8 +1754,9 @@ export function JobsPanel({
                     </strong>
                   </div>
                 )}
-                rows={jobs}
-                rowsTruncated={jobHistoryTruncated}
+                rows={history.rows}
+                remote={history.remote}
+                searchPlaceholder="Search job history"
                 showMobileRowActions={false}
                 storageKey="vpsman.grid.jobs.history"
                 title="Job records"
@@ -1779,7 +1793,7 @@ export function JobsPanel({
                   key={`job:${selectedJobId}`}
                   loadRequest={() => onLoadJobRequest(selectedJobId)}
                   operationType={
-                    jobs.find((job) => job.id === selectedJobId)?.command_type ?? ""
+                    selectedJob?.command_type ?? ""
                   }
                 />
                 <ActionFeedback

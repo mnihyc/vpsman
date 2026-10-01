@@ -1,5 +1,9 @@
+#[path = "tests_postgres_job_search.rs"]
+mod job_search;
 #[path = "tests_postgres_network_adapter_mutations.rs"]
 mod network_adapter_mutations;
+#[path = "tests_postgres_port_forward_bulk.rs"]
+mod port_forward_bulk;
 #[path = "tests_postgres_schedule_failures.rs"]
 mod schedule_failures;
 #[path = "tests_postgres_schedule_timeout.rs"]

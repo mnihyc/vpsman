@@ -220,6 +220,12 @@ impl Repository {
             .await?;
         let mut config = config_from_records(&records)?;
         let Self::Postgres(pool) = self;
+        config.native_cleanup_pending = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM port_forward_rules WHERE client_id=$1 AND mode <> 'custom_adapter' AND deleted_at IS NOT NULL AND removal_confirmed_at IS NULL AND forgotten_at IS NULL)",
+        )
+        .bind(client_id)
+        .fetch_one(pool)
+        .await?;
         config.cleanup_rules = sqlx::query_as::<_, (Uuid,i64)>(
             "SELECT id,revision FROM port_forward_rules WHERE client_id=$1 AND EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AND forgotten_at IS NULL AND removal_confirmed_at IS NULL AND NOT (mode='custom_adapter' AND enabled AND deleted_at IS NULL) ORDER BY id"
         ).bind(client_id).fetch_all(pool).await?.into_iter().map(|(rule_id,revision)| PortForwardCleanupRule{rule_id,revision}).collect();
@@ -1261,6 +1267,12 @@ fn config_from_records(records: &[PortForwardRuleRecord]) -> Result<AgentPortFor
             1
         },
         cleanup_rules,
+        native_cleanup_pending: records.iter().any(|record| {
+            record.mode != PortForwardMode::CustomAdapter
+                && record.deleted_at.is_some()
+                && record.removal_confirmed_at.is_none()
+                && record.forgotten_at.is_none()
+        }),
         desired_hash,
         rules,
     };

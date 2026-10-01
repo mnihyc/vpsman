@@ -1022,20 +1022,14 @@ export function PortForwardingPanel({
           className="localActionFeedback portForwardActionFeedback"
           message={
             error ??
-            (loading
-              ? "Reloading stored forwarding state"
-              : feedback?.anchor === "summary"
-                ? feedback.message
-                : null)
+            (feedback?.anchor === "summary" ? feedback.message : null)
           }
           tone={
             error
               ? "danger"
-              : loading
-                ? "progress"
-                : feedback?.anchor === "summary"
-                  ? feedback.tone
-                  : undefined
+              : feedback?.anchor === "summary"
+                ? feedback.tone
+                : undefined
           }
         />
         <div

@@ -165,6 +165,9 @@ pub struct AgentPortForwardingConfig {
     /// Custom owners whose absence must be acknowledged independently of nftables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup_rules: Vec<PortForwardCleanupRule>,
+    /// Native tombstones still need fresh table evidence, even with no native rules.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub native_cleanup_pending: bool,
 }
 
 impl Default for AgentPortForwardingConfig {
@@ -174,8 +177,13 @@ impl Default for AgentPortForwardingConfig {
             desired_hash: String::new(),
             rules: Vec::new(),
             cleanup_rules: Vec::new(),
+            native_cleanup_pending: false,
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -52,7 +52,7 @@ import {
   GripVertical,
   X,
 } from "lucide-react";
-import { SearchExpressionInput } from "./SearchExpressionInput";
+import { SearchExpressionInput, type SearchCompletion, type SearchCompletionProvider } from "./SearchExpressionInput";
 import {
   buildParseableSearchValueSuggestions,
   searchFieldsForSearchValues,
@@ -114,6 +114,27 @@ type ConsoleDataGridPreferences = {
   sorting?: SortingState;
 };
 
+export type ConsoleDataGridRemoteRequest = {
+  query: string;
+  sorting: SortingState;
+  pageSize: number;
+};
+
+/** Opt-in remote ownership; all other grids retain their local behavior. */
+export type ConsoleDataGridRemote = {
+  onRequest: (request: ConsoleDataGridRemoteRequest) => void;
+  onPageChange: (index: number) => void;
+  pageIndex: number;
+  hasNextPage: boolean;
+  total: number;
+  loading: boolean;
+  error: string | null;
+  queryError: string | null;
+  help: string;
+  completionProvider: SearchCompletionProvider;
+  onCompletionLookup: (lookup: SearchCompletion["lookup"]) => void;
+};
+
 const DEFAULT_COLUMN_SIZE = 160;
 const DEFAULT_COLUMN_PREFERRED_MIN_SIZE = 96;
 const DEFAULT_COLUMN_RESIZE_MIN_SIZE = 64;
@@ -143,6 +164,7 @@ export function ConsoleDataGrid<T>({
   renderSelectionPanel,
   rowActions = [],
   rows,
+  remote,
   rowsTruncated = false,
   selectable = true,
   singleExpandedRow = false,
@@ -179,6 +201,7 @@ export function ConsoleDataGrid<T>({
   renderSelectionPanel?: (rows: T[]) => ReactNode;
   rowActions?: ConsoleDataGridAction<T>[];
   rows: T[];
+  remote?: ConsoleDataGridRemote;
   rowsTruncated?: boolean;
   selectable?: boolean;
   singleExpandedRow?: boolean;
@@ -214,6 +237,13 @@ export function ConsoleDataGrid<T>({
   const [sorting, setSorting] = useState<SortingState>(
     preferences.sorting ?? [],
   );
+  const remoteRequestRef = useRef(remote?.onRequest);
+  remoteRequestRef.current = remote?.onRequest;
+  const isRemote = Boolean(remote);
+  const remoteSelectedRows = useRef(new Map<string, T>());
+  useEffect(() => {
+    remoteRequestRef.current?.({ query: globalFilter, sorting, pageSize });
+  }, [globalFilter, sorting, pageSize, isRemote]);
   const isMobileGrid = useMediaQuery("(max-width: 640px)");
   const showMobileCards = isMobileGrid && mobileLayout === "cards";
   const expandedRowsRef = useRef(expandedRows);
@@ -235,8 +265,9 @@ export function ConsoleDataGrid<T>({
   const searchFieldsForRow = (row: T): SearchFields =>
     searchFieldsForSearchValues(searchValuesForRow(row));
   const searchResult = useMemo(() => {
+    if (isRemote) return { items: rows, error: remote?.queryError ?? null };
     return filterBySearchExpression(rows, globalFilter, searchFieldsForRow);
-  }, [columns, globalFilter, rows]);
+  }, [columns, globalFilter, rows, isRemote, remote?.queryError]);
   const filteredRows = searchResult.items;
   const searchError = searchResult.error;
   useEffect(() => {
@@ -249,12 +280,12 @@ export function ConsoleDataGrid<T>({
   }, [filteredRows.length, globalFilter, pageSize, searchError]);
   const gridSearchSuggestions = useMemo(
     () =>
-      buildParseableSearchValueSuggestions(
+      isRemote ? [] : buildParseableSearchValueSuggestions(
         rows,
         searchValuesForRow,
         searchFieldsForRow,
       ),
-    [columns, rows],
+    [columns, rows, isRemote],
   );
   const dataColumnsById = useMemo(
     () => new Map(columns.map((column) => [column.id, column])),
@@ -413,6 +444,8 @@ export function ConsoleDataGrid<T>({
     getPaginationRowModel: getPaginationRowModel(),
     getRowId,
     getSortedRowModel: getSortedRowModel(),
+    manualPagination: isRemote,
+    manualSorting: isRemote,
     onColumnSizingChange: setColumnSizing,
     onColumnVisibilityChange: setColumnVisibility,
     onColumnOrderChange: setColumnOrder,
@@ -427,15 +460,16 @@ export function ConsoleDataGrid<T>({
     },
   });
   useEffect(() => {
-    table.setPageIndex(0);
-  }, [globalFilter, pageResetKey, sorting, storageKey, table]);
+    if (!isRemote) table.setPageIndex(0);
+  }, [globalFilter, pageResetKey, sorting, storageKey, table, isRemote]);
   useEffect(() => {
+    if (isRemote) return;
     const pageCount = Math.ceil(filteredRows.length / pageSize);
     const pageIndex = table.getState().pagination.pageIndex;
     if (pageIndex >= pageCount) {
       table.setPageIndex(Math.max(0, pageCount - 1));
     }
-  }, [filteredRows.length, pageSize, table]);
+  }, [filteredRows.length, pageSize, table, isRemote]);
   const visibleMinimumGridWidth = table
     .getVisibleLeafColumns()
     .reduce((total, column) => {
@@ -448,9 +482,15 @@ export function ConsoleDataGrid<T>({
   const gridContentStyle = showMobileCards
     ? undefined
     : { minWidth: visibleMinimumGridWidth };
-  const selectedRows = table
-    .getSelectedRowModel()
-    .rows.map((row) => row.original);
+  // Preserve explicit selections across remote pages/filters, as the local
+  // grid does. Retain only selected records, not every page ever visited.
+  const selectedRows = isRemote
+    ? [...new Map([...remoteSelectedRows.current, ...rows.map((row) => [getRowId(row), row] as const)])]
+      .filter(([id]) => rowSelection[id]).map(([, row]) => row)
+    : table.getSelectedRowModel().rows.map((row) => row.original);
+  useEffect(() => {
+    remoteSelectedRows.current = new Map(isRemote ? selectedRows.map((row) => [getRowId(row), row]) : []);
+  }, [getRowId, isRemote, selectedRows]);
   const selectedRowSignature = selectedRows.map(getRowId).join("\u001f");
   const selectionRowActions =
     selectedRows.length === 1
@@ -467,8 +507,14 @@ export function ConsoleDataGrid<T>({
     (action) => !action.hidden?.(selectedRows),
   );
   const contextRowActions = rowActions.length > 0 ? rowActions : actions;
-  const pageCount = table.getPageCount() || 1;
-  const currentPage = table.getState().pagination.pageIndex + 1;
+  const pageCount = remote ? Math.max(1, Math.ceil(remote.total / pageSize)) : table.getPageCount() || 1;
+  const currentPage = (remote?.pageIndex ?? table.getState().pagination.pageIndex) + 1;
+  const canPreviousPage = remote
+    ? remote.pageIndex > 0 && !remote.loading && !remote.error
+    : table.getCanPreviousPage();
+  const canNextPage = remote
+    ? remote.hasNextPage && !remote.loading && !remote.error
+    : table.getCanNextPage();
   const currentPageRows = table.getRowModel().rows;
   const selectedPageRowCount = currentPageRows.filter((row) =>
     row.getIsSelected(),
@@ -835,6 +881,13 @@ export function ConsoleDataGrid<T>({
   }
 
   function renderEmptyContent() {
+    if (remote && (remote.loading || remote.error)) {
+      return (
+        <div className="emptyState compactEmpty" title={remote.error ?? undefined}>
+          <strong>{remote.loading ? "Searching job history…" : remote.queryError ? "Invalid search" : "Search unavailable"}</strong>
+        </div>
+      );
+    }
     if (searchError) {
       return (
         <div className="emptyState compactEmpty">
@@ -851,7 +904,7 @@ export function ConsoleDataGrid<T>({
         </div>
       );
     }
-    if (rows.length > 0 && globalFilter.trim()) {
+    if ((rows.length > 0 || isRemote) && globalFilter.trim()) {
       if (rowsTruncated && truncatedSearchEmpty !== undefined) {
         return (
           <div className="emptyState compactEmpty">{truncatedSearchEmpty}</div>
@@ -906,8 +959,14 @@ export function ConsoleDataGrid<T>({
       <div className="gridToolbar">
         <div className="gridCounts">
           <strong>{title}</strong>
-          <span>
-            {rowsTruncated
+          <span title={remote?.error ?? undefined}>
+            {remote
+              ? remote.loading
+                ? "Searching…"
+                : remote.error
+                  ? remote.queryError ? "Previous results" : "Search unavailable"
+                  : remote.total + " matching " + (remote.total === 1 ? singularItemLabel : itemLabel)
+              : rowsTruncated
               ? truncatedStatus !== undefined
                 ? truncatedStatus
                 : globalFilter.trim().length > 0
@@ -920,15 +979,19 @@ export function ConsoleDataGrid<T>({
         <SearchExpressionInput
           ariaLabel={`${title} search`}
           className="gridSearch compact"
+          completionProvider={remote?.completionProvider}
+          onCompletionLookup={remote?.onCompletionLookup}
           inputId={`${controlIdPrefix}-search`}
           onChange={setGlobalFilter}
           placeholder={searchPlaceholder}
-          showVerificationMessage
+          showVerificationMessage={!isRemote}
+          metaDescription={remote?.help}
+          tooltipMessage={remote ? searchError ?? remote.error ?? remote.help : undefined}
           suggestions={gridSearchSuggestions}
           value={globalFilter}
-          verification={searchError ? "invalid" : "neutral"}
+          verification={searchError ? "invalid" : remote?.loading ? "checking" : "neutral"}
           verificationMessage={
-            searchError ? `Invalid search: ${searchError}` : undefined
+            searchError ? `Invalid search: ${searchError}` : remote?.error ?? undefined
           }
         />
         <div className="gridToolbarActions">
@@ -1106,10 +1169,10 @@ export function ConsoleDataGrid<T>({
             <button
               aria-label={`${title} previous page`}
               className="iconButton"
-              disabled={!table.getCanPreviousPage()}
-              onClick={() => table.previousPage()}
+              disabled={!canPreviousPage}
+              onClick={() => remote ? remote.onPageChange(remote.pageIndex - 1) : table.previousPage()}
               title={
-                table.getCanPreviousPage()
+                canPreviousPage
                   ? `Go to the previous ${title} page.`
                   : `Already on the first ${title} page.`
               }
@@ -1119,17 +1182,17 @@ export function ConsoleDataGrid<T>({
             </button>
             <span
               className="gridPageLabel"
-              title={`Page ${currentPage} of ${pageCount} for ${title}.`}
+              title={remote ? `Page ${currentPage} of matching history. Use the arrows to page through retained results.` : `Page ${currentPage} of ${pageCount} for ${title}.`}
             >
               {currentPage} / {pageCount}
             </span>
             <button
               aria-label={`${title} next page`}
               className="iconButton"
-              disabled={!table.getCanNextPage()}
-              onClick={() => table.nextPage()}
+              disabled={!canNextPage}
+              onClick={() => remote ? remote.onPageChange(remote.pageIndex + 1) : table.nextPage()}
               title={
-                table.getCanNextPage()
+                canNextPage
                   ? `Go to the next ${title} page.`
                   : `Already on the last ${title} page.`
               }

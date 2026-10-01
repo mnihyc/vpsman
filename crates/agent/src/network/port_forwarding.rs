@@ -360,6 +360,7 @@ impl PortForwardingConsumer {
     ) -> Result<PortForwardRuntimeSnapshot> {
         validate_port_forwarding_config(config)
             .map_err(|error| anyhow::anyhow!("invalid port-forwarding desired state: {error}"))?;
+        let require_table_access = require_table_access || config.native_cleanup_pending;
         if cancel_token.is_canceled() {
             self.adopt_desired(config).await?;
             cancel_token.check("port_forwarding")?;
@@ -470,15 +471,19 @@ impl PortForwardingConsumer {
             .rules
             .retain(|rule| !self.inventory.retains_owner(rule.id));
         native.desired_hash = native_hash(&native.rules);
-        let mut snapshot =
-            if self.has_native_ownership(&native) || !custom_ownership_context(config) {
-                self.inspect_native(&native, cancel_token.clone()).await
-            } else {
-                PortForwardRuntimeSnapshot {
-                    status: PortForwardRuntimeStatus::Absent,
-                    ..PortForwardRuntimeSnapshot::default()
-                }
-            };
+        // The apply snapshot can be replaced before telemetry sends it. Keep
+        // observing native absence until the server confirms its tombstones.
+        let mut snapshot = if config.native_cleanup_pending
+            || self.has_native_ownership(&native)
+            || !custom_ownership_context(config)
+        {
+            self.inspect_native(&native, cancel_token.clone()).await
+        } else {
+            PortForwardRuntimeSnapshot {
+                status: PortForwardRuntimeStatus::Absent,
+                ..PortForwardRuntimeSnapshot::default()
+            }
+        };
         attach_native_stats(&native, &mut snapshot);
         snapshot.removed_rules = self.inventory.removed_rules();
         let previous = self.published.borrow().clone();

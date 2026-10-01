@@ -1,6 +1,53 @@
 use super::*;
 use serde_json::Value;
 
+#[test]
+fn typed_field_parser_preserves_names_without_changing_selector_aliases() {
+    for (input, field, selector_field) in [
+        ("id = job-id", "id", "vps.id"),
+        ("client_id = v-11", "client_id", "vps.id"),
+        ("status:failed", "status", "vps.status"),
+    ] {
+        let Expression::Predicate(Predicate::Comparison { field: parsed, .. }) =
+            parse_field_expression(input).unwrap().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(parsed, field);
+        let Expression::Predicate(Predicate::Comparison { field: parsed, .. }) =
+            parse_expression(input).unwrap().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(parsed, selector_field);
+    }
+    assert!(matches!(
+        parse_field_expression("\"quoted history text\"")
+            .unwrap()
+            .unwrap(),
+        Expression::Predicate(Predicate::Bare(_))
+    ));
+}
+
+#[test]
+fn typed_field_parser_bounds_recursion_before_building_an_ast() {
+    let nested = format!("{}status = failed{}", "(".repeat(80), ")".repeat(80));
+    assert!(parse_field_expression(&nested)
+        .unwrap_err()
+        .contains("nesting"));
+    assert!(
+        parse_expression(&nested).is_ok(),
+        "selector semantics are unchanged"
+    );
+    let negated = format!("{}status = failed", "!".repeat(80));
+    assert!(parse_field_expression(&negated)
+        .unwrap_err()
+        .contains("nesting"));
+    assert!(parse_field_expression(&"x ".repeat(1025))
+        .unwrap_err()
+        .contains("tokens"));
+}
+
 fn vps() -> ExpressionContext {
     ExpressionContext::for_vps(VpsMetadata {
         id: "edge-01".to_string(),
