@@ -4182,7 +4182,7 @@ function TunnelPlanComposer({
                       const left = side === "left";
                       const label = left ? "Left" : "Right";
                       const clientId = left ? form.leftClientId : form.rightClientId;
-                      const direction = `${left ? "L→R" : "R→L"} (${clientId ? clientDisplayNameFromMap(clientId, advancedClientNames) : "Select VPS"})`;
+                      const direction = `${left ? "L→R" : "R→L"} · ${clientId ? clientDisplayNameFromMap(clientId, advancedClientNames) : "Select VPS"}`;
                       return (
                         <div className="tunnelAdditionalEndpoint" key={side}>
                           <div className="topologyFormGrid twoColumn compactNumericGrid">
