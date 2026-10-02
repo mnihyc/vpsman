@@ -590,6 +590,8 @@ fn directional_update_plan_compares_each_endpoint_to_its_own_target() {
     use std::collections::BTreeMap;
     let mut plan = bandwidth_test_plan();
     plan.recommended_ospf_cost = Some(49);
+    // These assertions exercise reviewed approval, independently of the default mode.
+    plan.input.ospf.as_mut().unwrap().mode = OspfControlMode::Reviewed;
     plan.input.ospf.as_mut().unwrap().left_cost_offset = 28.0;
     plan.input.ospf.as_mut().unwrap().left_cost_multiplier = 1.49;
     plan.plan.ospf = plan.input.ospf.clone();
