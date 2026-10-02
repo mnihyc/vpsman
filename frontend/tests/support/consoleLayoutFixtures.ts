@@ -3045,6 +3045,8 @@ export const tunnelPlans = [
     left_ospf_job_id: null,
     name: "sfo-fra-gre",
     recommended_ospf_cost: 22,
+    left_recommended_ospf_cost: 20,
+    right_recommended_ospf_cost: 20,
     right_client_id: "agent-fra-02",
     right_ospf_status: "verified",
     right_current_ospf_cost: 14,
@@ -3094,6 +3096,11 @@ export const tunnelPlans = [
         planned_latency_ms: 14,
         planned_packet_loss_ratio: 0,
         preference: 1,
+        cost_floor: 5,
+        left_cost_offset: 0,
+        right_cost_offset: 0,
+        left_cost_multiplier: 1,
+        right_cost_multiplier: 1,
         policy: {
           latency_weight: 1,
           loss_weight: 400,
@@ -3140,6 +3147,11 @@ export const tunnelPlans = [
         planned_latency_ms: 14,
         planned_packet_loss_ratio: 0,
         preference: 1,
+        cost_floor: 5,
+        left_cost_offset: 0,
+        right_cost_offset: 0,
+        left_cost_multiplier: 1,
+        right_cost_multiplier: 1,
         policy: {
           latency_weight: 1,
           loss_weight: 400,
@@ -3154,6 +3166,8 @@ export const tunnelPlans = [
         right_adapter_template_id: "55555555-5555-4555-8555-555555555555",
       },
       recommended_ospf_cost: 22,
+      left_recommended_ospf_cost: 20,
+      right_recommended_ospf_cost: 20,
       conflicts: [],
     },
   },
@@ -3974,6 +3988,8 @@ const topologyGraph = {
       left_ospf_status: "verified",
       right_ospf_status: "verified",
       recommended_ospf_cost: 22,
+      left_recommended_ospf_cost: 20,
+      right_recommended_ospf_cost: 20,
       right_client_id: "agent-fra-02",
       right_observed_at: "2026-05-31T10:02:00Z",
       right_runtime_reason: null,
@@ -4041,6 +4057,8 @@ const ospfRecommendations = [
     reason: "derived from persisted probe/speed-test trends",
     recommendation_id: "ospf-1234abcd5678ef90",
     recommended_ospf_cost: 22,
+    left_recommended_ospf_cost: 20,
+    right_recommended_ospf_cost: 20,
     right_client_id: "agent-fra-02",
     sample_count: 5,
     throughput_avg_mbps: 10.1,
@@ -4052,7 +4070,7 @@ export const ospfUpdatePlans = [
   {
     approval_scope: ["client:agent-sfo-01", "client:agent-fra-02"],
     change_summary:
-      "Apply OSPF cost 22 through the two resolved endpoint updaters",
+      "Apply OSPF costs L 20 / R 20 through the two resolved endpoint updaters",
     confidence: "measured",
     control_mode: "reviewed",
     evidence: {
@@ -4077,7 +4095,7 @@ export const ospfUpdatePlans = [
     left_adapter_definition_hash: "c".repeat(64),
     left_current_ospf_cost: 14,
     left_ospf_status: "verified",
-    maximum_cost_delta: 8,
+    maximum_cost_delta: 6,
     mutation_mode: "server_issued_adapter_jobs",
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
@@ -4085,6 +4103,8 @@ export const ospfUpdatePlans = [
     privilege_required: true,
     recommendation_id: "ospf-1234abcd5678ef90",
     recommended_ospf_cost: 22,
+    left_recommended_ospf_cost: 20,
+    right_recommended_ospf_cost: 20,
     requires_approval: true,
     right_client_id: "agent-fra-02",
     right_updater_source: "plan_override",
@@ -11948,10 +11968,12 @@ export async function installConsoleApiMock(
             (record) => record.id === planId,
           );
           if (plan) {
-            const nextCost =
-              (body as { desired_ospf_cost?: number }).desired_ospf_cost ??
-              plan.plan.recommended_ospf_cost;
-            plan.desired_ospf_cost = nextCost;
+            const desired = body as { left_desired_ospf_cost: number; right_desired_ospf_cost: number };
+            const mutablePlan = plan as unknown as Record<string, unknown>;
+            mutablePlan.left_desired_ospf_cost = desired.left_desired_ospf_cost;
+            mutablePlan.right_desired_ospf_cost = desired.right_desired_ospf_cost;
+            plan.desired_ospf_cost = desired.left_desired_ospf_cost === desired.right_desired_ospf_cost
+              ? desired.left_desired_ospf_cost : null;
             plan.ospf_status = "pending";
             plan.left_ospf_status = "pending";
             plan.right_ospf_status = "pending";

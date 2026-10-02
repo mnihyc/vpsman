@@ -395,6 +395,13 @@ fn parses_vty_tunnel_plan_advanced_ospf_policy_without_losing_values() {
         "--ospf-latency-ms=32.5",
         "--ospf-packet-loss-ratio=0.01",
         "--ospf-preference=1.4",
+        "--ospf-cost-floor=10",
+        "--ospf-left-cost-offset",
+        "-18",
+        "--ospf-right-cost-offset=28",
+        "--ospf-left-cost-multiplier=0.5",
+        "--ospf-right-cost-multiplier",
+        "1.49",
         "--ospf-min-cost-delta=9",
         "--ospf-healthy-windows=4",
         "--ospf-latency-weight=1.5",
@@ -409,6 +416,11 @@ fn parses_vty_tunnel_plan_advanced_ospf_policy_without_losing_values() {
     .unwrap();
 
     let ospf = request.input.ospf.unwrap();
+    assert_eq!(ospf.cost_floor, 10);
+    assert_eq!(ospf.left_cost_offset, -18.0);
+    assert_eq!(ospf.right_cost_offset, 28.0);
+    assert_eq!(ospf.left_cost_multiplier, 0.5);
+    assert_eq!(ospf.right_cost_multiplier, 1.49);
     assert_eq!(ospf.min_cost_delta, 9);
     assert_eq!(ospf.healthy_windows, 4);
     assert_eq!(ospf.policy.latency_weight, 1.5);
@@ -485,4 +497,73 @@ fn rejects_vty_tunnel_plan_missing_required_or_bad_values() {
         "--bandwidth-mbps=100",
     ])
     .is_err());
+}
+
+#[test]
+fn directional_ospf_defaults_and_invalid_values_use_shared_plan_validation() {
+    let base = [
+        "--name=ospf-edge",
+        "--interface=tunospf",
+        "--kind=gre",
+        "--left-client=left",
+        "--right-client=right",
+        "--left-remote-underlay=198.51.100.10",
+        "--right-remote-underlay=203.0.113.20",
+        "--left-tunnel-ipv4-cidr=10.255.30.0/31",
+        "--right-tunnel-ipv4-cidr=10.255.30.1/31",
+        "--bandwidth-mbps=750",
+    ];
+    let mut args = base.to_vec();
+    args.extend(["--ospf", "--ospf-latency-ms=32.5"]);
+    let request = parse_vty_tunnel_plan(&args).unwrap();
+    let ospf = request.input.ospf.as_ref().unwrap();
+    assert_eq!(ospf.mode, vpsman_common::OspfControlMode::Automatic);
+    assert_eq!(ospf.cost_floor, 5);
+    assert_eq!(ospf.left_cost_offset, 0.0);
+    assert_eq!(ospf.right_cost_offset, 0.0);
+    assert_eq!(ospf.left_cost_multiplier, 1.0);
+    assert_eq!(ospf.right_cost_multiplier, 1.0);
+    let encoded = serde_json::to_value(&request.input).unwrap();
+    let decoded: vpsman_common::TunnelPlanInput = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.ospf, request.input.ospf);
+    let mut reviewed_args = args.clone();
+    reviewed_args.push("--ospf-mode=reviewed");
+    assert_eq!(
+        parse_vty_tunnel_plan(&reviewed_args)
+            .unwrap()
+            .input
+            .ospf
+            .unwrap()
+            .mode,
+        vpsman_common::OspfControlMode::Reviewed
+    );
+
+    for invalid in [
+        "--ospf-cost-floor=0",
+        "--ospf-cost-floor=1.5",
+        "--ospf-cost-floor=65536",
+        "--ospf-left-cost-offset=NaN",
+        "--ospf-right-cost-offset=inf",
+        "--ospf-left-cost-multiplier=0",
+        "--ospf-right-cost-multiplier=-1",
+        "--ospf-right-cost-multiplier=NaN",
+    ] {
+        let mut invalid_args = args.clone();
+        invalid_args.push(invalid);
+        assert!(parse_vty_tunnel_plan(&invalid_args).is_err(), "{invalid}");
+    }
+    for requires_ospf in [
+        "--ospf-cost-floor=5",
+        "--ospf-left-cost-offset=0",
+        "--ospf-right-cost-offset=0",
+        "--ospf-left-cost-multiplier=1",
+        "--ospf-right-cost-multiplier=1",
+    ] {
+        let mut disabled_args = base.to_vec();
+        disabled_args.push(requires_ospf);
+        assert!(
+            parse_vty_tunnel_plan(&disabled_args).is_err(),
+            "{requires_ospf}"
+        );
+    }
 }

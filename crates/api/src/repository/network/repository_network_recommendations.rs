@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
-use vpsman_common::{observed_ospf_cost, payload_hash, OspfControlMode};
+use vpsman_common::{
+    adjusted_ospf_cost, observed_ospf_cost, ospf_cost_needs_floor_alignment, payload_hash,
+    OspfControlMode, TunnelEndpointSide,
+};
 
 use crate::{
     model::{
@@ -465,6 +468,11 @@ fn recommend_plan_ospf_cost(
         ),
     };
 
+    let base = u16::try_from(recommended_ospf_cost).expect("calculated OSPF base is in range");
+    let left_recommended_ospf_cost =
+        i32::from(adjusted_ospf_cost(base, ospf, TunnelEndpointSide::Left));
+    let right_recommended_ospf_cost =
+        i32::from(adjusted_ospf_cost(base, ospf, TunnelEndpointSide::Right));
     let evidence_summary = ospf_evidence_summary(
         latency_avg_ms,
         packet_loss_avg_ratio,
@@ -477,7 +485,8 @@ fn recommend_plan_ospf_cost(
     );
     let recommendation_id = ospf_recommendation_id(
         plan,
-        recommended_ospf_cost,
+        left_recommended_ospf_cost,
+        right_recommended_ospf_cost,
         &evidence_summary,
         latest_observed_at.as_deref(),
     );
@@ -495,6 +504,8 @@ fn recommend_plan_ospf_cost(
             effective_bandwidth_mbps: effective_bandwidth,
             plan_ospf_cost: planned_cost,
             recommended_ospf_cost,
+            left_recommended_ospf_cost,
+            right_recommended_ospf_cost,
             cost_delta: recommended_ospf_cost - planned_cost,
             latency_avg_ms,
             packet_loss_avg_ratio,
@@ -540,12 +551,27 @@ fn build_ospf_update_plan(
         plan.left_ospf_status == "verified" && plan.right_ospf_status == "verified";
     let current_costs_complete =
         plan.left_current_ospf_cost.is_some() && plan.right_current_ospf_cost.is_some();
-    let maximum_cost_delta = [plan.left_current_ospf_cost, plan.right_current_ospf_cost]
+    let endpoint_costs = [
+        (
+            plan.left_current_ospf_cost,
+            recommendation.left_recommended_ospf_cost,
+        ),
+        (
+            plan.right_current_ospf_cost,
+            recommendation.right_recommended_ospf_cost,
+        ),
+    ];
+    let maximum_cost_delta = endpoint_costs
         .into_iter()
-        .flatten()
-        .map(|current| (recommendation.recommended_ospf_cost - current).abs())
+        .filter_map(|(current, desired)| current.map(|current| (desired - current).abs()))
         .max()
         .unwrap_or(0);
+    let floor_alignment_needed = endpoint_costs.into_iter().any(|(current, desired)| {
+        current
+            .filter(|current| *current != desired)
+            .and_then(|current| u16::try_from(current).ok())
+            .is_some_and(|current| ospf_cost_needs_floor_alignment(current, ospf))
+    });
     let status = update_plan_status(
         &recommendation,
         adapters_ready,
@@ -553,30 +579,35 @@ fn build_ospf_update_plan(
         current_costs_complete,
         &plan.ospf_status,
         maximum_cost_delta,
+        floor_alignment_needed,
         ospf.mode,
         ospf.min_cost_delta,
         ospf.healthy_windows,
         healthy_probe_streak,
     );
+    let costs = format!(
+        "L {} / R {}",
+        recommendation.left_recommended_ospf_cost, recommendation.right_recommended_ospf_cost
+    );
     let change_summary = if !endpoints_verified {
         format!(
             "Check both endpoint OSPF updaters before applying cost {} on {}",
-            recommendation.recommended_ospf_cost, recommendation.interface_name
+            costs, recommendation.interface_name
         )
     } else if !current_costs_complete {
         format!(
             "Initialize OSPF cost {} on {} for endpoints without a reported current cost",
-            recommendation.recommended_ospf_cost, recommendation.interface_name
+            costs, recommendation.interface_name
         )
     } else if maximum_cost_delta == 0 {
         format!(
             "Both endpoints already report cost {} on {}",
-            recommendation.recommended_ospf_cost, recommendation.interface_name
+            costs, recommendation.interface_name
         )
     } else {
         format!(
             "Apply OSPF cost {} on {} to both verified endpoints",
-            recommendation.recommended_ospf_cost, recommendation.interface_name
+            costs, recommendation.interface_name
         )
     };
     let mutation_ready = matches!(
@@ -615,6 +646,8 @@ fn build_ospf_update_plan(
         left_ospf_status: plan.left_ospf_status.clone(),
         right_ospf_status: plan.right_ospf_status.clone(),
         recommended_ospf_cost: recommendation.recommended_ospf_cost,
+        left_recommended_ospf_cost: recommendation.left_recommended_ospf_cost,
+        right_recommended_ospf_cost: recommendation.right_recommended_ospf_cost,
         maximum_cost_delta,
         status,
         confidence: recommendation.confidence.clone(),
@@ -707,16 +740,19 @@ fn ospf_fallback_client_ids<'a>(
 
 fn ospf_recommendation_id(
     plan: &TunnelPlanView,
-    recommended_ospf_cost: i32,
+    left_recommended_ospf_cost: i32,
+    right_recommended_ospf_cost: i32,
     evidence_summary: &str,
     latest_observed_at: Option<&str>,
 ) -> String {
     let payload = format!(
-        "v2|{}|{:?}|{:?}|{}|{}|{}",
+        "v3|{}|{}|{:?}|{:?}|{}|{}|{}|{}",
         plan.id,
+        plan.revision,
         plan.left_current_ospf_cost,
         plan.right_current_ospf_cost,
-        recommended_ospf_cost,
+        left_recommended_ospf_cost,
+        right_recommended_ospf_cost,
         latest_observed_at.unwrap_or("none"),
         evidence_summary
     );
@@ -757,6 +793,7 @@ fn update_plan_status(
     current_costs_complete: bool,
     current_status: &str,
     maximum_cost_delta: i32,
+    floor_alignment_needed: bool,
     mode: OspfControlMode,
     min_cost_delta: u16,
     healthy_windows: u8,
@@ -770,7 +807,10 @@ fn update_plan_status(
         "needs_adapter_status".to_string()
     } else if current_costs_complete && maximum_cost_delta == 0 {
         "noop".to_string()
-    } else if current_costs_complete && maximum_cost_delta < i32::from(min_cost_delta) {
+    } else if current_costs_complete
+        && !floor_alignment_needed
+        && maximum_cost_delta < i32::from(min_cost_delta)
+    {
         "below_minimum_delta".to_string()
     } else if mode == OspfControlMode::Automatic
         && !automatic_evidence_ready(recommendation, healthy_windows, healthy_probe_streak)

@@ -836,10 +836,16 @@ fn openvpn_listener_bind_matches_the_initiators_destination_family() {
 
 fn ospf_config() -> TunnelOspfConfig {
     TunnelOspfConfig {
+        legacy_cost_wire: false,
         mode: OspfControlMode::Reviewed,
         planned_latency_ms: 20.0,
         planned_packet_loss_ratio: 0.01,
         preference: 1.0,
+        left_cost_offset: 0.0,
+        right_cost_offset: 0.0,
+        left_cost_multiplier: 1.0,
+        right_cost_multiplier: 1.0,
+        cost_floor: 5,
         policy: OspfCostPolicy::default(),
         min_cost_delta: 5,
         healthy_windows: 2,
@@ -857,13 +863,14 @@ fn routing_cost_privilege_payload_freezes_both_endpoint_snapshots() {
         Some(14),
         None,
         22,
+        35,
         &"a".repeat(64),
         &"b".repeat(64),
     );
     assert_eq!(
         payload,
         format!(
-            "v3|00000000-0000-0000-0000-000000000001|7|recommendation-1|14|none|22|{}|{}",
+            "v4|00000000-0000-0000-0000-000000000001|7|recommendation-1|14|none|22|35|{}|{}",
             "a".repeat(64),
             "b".repeat(64)
         )
@@ -941,6 +948,190 @@ fn latency_loss_and_preference_remain_primary_cost_inputs() {
     );
     assert!(unhealthy > healthy);
     assert!(preferred < healthy);
+}
+
+#[test]
+fn new_ospf_configs_default_to_automatic_without_overwriting_saved_modes() {
+    assert_eq!(OspfControlMode::default(), OspfControlMode::Automatic);
+    let reviewed = ospf_config();
+    let mut wire = serde_json::to_value(&reviewed).unwrap();
+    assert_eq!(
+        serde_json::from_value::<TunnelOspfConfig>(wire.clone())
+            .unwrap()
+            .mode,
+        OspfControlMode::Reviewed
+    );
+    wire.as_object_mut().unwrap().remove("mode");
+    assert_eq!(
+        serde_json::from_value::<TunnelOspfConfig>(wire)
+            .unwrap()
+            .mode,
+        OspfControlMode::Automatic
+    );
+}
+
+#[test]
+fn ospf_endpoint_adjustments_floor_after_addition_and_multiplication() {
+    let mut config = ospf_config();
+    for (base, expected) in [(49, 45), (50, 50), (54, 50)] {
+        assert_eq!(
+            adjusted_ospf_cost(base, &config, TunnelEndpointSide::Left),
+            expected
+        );
+        assert_eq!(
+            adjusted_ospf_cost(base, &config, TunnelEndpointSide::Right),
+            expected
+        );
+    }
+    config.left_cost_offset = 28.0;
+    config.left_cost_multiplier = 1.49;
+    assert_eq!(
+        adjusted_ospf_cost(49, &config, TunnelEndpointSide::Left),
+        110
+    );
+    assert_eq!(
+        adjusted_ospf_cost(49, &config, TunnelEndpointSide::Right),
+        45
+    );
+    config.right_cost_offset = -18.0;
+    config.right_cost_multiplier = 0.5;
+    assert_eq!(
+        adjusted_ospf_cost(49, &config, TunnelEndpointSide::Right),
+        15
+    );
+}
+
+#[test]
+fn ospf_endpoint_adjustments_preserve_decimal_bucket_boundaries_and_saturate() {
+    let mut config = ospf_config();
+    for (offset, multiplier, expected) in [
+        (0.0, 1.15, 115),
+        (0.0, 0.29, 25),
+        (0.0, 1.1499999999999997, 110),
+        (-0.5, 10.0, 995),
+        (-101.0, 1.0, 5),
+        (0.0, f64::MAX, 65535),
+        (f64::MAX, f64::MAX, 65535),
+        (-f64::MAX, f64::MAX, 5),
+        (0.0, f64::MIN_POSITIVE, 5),
+        (0.0, 5e-324, 5),
+    ] {
+        config.left_cost_offset = offset;
+        config.left_cost_multiplier = multiplier;
+        assert_eq!(
+            adjusted_ospf_cost(100, &config, TunnelEndpointSide::Left),
+            expected,
+            "{offset} / {multiplier}"
+        );
+    }
+    config.left_cost_offset = 0.0;
+    config.left_cost_multiplier = 0.29;
+    config.cost_floor = 1;
+    assert_eq!(
+        adjusted_ospf_cost(100, &config, TunnelEndpointSide::Left),
+        29
+    );
+}
+
+#[test]
+fn ospf_floor_alignment_respects_bounds_and_neutral_step_one() {
+    let mut config = ospf_config();
+    assert!(ospf_cost_needs_floor_alignment(49, &config));
+    assert!(!ospf_cost_needs_floor_alignment(50, &config));
+    config.policy.min_cost = 7;
+    config.policy.max_cost = 52;
+    config.left_cost_offset = -100.0;
+    assert_eq!(adjusted_ospf_cost(49, &config, TunnelEndpointSide::Left), 7);
+    config.left_cost_offset = 100.0;
+    assert_eq!(
+        adjusted_ospf_cost(49, &config, TunnelEndpointSide::Left),
+        52
+    );
+    assert!(!ospf_cost_needs_floor_alignment(7, &config));
+    assert!(!ospf_cost_needs_floor_alignment(52, &config));
+    config = ospf_config();
+    config.cost_floor = 1;
+    for base in [5, 6, 49, 50, 54, 100, 1000, 65535] {
+        assert_eq!(
+            adjusted_ospf_cost(base, &config, TunnelEndpointSide::Left),
+            base
+        );
+        assert!(!ospf_cost_needs_floor_alignment(base, &config));
+    }
+}
+
+#[test]
+fn ospf_adjustment_defaults_decode_previous_config_and_validate_new_inputs() {
+    let config = ospf_config();
+    let mut legacy = serde_json::to_value(&config).unwrap();
+    for key in [
+        "left_cost_offset",
+        "right_cost_offset",
+        "left_cost_multiplier",
+        "right_cost_multiplier",
+        "cost_floor",
+    ] {
+        legacy.as_object_mut().unwrap().remove(key);
+    }
+    assert_eq!(
+        serde_json::from_value::<TunnelOspfConfig>(legacy).unwrap(),
+        config
+    );
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
+    for (offset, multiplier, floor) in [
+        (f64::NAN, 1.0, 5),
+        (f64::INFINITY, 1.0, 5),
+        (0.0, 0.0, 5),
+        (0.0, -1.0, 5),
+        (0.0, f64::INFINITY, 5),
+        (0.0, 1.0, 0),
+    ] {
+        for side in [TunnelEndpointSide::Left, TunnelEndpointSide::Right] {
+            let mut invalid = config.clone();
+            invalid.cost_floor = floor;
+            match side {
+                TunnelEndpointSide::Left => {
+                    invalid.left_cost_offset = offset;
+                    invalid.left_cost_multiplier = multiplier;
+                }
+                TunnelEndpointSide::Right => {
+                    invalid.right_cost_offset = offset;
+                    invalid.right_cost_multiplier = multiplier;
+                }
+            }
+            input.ospf = Some(invalid);
+            assert_eq!(
+                plan_tunnel(&input).unwrap_err(),
+                NetworkPlanError::InvalidOspfConfig
+            );
+        }
+    }
+    let mut directional = config;
+    directional.left_cost_offset = 28.0;
+    directional.left_cost_multiplier = 1.49;
+    input.ospf = Some(directional.clone());
+    let plan = plan_tunnel(&input).unwrap();
+    let base = plan.recommended_ospf_cost.unwrap();
+    assert_eq!(
+        plan.left_recommended_ospf_cost,
+        Some(adjusted_ospf_cost(
+            base,
+            &directional,
+            TunnelEndpointSide::Left
+        ))
+    );
+    assert_eq!(
+        plan.right_recommended_ospf_cost,
+        Some(adjusted_ospf_cost(
+            base,
+            &directional,
+            TunnelEndpointSide::Right
+        ))
+    );
+    assert_ne!(
+        plan.left_recommended_ospf_cost,
+        plan.right_recommended_ospf_cost
+    );
 }
 
 #[test]

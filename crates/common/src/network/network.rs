@@ -14,7 +14,8 @@ pub use allocator::{
     tunnel_plan_global_networks, TunnelEndpointAllocation, TunnelEndpointAllocationOptions,
 };
 pub use cost::{
-    effective_bandwidth_mbps, observed_ospf_cost, ospf_cost, routing_cost_update_privilege_payload,
+    adjusted_ospf_cost, effective_bandwidth_mbps, observed_ospf_cost, ospf_cost,
+    ospf_cost_needs_floor_alignment, routing_cost_update_privilege_payload,
     MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 pub use models::{

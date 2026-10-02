@@ -14,6 +14,7 @@ import type {
   TunnelKind,
   TunnelAdditionalAddresses,
   TunnelPlanInput,
+  TunnelOspfConfig,
 } from "./types";
 import {
   FOU_TUNNEL_DEFAULTS,
@@ -270,7 +271,7 @@ export function isDefaultRuntimeTopology(
 }
 
 export const OSPF_COST_MODEL_DETAIL =
-  "cost = clamp(round((latency_ms + loss_ratio * 400 + 10 * sqrt(100 / clamp(bandwidth_mbps, 10, 10000))) / max(preference, 0.1)), 5, 65535). The sqrt bandwidth term gives diminishing returns across arbitrary Mbps values, so low bandwidth is visible but high bandwidth cannot hide bad latency or loss. Manual speed-test evidence can downgrade effective bandwidth; bandwidth tests never run automatically.";
+  "The base cost uses latency, loss, bandwidth and preference with the configured weights, rounding and bounds. Each endpoint then applies (base + Add) × Multiply, rounds down to a multiple of Floor step, and keeps the minimum/maximum bounds. L is Left → Right; R is Right → Left. Manual speed-test evidence can downgrade effective bandwidth; bandwidth tests never run automatically.";
 
 export const OSPF_COST_MODEL_SUMMARY =
   "Latency/loss plus a bounded sqrt bandwidth penalty; evidence is explicit and automatic changes are controlled by the server per plan.";
@@ -392,6 +393,64 @@ export function calculateOspfCostPreview({
       Math.round((raw * effectivePolicy.preference_bias) / preferenceBias),
     ),
   );
+}
+
+type OspfDirectionalPolicy = Pick<
+  TunnelOspfConfig,
+  "left_cost_offset" | "right_cost_offset" | "left_cost_multiplier" | "right_cost_multiplier" | "cost_floor" | "policy"
+>;
+
+export function calculateDirectionalOspfCosts(
+  baseCost: number,
+  config: OspfDirectionalPolicy,
+): { left: number | null; right: number | null } {
+  return {
+    left: adjustOspfCost(baseCost, config.left_cost_offset, config.left_cost_multiplier, config),
+    right: adjustOspfCost(baseCost, config.right_cost_offset, config.right_cost_multiplier, config),
+  };
+}
+
+// Match the server's exact arithmetic on the shortest decimal representation of
+// each finite input. Binary floating-point multiplication would floor 100 × 1.15
+// to 110 instead of 115 when the step is 5.
+function decimalRatio(value: number): [bigint, bigint] {
+  const [coefficient, exponentText] = value.toString().split("e");
+  const [whole, fraction = ""] = coefficient.split(".");
+  const exponent = Number(exponentText ?? 0) - fraction.length;
+  const digits = BigInt(whole + fraction);
+  return exponent >= 0
+    ? [digits * 10n ** BigInt(exponent), 1n]
+    : [digits, 10n ** BigInt(-exponent)];
+}
+
+function adjustOspfCost(
+  base: number,
+  offset: number,
+  multiplier: number,
+  { cost_floor: step, policy }: OspfDirectionalPolicy,
+): number | null {
+  if (
+    !Number.isInteger(base) || !Number.isFinite(offset) ||
+    !Number.isFinite(multiplier) || multiplier <= 0 ||
+    !Number.isInteger(step) || step < 1 || step > 65535 ||
+    !Number.isInteger(policy.min_cost) || !Number.isInteger(policy.max_cost) ||
+    policy.min_cost < 1 || policy.min_cost > policy.max_cost || policy.max_cost > 65535
+  ) return null;
+  const [offsetNumerator, offsetDenominator] = decimalRatio(offset);
+  const [multiplierNumerator, multiplierDenominator] = decimalRatio(multiplier);
+  const numerator = (BigInt(base) * offsetDenominator + offsetNumerator) * multiplierNumerator;
+  const denominator = offsetDenominator * multiplierDenominator;
+  // Negative results and tiny positive values clamp to the minimum. Division
+  // below therefore only sees positive operands, where BigInt truncation floors.
+  if (numerator <= BigInt(policy.min_cost) * denominator) return policy.min_cost;
+  const floored = numerator / (denominator * BigInt(step)) * BigInt(step);
+  return Number(floored > BigInt(policy.max_cost)
+    ? BigInt(policy.max_cost)
+    : floored < BigInt(policy.min_cost) ? BigInt(policy.min_cost) : floored);
+}
+
+export function formatOspfCostPair(left: number | null | undefined, right: number | null | undefined): string {
+  return `L ${left ?? "?"} / R ${right ?? "?"}`;
 }
 
 export function runtimeManagerLabel(

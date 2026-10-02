@@ -120,6 +120,12 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
             .then(|| vpsman_common::default_tunnel_mtu(kind))
             .flatten(),
         ospf: ospf.then(|| TunnelOspfConfig {
+            legacy_cost_wire: false,
+            left_cost_offset: 0.0,
+            right_cost_offset: 0.0,
+            left_cost_multiplier: 1.0,
+            right_cost_multiplier: 1.0,
+            cost_floor: 5,
             mode: OspfControlMode::Reviewed,
             planned_latency_ms: 18.0,
             planned_packet_loss_ratio: 0.0,
@@ -229,4 +235,44 @@ fn runtime_adapter(definition_id: &str) -> RuntimeTunnelAdapterCommands {
         status: command("status"),
         traffic_limit_apply: None,
     }
+}
+
+#[test]
+fn directional_ospf_http_contract_rejects_old_edits_and_scalar_apply() {
+    use crate::model::{UpdateTunnelPlanOspfCostRequest, UpdateTunnelPlanRequest};
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
+    let mut value = serde_json::to_value(input).unwrap();
+    value["expected_revision"] = serde_json::json!(1);
+    value["confirmed"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<UpdateTunnelPlanRequest>(value.clone()).is_ok());
+    for field in [
+        "left_cost_offset",
+        "right_cost_offset",
+        "left_cost_multiplier",
+        "right_cost_multiplier",
+        "cost_floor",
+    ] {
+        let mut old = value.clone();
+        old["ospf"].as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<UpdateTunnelPlanRequest>(old)
+            .unwrap_err()
+            .to_string()
+            .contains(field));
+    }
+    let mut request = serde_json::json!({
+        "plan_revision": 1, "recommendation_id": "ospf-test", "left_adapter_definition_hash": "a".repeat(64),
+        "right_adapter_definition_hash": "b".repeat(64), "left_current_ospf_cost": 49, "right_current_ospf_cost": 49,
+        "desired_ospf_cost": 45, "confirmed": true
+    });
+    assert!(serde_json::from_value::<UpdateTunnelPlanOspfCostRequest>(request.clone()).is_err());
+    request["left_desired_ospf_cost"] = serde_json::json!(110);
+    request["right_desired_ospf_cost"] = serde_json::json!(45);
+    let parsed: UpdateTunnelPlanOspfCostRequest = serde_json::from_value(request).unwrap();
+    assert_eq!(
+        (
+            parsed.left_desired_ospf_cost,
+            parsed.right_desired_ospf_cost
+        ),
+        (110, 45)
+    );
 }

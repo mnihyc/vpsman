@@ -9779,7 +9779,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     "OSPF 14",
   );
   await expect(graphPanel.getByLabel("Topology graph legend")).toContainText(
-    "Estimate 22 (+8)",
+    "Estimate L 20 / R 20",
   );
   await expect(graphPanel.getByLabel("Topology graph legend")).toContainText(
     "12.4 ms",
@@ -9814,7 +9814,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(graphPanel.locator(".topologyNodeInspector")).toHaveCount(0);
   const graphCost = graphPanel.locator(".topologyGraphEdgeRow [data-label=Cost]");
   await expect(graphCost).toContainText("OSPF 14");
-  await expect(graphCost).toContainText("Estimate 22 (+8)");
+  await expect(graphCost).toContainText("Estimate L 20 / R 20");
   await graphPanel.getByRole("button", { name: "Show all tunnels" }).click();
   await expect(graphPanel.locator(".topologyNodeInspector")).toBeVisible();
   await expect(
@@ -9896,7 +9896,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     evidence.getByText(ospfUpdatePlans[0].recommendation_id),
   ).toHaveCount(0);
-  await expect(evidence.getByText("14 -> 22").first()).toBeVisible();
+  await expect(evidence.getByText("L 20 / R 20", { exact: true }).first()).toBeVisible();
   await expect(evidence.getByText("Confidence Measured").first()).toBeVisible();
   await expect(
     evidence.getByText(/10\.1 Mbps avg - 10% of expected 100 Mbps/).first(),
@@ -10452,6 +10452,7 @@ test(
       .fill("ovpn70");
 
     await composer.getByText("Enable OSPF cost control").click();
+    await expect(composer.getByLabel("OSPF control mode", { exact: true })).toHaveValue("automatic");
     const resolvedOspfCommands = composer.getByLabel(
       "Resolved endpoint OSPF commands",
     );
@@ -10483,17 +10484,33 @@ test(
       "Bandwidth must be a whole number",
     );
     await bandwidth.fill("10");
-    const lowBandwidthCost = Number(await liveCost.textContent());
+    const lowBandwidthCost = Number((await liveCost.textContent())?.match(/L (\d+)/)?.[1]);
     await bandwidth.fill("10000");
-    const highBandwidthCost = Number(await liveCost.textContent());
+    const highBandwidthCost = Number((await liveCost.textContent())?.match(/L (\d+)/)?.[1]);
     expect(lowBandwidthCost).toBeGreaterThan(highBandwidthCost);
+
+    await expect(composer.getByLabel("OSPF floor step", { exact: true })).toHaveValue("5");
+    await composer.getByText("Automatic gates and cost policy", { exact: true }).click();
+    await expect(composer.getByLabel("Left OSPF addition", { exact: true })).toHaveValue("0");
+    await expect(composer.getByLabel("Right OSPF addition", { exact: true })).toHaveValue("0");
+    await expect(composer.getByLabel("Left OSPF multiplier", { exact: true })).toHaveValue("1");
+    await expect(composer.getByLabel("Right OSPF multiplier", { exact: true })).toHaveValue("1");
+    await composer.getByLabel("Planned tunnel latency").fill("48");
+    await composer.getByLabel("Left OSPF addition", { exact: true }).fill("28");
+    await composer.getByLabel("Left OSPF multiplier", { exact: true }).fill("1.49");
+    await expect(liveCost).toHaveText("L 110 / R 45");
+    await composer.getByLabel("Right OSPF multiplier", { exact: true }).fill("0");
+    await expect(liveCost).toHaveText("L 110 / R ?");
+    await activate(composer.getByRole("button", { name: "Review plan" }));
+    await expect(composer.locator(".localActionFeedback")).toContainText("Right OSPF multiplier must be a finite number greater than zero");
+    await composer.getByLabel("Right OSPF multiplier", { exact: true }).fill("1");
 
     await activate(composer.getByRole("button", { name: "Review plan" }));
     const confirmation = page.locator(".confirmationPrompt", {
       hasText: "Confirm tunnel plan creation",
     });
     await expect(confirmation).toContainText("External observed");
-    await expect(confirmation).toContainText("Reviewed · planned cost");
+    await expect(confirmation).toContainText("Automatic · planned L 110 / R 45");
     await expect(confirmation).toContainText("OSPF command overrides");
     await expect(confirmation).toContainText(
       "Per-plan override · SFO routing cost",
@@ -10525,8 +10542,13 @@ test(
       name: "external-openvpn-ospf",
       ospf: {
         left_adapter_template_id: "44444444-4444-4444-8444-444444444444",
-        mode: "reviewed",
+        mode: "automatic",
         right_adapter_template_id: "55555555-5555-4555-8555-555555555555",
+        cost_floor: 5,
+        left_cost_offset: 28,
+        right_cost_offset: 0,
+        left_cost_multiplier: 1.49,
+        right_cost_multiplier: 1,
       },
       right_client_id: "agent-fra-02",
       right_local_underlay: null,
@@ -12248,7 +12270,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(ospfTable).toContainText("sfo-fra-gre");
   await expect(ospfTable).toContainText("Reviewed");
   await expect(ospfTable).toContainText("Review required");
-  await expect(ospfTable).toContainText("max delta +8");
+  await expect(ospfTable).toContainText("max delta +6");
   await expect(ospfTable).toContainText("5 samples, 0 degraded");
   const ospfPlanRow = ospfTable
     .getByRole("row")
@@ -12276,7 +12298,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(ospfTable).toContainText("FRA routing cost");
   await expect(ospfTable).toContainText("Operator review required");
   await expect(ospfTable).toContainText("14 / 14");
-  await expect(ospfTable).toContainText("22 · max delta +8");
+  await expect(ospfTable).toContainText("L 20 / R 20 · max delta +6");
   await expect(ospfTable).toContainText("3 consecutive · 2 required");
   await ospfPlanRow.click({ button: "right" });
   await activate(
@@ -12310,7 +12332,8 @@ test("dispatches topology network tests and OSPF plan updates with local privile
     plan_id: ospfUpdatePlans[0].plan_id,
     body: {
       confirmed: true,
-      desired_ospf_cost: ospfUpdatePlans[0].recommended_ospf_cost,
+      left_desired_ospf_cost: ospfUpdatePlans[0].left_recommended_ospf_cost,
+      right_desired_ospf_cost: ospfUpdatePlans[0].right_recommended_ospf_cost,
       plan_revision: ospfUpdatePlans[0].plan_revision,
       left_adapter_definition_hash:
         ospfUpdatePlans[0].left_adapter_definition_hash,

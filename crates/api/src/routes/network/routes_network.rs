@@ -874,7 +874,10 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
             request.plan_revision,
             request.left_current_ospf_cost,
             request.right_current_ospf_cost,
-            Some(request.desired_ospf_cost),
+            Some((
+                request.left_desired_ospf_cost,
+                request.right_desired_ospf_cost,
+            )),
             left_job_id,
             right_job_id,
             &operator,
@@ -892,7 +895,8 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
         Some((
             request.left_current_ospf_cost,
             request.right_current_ospf_cost,
-            request.desired_ospf_cost,
+            request.left_desired_ospf_cost,
+            request.right_desired_ospf_cost,
         )),
     )
     .await;
@@ -1270,11 +1274,11 @@ fn validate_tunnel_plan_ospf_cost_request(
             ));
         }
     }
-    if request.desired_ospf_cost == 0 {
+    if request.left_desired_ospf_cost == 0 || request.right_desired_ospf_cost == 0 {
         return Err(ApiError::bad_request("tunnel_plan_ospf_cost_invalid"));
     }
-    if request.left_current_ospf_cost == Some(request.desired_ospf_cost)
-        && request.right_current_ospf_cost == Some(request.desired_ospf_cost)
+    if request.left_current_ospf_cost == Some(request.left_desired_ospf_cost)
+        && request.right_current_ospf_cost == Some(request.right_desired_ospf_cost)
     {
         return Err(ApiError::bad_request("tunnel_plan_ospf_cost_noop"));
     }
@@ -1306,7 +1310,8 @@ async fn validate_ospf_recommendation_contract(
     }
     if plan.plan_revision != request.plan_revision
         || plan.recommendation_id != request.recommendation_id
-        || plan.recommended_ospf_cost != i32::from(request.desired_ospf_cost)
+        || plan.left_recommended_ospf_cost != i32::from(request.left_desired_ospf_cost)
+        || plan.right_recommended_ospf_cost != i32::from(request.right_desired_ospf_cost)
         || plan.left_current_ospf_cost != request.left_current_ospf_cost.map(i32::from)
         || plan.right_current_ospf_cost != request.right_current_ospf_cost.map(i32::from)
         || plan.left_adapter_definition_hash.as_deref()
@@ -1408,7 +1413,8 @@ fn tunnel_plan_ospf_cost_payload_hash(
             &request.recommendation_id,
             request.left_current_ospf_cost,
             request.right_current_ospf_cost,
-            request.desired_ospf_cost,
+            request.left_desired_ospf_cost,
+            request.right_desired_ospf_cost,
             &request.left_adapter_definition_hash,
             &request.right_adapter_definition_hash,
         )
@@ -1626,7 +1632,7 @@ pub(crate) async fn dispatch_routing_jobs(
     right_job_id: Uuid,
     left_adapter: RoutingCostAdapterCommands,
     right_adapter: RoutingCostAdapterCommands,
-    apply: Option<(Option<u16>, Option<u16>, u16)>,
+    apply: Option<(Option<u16>, Option<u16>, u16, u16)>,
 ) -> (Vec<CreateJobResponse>, Vec<TunnelPlanOspfDispatchView>) {
     // The routing command protocol requires both OSPF adapter identifiers in the
     // plan. Freeze the effective per-endpoint source into this job-only snapshot
@@ -1642,14 +1648,14 @@ pub(crate) async fn dispatch_routing_jobs(
             plan.left_client_id.clone(),
             left_job_id,
             left_adapter,
-            apply.map(|(left, _, desired)| (left, desired)),
+            apply.map(|(left, _, desired, _)| (left, desired)),
         ),
         (
             TunnelEndpointSide::Right,
             plan.right_client_id.clone(),
             right_job_id,
             right_adapter,
-            apply.map(|(_, right, desired)| (right, desired)),
+            apply.map(|(_, right, _, desired)| (right, desired)),
         ),
     ];
     let mut jobs = Vec::with_capacity(specs.len());

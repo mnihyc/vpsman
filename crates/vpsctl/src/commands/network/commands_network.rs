@@ -131,7 +131,12 @@ pub(crate) struct TunnelPlanCommand {
         help = "Enable external OSPF cost control for this plan"
     )]
     pub(crate) ospf: bool,
-    #[arg(long, value_enum, default_value = "reviewed")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "automatic",
+        help = "OSPF control mode; use reviewed for manual approval of cost updates"
+    )]
     pub(crate) ospf_mode: OspfControlModeArg,
     #[arg(long, requires = "ospf")]
     pub(crate) ospf_latency_ms: Option<f64>,
@@ -139,6 +144,38 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) ospf_packet_loss_ratio: Option<f64>,
     #[arg(long, requires = "ospf")]
     pub(crate) ospf_preference: Option<f64>,
+    #[arg(long, default_value_t = 5, requires = "ospf", value_parser = clap::value_parser!(u16).range(1..), help = "Round final endpoint costs down to this multiple before clamping to bounds; 1 disables grouping")]
+    pub(crate) ospf_cost_floor: u16,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        requires = "ospf",
+        allow_hyphen_values = true,
+        help = "Signed addition to the base cost leaving the left VPS, applied before its multiplier"
+    )]
+    pub(crate) ospf_left_cost_offset: f64,
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        requires = "ospf",
+        help = "Positive multiplier after the left cost addition"
+    )]
+    pub(crate) ospf_left_cost_multiplier: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        requires = "ospf",
+        allow_hyphen_values = true,
+        help = "Signed addition to the base cost leaving the right VPS, applied before its multiplier"
+    )]
+    pub(crate) ospf_right_cost_offset: f64,
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        requires = "ospf",
+        help = "Positive multiplier after the right cost addition"
+    )]
+    pub(crate) ospf_right_cost_multiplier: f64,
     #[arg(long, default_value_t = 5, requires = "ospf")]
     pub(crate) ospf_min_cost_delta: u16,
     #[arg(
@@ -418,8 +455,10 @@ pub(crate) struct TunnelOspfCostUpdateCommand {
     pub(crate) left_current_ospf_cost: Option<u16>,
     #[arg(long)]
     pub(crate) right_current_ospf_cost: Option<u16>,
-    #[arg(long)]
-    pub(crate) desired_ospf_cost: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..), help = "Left endpoint target from network-ospf-update-plans")]
+    pub(crate) left_desired_ospf_cost: u16,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..), help = "Right endpoint target from network-ospf-update-plans")]
+    pub(crate) right_desired_ospf_cost: u16,
     #[arg(long)]
     pub(crate) left_adapter_definition_hash: String,
     #[arg(long)]
@@ -697,8 +736,8 @@ pub(crate) fn tunnel_ospf_cost_update(
         "tunnel-ospf-cost-update requires a positive --plan-revision"
     );
     anyhow::ensure!(
-        request.left_current_ospf_cost != Some(request.desired_ospf_cost)
-            || request.right_current_ospf_cost != Some(request.desired_ospf_cost),
+        request.left_current_ospf_cost != Some(request.left_desired_ospf_cost)
+            || request.right_current_ospf_cost != Some(request.right_desired_ospf_cost),
         "tunnel-ospf-cost-update requires at least one endpoint cost change"
     );
     validate_definition_hash(
@@ -724,7 +763,8 @@ pub(crate) fn tunnel_ospf_cost_update(
         &request.recommendation_id,
         request.left_current_ospf_cost,
         request.right_current_ospf_cost,
-        request.desired_ospf_cost,
+        request.left_desired_ospf_cost,
+        request.right_desired_ospf_cost,
         &request.left_adapter_definition_hash,
         &request.right_adapter_definition_hash,
     );
@@ -755,7 +795,8 @@ pub(crate) fn tunnel_ospf_cost_update(
                 "recommendation_id": request.recommendation_id,
                 "left_current_ospf_cost": request.left_current_ospf_cost,
                 "right_current_ospf_cost": request.right_current_ospf_cost,
-                "desired_ospf_cost": request.desired_ospf_cost,
+                "left_desired_ospf_cost": request.left_desired_ospf_cost,
+                "right_desired_ospf_cost": request.right_desired_ospf_cost,
                 "left_adapter_definition_hash": request.left_adapter_definition_hash,
                 "right_adapter_definition_hash": request.right_adapter_definition_hash,
                 "confirmed": request.confirmed,
@@ -791,7 +832,8 @@ pub(crate) fn tunnel_ospf_cost_payload_hash(
     recommendation_id: &str,
     left_current_ospf_cost: Option<u16>,
     right_current_ospf_cost: Option<u16>,
-    desired_ospf_cost: u16,
+    left_desired_ospf_cost: u16,
+    right_desired_ospf_cost: u16,
     left_adapter_definition_hash: &str,
     right_adapter_definition_hash: &str,
 ) -> String {
@@ -802,7 +844,8 @@ pub(crate) fn tunnel_ospf_cost_payload_hash(
             recommendation_id,
             left_current_ospf_cost,
             right_current_ospf_cost,
-            desired_ospf_cost,
+            left_desired_ospf_cost,
+            right_desired_ospf_cost,
             left_adapter_definition_hash,
             right_adapter_definition_hash,
         )
@@ -1184,12 +1227,18 @@ pub(crate) fn tunnel_plan(
         .flatten();
     let ospf = if request.ospf {
         Some(TunnelOspfConfig {
+            legacy_cost_wire: false,
             mode: request.ospf_mode.into(),
             planned_latency_ms: request
                 .ospf_latency_ms
                 .context("tunnel-plan --ospf requires --ospf-latency-ms")?,
             planned_packet_loss_ratio: request.ospf_packet_loss_ratio.unwrap_or(0.0),
             preference: request.ospf_preference.unwrap_or(1.0),
+            cost_floor: request.ospf_cost_floor,
+            left_cost_offset: request.ospf_left_cost_offset,
+            left_cost_multiplier: request.ospf_left_cost_multiplier,
+            right_cost_offset: request.ospf_right_cost_offset,
+            right_cost_multiplier: request.ospf_right_cost_multiplier,
             policy: OspfCostPolicy {
                 latency_weight: request.ospf_latency_weight,
                 loss_weight: request.ospf_loss_weight,

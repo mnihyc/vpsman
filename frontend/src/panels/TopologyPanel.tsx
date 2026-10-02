@@ -60,6 +60,8 @@ import {
   buildRuntimeControl,
   buildRuntimeTopology,
   calculateOspfCostPreview,
+  calculateDirectionalOspfCosts,
+  formatOspfCostPair,
   clampTunnelBandwidthMbps,
   DEFAULT_TUNNEL_BANDWIDTH_MBPS,
   DEFAULT_RUNTIME_FOU_OPTIONS,
@@ -2227,6 +2229,7 @@ function TunnelPlanDetails({
         {plan.plan.ospf ? (
           <PlanFact
             label="Configured OSPF"
+            title={formatPlanOspfConfigurationDetail(plan)}
             value={formatPlanOspfConfiguration(plan)}
           />
         ) : null}
@@ -2944,12 +2947,20 @@ function TunnelPlanComposer({
     form.rightClientId,
   );
   const policy = ospfPolicyFromForm(form);
-  const previewCost = calculateOspfCostPreview({
+  const previewBaseCost = calculateOspfCostPreview({
     bandwidthMbps: numberOr(form.bandwidthMbps, DEFAULT_TUNNEL_BANDWIDTH_MBPS),
     latencyMs: numberOr(form.plannedLatencyMs, 20),
     packetLossRatio: numberOr(form.packetLossPercent, 0) / 100,
     policy,
     preference: numberOr(form.preference, 1),
+  });
+  const previewCosts = calculateDirectionalOspfCosts(previewBaseCost, {
+    policy,
+    cost_floor: Number(form.costFloor),
+    left_cost_offset: form.leftCostOffset.trim() ? Number(form.leftCostOffset) : NaN,
+    right_cost_offset: form.rightCostOffset.trim() ? Number(form.rightCostOffset) : NaN,
+    left_cost_multiplier: Number(form.leftCostMultiplier),
+    right_cost_multiplier: Number(form.rightCostMultiplier),
   });
   const duplicateName = existingPlans.some(
     (plan) => plan.id !== initialPlan?.id && plan.name === form.name.trim(),
@@ -4133,137 +4144,191 @@ function TunnelPlanComposer({
                     value={form.preference}
                   />
                 </Field>
+                <Field
+                  label="Floor step"
+                  tooltip="Round each endpoint’s adjusted cost down to a multiple of this step: 49 → 45, 50 and 54 → 50 when set to 5. Use 1 for integer precision. Minimum and maximum costs still apply; equal full-path costs and daemon configuration determine ECMP."
+                >
+                  <input
+                    aria-label="OSPF floor step"
+                    max={65535}
+                    min={1}
+                    onChange={(event) => update("costFloor", event.target.value)}
+                    required
+                    step={1}
+                    type="number"
+                    value={form.costFloor}
+                  />
+                </Field>
                 <div
                   className="topologyOspfPreviewInline"
                   aria-label="Live OSPF cost preview"
-                  title={OSPF_COST_MODEL_DETAIL}
+                  title={`${OSPF_COST_MODEL_DETAIL} Current base: ${previewBaseCost}.`}
                 >
                   <span>Cost</span>
-                  <strong>{previewCost}</strong>
-                  <small>live preview</small>
+                  <strong>
+                    <span>L {previewCosts.left ?? "?"}</span>{" / "}
+                    <span>R {previewCosts.right ?? "?"}</span>
+                  </strong>
+                  <small>preview</small>
                 </div>
               </div>
               <details className="topologyAdvancedFields">
                 <summary title="Tune the automatic probe gate and the explicit cost formula. Reviewed mode also uses this formula but waits for confirmation.">
                   Automatic gates and cost policy
                 </summary>
-                <div className="topologyFormGrid fourColumn compactNumericGrid">
-                  <Field
-                    label="Minimum delta"
-                    tooltip="Ignore smaller differences between the current endpoint cost and the recommendation."
-                  >
-                    <UnitInput
-                      ariaLabel="Minimum OSPF cost delta"
-                      max={65535}
-                      min={1}
-                      onChange={(value) => update("minCostDelta", value)}
-                      unit="cost"
-                      value={form.minCostDelta}
-                    />
-                  </Field>
-                  <Field
-                    label="Healthy probes"
-                    tooltip="Automatic mode requires this many consecutive healthy probes within the recent evidence window. Reviewed mode still shows the streak for judgment."
-                  >
-                    <UnitInput
-                      ariaLabel="Required consecutive healthy OSPF probes"
-                      max={10}
-                      min={1}
-                      onChange={(value) => update("healthyWindows", value)}
-                      unit="probes"
-                      value={form.healthyWindows}
-                    />
-                  </Field>
-                  <Field
-                    label="Latency weight"
-                    tooltip="Multiplier applied to measured or planned latency in the cost formula."
-                  >
-                    <input
-                      aria-label="OSPF latency weight"
-                      min={0}
-                      onChange={(event) =>
-                        update("latencyWeight", event.target.value)
-                      }
-                      step="0.1"
-                      type="number"
-                      value={form.latencyWeight}
-                    />
-                  </Field>
-                  <Field
-                    label="Loss weight"
-                    tooltip="Multiplier applied to packet-loss ratio; higher values penalize lossy paths more strongly."
-                  >
-                    <input
-                      aria-label="OSPF loss weight"
-                      min={0}
-                      onChange={(event) =>
-                        update("lossWeight", event.target.value)
-                      }
-                      step="1"
-                      type="number"
-                      value={form.lossWeight}
-                    />
-                  </Field>
-                  <Field
-                    label="Bandwidth weight"
-                    tooltip="Multiplier for the diminishing-return bandwidth penalty across 10-10000 Mbps."
-                  >
-                    <input
-                      aria-label="OSPF bandwidth weight"
-                      min={0}
-                      onChange={(event) =>
-                        update("bandwidthWeight", event.target.value)
-                      }
-                      step="0.1"
-                      type="number"
-                      value={form.bandwidthWeight}
-                    />
-                  </Field>
-                  <Field
-                    label="Preference bias"
-                    tooltip="Global multiplier on computed cost before the per-plan preference divisor."
-                  >
-                    <input
-                      aria-label="OSPF preference bias"
-                      min={0}
-                      onChange={(event) =>
-                        update("preferenceBias", event.target.value)
-                      }
-                      step="0.1"
-                      type="number"
-                      value={form.preferenceBias}
-                    />
-                  </Field>
-                  <Field
-                    label="Minimum cost"
-                    tooltip="Lower clamp for the final OSPF cost."
-                  >
-                    <input
-                      aria-label="Minimum OSPF cost"
-                      max={65535}
-                      min={1}
-                      onChange={(event) =>
-                        update("minCost", event.target.value)
-                      }
-                      type="number"
-                      value={form.minCost}
-                    />
-                  </Field>
-                  <Field
-                    label="Maximum cost"
-                    tooltip="Upper clamp for the final OSPF cost."
-                  >
-                    <input
-                      aria-label="Maximum OSPF cost"
-                      max={65535}
-                      min={1}
-                      onChange={(event) =>
-                        update("maxCost", event.target.value)
-                      }
-                      type="number"
-                      value={form.maxCost}
-                    />
-                  </Field>
+                <div className="tunnelAdvancedBody">
+                  <div className="topologyFormGrid twoColumn">
+                    {(["left", "right"] as const).map((side) => {
+                      const left = side === "left";
+                      const label = left ? "Left" : "Right";
+                      const clientId = left ? form.leftClientId : form.rightClientId;
+                      const direction = `${left ? "L→R" : "R→L"} (${clientId ? clientDisplayNameFromMap(clientId, advancedClientNames) : "Select VPS"})`;
+                      return (
+                        <div className="tunnelAdditionalEndpoint" key={side}>
+                          <div className="topologyFormGrid twoColumn compactNumericGrid">
+                            <Field label={`Add · ${direction}`} truncateLabel tooltip={`Add · ${direction}: Add a signed value to the base cost of leaving the ${side} VPS over this tunnel, before multiplying. The other direction is independent.`}>
+                              <input
+                                aria-label={`${label} OSPF addition`}
+                                onChange={(event) => update(left ? "leftCostOffset" : "rightCostOffset", event.target.value)}
+                                required
+                                step="any"
+                                type="number"
+                                value={left ? form.leftCostOffset : form.rightCostOffset}
+                              />
+                            </Field>
+                            <Field label={`Multiply · ${direction}`} truncateLabel tooltip={`Multiply · ${direction}: Multiply the ${side} outgoing cost after Add, before flooring and applying the bounds. Must be greater than zero.`}>
+                              <input
+                                aria-label={`${label} OSPF multiplier`}
+                                onChange={(event) => update(left ? "leftCostMultiplier" : "rightCostMultiplier", event.target.value)}
+                                required
+                                step="any"
+                                type="number"
+                                value={left ? form.leftCostMultiplier : form.rightCostMultiplier}
+                              />
+                            </Field>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="topologyFormGrid fourColumn compactNumericGrid">
+                    <Field
+                      label="Minimum delta"
+                      tooltip="Ignore smaller differences between each endpoint’s current and recommended cost. Off-grid costs may still be normalized to the floor step; configured minimum/maximum bounds are exempt."
+                    >
+                      <UnitInput
+                        ariaLabel="Minimum OSPF cost delta"
+                        max={65535}
+                        min={1}
+                        onChange={(value) => update("minCostDelta", value)}
+                        unit="cost"
+                        value={form.minCostDelta}
+                      />
+                    </Field>
+                    <Field
+                      label="Healthy probes"
+                      tooltip="Automatic mode requires this many consecutive healthy probes within the recent evidence window. Reviewed mode still shows the streak for judgment."
+                    >
+                      <UnitInput
+                        ariaLabel="Required consecutive healthy OSPF probes"
+                        max={10}
+                        min={1}
+                        onChange={(value) => update("healthyWindows", value)}
+                        unit="probes"
+                        value={form.healthyWindows}
+                      />
+                    </Field>
+                    <Field
+                      label="Latency weight"
+                      tooltip="Multiplier applied to measured or planned latency in the cost formula."
+                    >
+                      <input
+                        aria-label="OSPF latency weight"
+                        min={0}
+                        onChange={(event) =>
+                          update("latencyWeight", event.target.value)
+                        }
+                        step="0.1"
+                        type="number"
+                        value={form.latencyWeight}
+                      />
+                    </Field>
+                    <Field
+                      label="Loss weight"
+                      tooltip="Multiplier applied to packet-loss ratio; higher values penalize lossy paths more strongly."
+                    >
+                      <input
+                        aria-label="OSPF loss weight"
+                        min={0}
+                        onChange={(event) =>
+                          update("lossWeight", event.target.value)
+                        }
+                        step="1"
+                        type="number"
+                        value={form.lossWeight}
+                      />
+                    </Field>
+                    <Field
+                      label="Bandwidth weight"
+                      tooltip="Multiplier for the diminishing-return bandwidth penalty across 10-10000 Mbps."
+                    >
+                      <input
+                        aria-label="OSPF bandwidth weight"
+                        min={0}
+                        onChange={(event) =>
+                          update("bandwidthWeight", event.target.value)
+                        }
+                        step="0.1"
+                        type="number"
+                        value={form.bandwidthWeight}
+                      />
+                    </Field>
+                    <Field
+                      label="Preference bias"
+                      tooltip="Global multiplier on computed cost before the per-plan preference divisor."
+                    >
+                      <input
+                        aria-label="OSPF preference bias"
+                        min={0}
+                        onChange={(event) =>
+                          update("preferenceBias", event.target.value)
+                        }
+                        step="0.1"
+                        type="number"
+                        value={form.preferenceBias}
+                      />
+                    </Field>
+                    <Field
+                      label="Minimum cost"
+                      tooltip="Lower clamp for the final OSPF cost."
+                    >
+                      <input
+                        aria-label="Minimum OSPF cost"
+                        max={65535}
+                        min={1}
+                        onChange={(event) =>
+                          update("minCost", event.target.value)
+                        }
+                        type="number"
+                        value={form.minCost}
+                      />
+                    </Field>
+                    <Field
+                      label="Maximum cost"
+                      tooltip="Upper clamp for the final OSPF cost."
+                    >
+                      <input
+                        aria-label="Maximum OSPF cost"
+                        max={65535}
+                        min={1}
+                        onChange={(event) =>
+                          update("maxCost", event.target.value)
+                        }
+                        type="number"
+                        value={form.maxCost}
+                      />
+                    </Field>
+                  </div>
                 </div>
               </details>
             </>
@@ -4446,14 +4511,16 @@ function Field({
   children,
   label,
   tooltip,
+  truncateLabel = false,
 }: {
   children: React.ReactNode;
   label: string;
   tooltip?: string;
+  truncateLabel?: boolean;
 }) {
   return (
     <label title={tooltip}>
-      <span>{label}</span>
+      <span className={truncateLabel ? "truncateValue" : undefined}>{label}</span>
       {children}
     </label>
   );
@@ -4870,10 +4937,15 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     openvpnPort: String(DEFAULT_RUNTIME_OPENVPN_OPTIONS.port),
     openvpnTransport: DEFAULT_RUNTIME_OPENVPN_OPTIONS.transport,
     ospfEnabled: false,
-    ospfMode: "reviewed",
+    ospfMode: "automatic",
     packetLossPercent: "0",
     plannedLatencyMs: "20",
     preference: "1",
+    costFloor: "5",
+    leftCostOffset: "0",
+    rightCostOffset: "0",
+    leftCostMultiplier: "1",
+    rightCostMultiplier: "1",
     preferenceBias: String(DEFAULT_OSPF_POLICY.preference_bias),
     rightClientId: "",
     rightIpv4: "",
@@ -4960,10 +5032,15 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     openvpnPort: String(openvpn.port),
     openvpnTransport: openvpn.transport,
     ospfEnabled: Boolean(ospf),
-    ospfMode: ospf?.mode ?? "reviewed",
+    ospfMode: ospf?.mode ?? "automatic",
     packetLossPercent: String((ospf?.planned_packet_loss_ratio ?? 0) * 100),
     plannedLatencyMs: String(ospf?.planned_latency_ms ?? 20),
     preference: String(ospf?.preference ?? 1),
+    costFloor: String(ospf?.cost_floor ?? 5),
+    leftCostOffset: String(ospf?.left_cost_offset ?? 0),
+    rightCostOffset: String(ospf?.right_cost_offset ?? 0),
+    leftCostMultiplier: String(ospf?.left_cost_multiplier ?? 1),
+    rightCostMultiplier: String(ospf?.right_cost_multiplier ?? 1),
     preferenceBias: String(policy.preference_bias),
     rightClientId: input.right_client_id,
     rightIpv4: input.ipv4_tunnel?.right ?? "",
@@ -5245,6 +5322,11 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
         100,
       ) ??
       validateNumberRange(form.preference, "Preference", 0.1, 100) ??
+      validateIntegerRange(form.costFloor, "OSPF floor step", 1, 65_535) ??
+      validateOspfAdjustment(form.leftCostOffset, "Left OSPF addition", false) ??
+      validateOspfAdjustment(form.rightCostOffset, "Right OSPF addition", false) ??
+      validateOspfAdjustment(form.leftCostMultiplier, "Left OSPF multiplier", true) ??
+      validateOspfAdjustment(form.rightCostMultiplier, "Right OSPF multiplier", true) ??
       validateIntegerRange(
         form.minCostDelta,
         "Minimum OSPF cost delta",
@@ -5330,6 +5412,13 @@ function validateNumberRange(
   return Number.isFinite(parsed) && parsed >= min && parsed <= max
     ? null
     : `${label} must be from ${min} to ${max}`;
+}
+
+function validateOspfAdjustment(value: string, label: string, positive: boolean): string | null {
+  const parsed = Number(value);
+  return value.trim() && Number.isFinite(parsed) && (!positive || parsed > 0)
+    ? null
+    : `${label} must be ${positive ? "a finite number greater than zero" : "a finite signed number"}`;
 }
 
 function validateNonNegativeNumber(
@@ -5833,6 +5922,11 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
           planned_packet_loss_ratio: numberOr(form.packetLossPercent, 0) / 100,
           policy: ospfPolicyFromForm(form),
           preference: numberOr(form.preference, 1),
+          cost_floor: Number(form.costFloor),
+          left_cost_offset: Number(form.leftCostOffset),
+          right_cost_offset: Number(form.rightCostOffset),
+          left_cost_multiplier: Number(form.leftCostMultiplier),
+          right_cost_multiplier: Number(form.rightCostMultiplier),
           right_adapter_template_id: form.rightRoutingDefinitionId || null,
         }
       : null,
@@ -6133,7 +6227,7 @@ function createConfirmationItems(
     {
       label: "OSPF",
       value: request.ospf
-        ? `${formatOspfMode(request.ospf.mode)} · planned cost ${calculateOspfCostPreview({ bandwidthMbps: request.bandwidth_mbps, latencyMs: request.ospf.planned_latency_ms, packetLossRatio: request.ospf.planned_packet_loss_ratio, policy: request.ospf.policy, preference: request.ospf.preference })}`
+        ? `${formatOspfMode(request.ospf.mode)} · planned ${formatRequestOspfCosts(request)}`
         : "Off",
     },
     ...(request.ospf
@@ -6160,6 +6254,10 @@ function createConfirmationItems(
               request.ospf.right_adapter_template_id,
               networkAdapterDefinitions,
             )}`,
+          },
+          {
+            label: "OSPF adjustments",
+            value: `L ${formatOspfAdjustment(request.ospf.left_cost_offset, request.ospf.left_cost_multiplier)} · R ${formatOspfAdjustment(request.ospf.right_cost_offset, request.ospf.right_cost_multiplier)} · Floor ${request.ospf.cost_floor}`,
           },
           {
             label: "OSPF gates",
@@ -6395,7 +6493,25 @@ function formatReportedOspfCostTitle(plan: TunnelPlanRecord): string {
 function formatPlanOspfConfiguration(plan: TunnelPlanRecord): string {
   const ospf = plan.plan.ospf;
   if (!ospf) return "Off";
-  return `Latency ${formatNetworkMeasurement(ospf.planned_latency_ms)} ms · Loss ${formatNetworkMeasurement(ospf.planned_packet_loss_ratio * 100)}% · Preference ${ospf.preference} · Preference bias ${ospf.policy.preference_bias} · Preview cost ${plan.recommended_ospf_cost ?? "unknown"}`;
+  return `Latency ${formatNetworkMeasurement(ospf.planned_latency_ms)} ms · Loss ${formatNetworkMeasurement(ospf.planned_packet_loss_ratio * 100)}% · Preference ${ospf.preference} · Preference bias ${ospf.policy.preference_bias} · Floor ${ospf.cost_floor ?? 5} · Preview ${formatOspfCostPair(plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost)}`;
+}
+
+function formatPlanOspfConfigurationDetail(plan: TunnelPlanRecord): string {
+  const ospf = plan.plan.ospf;
+  if (!ospf) return "Off";
+  return `${formatPlanOspfConfiguration(plan)}. Left → Right: ${formatOspfAdjustment(ospf.left_cost_offset ?? 0, ospf.left_cost_multiplier ?? 1)}; Right → Left: ${formatOspfAdjustment(ospf.right_cost_offset ?? 0, ospf.right_cost_multiplier ?? 1)}. Bounds ${ospf.policy.min_cost}–${ospf.policy.max_cost}. ${OSPF_COST_MODEL_DETAIL}`;
+}
+
+function formatRequestOspfCosts(request: TunnelPlanInput): string {
+  const ospf = request.ospf;
+  if (!ospf) return "Off";
+  const base = calculateOspfCostPreview({ bandwidthMbps: request.bandwidth_mbps, latencyMs: ospf.planned_latency_ms, packetLossRatio: ospf.planned_packet_loss_ratio, policy: ospf.policy, preference: ospf.preference });
+  const costs = calculateDirectionalOspfCosts(base, ospf);
+  return formatOspfCostPair(costs.left, costs.right);
+}
+
+function formatOspfAdjustment(offset: number, multiplier: number): string {
+  return `${offset >= 0 ? "+" : ""}${offset}, ×${multiplier}`;
 }
 
 function formatTunnelKind(kind: TunnelKind): string {
@@ -6615,6 +6731,11 @@ type TunnelPlanForm = {
   packetLossPercent: string;
   plannedLatencyMs: string;
   preference: string;
+  costFloor: string;
+  leftCostOffset: string;
+  rightCostOffset: string;
+  leftCostMultiplier: string;
+  rightCostMultiplier: string;
   preferenceBias: string;
   rightClientId: string;
   rightIpv4: string;

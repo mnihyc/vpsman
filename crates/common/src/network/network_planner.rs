@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    cost::{ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS},
+    cost::{adjusted_ospf_cost, ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS},
     models::{
         RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
         RuntimeTunnelOpenvpnOptions, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
@@ -190,8 +190,17 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         bandwidth_mbps: input.bandwidth_mbps,
         left_mtu: input.left_mtu,
         right_mtu: input.right_mtu,
-        ospf: input.ospf.clone(),
+        ospf: input.ospf.clone().map(|mut config| {
+            config.legacy_cost_wire = false;
+            config
+        }),
         recommended_ospf_cost,
+        left_recommended_ospf_cost: recommended_ospf_cost
+            .zip(input.ospf.as_ref())
+            .map(|(base, config)| adjusted_ospf_cost(base, config, TunnelEndpointSide::Left)),
+        right_recommended_ospf_cost: recommended_ospf_cost
+            .zip(input.ospf.as_ref())
+            .map(|(base, config)| adjusted_ospf_cost(base, config, TunnelEndpointSide::Right)),
         conflicts,
     })
 }
@@ -343,6 +352,13 @@ fn validate_ospf_config(config: &TunnelOspfConfig) -> Result<(), NetworkPlanErro
         || !(0.0..=1.0).contains(&config.planned_packet_loss_ratio)
         || !config.preference.is_finite()
         || !(0.1..=100.0).contains(&config.preference)
+        || !config.left_cost_offset.is_finite()
+        || !config.right_cost_offset.is_finite()
+        || !config.left_cost_multiplier.is_finite()
+        || config.left_cost_multiplier <= 0.0
+        || !config.right_cost_multiplier.is_finite()
+        || config.right_cost_multiplier <= 0.0
+        || config.cost_floor == 0
         || config.min_cost_delta == 0
         || !(1..=10).contains(&config.healthy_windows)
         || policy.min_cost == 0

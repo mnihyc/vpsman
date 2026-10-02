@@ -471,6 +471,99 @@ fn fou_defaults_and_explicit_types_require_typed_protocol_support() {
 }
 
 #[test]
+fn directional_ospf_commands_require_updated_agents_but_preserve_legacy_replay_bytes() {
+    let legacy_plan = serde_json::json!({
+        "name":"ospf-protocol", "interface_name":"tun-ospf", "kind":"gre",
+        "left_client_id":"left", "right_client_id":"right",
+        "left_remote_underlay":"192.0.2.1",
+        "right_remote_underlay":"192.0.2.2",
+        "left_tunnel_address":"10.0.0.0", "right_tunnel_address":"10.0.0.1",
+        "tunnel_prefix_len":31, "latency_primary_family":"ipv4", "bandwidth_mbps":100,
+        "left_mtu":1476,"right_mtu":1476,
+        "ospf":{"mode":"reviewed", "planned_latency_ms":20.0,"planned_packet_loss_ratio":0.0,
+            "preference":1.0,"policy":{"latency_weight":1.0,"loss_weight":400.0,
+                "bandwidth_weight":10.0,"preference_bias":1.0,"min_cost":5,"max_cost":65535},
+            "min_cost_delta":5,"healthy_windows":2},
+        "recommended_ospf_cost":30,"conflicts":[]
+    });
+    let legacy: crate::TunnelPlan = serde_json::from_value(legacy_plan.clone()).unwrap();
+    assert!(!legacy.ospf.as_ref().unwrap().has_directional_cost_fields());
+    assert_eq!(serde_json::to_value(&legacy).unwrap(), legacy_plan);
+    // This is the exact pre-upgrade typed encoding, including f64 spelling and
+    // field order; it is covered by already accepted command payload hashes.
+    assert_eq!(
+        serde_json::to_string(legacy.ospf.as_ref().unwrap()).unwrap(),
+        r#"{"mode":"reviewed","planned_latency_ms":20.0,"planned_packet_loss_ratio":0.0,"preference":1.0,"policy":{"latency_weight":1.0,"loss_weight":400.0,"bandwidth_weight":10.0,"preference_bias":1.0,"min_cost":5,"max_cost":65535},"min_cost_delta":5,"healthy_windows":2}"#
+    );
+    let mut edited_legacy = legacy.ospf.as_ref().unwrap().clone();
+    edited_legacy.left_cost_offset = 1.0;
+    assert!(edited_legacy.has_directional_cost_fields());
+    assert_eq!(
+        serde_json::to_value(&edited_legacy).unwrap()["left_cost_offset"],
+        1.0
+    );
+    let legacy_status = JobCommand::NetworkStatus {
+        plan_id: uuid::Uuid::from_u128(1).to_string(),
+        plan: Box::new(legacy.clone()),
+        side: crate::TunnelEndpointSide::Left,
+        runtime_adapter: None,
+    };
+    assert_eq!(
+        super::job_command_protocol_version(&legacy_status),
+        super::NETWORK_COMMAND_PROTOCOL_VERSION
+    );
+    // A saved legacy command has the original ordered plan/config encoding.
+    // Compare exact bytes rather than only JSON equality (the ledger hashes bytes).
+    let serialized = serde_json::to_string(&legacy_status).unwrap();
+    let frozen: JobCommand = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(serde_json::to_string(&frozen).unwrap(), serialized);
+    assert!(!serialized.contains("cost_floor"));
+    assert!(!serialized.contains("cost_multiplier"));
+
+    let mut current = legacy;
+    current.ospf.as_mut().unwrap().legacy_cost_wire = false;
+    let status = JobCommand::NetworkStatus {
+        plan_id: uuid::Uuid::from_u128(1).to_string(),
+        plan: Box::new(current.clone()),
+        side: crate::TunnelEndpointSide::Left,
+        runtime_adapter: None,
+    };
+    let mut config = crate::AgentRuntimeConfig::default();
+    config
+        .network
+        .runtime_status_telemetry_plans
+        .push(crate::AgentRuntimeStatusTelemetryPlan {
+            plan_id: Some(uuid::Uuid::from_u128(1).to_string()),
+            topology_identity_hash: String::new(),
+            runtime_evidence_identity_hash: String::new(),
+            endpoint_side: crate::TunnelEndpointSide::Left,
+            plan: current,
+            builtin_credentials: None,
+            runtime_adapter: None,
+            latency_monitoring_enabled: true,
+        });
+    let sync = JobCommand::RuntimeConfigSync {
+        desired_version: 1,
+        reason: "ospf-test".into(),
+        config: Box::new(config),
+    };
+    for command in [status, sync] {
+        assert_eq!(
+            super::job_command_protocol_version(&command),
+            super::OSPF_DIRECTIONAL_COST_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&command),
+            super::OSPF_DIRECTIONAL_COST_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            super::job_command_min_supported_protocol_version(&command),
+            super::OSPF_DIRECTIONAL_COST_PROTOCOL_VERSION
+        );
+    }
+}
+
+#[test]
 fn only_configs_and_commands_with_new_address_requirements_need_new_agent_support() {
     let input: crate::TunnelPlanInput = serde_json::from_value(serde_json::json!({
         "name": "protocol-address-test", "interface_name": "tun-test", "kind": "gre",
@@ -697,6 +790,8 @@ fn network_plan_operations_keep_the_current_dispatch_protocol() {
             right_mtu: Some(1476),
             ospf: None,
             recommended_ospf_cost: None,
+            left_recommended_ospf_cost: None,
+            right_recommended_ospf_cost: None,
             conflicts: Vec::new(),
         }),
         side: crate::TunnelEndpointSide::Left,

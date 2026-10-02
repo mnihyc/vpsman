@@ -31,6 +31,7 @@ import { usePanelDisplaySettings } from "../../panelDisplay";
 import { agentDisplayState } from "../../agentDisplayState";
 import {
   OSPF_COST_MODEL_DETAIL,
+  formatOspfCostPair,
   OSPF_COST_MODEL_SUMMARY,
   readableTelemetryToken,
 } from "../../topologyRuntime";
@@ -1414,19 +1415,17 @@ function reportedOspfCostDetail(edge: TopologyGraphEdge): string {
 }
 
 function ospfCostEstimate(edge: TopologyGraphEdge): string {
-  if (edge.recommended_ospf_cost === null) {
+  if (edge.left_recommended_ospf_cost == null && edge.right_recommended_ospf_cost == null) {
     return "No OSPF estimate";
   }
-  return edge.cost_delta === null
-    ? `Estimate ${edge.recommended_ospf_cost}`
-    : `Estimate ${edge.recommended_ospf_cost} (${edge.cost_delta > 0 ? "+" : ""}${edge.cost_delta})`;
+  return `Estimate ${formatOspfCostPair(edge.left_recommended_ospf_cost, edge.right_recommended_ospf_cost)}`;
 }
 
 function ospfCostReason(edge: TopologyGraphEdge): string {
-  if (edge.recommended_ospf_cost === null) {
+  if (!edge.ospf_enabled) {
     return "This tunnel plan has no routing cost adapter workflow.";
   }
-  return `${latencyLabel(edge)}, ${lossLabel(edge.packet_loss_avg_ratio)}, ${bandwidthLabel(edge)} drive recommended cost ${edge.recommended_ospf_cost}.`;
+  return `${latencyLabel(edge)}, ${lossLabel(edge.packet_loss_avg_ratio)}, ${bandwidthLabel(edge)} and configured adjustments drive ${formatOspfCostPair(edge.left_recommended_ospf_cost, edge.right_recommended_ospf_cost)}. L is Left → Right; R is Right → Left.`;
 }
 
 function edgeStatusDetail(edge: TopologyGraphEdge): string {

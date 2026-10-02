@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   backupId,
   installConsoleApiMock,
+  ospfUpdatePlans,
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
 import {
@@ -1336,7 +1337,8 @@ test("topology async review preparation ignores stale edits", async ({
   expect(ospfRequest).toMatchObject({
     body: {
       confirmed: true,
-      desired_ospf_cost: 22,
+      left_desired_ospf_cost: 20,
+      right_desired_ospf_cost: 20,
       left_adapter_definition_hash: "c".repeat(64),
       left_current_ospf_cost: 14,
       plan_revision: tunnelPlans[0].revision,
@@ -1406,7 +1408,7 @@ test("OSPF cost update submits a frozen endpoint-updater snapshot", async ({
     testInfo.project.name.includes("mobile"),
     "OSPF confirmation consistency is covered in desktop workflow tests",
   );
-  await installConsoleApiMock(page);
+  await installConsoleApiMock(page, { ospfUpdatePlansOverride: [{ ...ospfUpdatePlans[0], left_recommended_ospf_cost: 110, right_recommended_ospf_cost: 45, maximum_cost_delta: 96 }] });
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "OSPF");
   await unlockPrivilegeFor(page, "Network", "OSPF");
@@ -1416,7 +1418,8 @@ test("OSPF cost update submits a frozen endpoint-updater snapshot", async ({
   await expect(applyPrompt).toContainText("Confirm OSPF cost update");
   await expect(applyPrompt).toContainText("Current costs");
   await expect(applyPrompt).toContainText("14 / 14");
-  await expect(applyPrompt).toContainText("Desired cost");
+  await expect(applyPrompt).toContainText("Desired costs");
+  await expect(applyPrompt).toContainText("L 110 / R 45");
   await expect(applyPrompt).toContainText("Updater snapshots");
   await activate(
     applyPrompt.getByRole("button", {
@@ -1437,7 +1440,8 @@ test("OSPF cost update submits a frozen endpoint-updater snapshot", async ({
   expect(request).toMatchObject({
     body: {
       confirmed: true,
-      desired_ospf_cost: 22,
+      left_desired_ospf_cost: 110,
+      right_desired_ospf_cost: 45,
       left_adapter_definition_hash: "c".repeat(64),
       left_current_ospf_cost: 14,
       plan_revision: tunnelPlans[0].revision,

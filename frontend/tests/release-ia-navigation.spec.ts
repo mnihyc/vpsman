@@ -6998,7 +6998,7 @@ test("observability network metrics is chart-first and mutation-free", async ({
   ).not.toContainText("Down");
   await expect(
     panel.getByLabel("Network metrics review signals"),
-  ).toContainText("OSPF delta");
+  ).toContainText("OSPF base delta");
   await expect(
     panel.getByRole("button", {
       name: /Run status|Run probe|Run speed|Apply|Rollback|Dispatch|Delete|Create/,

@@ -92,39 +92,174 @@ impl Default for OspfCostPolicy {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OspfControlMode {
-    #[default]
     Reviewed,
+    #[default]
     Automatic,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug)]
 pub struct TunnelOspfConfig {
-    #[serde(default)]
     pub mode: OspfControlMode,
     pub planned_latency_ms: f64,
     pub planned_packet_loss_ratio: f64,
     pub preference: f64,
-    #[serde(default)]
+    pub left_cost_offset: f64,
+    pub right_cost_offset: f64,
+    pub left_cost_multiplier: f64,
+    pub right_cost_multiplier: f64,
+    pub cost_floor: u16,
     pub policy: OspfCostPolicy,
-    #[serde(default = "default_ospf_min_cost_delta")]
     pub min_cost_delta: u16,
-    #[serde(default = "default_ospf_healthy_windows")]
     pub healthy_windows: u8,
-    #[serde(
-        default,
-        rename = "left_adapter_template_id",
-        skip_serializing_if = "Option::is_none"
-    )]
     pub left_adapter_definition_id: Option<String>,
-    #[serde(
-        default,
-        rename = "right_adapter_template_id",
-        skip_serializing_if = "Option::is_none"
-    )]
     pub right_adapter_definition_id: Option<String>,
+    /// Preserve the signed bytes of already accepted commands that predate the
+    /// directional fields. Newly planned configurations always clear this flag.
+    #[doc(hidden)]
+    pub legacy_cost_wire: bool,
+}
+
+impl TunnelOspfConfig {
+    pub fn has_directional_cost_fields(&self) -> bool {
+        !self.legacy_cost_wire
+            || self.left_cost_offset != 0.0
+            || self.right_cost_offset != 0.0
+            || self.left_cost_multiplier != default_ospf_cost_multiplier()
+            || self.right_cost_multiplier != default_ospf_cost_multiplier()
+            || self.cost_floor != default_ospf_cost_floor()
+    }
+}
+
+// Wire presence is replay metadata, not an operator-configured policy value.
+impl PartialEq for TunnelOspfConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.planned_latency_ms == other.planned_latency_ms
+            && self.planned_packet_loss_ratio == other.planned_packet_loss_ratio
+            && self.preference == other.preference
+            && self.left_cost_offset == other.left_cost_offset
+            && self.right_cost_offset == other.right_cost_offset
+            && self.left_cost_multiplier == other.left_cost_multiplier
+            && self.right_cost_multiplier == other.right_cost_multiplier
+            && self.cost_floor == other.cost_floor
+            && self.policy == other.policy
+            && self.min_cost_delta == other.min_cost_delta
+            && self.healthy_windows == other.healthy_windows
+            && self.left_adapter_definition_id == other.left_adapter_definition_id
+            && self.right_adapter_definition_id == other.right_adapter_definition_id
+    }
+}
+
+impl Serialize for TunnelOspfConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let directional = self.has_directional_cost_fields();
+        let fields = 7
+            + if directional { 5 } else { 0 }
+            + usize::from(self.left_adapter_definition_id.is_some())
+            + usize::from(self.right_adapter_definition_id.is_some());
+        let mut state = serializer.serialize_struct("TunnelOspfConfig", fields)?;
+        // Preserve the existing typed field order, including the historical
+        // adapter_template_id names, because command hashes cover these bytes.
+        state.serialize_field("mode", &self.mode)?;
+        state.serialize_field("planned_latency_ms", &self.planned_latency_ms)?;
+        state.serialize_field("planned_packet_loss_ratio", &self.planned_packet_loss_ratio)?;
+        state.serialize_field("preference", &self.preference)?;
+        if directional {
+            state.serialize_field("left_cost_offset", &self.left_cost_offset)?;
+            state.serialize_field("right_cost_offset", &self.right_cost_offset)?;
+            state.serialize_field("left_cost_multiplier", &self.left_cost_multiplier)?;
+            state.serialize_field("right_cost_multiplier", &self.right_cost_multiplier)?;
+            state.serialize_field("cost_floor", &self.cost_floor)?;
+        }
+        state.serialize_field("policy", &self.policy)?;
+        state.serialize_field("min_cost_delta", &self.min_cost_delta)?;
+        state.serialize_field("healthy_windows", &self.healthy_windows)?;
+        if let Some(id) = &self.left_adapter_definition_id {
+            state.serialize_field("left_adapter_template_id", id)?;
+        }
+        if let Some(id) = &self.right_adapter_definition_id {
+            state.serialize_field("right_adapter_template_id", id)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for TunnelOspfConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A present null is invalid numeric input, not an absent legacy field.
+        fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+            deserializer: D,
+        ) -> Result<Option<T>, D::Error> {
+            T::deserialize(deserializer).map(Some)
+        }
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            mode: OspfControlMode,
+            planned_latency_ms: f64,
+            planned_packet_loss_ratio: f64,
+            preference: f64,
+            #[serde(default, deserialize_with = "present")]
+            left_cost_offset: Option<f64>,
+            #[serde(default, deserialize_with = "present")]
+            right_cost_offset: Option<f64>,
+            #[serde(default, deserialize_with = "present")]
+            left_cost_multiplier: Option<f64>,
+            #[serde(default, deserialize_with = "present")]
+            right_cost_multiplier: Option<f64>,
+            #[serde(default, deserialize_with = "present")]
+            cost_floor: Option<u16>,
+            #[serde(default)]
+            policy: OspfCostPolicy,
+            #[serde(default = "default_ospf_min_cost_delta")]
+            min_cost_delta: u16,
+            #[serde(default = "default_ospf_healthy_windows")]
+            healthy_windows: u8,
+            #[serde(default, rename = "left_adapter_template_id")]
+            left_adapter_definition_id: Option<String>,
+            #[serde(default, rename = "right_adapter_template_id")]
+            right_adapter_definition_id: Option<String>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let legacy_cost_wire = wire.left_cost_offset.is_none()
+            && wire.right_cost_offset.is_none()
+            && wire.left_cost_multiplier.is_none()
+            && wire.right_cost_multiplier.is_none()
+            && wire.cost_floor.is_none();
+        Ok(Self {
+            mode: wire.mode,
+            planned_latency_ms: wire.planned_latency_ms,
+            planned_packet_loss_ratio: wire.planned_packet_loss_ratio,
+            preference: wire.preference,
+            left_cost_offset: wire.left_cost_offset.unwrap_or_default(),
+            right_cost_offset: wire.right_cost_offset.unwrap_or_default(),
+            left_cost_multiplier: wire
+                .left_cost_multiplier
+                .unwrap_or_else(default_ospf_cost_multiplier),
+            right_cost_multiplier: wire
+                .right_cost_multiplier
+                .unwrap_or_else(default_ospf_cost_multiplier),
+            cost_floor: wire.cost_floor.unwrap_or_else(default_ospf_cost_floor),
+            policy: wire.policy,
+            min_cost_delta: wire.min_cost_delta,
+            healthy_windows: wire.healthy_windows,
+            left_adapter_definition_id: wire.left_adapter_definition_id,
+            right_adapter_definition_id: wire.right_adapter_definition_id,
+            legacy_cost_wire,
+        })
+    }
 }
 
 pub fn default_ospf_min_cost_delta() -> u16 {
+    5
+}
+
+pub fn default_ospf_cost_multiplier() -> f64 {
+    1.0
+}
+
+pub fn default_ospf_cost_floor() -> u16 {
     5
 }
 
@@ -833,6 +968,10 @@ pub struct TunnelPlan {
     pub ospf: Option<TunnelOspfConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_ospf_cost: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_recommended_ospf_cost: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_recommended_ospf_cost: Option<u16>,
     pub conflicts: Vec<String>,
 }
 

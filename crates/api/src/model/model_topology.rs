@@ -69,6 +69,8 @@ pub(crate) struct TopologyGraphEdgeView {
     pub(crate) left_ospf_status: String,
     pub(crate) right_ospf_status: String,
     pub(crate) recommended_ospf_cost: Option<i32>,
+    pub(crate) left_recommended_ospf_cost: Option<i32>,
+    pub(crate) right_recommended_ospf_cost: Option<i32>,
     pub(crate) cost_delta: Option<i32>,
     pub(crate) latency_avg_ms: Option<f64>,
     pub(crate) latest_latency_avg_ms: Option<f64>,

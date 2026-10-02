@@ -984,8 +984,9 @@
   font-weight: 400;
 }
 
+/* Give the directional preview room; numeric fields may shrink above the existing responsive breakpoints. */
 .ospfControlGrid {
-  grid-template-columns: minmax(130px, 0.9fr) repeat(3, minmax(120px, 1fr)) minmax(112px, 0.7fr);
+  grid-template-columns: minmax(130px, 0.9fr) repeat(4, minmax(0, 1fr)) minmax(180px, 1.35fr);
   align-items: end;
 }
 
@@ -1011,7 +1012,7 @@
 .topologyOspfPreviewInline > strong {
   grid-row: 1 / 3;
   grid-column: 2;
-  font-size: 20px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -2992,11 +2993,18 @@
   grid-row: 1 / 3;
   grid-column: 2;
   color: var(--primary-text);
-  font-size: 20px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 
 .topologyOspfPreviewInline > small {
   grid-column: 1;
+}
+
+/* Allow the pair to wrap between directions, keeping each label with its cost. */
+.topologyOspfPreviewInline > strong > span {
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
 }

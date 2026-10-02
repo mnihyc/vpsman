@@ -176,7 +176,12 @@ async fn process_automatic_ospf_update(
     let left_job_id = Uuid::new_v4();
     let right_job_id = Uuid::new_v4();
     let desired_cost = should_apply
-        .then(|| u16::try_from(update.recommended_ospf_cost).ok())
+        .then(|| {
+            Some((
+                u16::try_from(update.left_recommended_ospf_cost).ok()?,
+                u16::try_from(update.right_recommended_ospf_cost).ok()?,
+            ))
+        })
         .flatten();
     let staged = match state
         .repo
@@ -203,13 +208,14 @@ async fn process_automatic_ospf_update(
         }
         Err(error) => return Err(error),
     };
-    let apply = desired_cost.map(|desired| {
+    let apply = desired_cost.map(|(left_desired, right_desired)| {
         (
             plan.left_current_ospf_cost
                 .and_then(|value| u16::try_from(value).ok()),
             plan.right_current_ospf_cost
                 .and_then(|value| u16::try_from(value).ok()),
-            desired,
+            left_desired,
+            right_desired,
         )
     });
     let (jobs, dispatch) = dispatch_routing_jobs(

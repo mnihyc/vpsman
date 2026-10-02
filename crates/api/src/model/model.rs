@@ -708,6 +708,8 @@ pub(crate) struct NetworkOspfRecommendationView {
     pub(crate) effective_bandwidth_mbps: u32,
     pub(crate) plan_ospf_cost: i32,
     pub(crate) recommended_ospf_cost: i32,
+    pub(crate) left_recommended_ospf_cost: i32,
+    pub(crate) right_recommended_ospf_cost: i32,
     pub(crate) cost_delta: i32,
     pub(crate) latency_avg_ms: Option<f64>,
     pub(crate) packet_loss_avg_ratio: Option<f64>,
@@ -764,6 +766,8 @@ pub(crate) struct NetworkOspfUpdatePlanView {
     pub(crate) left_ospf_status: String,
     pub(crate) right_ospf_status: String,
     pub(crate) recommended_ospf_cost: i32,
+    pub(crate) left_recommended_ospf_cost: i32,
+    pub(crate) right_recommended_ospf_cost: i32,
     pub(crate) maximum_cost_delta: i32,
     pub(crate) status: String,
     pub(crate) confidence: String,
@@ -797,10 +801,14 @@ pub(crate) struct TunnelPlanView {
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
     pub(crate) recommended_ospf_cost: Option<i32>,
+    pub(crate) left_recommended_ospf_cost: Option<i32>,
+    pub(crate) right_recommended_ospf_cost: Option<i32>,
     pub(crate) ospf_status: String,
     pub(crate) left_ospf_status: String,
     pub(crate) right_ospf_status: String,
     pub(crate) desired_ospf_cost: Option<i32>,
+    pub(crate) left_desired_ospf_cost: Option<i32>,
+    pub(crate) right_desired_ospf_cost: Option<i32>,
     pub(crate) left_current_ospf_cost: Option<i32>,
     pub(crate) right_current_ospf_cost: Option<i32>,
     pub(crate) left_ospf_job_id: Option<Uuid>,
@@ -1085,15 +1093,52 @@ pub(crate) struct CreateTunnelPlanRequest {
     pub(crate) confirmed: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub(crate) struct UpdateTunnelPlanRequest {
-    #[serde(flatten)]
     pub(crate) input: TunnelPlanInput,
     pub(crate) expected_revision: i64,
-    #[serde(default)]
     pub(crate) enabled: Option<bool>,
-    #[serde(default)]
     pub(crate) confirmed: bool,
+}
+
+// Full edits must explicitly carry the new policy controls. Defaulting a missing
+// modifier here could reset a saved asymmetric policy sent by an older client.
+impl<'de> Deserialize<'de> for UpdateTunnelPlanRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(ospf) = value.get("ospf").and_then(serde_json::Value::as_object) {
+            for field in [
+                "left_cost_offset",
+                "right_cost_offset",
+                "left_cost_multiplier",
+                "right_cost_multiplier",
+                "cost_floor",
+            ] {
+                if !ospf.contains_key(field) {
+                    return Err(serde::de::Error::custom(format!(
+                        "ospf.{field} is required when updating a plan; upgrade the client"
+                    )));
+                }
+            }
+        }
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(flatten)]
+            input: TunnelPlanInput,
+            expected_revision: i64,
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default)]
+            confirmed: bool,
+        }
+        let wire: Wire = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            input: wire.input,
+            expected_revision: wire.expected_revision,
+            enabled: wire.enabled,
+            confirmed: wire.confirmed,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1111,7 +1156,8 @@ pub(crate) struct UpdateTunnelPlanOspfCostRequest {
     pub(crate) right_adapter_definition_hash: String,
     pub(crate) left_current_ospf_cost: Option<u16>,
     pub(crate) right_current_ospf_cost: Option<u16>,
-    pub(crate) desired_ospf_cost: u16,
+    pub(crate) left_desired_ospf_cost: u16,
+    pub(crate) right_desired_ospf_cost: u16,
     #[serde(default)]
     pub(crate) confirmed: bool,
     #[serde(default)]

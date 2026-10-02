@@ -281,6 +281,12 @@ impl Repository {
                 recommended_ospf_cost: recommendation
                     .map(|record| record.recommended_ospf_cost)
                     .or(plan.recommended_ospf_cost),
+                left_recommended_ospf_cost: recommendation
+                    .map(|record| record.left_recommended_ospf_cost)
+                    .or(plan.left_recommended_ospf_cost),
+                right_recommended_ospf_cost: recommendation
+                    .map(|record| record.right_recommended_ospf_cost)
+                    .or(plan.right_recommended_ospf_cost),
                 cost_delta: recommendation.map(|record| record.cost_delta),
                 latency_avg_ms: summary.latency_avg_ms,
                 latest_latency_avg_ms,

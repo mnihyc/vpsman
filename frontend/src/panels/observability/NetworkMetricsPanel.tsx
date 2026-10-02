@@ -27,6 +27,7 @@ import {
   networkObservationMetricDefinition,
   type NetworkObservationMetric,
 } from "../../telemetryMetrics";
+import { formatOspfCostPair } from "../../topologyRuntime";
 import { useByteCountFormatter } from "../../panelDisplay";
 import { formatCompactTime, timestampMillis } from "../../utils";
 import {
@@ -1458,11 +1459,11 @@ function buildOverlayRows(
   const ospfRows = recommendations
     .filter((recommendation) => recommendation.cost_delta !== 0)
     .map((recommendation) => ({
-      detail: `${recommendation.interface_name}: ${recommendation.plan_ospf_cost} -> ${recommendation.recommended_ospf_cost}; ${recommendation.reason}`,
+      detail: `${recommendation.interface_name}: ${formatOspfCostPair(recommendation.left_recommended_ospf_cost, recommendation.right_recommended_ospf_cost)}; base ${recommendation.plan_ospf_cost} → ${recommendation.recommended_ospf_cost} before adjustments; ${recommendation.reason}`,
       key: `ospf:${recommendation.plan_id}:${recommendation.interface_name}`,
       label: recommendation.plan_name,
       severity: "info" as const,
-      source: "OSPF delta",
+      source: "OSPF base delta",
     }));
   return [...observationRows, ...tunnelRows, ...ospfRows];
 }

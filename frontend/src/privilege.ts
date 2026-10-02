@@ -503,7 +503,7 @@ export function canonicalOperationJson(operation: JobOperation): string {
     return JSON.stringify(canonical);
   }
 
-  // The API serializes these seven fields as Rust f64, even when their values
+  // The API serializes these fields as Rust f64, even when their values
   // are whole numbers. Preserve its numeric spelling for the signed bytes;
   // the operation sent to the API and all other fields remain unchanged.
   const ospf = operation.plan.ospf;
@@ -511,6 +511,10 @@ export function canonicalOperationJson(operation: JobOperation): string {
     planned_latency_ms: rustF64Json(ospf.planned_latency_ms),
     planned_packet_loss_ratio: rustF64Json(ospf.planned_packet_loss_ratio),
     preference: rustF64Json(ospf.preference),
+    left_cost_offset: rustF64Json(ospf.left_cost_offset),
+    right_cost_offset: rustF64Json(ospf.right_cost_offset),
+    left_cost_multiplier: rustF64Json(ospf.left_cost_multiplier),
+    right_cost_multiplier: rustF64Json(ospf.right_cost_multiplier),
     policy: jsonObjectWithFields(ospf.policy, {
       latency_weight: rustF64Json(ospf.policy.latency_weight),
       loss_weight: rustF64Json(ospf.policy.loss_weight),

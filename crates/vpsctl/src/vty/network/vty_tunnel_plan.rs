@@ -48,10 +48,16 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut left_mtu = None::<u16>;
     let mut right_mtu = None::<u16>;
     let mut ospf_enabled = false;
-    let mut ospf_mode = OspfControlMode::Reviewed;
+    let mut ospf_mode = OspfControlMode::Automatic;
     let mut ospf_latency_ms = None::<f64>;
     let mut ospf_packet_loss_ratio = 0.0_f64;
     let mut ospf_preference = 1.0_f64;
+    let mut ospf_cost_floor = 5_u16;
+    let mut ospf_left_cost_offset = 0.0_f64;
+    let mut ospf_right_cost_offset = 0.0_f64;
+    let mut ospf_left_cost_multiplier = 1.0_f64;
+    let mut ospf_right_cost_multiplier = 1.0_f64;
+    let mut ospf_directional_options_set = false;
     let mut ospf_min_cost_delta = default_ospf_min_cost_delta();
     let mut ospf_healthy_windows = default_ospf_healthy_windows();
     let mut ospf_latency_weight = 1.0_f64;
@@ -450,6 +456,84 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             value if value.starts_with("--ospf-preference=") => {
                 ospf_preference =
                     parse_f64(flag_value(value, "--ospf-preference="), "--ospf-preference")?;
+                index += 1;
+            }
+            "--ospf-cost-floor" => {
+                ospf_cost_floor = parse_u16(
+                    next_value(tokens, index, "--ospf-cost-floor")?,
+                    "--ospf-cost-floor",
+                )?;
+                ospf_directional_options_set = true;
+                index += 2;
+            }
+            value if value.starts_with("--ospf-cost-floor=") => {
+                ospf_cost_floor =
+                    parse_u16(flag_value(value, "--ospf-cost-floor="), "--ospf-cost-floor")?;
+                ospf_directional_options_set = true;
+                index += 1;
+            }
+            "--ospf-left-cost-offset" => {
+                ospf_left_cost_offset = parse_f64(
+                    next_value(tokens, index, "--ospf-left-cost-offset")?,
+                    "--ospf-left-cost-offset",
+                )?;
+                ospf_directional_options_set = true;
+                index += 2;
+            }
+            value if value.starts_with("--ospf-left-cost-offset=") => {
+                ospf_left_cost_offset = parse_f64(
+                    flag_value(value, "--ospf-left-cost-offset="),
+                    "--ospf-left-cost-offset",
+                )?;
+                ospf_directional_options_set = true;
+                index += 1;
+            }
+            "--ospf-right-cost-offset" => {
+                ospf_right_cost_offset = parse_f64(
+                    next_value(tokens, index, "--ospf-right-cost-offset")?,
+                    "--ospf-right-cost-offset",
+                )?;
+                ospf_directional_options_set = true;
+                index += 2;
+            }
+            value if value.starts_with("--ospf-right-cost-offset=") => {
+                ospf_right_cost_offset = parse_f64(
+                    flag_value(value, "--ospf-right-cost-offset="),
+                    "--ospf-right-cost-offset",
+                )?;
+                ospf_directional_options_set = true;
+                index += 1;
+            }
+            "--ospf-left-cost-multiplier" => {
+                ospf_left_cost_multiplier = parse_f64(
+                    next_value(tokens, index, "--ospf-left-cost-multiplier")?,
+                    "--ospf-left-cost-multiplier",
+                )?;
+                ospf_directional_options_set = true;
+                index += 2;
+            }
+            value if value.starts_with("--ospf-left-cost-multiplier=") => {
+                ospf_left_cost_multiplier = parse_f64(
+                    flag_value(value, "--ospf-left-cost-multiplier="),
+                    "--ospf-left-cost-multiplier",
+                )?;
+                ospf_directional_options_set = true;
+                index += 1;
+            }
+            "--ospf-right-cost-multiplier" => {
+                ospf_right_cost_multiplier = parse_f64(
+                    next_value(tokens, index, "--ospf-right-cost-multiplier")?,
+                    "--ospf-right-cost-multiplier",
+                )?;
+                ospf_directional_options_set = true;
+                index += 2;
+            }
+            value if value.starts_with("--ospf-right-cost-multiplier=") => {
+                ospf_right_cost_multiplier = parse_f64(
+                    flag_value(value, "--ospf-right-cost-multiplier="),
+                    "--ospf-right-cost-multiplier",
+                )?;
+                ospf_directional_options_set = true;
                 index += 1;
             }
             "--ospf-min-cost-delta" => {
@@ -863,10 +947,16 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
 
     let ospf = if ospf_enabled {
         Some(TunnelOspfConfig {
+            legacy_cost_wire: false,
             mode: ospf_mode,
             planned_latency_ms: required(ospf_latency_ms, "--ospf-latency-ms")?,
             planned_packet_loss_ratio: ospf_packet_loss_ratio,
             preference: ospf_preference,
+            cost_floor: ospf_cost_floor,
+            left_cost_offset: ospf_left_cost_offset,
+            left_cost_multiplier: ospf_left_cost_multiplier,
+            right_cost_offset: ospf_right_cost_offset,
+            right_cost_multiplier: ospf_right_cost_multiplier,
             policy: OspfCostPolicy {
                 latency_weight: ospf_latency_weight,
                 loss_weight: ospf_loss_weight,
@@ -882,7 +972,8 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         })
     } else {
         anyhow::ensure!(
-            ospf_latency_ms.is_none()
+            !ospf_directional_options_set
+                && ospf_latency_ms.is_none()
                 && left_routing_adapter_definition_id.is_none()
                 && right_routing_adapter_definition_id.is_none(),
             "OSPF options require --ospf"

@@ -5,9 +5,9 @@ use sqlx::{types::Json as SqlJson, QueryBuilder, Row};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    tunnel_networks_overlap, tunnel_plan_global_networks, tunnel_topology_identity_hash,
-    RuntimeTunnelManager, TunnelBuiltinCredentials, TunnelEndpointSide, TunnelKind, TunnelPlan,
-    TunnelPlanInput,
+    adjusted_ospf_cost, tunnel_networks_overlap, tunnel_plan_global_networks,
+    tunnel_topology_identity_hash, RuntimeTunnelManager, TunnelBuiltinCredentials,
+    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 use crate::{
@@ -120,7 +120,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -241,7 +241,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -401,7 +401,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -463,6 +463,11 @@ impl Repository {
         enabled: bool,
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
+        // Creation accepts older input defaults, but newly saved configuration
+        // must explicitly carry the current policy contract in both documents.
+        let mut normalized_input = input.clone();
+        normalized_input.ospf = plan.ospf.clone();
+        let input = &normalized_input;
         let ospf_endpoint_status = if plan.ospf.is_some() && enabled {
             "unverified"
         } else {
@@ -480,10 +485,14 @@ impl Repository {
             left_client_id: plan.left_client_id.clone(),
             right_client_id: plan.right_client_id.clone(),
             recommended_ospf_cost: plan.recommended_ospf_cost.map(i32::from),
+            left_recommended_ospf_cost: plan.left_recommended_ospf_cost.map(i32::from),
+            right_recommended_ospf_cost: plan.right_recommended_ospf_cost.map(i32::from),
             ospf_status: ospf_endpoint_status.to_string(),
             left_ospf_status: ospf_endpoint_status.to_string(),
             right_ospf_status: ospf_endpoint_status.to_string(),
             desired_ospf_cost: None,
+            left_desired_ospf_cost: None,
+            right_desired_ospf_cost: None,
             left_current_ospf_cost: None,
             right_current_ospf_cost: None,
             left_ospf_job_id: None,
@@ -592,6 +601,9 @@ impl Repository {
         enabled: bool,
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
+        let mut normalized_input = input.clone();
+        normalized_input.ospf = plan.ospf.clone();
+        let input = &normalized_input;
         vpsman_common::validate_tunnel_link_local_addresses(plan_id, plan)?;
         let previous = self
             .get_tunnel_plan_identity(plan_id)
@@ -719,6 +731,8 @@ impl Repository {
                         left_ospf_status = CASE WHEN $14 THEN left_ospf_status ELSE $10 END,
                         right_ospf_status = CASE WHEN $14 THEN right_ospf_status ELSE $10 END,
                         desired_ospf_cost = CASE WHEN $14 THEN desired_ospf_cost END,
+                        left_desired_ospf_cost = CASE WHEN $14 THEN left_desired_ospf_cost END,
+                        right_desired_ospf_cost = CASE WHEN $14 THEN right_desired_ospf_cost END,
                         left_current_ospf_cost = CASE WHEN $14 THEN left_current_ospf_cost END,
                         right_current_ospf_cost = CASE WHEN $14 THEN right_current_ospf_cost END,
                         left_ospf_job_id = CASE WHEN $14 THEN left_ospf_job_id END,
@@ -736,7 +750,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -866,7 +880,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -1008,6 +1022,8 @@ impl Repository {
                             left_ospf_status = requested.ospf_status,
                             right_ospf_status = requested.ospf_status,
                             desired_ospf_cost = NULL,
+                            left_desired_ospf_cost = NULL,
+                            right_desired_ospf_cost = NULL,
                             left_current_ospf_cost = NULL,
                             right_current_ospf_cost = NULL,
                             left_ospf_job_id = NULL,
@@ -1028,7 +1044,7 @@ impl Repository {
                             target.input, target.plan, target.builtin_credentials,
                             target.recommended_ospf_cost,
                             target.ospf_status, target.left_ospf_status, target.right_ospf_status,
-                            target.desired_ospf_cost, target.left_current_ospf_cost,
+                            target.desired_ospf_cost, target.left_desired_ospf_cost, target.right_desired_ospf_cost, target.left_current_ospf_cost,
                             target.right_current_ospf_cost,
                             target.left_ospf_job_id, target.right_ospf_job_id,
                             target.connection_assessment, target.connection_assessment_note,
@@ -1247,7 +1263,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -1385,7 +1401,7 @@ impl Repository {
         expected_revision: i64,
         expected_left_cost: Option<u16>,
         expected_right_cost: Option<u16>,
-        desired_cost: Option<u16>,
+        desired_cost: Option<(u16, u16)>,
         left_job_id: Uuid,
         right_job_id: Uuid,
         operator: &AuthContext,
@@ -1416,6 +1432,8 @@ impl Repository {
                     UPDATE tunnel_plans
                     SET actor_id = $2,
                         desired_ospf_cost = $3,
+                        left_desired_ospf_cost = $9,
+                        right_desired_ospf_cost = $10,
                         ospf_status = 'pending',
                         left_ospf_status = 'pending',
                         right_ospf_status = 'pending',
@@ -1435,7 +1453,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -1448,12 +1466,14 @@ impl Repository {
                 )
                 .bind(plan_id)
                 .bind(persisted_actor_id(operator))
-                .bind(desired_cost.map(i32::from))
+                .bind(desired_cost.and_then(|(left, right)| (left == right).then_some(i32::from(left))))
                 .bind(left_job_id)
                 .bind(right_job_id)
                 .bind(expected_left_cost.map(i32::from))
                 .bind(expected_right_cost.map(i32::from))
                 .bind(expected_revision)
+                .bind(desired_cost.map(|(left, _)| i32::from(left)))
+                .bind(desired_cost.map(|(_, right)| i32::from(right)))
                 .fetch_optional(&mut *tx)
                 .await?;
                 let row = row.ok_or_else(|| anyhow::anyhow!("tunnel_plan_ospf_snapshot_stale"))?;
@@ -1515,7 +1535,7 @@ impl Repository {
                     "UPDATE tunnel_plans SET {status_column} = $3, {cost_column} = $4, updated_at = clock_timestamp() \
                      WHERE id = $1 AND deleted_at IS NULL AND {job_column} = $2 \
                        AND {status_column} = 'pending' \
-                     RETURNING enabled, plan, desired_ospf_cost, \
+                     RETURNING enabled, plan, left_desired_ospf_cost, right_desired_ospf_cost, \
                         left_ospf_status, right_ospf_status, \
                         left_current_ospf_cost, right_current_ospf_cost"
                 );
@@ -1542,7 +1562,8 @@ impl Repository {
                     plan.0.ospf.is_some(),
                     row.try_get::<String, _>("left_ospf_status")?.as_str(),
                     row.try_get::<String, _>("right_ospf_status")?.as_str(),
-                    row.try_get("desired_ospf_cost")?,
+                    row.try_get("left_desired_ospf_cost")?,
+                    row.try_get("right_desired_ospf_cost")?,
                     row.try_get("left_current_ospf_cost")?,
                     row.try_get("right_current_ospf_cost")?,
                 );
@@ -1555,7 +1576,7 @@ impl Repository {
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
                         input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
-                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        desired_ospf_cost, left_desired_ospf_cost, right_desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
                         connection_assessment, connection_assessment_note,
                         connection_assessed_at::text AS connection_assessed_at,
@@ -1599,8 +1620,14 @@ fn tunnel_plan_from_row(row: &sqlx::postgres::PgRow) -> Result<TunnelPlanView> {
         .transpose()?;
     let input = serde_json::from_value::<TunnelPlanInput>(input.0)
         .map_err(|error| anyhow::anyhow!("invalid persisted tunnel input: {error}"))?;
-    let plan = serde_json::from_value::<TunnelPlan>(plan.0)
+    let mut plan = serde_json::from_value::<TunnelPlan>(plan.0)
         .map_err(|error| anyhow::anyhow!("invalid persisted tunnel plan: {error}"))?;
+    if let (Some(base), Some(config)) = (plan.recommended_ospf_cost, plan.ospf.as_ref()) {
+        plan.left_recommended_ospf_cost =
+            Some(adjusted_ospf_cost(base, config, TunnelEndpointSide::Left));
+        plan.right_recommended_ospf_cost =
+            Some(adjusted_ospf_cost(base, config, TunnelEndpointSide::Right));
+    }
     Ok(TunnelPlanView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -1610,10 +1637,14 @@ fn tunnel_plan_from_row(row: &sqlx::postgres::PgRow) -> Result<TunnelPlanView> {
         left_client_id: row.try_get("left_client_id")?,
         right_client_id: row.try_get("right_client_id")?,
         recommended_ospf_cost: row.try_get("recommended_ospf_cost")?,
+        left_recommended_ospf_cost: plan.left_recommended_ospf_cost.map(i32::from),
+        right_recommended_ospf_cost: plan.right_recommended_ospf_cost.map(i32::from),
         ospf_status: row.try_get("ospf_status")?,
         left_ospf_status: row.try_get("left_ospf_status")?,
         right_ospf_status: row.try_get("right_ospf_status")?,
         desired_ospf_cost: row.try_get("desired_ospf_cost")?,
+        left_desired_ospf_cost: row.try_get("left_desired_ospf_cost")?,
+        right_desired_ospf_cost: row.try_get("right_desired_ospf_cost")?,
         left_current_ospf_cost: row.try_get("left_current_ospf_cost")?,
         right_current_ospf_cost: row.try_get("right_current_ospf_cost")?,
         left_ospf_job_id: row.try_get("left_ospf_job_id")?,
@@ -2057,7 +2088,7 @@ fn validate_ospf_stage(
     expected_revision: i64,
     expected_left_cost: Option<u16>,
     expected_right_cost: Option<u16>,
-    desired_cost: Option<u16>,
+    desired_cost: Option<(u16, u16)>,
 ) -> Result<()> {
     if plan.revision != expected_revision {
         anyhow::bail!("tunnel_plan_ospf_snapshot_stale");
@@ -2076,7 +2107,7 @@ fn validate_ospf_stage(
     {
         anyhow::bail!("tunnel_plan_ospf_snapshot_stale");
     }
-    if desired_cost == Some(0) {
+    if desired_cost.is_some_and(|(left, right)| left == 0 || right == 0) {
         anyhow::bail!("tunnel_plan_ospf_cost_invalid");
     }
     Ok(())
@@ -2105,7 +2136,8 @@ fn aggregate_ospf_status_fields(
     ospf_enabled: bool,
     left: &str,
     right: &str,
-    desired_ospf_cost: Option<i32>,
+    left_desired_ospf_cost: Option<i32>,
+    right_desired_ospf_cost: Option<i32>,
     left_current_ospf_cost: Option<i32>,
     right_current_ospf_cost: Option<i32>,
 ) -> &'static str {
@@ -2116,10 +2148,11 @@ fn aggregate_ospf_status_fields(
         return "pending";
     }
     if left == "verified" && right == "verified" {
-        if let Some(desired) = desired_ospf_cost {
-            if left_current_ospf_cost != Some(desired) || right_current_ospf_cost != Some(desired) {
-                return "stale";
-            }
+        if left_desired_ospf_cost.is_some_and(|desired| left_current_ospf_cost != Some(desired))
+            || right_desired_ospf_cost
+                .is_some_and(|desired| right_current_ospf_cost != Some(desired))
+        {
+            return "stale";
         }
         return "verified";
     }
@@ -2201,6 +2234,8 @@ fn ospf_jobs_metadata(
             "plan_id": view.id,
             "plan_name": &view.name,
             "desired_ospf_cost": view.desired_ospf_cost,
+            "left_desired_ospf_cost": view.left_desired_ospf_cost,
+            "right_desired_ospf_cost": view.right_desired_ospf_cost,
             "left_current_ospf_cost": view.left_current_ospf_cost,
             "right_current_ospf_cost": view.right_current_ospf_cost,
             "left_job_id": left_job_id,

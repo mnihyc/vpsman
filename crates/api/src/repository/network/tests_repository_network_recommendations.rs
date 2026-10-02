@@ -145,10 +145,14 @@ fn bandwidth_test_plan() -> TunnelPlanView {
         left_client_id: plan.left_client_id.clone(),
         right_client_id: plan.right_client_id.clone(),
         recommended_ospf_cost: plan.recommended_ospf_cost.map(i32::from),
+        left_recommended_ospf_cost: plan.left_recommended_ospf_cost.map(i32::from),
+        right_recommended_ospf_cost: plan.right_recommended_ospf_cost.map(i32::from),
         ospf_status: "verified".to_string(),
         left_ospf_status: "verified".to_string(),
         right_ospf_status: "verified".to_string(),
         desired_ospf_cost: None,
+        left_desired_ospf_cost: None,
+        right_desired_ospf_cost: None,
         left_current_ospf_cost: None,
         right_current_ospf_cost: None,
         left_ospf_job_id: None,
@@ -284,6 +288,7 @@ fn ospf_eligibility_keeps_endpoint_loss_and_initial_cost_gates_distinct() {
             true,
             "verified",
             20,
+            false,
             OspfControlMode::Reviewed,
             5,
             2,
@@ -303,6 +308,7 @@ fn ospf_eligibility_keeps_endpoint_loss_and_initial_cost_gates_distinct() {
             false,
             "verified",
             0,
+            false,
             OspfControlMode::Reviewed,
             5,
             2,
@@ -323,6 +329,7 @@ fn ospf_eligibility_keeps_endpoint_loss_and_initial_cost_gates_distinct() {
             true,
             "verified",
             20,
+            false,
             OspfControlMode::Reviewed,
             5,
             2,
@@ -349,6 +356,8 @@ fn ospf_recommendation() -> NetworkOspfRecommendationView {
         effective_bandwidth_mbps: 100,
         plan_ospf_cost: 10,
         recommended_ospf_cost: 30,
+        left_recommended_ospf_cost: 30,
+        right_recommended_ospf_cost: 30,
         cost_delta: 20,
         latency_avg_ms: Some(12.0),
         packet_loss_avg_ratio: None,
@@ -401,4 +410,236 @@ fn reachability_observation(
         observed_at: observed_unix.to_string(),
         received_at: observed_unix.to_string(),
     }
+}
+
+#[test]
+fn directional_ospf_recommendations_bind_both_targets_and_plan_revision() {
+    let mut plan = bandwidth_test_plan();
+    plan.recommended_ospf_cost = Some(49);
+    let config = plan.input.ospf.as_mut().unwrap();
+    config.left_cost_offset = 28.0;
+    config.left_cost_multiplier = 1.49;
+    let recommendation = recommend_plan_ospf_cost(&plan, &[]).view;
+    assert_eq!(recommendation.recommended_ospf_cost, 49);
+    assert_eq!(recommendation.left_recommended_ospf_cost, 110);
+    assert_eq!(recommendation.right_recommended_ospf_cost, 45);
+    plan.input.ospf.as_mut().unwrap().right_cost_offset = -18.0;
+    let changed_right = recommend_plan_ospf_cost(&plan, &[]).view;
+    assert_eq!(changed_right.left_recommended_ospf_cost, 110);
+    assert_eq!(changed_right.right_recommended_ospf_cost, 30);
+    assert_ne!(
+        changed_right.recommendation_id,
+        recommendation.recommendation_id
+    );
+    plan.revision += 1;
+    assert_ne!(
+        recommend_plan_ospf_cost(&plan, &[]).view.recommendation_id,
+        changed_right.recommendation_id
+    );
+}
+
+#[test]
+fn floor_alignment_bypasses_only_minimum_delta() {
+    let mut recommendation = ospf_recommendation();
+    recommendation.packet_loss_avg_ratio = Some(0.0);
+    let status = |recommendation: &NetworkOspfRecommendationView,
+                  adapters,
+                  verified,
+                  current_status,
+                  delta,
+                  align,
+                  mode,
+                  streak| {
+        update_plan_status(
+            recommendation,
+            adapters,
+            verified,
+            true,
+            current_status,
+            delta,
+            align,
+            mode,
+            5,
+            2,
+            streak,
+        )
+    };
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "verified",
+            4,
+            false,
+            OspfControlMode::Reviewed,
+            2
+        ),
+        "below_minimum_delta"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "verified",
+            4,
+            true,
+            OspfControlMode::Reviewed,
+            2
+        ),
+        "review_required"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "verified",
+            4,
+            true,
+            OspfControlMode::Automatic,
+            2
+        ),
+        "automatic_ready"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "verified",
+            4,
+            true,
+            OspfControlMode::Automatic,
+            1
+        ),
+        "automatic_waiting_evidence"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            false,
+            true,
+            "verified",
+            4,
+            true,
+            OspfControlMode::Reviewed,
+            2
+        ),
+        "adapter_unavailable"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            false,
+            "verified",
+            4,
+            true,
+            OspfControlMode::Reviewed,
+            2
+        ),
+        "needs_adapter_status"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "pending",
+            4,
+            true,
+            OspfControlMode::Reviewed,
+            2
+        ),
+        "in_progress"
+    );
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "verified",
+            0,
+            true,
+            OspfControlMode::Reviewed,
+            2
+        ),
+        "noop"
+    );
+    recommendation.packet_loss_avg_ratio = None;
+    assert_eq!(
+        status(
+            &recommendation,
+            true,
+            true,
+            "verified",
+            4,
+            true,
+            OspfControlMode::Automatic,
+            2
+        ),
+        "automatic_waiting_evidence"
+    );
+}
+
+#[test]
+fn directional_update_plan_compares_each_endpoint_to_its_own_target() {
+    use crate::model::ResolvedOspfCommandSource;
+    use std::collections::BTreeMap;
+    let mut plan = bandwidth_test_plan();
+    plan.recommended_ospf_cost = Some(49);
+    plan.input.ospf.as_mut().unwrap().left_cost_offset = 28.0;
+    plan.input.ospf.as_mut().unwrap().left_cost_multiplier = 1.49;
+    plan.plan.ospf = plan.input.ospf.clone();
+    let command = vpsman_common::RuntimeTunnelCommand {
+        argv: vec!["/bin/true".into()],
+        max_timeout_secs: 10,
+        max_output_bytes: 4096,
+    };
+    let sources = [plan.left_client_id.clone(), plan.right_client_id.clone()]
+        .into_iter()
+        .map(|client| {
+            (
+                client,
+                Some(ResolvedOspfCommandSource {
+                    origin: "test".into(),
+                    id: Uuid::new_v4(),
+                    name: "test".into(),
+                    definition_hash: "a".repeat(64),
+                    status: command.clone(),
+                    update: command.clone(),
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (left, right, delta, status) in [
+        (110, 45, 0, "noop"),
+        (110, 49, 4, "review_planned_baseline"),
+        (109, 45, 1, "review_planned_baseline"),
+        (105, 40, 5, "review_planned_baseline"),
+    ] {
+        plan.left_current_ospf_cost = Some(left);
+        plan.right_current_ospf_cost = Some(right);
+        let update = super::build_ospf_update_plan(
+            &plan,
+            recommend_plan_ospf_cost(&plan, &[]),
+            &[],
+            &sources,
+        )
+        .unwrap();
+        assert_eq!(update.maximum_cost_delta, delta);
+        assert_eq!(update.status, status);
+        assert_eq!(update.requires_approval, status != "noop");
+    }
+    // A configured lower bound outside the floor grid is already aligned.
+    plan.input.ospf.as_mut().unwrap().policy.min_cost = 47;
+    plan.plan.ospf = plan.input.ospf.clone();
+    plan.left_current_ospf_cost = Some(110);
+    plan.right_current_ospf_cost = Some(47);
+    let update =
+        super::build_ospf_update_plan(&plan, recommend_plan_ospf_cost(&plan, &[]), &[], &sources)
+            .unwrap();
+    assert_eq!(update.status, "noop");
 }

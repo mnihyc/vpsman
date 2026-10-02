@@ -470,7 +470,10 @@ equals `{desired_cost}`. When no cost has been recorded yet, that first status
 read establishes the baseline instead of inventing one. A changed current cost, adapter-definition hash,
 recommendation, or endpoint snapshot rejects stale confirmation.
 
-Enable reviewed OSPF on a plan after each endpoint resolves a configured updater
+New OSPF plans default to Automatic control. Existing saved plans retain their
+explicit mode during migration; Reviewed remains available when cost changes
+should require manual approval. The following example explicitly chooses
+Reviewed after each endpoint resolves a configured updater
 from its effective `ospf_update_command` preset or explicit per-plan override:
 
 First read the plan UUID and current declaration revision with `tunnel-plans`.
@@ -531,18 +534,24 @@ cargo run -p vpsctl -- tunnel-ospf-cost-update \
   --recommendation-id <recommendation_id> \
   --left-current-ospf-cost <left_cost> \
   --right-current-ospf-cost <right_cost> \
-  --desired-ospf-cost <recommended_cost> \
+  --left-desired-ospf-cost <left_recommended_ospf_cost> \
+  --right-desired-ospf-cost <right_recommended_ospf_cost> \
   --left-adapter-definition-hash <left_sha256> \
   --right-adapter-definition-hash <right_sha256> \
   --confirmed
 ```
 
-For automatic mode, use `--ospf-mode automatic`. The server controller, not an
+Automatic is the default when OSPF is enabled; `--ospf-mode automatic` makes that choice explicit. The server controller, not an
 agent-local loop, refreshes unverified or stale adapters, retries failed checks
 after five minutes, refreshes verified costs every ten minutes, and applies only
 after the configured minimum delta and consecutive healthy-probe count pass in
-the recent ten-minute evidence window. A degraded sample resets that streak; it
-does not block the plan forever. The agent still executes only explicit server-issued status/apply
+the recent ten-minute evidence window. The delta is the larger of the two
+endpoint changes, each compared with its own target. An off-grid reported cost
+may be normalized even below the minimum delta; for example, 49 to 45 with step
+5 and minimum delta 5. A cost at a configured minimum or maximum is a valid
+boundary, even when it is off-grid. All approval, adapter, health, and freshness
+gates still apply. A degraded sample resets the healthy streak; it does not
+block the plan forever. The agent still executes only explicit server-issued status/apply
 jobs with bound adapter-definition snapshots. Those internal routing jobs cannot be
 submitted as ordinary public operator mutations; operator-reviewed jobs retain
 the approving operator's authority.
@@ -557,13 +566,70 @@ raw = latency_ms * latency_weight
     + packet_loss_ratio * loss_weight
     + bandwidth_weight * sqrt(100 / bandwidth_mbps)
 
-cost = clamp(round(raw * preference_bias / preference), min_cost, max_cost)
+base = clamp(round(raw * preference_bias / preference), min_cost, max_cost)
+
+left_adjusted = (base + left_cost_offset) * left_cost_multiplier
+right_adjusted = (base + right_cost_offset) * right_cost_multiplier
+left_cost = clamp(floor(left_adjusted / cost_floor) * cost_floor, min_cost, max_cost)
+right_cost = clamp(floor(right_adjusted / cost_floor) * cost_floor, min_cost, max_cost)
 ```
 
 Measured throughput can lower effective bandwidth to the observed value but
 never raises it above configured bandwidth. Higher preference lowers cost;
-lower preference raises it. The console previews the cost beside these fields
-while the operator edits them.
+lower preference raises it. That dynamic calculation is unchanged; directional
+adjustments operate on its rounded, bounded base.
+
+Each offset defaults to 0 and accepts finite signed numbers. Each multiplier
+defaults to 1 and must be finite and positive. Addition precedes multiplication,
+then the result is rounded down to a multiple of the shared **Floor step**
+(`cost_floor`, default 5, integer 1 through 65535). Thus 49 becomes 45, while 50
+and 54 both become 50. Minimum and maximum bounds are applied last, so a boundary
+may be off-grid. Neutral offsets/multipliers and step 1 reproduce the previous
+costs. For base 49, left +28 then ×1.49 and step 5 produces 110; a neutral right
+endpoint produces 45.
+
+The console places Floor step immediately after Preference. Add and Multiply
+controls inside the existing OSPF Advanced parameters identify their direction
+and VPS in each label. The compact preview shows both resulting targets; hover for the
+calculation and rounding explanation. Configured values and estimates remain
+separate from actual endpoint-reported costs in Details. Tunnel table and Graph
+costs continue to reflect reported values.
+
+The CLI and VTY expose the same settings:
+
+```text
+--ospf-cost-floor 5
+--ospf-left-cost-offset -18 --ospf-left-cost-multiplier 0.5
+--ospf-right-cost-offset 28 --ospf-right-cost-multiplier 1.49
+```
+
+Left settings affect the cost of leaving the left VPS across this tunnel; right
+settings affect the reverse direction. To make a VPS expensive as an outgoing
+backup, raise its multiplier on each applicable tunnel, using its left or right
+position in that plan. Leave the opposite endpoint neutral to preserve the
+reverse direction's adjustment. This is a per-tunnel policy, not a VPS-wide
+switch, and it does not guarantee that traffic never uses that VPS.
+
+Flooring makes nearby link costs equal but does not itself enable ECMP. Equal
+complete route costs and appropriate routing-daemon/kernel export settings are
+also required. vpsman does not change those daemon settings for this feature.
+
+Reviewed apply commands require both `--left-desired-ospf-cost` and
+`--right-desired-ospf-cost`, even when the values match. The old scalar
+`--desired-ospf-cost` is rejected rather than guessing one side's intent.
+Recommendations and approvals bind both targets; each endpoint is verified
+against its own value. Apply still operates on both endpoints, so an unchanged
+side may run its adapter with its existing target.
+
+On upgrade, the normal server migration backfills neutral modifiers and Floor
+step 5 into existing OSPF-configured plans, including disabled plans. Other
+policies, saved control modes, preferences, health settings, and reported costs remain unchanged;
+nonmultiple recommendations intentionally adopt the new floor. Reviewed plans
+still need approval, and Automatic plans still need their usual health gates.
+Accepted pre-upgrade jobs retain their original shared target on both sides;
+old edit/approval snapshots must be refreshed after the plan revision changes.
+Update server, frontend, CLI, and agents together: plan identity includes the
+new configuration even though the endpoint adapter command protocol is unchanged.
 
 ## Status, Probe, And Speed Evidence
 

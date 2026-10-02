@@ -20,7 +20,8 @@ pub(crate) struct VtyTunnelOspfCostUpdateRequest {
     pub(crate) recommendation_id: String,
     pub(crate) left_current_ospf_cost: Option<u16>,
     pub(crate) right_current_ospf_cost: Option<u16>,
-    pub(crate) desired_ospf_cost: u16,
+    pub(crate) left_desired_ospf_cost: u16,
+    pub(crate) right_desired_ospf_cost: u16,
     pub(crate) left_adapter_definition_hash: String,
     pub(crate) right_adapter_definition_hash: String,
     pub(crate) confirmed: bool,
@@ -34,7 +35,8 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
     let mut recommendation_id = None::<String>;
     let mut left_current_ospf_cost = None::<u16>;
     let mut right_current_ospf_cost = None::<u16>;
-    let mut desired_ospf_cost = None::<u16>;
+    let mut left_desired_ospf_cost = None::<u16>;
+    let mut right_desired_ospf_cost = None::<u16>;
     let mut left_adapter_definition_hash = None::<String>;
     let mut right_adapter_definition_hash = None::<String>;
     let mut confirmed = false;
@@ -113,17 +115,31 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
                 )?);
                 index += 1;
             }
-            "--desired-ospf-cost" => {
-                desired_ospf_cost = Some(parse_u16(
-                    next_value(tokens, index, "--desired-ospf-cost")?,
-                    "--desired-ospf-cost",
+            "--left-desired-ospf-cost" => {
+                left_desired_ospf_cost = Some(parse_u16(
+                    next_value(tokens, index, "--left-desired-ospf-cost")?,
+                    "--left-desired-ospf-cost",
                 )?);
                 index += 2;
             }
-            value if value.starts_with("--desired-ospf-cost=") => {
-                desired_ospf_cost = Some(parse_u16(
-                    flag_value(value, "--desired-ospf-cost="),
-                    "--desired-ospf-cost",
+            value if value.starts_with("--left-desired-ospf-cost=") => {
+                left_desired_ospf_cost = Some(parse_u16(
+                    flag_value(value, "--left-desired-ospf-cost="),
+                    "--left-desired-ospf-cost",
+                )?);
+                index += 1;
+            }
+            "--right-desired-ospf-cost" => {
+                right_desired_ospf_cost = Some(parse_u16(
+                    next_value(tokens, index, "--right-desired-ospf-cost")?,
+                    "--right-desired-ospf-cost",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--right-desired-ospf-cost=") => {
+                right_desired_ospf_cost = Some(parse_u16(
+                    flag_value(value, "--right-desired-ospf-cost="),
+                    "--right-desired-ospf-cost",
                 )?);
                 index += 1;
             }
@@ -160,10 +176,11 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
     }
 
     anyhow::ensure!(confirmed, "tunnel-ospf-cost-update requires --confirmed");
-    let desired_ospf_cost = required(desired_ospf_cost, "--desired-ospf-cost")?;
+    let left_desired_ospf_cost = required(left_desired_ospf_cost, "--left-desired-ospf-cost")?;
+    let right_desired_ospf_cost = required(right_desired_ospf_cost, "--right-desired-ospf-cost")?;
     anyhow::ensure!(
-        left_current_ospf_cost != Some(desired_ospf_cost)
-            || right_current_ospf_cost != Some(desired_ospf_cost),
+        left_current_ospf_cost != Some(left_desired_ospf_cost)
+            || right_current_ospf_cost != Some(right_desired_ospf_cost),
         "tunnel-ospf-cost-update requires at least one endpoint cost change"
     );
 
@@ -173,7 +190,8 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
         recommendation_id: required(recommendation_id, "--recommendation-id")?,
         left_current_ospf_cost,
         right_current_ospf_cost,
-        desired_ospf_cost,
+        left_desired_ospf_cost,
+        right_desired_ospf_cost,
         left_adapter_definition_hash: required(
             left_adapter_definition_hash,
             "--left-adapter-definition-hash",
@@ -205,7 +223,8 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
         &request.recommendation_id,
         request.left_current_ospf_cost,
         request.right_current_ospf_cost,
-        request.desired_ospf_cost,
+        request.left_desired_ospf_cost,
+        request.right_desired_ospf_cost,
         &request.left_adapter_definition_hash,
         &request.right_adapter_definition_hash,
     );
@@ -234,7 +253,8 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
             "recommendation_id": request.recommendation_id,
             "left_current_ospf_cost": request.left_current_ospf_cost,
             "right_current_ospf_cost": request.right_current_ospf_cost,
-            "desired_ospf_cost": request.desired_ospf_cost,
+            "left_desired_ospf_cost": request.left_desired_ospf_cost,
+            "right_desired_ospf_cost": request.right_desired_ospf_cost,
             "left_adapter_definition_hash": request.left_adapter_definition_hash,
             "right_adapter_definition_hash": request.right_adapter_definition_hash,
             "confirmed": request.confirmed,

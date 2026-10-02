@@ -505,3 +505,105 @@ fn network_traffic_import_vnstat_allows_interface_discovery() {
         .join()
         .expect("CLI parser test panicked");
 }
+
+#[test]
+fn ospf_cli_preserves_directional_plan_options_and_requires_two_apply_targets() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let base = [
+                "vpsctl",
+                "tunnel-plan",
+                "--name=edge",
+                "--interface-name=tun0",
+                "--kind=gre",
+                "--left-client-id=left",
+                "--right-client-id=right",
+                "--left-remote-underlay=198.51.100.10",
+                "--right-remote-underlay=203.0.113.20",
+                "--left-tunnel-ipv4-cidr=10.255.0.0/31",
+                "--right-tunnel-ipv4-cidr=10.255.0.1/31",
+                "--bandwidth-mbps=100",
+            ];
+            let Command::TunnelPlan(defaults) = Args::try_parse_from(base).unwrap().command else {
+                panic!("expected tunnel-plan");
+            };
+            assert!(!defaults.ospf);
+            assert_eq!(vpsman_common::OspfControlMode::from(defaults.ospf_mode), vpsman_common::OspfControlMode::Automatic);
+            assert_eq!(defaults.ospf_cost_floor, 5);
+            assert_eq!(defaults.ospf_left_cost_offset, 0.0);
+            assert_eq!(defaults.ospf_right_cost_offset, 0.0);
+            assert_eq!(defaults.ospf_left_cost_multiplier, 1.0);
+            assert_eq!(defaults.ospf_right_cost_multiplier, 1.0);
+            let parsed = Args::try_parse_from(base.into_iter().chain([
+                "--ospf",
+                "--ospf-latency-ms=32.5",
+                "--ospf-cost-floor=10",
+                "--ospf-left-cost-offset",
+                "-18",
+                "--ospf-right-cost-offset=28",
+                "--ospf-left-cost-multiplier=0.5",
+                "--ospf-right-cost-multiplier=1.49",
+            ])).unwrap();
+            let Command::TunnelPlan(request) = parsed.command else {
+                panic!("expected tunnel-plan");
+            };
+            assert_eq!(vpsman_common::OspfControlMode::from(request.ospf_mode), vpsman_common::OspfControlMode::Automatic);
+            let reviewed = Args::try_parse_from(base.into_iter().chain([
+                "--ospf", "--ospf-latency-ms=32.5", "--ospf-mode=reviewed"
+            ])).unwrap();
+            let Command::TunnelPlan(reviewed) = reviewed.command else {
+                panic!("expected tunnel-plan");
+            };
+            assert_eq!(vpsman_common::OspfControlMode::from(reviewed.ospf_mode), vpsman_common::OspfControlMode::Reviewed);
+            assert_eq!(request.ospf_cost_floor, 10);
+            assert_eq!(request.ospf_left_cost_offset, -18.0);
+            assert_eq!(request.ospf_right_cost_offset, 28.0);
+            assert_eq!(request.ospf_left_cost_multiplier, 0.5);
+            assert_eq!(request.ospf_right_cost_multiplier, 1.49);
+            for flag in [
+                "--ospf-cost-floor=5",
+                "--ospf-left-cost-offset=0",
+                "--ospf-right-cost-offset=0",
+                "--ospf-left-cost-multiplier=1",
+                "--ospf-right-cost-multiplier=1",
+            ] {
+                assert!(Args::try_parse_from(base.into_iter().chain([flag])).is_err(), "{flag}");
+            }
+            for flag in ["--ospf-cost-floor=0", "--ospf-cost-floor=65536", "--ospf-cost-floor=1.5"] {
+                assert!(Args::try_parse_from(base.into_iter().chain(["--ospf", "--ospf-latency-ms=32.5", flag])).is_err(), "{flag}");
+            }
+
+            let apply = [
+                "vpsctl",
+                "tunnel-ospf-cost-update",
+                "--plan-id=00000000-0000-0000-0000-000000000001",
+                "--plan-revision=7",
+                "--recommendation-id=ospf-1234abcd5678ef90",
+                "--left-current-ospf-cost=50",
+                "--right-current-ospf-cost=75",
+                "--left-adapter-definition-hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--right-adapter-definition-hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "--confirmed",
+            ];
+            let parsed = Args::try_parse_from(apply.into_iter().chain([
+                "--left-desired-ospf-cost=55", "--right-desired-ospf-cost=75"
+            ])).unwrap();
+            let Command::TunnelOspfCostUpdate(request) = parsed.command else {
+                panic!("expected tunnel-ospf-cost-update");
+            };
+            assert_eq!(request.left_desired_ospf_cost, 55);
+            assert_eq!(request.right_desired_ospf_cost, 75);
+            for targets in [
+                vec!["--desired-ospf-cost=55"],
+                vec!["--left-desired-ospf-cost=55"],
+                vec!["--right-desired-ospf-cost=75"],
+                vec!["--left-desired-ospf-cost=0", "--right-desired-ospf-cost=75"],
+            ] {
+                assert!(Args::try_parse_from(apply.into_iter().chain(targets)).is_err());
+            }
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}

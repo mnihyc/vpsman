@@ -22,6 +22,7 @@ import {
   TOPOLOGY_EVIDENCE_LIMIT,
   formatLowerBoundCount,
 } from "../../constants";
+import { formatOspfCostPair } from "../../topologyRuntime";
 import { sha256Hex } from "../../fileTransfer";
 import { scrollIntoViewWithMotion } from "../../motion";
 import { usePanelDisplaySettings } from "../../panelDisplay";
@@ -165,7 +166,8 @@ export function TopologyOspfUpdateControls({
     const request: UpdateTunnelPlanOspfCostRequest = {
       confirmed: true,
       plan_revision: plan.plan_revision,
-      desired_ospf_cost: plan.recommended_ospf_cost,
+      left_desired_ospf_cost: plan.left_recommended_ospf_cost,
+      right_desired_ospf_cost: plan.right_recommended_ospf_cost,
       left_adapter_definition_hash: plan.left_adapter_definition_hash!,
       left_current_ospf_cost: plan.left_current_ospf_cost,
       recommendation_id: plan.recommendation_id,
@@ -286,15 +288,16 @@ export function TopologyOspfUpdateControls({
     {
       cell: (plan) => (
         <span className="historyPrimary">
-          <strong>{plan.recommended_ospf_cost}</strong>
+          <strong title={formatOspfCostPair(plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost)}>{formatOspfCostPair(plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost)}</strong>
           <small>{formatPlanDelta(plan)}</small>
         </span>
       ),
       header: "Recommendation",
       id: "recommendation",
       searchValue: (plan) =>
-        `${plan.recommended_ospf_cost} ${formatPlanDelta(plan)}`,
-      sortValue: (plan) => plan.recommended_ospf_cost,
+        `${formatOspfCostPair(plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost)} ${formatPlanDelta(plan)}`,
+      // Pack the two bounded u16 costs to preserve numeric left-then-right order.
+      sortValue: (plan) => plan.left_recommended_ospf_cost * 65536 + plan.right_recommended_ospf_cost,
     },
     {
       cell: (plan) => (
@@ -565,7 +568,7 @@ function OspfPlanDetail({
         />
         <Fact
           label="Recommendation"
-          value={`${plan.recommended_ospf_cost} · ${formatPlanDelta(plan)}`}
+          value={`${formatOspfCostPair(plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost)} · ${formatPlanDelta(plan)}`}
         />
         <Fact
           label="Healthy probes"
@@ -665,6 +668,7 @@ function Fact({ label, value }: { label: string; value: string }) {
 
 function canApply(plan: NetworkOspfUpdatePlanRecord): boolean {
   return (
+    hasDirectionalTargets(plan) &&
     plan.control_mode === "reviewed" &&
     ["review_required", "review_degraded", "review_planned_baseline"].includes(
       plan.status,
@@ -676,7 +680,15 @@ function canApply(plan: NetworkOspfUpdatePlanRecord): boolean {
   );
 }
 
+function hasDirectionalTargets(plan: NetworkOspfUpdatePlanRecord): boolean {
+  return [plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost]
+    .every((cost) => Number.isInteger(cost) && cost >= 1 && cost <= 65535);
+}
+
 function applyBlockedReason(plan: NetworkOspfUpdatePlanRecord): string {
+  if (!hasDirectionalTargets(plan)) {
+    return "Refresh to load both endpoint cost recommendations before applying";
+  }
   if (
     !plan.left_adapter_definition_hash ||
     !plan.right_adapter_definition_hash
@@ -716,7 +728,7 @@ function confirmationItems(
       label: "Current costs",
       value: `${request.left_current_ospf_cost ?? "unknown"} / ${request.right_current_ospf_cost ?? "unknown"}`,
     },
-    { label: "Desired cost", value: String(request.desired_ospf_cost) },
+    { label: "Desired costs", value: formatOspfCostPair(request.left_desired_ospf_cost, request.right_desired_ospf_cost) },
     { label: "Review condition", value: formatUpdateStatus(plan.status) },
     { label: "Recommendation", value: request.recommendation_id },
     {
@@ -748,13 +760,14 @@ function ospfPrivilegePayload(
   request: UpdateTunnelPlanOspfCostRequest,
 ): string {
   return [
-    "v3",
+    "v4",
     planId,
     request.plan_revision,
     request.recommendation_id.trim(),
     request.left_current_ospf_cost ?? "none",
     request.right_current_ospf_cost ?? "none",
-    request.desired_ospf_cost,
+    request.left_desired_ospf_cost,
+    request.right_desired_ospf_cost,
     request.left_adapter_definition_hash,
     request.right_adapter_definition_hash,
   ].join("|");

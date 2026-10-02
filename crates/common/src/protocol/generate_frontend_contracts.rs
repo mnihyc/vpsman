@@ -1507,10 +1507,17 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         ],
     ] {
         let plan = golden_tunnel_plan(Some(TunnelOspfConfig {
+            legacy_cost_wire: false,
             mode: Default::default(),
             planned_latency_ms: values[0],
             planned_packet_loss_ratio: values[1],
             preference: values[2],
+            left_cost_offset: values[0],
+            // Browser JSON normalizes negative zero to positive zero on send.
+            right_cost_offset: if values[1] == 0.0 { 0.0 } else { -values[1] },
+            left_cost_multiplier: values[2],
+            right_cost_multiplier: values[6],
+            cost_floor: 5,
             policy: vpsman_common::OspfCostPolicy {
                 latency_weight: values[3],
                 loss_weight: values[4],

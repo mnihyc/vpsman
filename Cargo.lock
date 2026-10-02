@@ -3155,6 +3155,7 @@ dependencies = [
  "ipnet",
  "libc",
  "lz4_flex",
+ "num-bigint",
  "rand 0.8.7",
  "regex",
  "serde",

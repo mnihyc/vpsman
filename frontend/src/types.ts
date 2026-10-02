@@ -2315,6 +2315,11 @@ export type TunnelOspfConfig = {
   planned_latency_ms: number;
   planned_packet_loss_ratio: number;
   preference: number;
+  left_cost_offset: number;
+  right_cost_offset: number;
+  left_cost_multiplier: number;
+  right_cost_multiplier: number;
+  cost_floor: number;
   policy: OspfCostPolicy;
   min_cost_delta: number;
   healthy_windows: number;
@@ -2387,6 +2392,8 @@ export type TunnelPlan = Omit<TunnelPlanInput, "dynamic_bandwidth"> & {
   runtime_control?: RuntimeTunnelControl;
   ospf?: TunnelOspfConfig | null;
   recommended_ospf_cost: number | null;
+  left_recommended_ospf_cost?: number | null;
+  right_recommended_ospf_cost?: number | null;
   conflicts: string[];
 };
 
@@ -2401,10 +2408,14 @@ export type TunnelPlanRecord = {
   left_client_id: string;
   right_client_id: string;
   recommended_ospf_cost: number | null;
+  left_recommended_ospf_cost?: number | null;
+  right_recommended_ospf_cost?: number | null;
   ospf_status: string;
   left_ospf_status: string;
   right_ospf_status: string;
   desired_ospf_cost: number | null;
+  left_desired_ospf_cost?: number | null;
+  right_desired_ospf_cost?: number | null;
   left_current_ospf_cost: number | null;
   right_current_ospf_cost: number | null;
   left_ospf_job_id: string | null;
@@ -2541,6 +2552,8 @@ export type TopologyGraphEdge = {
   stale_present_count: number;
   bandwidth_mbps: number;
   ospf_enabled: boolean;
+  left_recommended_ospf_cost?: number | null;
+  right_recommended_ospf_cost?: number | null;
   left_current_ospf_cost: number | null;
   right_current_ospf_cost: number | null;
   left_ospf_status: string;
@@ -2928,6 +2941,8 @@ export type NetworkOspfRecommendationRecord = {
   effective_bandwidth_mbps: number;
   plan_ospf_cost: number;
   recommended_ospf_cost: number;
+  left_recommended_ospf_cost: number;
+  right_recommended_ospf_cost: number;
   cost_delta: number;
   latency_avg_ms: number | null;
   packet_loss_avg_ratio: number | null;
@@ -2984,6 +2999,8 @@ export type NetworkOspfUpdatePlanRecord = {
   left_ospf_status: string;
   right_ospf_status: string;
   recommended_ospf_cost: number;
+  left_recommended_ospf_cost: number;
+  right_recommended_ospf_cost: number;
   maximum_cost_delta: number;
   status: string;
   confidence: string;
@@ -3659,7 +3676,8 @@ export type UpdateTunnelPlanOspfCostRequest = {
   right_adapter_definition_hash: string;
   left_current_ospf_cost: number | null;
   right_current_ospf_cost: number | null;
-  desired_ospf_cost: number;
+  left_desired_ospf_cost: number;
+  right_desired_ospf_cost: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };

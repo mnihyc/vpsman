@@ -1,3 +1,5 @@
+#[path = "tests_postgres_directional_ospf.rs"]
+mod directional_ospf;
 #[path = "tests_postgres_job_search.rs"]
 mod job_search;
 #[path = "tests_postgres_network_adapter_mutations.rs"]
@@ -7746,6 +7748,12 @@ async fn postgres_topology_graph_reports_endpoint_ospf_costs_separately_from_est
     input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
     input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
     input.ospf = Some(TunnelOspfConfig {
+        legacy_cost_wire: false,
+        left_cost_offset: 0.0,
+        right_cost_offset: 0.0,
+        left_cost_multiplier: 1.0,
+        right_cost_multiplier: 1.0,
+        cost_floor: 5,
         mode: OspfControlMode::Automatic,
         planned_latency_ms: 20.0,
         planned_packet_loss_ratio: 0.0,
@@ -12266,6 +12274,12 @@ async fn postgres_ospf_controller_batches_persist_fair_rotation() {
             prefix_len: 31,
         });
         input.ospf = Some(TunnelOspfConfig {
+            legacy_cost_wire: false,
+            left_cost_offset: 0.0,
+            right_cost_offset: 0.0,
+            left_cost_multiplier: 1.0,
+            right_cost_multiplier: 1.0,
+            cost_floor: 5,
             mode: OspfControlMode::Automatic,
             planned_latency_ms: 20.0,
             planned_packet_loss_ratio: 0.0,
@@ -12374,6 +12388,12 @@ async fn postgres_ospf_controller_advances_past_malformed_selected_plans() {
         prefix_len: 31,
     });
     input.ospf = Some(TunnelOspfConfig {
+        legacy_cost_wire: false,
+        left_cost_offset: 0.0,
+        right_cost_offset: 0.0,
+        left_cost_multiplier: 1.0,
+        right_cost_multiplier: 1.0,
+        cost_floor: 5,
         mode: OspfControlMode::Automatic,
         planned_latency_ms: 20.0,
         planned_packet_loss_ratio: 0.0,
@@ -12471,6 +12491,12 @@ async fn postgres_ospf_results_are_atomic_and_concurrency_safe() {
         prefix_len: 31,
     });
     input.ospf = Some(TunnelOspfConfig {
+        legacy_cost_wire: false,
+        left_cost_offset: 0.0,
+        right_cost_offset: 0.0,
+        left_cost_multiplier: 1.0,
+        right_cost_multiplier: 1.0,
+        cost_floor: 5,
         mode: OspfControlMode::Automatic,
         planned_latency_ms: 20.0,
         planned_packet_loss_ratio: 0.0,
@@ -13049,6 +13075,12 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
         ..Default::default()
     };
     tunnel_input.ospf = Some(vpsman_common::TunnelOspfConfig {
+        legacy_cost_wire: false,
+        left_cost_offset: 0.0,
+        right_cost_offset: 0.0,
+        left_cost_multiplier: 1.0,
+        right_cost_multiplier: 1.0,
+        cost_floor: 5,
         mode: vpsman_common::OspfControlMode::Reviewed,
         planned_latency_ms: 10.0,
         planned_packet_loss_ratio: 0.0,

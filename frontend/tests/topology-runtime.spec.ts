@@ -11,6 +11,7 @@ import {
   FOU_TUNNEL_KIND_DETAILS,
   validateFouAddressFamilies,
   calculateOspfCostPreview,
+  calculateDirectionalOspfCosts,
   clampTunnelBandwidthMbps,
   defaultAgentTunnelMtu,
   fouRuntimeFacts,
@@ -20,7 +21,53 @@ import {
   tunnelLinkLocalSummary,
   isTunnelLinkLocal,
 } from "../src/topologyRuntime";
-import type { TunnelPlanInput } from "../src/types";
+import type { TunnelPlanInput, TunnelOspfConfig } from "../src/types";
+
+const directionalOspf: TunnelOspfConfig = {
+  mode: "reviewed", planned_latency_ms: 20, planned_packet_loss_ratio: 0,
+  preference: 1, left_cost_offset: 0, right_cost_offset: 0,
+  left_cost_multiplier: 1, right_cost_multiplier: 1, cost_floor: 5,
+  min_cost_delta: 5, healthy_windows: 2,
+  policy: { latency_weight: 1, loss_weight: 400, bandwidth_weight: 10, preference_bias: 1, min_cost: 5, max_cost: 65535 },
+};
+
+test("directional OSPF costs add then multiply independently before flooring", () => {
+  expect(calculateDirectionalOspfCosts(49, {
+    ...directionalOspf, left_cost_offset: 28, left_cost_multiplier: 1.49,
+  })).toEqual({ left: 110, right: 45 });
+  for (const base of [50, 54]) {
+    expect(calculateDirectionalOspfCosts(base, directionalOspf)).toEqual({ left: 50, right: 50 });
+  }
+  expect(calculateDirectionalOspfCosts(49, {
+    ...directionalOspf, left_cost_offset: -18, right_cost_multiplier: 0.5,
+  })).toEqual({ left: 30, right: 20 });
+});
+
+test("directional OSPF arithmetic preserves decimal bucket boundaries and clamps finite extremes", () => {
+  expect(calculateDirectionalOspfCosts(100, {
+    ...directionalOspf, left_cost_multiplier: 1.15, right_cost_multiplier: 1e-308,
+  })).toEqual({ left: 115, right: 5 });
+  expect(calculateDirectionalOspfCosts(49, {
+    ...directionalOspf, left_cost_offset: Number.MAX_VALUE, left_cost_multiplier: Number.MAX_VALUE,
+    right_cost_offset: -Number.MAX_VALUE,
+  })).toEqual({ left: 65535, right: 5 });
+  expect(calculateDirectionalOspfCosts(10, {
+    ...directionalOspf, left_cost_offset: -9.9, left_cost_multiplier: 50,
+  }).left).toBe(5);
+  expect(calculateDirectionalOspfCosts(49, {
+    ...directionalOspf, cost_floor: 1,
+  })).toEqual({ left: 49, right: 49 });
+  expect(calculateDirectionalOspfCosts(49, {
+    ...directionalOspf, left_cost_multiplier: 2,
+    policy: { ...directionalOspf.policy, min_cost: 47, max_cost: 52 },
+  })).toEqual({ left: 52, right: 47 });
+});
+
+test("invalid OSPF directional drafts do not display a fabricated valid cost", () => {
+  expect(calculateDirectionalOspfCosts(49, { ...directionalOspf, left_cost_multiplier: 0 })).toEqual({ left: null, right: 45 });
+  expect(calculateDirectionalOspfCosts(49, { ...directionalOspf, left_cost_offset: Infinity }).left).toBeNull();
+  expect(calculateDirectionalOspfCosts(49, { ...directionalOspf, cost_floor: 1.5 })).toEqual({ left: null, right: null });
+});
 
 test("FOU type owns derived protocol, family support and editable MTU baseline", () => {
   expect(FOU_TUNNEL_KINDS).toEqual(["gre", "ipip", "sit"]);

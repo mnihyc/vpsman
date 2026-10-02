@@ -50,7 +50,7 @@ import {
   shortId,
   timestampMillis,
 } from "../../utils";
-import { readableTelemetryToken } from "../../topologyRuntime";
+import { formatOspfCostPair, readableTelemetryToken } from "../../topologyRuntime";
 import {
   DEFAULT_NETWORK_EVIDENCE_WINDOW,
   NETWORK_EVIDENCE_OBSERVATION_LIMIT,
@@ -1412,7 +1412,7 @@ function buildOspfUpdatePlanRow(
     healthDetail: bandwidthHealth.detail,
     signalLabel: bandwidthHealth.label,
     signalStatus,
-    metric: `${plan.left_current_ospf_cost ?? "?"} / ${plan.right_current_ospf_cost ?? "?"} -> ${plan.recommended_ospf_cost}`,
+    metric: `${formatOspfCostPair(plan.left_current_ospf_cost, plan.right_current_ospf_cost)} → ${formatOspfCostPair(plan.left_recommended_ospf_cost, plan.right_recommended_ospf_cost)}`,
     metricDetail: `${delta}; ${bandwidthHealth.summary}`,
     target: plan.requires_approval ? "approval required" : "no action",
     targetDetail: plan.requires_approval
@@ -1462,8 +1462,8 @@ function buildOspfRecommendationRow(
     healthDetail: bandwidthHealth.detail,
     signalLabel: bandwidthHealth.label,
     signalStatus,
-    metric: `${recommendation.plan_ospf_cost} -> ${recommendation.recommended_ospf_cost}`,
-    metricDetail: `${delta}; ${bandwidthHealth.summary}`,
+    metric: formatOspfCostPair(recommendation.left_recommended_ospf_cost, recommendation.right_recommended_ospf_cost),
+    metricDetail: `Base delta ${delta}; ${bandwidthHealth.summary}`,
     target: evidence,
     targetDetail: `${bandwidthHealth.summary}; ${evidenceSampleSummary(recommendation.sample_count, recommendation.latest_observed_at)}; ${recommendation.reason || throughput}`,
     latestObservedAt: recommendation.latest_observed_at,
