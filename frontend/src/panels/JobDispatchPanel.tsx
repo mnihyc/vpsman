@@ -593,7 +593,7 @@ export function JobDispatchPanel({
     setNetworkTrafficImportInterfacesText,
   ] = useDispatchHistoryState(
     "networkTrafficImportInterfacesText",
-    "",
+    "e*",
     preserveHistoryState,
   );
   const [networkTrafficImportStartDate, setNetworkTrafficImportStartDate] =
@@ -2680,12 +2680,12 @@ function operationReviewItems(
       { label: "Start", value: start },
       {
         label: "End",
-        value: "First retained live agent counter, independently per interface",
+        value: "Available collected history, independently per interface",
       },
       {
         label: "Effect",
         value:
-          "Replace prior vnStat imports for these interfaces and backfill one-minute traffic history; live samples remain unchanged",
+          "Update matching interfaces within the selected range; preserve live measurements, outside history and ranges that cannot be reconciled. Missing interfaces are skipped successfully.",
       },
     ];
   }

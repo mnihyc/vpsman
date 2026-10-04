@@ -316,9 +316,7 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
         ));
     }
     let resolved_interface_count = result.interfaces.len();
-    if resolved_interface_count == 0
-        || resolved_interface_count > NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES
-    {
+    if resolved_interface_count > NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES {
         return Ok(NetworkTrafficImportApply::Invalid(
             "network_traffic_import_invalid:agent_result_interface_count_out_of_range".to_string(),
         ));

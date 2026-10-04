@@ -172,44 +172,18 @@ async fn collect_vnstat_history(
         trafficless_entries = calendar_config.trafficless_entries,
         "loaded effective vnStat calendar configuration"
     );
-    let mut buckets = Vec::new();
-    let mut sources = Vec::new();
-    let resolved_interfaces = if input.interfaces.is_empty() {
-        input.cancel_token.check("network_traffic_import_vnstat")?;
-        let payload =
-            run_vnstat_query(executable, vnstat_version, None, input.cancel_token.clone()).await?;
-        let (interfaces, discovered_sources, discovered_buckets) =
-            parse_discovered_vnstat_payload_for_version(
-                &payload,
-                input.start_unix,
-                &calendar_config,
-                vnstat_version,
-            )?;
-        sources = discovered_sources;
-        buckets = discovered_buckets;
-        interfaces
-    } else {
-        for interface in input.interfaces {
-            input.cancel_token.check("network_traffic_import_vnstat")?;
-            let payload = run_vnstat_query(
-                executable,
-                vnstat_version,
-                Some(interface),
-                input.cancel_token.clone(),
-            )
-            .await?;
-            append_parsed_interface(
-                &payload,
-                interface,
-                input.start_unix,
-                &calendar_config,
-                vnstat_version,
-                &mut buckets,
-                &mut sources,
-            )?;
-        }
-        input.interfaces.to_vec()
-    };
+    // One database snapshot resolves exact names and prefix selectors without
+    // another history read for each absent name or each server-side gap.
+    input.cancel_token.check("network_traffic_import_vnstat")?;
+    let payload =
+        run_vnstat_query(executable, vnstat_version, None, input.cancel_token.clone()).await?;
+    let (resolved_interfaces, sources, mut buckets) = parse_selected_vnstat_payload_for_version(
+        &payload,
+        input.interfaces,
+        input.start_unix,
+        &calendar_config,
+        vnstat_version,
+    )?;
 
     buckets.sort_by(|left, right| {
         left.interface
@@ -312,7 +286,7 @@ fn validate_request_at(interfaces: &[String], start_unix: u64, now_unix: u64) ->
     anyhow::ensure!(
         normalized
             .iter()
-            .all(|interface| valid_interface_name(interface)),
+            .all(|interface| vpsman_common::valid_network_traffic_import_selector(interface)),
         "network traffic import contains an invalid interface"
     );
     normalized.sort_unstable();
@@ -361,10 +335,6 @@ fn discover_vnstat_interfaces(payload: &Value) -> Result<Vec<String>> {
         );
         interfaces.insert(interface.to_string());
     }
-    anyhow::ensure!(
-        !interfaces.is_empty() && interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
-        "vnstat discovered interface count is out of range"
-    );
     Ok(interfaces.into_iter().collect())
 }
 
@@ -386,6 +356,7 @@ fn parse_discovered_vnstat_payload(
     )
 }
 
+#[cfg(test)]
 fn parse_discovered_vnstat_payload_for_version(
     payload: &Value,
     requested_start_unix: u64,
@@ -396,11 +367,43 @@ fn parse_discovered_vnstat_payload_for_version(
     Vec<NetworkTrafficImportSource>,
     Vec<NetworkTrafficImportBucket>,
 )> {
-    let interfaces = discover_vnstat_interfaces(payload)?;
+    parse_selected_vnstat_payload_for_version(
+        payload,
+        &[],
+        requested_start_unix,
+        calendar_config,
+        version,
+    )
+}
+
+fn parse_selected_vnstat_payload_for_version(
+    payload: &Value,
+    selectors: &[String],
+    requested_start_unix: u64,
+    calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
+) -> Result<(
+    Vec<String>,
+    Vec<NetworkTrafficImportSource>,
+    Vec<NetworkTrafficImportBucket>,
+)> {
+    let interfaces = discover_vnstat_interfaces(payload)?
+        .into_iter()
+        .filter(|interface| {
+            selectors.is_empty()
+                || selectors.iter().any(|selector| {
+                    vpsman_common::network_interface_pattern_matches(selector, interface)
+                })
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+        "vnstat selected interface count is out of range"
+    );
     let mut sources = Vec::with_capacity(interfaces.len());
     let mut buckets = Vec::new();
     for interface in &interfaces {
-        append_parsed_interface(
+        if let Err(error) = append_parsed_interface(
             payload,
             interface,
             requested_start_unix,
@@ -408,7 +411,11 @@ fn parse_discovered_vnstat_payload_for_version(
             version,
             &mut buckets,
             &mut sources,
-        )?;
+        ) {
+            // The interface still appears in the result; absence of a source
+            // explicitly tells the API to preserve its stored history.
+            tracing::info!(%interface, %error, "preserving unavailable vnStat history");
+        }
     }
     Ok((interfaces, sources, buckets))
 }

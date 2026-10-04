@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
+#[cfg(test)]
 use chrono::{TimeZone, Utc};
-use sqlx::{postgres::PgRow, PgPool, Postgres, Row};
+use sqlx::{postgres::PgRow, Postgres, Row};
 use uuid::Uuid;
 use vpsman_common::{
     NetworkTrafficImportBucket, NetworkTrafficImportResult,
@@ -12,24 +13,21 @@ use vpsman_common::{
 
 #[cfg(test)]
 use crate::model_alert_policies::TrafficCounterRollupRecord;
-use crate::{model_alert_policies::TrafficCounterSampleRecord, repository::Repository};
+#[cfg(test)]
+use crate::model_alert_policies::TrafficCounterSampleRecord;
+use crate::repository::Repository;
 
 pub(crate) const VNSTAT_IMPORT_SOURCE_PREFIX: &str = "vnstat_import:";
 const MAX_IMPORT_BUCKET_DURATION_SECS: u64 = 367 * 24 * 60 * 60;
 const POSTGRES_IMPORT_MAX_PREPARATION_ATTEMPTS: usize = 3;
 // The hour-aligned raw frontier preserves every exact point in the configured
 // raw-retention window.
-// At most one partial boundary hour plus one sequencing predecessor sits beside
-// that window. Exceeding this bound indicates an interrupted or corrupt
-// import; it is not an alternate replacement policy.
+// At most one partial boundary hour plus one legacy sequencing predecessor sits
+// beside that window. Preserve oversized streams (including pending retention)
+// rather than expanding the read or widening the replacement range.
 const POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE: usize =
     (TRAFFIC_COUNTER_RAW_RETENTION_DAYS as usize * 24 + 1) * 60 + 1;
 const POSTGRES_IMPORT_WORK_MEM_SQL: &str = "SET LOCAL work_mem = '32MB'";
-const POSTGRES_IMPORT_SAME_SHAPE_UPDATE_BEGIN_SQL: &str =
-    "SELECT set_config('vpsman.traffic_import_same_shape_update', 'on', true)";
-const POSTGRES_IMPORT_SAME_SHAPE_UPDATE_END_SQL: &str =
-    "SELECT set_config('vpsman.traffic_import_same_shape_update', 'off', true)";
-
 #[derive(Clone, Debug)]
 pub(crate) struct NetworkTrafficImportSummary {
     pub(crate) message: String,
@@ -42,29 +40,8 @@ struct PreparedInterfaceImport {
     end_unix: u64,
     initial_rx_bytes: i64,
     initial_tx_bytes: i64,
-    initial_rx_counter_epoch: i64,
-    initial_tx_counter_epoch: i64,
     include_baseline: bool,
-    import_source: String,
     traffic: ExpandedMinuteTraffic,
-    imported_rx_bytes: u64,
-    imported_tx_bytes: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PostgresImportEpochAdjustment {
-    successor_unix: i64,
-    rx_delta: i64,
-    tx_delta: i64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PostgresImportRawPlan {
-    minimum_unix: u64,
-    rx_counter_epoch: i64,
-    tx_counter_epoch: i64,
-    delete_inbound_predecessor_unix: Option<i64>,
-    successor_adjustment: Option<PostgresImportEpochAdjustment>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,22 +74,6 @@ struct PreparedImportRollup {
     latest_observed_unix: u64,
 }
 
-#[derive(Clone, Debug)]
-struct PostgresImportSnapshot {
-    utc_day_start_unix: u64,
-    raw_cutoff_unix: u64,
-    boundary_samples: Vec<TrafficCounterSampleRecord>,
-    imported_raw_stats: Vec<PostgresImportOwnedRawStats>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PostgresImportOwnedRawStats {
-    interface: String,
-    count: i64,
-    first_observed_unix: Option<i64>,
-    last_observed_unix: Option<i64>,
-}
-
 #[derive(Debug)]
 struct PreparedImportRollupRows {
     bucket_secs: Vec<i32>,
@@ -135,19 +96,6 @@ struct PreparedImportRawRows {
 }
 
 #[derive(Debug)]
-struct PreparedPostgresInterfaceImport {
-    prepared: PreparedInterfaceImport,
-    rollups: PreparedImportRollupRows,
-    raw: PreparedImportRawRows,
-}
-
-#[derive(Debug)]
-struct PreparedPostgresImport {
-    snapshot: PostgresImportSnapshot,
-    interfaces: Vec<PreparedPostgresInterfaceImport>,
-}
-
-#[derive(Debug)]
 struct AssignmentState {
     assigned_rx_bytes: u64,
     assigned_tx_bytes: u64,
@@ -166,172 +114,19 @@ impl Repository {
         now_unix: u64,
     ) -> Result<NetworkTrafficImportSummary> {
         validate_result_contract(interfaces, start_unix, result, buckets, now_unix)?;
-        let resolved_interfaces = &result.interfaces;
-        match self {
-            Self::Postgres(pool) => {
-                let effective_starts =
-                    effective_interface_starts(resolved_interfaces, start_unix, result)?;
-                for attempt in 0..POSTGRES_IMPORT_MAX_PREPARATION_ATTEMPTS {
-                    let snapshot = load_postgres_import_preflight_snapshot(
-                        pool,
-                        client_id,
-                        resolved_interfaces,
-                        &effective_starts,
-                    )
-                    .await?;
-                    ensure_postgres_import_owned_raw_is_bounded(&snapshot)?;
-                    let postgres_prepared = prepare_postgres_import_outside_transaction(
-                        job_id,
-                        client_id,
-                        resolved_interfaces,
-                        start_unix,
-                        result,
-                        buckets,
-                        now_unix,
-                        snapshot,
-                    )
-                    .await?;
-
-                    let mut tx = pool.begin().await?;
-                    lock_postgres_traffic_import_client(&mut tx, client_id).await?;
-                    lock_postgres_traffic_counter_streams(&mut tx, client_id).await?;
-                    ensure_postgres_vnstat_interfaces_admitted(
-                        &mut tx,
-                        client_id,
-                        resolved_interfaces,
-                    )
-                    .await?;
-                    let locked_snapshot = load_postgres_import_snapshot(
-                        &mut tx,
-                        client_id,
-                        resolved_interfaces,
-                        &effective_starts,
-                        true,
-                        true,
-                    )
-                    .await?;
-                    ensure_postgres_import_owned_raw_is_bounded(&locked_snapshot)?;
-                    if !postgres_import_snapshots_match(
-                        &postgres_prepared.snapshot,
-                        &locked_snapshot,
-                    ) {
-                        tx.rollback().await?;
-                        if attempt + 1 == POSTGRES_IMPORT_MAX_PREPARATION_ATTEMPTS {
-                            anyhow::bail!(
-                                "network_traffic_import_preflight_changed_after_{}_attempts",
-                                POSTGRES_IMPORT_MAX_PREPARATION_ATTEMPTS
-                            );
-                        }
-                        continue;
-                    }
-
-                    let mut raw_plans = Vec::with_capacity(postgres_prepared.interfaces.len());
-                    for item in &postgres_prepared.interfaces {
-                        raw_plans.push(
-                            prepare_postgres_import_raw_plan(
-                                &mut tx,
-                                client_id,
-                                &item.prepared,
-                                locked_snapshot.raw_cutoff_unix,
-                            )
-                            .await?,
-                        );
-                    }
-                    sqlx::query(POSTGRES_IMPORT_WORK_MEM_SQL)
-                        .execute(&mut *tx)
-                        .await?;
-
-                    // vnStat replacement owns only its traffic-counter ledger.
-                    // Every raw mutation is one retention-bounded interface
-                    // statement; live telemetry remains independent.
-                    sqlx::query(
-                        r#"
-                        DELETE FROM traffic_counter_rollups
-                        WHERE client_id = $1
-                          AND source_kind = 'host'
-                          AND interface = ANY($2::text[])
-                          AND origin_kind = 'vnstat_import'
-                        "#,
-                    )
-                    .bind(client_id)
-                    .bind(resolved_interfaces)
-                    .execute(&mut *tx)
-                    .await?;
-                    for (item, raw_plan) in postgres_prepared.interfaces.iter().zip(&raw_plans) {
-                        let same_shape = postgres_import_can_update_same_shape(
-                            locked_snapshot.imported_raw_stats(&item.prepared.interface)?,
-                            &item.raw,
-                            raw_plan,
-                        )?;
-                        insert_postgres_import_rollups(
-                            &mut tx,
-                            client_id,
-                            &item.prepared.interface,
-                            &item.rollups,
-                        )
-                        .await?;
-                        let same_shape_updated = if same_shape {
-                            update_postgres_import_samples_same_shape(
-                                &mut tx,
-                                client_id,
-                                &item.prepared,
-                                &item.raw,
-                                raw_plan,
-                            )
-                            .await?
-                        } else {
-                            false
-                        };
-                        if !same_shape_updated {
-                            delete_postgres_import_samples(
-                                &mut tx,
-                                client_id,
-                                &item.prepared.interface,
-                                locked_snapshot.imported_raw_count(&item.prepared.interface)?,
-                            )
-                            .await?;
-                            insert_postgres_import_samples(
-                                &mut tx,
-                                client_id,
-                                &item.prepared,
-                                &item.raw,
-                                raw_plan,
-                            )
-                            .await?;
-                        }
-                        adjust_postgres_import_successor_epochs(
-                            &mut tx,
-                            client_id,
-                            &item.prepared.interface,
-                            raw_plan.successor_adjustment,
-                        )
-                        .await?;
-                    }
-                    // Replacement may alter already-promoted hours and their
-                    // revision fences. Rebuild monthly prefixes once after all
-                    // changed interfaces are coherent, inside the same client
-                    // transaction; reimport is an explicit rare operation.
-                    sqlx::query("SELECT refresh_traffic_counter_active_cycle_usage($1::text[])")
-                        .bind(vec![client_id])
-                        .execute(&mut *tx)
-                        .await?;
-                    tx.commit().await?;
-                    let prepared = postgres_prepared
-                        .interfaces
-                        .iter()
-                        .map(|item| &item.prepared)
-                        .collect::<Vec<_>>();
-                    return Ok(import_summary_refs(&prepared));
-                }
-                unreachable!("bounded PostgreSQL import preparation loop returns or errors")
-            }
-        }
+        ranges::import(
+            self, job_id, client_id, interfaces, start_unix, result, buckets,
+        )
+        .await
     }
 }
 
-/// Enforces the current durable-interface boundary once for the complete
-/// explicit import set. The caller owns the traffic-import transaction, so a
-/// rejection precedes every ledger mutation and cannot leave a partial import.
+#[path = "repository_network_traffic_import_ranges.rs"]
+pub(crate) mod ranges;
+
+/// Rechecks the durable-interface boundary before publishing a prepared patch.
+/// Excluded interfaces are normally preserved during preparation; the caller's
+/// transaction ensures that a changed policy cannot leave a partial import.
 pub(crate) async fn ensure_postgres_vnstat_interfaces_admitted(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     client_id: &str,
@@ -412,536 +207,6 @@ async fn postgres_import_retention_boundaries(
     ))
 }
 
-pub(crate) const POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL: &str = r#"
-    SELECT
-        boundary.client_id,
-        boundary.source_kind,
-        boundary.interface,
-        boundary.observed_at::text AS observed_at,
-        EXTRACT(EPOCH FROM boundary.observed_at)::bigint AS observed_unix,
-        boundary.rx_bytes,
-        boundary.tx_bytes,
-        boundary.rx_counter_epoch,
-        boundary.tx_counter_epoch,
-        boundary.sample_source
-    FROM unnest($2::text[], $3::bigint[]) AS requested(interface, start_unix)
-    CROSS JOIN LATERAL (
-        SELECT sample.*
-        FROM traffic_counter_samples sample
-        WHERE ROW(
-                  sample.client_id,
-                  sample.source_kind,
-                  sample.interface,
-                  (sample.sample_source LIKE 'vnstat_import:%'),
-                  sample.observed_at
-              ) < ROW(
-                  $1::text,
-                  'host'::text,
-                  requested.interface,
-                  $4::boolean,
-                  to_timestamp(requested.start_unix::double precision)
-              )
-          AND sample.client_id = $1::text
-          AND sample.source_kind = 'host'
-          AND sample.interface = requested.interface
-          AND (sample.sample_source LIKE 'vnstat_import:%') = $4::boolean
-          AND sample.observed_at < to_timestamp(requested.start_unix::double precision)
-        ORDER BY
-            sample.client_id DESC,
-            sample.source_kind DESC,
-            sample.interface DESC,
-            (sample.sample_source LIKE 'vnstat_import:%') DESC,
-            sample.observed_at DESC
-        LIMIT 1
-        FOR UPDATE OF sample
-    ) boundary
-    ORDER BY boundary.interface ASC
-"#;
-
-pub(crate) const POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_NONLOCKING_SQL: &str = r#"
-    SELECT
-        boundary.client_id,
-        boundary.source_kind,
-        boundary.interface,
-        boundary.observed_at::text AS observed_at,
-        EXTRACT(EPOCH FROM boundary.observed_at)::bigint AS observed_unix,
-        boundary.rx_bytes,
-        boundary.tx_bytes,
-        boundary.rx_counter_epoch,
-        boundary.tx_counter_epoch,
-        boundary.sample_source
-    FROM unnest($2::text[], $3::bigint[]) AS requested(interface, start_unix)
-    CROSS JOIN LATERAL (
-        SELECT sample.*
-        FROM traffic_counter_samples sample
-        WHERE ROW(
-                  sample.client_id,
-                  sample.source_kind,
-                  sample.interface,
-                  (sample.sample_source LIKE 'vnstat_import:%'),
-                  sample.observed_at
-              ) < ROW(
-                  $1::text,
-                  'host'::text,
-                  requested.interface,
-                  $4::boolean,
-                  to_timestamp(requested.start_unix::double precision)
-              )
-          AND sample.client_id = $1::text
-          AND sample.source_kind = 'host'
-          AND sample.interface = requested.interface
-          AND (sample.sample_source LIKE 'vnstat_import:%') = $4::boolean
-          AND sample.observed_at < to_timestamp(requested.start_unix::double precision)
-        ORDER BY
-            sample.client_id DESC,
-            sample.source_kind DESC,
-            sample.interface DESC,
-            (sample.sample_source LIKE 'vnstat_import:%') DESC,
-            sample.observed_at DESC
-        LIMIT 1
-    ) boundary
-    ORDER BY boundary.interface ASC
-"#;
-
-pub(crate) const POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL: &str = r#"
-    WITH desired_class AS MATERIALIZED (
-        SELECT $4::boolean AS imported
-    )
-    SELECT
-        boundary.client_id,
-        boundary.source_kind,
-        boundary.interface,
-        boundary.observed_at::text AS observed_at,
-        EXTRACT(EPOCH FROM boundary.observed_at)::bigint AS observed_unix,
-        boundary.rx_bytes,
-        boundary.tx_bytes,
-        boundary.rx_counter_epoch,
-        boundary.tx_counter_epoch,
-        boundary.sample_source
-    FROM desired_class
-    CROSS JOIN LATERAL (
-        SELECT
-            candidate.client_id,
-            candidate.source_kind,
-            candidate.interface,
-            candidate.observed_at,
-            candidate.rx_bytes,
-            candidate.tx_bytes,
-            candidate.rx_counter_epoch,
-            candidate.tx_counter_epoch,
-            candidate.sample_source
-        FROM (
-            (
-                SELECT
-                    sample.client_id,
-                    sample.source_kind,
-                    sample.interface,
-                    sample.observed_at,
-                    sample.rx_bytes,
-                    sample.tx_bytes,
-                    sample.rx_counter_epoch,
-                    sample.tx_counter_epoch,
-                    sample.sample_source,
-                    0::integer AS branch_priority
-                FROM traffic_counter_samples sample
-                WHERE ROW(
-                          sample.client_id,
-                          sample.source_kind,
-                          sample.interface,
-                          (sample.sample_source LIKE 'vnstat_import:%'),
-                          sample.observed_at
-                      ) >= ROW(
-                          $1::text,
-                          'host'::text,
-                          $2::text,
-                          desired_class.imported,
-                          to_timestamp($3::double precision)
-                      )
-                  AND sample.client_id = $1::text
-                  AND sample.source_kind = 'host'
-                  AND sample.interface = $2::text
-                  AND (sample.sample_source LIKE 'vnstat_import:%')
-                        = desired_class.imported
-                  AND sample.observed_at >= to_timestamp($3::double precision)
-                ORDER BY
-                    sample.client_id ASC,
-                    sample.source_kind ASC,
-                    sample.interface ASC,
-                    (sample.sample_source LIKE 'vnstat_import:%') ASC,
-                    sample.observed_at ASC
-                LIMIT 1
-            )
-            UNION ALL
-            (
-                SELECT
-                    rollup.client_id,
-                    rollup.source_kind,
-                    rollup.interface,
-                    GREATEST(
-                        rollup.first_observed_at,
-                        to_timestamp($3::double precision)
-                    ),
-                    0::bigint,
-                    0::bigint,
-                    0::bigint,
-                    0::bigint,
-                    'retained_live_rollup'::text,
-                    1::integer AS branch_priority
-                FROM traffic_counter_rollups rollup
-                WHERE ROW(
-                          rollup.client_id,
-                          rollup.source_kind,
-                          rollup.interface,
-                          rollup.bucket_start
-                      ) >= ROW(
-                          $1::text,
-                          'host'::text,
-                          $2::text,
-                          '-infinity'::timestamptz
-                      )
-                  AND ROW(
-                          rollup.client_id,
-                          rollup.source_kind,
-                          rollup.interface,
-                          rollup.bucket_start
-                      ) <= ROW(
-                          $1::text,
-                          'host'::text,
-                          $2::text,
-                          'infinity'::timestamptz
-                      )
-                  AND rollup.client_id = $1::text
-                  AND rollup.source_kind = 'host'
-                  AND rollup.interface = $2::text
-                  AND rollup.origin_kind = 'live'
-                  AND rollup.latest_observed_at >= to_timestamp($3::double precision)
-                ORDER BY
-                    GREATEST(
-                        rollup.first_observed_at,
-                        to_timestamp($3::double precision)
-                    ) ASC,
-                    rollup.client_id ASC,
-                    rollup.source_kind ASC,
-                    rollup.interface ASC,
-                    rollup.origin_kind ASC,
-                    rollup.bucket_secs ASC,
-                    rollup.bucket_start ASC
-                LIMIT 1
-            )
-        ) candidate
-        ORDER BY candidate.observed_at ASC, candidate.branch_priority ASC
-        LIMIT 1
-    ) boundary
-"#;
-
-#[cfg(test)]
-pub(crate) async fn load_postgres_import_boundary_samples(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    interfaces: &[String],
-    start_unix: u64,
-) -> Result<Vec<TrafficCounterSampleRecord>> {
-    let start_unix = i64::try_from(start_unix)
-        .context("network_traffic_import_invalid:start_timestamp_out_of_range")?;
-    let starts = vec![start_unix; interfaces.len()];
-    load_postgres_import_boundary_samples_for_starts(tx, client_id, interfaces, &starts, true).await
-}
-
-async fn load_postgres_import_boundary_samples_for_starts(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    interfaces: &[String],
-    effective_starts: &[i64],
-    lock_previous: bool,
-) -> Result<Vec<TrafficCounterSampleRecord>> {
-    anyhow::ensure!(
-        interfaces.len() == effective_starts.len(),
-        "network_traffic_import_invalid:effective_start_count_mismatch"
-    );
-    let mut samples = Vec::with_capacity(interfaces.len().saturating_mul(2));
-    let previous_query = if lock_previous {
-        POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL
-    } else {
-        POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_NONLOCKING_SQL
-    };
-    let previous_rows = sqlx::query(previous_query)
-        .bind(client_id)
-        .bind(interfaces)
-        .bind(effective_starts)
-        .bind(false)
-        .fetch_all(&mut **tx)
-        .await?;
-    samples.extend(
-        previous_rows
-            .into_iter()
-            .map(postgres_traffic_counter_sample)
-            .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?,
-    );
-    for (interface, effective_start) in interfaces.iter().zip(effective_starts) {
-        let Some(row) = sqlx::query(POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL)
-            .bind(client_id)
-            .bind(interface)
-            .bind(effective_start)
-            .bind(false)
-            .fetch_optional(&mut **tx)
-            .await?
-        else {
-            continue;
-        };
-        let sample = postgres_traffic_counter_sample(row)?;
-        anyhow::ensure!(
-            sample.interface == *interface,
-            "network_traffic_import_live_boundary_mismatch"
-        );
-        samples.push(sample);
-    }
-    Ok(samples)
-}
-
-pub(crate) const POSTGRES_IMPORT_OWNED_RAW_COUNTS_SQL: &str = r#"
-    SELECT
-        $2::text AS interface,
-        count(*)::bigint,
-        min(extract(epoch FROM bounded_imported.observed_at))::bigint,
-        max(extract(epoch FROM bounded_imported.observed_at))::bigint
-    FROM (
-        SELECT sample.observed_at
-        FROM traffic_counter_samples sample
-        WHERE ROW(
-                  sample.client_id,
-                  sample.source_kind,
-                  sample.interface,
-                  (sample.sample_source LIKE 'vnstat_import:%'),
-                  sample.observed_at
-              ) >= ROW(
-                  $1::text,
-                  'host'::text,
-                  $2::text,
-                  $4::boolean,
-                  '-infinity'::timestamptz
-              )
-          AND ROW(
-                  sample.client_id,
-                  sample.source_kind,
-                  sample.interface,
-                  (sample.sample_source LIKE 'vnstat_import:%'),
-                  sample.observed_at
-              ) <= ROW(
-                  $1::text,
-                  'host'::text,
-                  $2::text,
-                  $4::boolean,
-                  'infinity'::timestamptz
-              )
-          AND sample.client_id = $1::text
-          AND sample.source_kind = 'host'
-          AND sample.interface = $2::text
-          AND (sample.sample_source LIKE 'vnstat_import:%') = $4::boolean
-        LIMIT $3
-    ) bounded_imported
-"#;
-
-async fn load_postgres_import_owned_raw_counts(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    interfaces: &[String],
-) -> Result<Vec<PostgresImportOwnedRawStats>> {
-    let probe_limit = i64::try_from(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE + 1)
-        .context("network_traffic_import_raw_probe_limit_out_of_range")?;
-    let mut counts = Vec::with_capacity(interfaces.len());
-    for interface in interfaces {
-        let (interface, count, first_observed_unix, last_observed_unix) =
-            sqlx::query_as::<_, (String, i64, Option<i64>, Option<i64>)>(
-                POSTGRES_IMPORT_OWNED_RAW_COUNTS_SQL,
-            )
-            .bind(client_id)
-            .bind(interface)
-            .bind(probe_limit)
-            .bind(true)
-            .fetch_one(&mut **tx)
-            .await?;
-        counts.push(PostgresImportOwnedRawStats {
-            interface,
-            count,
-            first_observed_unix,
-            last_observed_unix,
-        });
-    }
-    anyhow::ensure!(
-        counts.len() == interfaces.len()
-            && counts
-                .iter()
-                .zip(interfaces)
-                .all(|(returned, requested)| returned.interface == *requested),
-        "network_traffic_import_raw_count_mismatch"
-    );
-    Ok(counts)
-}
-
-async fn load_postgres_import_snapshot(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    interfaces: &[String],
-    effective_starts: &[i64],
-    lock_previous: bool,
-    include_imported_raw_stats: bool,
-) -> Result<PostgresImportSnapshot> {
-    let (utc_day_start_unix, raw_cutoff_unix) = postgres_import_retention_boundaries(tx).await?;
-    // The locked snapshot probes the owned-row bound before boundary
-    // discovery: a corrupt or interrupted import-owned raw set must fail closed
-    // without scanning through millions of rows while looking for the first
-    // non-import successor. The repeatable-read preflight intentionally
-    // omits this duplicate probe; its boundary snapshot is revalidated under
-    // the client/advisory locks, where this bound is checked authoritatively.
-    let imported_raw_counts = if include_imported_raw_stats {
-        let counts = load_postgres_import_owned_raw_counts(tx, client_id, interfaces).await?;
-        ensure_postgres_import_owned_raw_counts_are_bounded(&counts)?;
-        counts
-    } else {
-        Vec::new()
-    };
-    let boundary_samples = load_postgres_import_boundary_samples_for_starts(
-        tx,
-        client_id,
-        interfaces,
-        effective_starts,
-        lock_previous,
-    )
-    .await?;
-    Ok(PostgresImportSnapshot {
-        utc_day_start_unix,
-        raw_cutoff_unix,
-        boundary_samples,
-        imported_raw_stats: imported_raw_counts,
-    })
-}
-
-async fn load_postgres_import_preflight_snapshot(
-    pool: &PgPool,
-    client_id: &str,
-    interfaces: &[String],
-    effective_starts: &[i64],
-) -> Result<PostgresImportSnapshot> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    let snapshot = load_postgres_import_snapshot(
-        &mut tx,
-        client_id,
-        interfaces,
-        effective_starts,
-        false,
-        false,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(snapshot)
-}
-
-impl PostgresImportSnapshot {
-    fn imported_raw_stats(&self, interface: &str) -> Result<&PostgresImportOwnedRawStats> {
-        let count = self
-            .imported_raw_stats
-            .iter()
-            .find(|stats| stats.interface == interface)
-            .context("network_traffic_import_raw_count_missing")?;
-        Ok(count)
-    }
-
-    fn imported_raw_count(&self, interface: &str) -> Result<u64> {
-        u64::try_from(self.imported_raw_stats(interface)?.count)
-            .context("network_traffic_import_raw_count_negative")
-    }
-}
-
-fn ensure_postgres_import_owned_raw_is_bounded(snapshot: &PostgresImportSnapshot) -> Result<()> {
-    ensure_postgres_import_owned_raw_counts_are_bounded(&snapshot.imported_raw_stats)
-}
-
-fn ensure_postgres_import_owned_raw_counts_are_bounded(
-    imported_raw_stats: &[PostgresImportOwnedRawStats],
-) -> Result<()> {
-    let maximum = i64::try_from(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE)
-        .context("network_traffic_import_raw_limit_out_of_range")?;
-    for stats in imported_raw_stats {
-        anyhow::ensure!(
-            stats.count >= 0,
-            "network_traffic_import_raw_count_negative"
-        );
-        anyhow::ensure!(
-            (stats.count == 0)
-                == (stats.first_observed_unix.is_none() && stats.last_observed_unix.is_none()),
-            "network_traffic_import_raw_bounds_missing"
-        );
-        if stats.count > 0 {
-            let first = stats
-                .first_observed_unix
-                .context("network_traffic_import_raw_first_missing")?;
-            let last = stats
-                .last_observed_unix
-                .context("network_traffic_import_raw_last_missing")?;
-            anyhow::ensure!(
-                first >= 0 && last >= first && first % 60 == 0 && last % 60 == 0,
-                "network_traffic_import_raw_bounds_invalid"
-            );
-        }
-        if stats.count > maximum {
-            anyhow::bail!(
-                "network_traffic_import_recovery_required:imported_raw_rows_exceed_retention_bound:{}:at_least_{}:max_{}",
-                stats.interface,
-                stats.count,
-                maximum
-            );
-        }
-    }
-    Ok(())
-}
-
-fn postgres_import_snapshots_match(
-    prepared: &PostgresImportSnapshot,
-    locked: &PostgresImportSnapshot,
-) -> bool {
-    prepared.utc_day_start_unix == locked.utc_day_start_unix
-        && prepared.raw_cutoff_unix == locked.raw_cutoff_unix
-        && (prepared.imported_raw_stats.is_empty()
-            || prepared.imported_raw_stats == locked.imported_raw_stats)
-        && prepared.boundary_samples.len() == locked.boundary_samples.len()
-        && prepared
-            .boundary_samples
-            .iter()
-            .zip(&locked.boundary_samples)
-            .all(|(prepared, locked)| {
-                prepared.client_id == locked.client_id
-                    && prepared.source_kind == locked.source_kind
-                    && prepared.interface == locked.interface
-                    && prepared.observed_at == locked.observed_at
-                    && prepared.observed_unix == locked.observed_unix
-                    && prepared.rx_bytes == locked.rx_bytes
-                    && prepared.tx_bytes == locked.tx_bytes
-                    && prepared.rx_counter_epoch == locked.rx_counter_epoch
-                    && prepared.tx_counter_epoch == locked.tx_counter_epoch
-                    && prepared.sample_source == locked.sample_source
-            })
-}
-
-fn postgres_traffic_counter_sample(
-    row: PgRow,
-) -> std::result::Result<TrafficCounterSampleRecord, sqlx::Error> {
-    Ok(TrafficCounterSampleRecord {
-        client_id: row.try_get("client_id")?,
-        source_kind: row.try_get("source_kind")?,
-        interface: row.try_get("interface")?,
-        observed_at: row.try_get("observed_at")?,
-        observed_unix: row.try_get("observed_unix")?,
-        rx_bytes: row.try_get("rx_bytes")?,
-        tx_bytes: row.try_get("tx_bytes")?,
-        rx_counter_epoch: row.try_get("rx_counter_epoch")?,
-        tx_counter_epoch: row.try_get("tx_counter_epoch")?,
-        sample_source: row.try_get("sample_source")?,
-    })
-}
-
 pub(crate) async fn lock_postgres_traffic_counter_streams(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     client_id: &str,
@@ -984,18 +249,33 @@ fn validate_result_contract(
     )?;
     invalid_ensure(start_unix < floor_minute(now_unix), "start_not_in_past")?;
 
+    invalid_ensure(
+        interfaces
+            .iter()
+            .all(|selector| vpsman_common::valid_network_traffic_import_selector(selector)),
+        "interface_selector_invalid",
+    )?;
     let requested = interfaces.iter().cloned().collect::<BTreeSet<_>>();
     invalid_ensure(requested.len() == interfaces.len(), "duplicate_interface")?;
     let result_interfaces = result.interfaces.iter().cloned().collect::<BTreeSet<_>>();
     invalid_ensure(
-        !result.interfaces.is_empty()
-            && result.interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES
+        result.interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES
             && result_interfaces.len() == result.interfaces.len(),
         "agent_result_interface_count_out_of_range",
     )?;
+    invalid_ensure(
+        result.interfaces.iter().all(|name| {
+            !name.contains('*') && vpsman_common::valid_network_traffic_import_selector(name)
+        }),
+        "agent_result_interface_invalid",
+    )?;
     if !interfaces.is_empty() {
         invalid_ensure(
-            result_interfaces == requested && result.interfaces.len() == interfaces.len(),
+            result_interfaces.iter().all(|interface| {
+                requested.iter().any(|selector| {
+                    vpsman_common::network_interface_pattern_matches(selector, interface)
+                })
+            }),
             "agent_result_interface_mismatch",
         )?;
     }
@@ -1005,7 +285,7 @@ fn validate_result_contract(
         .map(|source| source.interface.clone())
         .collect::<BTreeSet<_>>();
     invalid_ensure(
-        sources == result_interfaces && result.sources.len() == result.interfaces.len(),
+        sources.is_subset(&result_interfaces) && sources.len() == result.sources.len(),
         "source_interface_mismatch",
     )?;
     invalid_ensure(
@@ -1019,7 +299,7 @@ fn validate_result_contract(
     invalid_ensure(
         buckets
             .iter()
-            .all(|bucket| result_interfaces.contains(&bucket.interface)),
+            .all(|bucket| sources.contains(&bucket.interface)),
         "bucket_interface_mismatch",
     )?;
     for interface in &result.interfaces {
@@ -1057,240 +337,6 @@ fn validate_result_contract(
         )?;
     }
     Ok(())
-}
-
-fn effective_interface_starts(
-    interfaces: &[String],
-    requested_start_unix: u64,
-    result: &NetworkTrafficImportResult,
-) -> Result<Vec<i64>> {
-    let source_by_interface = result
-        .sources
-        .iter()
-        .map(|source| (source.interface.as_str(), source))
-        .collect::<HashMap<_, _>>();
-    interfaces
-        .iter()
-        .map(|interface| {
-            let source = source_by_interface
-                .get(interface.as_str())
-                .context("network_traffic_import_invalid:source_missing")?;
-            i64::try_from(requested_start_unix.max(source.retained_start_unix))
-                .context("network_traffic_import_invalid:effective_start_out_of_range")
-        })
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_imports(
-    job_id: Uuid,
-    client_id: &str,
-    interfaces: &[String],
-    start_unix: u64,
-    result: &NetworkTrafficImportResult,
-    buckets: &[NetworkTrafficImportBucket],
-    now_unix: u64,
-    existing: &[TrafficCounterSampleRecord],
-) -> Result<Vec<PreparedInterfaceImport>> {
-    let source_by_interface = result
-        .sources
-        .iter()
-        .map(|source| (source.interface.as_str(), source))
-        .collect::<HashMap<_, _>>();
-    let import_source = format!("{VNSTAT_IMPORT_SOURCE_PREFIX}{job_id}");
-    let now_minute = floor_minute(now_unix);
-    let mut prepared = Vec::new();
-
-    for interface in interfaces {
-        let source = source_by_interface
-            .get(interface.as_str())
-            .context("network_traffic_import_invalid:source_missing")?;
-        let effective_start_unix = start_unix.max(source.retained_start_unix);
-        let first_live_unix = existing
-            .iter()
-            .filter(|sample| {
-                sample.client_id == client_id
-                    && sample.source_kind == "host"
-                    && sample.interface == *interface
-                    && !is_vnstat_import_source(&sample.sample_source)
-                    && sample.observed_unix
-                        >= i64::try_from(effective_start_unix).unwrap_or(i64::MAX)
-            })
-            .map(|sample| sample.observed_unix)
-            .min()
-            .and_then(|value| u64::try_from(value).ok())
-            .context("network_traffic_import_invalid:first_live_agent_sample_missing")?;
-        let retained_start_through_live =
-            continuous_coverage_start_through(buckets, interface, first_live_unix)?;
-        invalid_ensure(
-            retained_start_through_live == source.retained_start_unix,
-            "vnstat_retained_coverage_does_not_reach_live_boundary",
-        )?;
-        invalid_ensure(
-            first_live_unix > effective_start_unix && first_live_unix <= now_minute,
-            "range_already_covered_by_agent",
-        )?;
-        invalid_ensure(
-            result.collected_until_unix >= first_live_unix,
-            "agent_collection_predates_live_boundary",
-        )?;
-
-        invalid_ensure(
-            source
-                .source_updated_unix
-                .map(floor_minute)
-                .is_some_and(|updated| updated >= first_live_unix),
-            "vnstat_source_not_updated_through_live_boundary",
-        )?;
-
-        let traffic =
-            expand_buckets_to_minutes(buckets, interface, effective_start_unix, first_live_unix)?;
-        let imported_rx_bytes = traffic.total_rx_bytes;
-        let imported_tx_bytes = traffic.total_tx_bytes;
-        let previous = existing
-            .iter()
-            .filter(|sample| {
-                sample.client_id == client_id
-                    && sample.source_kind == "host"
-                    && sample.interface == *interface
-                    && !is_vnstat_import_source(&sample.sample_source)
-                    && sample.observed_unix
-                        < i64::try_from(effective_start_unix).unwrap_or(i64::MAX)
-            })
-            .max_by_key(|sample| sample.observed_unix);
-        let cumulative_rx = previous.map_or(0, |sample| sample.rx_bytes);
-        let cumulative_tx = previous.map_or(0, |sample| sample.tx_bytes);
-        let initial_rx_counter_epoch = previous.map_or(0, |sample| sample.rx_counter_epoch);
-        let initial_tx_counter_epoch = previous.map_or(0, |sample| sample.tx_counter_epoch);
-        invalid_ensure(
-            cumulative_rx >= 0 && cumulative_tx >= 0,
-            "negative_counter_baseline",
-        )?;
-        anyhow::ensure!(
-            initial_rx_counter_epoch >= 0 && initial_tx_counter_epoch >= 0,
-            "network_traffic_import_predecessor_epoch_negative"
-        );
-        cumulative_rx
-            .checked_add(
-                i64::try_from(imported_rx_bytes)
-                    .context("network_traffic_import_invalid:rx_delta_exceeds_database_range")?,
-            )
-            .context("network_traffic_import_invalid:rx_counter_overflow")?;
-        cumulative_tx
-            .checked_add(
-                i64::try_from(imported_tx_bytes)
-                    .context("network_traffic_import_invalid:tx_delta_exceeds_database_range")?,
-            )
-            .context("network_traffic_import_invalid:tx_counter_overflow")?;
-        sample_record(
-            client_id,
-            interface,
-            effective_start_unix - 60,
-            cumulative_rx,
-            cumulative_tx,
-            &import_source,
-        )?;
-        sample_record(
-            client_id,
-            interface,
-            first_live_unix - 60,
-            cumulative_rx,
-            cumulative_tx,
-            &import_source,
-        )?;
-        prepared.push(PreparedInterfaceImport {
-            interface: interface.clone(),
-            start_unix: effective_start_unix,
-            end_unix: first_live_unix,
-            initial_rx_bytes: cumulative_rx,
-            initial_tx_bytes: cumulative_tx,
-            initial_rx_counter_epoch,
-            initial_tx_counter_epoch,
-            include_baseline: previous.is_none(),
-            import_source: import_source.clone(),
-            traffic,
-            imported_rx_bytes,
-            imported_tx_bytes,
-        });
-    }
-    Ok(prepared)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn prepare_postgres_import_outside_transaction(
-    job_id: Uuid,
-    client_id: &str,
-    interfaces: &[String],
-    start_unix: u64,
-    result: &NetworkTrafficImportResult,
-    buckets: &[NetworkTrafficImportBucket],
-    now_unix: u64,
-    snapshot: PostgresImportSnapshot,
-) -> Result<PreparedPostgresImport> {
-    let client_id = client_id.to_string();
-    let interfaces = interfaces.to_vec();
-    let result = result.clone();
-    let buckets = buckets.to_vec();
-    tokio::task::spawn_blocking(move || {
-        prepare_postgres_import(
-            job_id,
-            &client_id,
-            &interfaces,
-            start_unix,
-            &result,
-            &buckets,
-            now_unix,
-            snapshot,
-        )
-    })
-    .await
-    .context("network_traffic_import_preparation_task_failed")?
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_postgres_import(
-    job_id: Uuid,
-    client_id: &str,
-    interfaces: &[String],
-    start_unix: u64,
-    result: &NetworkTrafficImportResult,
-    buckets: &[NetworkTrafficImportBucket],
-    now_unix: u64,
-    snapshot: PostgresImportSnapshot,
-) -> Result<PreparedPostgresImport> {
-    let prepared = prepare_imports(
-        job_id,
-        client_id,
-        interfaces,
-        start_unix,
-        result,
-        buckets,
-        now_unix,
-        &snapshot.boundary_samples,
-    )?;
-    let mut postgres_interfaces = Vec::with_capacity(prepared.len());
-    for prepared in prepared {
-        let rollups = prepare_import_rollup_rows(
-            &prepared.interface,
-            prepare_import_rollups(
-                &prepared,
-                snapshot.utc_day_start_unix,
-                snapshot.raw_cutoff_unix,
-            )?,
-        )?;
-        let raw_minimum =
-            postgres_import_raw_superset_minimum(&prepared, snapshot.raw_cutoff_unix)?;
-        let raw = prepare_import_raw_rows(&prepared, raw_minimum, snapshot.raw_cutoff_unix)?;
-        postgres_interfaces.push(PreparedPostgresInterfaceImport {
-            prepared,
-            rollups,
-            raw,
-        });
-    }
-    Ok(PreparedPostgresImport {
-        snapshot,
-        interfaces: postgres_interfaces,
-    })
 }
 
 fn prepare_import_rollup_rows(
@@ -1348,33 +394,6 @@ fn prepare_import_rollup_rows(
         );
     }
     Ok(rows)
-}
-
-fn postgres_import_raw_superset_minimum(
-    prepared: &PreparedInterfaceImport,
-    raw_cutoff_unix: u64,
-) -> Result<u64> {
-    invalid_ensure(
-        raw_cutoff_unix.is_multiple_of(60),
-        "raw_retention_cutoff_not_minute_aligned",
-    )?;
-    let natural_start = if prepared.include_baseline {
-        prepared.start_unix - 60
-    } else {
-        prepared.start_unix
-    };
-    if natural_start >= raw_cutoff_unix {
-        return Ok(raw_cutoff_unix);
-    }
-    Ok(prepared
-        .end_unix
-        .checked_sub(60)
-        .context("network_traffic_import_invalid:sample_timestamp_underflow")?
-        .min(
-            raw_cutoff_unix
-                .checked_sub(60)
-                .context("network_traffic_import_invalid:raw_cutoff_underflow")?,
-        ))
 }
 
 fn prepare_import_raw_rows(
@@ -1495,18 +514,6 @@ fn latest_continuous_coverage(
         .into_iter()
         .max_by_key(|(start_unix, end_unix)| (*end_unix, std::cmp::Reverse(*start_unix)))
         .context("network_traffic_import_invalid:vnstat_retained_coverage_missing")
-}
-
-fn continuous_coverage_start_through(
-    buckets: &[NetworkTrafficImportBucket],
-    interface: &str,
-    through_unix: u64,
-) -> Result<u64> {
-    merged_coverage_components(buckets, interface)?
-        .into_iter()
-        .find(|(start_unix, end_unix)| *start_unix < through_unix && *end_unix >= through_unix)
-        .map(|(start_unix, _)| start_unix)
-        .context("network_traffic_import_invalid:vnstat_history_does_not_reach_live_boundary")
 }
 
 fn merged_coverage_components(
@@ -1868,6 +875,7 @@ fn push_assignment_segment(
     Ok(())
 }
 
+#[cfg(test)]
 fn sample_record(
     client_id: &str,
     interface: &str,
@@ -1984,10 +992,7 @@ fn assignment_totals_in_range(
     }
     let mut rx_total = 0_u64;
     let mut tx_total = 0_u64;
-    for segment in segments {
-        if segment.end_unix <= start_unix {
-            continue;
-        }
+    for segment in &segments[segments.partition_point(|segment| segment.end_unix <= start_unix)..] {
         if segment.start_unix >= end_unix {
             break;
         }
@@ -2199,7 +1204,7 @@ impl Iterator for PreparedImportSampleIter<'_> {
                 self.prepared.start_unix - 60,
                 self.cumulative_rx,
                 self.cumulative_tx,
-                &self.prepared.import_source,
+                "vnstat_import:fixture",
             ));
         }
         if self.next_unix >= self.prepared.end_unix {
@@ -2254,7 +1259,7 @@ impl Iterator for PreparedImportSampleIter<'_> {
             observed_unix,
             self.cumulative_rx,
             self.cumulative_tx,
-            &self.prepared.import_source,
+            "vnstat_import:fixture",
         ))
     }
 }
@@ -2399,647 +1404,6 @@ async fn insert_postgres_import_rollups(
     .execute(&mut **tx)
     .await?;
     Ok(())
-}
-
-fn postgres_import_raw_start_index(
-    raw: &PreparedImportRawRows,
-    raw_plan: &PostgresImportRawPlan,
-) -> Result<usize> {
-    let row_count = raw.observed_unix.len();
-    anyhow::ensure!(
-        raw.rx_bytes.len() == row_count
-            && raw.tx_bytes.len() == row_count
-            && raw.inbound_promoted.len() == row_count,
-        "network_traffic_import_raw_array_length_mismatch"
-    );
-    let minimum_unix = i64::try_from(raw_plan.minimum_unix)
-        .context("network_traffic_import_invalid:sample_timestamp_out_of_range")?;
-    Ok(raw
-        .observed_unix
-        .partition_point(|observed_unix| *observed_unix < minimum_unix))
-}
-
-fn postgres_import_can_update_same_shape(
-    stats: &PostgresImportOwnedRawStats,
-    raw: &PreparedImportRawRows,
-    raw_plan: &PostgresImportRawPlan,
-) -> Result<bool> {
-    let start_index = postgres_import_raw_start_index(raw, raw_plan)?;
-    let desired = &raw.observed_unix[start_index..];
-    let desired_count =
-        i64::try_from(desired.len()).context("network_traffic_import_raw_count_out_of_range")?;
-    if desired.is_empty() {
-        return Ok(stats.count == 0);
-    }
-    anyhow::ensure!(
-        desired.windows(2).all(|pair| pair[1] - pair[0] == 60),
-        "network_traffic_import_raw_timestamps_not_dense"
-    );
-    let first = *desired
-        .first()
-        .context("network_traffic_import_raw_first_missing")?;
-    let last = *desired
-        .last()
-        .context("network_traffic_import_raw_last_missing")?;
-    let dense_count = (last - first)
-        .checked_div(60)
-        .and_then(|span| span.checked_add(1))
-        .context("network_traffic_import_raw_dense_count_overflow")?;
-    Ok(stats.count == desired_count
-        && stats.first_observed_unix == Some(first)
-        && stats.last_observed_unix == Some(last)
-        && dense_count == desired_count)
-}
-
-async fn delete_postgres_import_samples(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    interface: &str,
-    expected_rows: u64,
-) -> Result<()> {
-    let maximum_rows = u64::try_from(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE)
-        .context("network_traffic_import_raw_limit_out_of_range")?;
-    anyhow::ensure!(
-        expected_rows <= maximum_rows,
-        "network_traffic_import_recovery_required:imported_raw_rows_exceed_retention_bound"
-    );
-    let deleted = sqlx::query(
-        r#"
-        DELETE FROM traffic_counter_samples
-        WHERE client_id = $1
-          AND source_kind = 'host'
-          AND interface = $2
-          AND sample_source LIKE 'vnstat_import:%'
-        "#,
-    )
-    .bind(client_id)
-    .bind(interface)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
-    anyhow::ensure!(
-        deleted == expected_rows,
-        "network_traffic_import_owned_raw_changed_after_lock:{interface}:expected_{expected_rows}:deleted_{deleted}"
-    );
-    Ok(())
-}
-
-async fn update_postgres_import_samples_same_shape(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    prepared: &PreparedInterfaceImport,
-    raw: &PreparedImportRawRows,
-    raw_plan: &PostgresImportRawPlan,
-) -> Result<bool> {
-    sqlx::query("SAVEPOINT vpsman_same_shape_update")
-        .execute(&mut **tx)
-        .await?;
-    if let Some(observed_unix) = raw_plan.delete_inbound_predecessor_unix {
-        if let Err(error) = sqlx::query(
-            r#"
-            DELETE FROM traffic_counter_samples
-            WHERE client_id = $1
-              AND source_kind = 'host'
-              AND interface = $2
-              AND observed_at = to_timestamp($3::double precision)
-              AND sample_source NOT LIKE 'vnstat_import:%'
-              AND inbound_promoted
-            "#,
-        )
-        .bind(client_id)
-        .bind(&prepared.interface)
-        .bind(observed_unix)
-        .execute(&mut **tx)
-        .await
-        {
-            sqlx::query("ROLLBACK TO SAVEPOINT vpsman_same_shape_update")
-                .execute(&mut **tx)
-                .await?;
-            sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-                .execute(&mut **tx)
-                .await?;
-            return Err(error.into());
-        }
-    }
-    let start_index = postgres_import_raw_start_index(raw, raw_plan)?;
-    if start_index == raw.observed_unix.len() {
-        sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        return Ok(true);
-    }
-    // `unnest($6, ...)` is intentionally parameterized.  PostgreSQL may
-    // otherwise promote this prepared statement to a generic plan that
-    // estimates ten rows and performs 47k point probes per client.  Force a
-    // custom plan only for this statement so the actual dense array cardinality
-    // selects the bounded hash/range join.  Preserve a caller/session-local
-    // setting rather than assuming the default plan mode.
-    let previous_plan_cache_mode =
-        sqlx::query_scalar::<_, String>("SELECT current_setting('plan_cache_mode')")
-            .fetch_one(&mut **tx)
-            .await?;
-    sqlx::query("SELECT set_config('plan_cache_mode', 'force_custom_plan', true)")
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(POSTGRES_IMPORT_SAME_SHAPE_UPDATE_BEGIN_SQL)
-        .execute(&mut **tx)
-        .await?;
-    let update_result = sqlx::query(
-        r#"
-        UPDATE traffic_counter_samples AS existing
-        SET
-            rx_bytes = incoming.rx_bytes,
-            tx_bytes = incoming.tx_bytes,
-            rx_counter_epoch = $4,
-            tx_counter_epoch = $5,
-            sample_source = $3,
-            inbound_promoted = incoming.inbound_promoted,
-            sample_count = 1,
-            rx_bytes_sum = incoming.rx_bytes::numeric,
-            tx_bytes_sum = incoming.tx_bytes::numeric,
-            latest_observed_at = existing.observed_at,
-            rx_usage_bytes = 0,
-            tx_usage_bytes = 0,
-            rx_reset_count = 0,
-            tx_reset_count = 0,
-            usage_authoritative = FALSE,
-            updated_at = clock_timestamp()
-        FROM unnest(
-            $6::bigint[], $7::bigint[], $8::bigint[], $9::boolean[]
-        ) AS incoming(observed_unix, rx_bytes, tx_bytes, inbound_promoted)
-        WHERE existing.client_id = $1
-          AND existing.source_kind = 'host'
-          AND existing.interface = $2
-          AND existing.observed_at = to_timestamp(incoming.observed_unix::double precision)
-          AND starts_with(existing.sample_source, 'vnstat_import:')
-        "#,
-    )
-    .bind(client_id)
-    .bind(&prepared.interface)
-    .bind(&prepared.import_source)
-    .bind(raw_plan.rx_counter_epoch)
-    .bind(raw_plan.tx_counter_epoch)
-    .bind(&raw.observed_unix[start_index..])
-    .bind(&raw.rx_bytes[start_index..])
-    .bind(&raw.tx_bytes[start_index..])
-    .bind(&raw.inbound_promoted[start_index..])
-    .execute(&mut **tx)
-    .await;
-    let updated = match update_result {
-        Ok(update_result) => update_result.rows_affected(),
-        Err(update_error) => {
-            // Once a statement fails, issuing cleanup SQL before rolling back
-            // the savepoint only creates secondary "current transaction is
-            // aborted" errors.  Rolling back the savepoint restores both
-            // transaction-local settings, so go straight to the rollback.
-            sqlx::query("ROLLBACK TO SAVEPOINT vpsman_same_shape_update")
-                .execute(&mut **tx)
-                .await?;
-            sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-                .execute(&mut **tx)
-                .await?;
-            return Err(update_error.into());
-        }
-    };
-    if let Err(reset_error) = sqlx::query(POSTGRES_IMPORT_SAME_SHAPE_UPDATE_END_SQL)
-        .execute(&mut **tx)
-        .await
-    {
-        sqlx::query("ROLLBACK TO SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        return Err(reset_error.into());
-    }
-    if let Err(restore_plan_cache_mode_error) =
-        sqlx::query("SELECT set_config('plan_cache_mode', $1, true)")
-            .bind(&previous_plan_cache_mode)
-            .execute(&mut **tx)
-            .await
-    {
-        sqlx::query("ROLLBACK TO SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        return Err(restore_plan_cache_mode_error.into());
-    }
-    let expected = u64::try_from(raw.observed_unix.len() - start_index)
-        .context("network_traffic_import_raw_count_out_of_range")?;
-    if updated != expected {
-        sqlx::query("ROLLBACK TO SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-            .execute(&mut **tx)
-            .await?;
-        return Ok(false);
-    }
-    sqlx::query("RELEASE SAVEPOINT vpsman_same_shape_update")
-        .execute(&mut **tx)
-        .await?;
-    Ok(true)
-}
-
-async fn insert_postgres_import_samples(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    prepared: &PreparedInterfaceImport,
-    raw: &PreparedImportRawRows,
-    raw_plan: &PostgresImportRawPlan,
-) -> Result<()> {
-    if let Some(observed_unix) = raw_plan.delete_inbound_predecessor_unix {
-        sqlx::query(
-            r#"
-            DELETE FROM traffic_counter_samples
-            WHERE client_id = $1
-              AND source_kind = 'host'
-              AND interface = $2
-              AND observed_at = to_timestamp($3::double precision)
-              AND sample_source NOT LIKE 'vnstat_import:%'
-              AND inbound_promoted
-            "#,
-        )
-        .bind(client_id)
-        .bind(&prepared.interface)
-        .bind(observed_unix)
-        .execute(&mut **tx)
-        .await?;
-    }
-    let row_count = raw.observed_unix.len();
-    let start_index = postgres_import_raw_start_index(raw, raw_plan)?;
-    if start_index == row_count {
-        return Ok(());
-    }
-    sqlx::query(
-        r#"
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at,
-            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
-            sample_source, inbound_promoted
-        )
-        SELECT
-            $1,
-            'host',
-            $2,
-            to_timestamp(imported.observed_unix::double precision),
-            imported.rx_bytes,
-            imported.tx_bytes,
-            $4,
-            $5,
-            $3,
-            imported.inbound_promoted
-        FROM unnest(
-            $6::bigint[], $7::bigint[], $8::bigint[], $9::boolean[]
-        ) AS imported(observed_unix, rx_bytes, tx_bytes, inbound_promoted)
-        ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET
-            rx_bytes = EXCLUDED.rx_bytes,
-            tx_bytes = EXCLUDED.tx_bytes,
-            rx_counter_epoch = EXCLUDED.rx_counter_epoch,
-            tx_counter_epoch = EXCLUDED.tx_counter_epoch,
-            sample_source = EXCLUDED.sample_source,
-            inbound_promoted = EXCLUDED.inbound_promoted,
-            sample_count = 1,
-            rx_bytes_sum = EXCLUDED.rx_bytes::numeric,
-            tx_bytes_sum = EXCLUDED.tx_bytes::numeric,
-            latest_observed_at = EXCLUDED.observed_at,
-            rx_usage_bytes = 0,
-            tx_usage_bytes = 0,
-            rx_reset_count = 0,
-            tx_reset_count = 0,
-            usage_authoritative = FALSE,
-            updated_at = clock_timestamp()
-        "#,
-    )
-    .bind(client_id)
-    .bind(&prepared.interface)
-    .bind(&prepared.import_source)
-    .bind(raw_plan.rx_counter_epoch)
-    .bind(raw_plan.tx_counter_epoch)
-    .bind(&raw.observed_unix[start_index..])
-    .bind(&raw.rx_bytes[start_index..])
-    .bind(&raw.tx_bytes[start_index..])
-    .bind(&raw.inbound_promoted[start_index..])
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-pub(crate) const POSTGRES_IMPORT_RAW_PREDECESSOR_SQL: &str = r#"
-    WITH desired_class AS MATERIALIZED (
-        SELECT $4::boolean AS imported
-    )
-    SELECT
-        boundary.observed_unix,
-        boundary.inbound_promoted
-    FROM desired_class
-    CROSS JOIN LATERAL (
-        SELECT
-            extract(epoch FROM sample.observed_at)::bigint AS observed_unix,
-            sample.inbound_promoted
-        FROM traffic_counter_samples sample
-        WHERE ROW(
-                  sample.client_id,
-                  sample.source_kind,
-                  sample.interface,
-                  (sample.sample_source LIKE 'vnstat_import:%'),
-                  sample.observed_at
-              ) < ROW(
-                  $1::text,
-                  'host'::text,
-                  $2::text,
-                  desired_class.imported,
-                  to_timestamp($3::double precision)
-              )
-          AND sample.client_id = $1::text
-          AND sample.source_kind = 'host'
-          AND sample.interface = $2::text
-          AND (sample.sample_source LIKE 'vnstat_import:%') = desired_class.imported
-          AND sample.observed_at < to_timestamp($3::double precision)
-        ORDER BY
-            sample.client_id DESC,
-            sample.source_kind DESC,
-            sample.interface DESC,
-            (sample.sample_source LIKE 'vnstat_import:%') DESC,
-            sample.observed_at DESC
-        LIMIT 1
-        FOR UPDATE OF sample
-    ) boundary
-"#;
-
-pub(crate) const POSTGRES_IMPORT_RAW_SUCCESSOR_SQL: &str = r#"
-    WITH desired_class AS MATERIALIZED (
-        SELECT $4::boolean AS imported
-    )
-    SELECT boundary.rx_counter_epoch, boundary.tx_counter_epoch
-    FROM desired_class
-    CROSS JOIN LATERAL (
-        SELECT sample.rx_counter_epoch, sample.tx_counter_epoch
-        FROM traffic_counter_samples sample
-        WHERE ROW(
-                  sample.client_id,
-                  sample.source_kind,
-                  sample.interface,
-                  (sample.sample_source LIKE 'vnstat_import:%'),
-                  sample.observed_at
-              ) >= ROW(
-                  $1::text,
-                  'host'::text,
-                  $2::text,
-                  desired_class.imported,
-                  to_timestamp($3::double precision)
-              )
-          AND sample.client_id = $1::text
-          AND sample.source_kind = 'host'
-          AND sample.interface = $2::text
-          AND (sample.sample_source LIKE 'vnstat_import:%') = desired_class.imported
-          AND sample.observed_at >= to_timestamp($3::double precision)
-        ORDER BY
-            sample.client_id ASC,
-            sample.source_kind ASC,
-            sample.interface ASC,
-            (sample.sample_source LIKE 'vnstat_import:%') ASC,
-            sample.observed_at ASC
-        LIMIT 1
-        FOR UPDATE OF sample
-    ) boundary
-"#;
-
-async fn prepare_postgres_import_raw_plan(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    prepared: &PreparedInterfaceImport,
-    raw_cutoff_unix: u64,
-) -> Result<PostgresImportRawPlan> {
-    let natural_start = if prepared.include_baseline {
-        prepared.start_unix - 60
-    } else {
-        prepared.start_unix
-    };
-    let mut minimum_unix = raw_cutoff_unix;
-    let mut delete_inbound_predecessor_unix = None;
-    if natural_start < raw_cutoff_unix {
-        let candidate_unix = prepared
-            .end_unix
-            .checked_sub(60)
-            .context("network_traffic_import_invalid:sample_timestamp_underflow")?
-            .min(
-                raw_cutoff_unix
-                    .checked_sub(60)
-                    .context("network_traffic_import_invalid:raw_cutoff_underflow")?,
-            );
-        let candidate_unix_i64 = i64::try_from(candidate_unix)
-            .context("network_traffic_import_invalid:sample_timestamp_out_of_range")?;
-        let raw_cutoff_unix_i64 = i64::try_from(raw_cutoff_unix)
-            .context("network_traffic_import_invalid:raw_cutoff_out_of_range")?;
-        let existing = sqlx::query_as::<_, (i64, bool)>(POSTGRES_IMPORT_RAW_PREDECESSOR_SQL)
-            .bind(client_id)
-            .bind(&prepared.interface)
-            .bind(raw_cutoff_unix_i64)
-            .bind(false)
-            .fetch_optional(&mut **tx)
-            .await?;
-        let retain_import_predecessor = existing
-            .as_ref()
-            .is_none_or(|(observed_unix, _)| *observed_unix < candidate_unix_i64);
-        if retain_import_predecessor {
-            minimum_unix = candidate_unix;
-            if let Some((observed_unix, true)) = existing {
-                delete_inbound_predecessor_unix = Some(observed_unix);
-            }
-        }
-    }
-
-    if prepared.end_unix <= raw_cutoff_unix {
-        if minimum_unix >= prepared.end_unix {
-            return Ok(PostgresImportRawPlan {
-                minimum_unix,
-                rx_counter_epoch: prepared.initial_rx_counter_epoch,
-                tx_counter_epoch: prepared.initial_tx_counter_epoch,
-                delete_inbound_predecessor_unix,
-                successor_adjustment: None,
-            });
-        }
-        let end_unix = i64::try_from(prepared.end_unix)
-            .context("network_traffic_import_invalid:sample_timestamp_out_of_range")?;
-        let successor_epochs = sqlx::query_as::<_, (i64, i64)>(POSTGRES_IMPORT_RAW_SUCCESSOR_SQL)
-            .bind(client_id)
-            .bind(&prepared.interface)
-            .bind(end_unix)
-            .bind(false)
-            .fetch_optional(&mut **tx)
-            .await?;
-        let (rx_counter_epoch, tx_counter_epoch) = successor_epochs.map_or_else(
-            || {
-                Ok::<_, anyhow::Error>((
-                    prepared
-                        .initial_rx_counter_epoch
-                        .checked_add(1)
-                        .context("network_traffic_import_rx_epoch_overflow")?,
-                    prepared
-                        .initial_tx_counter_epoch
-                        .checked_add(1)
-                        .context("network_traffic_import_tx_epoch_overflow")?,
-                ))
-            },
-            |(successor_rx_epoch, successor_tx_epoch)| {
-                anyhow::ensure!(
-                    successor_rx_epoch >= 0 && successor_tx_epoch >= 0,
-                    "network_traffic_import_successor_epoch_negative"
-                );
-                Ok((
-                    successor_rx_epoch
-                        .checked_add(1)
-                        .context("network_traffic_import_rx_epoch_overflow")?,
-                    successor_tx_epoch
-                        .checked_add(1)
-                        .context("network_traffic_import_tx_epoch_overflow")?,
-                ))
-            },
-        )?;
-        return Ok(PostgresImportRawPlan {
-            minimum_unix,
-            rx_counter_epoch,
-            tx_counter_epoch,
-            delete_inbound_predecessor_unix,
-            successor_adjustment: None,
-        });
-    }
-
-    let successor_unix = i64::try_from(prepared.end_unix)
-        .context("network_traffic_import_invalid:sample_timestamp_out_of_range")?;
-    let (successor_rx_epoch, successor_tx_epoch) = sqlx::query_as::<_, (i64, i64)>(
-        r#"
-        SELECT rx_counter_epoch, tx_counter_epoch
-        FROM traffic_counter_samples
-        WHERE client_id = $1
-          AND source_kind = 'host'
-          AND interface = $2
-          AND sample_source NOT LIKE 'vnstat_import:%'
-          AND observed_at = to_timestamp($3::double precision)
-        FOR UPDATE
-        "#,
-    )
-    .bind(client_id)
-    .bind(&prepared.interface)
-    .bind(successor_unix)
-    .fetch_optional(&mut **tx)
-    .await?
-    .context("network_traffic_import_live_successor_missing")?;
-    anyhow::ensure!(
-        successor_rx_epoch >= 0 && successor_tx_epoch >= 0,
-        "network_traffic_import_successor_epoch_negative"
-    );
-    let desired_rx_epoch = prepared
-        .initial_rx_counter_epoch
-        .checked_add(1)
-        .context("network_traffic_import_rx_epoch_overflow")?;
-    let desired_tx_epoch = prepared
-        .initial_tx_counter_epoch
-        .checked_add(1)
-        .context("network_traffic_import_tx_epoch_overflow")?;
-    anyhow::ensure!(
-        successor_rx_epoch <= desired_rx_epoch && successor_tx_epoch <= desired_tx_epoch,
-        "network_traffic_import_successor_epoch_exceeds_expected_transition"
-    );
-    let rx_delta = desired_rx_epoch - successor_rx_epoch;
-    let tx_delta = desired_tx_epoch - successor_tx_epoch;
-    if rx_delta != 0 || tx_delta != 0 {
-        let (max_rx_epoch, max_tx_epoch): (i64, i64) = sqlx::query_as(
-            r#"
-            SELECT
-                coalesce(max(rx_counter_epoch), 0)::bigint,
-                coalesce(max(tx_counter_epoch), 0)::bigint
-            FROM traffic_counter_samples
-            WHERE client_id = $1
-              AND source_kind = 'host'
-              AND interface = $2
-              AND sample_source NOT LIKE 'vnstat_import:%'
-              AND observed_at >= to_timestamp($3::double precision)
-            "#,
-        )
-        .bind(client_id)
-        .bind(&prepared.interface)
-        .bind(successor_unix)
-        .fetch_one(&mut **tx)
-        .await?;
-        max_rx_epoch
-            .checked_add(rx_delta)
-            .context("network_traffic_import_rx_epoch_overflow")?;
-        max_tx_epoch
-            .checked_add(tx_delta)
-            .context("network_traffic_import_tx_epoch_overflow")?;
-    }
-    Ok(PostgresImportRawPlan {
-        minimum_unix,
-        rx_counter_epoch: prepared.initial_rx_counter_epoch,
-        tx_counter_epoch: prepared.initial_tx_counter_epoch,
-        delete_inbound_predecessor_unix,
-        successor_adjustment: Some(PostgresImportEpochAdjustment {
-            successor_unix,
-            rx_delta,
-            tx_delta,
-        }),
-    })
-}
-
-async fn adjust_postgres_import_successor_epochs(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    client_id: &str,
-    interface: &str,
-    adjustment: Option<PostgresImportEpochAdjustment>,
-) -> Result<()> {
-    let Some(adjustment) = adjustment else {
-        return Ok(());
-    };
-    if adjustment.rx_delta == 0 && adjustment.tx_delta == 0 {
-        return Ok(());
-    }
-    sqlx::query(
-        r#"
-        UPDATE traffic_counter_samples
-        SET
-            rx_counter_epoch = rx_counter_epoch + $3,
-            tx_counter_epoch = tx_counter_epoch + $4
-        WHERE client_id = $1
-          AND source_kind = 'host'
-          AND interface = $2
-          AND sample_source NOT LIKE 'vnstat_import:%'
-          AND observed_at >= to_timestamp($5::double precision)
-        "#,
-    )
-    .bind(client_id)
-    .bind(interface)
-    .bind(adjustment.rx_delta)
-    .bind(adjustment.tx_delta)
-    .bind(adjustment.successor_unix)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-fn import_summary_refs(prepared: &[&PreparedInterfaceImport]) -> NetworkTrafficImportSummary {
-    let minutes = prepared
-        .iter()
-        .map(|item| item.traffic.minute_count)
-        .sum::<u64>();
-    let rx = prepared
-        .iter()
-        .map(|item| item.imported_rx_bytes)
-        .fold(0_u64, u64::saturating_add);
-    let tx = prepared
-        .iter()
-        .map(|item| item.imported_tx_bytes)
-        .fold(0_u64, u64::saturating_add);
-    NetworkTrafficImportSummary {
-        message: format!(
-            "vnStat history imported: {} interface(s), {minutes} synthetic minute samples, {rx} RX bytes, {tx} TX bytes; live agent counters continue at the existing boundary",
-            prepared.len()
-        ),
-    }
 }
 
 pub(crate) fn is_vnstat_import_source(source: &str) -> bool {

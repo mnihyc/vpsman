@@ -21,9 +21,17 @@ test("vnStat import leaves interfaces empty for agent-side discovery", () => {
 
 test("vnStat import retains interface, date, and past-time validation", () => {
   expect(() => buildNetworkTrafficImportOperation("eth 0", "2020-01-01", 1_722_470_400)).toThrow(
-    "Interface names may contain only",
+    "Use interface names",
   );
   expect(() => buildNetworkTrafficImportOperation("eth0", "2024-08-02", 1_722_470_400)).toThrow(
     "before the current UTC minute",
   );
+});
+
+test("vnStat import accepts prefix selectors without changing exact names or blank discovery", () => {
+  expect(buildNetworkTrafficImportOperation("e*, eth0, absent0", "2020-01-01", 1_722_470_400).interfaces)
+    .toEqual(["e*", "eth0", "absent0"]);
+  for (const invalid of ["e**", "*e", "e*h", "e?", "../eth0"]) {
+    expect(() => buildNetworkTrafficImportOperation(invalid, "2020-01-01", 1_722_470_400)).toThrow();
+  }
 });

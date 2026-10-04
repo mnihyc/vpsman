@@ -253,9 +253,10 @@ export function buildNetworkTrafficImportOperation(
   if (interfaces.length > 16) {
     throw new Error("vnStat import supports at most 16 host interfaces");
   }
-  if (interfaces.some((interfaceName) => !/^[A-Za-z0-9_.:-]{1,64}$/.test(interfaceName))) {
+  if (interfaces.some((interfaceName) =>
+    interfaceName.length > 64 || !/^(?:[A-Za-z0-9_.:-]+\*?|\*)$/.test(interfaceName))) {
     throw new Error(
-      "Interface names may contain only letters, digits, '_', '-', '.', or ':'",
+      "Use interface names or a trailing '*' prefix pattern, such as e*",
     );
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {

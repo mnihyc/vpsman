@@ -874,21 +874,15 @@ export function JobOperationEditor({
 
   if (mode === "network_traffic_import_vnstat") {
     return (
-      <div className="operationNote compactOperation">
-        <Activity size={18} />
-        <div>
-          <strong>Import retained vnStat traffic</strong>
-          <span>
-            The agent reads vnStat once. After its output is stored, the target
-            stays running while the API durably backfills synthetic minute
-            samples up to each interface&apos;s first live counter sample. A
-            restart resumes pending server-side imports. A rerun replaces prior
-            vnStat-imported samples for those interfaces.
-          </span>
+      <div className="operationNote trafficImportOperation">
+        <div className="trafficImportHeading">
+          <Activity size={18} />
+          <strong title="Imports matching interfaces within the selected retained range. Existing live measurements and history outside that range are preserved. Missing interfaces and ranges that cannot be safely reconciled are skipped successfully. After collection, the API finishes the import durably; a restart resumes pending work.">
+            Import retained vnStat traffic
+          </strong>
         </div>
         <label
-          className="wideField"
-          title="Comma-separated host interfaces to import, such as eth0, ens3. Leave blank to import every interface reported by vnStat."
+          title="Names or trailing '*' prefix patterns, separated by commas or newlines. e* matches eth0, ens3 and other names starting with e. Blank selects all vnStat interfaces. Missing matches are skipped."
         >
           <span>Host interfaces</span>
           <NumberedTextarea
@@ -896,12 +890,12 @@ export function JobOperationEditor({
             onChange={(event) =>
               setNetworkTrafficImportInterfacesText(event.target.value)
             }
-            placeholder="eth0, ens3"
+            placeholder="e*"
             rows={2}
             value={networkTrafficImportInterfacesText}
           />
         </label>
-        <label>
+        <label title="UTC start date. Only available history from this date onward is updated. Older history, live measurements and ranges that cannot be reconstructed safely are preserved. Retained aggregate totals are preserved; minute distribution is reconstructed from vnStat's retained resolutions.">
           <span>Start date (UTC)</span>
           <input
             aria-label="vnStat import start date"
@@ -912,14 +906,6 @@ export function JobOperationEditor({
             value={networkTrafficImportStartDate}
           />
         </label>
-        <span className="operationHint">
-          There is no fixed lookback limit. A selected date earlier than an
-          interface&apos;s vnStat history is clamped independently to that
-          interface&apos;s latest continuous retained coverage. The operation
-          also requires that coverage to reach an existing live agent sample.
-          Aggregate bytes are preserved; minute-level distribution is
-          reconstructed from vnStat&apos;s retained resolutions.
-        </span>
       </div>
     );
   }

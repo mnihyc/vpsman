@@ -21,6 +21,17 @@ pub const NETWORK_SPEED_TEST_MAX_PORT: u16 = 65_535;
 pub const NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS: u16 = 100;
 pub const NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS: u16 = 30_000;
 pub const NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES: usize = 16;
+
+/// Import selectors use exact names or one trailing `*`, like network.interfaces.
+/// Keep the existing name alphabet (including aliases containing `:`).
+pub fn valid_network_traffic_import_selector(selector: &str) -> bool {
+    let prefix = selector.strip_suffix('*').unwrap_or(selector);
+    !selector.is_empty()
+        && selector.len() <= 64
+        && prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
 pub const NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE: usize = 20_000;
 pub const NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT: usize = 128;
 pub const MAX_SHELL_SCRIPT_BYTES: usize = 16 * 1024;
@@ -34,7 +45,7 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 9;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 10;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -56,7 +67,9 @@ pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION: u16 = 3;
-pub const NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION: u16 = 4;
+// Best-effort source selection (including prefix patterns) requires the new collector.
+// Other command families retain their existing protocol requirements.
+pub const NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION: u16 = 10;
 
 pub const JOB_STATUS_QUEUED: &str = "queued";
 pub const JOB_STATUS_RUNNING: &str = "running";

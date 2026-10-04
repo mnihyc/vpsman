@@ -298,20 +298,26 @@ vnStat is not a selectable runtime accounting backend. Agent-managed tunnel
 interfaces may not exist long enough for `vnstatd` to retain them, so tunnel
 traffic telemetry always uses the managed interface's live kernel counters.
 
-For a host interface whose agent started after the current traffic cycle, an
-operator may dispatch `network_traffic_import_vnstat` once. The command accepts
-an optional list of host interface names and a UTC-minute-aligned start. An
-empty list asks the agent to read one all-interface vnStat JSON snapshot and
-import every valid interface it reports; an explicit list remains exact and is
-queried with vnStat's canonical `--iface` option. The complete resolved set
-must satisfy `network.interfaces`; otherwise the import is rejected without a
-partial write. The API derives
-the end independently for each interface from its first retained live agent
-sample; an operator-supplied end could create a gap or overlap and is therefore
-not part of the command.
+An operator can dispatch `network_traffic_import_vnstat` to backfill or refresh
+host traffic history. The command accepts exact interface names or trailing-`*`
+prefix selectors and a UTC-minute-aligned start. The frontend defaults to `e*`
+(names starting with `e`); a blank list selects every available vnStat interface.
+The agent reads one all-interface JSON snapshot and resolves overlapping selectors
+without duplicates. Missing interfaces, sources with unusable history and
+interfaces excluded by `network.interfaces` leave stored history unchanged.
+These preservation cases, including an entirely empty selection, complete
+successfully with a summary. New imports require command protocol 10 so an older
+collector cannot misinterpret the selectors or fail on an absent interface.
+
+Each interface's effective range starts at the later of the requested minute
+and its retained source coverage, and ends at the earliest of collection time,
+the source's last complete minute and its available retained bucket coverage.
+No end-date control is added. Reruns
+update only supported imported contributions in that range, preserve other
+interfaces and earlier/later history, and avoid rewriting unchanged rows.
 
 The agent supports vnStat 2.0 and newer and reads the retained five-minute,
-hourly, daily, monthly, and yearly JSON in one snapshot per interface. For
+hourly, daily, monthly, and yearly JSON from that snapshot. For
 vnStat 2.0–2.9, whose JSON calendar fields do not include Unix timestamps, the
 agent reconstructs each timestamp from the reported date and time. Those
 versions report an interface's creation date without a time of day, so it is
@@ -324,8 +330,8 @@ periods are interpreted consistently with the source database. Monthly and
 yearly rows use their natural calendar boundaries rather than the next retained
 row. The agent merges the emitted bucket intervals and reports the start of the
 latest continuous retained component for each interface. The API validates that
-component through the first live sample and starts at the later of its start and
-the operator's requested minute. This skips expired leading history and any
+component and starts at the later of its start and the operator's requested
+minute. This skips expired leading history and any
 older component separated by a retention gap without inventing traffic. The
 requested start remains present in the job operation and agent result for audit.
 Old history therefore remains
@@ -336,23 +342,32 @@ supply the requested span; if yearly collection is disabled, the month remains
 authoritative. This keeps the aggregate hierarchy reconcilable. The API
 reconciles overlapping resolutions from finest to coarsest,
 preserves each aggregate byte total, and distributes only the unresolved coarse
-residual across uncovered minutes. It then inserts cumulative synthetic
-host-interface samples before the first live sample. The synthetic to live
-transition is an intentional counter epoch boundary: no bridge delta is counted
-and it is not reported as a counter reset.
+residual across uncovered minutes. Recent imported minutes carry authoritative
+usage deltas; old history is written directly to the existing retained rollup
+tiers. Historical ranges remain compact in memory, and raw writes stay within
+the current retention window rather than expanding years into minute rows.
+Synthetic counters use a separate epoch from live observations, preventing a
+fabricated rate spike at their boundary without changing live counters.
+
+Live counter observations remain intact. An interior gap is repaired only when
+retained evidence can reconcile its accounting boundary. For a comparable
+single-observation resume counter, the imported gap bytes are subtracted from
+its existing bridge contribution, retaining the remainder. Counter resets and
+known-zero boundaries are handled independently. If the evidence disagrees,
+the resume minute contains inseparable live observations, or an old rollup
+cannot prove a partial boundary's byte split, that fragment is preserved. The
+import does not manufacture missing detail from rollup bounds. Existing dense
+imported contributions can still be refreshed where their ownership is known.
 
 Collection and server-side backfill are asynchronous and durable. After the
 agent's output is persisted, the target remains running while the API imports
-it; an API restart discovers that output and resumes finalization. The import
-requires continuous retained coverage through a live agent sample that
-establishes its end. Rerunning it replaces only prior `vnstat_import:*` samples
-for the selected interfaces. Normal agent collection continues unchanged
-afterward; vnStat is not polled periodically by vpsman. There is no fixed import
-lookback: a requested date may precede retained history, and each interface is
-clamped independently to the start of its latest continuous retained coverage.
-Long ranges are
-expanded and inserted in bounded batches rather than allocating the complete
-minute span in memory.
+it; an API restart discovers that output and resumes finalization. Preparation
+runs outside mutation locks, then an indexed snapshot is revalidated under the
+existing client/traffic locks before an atomic, range-scoped bulk update.
+Malformed job output, collection command failures and database failures retain
+their existing error/retry handling; a successful preservation is terminal,
+not a pending import. Normal agent collection continues unchanged afterward;
+vnStat is not polled periodically. There is no fixed import lookback limit.
 
 The optional display rules next to traffic do not alter accounting:
 

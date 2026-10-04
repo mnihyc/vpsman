@@ -295,6 +295,77 @@ fn empty_requested_interfaces_are_valid_for_vnstat_discovery() {
 }
 
 #[test]
+fn selected_vnstat_sources_are_best_effort_and_prefixes_are_deduplicated() {
+    let start = 1_722_470_400_u64;
+    let valid_interface = |name: &str| {
+        serde_json::json!({
+            "name": name, "created": {"timestamp": start},
+            "updated": {"timestamp": start + 600},
+            "traffic": {"fiveminute": [{"timestamp": start, "rx": 100, "tx": 50}]}
+        })
+    };
+    let payload = serde_json::json!({"jsonversion": 2, "interfaces": [
+        valid_interface("eth0"), valid_interface("ens3"), valid_interface("lo"),
+        {"name": "empty0", "traffic": {}}
+    ]});
+    let parse = |selectors: &[String]| {
+        parse_selected_vnstat_payload_for_version(
+            &payload,
+            selectors,
+            start,
+            &utc_calendar_config(),
+            VnstatVersion::modern_json(),
+        )
+        .unwrap()
+    };
+    let (names, sources, buckets) = parse(&["e*".into(), "eth0".into(), "absent0".into()]);
+    assert_eq!(names, ["empty0", "ens3", "eth0"]);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.interface.as_str())
+            .collect::<Vec<_>>(),
+        ["ens3", "eth0"]
+    );
+    assert!(buckets
+        .iter()
+        .all(|bucket| matches!(bucket.interface.as_str(), "eth0" | "ens3")));
+    assert_eq!(
+        buckets
+            .iter()
+            .filter(|bucket| bucket.rx_bytes == 100)
+            .count(),
+        2
+    );
+    let (names, sources, buckets) = parse(&["missing*".into()]);
+    assert!(names.is_empty() && sources.is_empty() && buckets.is_empty());
+    let (names, sources, buckets) = parse(&["empty0".into()]);
+    assert_eq!(names, ["empty0"]);
+    assert!(sources.is_empty() && buckets.is_empty());
+}
+
+#[test]
+fn vnstat_resolved_interface_limit_applies_after_selection() {
+    let payload = serde_json::json!({"jsonversion": 2,
+        "interfaces": (0..=NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES)
+            .map(|index| serde_json::json!({"name": format!("eth{index}")}))
+            .collect::<Vec<_>>()
+    });
+    let parse = |selectors: &[String]| {
+        parse_selected_vnstat_payload_for_version(
+            &payload,
+            selectors,
+            60,
+            &utc_calendar_config(),
+            VnstatVersion::modern_json(),
+        )
+    };
+    assert!(parse(&["eth0".into()]).is_ok());
+    assert!(parse(&["e*".into()]).is_err());
+    assert!(parse(&[]).is_err());
+}
+
+#[test]
 fn vnstat_configuration_query_uses_showconfig_once_without_an_interface() {
     let command = vnstat_showconfig_command("/usr/bin/vnstat");
     let args = command

@@ -406,13 +406,10 @@ fn validate_network_traffic_import_vnstat(
         .iter()
         .map(|interface| interface.trim())
         .collect::<Vec<_>>();
-    if normalized.iter().any(|interface| {
-        interface.is_empty()
-            || interface.len() > 64
-            || !interface.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-            })
-    }) {
+    if normalized
+        .iter()
+        .any(|interface| !vpsman_common::valid_network_traffic_import_selector(interface))
+    {
         return Err(ApiError::bad_request(
             "network_traffic_import_interface_invalid",
         ));

@@ -31,6 +31,40 @@ fn interface_bucket(
     }
 }
 
+#[test]
+fn best_effort_contract_accepts_empty_subsets_but_rejects_unselected_or_unowned_data() {
+    use vpsman_common::NetworkTrafficImportSource;
+    let mut result = NetworkTrafficImportResult {
+        r#type: "network_traffic_import_vnstat".into(),
+        status: "collected".into(),
+        requested_start_unix: 60,
+        collected_until_unix: 600,
+        interfaces: vec!["eth0".into(), "empty0".into()],
+        sources: vec![NetworkTrafficImportSource {
+            interface: "eth0".into(),
+            database_created_unix: Some(60),
+            retained_start_unix: 60,
+            source_updated_unix: Some(600),
+        }],
+        batch_count: 1,
+        bucket_count: 1,
+        message: String::new(),
+    };
+    let selectors = vec!["e*".into(), "absent0".into()];
+    let buckets = [interface_bucket("eth0", 60, 540, 90, 180)];
+    assert!(validate_result_contract(&selectors, 60, &result, &buckets, 660).is_ok());
+    let invalid = [interface_bucket("empty0", 60, 540, 90, 180)];
+    assert!(validate_result_contract(&selectors, 60, &result, &invalid, 660).is_err());
+    assert!(validate_result_contract(&["ens3".into()], 60, &result, &buckets, 660).is_err());
+    result.interfaces[1] = "e*".into();
+    assert!(validate_result_contract(&selectors, 60, &result, &buckets, 660).is_err());
+    result.interfaces.clear();
+    result.sources.clear();
+    result.bucket_count = 0;
+    result.batch_count = 0;
+    assert!(validate_result_contract(&selectors, 60, &result, &[], 660).is_ok());
+}
+
 fn minute_rows(traffic: &ExpandedMinuteTraffic) -> Vec<(u64, u64, u64)> {
     traffic
         .segments
@@ -85,59 +119,25 @@ fn explicit_trafficless_year_keeps_ancient_import_continuous_and_bounded() {
     let year_2022 = 1_640_995_200;
     let year_2023 = 1_672_531_200;
     let live = 1_704_067_200; // 2024-01-01T00:00:00Z
-    let job_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap();
-    let result = NetworkTrafficImportResult {
-        r#type: "network_traffic_import_vnstat".to_string(),
-        status: "collected".to_string(),
-        requested_start_unix: start,
-        collected_until_unix: live,
-        interfaces: vec!["eth0".to_string()],
-        sources: vec![vpsman_common::NetworkTrafficImportSource {
-            interface: "eth0".to_string(),
-            database_created_unix: Some(start),
-            retained_start_unix: start,
-            source_updated_unix: Some(live),
-        }],
-        batch_count: 1,
-        bucket_count: 3,
-        message: String::new(),
-    };
     let buckets = vec![
         bucket(start, 365 * 86_400, 365, 100),
         bucket(year_2022, 365 * 86_400, 0, 0),
         bucket(year_2023, 365 * 86_400, 730, 200),
     ];
-    let existing =
-        vec![sample_record("agent-a", "eth0", live, 10, 20, "interface_counters").unwrap()];
+    let traffic = expand_buckets_to_minutes(&buckets, "eth0", start, live).unwrap();
 
-    let prepared = prepare_imports(
-        job_id,
-        "agent-a",
-        &["eth0".to_string()],
-        start,
-        &result,
-        &buckets,
-        live + 60,
-        &existing,
-    )
-    .unwrap();
-
-    assert_eq!(prepared.len(), 1);
-    assert_eq!(prepared[0].traffic.minute_count, (live - start) / 60);
-    assert_eq!(prepared[0].imported_rx_bytes, 1_095);
-    assert_eq!(prepared[0].imported_tx_bytes, 300);
-    assert_eq!(
-        prepared[0].traffic.segments.first().unwrap().start_unix,
-        start
-    );
-    assert_eq!(prepared[0].traffic.segments.last().unwrap().end_unix, live);
-    assert!(prepared[0].traffic.segments.iter().any(|segment| {
+    assert_eq!(traffic.minute_count, (live - start) / 60);
+    assert_eq!(traffic.total_rx_bytes, 1_095);
+    assert_eq!(traffic.total_tx_bytes, 300);
+    assert_eq!(traffic.segments.first().unwrap().start_unix, start);
+    assert_eq!(traffic.segments.last().unwrap().end_unix, live);
+    assert!(traffic.segments.iter().any(|segment| {
         segment.start_unix <= year_2022
             && segment.end_unix >= year_2023
             && segment.rx_bytes == 0
             && segment.tx_bytes == 0
     }));
-    assert!(prepared[0].traffic.segments.len() <= 6);
+    assert!(traffic.segments.len() <= 6);
 }
 
 #[test]
@@ -276,153 +276,6 @@ fn import_to_live_boundary_is_intentional_but_reverse_is_not() {
 }
 
 #[test]
-fn prepare_import_stops_immediately_before_first_live_sample() {
-    let start = 1_722_470_400;
-    let live = start + 600;
-    let job_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
-    let result = NetworkTrafficImportResult {
-        r#type: "network_traffic_import_vnstat".to_string(),
-        status: "collected".to_string(),
-        requested_start_unix: start,
-        collected_until_unix: live + 600,
-        interfaces: vec!["eth0".to_string()],
-        sources: vec![vpsman_common::NetworkTrafficImportSource {
-            interface: "eth0".to_string(),
-            database_created_unix: Some(start - 60),
-            retained_start_unix: start,
-            source_updated_unix: Some(live + 600),
-        }],
-        batch_count: 1,
-        bucket_count: 1,
-        message: String::new(),
-    };
-    let existing =
-        vec![sample_record("agent-a", "eth0", live, 10, 20, "interface_counters").unwrap()];
-    let prepared = prepare_imports(
-        job_id,
-        "agent-a",
-        &["eth0".to_string()],
-        start,
-        &result,
-        &[bucket(start, 600, 100, 50)],
-        live + 600,
-        &existing,
-    )
-    .unwrap();
-    let samples = prepared[0]
-        .samples("agent-a")
-        .collect::<Result<Vec<_>>>()
-        .unwrap();
-
-    assert_eq!(prepared[0].end_unix, live);
-    assert_eq!(samples.first().unwrap().observed_unix, (start - 60) as i64);
-    assert_eq!(samples.last().unwrap().observed_unix, (live - 60) as i64);
-}
-
-#[test]
-fn prepare_import_clamps_each_interface_to_its_distinct_continuous_retained_start() {
-    let requested_start = 1_722_470_400;
-    let eth0_created = requested_start - 3_600;
-    let eth0_effective_start = requested_start + 120;
-    let eth0_live = requested_start + 600;
-    let ens3_created = requested_start - 7_200;
-    let ens3_effective_start = requested_start + 240;
-    let ens3_live = requested_start + 900;
-    let job_id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
-    let result = NetworkTrafficImportResult {
-        r#type: "network_traffic_import_vnstat".to_string(),
-        status: "collected".to_string(),
-        requested_start_unix: requested_start,
-        collected_until_unix: ens3_live + 60,
-        interfaces: vec!["eth0".to_string(), "ens3".to_string()],
-        sources: vec![
-            vpsman_common::NetworkTrafficImportSource {
-                interface: "eth0".to_string(),
-                database_created_unix: Some(eth0_created),
-                retained_start_unix: eth0_effective_start,
-                source_updated_unix: Some(eth0_live + 60),
-            },
-            vpsman_common::NetworkTrafficImportSource {
-                interface: "ens3".to_string(),
-                database_created_unix: Some(ens3_created),
-                retained_start_unix: ens3_effective_start,
-                source_updated_unix: Some(ens3_live + 60),
-            },
-        ],
-        batch_count: 1,
-        bucket_count: 4,
-        message: String::new(),
-    };
-    let existing = vec![
-        sample_record("agent-a", "eth0", eth0_live, 10, 20, "interface_counters").unwrap(),
-        sample_record("agent-a", "ens3", ens3_live, 30, 40, "interface_counters").unwrap(),
-    ];
-    let buckets = [
-        interface_bucket("eth0", requested_start, 60, 10, 5),
-        interface_bucket(
-            "eth0",
-            eth0_effective_start,
-            u32::try_from(eth0_live - eth0_effective_start).unwrap(),
-            90,
-            45,
-        ),
-        interface_bucket("ens3", requested_start, 120, 20, 10),
-        interface_bucket(
-            "ens3",
-            ens3_effective_start,
-            u32::try_from(ens3_live - ens3_effective_start).unwrap(),
-            120,
-            60,
-        ),
-    ];
-    assert!(validate_result_contract(
-        &["eth0".to_string(), "ens3".to_string()],
-        requested_start,
-        &result,
-        &buckets,
-        ens3_live + 120,
-    )
-    .is_ok());
-    let prepared = prepare_imports(
-        job_id,
-        "agent-a",
-        &["eth0".to_string(), "ens3".to_string()],
-        requested_start,
-        &result,
-        &buckets,
-        ens3_live + 60,
-        &existing,
-    )
-    .unwrap();
-
-    assert_eq!(result.requested_start_unix, requested_start);
-    assert_eq!(prepared[0].start_unix, eth0_effective_start);
-    assert_eq!(prepared[0].traffic.minute_count, 8);
-    assert_eq!(prepared[1].start_unix, ens3_effective_start);
-    assert_eq!(prepared[1].traffic.minute_count, 11);
-    assert_eq!(
-        prepared[0]
-            .samples("agent-a")
-            .collect::<Result<Vec<_>>>()
-            .unwrap()
-            .first()
-            .unwrap()
-            .observed_unix,
-        i64::try_from(eth0_effective_start - 60).unwrap()
-    );
-    assert_eq!(
-        prepared[1]
-            .samples("agent-a")
-            .collect::<Result<Vec<_>>>()
-            .unwrap()
-            .first()
-            .unwrap()
-            .observed_unix,
-        i64::try_from(ens3_effective_start - 60).unwrap()
-    );
-}
-
-#[test]
 fn empty_request_accepts_the_agents_bounded_discovered_interface_set() {
     let start = 1_722_470_400;
     let result = NetworkTrafficImportResult {
@@ -451,97 +304,6 @@ fn empty_request_accepts_the_agents_bounded_discovered_interface_set() {
     .is_ok());
 }
 
-#[test]
-fn rerun_boundaries_prepare_the_same_replacement_as_full_import_history() {
-    let start = 1_722_470_400;
-    let live = start + 600;
-    let job_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
-    let result = NetworkTrafficImportResult {
-        r#type: "network_traffic_import_vnstat".to_string(),
-        status: "collected".to_string(),
-        requested_start_unix: start,
-        collected_until_unix: live + 600,
-        interfaces: vec!["eth0".to_string()],
-        sources: vec![vpsman_common::NetworkTrafficImportSource {
-            interface: "eth0".to_string(),
-            database_created_unix: Some(start - 60),
-            retained_start_unix: start,
-            source_updated_unix: Some(live + 600),
-        }],
-        batch_count: 1,
-        bucket_count: 1,
-        message: String::new(),
-    };
-    let previous = sample_record(
-        "agent-a",
-        "eth0",
-        start - 60,
-        700,
-        900,
-        "interface_counters",
-    )
-    .unwrap();
-    let first_live = sample_record("agent-a", "eth0", live, 20, 30, "interface_counters").unwrap();
-    let boundaries = vec![previous.clone(), first_live.clone()];
-    let mut full_history = boundaries.clone();
-    for minute in 0..10 {
-        full_history.push(
-            sample_record(
-                "agent-a",
-                "eth0",
-                start + minute * 60,
-                800 + i64::try_from(minute).unwrap(),
-                1_000 + i64::try_from(minute).unwrap(),
-                "vnstat_import:11111111-1111-4111-8111-111111111111",
-            )
-            .unwrap(),
-        );
-    }
-
-    let prepare = |existing: &[TrafficCounterSampleRecord]| {
-        prepare_imports(
-            job_id,
-            "agent-a",
-            &["eth0".to_string()],
-            start,
-            &result,
-            &[bucket(start, 600, 100, 50)],
-            live + 600,
-            existing,
-        )
-        .unwrap()
-    };
-    let from_full_history = prepare(&full_history);
-    let from_boundaries = prepare(&boundaries);
-    let sample_values = |prepared: &PreparedInterfaceImport| {
-        prepared
-            .samples("agent-a")
-            .map(|sample| {
-                let sample = sample.unwrap();
-                (
-                    sample.observed_unix,
-                    sample.rx_bytes,
-                    sample.tx_bytes,
-                    sample.sample_source,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(
-        sample_values(&from_full_history[0]),
-        sample_values(&from_boundaries[0])
-    );
-    assert_eq!(
-        from_full_history[0].imported_rx_bytes,
-        from_boundaries[0].imported_rx_bytes
-    );
-    assert_eq!(
-        from_full_history[0].imported_tx_bytes,
-        from_boundaries[0].imported_tx_bytes
-    );
-}
-
 fn prepared_import_for_test(
     start_unix: u64,
     end_unix: u64,
@@ -558,18 +320,13 @@ fn prepared_import_for_test(
         end_unix,
         initial_rx_bytes,
         initial_tx_bytes,
-        initial_rx_counter_epoch: 0,
-        initial_tx_counter_epoch: 0,
         include_baseline,
-        import_source: "vnstat_import:55555555-5555-4555-8555-555555555555".to_string(),
         traffic: ExpandedMinuteTraffic {
             segments,
             minute_count: (end_unix - start_unix) / 60,
             total_rx_bytes,
             total_tx_bytes,
         },
-        imported_rx_bytes: total_rx_bytes,
-        imported_tx_bytes: total_tx_bytes,
     }
 }
 
@@ -971,8 +728,7 @@ fn compact_raw_preparation_matches_sample_iterator_for_every_slice_path() {
             );
         }
 
-        let superset_minimum =
-            postgres_import_raw_superset_minimum(&prepared, raw_cutoff_unix).unwrap();
+        let superset_minimum = raw_cutoff_unix;
         let superset =
             prepare_import_raw_rows(&prepared, superset_minimum, raw_cutoff_unix).unwrap();
         for plan_minimum in [superset_minimum, raw_cutoff_unix, end_unix] {
@@ -1002,64 +758,6 @@ fn compact_raw_preparation_matches_sample_iterator_for_every_slice_path() {
             );
         }
     }
-}
-
-#[test]
-fn same_shape_raw_update_requires_an_exact_dense_locked_keyset() {
-    let prepared = prepared_import_for_test(
-        1_772_323_200,
-        1_772_323_200 + 6 * 60,
-        0,
-        0,
-        true,
-        vec![MinuteAssignmentSegment {
-            start_unix: 1_772_323_200,
-            end_unix: 1_772_323_200 + 6 * 60,
-            rx_bytes: 3,
-            tx_bytes: 2,
-        }],
-    );
-    let raw = prepare_import_raw_rows(&prepared, 1_772_323_140, 1_772_323_200 + 60).unwrap();
-    let plan = PostgresImportRawPlan {
-        minimum_unix: 1_772_323_140,
-        rx_counter_epoch: 0,
-        tx_counter_epoch: 0,
-        delete_inbound_predecessor_unix: None,
-        successor_adjustment: None,
-    };
-    let exact = PostgresImportOwnedRawStats {
-        interface: "eth0".to_string(),
-        count: i64::try_from(raw.observed_unix.len()).unwrap(),
-        first_observed_unix: raw.observed_unix.first().copied(),
-        last_observed_unix: raw.observed_unix.last().copied(),
-    };
-    assert!(postgres_import_can_update_same_shape(&exact, &raw, &plan).unwrap());
-
-    let mut shifted = exact.clone();
-    shifted.first_observed_unix = shifted.first_observed_unix.map(|value| value + 60);
-    assert!(!postgres_import_can_update_same_shape(&shifted, &raw, &plan).unwrap());
-
-    let mut missing = exact.clone();
-    missing.count -= 1;
-    assert!(!postgres_import_can_update_same_shape(&missing, &raw, &plan).unwrap());
-
-    let mut sparse = raw.clone();
-    sparse.observed_unix[2] += 60;
-    assert!(postgres_import_can_update_same_shape(&exact, &sparse, &plan).is_err());
-
-    let mut empty_plan = plan;
-    empty_plan.minimum_unix = 1_772_323_200 + 6 * 60;
-    let empty_raw =
-        prepare_import_raw_rows(&prepared, empty_plan.minimum_unix, 1_772_323_200 + 6 * 60)
-            .unwrap();
-    let empty_stats = PostgresImportOwnedRawStats {
-        interface: "eth0".to_string(),
-        count: 0,
-        first_observed_unix: None,
-        last_observed_unix: None,
-    };
-    assert!(postgres_import_can_update_same_shape(&empty_stats, &empty_raw, &empty_plan).unwrap());
-    assert!(!postgres_import_can_update_same_shape(&exact, &empty_raw, &empty_plan).unwrap());
 }
 
 #[test]
@@ -1114,95 +812,7 @@ fn compact_rollup_arrays_preserve_direct_rollup_values() {
 }
 
 #[test]
-fn postgres_preflight_revalidation_detects_every_mutable_descriptor_group() {
-    let boundary = sample_record(
-        "agent-a",
-        "eth0",
-        1_772_323_200,
-        100,
-        200,
-        "interface_counters",
-    )
-    .unwrap();
-    let snapshot = PostgresImportSnapshot {
-        utc_day_start_unix: 1_772_323_200,
-        raw_cutoff_unix: 1_772_323_200 - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400,
-        boundary_samples: vec![boundary],
-        imported_raw_stats: vec![PostgresImportOwnedRawStats {
-            interface: "eth0".to_string(),
-            count: 1,
-            first_observed_unix: Some(1_772_323_140),
-            last_observed_unix: Some(1_772_323_140),
-        }],
-    };
-    assert!(postgres_import_snapshots_match(
-        &snapshot,
-        &snapshot.clone()
-    ));
-
-    let mut changed_retention = snapshot.clone();
-    changed_retention.raw_cutoff_unix += 86_400;
-    assert!(!postgres_import_snapshots_match(
-        &snapshot,
-        &changed_retention
-    ));
-    let mut changed_boundary = snapshot.clone();
-    changed_boundary.boundary_samples[0].rx_bytes += 1;
-    assert!(!postgres_import_snapshots_match(
-        &snapshot,
-        &changed_boundary
-    ));
-    let mut changed_owned_rows = snapshot.clone();
-    changed_owned_rows.imported_raw_stats[0].count += 1;
-    assert!(!postgres_import_snapshots_match(
-        &snapshot,
-        &changed_owned_rows
-    ));
-
-    // The repeatable-read preflight deliberately carries no owned-row stats;
-    // the locked snapshot remains the authoritative bound/shape check.
-    let mut shape_only_preflight = snapshot.clone();
-    shape_only_preflight.imported_raw_stats.clear();
-    assert!(postgres_import_snapshots_match(
-        &shape_only_preflight,
-        &changed_owned_rows
-    ));
-}
-
-#[test]
-fn imported_raw_recovery_guard_accepts_exact_canonical_maximum_only() {
-    assert_eq!(
-        POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE,
-        (usize::try_from(TRAFFIC_COUNTER_RAW_RETENTION_DAYS).unwrap() * 24 + 1) * 60 + 1
-    );
-    assert_eq!(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE, 1_501);
-    let utc_day_start_unix = 1_772_323_200;
-    let current_hour_unix = utc_day_start_unix + 23 * 3_600;
-    let raw_cutoff_unix = current_hour_unix - TRAFFIC_COUNTER_RAW_RETENTION_DAYS as u64 * 86_400;
-    let last_observed_unix = current_hour_unix + 59 * 60;
-    let mut snapshot = PostgresImportSnapshot {
-        utc_day_start_unix,
-        raw_cutoff_unix,
-        boundary_samples: Vec::new(),
-        imported_raw_stats: vec![PostgresImportOwnedRawStats {
-            interface: "eth0".to_string(),
-            count: i64::try_from(POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE).unwrap(),
-            first_observed_unix: Some(i64::try_from(raw_cutoff_unix - 60).unwrap()),
-            last_observed_unix: Some(i64::try_from(last_observed_unix).unwrap()),
-        }],
-    };
-    ensure_postgres_import_owned_raw_is_bounded(&snapshot).unwrap();
-
-    snapshot.imported_raw_stats[0].count += 1;
-    let error = ensure_postgres_import_owned_raw_is_bounded(&snapshot)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("network_traffic_import_recovery_required"));
-    assert!(error.contains("max_1501"));
-}
-
-#[test]
-fn five_year_raw_superset_is_bounded_at_maximum_for_all_sixteen_interfaces() {
+fn five_year_raw_tail_is_bounded_at_maximum_for_all_sixteen_interfaces() {
     assert_eq!(NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES, 16);
     let utc_day_start_unix = 1_772_323_200;
     let current_hour_unix = utc_day_start_unix + 23 * 3_600;
@@ -1210,7 +820,8 @@ fn five_year_raw_superset_is_bounded_at_maximum_for_all_sixteen_interfaces() {
     let start_unix = utc_day_start_unix - 5 * 365 * 86_400;
     // Import coverage is end-exclusive. Ending at the next hour includes the
     // current hour's :59 sample, so this exercises the exact worst case: the
-    // one-day floor-aligned window, one partial hour, and one predecessor.
+    // one-day floor-aligned window and one partial hour, without an old raw
+    // predecessor (authoritative imported usage does not need one).
     let end_unix = current_hour_unix + 60 * 60;
     let base = prepared_import_for_test(
         start_unix,
@@ -1229,17 +840,17 @@ fn five_year_raw_superset_is_bounded_at_maximum_for_all_sixteen_interfaces() {
     for index in 0..NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES {
         let mut prepared = base.clone();
         prepared.interface = format!("eth{index}");
-        let minimum = postgres_import_raw_superset_minimum(&prepared, raw_cutoff_unix).unwrap();
-        assert_eq!(minimum, raw_cutoff_unix - 60);
+        let minimum = raw_cutoff_unix;
+        assert_eq!(minimum, raw_cutoff_unix);
         let rows = prepare_import_raw_rows(&prepared, minimum, raw_cutoff_unix).unwrap();
         assert_eq!(
             rows.observed_unix.len(),
-            POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE
+            POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE - 1
         );
         total_rows += rows.observed_unix.len();
     }
     assert_eq!(
         total_rows,
-        NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES * POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE
+        NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES * (POSTGRES_IMPORT_MAX_RAW_ROWS_PER_INTERFACE - 1)
     );
 }

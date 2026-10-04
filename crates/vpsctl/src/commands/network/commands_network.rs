@@ -510,12 +510,12 @@ pub(crate) struct NetworkTrafficImportVnstatCommand {
     #[arg(
         long = "interface",
         value_delimiter = ',',
-        help = "Host interface name; repeat the flag or use a comma-separated list. Omit to import every interface reported by vnStat"
+        help = "Host interface name or trailing-* prefix (quote e* in the shell); repeat the flag or use a comma-separated list. Omit to select every vnStat interface. Unavailable interfaces are preserved"
     )]
     pub(crate) interfaces: Vec<String>,
     #[arg(
         long,
-        help = "Import start as YYYY-MM-DD (UTC midnight) or an RFC3339 timestamp aligned to a minute; there is no fixed lookback limit, and the end is derived from each interface's first live agent sample"
+        help = "Import start as YYYY-MM-DD (UTC midnight) or an RFC3339 timestamp aligned to a minute; there is no fixed lookback limit, and the end is the available collected history for each interface. Live data, outside-range history and unreconcilable fragments are preserved"
     )]
     pub(crate) start: String,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -883,7 +883,7 @@ pub(crate) fn network_traffic_import_vnstat(
             .interfaces
             .iter()
             .all(|interface| valid_import_interface_name(interface)),
-        "--interface values must be 1-64 characters containing only letters, digits, '_', '-', '.', or ':'"
+        "--interface accepts names or trailing '*' prefix patterns, such as e* (at most 64 characters)"
     );
     let start_unix = parse_network_traffic_import_start(&request.start)?;
     let now_unix = Utc::now().timestamp();
@@ -960,11 +960,7 @@ fn normalize_unique_nonempty(values: &mut Vec<String>, flag: &str) -> Result<()>
 }
 
 fn valid_import_interface_name(interface: &str) -> bool {
-    !interface.is_empty()
-        && interface.len() <= 64
-        && interface
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+    vpsman_common::valid_network_traffic_import_selector(interface)
 }
 
 pub(crate) fn tunnel_status(

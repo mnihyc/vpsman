@@ -4850,13 +4850,7 @@ use crate::{
     },
     repository_network::{TunnelPlanLifecycleUpdate, TunnelPlanLifecycleUpdateResult},
     repository_network_observations::NetworkObservationFilter,
-    repository_network_traffic_import::{
-        ensure_postgres_vnstat_interfaces_admitted, load_postgres_import_boundary_samples,
-        POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL, POSTGRES_IMPORT_OWNED_RAW_COUNTS_SQL,
-        POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_NONLOCKING_SQL,
-        POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL, POSTGRES_IMPORT_RAW_PREDECESSOR_SQL,
-        POSTGRES_IMPORT_RAW_SUCCESSOR_SQL,
-    },
+    repository_network_traffic_import::ensure_postgres_vnstat_interfaces_admitted,
     repository_system_dashboard::SYSTEM_DASHBOARD_SNAPSHOT_SQL,
     repository_telemetry_rollups::{
         aggregate_selected_network_history_oracle, raw_telemetry_network_rate_candidate_keys_sql,
@@ -24822,459 +24816,6 @@ async fn postgres_retained_traffic_keeps_bidirectional_diagnostics() {
 }
 
 #[tokio::test]
-async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_plans() {
-    fn relation_uses_bitmap_scan(plan: &Value, relation: &str) -> bool {
-        if plan["Node Type"]
-            .as_str()
-            .is_some_and(|node_type| node_type.starts_with("Bitmap"))
-            && plan["Relation Name"].as_str() == Some(relation)
-        {
-            return true;
-        }
-        plan["Plans"].as_array().is_some_and(|children| {
-            children
-                .iter()
-                .any(|child| relation_uses_bitmap_scan(child, relation))
-        })
-    }
-
-    fn plan_uses_node_type(plan: &Value, expected: &str) -> bool {
-        plan["Node Type"].as_str() == Some(expected)
-            || plan["Plans"].as_array().is_some_and(|children| {
-                children
-                    .iter()
-                    .any(|child| plan_uses_node_type(child, expected))
-            })
-    }
-
-    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
-        return;
-    };
-    let target_client_id = "traffic-import-plan-target";
-    let distractor_client_id = "traffic-import-plan-distractor";
-    let boundary_unix = 1_722_470_400_i64;
-    insert_client(&db.pool, target_client_id, None).await;
-    insert_client(&db.pool, distractor_client_id, None).await;
-
-    sqlx::query(
-        r#"
-        WITH streams(client_id, interface) AS (
-            VALUES
-                ($1::text, 'eth0'::text),
-                ($1::text, 'eth1'::text),
-                ($2::text, 'eth0'::text),
-                ($2::text, 'eth1'::text)
-            UNION ALL
-            SELECT $1::text, format('noise-%s', ordinal)
-            FROM generate_series(0, 15) AS generated(ordinal)
-            UNION ALL
-            SELECT $2::text, format('noise-%s', ordinal)
-            FROM generate_series(0, 15) AS generated(ordinal)
-        )
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at,
-            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
-            sample_source
-        )
-        SELECT
-            streams.client_id,
-            'host',
-            streams.interface,
-            to_timestamp(($3::bigint + point::bigint * 60)::double precision),
-            100000 + point::bigint + 60,
-            200000 + point::bigint + 60,
-            0,
-            0,
-            CASE
-                WHEN point IN (-3, 2) THEN 'interface_counters'
-                ELSE 'vnstat_import:planner-fixture'
-            END
-        FROM streams
-        CROSS JOIN generate_series(-60, 119) AS generated(point)
-        "#,
-    )
-    .bind(target_client_id)
-    .bind(distractor_client_id)
-    .bind(boundary_unix)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at,
-            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch,
-            sample_source
-        )
-        SELECT
-            $1,
-            'host',
-            'dirty-owned',
-            to_timestamp(($2::bigint - point::bigint * 60)::double precision),
-            point::bigint,
-            point::bigint * 2,
-            0,
-            0,
-            'vnstat_import:planner-dirty-fixture'
-        FROM generate_series(1, 50000) AS generated(point)
-        "#,
-    )
-    .bind(target_client_id)
-    .bind(boundary_unix)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        WITH streams(client_id, interface) AS (
-            VALUES
-                ($1::text, 'eth0'::text),
-                ($1::text, 'eth1'::text),
-                ($2::text, 'eth0'::text),
-                ($2::text, 'eth1'::text)
-            UNION ALL
-            SELECT $1::text, format('noise-%s', ordinal)
-            FROM generate_series(0, 15) AS generated(ordinal)
-            UNION ALL
-            SELECT $2::text, format('noise-%s', ordinal)
-            FROM generate_series(0, 15) AS generated(ordinal)
-        )
-        INSERT INTO traffic_counter_rollups (
-            client_id, source_kind, interface, origin_kind,
-            bucket_secs, bucket_start, rx_bytes, tx_bytes,
-            rx_valid_count, tx_valid_count, any_valid_count,
-            rx_reset_count, tx_reset_count, any_reset_count,
-            first_observed_at, latest_observed_at
-        )
-        SELECT
-            streams.client_id,
-            'host',
-            streams.interface,
-            'live',
-            3600,
-            to_timestamp($3::double precision) + bucket * interval '1 hour',
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            to_timestamp($3::double precision)
-                + bucket * interval '1 hour' + interval '2 minutes',
-            to_timestamp($3::double precision)
-                + bucket * interval '1 hour' + interval '2 minutes'
-        FROM streams
-        CROSS JOIN generate_series(0, 7) AS generated(bucket)
-        "#,
-    )
-    .bind(target_client_id)
-    .bind(distractor_client_id)
-    .bind(boundary_unix as f64)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query("ANALYZE traffic_counter_samples")
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("ANALYZE traffic_counter_rollups")
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let requested_interfaces = ["eth0".to_string(), "eth1".to_string()];
-    let requested_starts = [boundary_unix, boundary_unix];
-    let mut tied_boundaries = Vec::with_capacity(requested_interfaces.len());
-    for (interface, start) in requested_interfaces.iter().zip(&requested_starts) {
-        tied_boundaries.push(
-            sqlx::query(POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL)
-                .bind(target_client_id)
-                .bind(interface)
-                .bind(start)
-                .bind(false)
-                .fetch_one(&db.pool)
-                .await
-                .unwrap(),
-        );
-    }
-    assert_eq!(tied_boundaries.len(), 2);
-    assert!(tied_boundaries.iter().all(|row| {
-        row.try_get::<String, _>("sample_source")
-            .is_ok_and(|source| source == "interface_counters")
-    }));
-
-    let preparations = [
-        (
-            "vnstat_owned_cap",
-            "(text, text, bigint, boolean)",
-            POSTGRES_IMPORT_OWNED_RAW_COUNTS_SQL,
-        ),
-        (
-            "vnstat_previous_locked",
-            "(text, text[], bigint[], boolean)",
-            POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL,
-        ),
-        (
-            "vnstat_previous_nonlocking",
-            "(text, text[], bigint[], boolean)",
-            POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_NONLOCKING_SQL,
-        ),
-        (
-            "vnstat_live_boundary",
-            "(text, text, bigint, boolean)",
-            POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL,
-        ),
-        (
-            "vnstat_raw_predecessor",
-            "(text, text, bigint, boolean)",
-            POSTGRES_IMPORT_RAW_PREDECESSOR_SQL,
-        ),
-        (
-            "vnstat_raw_successor",
-            "(text, text, bigint, boolean)",
-            POSTGRES_IMPORT_RAW_SUCCESSOR_SQL,
-        ),
-    ];
-    let interfaces = "ARRAY['eth0','eth1']::text[]";
-    let starts = format!("ARRAY[{boundary_unix},{boundary_unix}]::bigint[]");
-    let executions = vec![
-        (
-            "owned cap",
-            format!("vnstat_owned_cap('{target_client_id}', 'eth0', 47521, true)"),
-            178.0,
-            None,
-            true,
-            false,
-            false,
-        ),
-        (
-            "dirty owned cap",
-            format!("vnstat_owned_cap('{target_client_id}', 'dirty-owned', 47521, true)"),
-            // A custom plan sees that this probe consumes 95% of the dirty
-            // stream and may correctly scan the 56,480-row disposable table.
-            // The generic cached plan remains pinned to the exact
-            // class/stream index.
-            56_480.0,
-            None,
-            true,
-            false,
-            true,
-        ),
-        (
-            "previous locked",
-            format!("vnstat_previous_locked('{target_client_id}', {interfaces}, {starts}, false)"),
-            2.0,
-            None,
-            true,
-            true,
-            false,
-        ),
-        (
-            "previous nonlocking",
-            format!(
-                "vnstat_previous_nonlocking('{target_client_id}', {interfaces}, {starts}, false)"
-            ),
-            2.0,
-            None,
-            true,
-            false,
-            false,
-        ),
-        (
-            "live raw branch",
-            format!("vnstat_live_boundary('{target_client_id}', 'eth0', {boundary_unix}, false)"),
-            1.0,
-            Some(16.0),
-            true,
-            false,
-            false,
-        ),
-        (
-            "mutation predecessor",
-            format!("vnstat_raw_predecessor('{target_client_id}', 'eth0', {boundary_unix}, false)"),
-            1.0,
-            None,
-            true,
-            true,
-            false,
-        ),
-        (
-            "mutation successor",
-            format!("vnstat_raw_successor('{target_client_id}', 'eth0', {boundary_unix}, false)"),
-            1.0,
-            None,
-            true,
-            true,
-            false,
-        ),
-    ];
-
-    for (mode, setting) in [
-        (
-            "force_custom_plan",
-            "SET LOCAL plan_cache_mode = 'force_custom_plan'",
-        ),
-        (
-            "force_generic_plan",
-            "SET LOCAL plan_cache_mode = 'force_generic_plan'",
-        ),
-    ] {
-        let mut plan_tx = db.pool.begin().await.unwrap();
-        sqlx::query(setting).execute(&mut *plan_tx).await.unwrap();
-        for &(name, signature, query) in &preparations {
-            sqlx::query(&format!("PREPARE {name} {signature} AS {query}"))
-                .execute(&mut *plan_tx)
-                .await
-                .unwrap();
-        }
-        let mut plans = Vec::with_capacity(executions.len());
-        for (
-            label,
-            execution,
-            maximum_sample_rows,
-            maximum_rollup_rows,
-            require_observed_at,
-            require_lock_rows,
-            allow_custom_sequential_scan,
-        ) in &executions
-        {
-            let explain_sql =
-                format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE {execution}");
-            let plan: Value = sqlx::query_scalar(&explain_sql)
-                .fetch_one(&mut *plan_tx)
-                .await
-                .unwrap();
-            plans.push((
-                *label,
-                plan,
-                *maximum_sample_rows,
-                *maximum_rollup_rows,
-                *require_observed_at,
-                *require_lock_rows,
-                *allow_custom_sequential_scan,
-            ));
-        }
-        for &(name, _, _) in &preparations {
-            sqlx::query(&format!("DEALLOCATE {name}"))
-                .execute(&mut *plan_tx)
-                .await
-                .unwrap();
-        }
-        plan_tx.commit().await.unwrap();
-
-        for (
-            label,
-            plan,
-            maximum_sample_rows,
-            maximum_rollup_rows,
-            require_observed_at,
-            require_lock_rows,
-            allow_custom_sequential_scan,
-        ) in plans
-        {
-            let plan_root = &plan[0]["Plan"];
-            let plan_text = plan.to_string();
-            let mut import_class_stream_conditions = Vec::new();
-            collect_explain_index_conditions(
-                plan_root,
-                "traffic_counter_samples_import_class_stream_idx",
-                &mut import_class_stream_conditions,
-            );
-            let has_exact_class_stream_index =
-                import_class_stream_conditions.iter().any(|condition| {
-                    !condition.is_empty()
-                        && condition.contains("client_id =")
-                        && condition.contains("source_kind =")
-                        && condition.contains("interface =")
-                        && condition.contains("sample_source")
-                        && (!require_observed_at || condition.contains("observed_at"))
-                });
-            let sample_sequential_scan =
-                explain_relation_uses_sequential_scan(plan_root, "traffic_counter_samples");
-            if allow_custom_sequential_scan && mode == "force_custom_plan" {
-                assert!(
-                    has_exact_class_stream_index || sample_sequential_scan,
-                    "{mode} {label} lost both bounded sample access paths: {plan_text}"
-                );
-                assert!(
-                    !plan_uses_node_type(plan_root, "Sort"),
-                    "{mode} {label} introduced a sort for its near-full guard: {plan_text}"
-                );
-            } else {
-                assert!(
-                    has_exact_class_stream_index,
-                    "{mode} {label} lost its exact class+stream+time Index Cond: {plan_text}"
-                );
-                assert!(
-                    !sample_sequential_scan,
-                    "{mode} {label} selected a sample sequential scan: {plan_text}"
-                );
-            }
-            assert!(
-                !plan_text.contains("traffic_counter_samples_observed_idx")
-                    && !plan_text.contains("traffic_counter_samples_lookup_idx"),
-                "{mode} {label} selected a non-classified sample index: {plan_text}"
-            );
-            assert!(
-                !relation_uses_bitmap_scan(plan_root, "traffic_counter_samples"),
-                "{mode} {label} selected a sample bitmap scan: {plan_text}"
-            );
-            if require_lock_rows {
-                assert!(
-                    plan_uses_node_type(plan_root, "LockRows"),
-                    "{mode} {label} lost its row lock: {plan_text}"
-                );
-            }
-            let examined_sample_rows =
-                explain_relation_examined_rows(plan_root, "traffic_counter_samples");
-            assert!(
-                examined_sample_rows > 0.0 && examined_sample_rows <= maximum_sample_rows,
-                "{mode} {label} examined {examined_sample_rows} sample rows (maximum {maximum_sample_rows}): {plan_text}"
-            );
-            if let Some(maximum_rollup_rows) = maximum_rollup_rows {
-                let mut rollup_stream_conditions = Vec::new();
-                collect_explain_index_conditions(
-                    plan_root,
-                    "traffic_counter_rollups_range_idx",
-                    &mut rollup_stream_conditions,
-                );
-                collect_explain_index_conditions(
-                    plan_root,
-                    "traffic_counter_rollups_pkey",
-                    &mut rollup_stream_conditions,
-                );
-                assert!(
-                    rollup_stream_conditions.iter().any(|condition| {
-                        !condition.is_empty()
-                            && condition.contains("client_id =")
-                            && condition.contains("source_kind =")
-                            && condition.contains("interface =")
-                    }),
-                    "{mode} {label} lost its exact rollup stream Index Cond: {plan_text}"
-                );
-                assert!(
-                    !plan_text.contains("traffic_counter_rollups_retention_idx")
-                        && !explain_relation_uses_sequential_scan(
-                            plan_root,
-                            "traffic_counter_rollups",
-                        ),
-                    "{mode} {label} selected an unbounded rollup scan: {plan_text}"
-                );
-                let examined_rollup_rows =
-                    explain_relation_examined_rows(plan_root, "traffic_counter_rollups");
-                assert!(
-                    examined_rollup_rows > 0.0 && examined_rollup_rows <= maximum_rollup_rows,
-                    "{mode} {label} examined {examined_rollup_rows} rollup rows (maximum {maximum_rollup_rows}): {plan_text}"
-                );
-            }
-        }
-    }
-
-    db.cleanup().await;
-}
-
-#[tokio::test]
 async fn postgres_vnstat_interface_gate_rejects_the_complete_ineligible_set_before_import() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -25374,112 +24915,6 @@ async fn postgres_vnstat_interface_gate_rejects_the_complete_ineligible_set_befo
         .to_string()
         .contains("interface_excluded_by_network_policy:wg0"));
     tx.rollback().await.unwrap();
-
-    db.cleanup().await;
-}
-
-#[tokio::test]
-async fn postgres_vnstat_rerun_hydrates_only_non_import_boundary_rows() {
-    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
-        return;
-    };
-    let client_id = "traffic-import-bounded-rerun";
-    let start_unix = 1_722_470_400_i64;
-    insert_client(&db.pool, client_id, None).await;
-
-    sqlx::query(
-        r#"
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at,
-            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
-        )
-        SELECT
-            $1,
-            'host',
-            'eth0',
-            to_timestamp(($2::bigint - (generated.sample::bigint + 1) * 60)::double precision),
-            generated.sample::bigint,
-            generated.sample::bigint * 2,
-            0,
-            0,
-            'vnstat_import:11111111-1111-4111-8111-111111111111'
-        FROM generate_series(1, 50000) AS generated(sample)
-        "#,
-    )
-    .bind(client_id)
-    .bind(start_unix)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at,
-            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
-        )
-        SELECT
-            $1,
-            'host',
-            'eth0',
-            to_timestamp(($2::bigint + generated.sample::bigint * 60)::double precision),
-            50000 + generated.sample::bigint,
-            100000 + generated.sample::bigint,
-            0,
-            0,
-            'vnstat_import:11111111-1111-4111-8111-111111111111'
-        FROM generate_series(0, 9) AS generated(sample)
-        "#,
-    )
-    .bind(client_id)
-    .bind(start_unix)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO traffic_counter_samples (
-            client_id, source_kind, interface, observed_at,
-            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
-        )
-        VALUES
-            ($1, 'host', 'eth0', to_timestamp(($2::bigint - 60)::double precision), 700, 900, 3, 4, 'interface_counters'),
-            ($1, 'host', 'eth0', to_timestamp(($2::bigint + 600)::double precision), 20, 30, 5, 6, 'interface_counters')
-        "#,
-    )
-    .bind(client_id)
-    .bind(start_unix)
-    .execute(&db.pool)
-    .await
-    .unwrap();
-
-    let imported_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM traffic_counter_samples WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'",
-    )
-    .bind(client_id)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(imported_rows, 50_010);
-
-    let mut tx = db.pool.begin().await.unwrap();
-    let boundaries = load_postgres_import_boundary_samples(
-        &mut tx,
-        client_id,
-        &["eth0".to_string()],
-        start_unix as u64,
-    )
-    .await
-    .unwrap();
-    tx.rollback().await.unwrap();
-
-    assert_eq!(boundaries.len(), 2);
-    assert!(boundaries
-        .iter()
-        .all(|sample| sample.sample_source == "interface_counters"));
-    assert_eq!(boundaries[0].observed_unix, start_unix - 60);
-    assert_eq!(boundaries[0].rx_bytes, 700);
-    assert_eq!(boundaries[1].observed_unix, start_unix + 600);
-    assert_eq!(boundaries[1].tx_bytes, 30);
 
     db.cleanup().await;
 }
@@ -25698,19 +25133,10 @@ async fn postgres_vnstat_reimport_replaces_only_imported_traffic_ledger() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(imported_exact, 1);
-    let import_predecessor_promoted: bool = sqlx::query_scalar(
-        r#"
-        SELECT inbound_promoted
-        FROM traffic_counter_samples
-        WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'
-        "#,
-    )
-    .bind(client_id)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert!(import_predecessor_promoted);
+    assert_eq!(
+        imported_exact, 0,
+        "old history is written directly to rollups"
+    );
     let live_counter_epochs: (i64, i64) = sqlx::query_as(
         r#"
         SELECT rx_counter_epoch, tx_counter_epoch
@@ -25726,19 +25152,6 @@ async fn postgres_vnstat_reimport_replaces_only_imported_traffic_ledger() {
     .await
     .unwrap();
     assert_eq!(live_counter_epochs, (5, 6));
-    let imported_counter_epochs: (i64, i64) = sqlx::query_as(
-        r#"
-        SELECT rx_counter_epoch, tx_counter_epoch
-        FROM traffic_counter_samples
-        WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'
-        "#,
-    )
-    .bind(client_id)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(imported_counter_epochs, (6, 7));
-
     db.cleanup().await;
 }
 
@@ -25814,22 +25227,12 @@ async fn postgres_old_vnstat_import_allows_retained_rollup_without_raw_successor
             .await
             .unwrap();
     }
-    let imported_predecessor: (i64, bool, i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            count(*)::bigint,
-            bool_and(inbound_promoted),
-            min(rx_counter_epoch)::bigint,
-            min(tx_counter_epoch)::bigint
-        FROM traffic_counter_samples
-        WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'
-        "#,
-    )
-    .bind(client_id)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(imported_predecessor, (1, true, 1, 1));
+    let imported_raw: i64 = sqlx::query_scalar("SELECT count(*) FROM traffic_counter_samples WHERE client_id=$1 AND sample_source LIKE 'vnstat_import:%'")
+        .bind(client_id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        imported_raw, 0,
+        "old imports do not regenerate raw predecessors"
+    );
     let live_raw_rows: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*)
@@ -25967,7 +25370,7 @@ async fn postgres_five_year_vnstat_import_stays_bounded_and_exact() {
             count(*) FILTER (WHERE inbound_promoted)::bigint,
             extract(epoch FROM min(observed_at))::bigint,
             extract(epoch FROM max(observed_at))::bigint,
-            extract(epoch FROM min(observed_at) FILTER (WHERE inbound_promoted))::bigint
+            count(*) FILTER (WHERE usage_authoritative)::bigint
         FROM traffic_counter_samples
         WHERE client_id = $1
           AND source_kind = 'host'
@@ -25979,17 +25382,17 @@ async fn postgres_five_year_vnstat_import_stays_bounded_and_exact() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    let raw_cutoff_unix = raw_shape.2 + 60;
-    assert!(raw_shape.0 <= 10_141);
+    let raw_cutoff_unix = raw_shape.2;
+    assert!(raw_shape.0 <= (i64::from(TRAFFIC_COUNTER_RAW_RETENTION_DAYS) * 24 + 1) * 60);
     assert!(
         raw_cutoff_unix == raw_cutoff_before || raw_cutoff_unix == raw_cutoff_after,
         "oldest retained import must fence the database UTC retention cutoff",
     );
-    assert_eq!(raw_shape.0, (live_unix - raw_cutoff_unix) / 60 + 1);
-    assert_eq!(raw_shape.1, 1);
-    assert_eq!(raw_shape.2, raw_cutoff_unix - 60);
+    assert_eq!(raw_shape.0, (live_unix - raw_cutoff_unix) / 60);
+    assert_eq!(raw_shape.1, 0);
+    assert_eq!(raw_shape.2, raw_cutoff_unix);
     assert_eq!(raw_shape.3, live_unix - 60);
-    assert_eq!(raw_shape.4, raw_cutoff_unix - 60);
+    assert_eq!(raw_shape.4, raw_shape.0);
 
     let rollup_shape: (i64, i64, i64, i64) = sqlx::query_as(
         r#"
@@ -26017,25 +25420,10 @@ async fn postgres_five_year_vnstat_import_stays_bounded_and_exact() {
 
     let recent_raw_bytes: (i64, i64) = sqlx::query_as(
         r#"
-        WITH sequenced AS (
-            SELECT
-                observed_at,
-                rx_bytes,
-                tx_bytes,
-                lag(rx_bytes) OVER (ORDER BY observed_at) AS previous_rx_bytes,
-                lag(tx_bytes) OVER (ORDER BY observed_at) AS previous_tx_bytes
-            FROM traffic_counter_samples
-            WHERE client_id = $1
-              AND source_kind = 'host'
-              AND interface = 'eth0'
-              AND sample_source LIKE 'vnstat_import:%'
-        )
-        SELECT
-            coalesce(sum(rx_bytes - previous_rx_bytes)
-                FILTER (WHERE observed_at >= to_timestamp($2)), 0)::bigint,
-            coalesce(sum(tx_bytes - previous_tx_bytes)
-                FILTER (WHERE observed_at >= to_timestamp($2)), 0)::bigint
-        FROM sequenced
+        SELECT coalesce(sum(rx_usage_bytes),0)::bigint, coalesce(sum(tx_usage_bytes),0)::bigint
+        FROM traffic_counter_samples
+        WHERE client_id=$1 AND source_kind='host' AND interface='eth0'
+          AND sample_source LIKE 'vnstat_import:%' AND observed_at>=to_timestamp($2)
         "#,
     )
     .bind(client_id)
@@ -26497,6 +25885,8 @@ async fn capture_current_database_statement_stats(
                 shared_blks_hit,
                 temp_blks_read,
                 temp_blks_written,
+                toplevel,
+                wal_bytes,
                 regexp_replace(btrim(query), '[[:space:]]+', ' ', 'g') AS normalized_query
             FROM pg_stat_statements
             WHERE dbid = (
@@ -26515,6 +25905,7 @@ async fn capture_current_database_statement_stats(
                 'statements', (SELECT count(*) FROM statements),
                 'calls', (SELECT coalesce(sum(calls), 0) FROM statements),
                 'rows', (SELECT coalesce(sum(rows), 0) FROM statements),
+                'top_level_wal_bytes', (SELECT coalesce(sum(wal_bytes) FILTER (WHERE toplevel), 0) FROM statements),
                 'total_plan_time_ms',
                     (SELECT coalesce(sum(total_plan_time), 0) FROM statements),
                 'total_exec_time_ms',
@@ -27254,38 +26645,23 @@ async fn verify_exact_vnstat_probe_client(
 ) -> anyhow::Result<(String, i64)> {
     let raw: (i64, i64, i64, String, i64, i64) = sqlx::query_as(
         r#"
-        WITH sequenced AS (
-            SELECT
-                sample_source,
-                inbound_promoted,
-                rx_bytes,
-                tx_bytes,
-                lag(rx_bytes) OVER (ORDER BY observed_at) AS previous_rx_bytes,
-                lag(tx_bytes) OVER (ORDER BY observed_at) AS previous_tx_bytes
-            FROM traffic_counter_samples
-            WHERE client_id = $1
-              AND source_kind = 'host'
-              AND interface = 'eth0'
-              AND sample_source LIKE 'vnstat_import:%'
-        )
-        SELECT
-            count(*)::bigint,
+        SELECT count(*)::bigint,
             count(*) FILTER (WHERE inbound_promoted)::bigint,
-            count(DISTINCT sample_source)::bigint,
-            min(sample_source),
-            coalesce(sum(rx_bytes - previous_rx_bytes)
-                FILTER (WHERE previous_rx_bytes IS NOT NULL), 0)::bigint,
-            coalesce(sum(tx_bytes - previous_tx_bytes)
-                FILTER (WHERE previous_tx_bytes IS NOT NULL), 0)::bigint
-        FROM sequenced
+            count(DISTINCT sample_source)::bigint, min(sample_source),
+            coalesce(sum(rx_usage_bytes),0)::bigint,coalesce(sum(tx_usage_bytes),0)::bigint
+        FROM traffic_counter_samples
+        WHERE client_id=$1 AND source_kind='host' AND interface='eth0'
+          AND sample_source LIKE 'vnstat_import:%' AND usage_authoritative
         "#,
     )
     .bind(&spec.client_id)
     .fetch_one(&db.verifier_pool)
     .await?;
-    anyhow::ensure!((1..=10_141).contains(&raw.0));
-    anyhow::ensure!(raw.1 == 1 && raw.2 == 1);
-    anyhow::ensure!(raw.3 == format!("vnstat_import:{job_id}"));
+    anyhow::ensure!(
+        (1..=(i64::from(TRAFFIC_COUNTER_RAW_RETENTION_DAYS) * 24 + 1) * 60).contains(&raw.0)
+    );
+    anyhow::ensure!(raw.1 == 0 && raw.2 == 1);
+    anyhow::ensure!(raw.3 == format!("vnstat_import:{}", previous_job_id.unwrap_or(job_id)));
 
     let rollup: (i64, i64, i64, i64) = sqlx::query_as(
         r#"
@@ -27329,8 +26705,8 @@ async fn verify_exact_vnstat_probe_client(
             extract(epoch FROM observed_at)::bigint,
             rx_bytes,
             tx_bytes,
-            rx_counter_epoch - previous_rx_epoch,
-            tx_counter_epoch - previous_tx_epoch,
+            rx_counter_epoch,
+            tx_counter_epoch,
             count(*) OVER ()::bigint,
             previous_source
         FROM sequenced
@@ -27342,7 +26718,7 @@ async fn verify_exact_vnstat_probe_client(
     .await?;
     anyhow::ensure!(live_boundary.0 == live_unix);
     anyhow::ensure!(live_boundary.1 == 10 && live_boundary.2 == 20);
-    anyhow::ensure!(live_boundary.3 == 1 && live_boundary.4 == 1);
+    anyhow::ensure!(live_boundary.3 == 0 && live_boundary.4 == 0);
     anyhow::ensure!(live_boundary.5 == 1 && live_boundary.6.starts_with("vnstat_import:"));
 
     let hourly_parity: (i64, i64, i64) = sqlx::query_as(
@@ -27355,6 +26731,7 @@ async fn verify_exact_vnstat_probe_client(
                 rx_counter_epoch,
                 tx_counter_epoch,
                 sample_source,
+                usage_authoritative, rx_usage_bytes, tx_usage_bytes, rx_reset_count, tx_reset_count,
                 lag(rx_bytes) OVER (ORDER BY observed_at) AS previous_rx_bytes,
                 lag(tx_bytes) OVER (ORDER BY observed_at) AS previous_tx_bytes,
                 lag(rx_counter_epoch) OVER (ORDER BY observed_at) AS previous_rx_epoch,
@@ -27368,20 +26745,14 @@ async fn verify_exact_vnstat_probe_client(
                     interval '1 hour', observed_at,
                     TIMESTAMPTZ '1970-01-01 00:00:00+00'
                 ) AS bucket_start,
-                coalesce(sum(CASE WHEN rx_counter_epoch = previous_rx_epoch
+                coalesce(sum(CASE WHEN usage_authoritative THEN rx_usage_bytes WHEN rx_counter_epoch = previous_rx_epoch
                     AND rx_bytes >= previous_rx_bytes
                     THEN rx_bytes - previous_rx_bytes ELSE 0 END), 0)::bigint AS rx_bytes,
-                coalesce(sum(CASE WHEN tx_counter_epoch = previous_tx_epoch
+                coalesce(sum(CASE WHEN usage_authoritative THEN tx_usage_bytes WHEN tx_counter_epoch = previous_tx_epoch
                     AND tx_bytes >= previous_tx_bytes
                     THEN tx_bytes - previous_tx_bytes ELSE 0 END), 0)::bigint AS tx_bytes,
-                count(*) FILTER (WHERE previous_rx_epoch IS NOT NULL
-                    AND rx_counter_epoch <> previous_rx_epoch
-                    AND NOT (previous_source LIKE 'vnstat_import:%'
-                        AND sample_source NOT LIKE 'vnstat_import:%'))::integer AS rx_resets,
-                count(*) FILTER (WHERE previous_tx_epoch IS NOT NULL
-                    AND tx_counter_epoch <> previous_tx_epoch
-                    AND NOT (previous_source LIKE 'vnstat_import:%'
-                        AND sample_source NOT LIKE 'vnstat_import:%'))::integer AS tx_resets,
+                sum(rx_reset_count)::integer AS rx_resets,
+                sum(tx_reset_count)::integer AS tx_resets,
                 count(*)::integer AS samples,
                 min(observed_at) AS first_observed_at,
                 max(observed_at) AS latest_observed_at
@@ -27462,8 +26833,8 @@ async fn verify_exact_vnstat_probe_client(
         .fetch_one(&db.verifier_pool)
         .await?;
         anyhow::ensure!(
-            previous_rows == 0,
-            "old import source rows survived reimport"
+            previous_rows == raw.0,
+            "unchanged reimport must preserve prior row provenance"
         );
     }
     Ok((
@@ -27535,6 +26906,10 @@ async fn exact_vnstat_probe_fault_injection(
     .execute(&db.setup_pool)
     .await?;
     let failure_job_id = Uuid::new_v4();
+    let mut changed_buckets = spec.buckets.clone();
+    for bucket in &mut changed_buckets {
+        bucket.rx_bytes += u64::from(bucket.duration_secs) / 60;
+    }
     let failure = tokio::time::timeout(
         Duration::from_secs(60),
         db.repo.import_vnstat_traffic_history(
@@ -27543,7 +26918,7 @@ async fn exact_vnstat_probe_fault_injection(
             &["eth0".to_string()],
             u64::try_from(start_unix)?,
             &spec.result,
-            &spec.buckets,
+            &changed_buckets,
             u64::try_from(live_unix + 60)?,
         ),
     )
@@ -27710,6 +27085,7 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
         &initial_application_name,
     )
     .await?;
+    let initial_clock = std::time::Instant::now();
     let initial_concurrency = run_exact_vnstat_import_calls(
         db,
         probe,
@@ -27720,6 +27096,7 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
         &initial_application_name,
     )
     .await?;
+    let initial_ms = initial_clock.elapsed().as_millis();
     let initial_attribution = finish_postgres_measured_phase(
         &db.importer_pool,
         probe.client_count(),
@@ -27730,6 +27107,11 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
     )
     .await?;
     initial_attribution.assert_clean()?;
+    eprintln!(
+        "vnStat {} initial: elapsed_ms={initial_ms}, SQL={}",
+        probe.label(),
+        initial_attribution.statements["summary"]
+    );
     anyhow::ensure!(initial_concurrency == probe.client_count());
     for spec in &specs {
         complete_exact_vnstat_probe_job(&db.setup_pool, spec, spec.initial_job_id).await?;
@@ -27777,6 +27159,7 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
                 .collect::<BTreeSet<_>>(),
         "exact probe importer pool did not preserve its backends/prepared caches between phases",
     );
+    let reimport_clock = std::time::Instant::now();
     let reimport_concurrency = run_exact_vnstat_import_calls(
         db,
         probe,
@@ -27787,6 +27170,7 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
         &reimport_application_name,
     )
     .await?;
+    let reimport_ms = reimport_clock.elapsed().as_millis();
     let reimport_attribution = finish_postgres_measured_phase(
         &db.importer_pool,
         probe.client_count(),
@@ -27797,6 +27181,11 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
     )
     .await?;
     reimport_attribution.assert_clean()?;
+    eprintln!(
+        "vnStat {} unchanged rerun: elapsed_ms={reimport_ms}, SQL={}",
+        probe.label(),
+        reimport_attribution.statements["summary"]
+    );
     anyhow::ensure!(reimport_concurrency == probe.client_count());
     for spec in &specs {
         complete_exact_vnstat_probe_job(&db.setup_pool, spec, spec.reimport_job_id).await?;
@@ -27814,7 +27203,10 @@ async fn run_exact_five_year_vnstat_reimport_probe_body(
             .get(&spec.client_id)
             .ok_or_else(|| anyhow::anyhow!("missing initial exact-probe state"))?;
         anyhow::ensure!(&reimport_fingerprint == initial_fingerprint);
-        anyhow::ensure!(reimport_revision > *initial_revision);
+        anyhow::ensure!(
+            reimport_revision == *initial_revision,
+            "unchanged reimport must not advance traffic revisions"
+        );
     }
 
     if matches!(probe, ExactVnstatReimportProbe::OneClient) {
@@ -50263,3 +49655,5 @@ async fn postgres_tunnel_display_name_migration_resets_only_owned_evidence() {
     assert_eq!(accepted, new_identity);
     db.cleanup().await;
 }
+#[path = "tests_postgres_vnstat_ranges.rs"]
+mod vnstat_ranges;

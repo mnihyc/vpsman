@@ -359,6 +359,36 @@ fn network_interfaces_read_uses_its_original_dispatch_protocol() {
 }
 
 #[test]
+fn best_effort_vnstat_import_requires_a_compatible_collector() {
+    for interfaces in [vec![], vec!["eth0".into()], vec!["e*".into()]] {
+        let command = JobCommand::NetworkTrafficImportVnstat {
+            interfaces,
+            start_unix: 60,
+        };
+        assert_eq!(super::job_command_dispatch_protocol_version(&command), 10);
+        assert_eq!(
+            super::job_command_min_supported_protocol_version(&command),
+            10
+        );
+    }
+    for valid in ["eth0", "ens3", "eth0:1", "e*", "*", "br-*"] {
+        assert!(
+            super::valid_network_traffic_import_selector(valid),
+            "{valid}"
+        );
+    }
+    for invalid in ["", "e**", "*e", "e*h", "eth 0", "../eth0", "e?"] {
+        assert!(
+            !super::valid_network_traffic_import_selector(invalid),
+            "{invalid}"
+        );
+    }
+    assert!(!super::valid_network_traffic_import_selector(
+        &"e".repeat(65)
+    ));
+}
+
+#[test]
 fn runtime_config_commands_require_the_current_dispatch_protocol() {
     let config_read = JobCommand::ConfigRead;
     assert_eq!(
