@@ -45,7 +45,7 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 10;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 11;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -54,6 +54,7 @@ pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const TUNNEL_ADDRESS_MANAGEMENT_PROTOCOL_VERSION: u16 = 6;
 pub const FOU_TUNNEL_KIND_PROTOCOL_VERSION: u16 = 7;
+pub const GRE6_TUNNEL_PROTOCOL_VERSION: u16 = 11;
 pub const INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION: u16 = 8;
 pub const OSPF_DIRECTIONAL_COST_PROTOCOL_VERSION: u16 = 9;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -3451,6 +3452,14 @@ fn runtime_config_protocol_version(config: &AgentRuntimeConfig) -> u16 {
         .network
         .runtime_status_telemetry_plans
         .iter()
+        .any(|entry| tunnel_plan_has_gre6(&entry.plan))
+    {
+        return GRE6_TUNNEL_PROTOCOL_VERSION;
+    }
+    if config
+        .network
+        .runtime_status_telemetry_plans
+        .iter()
         .any(|entry| tunnel_plan_has_directional_ospf_fields(&entry.plan))
     {
         return OSPF_DIRECTIONAL_COST_PROTOCOL_VERSION;
@@ -3509,6 +3518,9 @@ fn runtime_config_protocol_version(config: &AgentRuntimeConfig) -> u16 {
 }
 
 fn tunnel_plan_command_protocol_version(plan: &TunnelPlan, baseline: u16) -> u16 {
+    if tunnel_plan_has_gre6(plan) {
+        return GRE6_TUNNEL_PROTOCOL_VERSION;
+    }
     // Even explicit neutral defaults change serialized plan bytes and hashes.
     // Frozen legacy commands retain their original shape and protocol version.
     if tunnel_plan_has_directional_ospf_fields(plan) {
@@ -3524,6 +3536,11 @@ fn tunnel_plan_command_protocol_version(plan: &TunnelPlan, baseline: u16) -> u16
     } else {
         baseline
     }
+}
+
+fn tunnel_plan_has_gre6(plan: &TunnelPlan) -> bool {
+    plan.kind == crate::TunnelKind::Gre6
+        || plan.runtime_control.fou.tunnel_kind == crate::RuntimeTunnelFouKind::Gre6
 }
 
 fn tunnel_plan_has_directional_ospf_fields(plan: &TunnelPlan) -> bool {

@@ -70,9 +70,9 @@ test("invalid OSPF directional drafts do not display a fabricated valid cost", (
 });
 
 test("FOU type owns derived protocol, family support and editable MTU baseline", () => {
-  expect(FOU_TUNNEL_KINDS).toEqual(["gre", "ipip", "sit"]);
+  expect(FOU_TUNNEL_KINDS).toEqual(["gre", "gre6", "ipip", "sit"]);
   expect(DEFAULT_RUNTIME_FOU_OPTIONS.tunnel_kind).toBe("gre");
-  for (const [kind, protocol, mtu] of [["gre", 47, 1468], ["ipip", 4, 1472], ["sit", 41, 1472]] as const) {
+  for (const [kind, protocol, mtu] of [["gre", 47, 1468], ["gre6", 47, 1440], ["ipip", 4, 1472], ["sit", 41, 1472]] as const) {
     const runtime = buildRuntimeControl("agent_builtin", {
       ingressKbps: "", egressKbps: "", burstKb: "", fouTunnelKind: kind,
       fouPort: "15555", fouPeerPort: "15556",
@@ -85,13 +85,14 @@ test("FOU type owns derived protocol, family support and editable MTU baseline",
     expect(isDerivedAgentTunnelMtu("fou", 1400, kind)).toBe(false);
   }
   expect(validateFouAddressFamilies("gre", true, true)).toBeNull();
+  expect(validateFouAddressFamilies("gre6", true, true)).toBeNull();
   expect(validateFouAddressFamilies("ipip", true, false)).toBeNull();
   expect(validateFouAddressFamilies("sit", false, true)).toBeNull();
   expect(validateFouAddressFamilies("ipip", false, true)).toContain("IPv4 only");
   expect(validateFouAddressFamilies("sit", true, false)).toContain("IPv6 only");
   expect(() => buildRuntimeControl("agent_builtin", {
     ingressKbps: "", egressKbps: "", burstKb: "", fouTunnelKind: "47" as never,
-  })).toThrow("FOU tunnel type must be GRE, IPIP, or SIT");
+  })).toThrow("FOU tunnel type must be GRE, GRE6, IPIP, or SIT");
 });
 
 test("FOU review separates receive and peer ports from the encapsulated type", () => {
@@ -436,6 +437,7 @@ test("Agent builtin tunnel MTU defaults account for encapsulation", () => {
   expect(defaultAgentTunnelMtu("ipip")).toBe(1480);
   expect(defaultAgentTunnelMtu("sit")).toBe(1480);
   expect(defaultAgentTunnelMtu("fou")).toBe(1468);
+  expect(defaultAgentTunnelMtu("gre6")).toBe(1448);
   expect(defaultAgentTunnelMtu("wireguard")).toBe(1420);
   expect(defaultAgentTunnelMtu("openvpn")).toBe(1500);
   expect(defaultAgentTunnelMtu("tun_tap")).toBeNull();

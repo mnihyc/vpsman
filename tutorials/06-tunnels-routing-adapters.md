@@ -11,7 +11,7 @@ software. An operator selects one runtime ownership mode for each plan:
 | **Custom adapter** | The agent invokes the selected operator-supplied lifecycle commands as bounded argv and records their results. | The adapter owns its implementation, credentials, process, routes, and daemon state. | vpsman invokes only the bound stop or cleanup command and never deletes the adapter executable. |
 
 **Agent builtin** is an ownership boundary, not another name for iproute2. GRE,
-IPIP, SIT, and FOU use the built-in iproute2 driver. WireGuard and OpenVPN fit
+GRE6, IPIP, SIT, and FOU use the built-in iproute2 driver. WireGuard and OpenVPN fit
 the same ownership mode when their kind-specific driver and endpoint
 prerequisites are available. Missing prerequisites remain an explicit failed or
 degraded state; vpsman never falls back to either non-builtin mode.
@@ -128,14 +128,14 @@ their claims; TCP and UDP may use the same numeric port.
 ## Agent builtin inputs and prerequisites
 
 The selected tunnel kind determines the driver and its small additional input
-set. GRE, IPIP, SIT, FOU, WireGuard, and OpenVPN have built-in implementations.
+set. GRE, GRE6, IPIP, SIT, FOU, WireGuard, and OpenVPN have built-in implementations.
 Selecting one never reclassifies an existing External observed or Custom
 adapter plan. Driver availability is endpoint evidence, not permission to
 install packages or change firewall policy:
 
 | Kind | Additional plan inputs | Endpoint prerequisites and ownership |
 | --- | --- | --- |
-| GRE, IPIP, SIT, FOU | Existing underlay addresses; FOU additionally selects GRE, IPIP, or SIT encapsulation and local/peer UDP ports. | Configured `ip` and `tc` commands, Linux support for the selected kind, and root execution under the default mutation gate. The agent owns the declared link, addresses, MTU, routes, and shaping. |
+| GRE, GRE6, IPIP, SIT, FOU | Existing underlay addresses; FOU additionally selects GRE, GRE6, IPIP, or SIT encapsulation and local/peer UDP ports. | Configured `ip` and `tc` commands, Linux support for the selected kind, and root execution under the default mutation gate. The agent owns the declared link, addresses, MTU, routes, and shaping. |
 | WireGuard | Fixed VPS (`left`, `right`, or `both`, default `both`); left and right UDP listen ports (default `51820`); left and right persistent-keepalive seconds (`25` recommended, `0` disables it). | Configured `ip` and `wg` commands, kernel WireGuard support, and root execution. In a one-sided mode the roaming VPS receives the fixed VPS destination and should initiate traffic; the fixed VPS omits the roaming destination and learns it from authenticated WireGuard traffic. The enabled IPv4/IPv6 families use a full-family peer ACL so static and OSPF-learned routes can traverse the point-to-point link; this does not install a default route. WireGuard has no TCP mode or direct local-source bind setting. |
 | OpenVPN | Transport (`UDP` or `TCP`), listener side (`left` or `right`), and listener port (default `1194`). | Configured `openvpn` 2.4 or newer (verified with 2.4–2.6), `/dev/net/tun`, and root execution under the default mutation gate. The agent selects the installed version's supported cipher directive. The listener is the TLS server; the other endpoint is the TLS client, including complementary `tcp-server`/`tcp-client` roles for TCP. |
 
@@ -165,27 +165,50 @@ Upgrade endpoint agents to v0.5.20 for this behavior. Runtime configurations
 whose behavior changed require protocol 8; unchanged configurations keep their
 existing protocol requirements. No database migration or plan rewrite is needed.
 
+### GRE6 underlay
+
+Choose **GRE6** (`--kind gre6`) for GRE over IPv6. Both IPv4 and IPv6 inner
+addresses, managed link-local addresses and OSPF use the existing workflow.
+Each endpoint needs an explicit local IPv6 address assigned to that VPS and
+a reachable remote IPv6 address. Blank, unspecified, multicast and link-local
+underlays are rejected: Linux cannot transmit with an unspecified GRE6 source,
+and these plans do not declare a physical device for scoped underlays.
+
+The agent creates Linux `ip6gre` interfaces with hop limit 255 and the default
+encapsulation limit 4. The editable MTU suggestion is 1448 for a 1500-byte
+underlay, accounting for 40 bytes of IPv6, 4 bytes of GRE and the 8-byte
+encapsulation-limit option. Existing GRE continues to use IPv4 and MTU 1476.
+Both endpoint agents must support command protocol 11. Linux `ip6_gre` support
+is required; GRE6 over FOU additionally requires `fou6` support loaded on both
+VPSs. Kernel modules remain an operator prerequisite, as with other drivers.
+
 ### FOU encapsulated tunnel type
 
 FOU transports a selected tunnel protocol over UDP. Choose **GRE** (the default),
-**IPIP**, or **SIT** in **Encapsulated tunnel**. The agent uses the same selection
+**GRE6**, **IPIP**, or **SIT** in **Encapsulated tunnel**. The agent uses the same selection
 for its native link type and the receive port's IP protocol; protocol numbers are
 not a separate editable input.
 
 | Encapsulated tunnel | Derived IP protocol | Inner address families | Suggested MTU |
 | --- | ---: | --- | ---: |
 | GRE | 47 | IPv4 and IPv6 | 1468 |
+| GRE6 | 47 | IPv4 and IPv6 | 1440 |
 | IPIP | 4 | IPv4 only | 1472 |
 | SIT | 41 | IPv6 only | 1472 |
 
-These MTU suggestions assume a 1500-byte IPv4 underlay and account for UDP and
-any GRE header. Both endpoint MTUs remain editable. Changing the type updates
+These MTU suggestions assume a 1500-byte underlay and account for UDP and
+the tunnel headers. GRE6 uses IPv6 and its default encapsulation-limit option;
+the other types use IPv4. Both endpoint MTUs remain editable. Changing the type updates
 only still-derived suggestions; explicit MTUs and addresses are not silently
 rewritten. Unsupported primary or additional address families are rejected.
-The existing IPv4 outer-address requirement is unchanged.
+GRE6 follows the explicit IPv6 underlay requirements above. Its UDP listener
+is IPv6-only and outgoing UDPv6 checksums are enabled. Existing IPv4 FOU
+listener and checksum behavior is unchanged.
+FOU listener reuse requires iproute2 with JSON support for `ip -j fou show`;
+older versions that return plain text cannot provide the required ownership evidence.
 
-The declaration stores `runtime_control.fou.tunnel_kind` as `gre`, `ipip`, or
-`sit`. CLI and VTY use `--fou-tunnel-kind gre|ipip|sit`, with optional
+The declaration stores `runtime_control.fou.tunnel_kind` as `gre`, `gre6`, `ipip`, or
+`sit`. CLI and VTY use `--fou-tunnel-kind gre|gre6|ipip|sit`, with optional
 `--fou-port` and `--fou-peer-port`. The old `--fou-ipproto` flag and JSON `ipproto`
 input are rejected rather than interpreted as a different tunnel type.
 The hook placeholder `{fou_ipproto}` remains available as the derived value.
@@ -195,7 +218,7 @@ link or listener whose type or receive protocol does not match.
 
 FOU commands and runtime configurations require agents advertising command
 protocol **7** or newer, even when GRE defaults are omitted from the declaration.
-Update both endpoint agents before enabling a FOU plan. Unrelated tunnel kinds
+FOU GRE6 requires protocol 11. Update both endpoint agents before enabling a FOU plan. Unrelated tunnel kinds
 retain their existing protocol requirements.
 
 ### Built-in credentials
@@ -291,7 +314,7 @@ until both endpoint sync jobs succeed.
 
 Changing an immutable runtime identity, such as interface, kind, endpoint VPS,
 or endpoint address, removes the old declared state before reconciling the new
-state. GRE, IPIP, SIT, and FOU underlay changes are also identity changes.
+state. GRE, GRE6, IPIP, SIT, and FOU underlay changes are also identity changes.
 WireGuard applies underlay, listener, roaming, keepalive, and MTU edits to its
 existing interface; OpenVPN restarts only its owned process when an underlay or
 runtime setting changes. Routes and stale interfaces remain explicit: the
@@ -685,7 +708,8 @@ enable/disable changes, or retirement clear it back to automatic measurement.
 - Endpoints must be two different registered VPSs. Each remote destination is
   required. Its optional local source is validated only against that endpoint's
   address family; no address equality or cross-endpoint derivation is allowed.
-  The GRE, IPIP, SIT, and FOU built-in driver uses IPv4 outer addresses. Other
+  GRE6 and FOU GRE6 require explicit local and remote IPv6 addresses; GRE,
+  IPIP, SIT, and the other FOU types use IPv4 outer addresses. Other
   built-in drivers validate their own transport family without assuming every
   VPS is dual-stack.
 - Keep each overlay address unique across saved plans and each interface name

@@ -39367,6 +39367,17 @@ async fn postgres_fou_typed_model_round_trips_without_rewriting_other_tunnels() 
     let mut previous_identity = None;
     for kind in RuntimeTunnelFouKind::ALL {
         input.runtime_control.fou.tunnel_kind = kind;
+        if kind == RuntimeTunnelFouKind::Gre6 {
+            input.left_local_underlay = Some("2001:db8::1".into());
+            input.left_remote_underlay = "2001:db8::2".into();
+            input.right_local_underlay = Some("2001:db8::2".into());
+            input.right_remote_underlay = "2001:db8::1".into();
+        } else {
+            input.left_local_underlay = None;
+            input.right_local_underlay = None;
+            input.left_remote_underlay = "192.0.2.2".into();
+            input.right_remote_underlay = "192.0.2.1".into();
+        }
         input.left_mtu = Some(kind.default_mtu());
         input.right_mtu = input.left_mtu;
         if kind == RuntimeTunnelFouKind::Sit {
@@ -39397,7 +39408,7 @@ async fn postgres_fou_typed_model_round_trips_without_rewriting_other_tunnels() 
         for owner in ["input", "plan"] {
             assert_eq!(
                 raw[owner]["runtime_control"]["fou"]["tunnel_kind"],
-                kind.linux_tunnel_mode()
+                kind.name()
             );
             assert!(raw[owner]["runtime_control"]["fou"]
                 .get("ipproto")
@@ -39468,6 +39479,31 @@ async fn postgres_fou_typed_model_round_trips_without_rewriting_other_tunnels() 
         before, after,
         "FOU model change rewrote an unrelated tunnel"
     );
+    // Native GRE6 uses the existing text/JSON storage and graph type mapping.
+    input.kind = TunnelKind::Gre6;
+    input.runtime_control.fou = Default::default();
+    input.left_local_underlay = Some("2001:db8::1".into());
+    input.left_remote_underlay = "2001:db8::2".into();
+    input.right_local_underlay = Some("2001:db8::2".into());
+    input.right_remote_underlay = "2001:db8::1".into();
+    input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre6);
+    input.right_mtu = input.left_mtu;
+    let stored = db
+        .repo
+        .update_tunnel_plan(
+            stored.id,
+            stored.revision,
+            &input,
+            &plan_tunnel(&input).unwrap(),
+            false,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let read = db.repo.get_tunnel_plan(stored.id).await.unwrap().unwrap();
+    assert_eq!(read.kind, TunnelKind::Gre6);
+    assert_eq!(read.input, input);
+    assert_eq!(read.plan.kind, TunnelKind::Gre6);
     db.cleanup().await;
 }
 

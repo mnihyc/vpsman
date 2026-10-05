@@ -298,6 +298,8 @@ export function defaultAgentTunnelMtu(
   switch (kind) {
     case "gre":
       return 1476;
+    case "gre6":
+      return 1448; // IPv6 + GRE + the default encapsulation-limit option.
     case "ipip":
     case "sit":
       return 1480;
@@ -332,7 +334,7 @@ export function validateFouAddressFamilies(
   ipv6: boolean,
 ): string | null {
   const details = FOU_TUNNEL_KIND_DETAILS[kind];
-  if (!details) return "FOU tunnel type must be GRE, IPIP, or SIT";
+  if (!details) return "FOU tunnel type must be GRE, GRE6, IPIP, or SIT";
   if (ipv4 && !details.ipv4) return "FOU SIT carries IPv6 only; remove IPv4 addresses or select GRE";
   if (ipv6 && !details.ipv6) return "FOU IPIP carries IPv4 only; remove IPv6 addresses or select GRE";
   return null;
@@ -702,7 +704,7 @@ function buildFouOptions(
   values: RuntimeControlFormValues,
 ): RuntimeTunnelFouOptions | undefined {
   if (values.fouTunnelKind && !FOU_TUNNEL_KINDS.includes(values.fouTunnelKind)) {
-    throw new Error("FOU tunnel type must be GRE, IPIP, or SIT");
+    throw new Error("FOU tunnel type must be GRE, GRE6, IPIP, or SIT");
   }
   const fou: RuntimeTunnelFouOptions = {
     port: numericValueOrDefault(

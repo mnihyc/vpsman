@@ -2173,6 +2173,7 @@ export type EventScheduleTemplatePreviewResponse = {
 
 export type TunnelKind =
   | "gre"
+  | "gre6"
   | "ipip"
   | "sit"
   | "fou"

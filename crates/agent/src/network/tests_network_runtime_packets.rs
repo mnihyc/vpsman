@@ -198,13 +198,34 @@ async fn fou_gre_packet_and_address_lifecycle() {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and kernel ip6_gre"]
+async fn gre6_packet_and_address_lifecycle() {
+    builtin_packet_matrix(&[TunnelKind::Gre6]).await;
+    builtin_address_policy_matrix(&[TunnelKind::Gre6]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and kernel fou6"]
+async fn fou_gre6_packet_and_address_lifecycle() {
+    require_isolated_network();
+    // An unrelated IPv4 listener on the same port must survive IPv6 ownership
+    // checks and teardown. The product's conservative port reservations remain.
+    checked_native("/sbin/ip", &["fou", "add", "port", "5555", "ipproto", "47"]).await;
+    builtin_packet_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Gre6).await;
+    builtin_address_policy_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Gre6).await;
+    let listeners: serde_json::Value = serde_json::from_slice(&checked_native("/sbin/ip", &["-j", "fou", "show"]).await.stdout).unwrap();
+    assert!(listeners.as_array().unwrap().iter().any(|listener| listener["port"] == 5555 && listener["ipproto"] == 47 && matches!(listener["family"].as_str(), None | Some("inet"))), "unrelated IPv4 listener was removed: {listeners}");
+    checked_native("/sbin/ip", &["fou", "del", "port", "5555"]).await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and available kernel FOU/SIT"]
 async fn fou_sit_packet_and_address_lifecycle() {
     builtin_packet_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Sit).await;
     builtin_address_policy_matrix_with_fou(&[TunnelKind::Fou], vpsman_common::RuntimeTunnelFouKind::Sit).await;
 }
 
-async fn create_packet_namespaces() {
+async fn create_packet_namespaces(ipv6_underlay: bool) {
     for namespace in ["address-left", "address-right"] {
         checked_native("/sbin/ip", &["netns", "add", namespace]).await;
     }
@@ -248,6 +269,11 @@ async fn create_packet_namespaces() {
             ],
         )
         .await;
+    }
+    if ipv6_underlay {
+        for (namespace, device, address) in [("address-left", "under-left", "fd00:abcd::1/64"), ("address-right", "under-right", "fd00:abcd::2/64")] {
+            checked_native("/sbin/ip", &["-n", namespace, "-6", "addr", "add", address, "dev", device, "nodad"]).await;
+        }
     }
 }
 
@@ -295,8 +321,10 @@ async fn packet_openvpn_address_state(namespace: &str, interface: &str) -> serde
         "/sbin/ip", &["-n", namespace, "-j", "addr", "show", "dev", interface],
     ).await;
     let links: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(links.as_array().unwrap().len(), 1);
-    links[0].clone()
+    // iproute2 4.15 can prepend unnamed records to a device-filtered response.
+    let matching = links.as_array().unwrap().iter().filter(|link| link["ifname"] == interface).collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    matching[0].clone()
 }
 
 fn assert_packet_openvpn_address_tuples(
@@ -351,7 +379,7 @@ async fn packet_openvpn_identity(id: &str, side: &str, state: &serde_json::Value
 #[ignore = "requires disposable Docker private networking, SYS_ADMIN for nested namespaces, NET_ADMIN and WireGuard"]
 async fn parallel_plans_keep_distinct_stable_link_local_addresses_and_packets() {
     require_isolated_network();
-    create_packet_namespaces().await;
+    create_packet_namespaces(false).await;
     let mut plans = Vec::new();
     for index in 0..2u16 {
         let id = uuid::Uuid::new_v4();
@@ -574,16 +602,24 @@ async fn builtin_packet_matrix_with_openvpn_upgrade(
     }
     for &kind in kinds {
         let id = uuid::Uuid::new_v4().to_string();
-        create_packet_namespaces().await;
+        let gre6 = kind.iproute2_underlay_family(fou_kind) == Some(TunnelAddressFamily::Ipv6);
+        create_packet_namespaces(gre6).await;
         let mut plan = isolated_plan(kind);
         set_fou_test_kind(&mut plan, fou_kind);
         let carries_ipv4 = packet_test_supports_family(&plan, TunnelAddressFamily::Ipv4);
         let carries_ipv6 = packet_test_supports_family(&plan, TunnelAddressFamily::Ipv6);
         plan.interface_name = "vpspkt".into();
+        if gre6 {
+            // ip-link also accepts short names that resemble its options.
+            plan.interface_name = "t".into();
+        }
         plan.left_local_underlay = Some("192.0.2.1".into());
         plan.right_local_underlay = Some("192.0.2.2".into());
         plan.left_remote_underlay = "192.0.2.2".into();
         plan.right_remote_underlay = "192.0.2.1".into();
+        if gre6 {
+            set_gre6_test_underlay(&mut plan);
+        }
         if carries_ipv4 {
             plan.additional_addresses.left.ipv4 = vec!["10.254.20.1/30".into()];
             plan.additional_addresses.right.ipv4 = vec!["10.254.20.2/30".into()];
@@ -722,6 +758,21 @@ async fn builtin_packet_matrix_with_openvpn_upgrade(
                 }
             }
             wait_for_packet_openvpn_tls(&id, &plan.interface_name).await;
+        }
+        if gre6 {
+            // Reapply real ip6gre JSON and adopt the IPv6 FOU listener without
+            // replacing the link or changing its configured addresses.
+            for (namespace, side) in [("address-left", TunnelEndpointSide::Left), ("address-right", TunnelEndpointSide::Right)] {
+                let before = packet_openvpn_address_state(namespace, &plan.interface_name).await;
+                reconcile_packet_endpoint(namespace, &id, &plan, side, None).await;
+                let after = packet_openvpn_address_state(namespace, &plan.interface_name).await;
+                assert_eq!(before["ifindex"], after["ifindex"]);
+                assert_eq!(before["addr_info"], after["addr_info"]);
+            }
+            // Include default encapsulation-limit overhead at the MTU boundary.
+            for (target, header) in [("10.254.20.2", 28), ("fd00:123::2", 48)] {
+                checked_native("/sbin/ip", &["netns", "exec", "address-left", "/usr/bin/ping", "-n", "-c", "1", "-W", "2", "-M", "do", "-s", &(plan.left_mtu.unwrap() - header).to_string(), target]).await;
+            }
         }
         let mut targets = Vec::new();
         if kind == TunnelKind::Openvpn {

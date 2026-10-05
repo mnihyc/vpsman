@@ -5,6 +5,12 @@ fn fou_input(kind: RuntimeTunnelFouKind) -> TunnelPlanInput {
     input.runtime_control.fou.tunnel_kind = kind;
     input.left_mtu = Some(kind.default_mtu());
     input.right_mtu = Some(kind.default_mtu());
+    if kind == RuntimeTunnelFouKind::Gre6 {
+        input.left_remote_underlay = "2001:db8::2".into();
+        input.right_remote_underlay = "2001:db8::1".into();
+        input.left_local_underlay = Some("2001:db8::1".into());
+        input.right_local_underlay = Some("2001:db8::2".into());
+    }
     if kind == RuntimeTunnelFouKind::Sit {
         input.ipv4_tunnel = None;
         input.ipv6_tunnel = Some(TunnelAddressPair {
@@ -21,6 +27,7 @@ fn fou_input(kind: RuntimeTunnelFouKind) -> TunnelPlanInput {
 fn fou_type_owns_receive_protocol_transmit_device_and_preview() {
     for (kind, name, protocol, mtu) in [
         (RuntimeTunnelFouKind::Gre, "gre", 47, 1468),
+        (RuntimeTunnelFouKind::Gre6, "ip6gre", 47, 1440),
         (RuntimeTunnelFouKind::Ipip, "ipip", 4, 1472),
         (RuntimeTunnelFouKind::Sit, "sit", 41, 1472),
     ] {
@@ -57,11 +64,87 @@ fn fou_type_owns_receive_protocol_transmit_device_and_preview() {
             }));
         }
         let serialized = serde_json::to_value(&input.runtime_control.fou).unwrap();
-        assert_eq!(serialized["tunnel_kind"], name);
+        assert_eq!(serialized["tunnel_kind"], kind.name());
         assert!(serialized.get("ipproto").is_none());
         let roundtrip: TunnelPlanInput =
             serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
         assert_eq!(roundtrip, input);
+    }
+}
+
+#[test]
+fn gre6_native_and_fou_require_explicit_ipv6_underlays_and_keep_both_inner_families() {
+    for kind in [TunnelKind::Gre6, TunnelKind::Fou] {
+        let mut input = fou_input(RuntimeTunnelFouKind::Gre6);
+        input.kind = kind;
+        if kind == TunnelKind::Gre6 {
+            input.runtime_control.fou = Default::default();
+            input.left_mtu = default_tunnel_mtu(kind);
+            input.right_mtu = default_tunnel_mtu(kind);
+        }
+        input.ipv6_tunnel = Some(TunnelAddressPair {
+            left: "fd00::".into(),
+            right: "fd00::1".into(),
+            prefix_len: 127,
+        });
+        let plan = plan_tunnel(&input).unwrap();
+        assert!(plan.ipv4_tunnel.is_some() && plan.ipv6_tunnel.is_some());
+        assert_eq!(
+            plan.left_mtu,
+            Some(if kind == TunnelKind::Gre6 { 1448 } else { 1440 })
+        );
+        for side in [TunnelEndpointSide::Left, TunnelEndpointSide::Right] {
+            let endpoint = render_tunnel_endpoint_config(&plan, side).unwrap();
+            let argv = build_ip_tunnel_argv(&["/sbin/ip".into()], "add", &plan, &endpoint).unwrap();
+            assert!(argv.windows(2).any(|pair| pair == ["type", "ip6gre"]));
+            assert!(argv.windows(2).any(|pair| pair == ["ttl", "255"]));
+            assert!(argv
+                .windows(2)
+                .any(|pair| pair == ["local", endpoint.local_underlay.as_deref().unwrap()]));
+            assert_eq!(
+                argv.contains(&"encap-udp6-csum".into()),
+                kind == TunnelKind::Fou
+            );
+        }
+        if kind == TunnelKind::Fou {
+            assert_eq!(
+                build_fou_listener_argv(&["/sbin/ip".into()], "add", &plan),
+                ["/sbin/ip", "-6", "fou", "add", "port", "5555", "ipproto", "47"]
+            );
+            assert_eq!(
+                build_fou_listener_argv(&["/sbin/ip".into()], "del", &plan),
+                ["/sbin/ip", "-6", "fou", "del", "port", "5555"]
+            );
+        }
+        for invalid in [
+            None,
+            Some(""),
+            Some("192.0.2.1"),
+            Some("::"),
+            Some("fe80::1"),
+            Some("ff02::1"),
+        ] {
+            let mut changed = input.clone();
+            changed.left_local_underlay = invalid.map(str::to_string);
+            assert_eq!(
+                plan_tunnel(&changed),
+                Err(NetworkPlanError::InvalidGre6UnderlayAddress)
+            );
+            let mut changed = plan.clone();
+            changed.left_local_underlay = invalid.map(str::to_string);
+            assert_eq!(
+                render_tunnel_endpoint_config(&changed, TunnelEndpointSide::Left),
+                Err(NetworkPlanError::InvalidGre6UnderlayAddress)
+            );
+        }
+        for invalid in ["192.0.2.1", "::", "fe80::1", "ff02::1"] {
+            let mut changed = input.clone();
+            changed.right_remote_underlay = invalid.into();
+            assert_eq!(
+                plan_tunnel(&changed),
+                Err(NetworkPlanError::InvalidGre6UnderlayAddress)
+            );
+        }
     }
 }
 

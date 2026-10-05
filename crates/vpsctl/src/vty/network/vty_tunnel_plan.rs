@@ -1173,6 +1173,7 @@ fn ensure_explicit_tunnel_endpoints(
 fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
     match value {
         "gre" => Ok(TunnelKind::Gre),
+        "gre6" => Ok(TunnelKind::Gre6),
         "ipip" => Ok(TunnelKind::Ipip),
         "sit" => Ok(TunnelKind::Sit),
         "fou" => Ok(TunnelKind::Fou),
@@ -1181,7 +1182,7 @@ fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
         "tun_tap" | "tuntap" => Ok(TunnelKind::TunTap),
         "custom" => Ok(TunnelKind::Custom),
         _ => anyhow::bail!(
-            "--kind must be one of gre, ipip, sit, fou, openvpn, wireguard, tun_tap, custom"
+            "--kind must be one of gre, gre6, ipip, sit, fou, openvpn, wireguard, tun_tap, custom"
         ),
     }
 }

@@ -10200,7 +10200,7 @@ test("submits selected tunnel lifecycle changes as one ordered request", async (
 test("FOU review keeps the selected type and both UDP ports fully readable", async ({ page }) => {
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
-  for (const [kind, protocol] of [["gre", 47], ["ipip", 4], ["sit", 41]] as const) {
+  for (const [kind, protocol] of [["gre", 47], ["gre6", 47], ["ipip", 4], ["sit", 41]] as const) {
     await page.getByRole("button", { name: "Create plan", exact: true }).click();
     const composer = page.locator(".tunnelPlanComposer");
     await composer.getByLabel("Tunnel plan name").fill(`fou-review-${kind}`);
@@ -10209,6 +10209,12 @@ test("FOU review keeps the selected type and both UDP ports fully readable", asy
     await composer.getByLabel("FOU encapsulated tunnel", { exact: true }).selectOption(kind);
     await chooseVpsBySearch(composer, "Left tunnel VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
     await chooseVpsBySearch(composer, "Right tunnel VPS", "fra", /core-fra-02.*agent-fra-02/);
+    if (kind === "gre6") {
+      await composer.getByLabel("Left local underlay source", { exact: true }).fill("2001:db8::1");
+      await composer.getByLabel("Left remote underlay destination", { exact: true }).fill("2001:db8::2");
+      await composer.getByLabel("Right local underlay source", { exact: true }).fill("2001:db8::2");
+      await composer.getByLabel("Right remote underlay destination", { exact: true }).fill("2001:db8::1");
+    }
     await composer.getByLabel("FOU local port", { exact: true }).fill("65535");
     await composer.getByLabel("FOU peer port", { exact: true }).fill("54321");
     if (kind === "sit") {
@@ -10373,7 +10379,7 @@ test(
     await expect(rightMtu).toHaveValue("1468");
     const fouKind = composer.getByLabel("FOU encapsulated tunnel");
     await expect(fouKind).toHaveValue("gre");
-    await expect(fouKind.locator("option")).toHaveText(["GRE", "IPIP", "SIT"]);
+    await expect(fouKind.locator("option")).toHaveText(["GRE", "GRE6", "IPIP", "SIT"]);
     await expect(composer.getByLabel("FOU IP protocol", { exact: true })).toHaveCount(0);
     await expect(composer).toContainText("IP protocol 47 · derived from tunnel type");
     await fouKind.selectOption("ipip");

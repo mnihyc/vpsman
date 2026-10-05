@@ -25,8 +25,16 @@ fn fou_vty_type_selection_defaults_and_legacy_rejection() {
         "--right-tunnel-ipv6-cidr=fd00::1/127",
     ];
     for kind in vpsman_common::RuntimeTunnelFouKind::ALL {
-        let flag = format!("--fou-tunnel-kind={}", kind.linux_tunnel_mode());
+        let flag = format!("--fou-tunnel-kind={}", kind.name());
         let mut args = base.to_vec();
+        if kind == vpsman_common::RuntimeTunnelFouKind::Gre6 {
+            args[5] = "--left-remote-underlay=2001:db8::2";
+            args[6] = "--right-remote-underlay=2001:db8::1";
+            args.extend([
+                "--left-local-underlay=2001:db8::1",
+                "--right-local-underlay=2001:db8::2",
+            ]);
+        }
         args.extend(if kind == vpsman_common::RuntimeTunnelFouKind::Sit {
             ipv6
         } else {

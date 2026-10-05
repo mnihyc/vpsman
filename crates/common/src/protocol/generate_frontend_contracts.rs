@@ -72,7 +72,7 @@ fn main() -> io::Result<()> {
     write_string_array(
         &mut output,
         "FOU_TUNNEL_KINDS",
-        &RuntimeTunnelFouKind::ALL.map(RuntimeTunnelFouKind::linux_tunnel_mode),
+        &RuntimeTunnelFouKind::ALL.map(RuntimeTunnelFouKind::name),
     )?;
     writeln!(
         output,
@@ -88,8 +88,9 @@ fn main() -> io::Result<()> {
         .into_iter()
         .map(|kind| {
             (
-                kind.linux_tunnel_mode(),
+                kind.name(),
                 serde_json::json!({
+                    "underlay_family": kind.underlay_family(),
                     "ip_protocol": kind.ip_protocol(),
                     "default_mtu": kind.default_mtu(),
                     "ipv4": kind.supports_family(TunnelAddressFamily::Ipv4),

@@ -2316,6 +2316,7 @@ async fn insert_tunnel_audit(
 fn tunnel_kind_name(kind: TunnelKind) -> &'static str {
     match kind {
         TunnelKind::Gre => "gre",
+        TunnelKind::Gre6 => "gre6",
         TunnelKind::Ipip => "ipip",
         TunnelKind::Sit => "sit",
         TunnelKind::Fou => "fou",
@@ -2329,6 +2330,7 @@ fn tunnel_kind_name(kind: TunnelKind) -> &'static str {
 fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
     Ok(match value {
         "gre" => TunnelKind::Gre,
+        "gre6" => TunnelKind::Gre6,
         "ipip" => TunnelKind::Ipip,
         "sit" => TunnelKind::Sit,
         "fou" => TunnelKind::Fou,

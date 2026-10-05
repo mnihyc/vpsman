@@ -27,6 +27,10 @@ pub enum NetworkPlanError {
     InvalidTunnelEndpoints,
     #[error("invalid tunnel underlay address")]
     InvalidUnderlayAddress,
+    #[error(
+        "GRE6 requires explicit unicast IPv6 local and remote underlays without link-local scope"
+    )]
+    InvalidGre6UnderlayAddress,
     #[error("invalid tunnel interface name")]
     InvalidInterfaceName,
     #[error("invalid IPv4 CIDR")]
@@ -223,12 +227,14 @@ fn validate_plan_identity(input: &TunnelPlanInput) -> Result<(), NetworkPlanErro
         input.left_local_underlay.as_deref(),
         input.runtime_control.manager,
         input.kind,
+        input.runtime_control.fou.tunnel_kind,
     )?;
     validate_endpoint_underlay(
         &input.right_remote_underlay,
         input.right_local_underlay.as_deref(),
         input.runtime_control.manager,
         input.kind,
+        input.runtime_control.fou.tunnel_kind,
     )?;
     validate_openvpn_underlays(input)?;
     Ok(())
@@ -239,6 +245,7 @@ fn validate_endpoint_underlay(
     local: Option<&str>,
     manager: RuntimeTunnelManager,
     kind: TunnelKind,
+    fou_kind: super::RuntimeTunnelFouKind,
 ) -> Result<(), NetworkPlanError> {
     let remote = remote
         .parse::<IpAddr>()
@@ -249,14 +256,27 @@ fn validate_endpoint_underlay(
         .map(str::parse::<IpAddr>)
         .transpose()
         .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
-    let builtin_iproute =
-        manager == RuntimeTunnelManager::AgentBuiltin && kind.uses_ipv4_iproute2();
+    let builtin_family = (manager == RuntimeTunnelManager::AgentBuiltin)
+        .then(|| kind.iproute2_underlay_family(fou_kind))
+        .flatten();
+    if builtin_family == Some(TunnelAddressFamily::Ipv6) {
+        // ip6gre accepts an unspecified local source but cannot transmit with
+        // it. Link-local underlays also require a physical-device scope, which
+        // the plan does not declare. Inner link-local addresses are unaffected.
+        let usable = |ip: IpAddr| {
+            matches!(ip, IpAddr::V6(ip) if !ip.is_unspecified()
+            && !ip.is_multicast() && !ip.is_unicast_link_local())
+        };
+        if !usable(remote) || !local.is_some_and(usable) {
+            return Err(NetworkPlanError::InvalidGre6UnderlayAddress);
+        }
+    }
     let builtin_wireguard =
         manager == RuntimeTunnelManager::AgentBuiltin && kind == TunnelKind::Wireguard;
     let builtin_openvpn =
         manager == RuntimeTunnelManager::AgentBuiltin && kind == TunnelKind::Openvpn;
     if (!builtin_openvpn && local.is_some_and(|local| local.is_ipv4() != remote.is_ipv4()))
-        || (builtin_iproute && !remote.is_ipv4())
+        || (builtin_family == Some(TunnelAddressFamily::Ipv4) && !remote.is_ipv4())
         || (builtin_wireguard && local.is_some())
     {
         return Err(NetworkPlanError::InvalidUnderlayAddress);
@@ -420,6 +440,19 @@ pub fn render_tunnel_endpoint_config(
             plan.right_mtu,
         ),
     };
+    if plan
+        .kind
+        .iproute2_underlay_family(plan.runtime_control.fou.tunnel_kind)
+        == Some(TunnelAddressFamily::Ipv6)
+    {
+        validate_endpoint_underlay(
+            remote_underlay,
+            local_underlay.as_deref(),
+            plan.runtime_control.manager,
+            plan.kind,
+            plan.runtime_control.fou.tunnel_kind,
+        )?;
+    }
     Ok(TunnelEndpointConfig {
         side,
         local_client_id: local_client_id.clone(),
@@ -649,6 +682,7 @@ pub fn validate_runtime_tunnel_driver_options(
         && !matches!(
             kind,
             TunnelKind::Gre
+                | TunnelKind::Gre6
                 | TunnelKind::Ipip
                 | TunnelKind::Sit
                 | TunnelKind::Fou

@@ -329,7 +329,7 @@ fn fou_cli_accepts_only_typed_encapsulation_flags() {
                 "--bandwidth-mbps=100",
             ];
             for kind in vpsman_common::RuntimeTunnelFouKind::ALL {
-                let flag = format!("--fou-tunnel-kind={}", kind.linux_tunnel_mode());
+                let flag = format!("--fou-tunnel-kind={}", kind.name());
                 let parsed = Args::try_parse_from(base.into_iter().chain([flag.as_str()])).unwrap();
                 let Command::TunnelPlan(request) = parsed.command else {
                     panic!("expected tunnel-plan");

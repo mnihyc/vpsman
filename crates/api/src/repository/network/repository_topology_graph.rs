@@ -1065,6 +1065,7 @@ fn plan_routing_state(status: &str) -> &'static str {
 fn tunnel_kind_label(kind: TunnelKind) -> String {
     match kind {
         TunnelKind::Gre => "gre",
+        TunnelKind::Gre6 => "gre6",
         TunnelKind::Ipip => "ipip",
         TunnelKind::Sit => "sit",
         TunnelKind::Fou => "fou",

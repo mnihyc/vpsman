@@ -1831,6 +1831,7 @@ fn runtime_manager_label(manager: RuntimeTunnelManager) -> &'static str {
 fn tunnel_kind_label(kind: TunnelKind) -> &'static str {
     match kind {
         TunnelKind::Gre => "gre",
+        TunnelKind::Gre6 => "gre6",
         TunnelKind::Ipip => "ipip",
         TunnelKind::Sit => "sit",
         TunnelKind::Fou => "fou",

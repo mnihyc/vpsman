@@ -434,9 +434,19 @@ fn fou_defaults_and_explicit_types_require_typed_protocol_support() {
         .unwrap()
         .get("runtime_control")
         .is_none());
-    for kind in crate::RuntimeTunnelFouKind::ALL {
+    for (plan_kind, kind) in crate::RuntimeTunnelFouKind::ALL
+        .into_iter()
+        .map(|kind| (crate::TunnelKind::Fou, kind))
+        .chain(std::iter::once((
+            crate::TunnelKind::Gre6,
+            crate::RuntimeTunnelFouKind::Gre,
+        )))
+    {
         let mut plan = baseline.clone();
+        plan.kind = plan_kind;
         plan.runtime_control.fou.tunnel_kind = kind;
+        let gre6 =
+            plan_kind == crate::TunnelKind::Gre6 || kind == crate::RuntimeTunnelFouKind::Gre6;
         if kind == crate::RuntimeTunnelFouKind::Sit {
             plan.ipv4_tunnel = None;
             plan.ipv6_tunnel = Some(crate::TunnelAddressPair {
@@ -473,15 +483,19 @@ fn fou_defaults_and_explicit_types_require_typed_protocol_support() {
             reason: "fou-test".into(),
             config: Box::new(config),
         };
-        let sync_version = if kind == crate::RuntimeTunnelFouKind::Sit {
+        let status_version = if gre6 {
+            super::GRE6_TUNNEL_PROTOCOL_VERSION
+        } else {
+            super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
+        };
+        let sync_version = if gre6 {
+            super::GRE6_TUNNEL_PROTOCOL_VERSION
+        } else if kind == crate::RuntimeTunnelFouKind::Sit {
             super::FOU_TUNNEL_KIND_PROTOCOL_VERSION
         } else {
             super::INDEPENDENT_LINK_LOCAL_PROTOCOL_VERSION
         };
-        for (command, expected) in [
-            (status, super::FOU_TUNNEL_KIND_PROTOCOL_VERSION),
-            (sync, sync_version),
-        ] {
+        for (command, expected) in [(status, status_version), (sync, sync_version)] {
             assert_eq!(super::job_command_protocol_version(&command), expected);
             assert_eq!(
                 super::job_command_dispatch_protocol_version(&command),

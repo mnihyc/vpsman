@@ -1807,6 +1807,9 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         NetworkPlanError::TunnelAddressConflict => "tunnel_plan_address_conflict",
         NetworkPlanError::InvalidReservedAddress(_) => "invalid_reserved_tunnel_address",
         NetworkPlanError::InvalidUnderlayAddress => "invalid_tunnel_underlay_address",
+        NetworkPlanError::InvalidGre6UnderlayAddress => {
+            "gre6_requires_explicit_unicast_ipv6_underlays"
+        }
         NetworkPlanError::InvalidAdditionalAddress(_) => "invalid_tunnel_additional_address",
         NetworkPlanError::InvalidFouAddressFamily(_) => "invalid_fou_address_family",
         NetworkPlanError::OpenvpnDirectiveOwned(_) => "openvpn_directive_owned",

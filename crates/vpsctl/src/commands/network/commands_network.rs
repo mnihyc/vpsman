@@ -342,6 +342,7 @@ pub(crate) struct TunnelOspfStatusRefreshCommand {
 #[value(rename_all = "snake_case")]
 pub(crate) enum TunnelKindArg {
     Gre,
+    Gre6,
     Ipip,
     Sit,
     Fou,
@@ -355,6 +356,7 @@ impl From<TunnelKindArg> for TunnelKind {
     fn from(value: TunnelKindArg) -> Self {
         match value {
             TunnelKindArg::Gre => Self::Gre,
+            TunnelKindArg::Gre6 => Self::Gre6,
             TunnelKindArg::Ipip => Self::Ipip,
             TunnelKindArg::Sit => Self::Sit,
             TunnelKindArg::Fou => Self::Fou,

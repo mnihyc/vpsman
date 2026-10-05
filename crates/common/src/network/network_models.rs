@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum TunnelKind {
     Gre,
+    Gre6,
     Ipip,
     Sit,
     Fou,
@@ -39,8 +40,16 @@ pub enum RuntimeTunnelManager {
 }
 
 impl TunnelKind {
-    pub(crate) fn uses_ipv4_iproute2(self) -> bool {
-        matches!(self, Self::Gre | Self::Ipip | Self::Sit | Self::Fou)
+    pub const fn iproute2_underlay_family(
+        self,
+        fou_kind: RuntimeTunnelFouKind,
+    ) -> Option<TunnelAddressFamily> {
+        match self {
+            Self::Gre | Self::Ipip | Self::Sit => Some(TunnelAddressFamily::Ipv4),
+            Self::Gre6 => Some(TunnelAddressFamily::Ipv6),
+            Self::Fou => Some(fou_kind.underlay_family()),
+            _ => None,
+        }
     }
 }
 
@@ -58,6 +67,8 @@ pub const ROUTING_COST_ADAPTER_CONTRACT_VERSION: u16 = 2;
 pub const fn default_tunnel_mtu(kind: TunnelKind) -> Option<u16> {
     match kind {
         TunnelKind::Gre => Some(1476),
+        // IPv6 + GRE + Linux's default tunnel encapsulation-limit option.
+        TunnelKind::Gre6 => Some(1448), // 1500 - 40 - 4 - 8.
         TunnelKind::Ipip | TunnelKind::Sit => Some(1480),
         TunnelKind::Fou => Some(RuntimeTunnelFouKind::Gre.default_mtu()),
         TunnelKind::Wireguard => Some(1420),
@@ -422,16 +433,34 @@ pub struct RuntimeTunnelTrafficLimit {
 pub enum RuntimeTunnelFouKind {
     #[default]
     Gre,
+    Gre6,
     Ipip,
     Sit,
 }
 
 impl RuntimeTunnelFouKind {
-    pub const ALL: [Self; 3] = [Self::Gre, Self::Ipip, Self::Sit];
+    pub const ALL: [Self; 4] = [Self::Gre, Self::Gre6, Self::Ipip, Self::Sit];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gre => "gre",
+            Self::Gre6 => "gre6",
+            Self::Ipip => "ipip",
+            Self::Sit => "sit",
+        }
+    }
+
+    pub const fn underlay_family(self) -> TunnelAddressFamily {
+        match self {
+            Self::Gre6 => TunnelAddressFamily::Ipv6,
+            _ => TunnelAddressFamily::Ipv4,
+        }
+    }
 
     pub const fn linux_tunnel_mode(self) -> &'static str {
         match self {
             Self::Gre => "gre",
+            Self::Gre6 => "ip6gre",
             Self::Ipip => "ipip",
             Self::Sit => "sit",
         }
@@ -439,16 +468,17 @@ impl RuntimeTunnelFouKind {
 
     pub const fn ip_protocol(self) -> u8 {
         match self {
-            Self::Gre => 47,
+            Self::Gre | Self::Gre6 => 47,
             Self::Ipip => 4,
             Self::Sit => 41,
         }
     }
 
-    /// Editable baseline: 1500-byte underlay minus IPv4, UDP and tunnel headers.
+    /// Editable baseline: 1500-byte underlay minus outer IP, UDP and tunnel headers.
     pub const fn default_mtu(self) -> u16 {
         match self {
             Self::Gre => 1468,              // 1500 - 20 IPv4 - 8 UDP - 4 GRE.
+            Self::Gre6 => 1440,             // 1500 - 40 IPv6 - 8 UDP - 4 GRE - 8 encap limit.
             Self::Ipip | Self::Sit => 1472, // No header between UDP and inner IP.
         }
     }
@@ -456,7 +486,7 @@ impl RuntimeTunnelFouKind {
     pub const fn supports_family(self, family: TunnelAddressFamily) -> bool {
         matches!(
             (self, family),
-            (Self::Gre, _)
+            (Self::Gre | Self::Gre6, _)
                 | (Self::Ipip, TunnelAddressFamily::Ipv4)
                 | (Self::Sit, TunnelAddressFamily::Ipv6)
         )

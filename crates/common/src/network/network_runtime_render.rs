@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::{
     render_tunnel_endpoint_config, NetworkPlanError, RuntimeTunnelCommand, RuntimeTunnelManager,
     RuntimeTunnelOpenvpnTransport, RuntimeTunnelRoute, RuntimeTunnelTrafficLimit,
-    TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelAddressFamily, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
 };
 
 /// The existing runtime-adapter command contract, also used by lifecycle hooks.
@@ -282,6 +282,7 @@ pub fn openvpn_config_path_value(path: &Path) -> Result<String, NetworkPlanError
 pub fn tunnel_iproute2_mode(plan: &TunnelPlan) -> Result<&'static str, NetworkPlanError> {
     match plan.kind {
         TunnelKind::Gre => Ok("gre"),
+        TunnelKind::Gre6 => Ok("ip6gre"),
         TunnelKind::Ipip => Ok("ipip"),
         TunnelKind::Sit => Ok("sit"),
         TunnelKind::Fou => Ok(plan.runtime_control.fou.tunnel_kind.linux_tunnel_mode()),
@@ -297,16 +298,20 @@ pub fn build_ip_tunnel_argv(
 ) -> Result<Vec<String>, NetworkPlanError> {
     let mode = tunnel_iproute2_mode(plan)?;
     // UDP encapsulation is a link-type option; `ip tunnel` does not accept it.
-    let (object, mode_option) = if plan.kind == TunnelKind::Fou {
+    let (object, mode_option) = if matches!(plan.kind, TunnelKind::Fou | TunnelKind::Gre6) {
         ("link", "type")
     } else {
         ("tunnel", "mode")
     };
-    let mut argv = extend_argv(
-        base,
+    let mut argv = extend_argv(base, [object, action]);
+    // Explicitly delimit new IPv6 link names so a valid name such as `t` is
+    // not interpreted as an abbreviated ip-link option (e.g. txqueuelen).
+    if mode == "ip6gre" {
+        argv.push("dev".to_string());
+    }
+    argv = extend_argv(
+        &argv,
         [
-            object,
-            action,
             &plan.interface_name,
             mode_option,
             mode,
@@ -327,8 +332,33 @@ pub fn build_ip_tunnel_argv(
             "encap-dport".to_string(),
             plan.runtime_control.fou.peer_port.to_string(),
         ]);
+        if plan.runtime_control.fou.tunnel_kind.underlay_family() == TunnelAddressFamily::Ipv6 {
+            argv.push("encap-udp6-csum".to_string());
+        }
     }
     Ok(argv)
+}
+
+/// The listener family is part of its identity for both creation and cleanup.
+pub fn build_fou_listener_argv(base: &[String], action: &str, plan: &TunnelPlan) -> Vec<String> {
+    let mut argv = base.to_vec();
+    let fou = &plan.runtime_control.fou;
+    if fou.tunnel_kind.underlay_family() == TunnelAddressFamily::Ipv6 {
+        argv.push("-6".to_string());
+    }
+    argv.extend([
+        "fou".to_string(),
+        action.to_string(),
+        "port".to_string(),
+        fou.port.to_string(),
+    ]);
+    if action == "add" {
+        argv.extend([
+            "ipproto".to_string(),
+            fou.tunnel_kind.ip_protocol().to_string(),
+        ]);
+    }
+    argv
 }
 
 /// `None` is draft-preview context; executable commands require the saved plan
@@ -683,6 +713,7 @@ pub fn render_runtime_tunnel_command(
     }
     let kind = match plan.kind {
         TunnelKind::Gre => "gre",
+        TunnelKind::Gre6 => "gre6",
         TunnelKind::Ipip => "ipip",
         TunnelKind::Sit => "sit",
         TunnelKind::Fou => "fou",
@@ -871,27 +902,16 @@ pub fn render_tunnel_runtime_preview(
             push("cleanup", command.label, command.argv);
         }
         match plan.kind {
-            TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou => {
+            TunnelKind::Gre
+            | TunnelKind::Gre6
+            | TunnelKind::Ipip
+            | TunnelKind::Sit
+            | TunnelKind::Fou => {
                 if plan.kind == TunnelKind::Fou {
                     push(
                         "start",
                         "FOU listener",
-                        extend_argv(
-                            &ip,
-                            [
-                                "fou",
-                                "add",
-                                "port",
-                                &plan.runtime_control.fou.port.to_string(),
-                                "ipproto",
-                                &plan
-                                    .runtime_control
-                                    .fou
-                                    .tunnel_kind
-                                    .ip_protocol()
-                                    .to_string(),
-                            ],
-                        ),
+                        build_fou_listener_argv(&ip, "add", plan),
                     );
                 }
                 push(
@@ -1060,15 +1080,7 @@ pub fn render_tunnel_runtime_preview(
             push(
                 "shutdown",
                 "Remove FOU listener",
-                extend_argv(
-                    &ip,
-                    [
-                        "fou",
-                        "del",
-                        "port",
-                        &plan.runtime_control.fou.port.to_string(),
-                    ],
-                ),
+                build_fou_listener_argv(&ip, "del", plan),
             );
         }
         if let Some(hook) = &hooks.post_shutdown {

@@ -690,6 +690,61 @@ fn fou_listener_idempotency_requires_exact_compatible_kernel_evidence() {
     ] {
         assert!(!fou_listener_matches(&plan, &evidence));
     }
+    plan.runtime_control.fou.tunnel_kind = vpsman_common::RuntimeTunnelFouKind::Gre6;
+    assert!(!fou_listener_matches(&plan, &report(valid.clone())));
+    let mut ipv6 = valid;
+    ipv6["family"] = serde_json::json!("inet6");
+    assert!(fou_listener_matches(&plan, &report(ipv6.clone())));
+    ipv6.as_object_mut().unwrap().remove("family");
+    assert!(!fou_listener_matches(&plan, &report(ipv6)));
+}
+
+#[test]
+fn gre6_reapply_validates_identity_and_fou_cleanup_keeps_the_declared_family() {
+    let config = AgentConfig::default();
+    for kind in [TunnelKind::Gre6, TunnelKind::Fou] {
+        let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
+        plan.kind = kind;
+        plan.left_local_underlay = Some("2001:db8::1".into());
+        plan.left_remote_underlay = "2001:db8::2".into();
+        if kind == TunnelKind::Fou {
+            plan.runtime_control.fou.tunnel_kind = vpsman_common::RuntimeTunnelFouKind::Gre6;
+        }
+        let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+        let mut captured = serde_json::json!([{"ifname":"tunab", "mtu":1440, "linkinfo": {"info_kind":"ip6gre", "info_data": {"local":"2001:db8:0:0::1", "remote":"2001:db8::2", "ttl":255, "encap_limit":4}}}]);
+        if kind == TunnelKind::Fou {
+            captured[0]["linkinfo"]["info_data"]["encap"] =
+                serde_json::json!({"type":"fou","dport":5555,"csum6":true});
+        }
+        let link = parse_iproute2_link_json(&captured.to_string(), &plan.interface_name).unwrap();
+        assert!(existing_iproute2_tunnel_mismatches(&link, &plan, &endpoint)
+            .unwrap()
+            .is_empty());
+        captured[0]["linkinfo"]["info_kind"] = serde_json::json!("gre");
+        let wrong = parse_iproute2_link_json(&captured.to_string(), &plan.interface_name).unwrap();
+        assert!(
+            !existing_iproute2_tunnel_mismatches(&wrong, &plan, &endpoint)
+                .unwrap()
+                .is_empty()
+        );
+        let steps = build_iproute2_reconcile_steps(&config, &plan, &endpoint, true, None).unwrap();
+        assert!(!steps.iter().any(|step| step.label == "runtime_tunnel_add"));
+        if kind == TunnelKind::Fou {
+            let (steps, _) =
+                build_runtime_compensation_steps(&config, &plan, &endpoint, None, false, true)
+                    .unwrap();
+            assert_eq!(steps.len(), 1);
+            assert_eq!(
+                steps[0].argv,
+                ["/sbin/ip", "-6", "fou", "del", "port", "5555"]
+            );
+            let steps = build_iproute2_remove_steps(&config, &plan, false).unwrap();
+            assert_eq!(
+                steps.last().unwrap().argv,
+                ["/sbin/ip", "-6", "fou", "del", "port", "5555"]
+            );
+        }
+    }
 }
 
 fn hooked_builtin_plan() -> TunnelPlan {
@@ -1411,6 +1466,11 @@ mod isolated_linux_failures {
         let mut plan = plan(RuntimeTunnelManager::AgentBuiltin);
         plan.kind = kind;
         plan.interface_name = unique_interface();
+        if kind == TunnelKind::Gre6 {
+            set_gre6_test_underlay(&mut plan);
+            plan.left_mtu = vpsman_common::default_tunnel_mtu(kind);
+            plan.right_mtu = plan.left_mtu;
+        }
         if kind == TunnelKind::Openvpn {
             // A local listener needs no external peer to create its TUN device.
             plan.left_local_underlay = Some("127.0.0.1".to_string());
@@ -1517,13 +1577,20 @@ exec /sbin/ip "$@""#
     }
 
     #[tokio::test]
-    #[ignore = "requires disposable Docker private networking, GRE/IPIP/SIT, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
+    #[ignore = "requires disposable Docker private networking, GRE/IPIP/SIT/ip6_gre/fou6, NET_ADMIN and VPSMAN_TEST_ISOLATED_NETWORK=1"]
     async fn iproute2_builtin_apply_failure_ownership_matrix() {
         let mut preserved = PreservedResources::new().await;
         let mut config = config();
         config.network.runtime_ip_argv = fail_mtu_argv();
-        for kind in [TunnelKind::Gre, TunnelKind::Ipip, TunnelKind::Sit] {
-            let plan = isolated_plan(kind);
+        for kind in [
+            TunnelKind::Gre,
+            TunnelKind::Ipip,
+            TunnelKind::Sit,
+            TunnelKind::Gre6,
+            TunnelKind::Fou,
+        ] {
+            let mut plan = isolated_plan(kind);
+            set_fou_test_kind(&mut plan, vpsman_common::RuntimeTunnelFouKind::Gre6);
             let plan_id = uuid::Uuid::new_v4().to_string();
             let report = reconcile(&config, &plan, Some(&plan_id), None)
                 .await
@@ -1533,6 +1600,14 @@ exec /sbin/ip "$@""#
             assert_eq!(report_step(&report, "runtime_link_mtu")["success"], false);
             assert_eq!(report["compensation"]["status"], "completed", "{report}");
             assert_link_absent(&plan).await;
+            if kind == TunnelKind::Fou {
+                let listeners = checked_native("/sbin/ip", &["-j", "fou", "show"]).await;
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&listeners.stdout).unwrap(),
+                    serde_json::json!([]),
+                    "failed create leaked a listener"
+                );
+            }
             preserved.assert_preserved().await;
 
             // Retry through the same reconciler with the failed command restored.
@@ -1570,6 +1645,19 @@ exec /sbin/ip "$@""#
             );
             preserved.assert_preserved().await;
             checked_native("/sbin/ip", &["link", "delete", "dev", &plan.interface_name]).await;
+            if kind == TunnelKind::Fou {
+                checked_native(
+                    "/sbin/ip",
+                    &[
+                        "-6",
+                        "fou",
+                        "del",
+                        "port",
+                        &plan.runtime_control.fou.port.to_string(),
+                    ],
+                )
+                .await;
+            }
         }
     }
 
@@ -1769,7 +1857,11 @@ exec /sbin/ip "$@""#
     async fn address_set(interface: &str) -> Vec<String> {
         let result = checked_native("/sbin/ip", &["-j", "addr", "show", "dev", interface]).await;
         let links: Vec<serde_json::Value> = serde_json::from_slice(&result.stdout).unwrap();
-        links[0]["addr_info"]
+        // Legacy iproute2 includes unnamed placeholders for filtered links.
+        links
+            .iter()
+            .find(|link| link["ifname"] == interface)
+            .unwrap()["addr_info"]
             .as_array()
             .unwrap()
             .iter()
@@ -1901,6 +1993,9 @@ exec /sbin/ip "$@""#
         plan.runtime_control.fou.tunnel_kind = kind;
         plan.left_mtu = Some(kind.default_mtu());
         plan.right_mtu = Some(kind.default_mtu());
+        if kind == vpsman_common::RuntimeTunnelFouKind::Gre6 {
+            set_gre6_test_underlay(plan);
+        }
         if kind == vpsman_common::RuntimeTunnelFouKind::Sit {
             plan.ipv4_tunnel = None;
             plan.ipv6_tunnel = Some(TunnelAddressPair {
@@ -1913,6 +2008,13 @@ exec /sbin/ip "$@""#
             plan.tunnel_prefix_len = 127;
             plan.latency_primary_family = TunnelAddressFamily::Ipv6;
         }
+    }
+
+    fn set_gre6_test_underlay(plan: &mut TunnelPlan) {
+        plan.left_local_underlay = Some("fd00:abcd::1".into());
+        plan.right_local_underlay = Some("fd00:abcd::2".into());
+        plan.left_remote_underlay = "fd00:abcd::2".into();
+        plan.right_remote_underlay = "fd00:abcd::1".into();
     }
 
     fn packet_test_supports_family(plan: &TunnelPlan, family: TunnelAddressFamily) -> bool {
@@ -2125,7 +2227,11 @@ exec /sbin/ip "$@""#
                         .unwrap()
                         .iter()
                         .all(|listener| listener["port"].as_u64()
-                            != Some(u64::from(plan.runtime_control.fou.port))),
+                            != Some(u64::from(plan.runtime_control.fou.port))
+                            || match plan.runtime_control.fou.tunnel_kind.underlay_family() {
+                                TunnelAddressFamily::Ipv4 => listener["family"] == "inet6",
+                                TunnelAddressFamily::Ipv6 => listener["family"] != "inet6",
+                            }),
                     "FOU listener survived teardown: {listeners}"
                 );
             }

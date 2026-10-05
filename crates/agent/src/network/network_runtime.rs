@@ -3,9 +3,10 @@ use std::{net::IpAddr, path::Path, time::Duration};
 use anyhow::{Context, Result};
 use tokio::time;
 use vpsman_common::{
-    render_tunnel_endpoint_config, AgentConfig, AgentRuntimeUnprivilegedMutationPolicy,
-    RuntimeTunnelAdapterCommands, RuntimeTunnelCommand, RuntimeTunnelManager, RuntimeTunnelRoute,
-    RuntimeTunnelTrafficLimit, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    build_fou_listener_argv, render_tunnel_endpoint_config, AgentConfig,
+    AgentRuntimeUnprivilegedMutationPolicy, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
+    RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTrafficLimit, TunnelAddressFamily,
+    TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
 };
 
 #[path = "network_runtime_addresses.rs"]
@@ -193,7 +194,11 @@ async fn reconcile_runtime_tunnel(
     let previous_plan = input.previous_plan.unwrap_or(input.plan);
     if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin {
         match input.plan.kind {
-            TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou => {
+            TunnelKind::Gre
+            | TunnelKind::Gre6
+            | TunnelKind::Ipip
+            | TunnelKind::Sit
+            | TunnelKind::Fou => {
                 if link_exists {
                     let (reports, validation) = validate_existing_iproute2_tunnel(
                         input.config,
@@ -308,15 +313,17 @@ async fn reconcile_runtime_tunnel(
     };
     let specs = match input.plan.runtime_control.manager {
         RuntimeTunnelManager::AgentBuiltin => match input.plan.kind {
-            TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou => {
-                build_iproute2_reconcile_steps(
-                    input.config,
-                    input.plan,
-                    &endpoint,
-                    active_link_exists,
-                    plan_uuid,
-                )?
-            }
+            TunnelKind::Gre
+            | TunnelKind::Gre6
+            | TunnelKind::Ipip
+            | TunnelKind::Sit
+            | TunnelKind::Fou => build_iproute2_reconcile_steps(
+                input.config,
+                input.plan,
+                &endpoint,
+                active_link_exists,
+                plan_uuid,
+            )?,
             TunnelKind::Wireguard => wireguard::build_wireguard_reconcile_steps(
                 input.config,
                 input.plan,
@@ -1094,14 +1101,19 @@ fn fou_listener_matches(plan: &TunnelPlan, inspection: &serde_json::Value) -> bo
         return false;
     };
     listeners.iter().any(|listener| {
-        // The builtin declaration creates an unrestricted IPv4 FOU listener.
-        // A same-number GUE, IPv6, or address/device-bound listener is not it.
+        // Only adopt the unrestricted listener in the declared underlay family.
+        // Older iproute2 omitted the family for IPv4, never for IPv6.
         listener["port"].as_u64() == Some(u64::from(plan.runtime_control.fou.port))
             && listener["ipproto"].as_u64()
                 == Some(u64::from(
                     plan.runtime_control.fou.tunnel_kind.ip_protocol(),
                 ))
-            && matches!(listener["family"].as_str(), None | Some("inet"))
+            && match plan.runtime_control.fou.tunnel_kind.underlay_family() {
+                TunnelAddressFamily::Ipv4 => {
+                    matches!(listener["family"].as_str(), None | Some("inet"))
+                }
+                TunnelAddressFamily::Ipv6 => listener["family"].as_str() == Some("inet6"),
+            }
             && ["gue", "local", "peer", "peer_port", "dev"]
                 .iter()
                 .all(|field| listener.get(*field).is_none())
@@ -1128,19 +1140,9 @@ fn build_iproute2_reconcile_steps(
     });
 
     if plan.kind == TunnelKind::Fou {
-        let fou_port = plan.runtime_control.fou.port.to_string();
-        let fou_ipproto = plan
-            .runtime_control
-            .fou
-            .tunnel_kind
-            .ip_protocol()
-            .to_string();
         steps.push(RuntimeCommandSpec {
             label: "runtime_fou_add",
-            argv: extend_argv(
-                &config.network.runtime_ip_argv,
-                ["fou", "add", "port", &fou_port, "ipproto", &fou_ipproto],
-            ),
+            argv: build_fou_listener_argv(&config.network.runtime_ip_argv, "add", plan),
             mutates: true,
             required: true,
         });
@@ -1311,13 +1313,9 @@ fn build_iproute2_remove_steps(
         });
     }
     if plan.kind == TunnelKind::Fou {
-        let fou_port = plan.runtime_control.fou.port.to_string();
         steps.push(RuntimeCommandSpec {
             label: "runtime_fou_delete",
-            argv: extend_argv(
-                &config.network.runtime_ip_argv,
-                ["fou", "del", "port", &fou_port],
-            ),
+            argv: build_fou_listener_argv(&config.network.runtime_ip_argv, "del", plan),
             mutates: true,
             required: false,
         });
@@ -1458,6 +1456,8 @@ struct ExistingIproute2Tunnel {
     ttl: Option<String>,
     encap: Option<String>,
     encap_dport: Option<String>,
+    encap_limit: Option<String>,
+    encap_csum6: Option<bool>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1507,6 +1507,11 @@ fn parse_iproute2_link_json(stdout: &str, interface_name: &str) -> Result<Existi
         local: string_field(data, &["local", "local_address", "local-address"]),
         remote: string_field(data, &["remote", "remote_address", "remote-address"]),
         ttl: string_field(data, &["ttl", "hoplimit", "hop_limit", "hop-limit"]),
+        encap_limit: string_field(data, &["encap_limit"]),
+        encap_csum6: data
+            .get("encap")
+            .and_then(|encap| encap.get("csum6"))
+            .and_then(serde_json::Value::as_bool),
         encap: data
             .get("encap")
             .and_then(|encap| string_field(encap, &["type"]))
@@ -1580,6 +1585,26 @@ fn existing_iproute2_tunnel_mismatches(
         expected_remote,
     );
     push_string_mismatch(&mut mismatches, "ttl", link.ttl.as_deref(), "255");
+    if plan
+        .kind
+        .iproute2_underlay_family(plan.runtime_control.fou.tunnel_kind)
+        == Some(TunnelAddressFamily::Ipv6)
+    {
+        push_string_mismatch(
+            &mut mismatches,
+            "encap_limit",
+            link.encap_limit.as_deref(),
+            "4",
+        );
+        if plan.kind == TunnelKind::Fou && link.encap_csum6 != Some(true) {
+            mismatches.push("GRE6 FOU requires UDPv6 checksums".to_string());
+        }
+        if plan.kind == TunnelKind::Gre6
+            && link.encap.as_deref().is_some_and(|encap| encap != "none")
+        {
+            mismatches.push("native GRE6 requires no UDP encapsulation".to_string());
+        }
+    }
     if plan.kind == TunnelKind::Fou {
         push_string_mismatch(&mut mismatches, "encap", link.encap.as_deref(), "fou");
         let expected_dport = plan.runtime_control.fou.peer_port.to_string();
@@ -1979,15 +2004,7 @@ fn build_runtime_compensation_steps(
             if plan_owned_fou_port_created {
                 steps.push(RuntimeCommandSpec {
                     label: "runtime_compensate_fou_delete",
-                    argv: extend_argv(
-                        &config.network.runtime_ip_argv,
-                        [
-                            "fou",
-                            "del",
-                            "port",
-                            &plan.runtime_control.fou.port.to_string(),
-                        ],
-                    ),
+                    argv: build_fou_listener_argv(&config.network.runtime_ip_argv, "del", plan),
                     mutates: true,
                     required: false,
                 });

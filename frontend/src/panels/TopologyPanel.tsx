@@ -161,6 +161,7 @@ import {
 
 const AGENT_TUNNEL_KINDS: TunnelKind[] = [
   "gre",
+  "gre6",
   "ipip",
   "sit",
   "fou",
@@ -169,6 +170,7 @@ const AGENT_TUNNEL_KINDS: TunnelKind[] = [
 ];
 const ALL_TUNNEL_KINDS: TunnelKind[] = [
   "gre",
+  "gre6",
   "ipip",
   "sit",
   "fou",
@@ -2999,7 +3001,11 @@ function TunnelPlanComposer({
       // Prefill belongs to the operator's dependent-field edit, never to a
       // background evidence refresh or an unrelated edit further down the form.
       const compatibilityChanged =
-        key === "kind" || key === "runtimeManager";
+        key === "kind" ||
+        key === "runtimeManager" ||
+        (key === "fouTunnelKind" &&
+          iproute2UnderlayFamily(current.kind, current.fouTunnelKind) !==
+            iproute2UnderlayFamily(next.kind, next.fouTunnelKind));
       if (
         autoFillOwnership.leftRemote &&
         (key === "rightClientId" || compatibilityChanged)
@@ -3010,6 +3016,7 @@ function TunnelPlanComposer({
             next.rightClientId,
             next.runtimeManager,
             next.kind,
+            next.fouTunnelKind,
           ) ?? "";
       }
       if (
@@ -3022,6 +3029,7 @@ function TunnelPlanComposer({
             next.leftClientId,
             next.runtimeManager,
             next.kind,
+            next.fouTunnelKind,
           ) ?? "";
       }
       return next;
@@ -3034,7 +3042,7 @@ function TunnelPlanComposer({
       !AGENT_TUNNEL_KINDS.includes(form.kind)
     ) {
       setFeedback({
-        message: `${formatTunnelKind(form.kind)} requires external ownership. Agent builtin supports GRE, IPIP, SIT, FOU, WireGuard, and OpenVPN.`,
+        message: `${formatTunnelKind(form.kind)} requires external ownership. Agent builtin supports GRE, GRE6, IPIP, SIT, FOU, WireGuard, and OpenVPN.`,
         location: "manager",
         tone: "warning",
       });
@@ -3133,6 +3141,9 @@ function TunnelPlanComposer({
     form.runtimeManager === "agent_builtin"
       ? AGENT_TUNNEL_KINDS
       : ALL_TUNNEL_KINDS;
+  const gre6Underlay =
+    form.runtimeManager === "agent_builtin" &&
+    iproute2UnderlayFamily(form.kind, form.fouTunnelKind) === "ipv6";
   const wireguardSelectsLocalSource =
     form.runtimeManager === "agent_builtin" && form.kind === "wireguard";
   const bandwidthField = (
@@ -3222,7 +3233,7 @@ function TunnelPlanComposer({
             </Field>
             <Field
               label="Kind"
-              tooltip="Agent builtin supports GRE, IPIP, SIT, FOU, WireGuard, and OpenVPN. TUN/TAP and custom interfaces require external ownership."
+              tooltip="Agent builtin supports GRE, GRE6, IPIP, SIT, FOU, WireGuard, and OpenVPN. GRE uses IPv4 underlays; GRE6 uses IPv6. TUN/TAP and custom interfaces require external ownership."
             >
               <select
                 aria-label="Tunnel kind"
@@ -3272,14 +3283,17 @@ function TunnelPlanComposer({
             {!wireguardSelectsLocalSource && (
               <Field
                 label="Left local source"
-                tooltip="Optional outer-packet source bound on the left VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."
+                tooltip={gre6Underlay
+                  ? "Required IPv6 address assigned to this VPS. GRE6 needs an explicit local source; link-local underlays are unsupported."
+                  : "Optional outer-packet source bound on the left VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."}
               >
                 <input
                   aria-label="Left local underlay source"
                   onChange={(event) =>
                     update("leftLocalUnderlay", event.target.value)
                   }
-                  placeholder="Automatic"
+                  placeholder={gre6Underlay ? "Local IPv6 address" : "Automatic"}
+                  required={gre6Underlay}
                   value={form.leftLocalUnderlay}
                 />
               </Field>
@@ -3314,14 +3328,17 @@ function TunnelPlanComposer({
             {!wireguardSelectsLocalSource && (
               <Field
                 label="Right local source"
-                tooltip="Optional outer-packet source bound on the right VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."
+                tooltip={gre6Underlay
+                  ? "Required IPv6 address assigned to this VPS. GRE6 needs an explicit local source; link-local underlays are unsupported."
+                  : "Optional outer-packet source bound on the right VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."}
               >
                 <input
                   aria-label="Right local underlay source"
                   onChange={(event) =>
                     update("rightLocalUnderlay", event.target.value)
                   }
-                  placeholder="Automatic"
+                  placeholder={gre6Underlay ? "Local IPv6 address" : "Automatic"}
+                  required={gre6Underlay}
                   value={form.rightLocalUnderlay}
                 />
               </Field>
@@ -3521,7 +3538,7 @@ function TunnelPlanComposer({
                 </Field>
                 <Field
                   label="Encapsulated tunnel"
-                  tooltip="FOU carries GRE, IPIP, or SIT over UDP. This choice controls both the native tunnel device and the receive protocol. GRE supports IPv4 and IPv6; IPIP carries IPv4; SIT carries IPv6."
+                  tooltip="FOU carries GRE, GRE6, IPIP, or SIT over UDP. GRE6 uses IPv6 underlays; the others use IPv4. Both GRE types carry IPv4 and IPv6; IPIP carries IPv4; SIT carries IPv6. GRE6 requires kernel fou6 support."
                 >
                   <select
                     aria-label="FOU encapsulated tunnel"
@@ -5151,6 +5168,7 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     form.leftLocalUnderlay,
     form.runtimeManager,
     form.kind,
+    form.fouTunnelKind,
   );
   if (leftUnderlayError) return leftUnderlayError;
   const rightUnderlayError = validateEndpointUnderlay(
@@ -5159,6 +5177,7 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     form.rightLocalUnderlay,
     form.runtimeManager,
     form.kind,
+    form.fouTunnelKind,
   );
   if (rightUnderlayError) return rightUnderlayError;
   const openvpnUnderlayError = validateOpenvpnUnderlayPair(form);
@@ -5201,7 +5220,7 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     const fouError =
       validateIntegerRange(form.fouPort, "FOU port", 1, 65_535) ??
       validateIntegerRange(form.fouPeerPort, "FOU peer port", 1, 65_535);
-    if (!FOU_TUNNEL_KINDS.includes(form.fouTunnelKind)) return "FOU tunnel type must be GRE, IPIP, or SIT";
+    if (!FOU_TUNNEL_KINDS.includes(form.fouTunnelKind)) return "FOU tunnel type must be GRE, GRE6, IPIP, or SIT";
     if (form.runtimeManager === "agent_builtin") {
       const familyError = validateFouAddressFamilies(
         form.fouTunnelKind,
@@ -5437,6 +5456,7 @@ function validateEndpointUnderlay(
   localValue: string,
   manager: RuntimeTunnelManager,
   kind: TunnelKind,
+  fouKind: RuntimeTunnelFouKind,
 ): string | null {
   const remote = remoteValue.trim();
   const local =
@@ -5457,10 +5477,17 @@ function validateEndpointUnderlay(
   }
   if (
     manager === "agent_builtin" &&
-    ["gre", "ipip", "sit", "fou"].includes(kind) &&
+    iproute2UnderlayFamily(kind, fouKind) === "ipv4" &&
     !isIpv4Address(remote)
   ) {
     return `${side} Agent builtin ${formatTunnelKind(kind)} requires an IPv4 remote destination`;
+  }
+  if (
+    manager === "agent_builtin" &&
+    iproute2UnderlayFamily(kind, fouKind) === "ipv6" &&
+    (!isGre6Underlay(remote) || !isGre6Underlay(local))
+  ) {
+    return `${side} GRE6 requires explicit unicast IPv6 local and remote underlays without link-local scope`;
   }
   if (manager === "agent_builtin" && kind === "wireguard" && local) {
     return `${side} WireGuard local source must remain empty; routing selects the source address`;
@@ -6450,7 +6477,7 @@ function builtinDriverCapabilityTitle(
 function builtinDriverName(
   kind: TunnelKind,
 ): "iproute2" | "wireguard" | "openvpn" | null {
-  if (["gre", "ipip", "sit", "fou"].includes(kind)) return "iproute2";
+  if (["gre", "gre6", "ipip", "sit", "fou"].includes(kind)) return "iproute2";
   if (kind === "wireguard") return "wireguard";
   if (kind === "openvpn") return "openvpn";
   return null;
@@ -6519,6 +6546,7 @@ function formatTunnelKind(kind: TunnelKind): string {
     custom: "Custom",
     fou: "FOU",
     gre: "GRE",
+    gre6: "GRE6",
     ipip: "IPIP",
     openvpn: "OpenVPN",
     sit: "SIT",
@@ -6668,6 +6696,7 @@ function observedPeerAddress(
   clientId: string,
   manager: RuntimeTunnelManager,
   kind: TunnelKind,
+  fouKind: RuntimeTunnelFouKind,
 ): string | null {
   if (!clientId) return null;
   const observed = agents
@@ -6676,12 +6705,29 @@ function observedPeerAddress(
   if (!observed || !isIpAddress(observed)) return null;
   if (
     manager === "agent_builtin" &&
-    ["gre", "ipip", "sit", "fou"].includes(kind) &&
-    !isIpv4Address(observed)
+    ((iproute2UnderlayFamily(kind, fouKind) === "ipv4" && !isIpv4Address(observed)) ||
+      (iproute2UnderlayFamily(kind, fouKind) === "ipv6" && !isGre6Underlay(observed)))
   ) {
     return null;
   }
   return observed;
+}
+
+function iproute2UnderlayFamily(
+  kind: TunnelKind,
+  fouKind: RuntimeTunnelFouKind,
+): "ipv4" | "ipv6" | null {
+  if (kind === "fou") return FOU_TUNNEL_KIND_DETAILS[fouKind].underlay_family;
+  if (kind === "gre6") return "ipv6";
+  return ["gre", "ipip", "sit"].includes(kind) ? "ipv4" : null;
+}
+
+function isGre6Underlay(value: string): boolean {
+  if (!isIpv6Address(value)) return false;
+  const address = ipv6AddressValue(value);
+  // Exclude unspecified, ff00::/8 multicast and fe80::/10 scoped addresses.
+  return address !== null && address !== 0n &&
+    (address >> 120n) !== 0xffn && (address >> 118n) !== 0x3fan;
 }
 
 type TunnelPlanForm = {

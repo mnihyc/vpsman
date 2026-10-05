@@ -32,6 +32,7 @@ impl From<RuntimeManagerArg> for RuntimeTunnelManager {
 #[value(rename_all = "snake_case")]
 pub(crate) enum FouTunnelKindArg {
     Gre,
+    Gre6,
     Ipip,
     Sit,
 }
@@ -40,6 +41,7 @@ impl From<FouTunnelKindArg> for RuntimeTunnelFouKind {
     fn from(value: FouTunnelKindArg) -> Self {
         match value {
             FouTunnelKindArg::Gre => Self::Gre,
+            FouTunnelKindArg::Gre6 => Self::Gre6,
             FouTunnelKindArg::Ipip => Self::Ipip,
             FouTunnelKindArg::Sit => Self::Sit,
         }
@@ -49,7 +51,7 @@ impl From<FouTunnelKindArg> for RuntimeTunnelFouKind {
 pub(crate) fn parse_fou_tunnel_kind(value: &str) -> Result<RuntimeTunnelFouKind> {
     FouTunnelKindArg::from_str(value, false)
         .map(Into::into)
-        .map_err(|_| anyhow::anyhow!("FOU tunnel kind must be gre, ipip, or sit"))
+        .map_err(|_| anyhow::anyhow!("FOU tunnel kind must be gre, gre6, ipip, or sit"))
 }
 
 pub(crate) struct RuntimeControlArgs<'a> {
