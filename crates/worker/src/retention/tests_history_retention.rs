@@ -2187,7 +2187,10 @@ async fn ping_due_span_rollback_restart_and_destination_conflict_is_fail_closed(
     .unwrap();
     assert_eq!(after_rollback, (5, 0));
 
-    let restarted_pool = db.additional_pool(2).await.unwrap();
+    // Serialize retries so SQLx finishes the previous dropped transaction's
+    // rollback before the next claim. A second connection may legitimately
+    // SKIP LOCKED to a different conflicting tier while rollback is pending.
+    let restarted_pool = db.additional_pool(1).await.unwrap();
     db.pool.close().await;
     let promoted = promote_ping_rollups(&restarted_pool).await.unwrap();
     assert_eq!(
