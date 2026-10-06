@@ -83,6 +83,19 @@ impl ClaimedRuntimeConfigReconciliation {
         &self,
         content_hash: &str,
     ) -> Result<Option<Option<Uuid>>> {
+        // These requests repair live resources even when desired bytes have not
+        // changed. A previously applied/queued hash cannot prove that repair.
+        if matches!(
+            self.reason.as_str(),
+            "port_forward_table_reapply"
+                | "port_forward_bulk_reapply"
+                | "agent_reconnect_authoritative_sync"
+                | "agent_reconnect_authoritative_port_forwarding_sync"
+                | "agent_reconnect_port_forwarding_sync"
+                | "agent_reconnect_runtime_tunnels_sync"
+        ) {
+            return Ok(None);
+        }
         let mut tx = self.pool.begin().await?;
         let owns_revision = sqlx::query_scalar::<_, i64>(
             r#"

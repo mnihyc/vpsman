@@ -265,4 +265,138 @@ fn redirect_and_dnat_forward_real_packets_in_isolated_network() {
     );
     assert!(output.contains("passed: output"));
     println!("{output}");
+    exercise_native_pools(&fixture, ip.trim(), ipv6.trim());
+}
+
+fn exercise_native_pools(fixture: &Fixture, ipv4: &str, ipv6: &str) {
+    use vpsman_common::{
+        PortForwardPool, PortForwardPoolStrategy, PortForwardUpstream, PortForwardUpstreamRole,
+        PortRange,
+    };
+    let mut pool_config = config();
+    pool_config.schema_version = 3;
+    pool_config.rules.clear();
+    for (index, address) in [ipv4, ipv6].into_iter().enumerate() {
+        let mut rule = config().rules.remove(0);
+        rule.id = uuid::Uuid::from_u128(index as u128 + 123);
+        rule.target_ip = None;
+        rule.mappings.clear();
+        let upstream = |start, end, weight, enabled| PortForwardUpstream {
+            id: uuid::Uuid::new_v4(),
+            target_ip: address.parse().unwrap(),
+            target_hostname: None,
+            ports: PortRange { start, end },
+            weight,
+            enabled,
+            role: PortForwardUpstreamRole::Primary,
+            failure_policy: None,
+        };
+        rule.pool = Some(PortForwardPool {
+            incoming: vec![PortRange {
+                start: 17400,
+                end: 17401,
+            }],
+            strategy: PortForwardPoolStrategy::RoundRobin,
+            upstreams: vec![
+                upstream(18080, 18081, 2, true),
+                upstream(18082, 18082, 1, true),
+                upstream(18100, 18100, 20, false),
+            ],
+            connect_timeout_secs: None,
+            retry_policy: None,
+        });
+        pool_config.rules.push(rule);
+    }
+    for strategy in [
+        PortForwardPoolStrategy::RoundRobin,
+        PortForwardPoolStrategy::Random,
+        PortForwardPoolStrategy::SourceIpHash,
+    ] {
+        for rule in &mut pool_config.rules {
+            rule.pool.as_mut().unwrap().strategy = strategy;
+        }
+        pool_config.desired_hash = port_forwarding_desired_hash(&pool_config.rules);
+        let program = render_apply_script(&pool_config, true).unwrap();
+        docker(
+            &[
+                "exec",
+                "-i",
+                &fixture.container,
+                "nft",
+                "--check",
+                "--file",
+                "-",
+            ],
+            Some(program.as_bytes()),
+        );
+        docker(
+            &["exec", "-i", &fixture.container, "nft", "--file", "-"],
+            Some(program.as_bytes()),
+        );
+        let probe = r#"
+import socket,sys,collections,json
+mode=sys.argv[1]
+results=[]
+for family in (socket.AF_INET,socket.AF_INET6):
+    address=socket.getaddrinfo(sys.argv[2],None,family)[0][4][0]
+    for kind in (socket.SOCK_STREAM,socket.SOCK_DGRAM):
+        values=[]
+        for index in range(50):
+            with socket.socket(family,kind) as sock:
+                sock.settimeout(3); sock.connect((address,17400+index%2)); sock.send(b'pool')
+                values.append(int(sock.recv(128).decode().split()[0]))
+        assert set(values) <= {18080,18081,18082},values
+        if mode == 'RoundRobin': assert collections.Counter(values)=={18080:20,18081:20,18082:10},values
+        if mode == 'SourceIpHash': assert len(set(values))==1,values
+        results.append(values)
+print(json.dumps(results))
+"#;
+        let source = if strategy == PortForwardPoolStrategy::SourceIpHash {
+            &fixture.container
+        } else {
+            &fixture.target
+        };
+        let before = docker(
+            &[
+                "exec",
+                source,
+                "python3",
+                "-c",
+                probe,
+                &format!("{strategy:?}"),
+                &fixture.container,
+            ],
+            None,
+        );
+        if strategy == PortForwardPoolStrategy::SourceIpHash {
+            docker(
+                &["exec", "-i", &fixture.container, "nft", "--file", "-"],
+                Some(program.as_bytes()),
+            );
+            let after = docker(
+                &[
+                    "exec",
+                    source,
+                    "python3",
+                    "-c",
+                    probe,
+                    &format!("{strategy:?}"),
+                    &fixture.container,
+                ],
+                None,
+            );
+            assert_eq!(
+                before, after,
+                "source affinity must survive a table rebuild"
+            );
+        }
+        println!("IPv4/IPv6 TCP/UDP {strategy:?} pools passed with unequal ranges and disabled upstreams");
+    }
+    let removal = render_apply_script(&AgentPortForwardingConfig::default(), true).unwrap();
+    docker(
+        &["exec", "-i", &fixture.container, "nft", "--file", "-"],
+        Some(removal.as_bytes()),
+    );
+    let tables = docker(&["exec", &fixture.container, "nft", "list", "tables"], None);
+    assert!(!tables.contains(OWNED_TABLE_NAME));
 }

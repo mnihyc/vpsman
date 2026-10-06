@@ -5,6 +5,7 @@ use vpsman_common::{
 
 fn config() -> AgentPortForwardingConfig {
     let rules = vec![PortForwardRule {
+        pool: Default::default(),
         id: uuid::Uuid::parse_str("018f89ac-a5ec-7d71-a249-7ccddc0a0001").unwrap(),
         revision: 3,
         name: "web".to_string(),
@@ -52,6 +53,7 @@ fn renders_only_the_owned_table_and_local_destination_rules() {
 #[test]
 fn unchanged_large_port_range_stays_compact() {
     let rules = vec![PortForwardRule {
+        pool: Default::default(),
         id: uuid::Uuid::parse_str("018f89ac-a5ec-7d71-a249-7ccddc0a0002").unwrap(),
         revision: 1,
         name: "identity-range".to_string(),
@@ -168,6 +170,8 @@ async fn bulk_removal_reports_all_native_and_custom_cleanup() {
             rule.mappings = pair_port_expressions(&(18080 + index).to_string(), "8080").unwrap();
             if mode == PortForwardMode::CustomAdapter {
                 rule.adapter = Some(PortForwardAdapterCommands {
+                    contract_version: 1,
+                    pool_capabilities: None,
                     definition_id: uuid::Uuid::new_v4(),
                     definition_name: "fixture".into(),
                     definition_hash: "fixture".into(),
@@ -472,6 +476,8 @@ fn custom_changes_do_not_change_native_program_or_native_identity() {
         max_output_bytes: 16 * 1024,
     };
     custom.adapter = Some(vpsman_common::PortForwardAdapterCommands {
+        contract_version: 1,
+        pool_capabilities: None,
         definition_id: uuid::Uuid::new_v4(),
         definition_name: "service".to_string(),
         definition_hash: "fixture".to_string(),

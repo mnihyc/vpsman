@@ -32,12 +32,19 @@ import {
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { NetworkAdapterDefinitionsPanel, type NetworkAdapterReviewControls } from "./NetworkAdapterDefinitionsPanel";
+import { PortForwardPoolFields, PortForwardPoolDetails } from "./PortForwardPoolFields";
+import {
+  buildPool, literalIpFamily, newPool, newUpstream, poolCapabilities,
+  poolDraftFromSaved, poolSummary, poolTooltip, POOL_STRATEGIES,
+  retrySummary, upstreamAddress, upstreamSummary, type PoolDraft,
+} from "../../portForwardPools";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
   formatPortMappings,
   formatPortRange,
   mappingsToExpressions,
   pairPortExpressions,
+  parsePortExpression,
 } from "../../portForwarding";
 import type {
   AgentView,
@@ -50,6 +57,7 @@ import type {
   PortForwardBulkResponse,
   PortForwardMutationResponse,
   PortForwardProtocol,
+  PortForwardPool,
   PortForwardRuleCorruptRecord,
   PortForwardRuleListItem,
   PortForwardRuleRecord,
@@ -105,6 +113,8 @@ type PortForwardingPanelProps = {
 };
 
 type EditorDraft = {
+  mappingPolicy: "mapped" | "pool";
+  pool: PoolDraft;
   mode: PortForwardMode;
   addressFamily: PortForwardAddressFamily;
   adapterDefinitionId: string;
@@ -121,7 +131,7 @@ type EditorDraft = {
 };
 
 type ConfirmationState =
-  | { kind: "save"; draft: EditorDraft; editing: PortForwardRuleRecord | null }
+  | { kind: "save"; draft: EditorDraft; editing: PortForwardRuleRecord | null; pool?: PortForwardPool }
   | {
       kind: "single";
       operation: "enable" | "disable" | "delete" | "forget" | "reapply";
@@ -144,7 +154,8 @@ type Feedback = FeedbackContent & {
   anchor: "detail" | "editor" | "registry" | "summary";
 };
 
-const EMPTY_DRAFT: EditorDraft = {
+const EMPTY_DRAFT: Omit<EditorDraft, "pool"> = {
+  mappingPolicy: "mapped",
   mode: "dnat",
   addressFamily: "ipv4",
   adapterDefinitionId: "",
@@ -292,7 +303,7 @@ export function PortForwardingPanel({
     setFeedback(null);
     setEditor({
       editing: null,
-      draft: { ...EMPTY_DRAFT },
+      draft: { ...EMPTY_DRAFT, pool: newPool() },
     });
   }
 
@@ -303,12 +314,14 @@ export function PortForwardingPanel({
     setEditor({
       editing: rule,
       draft: {
+        mappingPolicy: rule.pool ? "pool" : "mapped",
+        pool: rule.pool ? poolDraftFromSaved(rule.pool) : newPool(),
         mode: rule.mode,
         addressFamily: rule.address_family ?? "ipv4",
         adapterDefinitionId: rule.adapter_definition_id ?? "",
         clientId: rule.client_id,
         enabled: rule.enabled,
-        incoming: expressions.incoming,
+        incoming: rule.pool ? rule.pool.incoming.map(formatPortRange).join(",") : expressions.incoming,
         masquerade: rule.masquerade,
         name: rule.name,
         protocol: rule.protocol,
@@ -327,12 +340,14 @@ export function PortForwardingPanel({
     setEditor({
       editing: null,
       draft: {
+        mappingPolicy: rule.pool ? "pool" : "mapped",
+        pool: rule.pool ? poolDraftFromSaved(rule.pool) : newPool(),
         mode: rule.mode,
         addressFamily: rule.address_family ?? "ipv4",
         adapterDefinitionId: rule.adapter_definition_id ?? "",
         clientId: rule.client_id,
         enabled: false,
-        incoming: expressions.incoming,
+        incoming: rule.pool ? rule.pool.incoming.map(formatPortRange).join(",") : expressions.incoming,
         masquerade: rule.masquerade,
         name: nextCloneName(rule.name, rules, rule.client_id),
         protocol: rule.protocol,
@@ -379,6 +394,7 @@ export function PortForwardingPanel({
           snapshot.draft,
           snapshot.editing,
           true,
+          snapshot.pool,
         );
         setEditor(null);
         setFeedback({
@@ -436,9 +452,10 @@ export function PortForwardingPanel({
     draft: EditorDraft,
     editing: PortForwardRuleRecord | null,
     confirmed: boolean,
+    pool?: PortForwardPool,
   ) {
-    const mappings = pairPortExpressions(draft.incoming, draft.target);
-    if (draft.mode === "dnat" && !draft.targetIp)
+    const mappings = pool ? [] : pairPortExpressions(draft.incoming, draft.target);
+    if (!pool && draft.mode === "dnat" && !draft.targetIp)
       throw new Error("Resolve and select a literal target IP");
     const base = {
       mode: draft.mode,
@@ -448,11 +465,12 @@ export function PortForwardingPanel({
       confirmed,
       enabled: draft.enabled,
       mappings,
+      ...(pool ? { pool } : editing?.pool ? { pool: null } : {}),
       masquerade: draft.mode === "dnat" && draft.masquerade,
       name: draft.name.trim(),
       protocol: draft.protocol,
-      target_hostname: draft.mode === "redirect" ? null : draft.targetHostname,
-      target_ip: draft.mode === "redirect" ? null : draft.targetIp || null,
+      target_hostname: pool || draft.mode === "redirect" ? null : draft.targetHostname,
+      target_ip: pool || draft.mode === "redirect" ? null : draft.targetIp || null,
     };
     return editing
       ? onUpdate(editing.id, {
@@ -466,11 +484,20 @@ export function PortForwardingPanel({
     event.preventDefault();
     if (!editor || pending || !canWrite) return;
     try {
-      validateEditor(editor.draft, agentById.get(editor.draft.clientId));
-      pairPortExpressions(editor.draft.incoming, editor.draft.target);
+      const adapter = adapterDefinitions.find((item) => item.id === editor.draft.adapterDefinitionId);
+      const capabilities = poolCapabilities(editor.draft.mode, editor.draft.protocol,
+        agentById.get(editor.draft.clientId), adapter);
+      const isPool = editor.draft.mode !== "redirect" && editor.draft.mappingPolicy === "pool";
+      if (isPool && !capabilities) {
+        throw new Error("This forwarder cannot use the stored pool. Select Port mapping to convert it, or return to a compatible forwarder.");
+      }
+      const pool = isPool && capabilities
+        ? buildPool(editor.draft.incoming, editor.draft.pool, capabilities) : undefined;
+      validateEditor(editor.draft, agentById.get(editor.draft.clientId), Boolean(pool), adapter);
+      if (!pool) pairPortExpressions(editor.draft.incoming, editor.draft.target);
       if (editor.draft.enabled || editor.editing?.enabled) {
         setFeedback(null);
-        setConfirmation({ kind: "save", ...editor });
+        setConfirmation({ kind: "save", ...editor, pool });
         return;
       }
       setPending(true);
@@ -479,7 +506,7 @@ export function PortForwardingPanel({
         message: "Saving disabled rule",
         tone: "progress",
       });
-      const response = await saveDraft(editor.draft, editor.editing, false);
+      const response = await saveDraft(editor.draft, editor.editing, false, pool);
       setEditor(null);
       setFeedback({
         ...syncFeedback(
@@ -559,15 +586,15 @@ export function PortForwardingPanel({
         id: "domain",
         header: "Domain",
         headerTitle:
-          "DNS hostname retained with the selected literal target address.",
+          "DNS hostnames retained with the selected literal target addresses.",
         cell: (rule) =>
-          rule.target_hostname ? (
-            <span className="truncateValue">{rule.target_hostname}</span>
+          portForwardDomains(rule) ? (
+            <span className="truncateValue" title={portForwardDomains(rule)}>{portForwardDomains(rule)}</span>
           ) : (
             <span>-</span>
           ),
-        searchValue: (rule) => rule.target_hostname ?? "",
-        sortValue: (rule) => rule.target_hostname ?? "",
+        searchValue: portForwardDomains,
+        sortValue: portForwardDomains,
         minSize: 140,
         size: 190,
       },
@@ -577,13 +604,13 @@ export function PortForwardingPanel({
         cell: (rule) => (
           <span
             className="truncateValue mappingValue"
-            title={portForwardMappingLabel(rule)}
+            title={rule.pool ? poolTooltip(rule.pool) : portForwardMappingLabel(rule)}
           >
             {portForwardMappingLabel(rule)}
           </span>
         ),
         searchValue: (rule) =>
-          `${portForwardMappingLabel(rule)} ${familyLabel(rule.address_family)}`,
+          `${portForwardMappingLabel(rule)} ${rule.pool ? poolTooltip(rule.pool) : ""} ${familyLabel(rule.address_family)}`,
         sortValue: (rule) => portForwardMappingLabel(rule),
         minSize: 220,
         size: 300,
@@ -659,10 +686,17 @@ export function PortForwardingPanel({
     return rows.filter((rule) => !rule.deleted_at);
   }
 
+  function supportsRule(rule: PortForwardRuleRecord) {
+    const agent = agentById.get(rule.client_id);
+    const adapter = adapterDefinitions.find((item) => item.id === rule.adapter_definition_id);
+    return supportsMode(agent, rule.mode, adapter)
+      && (!rule.pool || Boolean(poolCapabilities(rule.mode, rule.protocol, agent, adapter)));
+  }
+
   function enableRows(rows: PortForwardRuleRecord[]) {
     return activeRows(rows).filter(
       (rule) =>
-        !rule.enabled && supportsMode(agentById.get(rule.client_id), rule.mode),
+        !rule.enabled && supportsRule(rule),
     );
   }
 
@@ -671,9 +705,7 @@ export function PortForwardingPanel({
   }
 
   function reapplyRows(rows: PortForwardRuleRecord[]) {
-    return activeRows(rows).filter((rule) =>
-      supportsMode(agentById.get(rule.client_id), rule.mode),
-    );
+    return activeRows(rows).filter(supportsRule);
   }
 
   function reviewMutation(
@@ -847,11 +879,11 @@ export function PortForwardingPanel({
             label="Listener scope"
             value={listenerScope(rule.mode, rule.address_family)}
           />
-          <Detail label="Domain" value={rule.target_hostname ?? "-"} />
+          {!rule.pool && <Detail label="Domain" value={rule.target_hostname ?? "-"} />}
           <Detail
             label="Target"
             value={
-              rule.mode === "redirect"
+              rule.pool ? `${rule.pool.upstreams.length} upstream rows` : rule.mode === "redirect"
                 ? "This VPS"
                 : (rule.target_ip ?? "Controlled by adapter")
             }
@@ -866,7 +898,7 @@ export function PortForwardingPanel({
               }
             />
           )}
-          <Detail label="Mappings" value={formatPortMappings(rule.mappings)} />
+          <Detail label={rule.pool ? "Pool" : "Mappings"} value={rule.pool ? poolSummary(rule.pool) : formatPortMappings(rule.mappings)} />
           <Detail
             label="Return path"
             value={returnPathLabel(rule.mode, rule.masquerade)}
@@ -886,13 +918,15 @@ export function PortForwardingPanel({
                 ?.reason ?? undefined
             }
             value={
-              rule.mode === "custom_adapter"
-                ? supportsMode(agentById.get(rule.client_id), rule.mode)
-                  ? "Custom adapters supported"
-                  : "Custom adapter support not reported"
-                : capabilitySummary(
-                    agentById.get(rule.client_id)?.capabilities.port_forwarding,
-                  )
+              rule.pool && !supportsRule(rule)
+                ? "Pool support not reported"
+                : rule.mode === "custom_adapter"
+                  ? supportsRule(rule)
+                    ? "Custom adapters supported"
+                    : "Selected adapter support not reported"
+                  : capabilitySummary(
+                      agentById.get(rule.client_id)?.capabilities.port_forwarding,
+                    )
             }
           />
           {rule.mode === "dnat" && (
@@ -940,6 +974,7 @@ export function PortForwardingPanel({
             />
           )}
         </dl>
+        {rule.pool && <PortForwardPoolDetails pool={rule.pool} mode={rule.mode} observations={rule.upstream_observations} />}
         <ActionFeedback
           className="localActionFeedback portForwardDetailFeedback"
           message={feedback?.anchor === "detail" ? feedback.message : null}
@@ -1251,6 +1286,7 @@ export function PortForwardingPanel({
       )}
 
       <ConfirmationPrompt
+        className={confirmation?.kind === "save" && confirmation.pool ? "portForwardPoolReview" : undefined}
         confirmLabel={confirmationLabel(confirmation)}
         detail={confirmationDetail(confirmation)}
         error={
@@ -1361,6 +1397,7 @@ const PortForwardEditor = forwardRef<
   );
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
+  const [poolResolutionPending, setPoolResolutionPending] = useState(false);
   const feedbackRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(false);
   const resolveRequestGenerationRef = useRef(0);
@@ -1387,25 +1424,37 @@ const PortForwardEditor = forwardRef<
   const selectedAdapter = adapterDefinitions.find(
     (definition) => definition.id === draft.adapterDefinitionId,
   );
+  const poolSupport = poolCapabilities(draft.mode, draft.protocol, selectedAgent, selectedAdapter);
+  const isPool = draft.mode !== "redirect" && draft.mappingPolicy === "pool";
+  const poolPreview = (() => {
+    if (!isPool) return { pool: null, error: null };
+    if (!poolSupport) return { pool: null, error: "This forwarder cannot use the stored pool. Select Port mapping to convert it, or return to a compatible forwarder." };
+    try { return { pool: buildPool(draft.incoming, draft.pool, poolSupport), error: null }; }
+    catch (error) { return { pool: null, error: (error as Error).message }; }
+  })();
+  const previewStarted = isPool ? Boolean(draft.incoming.trim() || draft.pool.upstreams.some((row) => row.address.trim())) : mappingStarted;
+  const previewError = isPool ? poolPreview.error : mappingPreview.error;
   const targetIsLiteral = literalIpFamily(draft.targetInput) !== null;
   const saveDisabledReason = pending
     ? "Another port-forwarding action is in progress"
     : resolving
       ? "Wait for hostname resolution to finish before reviewing this rule, then select one resolved address"
+      : poolResolutionPending
+        ? "Apply or cancel the DNS address selection before reviewing this rule"
       : !draft.name.trim()
         ? "Enter a rule name"
         : utf8ByteLength(draft.name.trim()) > MAX_RULE_NAME_BYTES
           ? `Rule name must not exceed ${MAX_RULE_NAME_BYTES} UTF-8 bytes`
           : !draft.clientId
             ? "Select a VPS"
-            : destinationError(draft)
+            : !isPool && destinationError(draft)
               ? destinationError(draft)
               : draft.mode === "custom_adapter" && !selectedAdapter
                 ? "Select a port-forward adapter definition"
-                : mappingPreview.error
-                  ? mappingPreview.error
-                  : draft.enabled && !supportsMode(selectedAgent, draft.mode)
-                    ? modeCapabilityLabel(selectedAgent, draft.mode)
+                : previewError
+                  ? previewError
+                  : draft.enabled && !supportsMode(selectedAgent, draft.mode, selectedAdapter)
+                    ? modeCapabilityLabel(selectedAgent, draft.mode, selectedAdapter)
                     : null;
   const saveDisabled = saveDisabledReason !== null;
 
@@ -1489,7 +1538,7 @@ const PortForwardEditor = forwardRef<
       <form
         className="portForwardForm"
         onSubmit={(event) => {
-          if (resolving) {
+          if (resolving || poolResolutionPending) {
             event.preventDefault();
             return;
           }
@@ -1560,6 +1609,56 @@ const PortForwardEditor = forwardRef<
             ))}
           </div>
         </fieldset>
+        {draft.mode === "custom_adapter" && (
+          <div className="portForwardAdapterField fieldFull">
+            <label>
+              <span>Adapter definition</span>
+              <select
+                aria-label="Port-forward adapter definition"
+                disabled={pending}
+                onChange={(event) =>
+                  onChange({
+                    adapterDefinitionId: event.target.value,
+                  })
+                }
+                required
+                value={draft.adapterDefinitionId}
+              >
+                <option value="">Select adapter…</option>
+                {adapterDefinitions.map((definition) => (
+                  <option key={definition.id} value={definition.id}>
+                    {definition.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="previewMeta">
+              <button
+                className="secondaryAction compactAction"
+                disabled={pending}
+                onClick={onCreateAdapter}
+                type="button"
+              >
+                <CirclePlus size={14} /> Create adapter
+              </button>
+              <button className="secondaryAction compactAction" disabled={pending || !selectedAdapter}
+                onClick={() => selectedAdapter && onEditAdapter(selectedAdapter, "details")}
+                title="Edit name and description without restarting resources" type="button">
+                <Pencil size={14} /> Edit details
+              </button>
+              <button className="secondaryAction compactAction" disabled={pending || !selectedAdapter}
+                onClick={() => selectedAdapter && onEditAdapter(selectedAdapter, "commands")}
+                title="Review command changes and affected forwarding rules" type="button">
+                <Pencil size={14} /> Edit commands
+              </button>
+            </div>
+            <small>
+              The adapter manages its listener, address family, source handling,
+              and port collisions. Apply and Remove must finish before Status
+              confirms the requested state.
+            </small>
+          </div>
+        )}
         <fieldset className="compactFieldset">
           <legend>Protocol</legend>
           <div className="segmentedControl" role="group" aria-label="Protocol">
@@ -1617,6 +1716,8 @@ const PortForwardEditor = forwardRef<
               value={
                 draft.mode === "custom_adapter"
                   ? "Controlled by adapter"
+                  : isPool
+                    ? familyLabel(literalIpFamily(draft.pool.upstreams.find((row) => literalIpFamily(row.address))?.address ?? ""))
                   : draft.targetIp
                     ? familyLabel(literalIpFamily(draft.targetIp))
                     : "Derived from destination"
@@ -1624,6 +1725,20 @@ const PortForwardEditor = forwardRef<
             />
           </label>
         )}
+        {(poolSupport || isPool) && <label className="poolMappingPolicy" title="Port mapping retains positional translation. An upstream pool selects from all configured endpoints for every incoming port.">
+          <span>Mapping policy</span>
+          <select aria-label="Mapping policy" disabled={pending} value={isPool ? poolSupport ? "pool" : "" : "mapped"} onChange={(event) => {
+            const mappingPolicy = event.target.value as EditorDraft["mappingPolicy"];
+            let pool = draft.pool;
+            if (mappingPolicy === "pool" && pool.upstreams.every((row) => !row.address && !row.ports) && draft.targetIp) {
+              try {
+                const ports = [...new Set(draft.target.split(","))].flatMap((item) => parsePortExpression(item));
+                pool = { ...pool, upstreams: ports.map((range) => newUpstream({ address: draft.targetIp, hostname: draft.targetHostname, ports: formatPortRange(range) })) };
+              } catch { /* Preserve the pool draft while the port mapping is incomplete. */ }
+            }
+            onChange({ mappingPolicy, pool });
+          }}>{isPool && !poolSupport && <option value="" disabled>Choose a mapping policy…</option>}<option value="mapped">Port mapping</option>{poolSupport && <option value="pool">Upstream pool</option>}</select>
+        </label>}
         <label title="Local listener ports matched by this rule; enter a port, range, or comma-separated mappings.">
           <span>Incoming ports</span>
           <input
@@ -1636,7 +1751,7 @@ const PortForwardEditor = forwardRef<
           />
           <small>PORT or START-END, comma separated</small>
         </label>
-        <label title="Destination ports paired with the incoming mappings; one port may serve every incoming port.">
+        {!isPool && <label title="Destination ports paired with the incoming mappings; one port may serve every incoming port.">
           <span>
             {draft.mode === "redirect" ? "Local ports" : "Target ports"}
           </span>
@@ -1649,8 +1764,10 @@ const PortForwardEditor = forwardRef<
             value={draft.target}
           />
           <small>One port for all, or corresponding items</small>
-        </label>
-        {draft.mode === "redirect" ? (
+        </label>}
+        {isPool && poolSupport && <PortForwardPoolFields draft={draft.pool} capabilities={poolSupport} mode={draft.mode} protocol={draft.protocol} pending={pending}
+          onChange={(pool) => onChange({ pool })} onResolve={onResolveHostname} onResolutionPendingChange={setPoolResolutionPending} />}
+        {!isPool && (draft.mode === "redirect" ? (
           <div className="portForwardLocalHint fieldFull">
             <strong>Destination: This VPS</strong>
             <p>
@@ -1707,9 +1824,9 @@ const PortForwardEditor = forwardRef<
               </button>
             )}
           </div>
-        )}
-        <ActionFeedback message={resolveError} tone="danger" />
-        {draft.mode !== "redirect" && resolution && (
+        ))}
+        {!isPool && <ActionFeedback message={resolveError} tone="danger" />}
+        {!isPool && draft.mode !== "redirect" && resolution && (
           <fieldset
             className="dnsCandidateList"
             disabled={pending}
@@ -1737,56 +1854,7 @@ const PortForwardEditor = forwardRef<
             ))}
           </fieldset>
         )}
-        {draft.mode === "custom_adapter" && (
-          <div className="portForwardAdapterField fieldFull">
-            <label>
-              <span>Adapter definition</span>
-              <select
-                aria-label="Port-forward adapter definition"
-                disabled={pending}
-                onChange={(event) =>
-                  onChange({
-                    adapterDefinitionId: event.target.value,
-                  })
-                }
-                required
-                value={draft.adapterDefinitionId}
-              >
-                <option value="">Select adapter…</option>
-                {adapterDefinitions.map((definition) => (
-                  <option key={definition.id} value={definition.id}>
-                    {definition.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="previewMeta">
-              <button
-                className="secondaryAction compactAction"
-                disabled={pending}
-                onClick={onCreateAdapter}
-                type="button"
-              >
-                <CirclePlus size={14} /> Create adapter
-              </button>
-              <button className="secondaryAction compactAction" disabled={pending || !selectedAdapter}
-                onClick={() => selectedAdapter && onEditAdapter(selectedAdapter, "details")}
-                title="Edit name and description without restarting resources" type="button">
-                <Pencil size={14} /> Edit details
-              </button>
-              <button className="secondaryAction compactAction" disabled={pending || !selectedAdapter}
-                onClick={() => selectedAdapter && onEditAdapter(selectedAdapter, "commands")}
-                title="Review command changes and affected forwarding rules" type="button">
-                <Pencil size={14} /> Edit commands
-              </button>
-            </div>
-            <small>
-              The adapter manages its listener, address family, source handling,
-              and port collisions. Apply and Remove must finish before Status
-              confirms the requested state.
-            </small>
-          </div>
-        )}
+
         {draft.mode === "dnat" && (
           <fieldset className="compactFieldset returnPathField">
             <legend>Return path</legend>
@@ -1848,20 +1916,22 @@ const PortForwardEditor = forwardRef<
           <span>Enabled</span>
         </label>
         <div
-          className={`portMappingPreview ${!mappingStarted ? "idle" : mappingPreview.error ? "invalid" : "valid"}`}
+          className={`portMappingPreview ${!previewStarted ? "idle" : previewError ? "invalid" : "valid"}`}
         >
-          {!mappingStarted ? (
+          {!previewStarted ? (
             <>
               <Info size={16} />
               <span>
-                Enter incoming and target ports to preview the exact mappings
+                {isPool ? "Enter incoming ports and upstreams to preview the pool" : "Enter incoming and target ports to preview the exact mappings"}
               </span>
             </>
-          ) : mappingPreview.error ? (
+          ) : previewError ? (
             <>
               <ShieldAlert size={16} />
-              <span title={mappingPreview.error}>{mappingPreview.error}</span>
+              <span title={previewError}>{previewError}</span>
             </>
+          ) : poolPreview.pool ? (
+            <><CheckCircle2 size={16} /><span title={poolTooltip(poolPreview.pool)}>{poolSummary(poolPreview.pool)}</span></>
           ) : (
             <>
               <CheckCircle2 size={16} />
@@ -1877,11 +1947,11 @@ const PortForwardEditor = forwardRef<
             </>
           )}
         </div>
-        {selectedAgent && !supportsMode(selectedAgent, draft.mode) && (
+        {selectedAgent && !supportsMode(selectedAgent, draft.mode, selectedAdapter) && (
           <div className="portForwardCapabilityNotice">
             <ShieldAlert size={16} />
             <span title={capability?.reason ?? capability?.status ?? "unknown"}>
-              {modeCapabilityLabel(selectedAgent, draft.mode)}
+              {modeCapabilityLabel(selectedAgent, draft.mode, selectedAdapter)}
             </span>
           </div>
         )}
@@ -1962,6 +2032,7 @@ function Detail({
 }
 
 function portForwardMappingLabel(rule: PortForwardRuleRecord) {
+  if (rule.pool) return `${rule.protocol.toUpperCase()} · ${poolSummary(rule.pool)}`;
   const targetAddress =
     rule.mode === "redirect"
       ? "This VPS"
@@ -1975,6 +2046,12 @@ function portForwardMappingLabel(rule: PortForwardRuleRecord) {
     .map((item) => formatPortRange(item.target))
     .join(",");
   return `${rule.protocol.toUpperCase()} · ${incoming} -> ${targetAddress}:${target}`;
+}
+
+function portForwardDomains(rule: PortForwardRuleRecord): string {
+  return rule.pool
+    ? [...new Set(rule.pool.upstreams.map((row) => row.target_hostname).filter(Boolean))].join(", ")
+    : rule.target_hostname ?? "";
 }
 
 function StatusBadge({ status, title }: { status: string; title?: string }) {
@@ -2057,38 +2134,19 @@ function capabilitySummary(
     : status;
 }
 
-function literalIpFamily(value: string): "ipv4" | "ipv6" | null {
-  const input = value.trim();
-  const ipv4 = input.split(".");
-  if (
-    ipv4.length === 4 &&
-    ipv4.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
-  )
-    return "ipv4";
-  if (input.includes(":") && /^[0-9a-f:.]+$/i.test(input)) {
-    try {
-      new URL(`http://[${input}]/`);
-      return "ipv6";
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function validateEditor(draft: EditorDraft, agent: AgentView | undefined) {
+function validateEditor(draft: EditorDraft, agent: AgentView | undefined, isPool = false, adapter?: NetworkAdapterDefinitionRecord) {
   if (!draft.name.trim()) throw new Error("Rule name is required");
   if (utf8ByteLength(draft.name.trim()) > MAX_RULE_NAME_BYTES)
     throw new Error(
       `Rule name must not exceed ${MAX_RULE_NAME_BYTES} UTF-8 bytes`,
     );
   if (!agent) throw new Error("Select a VPS");
-  const targetError = destinationError(draft);
+  const targetError = isPool ? null : destinationError(draft);
   if (targetError) throw new Error(targetError);
   if (draft.mode === "custom_adapter" && !draft.adapterDefinitionId)
     throw new Error("Select a port-forward adapter definition");
-  if (draft.enabled && !supportsMode(agent, draft.mode))
-    throw new Error(modeCapabilityLabel(agent, draft.mode));
+  if (draft.enabled && !supportsMode(agent, draft.mode, adapter))
+    throw new Error(modeCapabilityLabel(agent, draft.mode, adapter));
 }
 
 function capabilityLabel(status?: string, reason?: string | null) {
@@ -2138,10 +2196,18 @@ function returnPathLabel(mode: PortForwardMode, masquerade: boolean) {
       : "Preserve source";
 }
 
-function supportsMode(agent: AgentView | undefined, mode: PortForwardMode) {
+function adapterUsesContract2(adapter: NetworkAdapterDefinitionRecord | undefined) {
+  const definition = adapter?.definition;
+  return definition !== null && typeof definition === "object"
+    && !Array.isArray(definition) && definition.contract_version === 2;
+}
+
+function supportsMode(agent: AgentView | undefined, mode: PortForwardMode, adapter?: NetworkAdapterDefinitionRecord) {
   const capability = agent?.capabilities.port_forwarding;
   if (!capability) return false;
   if (mode === "dnat") return capability.status === "supported";
+  if (mode === "custom_adapter" && adapterUsesContract2(adapter)
+    && (capability.schema_version ?? 1) < 3) return false;
   return (
     (capability.schema_version ?? 1) >= 2 &&
     capability.supported_modes?.includes(mode) === true &&
@@ -2152,8 +2218,12 @@ function supportsMode(agent: AgentView | undefined, mode: PortForwardMode) {
 function modeCapabilityLabel(
   agent: AgentView | undefined,
   mode: PortForwardMode,
+  adapter?: NetworkAdapterDefinitionRecord,
 ) {
   const capability = agent?.capabilities.port_forwarding;
+  if (mode === "custom_adapter" && adapterUsesContract2(adapter)
+    && (capability?.schema_version ?? 1) < 3)
+    return "Upgrade this agent to use the selected adapter";
   if (
     mode !== "dnat" &&
     (!capability?.schema_version || capability.schema_version < 2)
@@ -2364,6 +2434,21 @@ function confirmationItems(
 ) {
   if (!state) return [];
   if (state.kind === "save") {
+    if (state.pool) {
+      const capabilities = poolCapabilities(state.draft.mode, state.draft.protocol,
+        agents.get(state.draft.clientId), adapterDefinitions.find((item) => item.id === state.draft.adapterDefinitionId));
+      return [
+        { label: "VPS", value: agents.get(state.draft.clientId)?.display_name || state.draft.clientId },
+        { label: "Mode", value: modeLabel(state.draft.mode) },
+        ...(state.draft.mode === "custom_adapter" ? [{ label: "Adapter", value: adapterDefinitions.find((item) => item.id === state.draft.adapterDefinitionId)?.name ?? state.draft.adapterDefinitionId }] : []),
+        { label: "Incoming", value: `${state.draft.protocol.toUpperCase()} ${state.pool.incoming.map(formatPortRange).join(",")}` },
+        { label: "Pool strategy", value: POOL_STRATEGIES[state.pool.strategy].label },
+        ...state.pool.upstreams.map((row) => ({ label: upstreamAddress(row), value: upstreamSummary(row), title: upstreamSummary(row) })),
+        ...(capabilities?.connect_timeout ? [{ label: "Connect timeout", value: state.pool.connect_timeout_secs !== undefined ? `${state.pool.connect_timeout_secs}s per attempt` : "Default", title: "Applies to every upstream connection attempt for this rule, independently of retry and failure exclusion settings." }] : []),
+        ...(capabilities?.retries ? [{ label: "Connection retry", value: retrySummary(state.pool) }] : []),
+        { label: "Return", value: returnPathLabel(state.draft.mode, state.draft.masquerade) },
+      ];
+    }
     const mappings = (() => {
       try {
         return formatPortMappings(

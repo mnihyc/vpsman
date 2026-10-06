@@ -45,7 +45,8 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 11;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 12;
+pub const PORT_FORWARD_POOLS_PROTOCOL_VERSION: u16 = 12;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -3448,6 +3449,10 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
 }
 
 fn runtime_config_protocol_version(config: &AgentRuntimeConfig) -> u16 {
+    if config.network.port_forwarding.schema_version >= crate::PORT_FORWARDING_POOLS_SCHEMA_VERSION
+    {
+        return PORT_FORWARD_POOLS_PROTOCOL_VERSION;
+    }
     if config
         .network
         .runtime_status_telemetry_plans

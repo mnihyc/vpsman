@@ -48,6 +48,9 @@ const NFT_TIMEOUT_SECS: u64 = 15;
 mod adapters;
 use adapters::AdapterInventory;
 
+#[path = "port_forwarding_pools.rs"]
+mod pools;
+
 #[derive(Clone, Debug)]
 struct AppliedBaseline {
     desired_hash: String,
@@ -334,12 +337,15 @@ impl PortForwardingConsumer {
 
     async fn probe(&mut self) -> PortForwardCapability {
         let mut capability = probe_port_forwarding_capability_inner().await;
-        capability.schema_version = 2;
+        capability.schema_version = vpsman_common::PORT_FORWARDING_POOLS_SCHEMA_VERSION;
         capability.supported_modes = vec![PortForwardMode::CustomAdapter];
         if capability.supported() {
             capability
                 .supported_modes
                 .extend([PortForwardMode::Dnat, PortForwardMode::Redirect]);
+            if pools::probe().await {
+                capability.pool = Some(vpsman_common::PortForwardPoolCapabilities::native());
+            }
         }
         if capability.supported() && self.monitor.is_none() {
             if let Some(nft) = resolve_nft_binary() {
@@ -722,11 +728,11 @@ fn native_config(config: &AgentPortForwardingConfig) -> AgentPortForwardingConfi
         .cloned()
         .collect::<Vec<_>>();
     AgentPortForwardingConfig {
-        schema_version: if rules.iter().all(|rule| rule.mode == PortForwardMode::Dnat) {
-            1
-        } else {
-            2
-        },
+        schema_version: rules
+            .iter()
+            .map(PortForwardRule::required_schema_version)
+            .max()
+            .unwrap_or(1),
         desired_hash: native_hash(&rules),
         rules,
         ..AgentPortForwardingConfig::default()
@@ -896,9 +902,9 @@ fn render_dispatch_maps(script: &mut String, rules: &[PortForwardRule]) {
             {
                 continue;
             }
-            for mapping in &rule.mappings {
+            for range in rule.incoming_ranges() {
                 push_element_separator(script, &mut first);
-                let incoming = render_port_range(mapping.incoming.start, mapping.incoming.end);
+                let incoming = render_port_range(range.start, range.end);
                 let _ = write!(
                     script,
                     "{incoming} : jump {}",
@@ -912,6 +918,10 @@ fn render_dispatch_maps(script: &mut String, rules: &[PortForwardRule]) {
 
 fn render_translation_maps(script: &mut String, rules: &[PortForwardRule]) {
     for (rule_index, rule) in rules.iter().enumerate() {
+        if rule.pool.is_some() {
+            pools::render_map(script, rule_index, rule);
+            continue;
+        }
         for transport in rule.protocol.transports() {
             if rule.mappings.iter().any(mapping_is_fixed) {
                 let name = fixed_map_name(rule_index, transport);
@@ -983,6 +993,11 @@ fn render_rule_chains(script: &mut String, rules: &[PortForwardRule]) {
                 "  chain {chain_name} {{\n    counter{track} comment \"vpsman-rule:{}:{}\"",
                 rule.id, rule.revision
             );
+            if rule.pool.is_some() {
+                pools::render_translation(script, rule_index, rule, transport);
+                script.push_str("  }\n");
+                continue;
+            }
             let (translation, destination) = match rule.mode {
                 PortForwardMode::Dnat => {
                     let (family, ip) =
@@ -1128,6 +1143,7 @@ fn render_capability_probe_script() -> Result<String> {
     for (index, (mode, target, address_family)) in modes.into_iter().enumerate() {
         let port = 65000 + index * 10;
         rules.push(PortForwardRule {
+            pool: Default::default(),
             id: uuid::Uuid::from_u128(index as u128 + 1),
             revision: 1,
             name: format!("capability-{index}"),
@@ -1663,6 +1679,7 @@ fn extract_rule_counters(value: &Value) -> Vec<PortForwardRuleRuntimeStat> {
         .into_iter()
         .map(
             |((rule_id, revision), nat_matches)| PortForwardRuleRuntimeStat {
+                upstream_observations: Vec::new(),
                 rule_id,
                 revision,
                 nat_matches: Some(nat_matches),

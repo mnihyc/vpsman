@@ -2,8 +2,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
-    ensure_private_dir_async, write_private_file_atomically_async, PortForwardCleanupRule,
-    RuntimeTunnelCommand,
+    ensure_private_dir_async, write_private_file_atomically_async, PortForwardAdapterRequest,
+    PortForwardCleanupRule, PortForwardUpstreamObservation, RuntimeTunnelCommand,
 };
 
 /// Last cleanup owner, saved before Apply so interrupted/partial applies remain removable.
@@ -238,8 +238,12 @@ impl AdapterInventory {
             .adapter
             .as_ref()
             .context("saved custom owner has no adapter")?;
-        run(&adapter.remove, entry, cancel.clone(), "remove").await?;
-        let status = observe(entry, cancel).await?;
+        let root = self
+            .root
+            .as_deref()
+            .context("adapter inventory is not loaded")?;
+        run(&adapter.remove, entry, cancel.clone(), "remove", root).await?;
+        let status = observe(entry, cancel, root).await?;
         anyhow::ensure!(
             status.state == AdapterState::Absent,
             "adapter removal verification: {}",
@@ -285,8 +289,12 @@ impl AdapterInventory {
             receipts.remove(&rule.id);
             self.store(owners, receipts, self.cleanup_failures.clone())
                 .await?;
-            run(&adapter.apply, &entry, cancel.clone(), "apply").await?;
-            let status = observe(&entry, cancel).await?;
+            let root = self
+                .root
+                .as_deref()
+                .context("adapter inventory is not loaded")?;
+            run(&adapter.apply, &entry, cancel.clone(), "apply", root).await?;
+            let status = observe(&entry, cancel, root).await?;
             anyhow::ensure!(
                 status.state == AdapterState::Applied,
                 "adapter apply verification: {}",
@@ -300,11 +308,15 @@ impl AdapterInventory {
                 self.store(self.owned.clone(), self.removed_rules.clone(), failures)
                     .await?;
             }
-            Ok::<_, anyhow::Error>(())
+            Ok::<_, anyhow::Error>(status.upstream_observations)
         }
         .await;
         match result {
-            Ok(()) => runtime_stat(rule, PortForwardRuntimeStatus::Applied),
+            Ok(observations) => {
+                let mut stat = runtime_stat(rule, PortForwardRuntimeStatus::Applied);
+                stat.upstream_observations = observations;
+                stat
+            }
             Err(error) => {
                 let Some(cleanup) = self.cleanup_failures.get(&rule.id) else {
                     return error_stat(rule, "adapter_apply_failed", &error.to_string());
@@ -360,7 +372,15 @@ impl AdapterInventory {
                 client_id: self.client_id.clone(),
                 rule: rule.clone(),
             };
-            match observe(&entry, cancel_token.clone()).await {
+            let Some(root) = self.root.as_deref() else {
+                stats.push(error_stat(
+                    rule,
+                    "adapter_inventory_failed",
+                    "adapter inventory is not loaded",
+                ));
+                continue;
+            };
+            match observe(&entry, cancel_token.clone(), root).await {
                 Ok(status) => {
                     let mut stat = runtime_stat(
                         rule,
@@ -372,6 +392,8 @@ impl AdapterInventory {
                     );
                     if status.state != AdapterState::Applied {
                         stat.error_message = status.message;
+                    } else {
+                        stat.upstream_observations = status.upstream_observations;
                     }
                     stats.push(stat);
                 }
@@ -498,6 +520,10 @@ struct AdapterObservation {
     state: AdapterState,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    config_hash: Option<String>,
+    #[serde(default)]
+    upstream_observations: Vec<PortForwardUpstreamObservation>,
 }
 
 impl AdapterObservation {
@@ -513,38 +539,95 @@ impl AdapterObservation {
     }
 }
 
-async fn observe(entry: &OwnedRule, cancel: CommandCancelToken) -> Result<AdapterObservation> {
+async fn observe(
+    entry: &OwnedRule,
+    cancel: CommandCancelToken,
+    root: &Path,
+) -> Result<AdapterObservation> {
     let adapter = entry
         .rule
         .adapter
         .as_ref()
         .context("custom rule has no adapter")?;
-    let bytes = run(&adapter.status, entry, cancel, "status").await?;
-    serde_json::from_slice(&bytes)
-        .context("adapter status must return JSON state applied, absent, or drifted")
+    let bytes = run(&adapter.status, entry, cancel, "status", root).await?;
+    let mut status: AdapterObservation = serde_json::from_slice(&bytes)
+        .context("adapter status must return JSON state applied, absent, or drifted")?;
+    if adapter.contract_version == 2 && status.state == AdapterState::Applied {
+        let expected = PortForwardAdapterRequest::new(&entry.client_id, &entry.rule);
+        if status.config_hash.as_deref() != Some(expected.config_hash.as_str()) {
+            status.state = AdapterState::Drifted;
+            status.message =
+                Some("adapter has not confirmed the requested loaded configuration hash".into());
+            status.upstream_observations.clear();
+            return Ok(status);
+        }
+        let mut seen = BTreeSet::new();
+        for observation in &status.upstream_observations {
+            anyhow::ensure!(
+                entry
+                    .rule
+                    .pool
+                    .as_ref()
+                    .is_some_and(|pool| pool
+                        .upstreams
+                        .iter()
+                        .any(|row| row.id == observation.upstream_id
+                            && row.ports.start <= observation.port
+                            && observation.port <= row.ports.end)),
+                "adapter observation references an unknown upstream endpoint"
+            );
+            anyhow::ensure!(
+                seen.insert((observation.upstream_id, observation.port)),
+                "adapter observation repeats an endpoint"
+            );
+            anyhow::ensure!(
+                observation
+                    .reason
+                    .as_ref()
+                    .is_none_or(|reason| reason.len() <= 1024),
+                "adapter observation reason exceeds 1024 bytes"
+            );
+        }
+    } else {
+        // Legacy status has no verified pool identity; stale observations are not live evidence.
+        status.upstream_observations.clear();
+    }
+    Ok(status)
 }
 
 fn render(command: &RuntimeTunnelCommand, entry: &OwnedRule) -> Result<Vec<String>> {
+    render_with_path(command, entry, None)
+}
+
+fn render_with_path(
+    command: &RuntimeTunnelCommand,
+    entry: &OwnedRule,
+    config_path: Option<&Path>,
+) -> Result<Vec<String>> {
     anyhow::ensure!(
         !command.argv.is_empty() && !command.argv[0].trim().is_empty(),
         "adapter command requires an executable"
     );
     let rule = &entry.rule;
     let ports = |incoming| {
-        rule.mappings
-            .iter()
-            .map(|mapping| {
-                let range = if incoming {
-                    mapping.incoming
-                } else {
-                    mapping.target
-                };
-                render_port_range(range.start, range.end)
-            })
+        let ranges = if incoming {
+            rule.incoming_ranges()
+        } else {
+            rule.mappings.iter().map(|mapping| mapping.target).collect()
+        };
+        ranges
+            .into_iter()
+            .map(|range| render_port_range(range.start, range.end))
             .collect::<Vec<_>>()
             .join(",")
     };
     let placeholders = [
+        (
+            "{rule_config_path}",
+            config_path
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
         ("{rule_id}", rule.id.to_string()),
         ("{client_id}", entry.client_id.clone()),
         ("{revision}", rule.revision.to_string()),
@@ -596,8 +679,46 @@ async fn run(
     entry: &OwnedRule,
     cancel: CommandCancelToken,
     phase: &str,
+    root: &Path,
 ) -> Result<Vec<u8>> {
-    let argv = render(command, entry)?;
+    let config_path = if entry
+        .rule
+        .adapter
+        .as_ref()
+        .is_some_and(|adapter| adapter.contract_version == 2)
+    {
+        let requests = root.join("requests");
+        ensure_private_dir_async(&requests).await?;
+        // The inventory worker serializes commands. A stable path bounds files left by a crash;
+        // each invocation gets a fresh atomic snapshot, retained until its process exits.
+        let path = requests.join(format!("{}.json", entry.rule.id));
+        let request = PortForwardAdapterRequest::new(&entry.client_id, &entry.rule);
+        write_private_file_atomically_async(&path, &serde_json::to_vec(&request)?).await?;
+        Some(path)
+    } else {
+        None
+    };
+    let result = run_with_path(command, entry, cancel, phase, config_path.as_deref()).await;
+    if let Some(path) = config_path {
+        tokio::fs::remove_file(path)
+            .await
+            .context("cannot remove adapter invocation file")?;
+    }
+    result
+}
+
+async fn run_with_path(
+    command: &RuntimeTunnelCommand,
+    entry: &OwnedRule,
+    cancel: CommandCancelToken,
+    phase: &str,
+    config_path: Option<&Path>,
+) -> Result<Vec<u8>> {
+    let argv = if config_path.is_some() {
+        render_with_path(command, entry, config_path)?
+    } else {
+        render(command, entry)?
+    };
     let mut child = Command::new(&argv[0]);
     child.args(&argv[1..]).stdin(Stdio::null());
     let result = crate::child_process::run_child_with_bounded_output_cancelable(
@@ -635,6 +756,7 @@ pub(super) fn runtime_stat(
     status: PortForwardRuntimeStatus,
 ) -> PortForwardRuleRuntimeStat {
     PortForwardRuleRuntimeStat {
+        upstream_observations: Vec::new(),
         rule_id: rule.id,
         revision: rule.revision,
         nat_matches: None,

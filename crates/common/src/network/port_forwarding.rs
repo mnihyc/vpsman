@@ -4,8 +4,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+#[path = "port_forwarding_pools.rs"]
+mod pools;
+pub use pools::*;
+
 pub const PORT_FORWARDING_SCHEMA_VERSION: u16 = 1;
 pub const PORT_FORWARDING_MODES_SCHEMA_VERSION: u16 = 2;
+pub const PORT_FORWARDING_POOLS_SCHEMA_VERSION: u16 = 3;
 pub const MAX_PORT_FORWARD_RULES: usize = 512;
 pub const MAX_PORT_FORWARD_MAPPINGS: usize = 256;
 pub const MAX_PORT_FORWARD_NAME_BYTES: usize = 128;
@@ -43,6 +48,13 @@ pub struct PortForwardAdapterCommands {
     #[serde(rename = "template_name")]
     pub definition_name: String,
     pub definition_hash: String,
+    #[serde(
+        default = "default_adapter_contract_version",
+        skip_serializing_if = "is_legacy_adapter_contract"
+    )]
+    pub contract_version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_capabilities: Option<PortForwardPoolCapabilities>,
     pub apply: crate::RuntimeTunnelCommand,
     pub remove: crate::RuntimeTunnelCommand,
     pub status: crate::RuntimeTunnelCommand,
@@ -117,6 +129,8 @@ pub struct PortForwardRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_ip: Option<IpAddr>,
     pub mappings: Vec<PortForwardMapping>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PortForwardPool>,
     #[serde(default = "default_true")]
     pub masquerade: bool,
     #[serde(default, skip_serializing_if = "PortForwardMode::is_dnat")]
@@ -128,11 +142,44 @@ pub struct PortForwardRule {
 }
 
 impl PortForwardRule {
+    pub fn incoming_ranges(&self) -> Vec<PortRange> {
+        self.pool
+            .as_ref()
+            .map(|pool| pool.incoming.clone())
+            .unwrap_or_else(|| {
+                self.mappings
+                    .iter()
+                    .map(|mapping| mapping.incoming)
+                    .collect()
+            })
+    }
+
+    pub fn required_schema_version(&self) -> u16 {
+        if self.pool.is_some()
+            || self
+                .adapter
+                .as_ref()
+                .is_some_and(|adapter| adapter.contract_version == 2)
+        {
+            PORT_FORWARDING_POOLS_SCHEMA_VERSION
+        } else if self.mode != PortForwardMode::Dnat {
+            PORT_FORWARDING_MODES_SCHEMA_VERSION
+        } else {
+            PORT_FORWARDING_SCHEMA_VERSION
+        }
+    }
+
     /// Built-in dispatch claims only; custom adapters own their own listeners.
     pub fn native_families(&self) -> &'static [PortForwardAddressFamily] {
         use PortForwardAddressFamily::{Both, Ipv4, Ipv6};
         match self.mode {
-            PortForwardMode::Dnat => match self.target_ip {
+            PortForwardMode::Dnat => match self.target_ip.or_else(|| {
+                self.pool
+                    .as_ref()?
+                    .upstreams
+                    .first()
+                    .map(|row| row.target_ip)
+            }) {
                 Some(IpAddr::V4(_)) => &[Ipv4],
                 Some(IpAddr::V6(_)) => &[Ipv6],
                 None => &[],
@@ -210,6 +257,8 @@ pub struct PortForwardCapability {
     pub schema_version: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_modes: Vec<PortForwardMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PortForwardPoolCapabilities>,
 }
 
 impl Default for PortForwardCapability {
@@ -220,6 +269,7 @@ impl Default for PortForwardCapability {
             reason: None,
             schema_version: PORT_FORWARDING_SCHEMA_VERSION,
             supported_modes: Vec::new(),
+            pool: None,
         }
     }
 }
@@ -273,6 +323,8 @@ pub struct PortForwardRuleRuntimeStat {
     pub error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_observations: Vec<PortForwardUpstreamObservation>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -307,6 +359,8 @@ pub struct PortForwardRuntimeSnapshot {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum PortForwardValidationError {
+    #[error("invalid upstream pool: {0}")]
+    PoolInvalid(String),
     #[error("port 0 is not valid")]
     PortZero,
     #[error("port range start must not exceed its end")]
@@ -431,16 +485,21 @@ pub fn validate_port_forward_rule(
     }
     match rule.mode {
         PortForwardMode::Dnat => {
-            validate_target_ip(
-                rule.target_ip
-                    .ok_or(PortForwardValidationError::TargetIpInvalid)?,
-            )?;
+            if rule.pool.is_none() {
+                validate_target_ip(
+                    rule.target_ip
+                        .ok_or(PortForwardValidationError::TargetIpInvalid)?,
+                )?;
+            } else if rule.target_ip.is_some() {
+                return Err(PortForwardValidationError::ModeFieldsInvalid);
+            }
             if rule.adapter.is_some() || rule.address_family.is_some() {
                 return Err(PortForwardValidationError::ModeFieldsInvalid);
             }
         }
         PortForwardMode::Redirect => {
-            if rule.target_ip.is_some()
+            if rule.pool.is_some()
+                || rule.target_ip.is_some()
                 || rule.adapter.is_some()
                 || rule.address_family.is_none()
                 || rule.masquerade
@@ -456,9 +515,22 @@ pub fn validate_port_forward_rule(
                 .adapter
                 .as_ref()
                 .ok_or(PortForwardValidationError::ModeFieldsInvalid)?;
+            if !matches!(adapter.contract_version, 1 | 2)
+                || (adapter.contract_version == 1 && adapter.pool_capabilities.is_some())
+            {
+                return Err(PortForwardValidationError::AdapterCommandInvalid);
+            }
+            if let Some(cap) = &adapter.pool_capabilities {
+                validate_port_forward_pool_capabilities(cap)?;
+            }
             // Share the existing adapter command budget and direct-argv contract.
             for command in [&adapter.apply, &adapter.remove, &adapter.status] {
                 if command.argv.is_empty()
+                    || (adapter.contract_version == 2
+                        && !command
+                            .argv
+                            .iter()
+                            .any(|arg| arg.contains("{rule_config_path}")))
                     || command.argv.len() > 32
                     || !std::path::Path::new(&command.argv[0]).is_absolute()
                     || command
@@ -473,7 +545,26 @@ pub fn validate_port_forward_rule(
             }
         }
     }
-    validate_mappings(&rule.mappings)
+    if let Some(pool) = &rule.pool {
+        if !rule.mappings.is_empty() || rule.target_ip.is_some() {
+            return Err(PortForwardValidationError::ModeFieldsInvalid);
+        }
+        let native = PortForwardPoolCapabilities::native();
+        let cap = if rule.mode == PortForwardMode::Dnat {
+            &native
+        } else {
+            rule.adapter
+                .as_ref()
+                .filter(|adapter| adapter.contract_version == 2)
+                .and_then(|adapter| adapter.pool_capabilities.as_ref())
+                .ok_or_else(|| {
+                    PortForwardValidationError::PoolInvalid("adapter does not support pools".into())
+                })?
+        };
+        validate_port_forward_pool(pool, rule.mode, rule.protocol, cap)
+    } else {
+        validate_mappings(&rule.mappings)
+    }
 }
 
 pub fn validate_port_forwarding_config(
@@ -481,13 +572,22 @@ pub fn validate_port_forwarding_config(
 ) -> Result<(), PortForwardValidationError> {
     if !matches!(
         config.schema_version,
-        PORT_FORWARDING_SCHEMA_VERSION | PORT_FORWARDING_MODES_SCHEMA_VERSION
+        PORT_FORWARDING_SCHEMA_VERSION
+            | PORT_FORWARDING_MODES_SCHEMA_VERSION
+            | PORT_FORWARDING_POOLS_SCHEMA_VERSION
     ) || (config.schema_version == PORT_FORWARDING_SCHEMA_VERSION
         && (!config.cleanup_rules.is_empty()
             || config
                 .rules
                 .iter()
                 .any(|rule| rule.mode != PortForwardMode::Dnat)))
+    {
+        return Err(PortForwardValidationError::SchemaUnsupported);
+    }
+    if config
+        .rules
+        .iter()
+        .any(|rule| rule.required_schema_version() > config.schema_version)
     {
         return Err(PortForwardValidationError::SchemaUnsupported);
     }
@@ -605,11 +705,11 @@ fn validate_cross_rule_overlaps(
                     .transports()
                     .iter()
                     .flat_map(move |transport| {
-                        rule.mappings.iter().map(move |mapping| {
+                        rule.incoming_ranges().into_iter().map(move |incoming| {
                             (
                                 *family == PortForwardAddressFamily::Ipv6,
                                 *transport,
-                                mapping.incoming,
+                                incoming,
                             )
                         })
                     })
@@ -639,6 +739,23 @@ fn estimated_nft_program_bytes(rules: &[PortForwardRule]) -> usize {
         .filter(|rule| rule.mode != PortForwardMode::CustomAdapter)
         .fold(BASE_BYTES, |total, rule| {
             let transports = rule.protocol.transports().len() * rule.native_families().len();
+            if let Some(pool) = &rule.pool {
+                // Each enabled IP:port renders one integer interval -> address.port
+                // element. 160 bytes bounds IPv6, two u32 indices and punctuation.
+                let endpoints = pool
+                    .upstreams
+                    .iter()
+                    .filter(|row| row.enabled)
+                    .fold(0_usize, |sum, row| {
+                        sum.saturating_add(row.ports.cardinality() as usize)
+                    });
+                return total.saturating_add(
+                    RULE_PROGRAM_BYTES
+                        .saturating_add(pool.incoming.len().saturating_mul(DISPATCH_ELEMENT_BYTES))
+                        .saturating_add(endpoints.saturating_mul(160))
+                        .saturating_mul(transports),
+                );
+            }
             let compact_elements = rule
                 .mappings
                 .iter()
@@ -677,6 +794,13 @@ const fn default_port_forwarding_schema_version() -> u16 {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_adapter_contract_version() -> u16 {
+    1
+}
+fn is_legacy_adapter_contract(version: &u16) -> bool {
+    *version == 1
 }
 
 #[cfg(test)]

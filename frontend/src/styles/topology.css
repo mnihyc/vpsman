@@ -470,6 +470,341 @@
   font-size: 13px;
 }
 
+/* Pool fields use the forwarding editor and tunnel Advanced control styles. */
+.portForwardForm > .poolMappingPolicy {
+  align-self: start;
+}
+
+.portForwardPoolFields .formHint,
+.poolConfiguredDetails .formHint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.portForwardPoolFields {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  min-width: 0;
+}
+
+.portForwardPoolFields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.poolStrategyRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 16px;
+}
+
+.poolStrategyRow > .formHint {
+  padding-bottom: 8px;
+}
+
+.poolUpstreamList {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.poolUpstreamGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px 76px 32px 64px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.poolUpstreamGrid.withBackup {
+  grid-template-columns: minmax(0, 1fr) 140px 76px 104px 32px 64px;
+}
+
+.poolUpstreamHeader {
+  padding: 0 19px 0 11px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.poolUpstream {
+  min-width: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.poolDomain,
+.poolDirect {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.poolDirect {
+  padding-right: 8px;
+}
+
+.poolUpstream:first-child {
+  border-top: 0;
+}
+
+.poolDomainHeading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.poolDomainHeading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.poolDomainHeading > .formHint {
+  white-space: nowrap;
+}
+
+.poolDomainHeading > .poolRowActions {
+  margin-left: auto;
+}
+
+.poolDomain > .poolDomainHeading,
+.poolDetailDomain > .poolDomainHeading {
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 5px 5px 0 0;
+  background: var(--surface-subtle);
+}
+
+.poolDomainChildren {
+  min-width: 0;
+  margin: 0 8px 8px 20px;
+}
+
+.poolDomain > .poolDnsPicker {
+  margin: 0 10px 8px 20px;
+}
+
+.poolResolvedAddress {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.poolUpstream.isDisabled .poolAddressInput input,
+.poolUpstream.isDisabled .poolResolvedAddress {
+  color: var(--muted);
+}
+
+.poolAddressInput {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.poolAddressInput input {
+  flex: 1;
+  min-width: 0;
+}
+
+.poolRowActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.poolRowActions .iconButton,
+.poolAddressInput .iconButton {
+  width: 28px;
+  min-width: 28px;
+  height: 32px;
+  padding: 4px;
+}
+
+.poolRowActions .hasSettings {
+  color: var(--primary-text);
+}
+
+.portForwardPoolFields .poolEnabledField {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.poolMobileLabel {
+  display: none;
+}
+
+.poolRowSettings {
+  margin: 10px 0 2px 16px;
+  padding: 8px 10px;
+}
+
+.poolConnectionSettings {
+  padding-top: 10px;
+}
+
+.poolRowError {
+  margin-top: 6px;
+  color: var(--danger-strong);
+  font-size: 12px;
+}
+
+.poolFooter,
+.poolDnsHeading,
+.poolDnsActions,
+.poolDetailHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.poolConnectionOptions {
+  margin: 0;
+}
+
+.poolDnsPicker {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  margin-top: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-neutral);
+  min-width: 0;
+}
+
+.poolDnsHeading strong {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.portForwardForm .poolDnsHeading select {
+  width: auto;
+}
+
+.poolDnsCandidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  gap: 6px 12px;
+  min-width: 0;
+}
+
+.poolDnsCandidates label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 8px;
+  padding: 6px;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.poolDnsCandidates label > span {
+  overflow-wrap: anywhere;
+}
+
+.poolDnsCandidates label > small {
+  grid-column: 2;
+}
+
+.poolConfiguredDetails {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 18px 12px;
+}
+
+.poolDetailDomain {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.poolDetailDomain > .poolDomainChildren {
+  padding: 0 10px;
+}
+
+.poolDetailDomain .poolDetailRow:first-child {
+  border-top: 0;
+}
+
+.poolDetailRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 110px 140px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12px;
+  min-width: 0;
+}
+
+.poolDetailRow.withFailure {
+  grid-template-columns: minmax(0, 1fr) 90px 110px minmax(0, 1.5fr) 140px;
+}
+
+.poolDetailRow > .portForwardStatus {
+  justify-self: end;
+}
+
+.poolDetailRow.isNative {
+  grid-template-columns: minmax(0, 1fr) 110px 120px;
+}
+
+.poolDetailAddress,
+.poolDetailFailure {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.portForwardPoolReview .confirmationPromptBody dt,
+.portForwardPoolReview .confirmationPromptBody dd {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1000px) {
+  .poolUpstreamGrid,
+  .poolUpstreamGrid.withBackup {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: end;
+  }
+  .poolUpstreamHeader { display: none; }
+  .poolAddressField { grid-column: 1 / -1; }
+  .poolMobileLabel { display: inline; }
+  .poolUpstreamGrid .poolEnabledField { justify-content: flex-start; min-height: 36px; }
+  .poolRowActions { grid-column: 2; }
+  .poolStrategyRow { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .poolRowSettings.topologyFormGrid, .poolConnectionSettings.topologyFormGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .poolDetailRow, .poolDetailRow.withFailure, .poolDetailRow.isNative { grid-template-columns: minmax(0, 1fr) auto; }
+  .poolDetailFailure { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
+}
+
+@media (max-width: 480px) {
+  .poolRowSettings.topologyFormGrid, .poolConnectionSettings.topologyFormGrid { grid-template-columns: minmax(0, 1fr); }
+}
+
 .endpointStatusPair,
 .topologyEndpointPair {
   display: flex;

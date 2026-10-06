@@ -814,6 +814,10 @@ fn network_adapter_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("network_adapter_review_required")
     } else if message.contains("network_adapter_traffic_limit_required_by_binding") {
         ApiError::conflict("network_adapter_traffic_limit_required_by_binding")
+    } else if message.contains("network_adapter_pool_required_by_binding") {
+        ApiError::conflict_with_message("network_adapter_pool_required_by_binding", "An attached forwarding pool requires capabilities removed or restricted by this edit. Update those rules first.".to_string())
+    } else if message.contains("network_adapter_pool_agent_capability_required") {
+        ApiError::conflict_with_message("network_adapter_pool_agent_capability_required", "Update agents used by enabled rules to support adapter contract 2 before changing this definition.".to_string())
     } else if message.contains("network_adapter_definition_in_use") {
         ApiError::conflict("network_adapter_definition_in_use")
     } else if message.contains("network_adapter_definition_kind_immutable") {

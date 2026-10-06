@@ -68,6 +68,7 @@ fn rejects_ambiguous_or_overlapping_expressions() {
 #[test]
 fn rejects_cross_rule_protocol_and_family_collisions() {
     let base = PortForwardRule {
+        pool: Default::default(),
         id: Uuid::new_v4(),
         revision: 1,
         name: "web".to_string(),
@@ -118,6 +119,7 @@ fn rejects_desired_state_that_would_render_an_oversized_program() {
             })
             .collect::<Vec<_>>();
         rules.push(PortForwardRule {
+            pool: Default::default(),
             id: Uuid::new_v4(),
             revision: 1,
             name: format!("rule-{rule_index}"),
@@ -160,6 +162,7 @@ fn dnat_wire_roundtrip_preserves_existing_desired_identity() {
 
 fn redirect_rule() -> PortForwardRule {
     PortForwardRule {
+        pool: Default::default(),
         id: Uuid::new_v4(),
         revision: 1,
         name: "local".into(),
@@ -199,6 +202,8 @@ fn dual_family_redirect_claims_both_native_families_but_not_custom_listeners() {
         max_output_bytes: 16384,
     };
     custom.adapter = Some(PortForwardAdapterCommands {
+        contract_version: 1,
+        pool_capabilities: None,
         definition_id: Uuid::new_v4(),
         definition_name: "listener".into(),
         definition_hash: "test".into(),

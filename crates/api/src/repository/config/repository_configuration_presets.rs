@@ -1945,6 +1945,7 @@ pub(crate) fn validate_network_adapter_definition(
         "routing_cost" => &["contract_version", "status_command", "update_command"][..],
         "port_forward" => &[
             "contract_version",
+            "pool_capabilities",
             "apply_command",
             "remove_command",
             "status_command",
@@ -1961,7 +1962,9 @@ pub(crate) fn validate_network_adapter_definition(
         1
     };
     anyhow::ensure!(
-        object.get("contract_version").and_then(Value::as_u64) == Some(expected_contract_version),
+        object.get("contract_version").and_then(Value::as_u64) == Some(expected_contract_version)
+            || (request.adapter_kind == "port_forward"
+                && object.get("contract_version").and_then(Value::as_u64) == Some(2)),
         "network_adapter_contract_version_invalid"
     );
     let command = |field: &str, required: bool| -> Result<Option<PresetCommand>> {
@@ -1994,9 +1997,29 @@ pub(crate) fn validate_network_adapter_definition(
             "network_adapter_remove_command_required"
         );
     } else if request.adapter_kind == "port_forward" {
-        command("apply_command", true)?;
-        command("remove_command", true)?;
-        command("status_command", true)?;
+        let version = object
+            .get("contract_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        if let Some(capabilities) = object.get("pool_capabilities") {
+            anyhow::ensure!(version == 2, "network_adapter_pool_contract_v2_required");
+            let cap: vpsman_common::PortForwardPoolCapabilities =
+                serde_json::from_value(capabilities.clone())
+                    .context("network_adapter_pool_capabilities_invalid")?;
+            vpsman_common::validate_port_forward_pool_capabilities(&cap)
+                .context("network_adapter_pool_capabilities_invalid")?;
+        }
+        for field in ["apply_command", "remove_command", "status_command"] {
+            let parsed = command(field, true)?.expect("required command");
+            anyhow::ensure!(
+                version != 2
+                    || parsed
+                        .argv
+                        .iter()
+                        .any(|arg| arg.contains("{rule_config_path}")),
+                "network_adapter_rule_config_path_required"
+            );
+        }
     } else {
         command("status_command", true)?;
         command("update_command", true)?;

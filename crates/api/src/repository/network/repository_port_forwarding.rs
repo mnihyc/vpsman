@@ -10,7 +10,7 @@ use uuid::Uuid;
 use vpsman_common::{
     port_forwarding_desired_hash, validate_port_forward_rule, validate_port_forwarding_config,
     AgentPortForwardingConfig, PortForwardAddressFamily, PortForwardCleanupRule,
-    PortForwardMapping, PortForwardMode, PortForwardProtocol, PortForwardRule,
+    PortForwardMapping, PortForwardMode, PortForwardPool, PortForwardProtocol, PortForwardRule,
     PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, MAX_PORT_FORWARD_RULES,
 };
 
@@ -21,7 +21,7 @@ use crate::{
         normalize_port_forward_hostname, CreatePortForwardRuleRequest, PortForwardBulkAction,
         PortForwardBulkItem, PortForwardRuleCorruptView, PortForwardRuleListItem,
         PortForwardRuleRecord, PortForwardRuleView, PortForwardRuntimeRecord,
-        UpdatePortForwardRuleRequest, UpdateTargetHostname,
+        UpdatePortForwardPool, UpdatePortForwardRuleRequest, UpdateTargetHostname,
     },
     repository::Repository,
     repository_key_lifecycle::lock_postgres_client_lifecycles_in_tx,
@@ -198,17 +198,28 @@ impl Repository {
         let pool = match self {
             Self::Postgres(pool) => pool,
         };
-        let mapping = sqlx::query_scalar::<_, SqlJson<serde_json::Value>>(
-            "SELECT mappings FROM port_forward_rules WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-        Ok(mapping.and_then(|mapping| {
-            serde_json::from_value::<Vec<PortForwardMapping>>(mapping.0)
-                .err()
-                .map(|error| format!("Persisted port-forward configuration is invalid: {error}"))
-        }))
+        let configuration =
+            sqlx::query("SELECT mappings, pool FROM port_forward_rules WHERE id = $1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+        configuration
+            .map(|row| {
+                let mappings: SqlJson<serde_json::Value> = row.try_get("mappings")?;
+                let pool: Option<SqlJson<serde_json::Value>> = row.try_get("pool")?;
+                let error = serde_json::from_value::<Vec<PortForwardMapping>>(mappings.0)
+                    .err()
+                    .or_else(|| {
+                        pool.and_then(|pool| {
+                            serde_json::from_value::<PortForwardPool>(pool.0).err()
+                        })
+                    });
+                Ok(error.map(|error| {
+                    format!("Persisted port-forward configuration is invalid: {error}")
+                }))
+            })
+            .transpose()
+            .map(Option::flatten)
     }
 
     pub(crate) async fn port_forwarding_config_for_client(
@@ -230,7 +241,9 @@ impl Repository {
             "SELECT id,revision FROM port_forward_rules WHERE client_id=$1 AND EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AND forgotten_at IS NULL AND removal_confirmed_at IS NULL AND NOT (mode='custom_adapter' AND enabled AND deleted_at IS NULL) ORDER BY id"
         ).bind(client_id).fetch_all(pool).await?.into_iter().map(|(rule_id,revision)| PortForwardCleanupRule{rule_id,revision}).collect();
         if !config.cleanup_rules.is_empty() {
-            config.schema_version = vpsman_common::PORT_FORWARDING_MODES_SCHEMA_VERSION;
+            config.schema_version = config
+                .schema_version
+                .max(vpsman_common::PORT_FORWARDING_MODES_SCHEMA_VERSION);
         }
         validate_port_forwarding_config(&config)
             .map_err(|error| anyhow::anyhow!("port_forward_desired_state_invalid:{error}"))?;
@@ -247,6 +260,7 @@ impl Repository {
         } else {
             normalized_target_hostname(request.target_hostname.as_deref())?
         };
+        let pool = normalized_pool(request.pool.clone())?;
         let now = unix_now().to_string();
         let mut candidate = PortForwardRuleRecord {
             id: Uuid::new_v4(),
@@ -259,6 +273,7 @@ impl Repository {
                 request.mode,
                 request.address_family,
                 request.target_ip,
+                pool.as_ref(),
             ),
             adapter_definition_id: request.adapter_definition_id,
             adapter: None,
@@ -267,6 +282,7 @@ impl Repository {
             target_ip: request.target_ip,
             target_hostname,
             mappings: request.mappings.clone(),
+            pool,
             masquerade: request.mode == PortForwardMode::Dnat && request.masquerade,
             enabled: request.enabled,
             revision: 1,
@@ -289,13 +305,14 @@ impl Repository {
                     select_postgres_port_forward_rules_for_client(&mut tx, &candidate.client_id)
                         .await?;
                 ensure_candidate_valid(&candidate, &existing, None)?;
+                ensure_pool_agent_support(&mut tx, &candidate).await?;
                 sqlx::query(
                     r#"
                     INSERT INTO port_forward_rules (
                         id, actor_id, client_id, name, protocol, target_ip, target_hostname,
-                        mappings, masquerade, enabled, mode, address_family, adapter_definition_id
+                        mappings, masquerade, enabled, mode, address_family, adapter_definition_id, pool
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10, $11, $12, $13, $14)
                     "#,
                 )
                 .bind(candidate.id)
@@ -311,6 +328,7 @@ impl Repository {
                 .bind(mode_name(candidate.mode))
                 .bind(candidate.address_family.map(family_name))
                 .bind(candidate.adapter_definition_id)
+                .bind(candidate.pool.as_ref().map(SqlJson))
                 .execute(&mut *tx)
                 .await?;
                 record_requested_port_forward_adapter_owner(&mut tx, &candidate).await?;
@@ -344,7 +362,7 @@ impl Repository {
                 ensure_postgres_port_forward_client_active(&mut tx, &client_id).await?;
                 let current = sqlx::query(
                     r#"
-                    SELECT id, actor_id, client_id, target_hostname, enabled, revision,
+                    SELECT id, actor_id, client_id, target_hostname, pool, enabled, revision,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
@@ -372,6 +390,18 @@ impl Repository {
                     Some(id),
                 )
                 .await?;
+                let pool = match &request.pool {
+                    UpdatePortForwardPool::Omitted => {
+                        anyhow::ensure!(
+                            current
+                                .try_get::<Option<SqlJson<serde_json::Value>>, _>("pool")?
+                                .is_none(),
+                            "port_forward_pool_update_required"
+                        );
+                        None
+                    }
+                    UpdatePortForwardPool::Replace(pool) => normalized_pool(pool.clone())?,
+                };
                 let mut candidate = PortForwardRuleRecord {
                     id,
                     actor_id: persisted_actor_id(operator),
@@ -383,6 +413,7 @@ impl Repository {
                         request.mode,
                         request.address_family,
                         request.target_ip,
+                        pool.as_ref(),
                     ),
                     adapter_definition_id: request.adapter_definition_id,
                     adapter: None,
@@ -398,6 +429,7 @@ impl Repository {
                             .unwrap_or(current.try_get("target_hostname")?)
                     },
                     mappings: request.mappings.clone(),
+                    pool,
                     masquerade: request.mode == PortForwardMode::Dnat && request.masquerade,
                     enabled: request.enabled,
                     revision: revision + 1,
@@ -412,6 +444,7 @@ impl Repository {
                 };
                 resolve_postgres_port_forward_adapter(&mut tx, &mut candidate).await?;
                 ensure_candidate_valid(&candidate, &existing, Some(id))?;
+                ensure_pool_agent_support(&mut tx, &candidate).await?;
                 let result = sqlx::query(
                     r#"
                     UPDATE port_forward_rules
@@ -426,6 +459,7 @@ impl Repository {
                         mode = $11,
                         address_family = $12,
                         adapter_definition_id = $13,
+                        pool = $14,
                         revision = revision + 1,
                         updated_at = now()
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
@@ -444,6 +478,7 @@ impl Repository {
                 .bind(mode_name(candidate.mode))
                 .bind(candidate.address_family.map(family_name))
                 .bind(candidate.adapter_definition_id)
+                .bind(candidate.pool.as_ref().map(SqlJson))
                 .execute(&mut *tx)
                 .await?;
                 anyhow::ensure!(
@@ -486,6 +521,7 @@ impl Repository {
             target_ip: current.target_ip,
             target_hostname: UpdateTargetHostname::Preserve,
             mappings: current.mappings,
+            pool: UpdatePortForwardPool::Replace(current.pool),
             masquerade: current.masquerade,
             enabled,
             confirmed: true,
@@ -529,7 +565,7 @@ impl Repository {
                         updated_at = now()
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -689,7 +725,7 @@ impl Repository {
                       AND removal_confirmed_at IS NULL
                       AND forgotten_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -784,7 +820,7 @@ impl Repository {
                 let selected_rows = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -810,6 +846,7 @@ impl Repository {
                 let mut candidates = Vec::with_capacity(selected.len());
                 for mut record in selected {
                     apply_bulk_action(&mut record, action, &now, reason, operator)?;
+                    ensure_pool_agent_support(&mut tx, &record).await?;
                     candidates.push(record);
                 }
                 for client_id in &client_ids {
@@ -841,7 +878,7 @@ impl Repository {
                             updated_at = now()
                         WHERE id = $1 AND revision = $2
                         RETURNING id, actor_id, client_id, name, protocol,
-                            host(target_ip) AS target_ip, target_hostname, mappings,
+                            host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -953,7 +990,7 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -1002,7 +1039,7 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -1259,7 +1296,11 @@ fn config_from_records(records: &[PortForwardRuleRecord]) -> Result<AgentPortFor
         .collect::<Vec<_>>();
     cleanup_rules.sort_unstable_by_key(|rule| rule.rule_id);
     let config = AgentPortForwardingConfig {
-        schema_version: if !cleanup_rules.is_empty()
+        schema_version: if rules.iter().any(|rule| {
+            rule.required_schema_version() >= vpsman_common::PORT_FORWARDING_POOLS_SCHEMA_VERSION
+        }) {
+            vpsman_common::PORT_FORWARDING_POOLS_SCHEMA_VERSION
+        } else if !cleanup_rules.is_empty()
             || rules.iter().any(|rule| rule.mode != PortForwardMode::Dnat)
         {
             2
@@ -1363,6 +1404,10 @@ fn validate_all_enabled_records(records: &[PortForwardRuleRecord]) -> Result<()>
 
 fn validate_record(record: &PortForwardRuleRecord) -> Result<()> {
     anyhow::ensure!(
+        record.pool.is_none() || record.target_hostname.is_none(),
+        "port_forward_pool_hostname_not_applicable"
+    );
+    anyhow::ensure!(
         record.mode != PortForwardMode::Redirect || record.target_hostname.is_none(),
         "port_forward_redirect_hostname_not_applicable"
     );
@@ -1387,6 +1432,12 @@ fn runtime_rule_from_record(record: &PortForwardRuleRecord) -> PortForwardRule {
         adapter: record.adapter.clone(),
         target_ip: record.target_ip,
         mappings: record.mappings.clone(),
+        pool: record.pool.clone().map(|mut pool| {
+            for row in &mut pool.upstreams {
+                row.target_hostname = None;
+            }
+            pool
+        }),
         masquerade: record.masquerade,
     }
 }
@@ -1472,7 +1523,18 @@ fn record_to_view(
     let forwarding_enabled = snapshot
         .filter(|_| record.mode == PortForwardMode::Dnat)
         .and_then(|snapshot| {
-            if record.target_ip.is_some_and(|ip| ip.is_ipv4()) {
+            if record
+                .target_ip
+                .or_else(|| {
+                    record
+                        .pool
+                        .as_ref()?
+                        .upstreams
+                        .first()
+                        .map(|row| row.target_ip)
+                })
+                .is_some_and(|ip| ip.is_ipv4())
+            {
                 snapshot.ipv4_forwarding_enabled
             } else {
                 snapshot.ipv6_forwarding_enabled
@@ -1535,6 +1597,11 @@ fn record_to_view(
         target_ip: record.target_ip,
         target_hostname: record.target_hostname,
         mappings: record.mappings,
+        pool: record.pool,
+        upstream_observations: rule_runtime
+            .filter(|_| runtime_is_current)
+            .map(|stat| stat.upstream_observations.clone())
+            .unwrap_or_default(),
         masquerade: record.masquerade,
         enabled: record.enabled,
         revision: record.revision,
@@ -1672,15 +1739,18 @@ fn stored_address_family(
     mode: PortForwardMode,
     requested: Option<PortForwardAddressFamily>,
     ip: Option<IpAddr>,
+    pool: Option<&PortForwardPool>,
 ) -> Option<PortForwardAddressFamily> {
     match mode {
-        PortForwardMode::Dnat => ip.map(|ip| {
-            if ip.is_ipv4() {
-                PortForwardAddressFamily::Ipv4
-            } else {
-                PortForwardAddressFamily::Ipv6
-            }
-        }),
+        PortForwardMode::Dnat => ip
+            .or_else(|| pool?.upstreams.first().map(|row| row.target_ip))
+            .map(|ip| {
+                if ip.is_ipv4() {
+                    PortForwardAddressFamily::Ipv4
+                } else {
+                    PortForwardAddressFamily::Ipv6
+                }
+            }),
         PortForwardMode::Redirect => Some(requested.unwrap_or(PortForwardAddressFamily::Ipv4)),
         PortForwardMode::CustomAdapter => None,
     }
@@ -1700,6 +1770,40 @@ async fn resolve_postgres_port_forward_adapter(
     Ok(())
 }
 
+async fn ensure_pool_agent_support(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    record: &PortForwardRuleRecord,
+) -> Result<()> {
+    let rule = runtime_rule_from_record(record);
+    if !record.enabled || record.deleted_at.is_some() || rule.required_schema_version() < 3 {
+        return Ok(());
+    }
+    let cap = sqlx::query_scalar::<_, SqlJson<vpsman_common::PortForwardCapability>>(
+        "SELECT COALESCE(capabilities->'port_forwarding', '{}'::jsonb) FROM clients WHERE id=$1",
+    )
+    .bind(&record.client_id)
+    .fetch_one(&mut **tx)
+    .await?
+    .0;
+    anyhow::ensure!(
+        cap.schema_version >= 3 && cap.supports_mode(record.mode),
+        "port_forward_pool_agent_capability_required"
+    );
+    if let Some(pool) = rule
+        .pool
+        .as_ref()
+        .filter(|_| record.mode == PortForwardMode::Dnat)
+    {
+        let native = cap
+            .pool
+            .as_ref()
+            .context("port_forward_pool_agent_capability_required")?;
+        vpsman_common::validate_port_forward_pool(pool, record.mode, record.protocol, native)
+            .context("port_forward_pool_agent_capability_required")?;
+    }
+    Ok(())
+}
+
 async fn record_requested_port_forward_adapter_owner(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     record: &PortForwardRuleRecord,
@@ -1715,6 +1819,16 @@ async fn record_requested_port_forward_adapter_owner(
             .bind(record.id).bind(definition_id).execute(&mut **tx).await?;
     }
     Ok(())
+}
+
+fn normalized_pool(pool: Option<PortForwardPool>) -> Result<Option<PortForwardPool>> {
+    pool.map(|mut pool| {
+        for row in &mut pool.upstreams {
+            row.target_hostname = normalized_target_hostname(row.target_hostname.as_deref())?;
+        }
+        Ok(pool)
+    })
+    .transpose()
 }
 
 fn normalized_target_hostname(value: Option<&str>) -> Result<Option<String>> {
@@ -1770,6 +1884,7 @@ fn port_forward_audit_metadata(
             "target_ip": record.target_ip,
             "target_hostname": &record.target_hostname,
             "mappings": &record.mappings,
+            "pool": &record.pool,
             "masquerade": record.masquerade,
             "enabled": record.enabled,
             "revision": record.revision,
@@ -1873,6 +1988,9 @@ fn port_forward_record_from_row(row: &sqlx::postgres::PgRow) -> Result<PortForwa
             .transpose()?,
         target_hostname: row.try_get("target_hostname")?,
         mappings,
+        pool: row
+            .try_get::<Option<SqlJson<PortForwardPool>>, _>("pool")?
+            .map(|value| value.0),
         masquerade: row.try_get("masquerade")?,
         enabled: row.try_get("enabled")?,
         revision: row.try_get("revision")?,
@@ -2111,7 +2229,7 @@ async fn select_postgres_port_forward_rules_for_client_excluding(
     let rows = sqlx::query(
         r#"
         SELECT id, actor_id, client_id, name, protocol,
-            host(target_ip) AS target_ip, target_hostname, mappings,
+            host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,
@@ -2155,7 +2273,7 @@ async fn select_postgres_port_forward_rule(
     let row = sqlx::query(
         r#"
         SELECT id, actor_id, client_id, name, protocol,
-            host(target_ip) AS target_ip, target_hostname, mappings,
+            host(target_ip) AS target_ip, target_hostname, mappings, pool,
                         mode, address_family, adapter_definition_id,
                         EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=port_forward_rules.id) AS adapter_cleanup_pending,
                         (SELECT to_jsonb(adapter) FROM network_adapter_definitions adapter WHERE adapter.id = adapter_definition_id) AS adapter_definition,

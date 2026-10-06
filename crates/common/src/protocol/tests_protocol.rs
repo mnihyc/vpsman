@@ -515,6 +515,28 @@ fn fou_defaults_and_explicit_types_require_typed_protocol_support() {
 }
 
 #[test]
+fn port_forward_pools_require_protocol_twelve_without_raising_legacy_syncs() {
+    let mut config = crate::AgentRuntimeConfig::default();
+    for schema in [1, 2, 3] {
+        config.network.port_forwarding.schema_version = schema;
+        let command = JobCommand::RuntimeConfigSync {
+            desired_version: 1,
+            reason: "pool-protocol".into(),
+            config: Box::new(config.clone()),
+        };
+        let expected = if schema == 3 { 12 } else { 3 };
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&command),
+            expected
+        );
+        assert_eq!(
+            super::job_command_min_supported_protocol_version(&command),
+            expected
+        );
+    }
+}
+
+#[test]
 fn directional_ospf_commands_require_updated_agents_but_preserve_legacy_replay_bytes() {
     let legacy_plan = serde_json::json!({
         "name":"ospf-protocol", "interface_name":"tun-ospf", "kind":"gre",

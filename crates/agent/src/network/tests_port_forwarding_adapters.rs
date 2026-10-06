@@ -17,6 +17,7 @@ async fn fixture() -> (AdapterInventory, PortForwardRule, PathBuf) {
     let state = root.join("listener-state.json");
     let state = state.to_str().unwrap();
     let rule = PortForwardRule {
+        pool: Default::default(),
         id: Uuid::new_v4(),
         revision: 1,
         name: "fixture".to_string(),
@@ -27,6 +28,8 @@ async fn fixture() -> (AdapterInventory, PortForwardRule, PathBuf) {
         mode: PortForwardMode::CustomAdapter,
         address_family: None,
         adapter: Some(PortForwardAdapterCommands {
+            contract_version: 1,
+            pool_capabilities: None,
             definition_id: Uuid::new_v4(),
             definition_name: "fixture service".to_string(),
             definition_hash: "fixture".to_string(),
@@ -105,6 +108,153 @@ async fn interrupted_apply_retains_cleanup_owner_across_restart() {
     assert!(failed.is_empty());
     assert_eq!(removed, vec![rule.id]);
     assert!(restarted.owned.is_empty());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+async fn pool_fixture() -> (AdapterInventory, PortForwardRule, PathBuf) {
+    let (inventory, mut rule, root) = fixture().await;
+    rule.protocol = PortForwardProtocol::Tcp;
+    rule.mappings.clear();
+    rule.pool = Some(serde_json::from_value(serde_json::json!({
+        "incoming":[{"start":18443,"end":18443}],"strategy":"round_robin",
+        "upstreams":[{"id":Uuid::new_v4(),"target_ip":"127.0.0.1","ports":{"start":2000,"end":2002},"weight":2,"role":"primary","enabled":true}]
+    })).unwrap());
+    let program = root.join("adapter.py");
+    tokio::fs::write(&program, r#"
+import json, os, pathlib, stat, sys, time
+action, filename, state = sys.argv[1:]
+path, state = pathlib.Path(filename), pathlib.Path(state)
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+request = json.loads(path.read_text())
+assert request['contract_version'] == 2 and 'adapter' not in request['rule']
+assert request['rule']['pool']['upstreams'][0]['ports']['end'] == 2002
+if action == 'apply':
+    state.write_text(json.dumps({'state':'applied','config_hash':request['config_hash'], 'upstream_observations':[
+        {'upstream_id':request['rule']['pool']['upstreams'][0]['id'],'port':2001,'state':'excluded','retry_after_unix':2000}]}))
+elif action == 'remove':
+    state.write_text('{"state":"absent"}')
+elif action == 'sleep':
+    time.sleep(5)
+else:
+    print(state.read_text())
+"#).await.unwrap();
+    let state = root.join("v2-state.json");
+    let argv = |phase: &str| {
+        command(&[
+            "/usr/bin/python3",
+            program.to_str().unwrap(),
+            phase,
+            "{rule_config_path}",
+            state.to_str().unwrap(),
+        ])
+    };
+    let adapter = rule.adapter.as_mut().unwrap();
+    adapter.contract_version = 2;
+    adapter.pool_capabilities = Some(vpsman_common::PortForwardPoolCapabilities::native());
+    adapter.apply = argv("apply");
+    adapter.remove = argv("remove");
+    adapter.status = argv("status");
+    (inventory, rule, root)
+}
+
+#[tokio::test]
+async fn pool_adapter_verifies_loaded_hash_and_preserves_cleanup_across_restart() {
+    let (mut inventory, mut rule, root) = pool_fixture().await;
+    let applied = inventory.apply(&rule, CommandCancelToken::default()).await;
+    assert_eq!(applied.status, Some(PortForwardRuntimeStatus::Applied));
+    assert_eq!(applied.upstream_observations.len(), 1);
+    let requests = inventory.root.as_ref().unwrap().join("requests");
+    assert!(tokio::fs::read_dir(&requests)
+        .await
+        .unwrap()
+        .next_entry()
+        .await
+        .unwrap()
+        .is_none());
+    rule.revision += 1;
+    // Status for the previous generation must not acknowledge a new request.
+    let config = AgentPortForwardingConfig {
+        schema_version: 3,
+        rules: vec![rule.clone()],
+        ..Default::default()
+    };
+    let stale = inventory
+        .inspect(&config, CommandCancelToken::default())
+        .await;
+    assert_eq!(stale[0].status, Some(PortForwardRuntimeStatus::Drifted));
+    assert!(stale[0].upstream_observations.is_empty());
+    let mut restarted = AdapterInventory::new(inventory.client_id.clone());
+    restarted.root = inventory.root.clone();
+    restarted.load().await.unwrap();
+    let (removed, failed) = restarted
+        .remove_replaced(
+            &AgentPortForwardingConfig::default(),
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed, vec![rule.id]);
+    assert!(failed.is_empty());
+    assert!(restarted.owned.is_empty());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_adapter_timeout_keeps_owner_but_cleans_invocation_file() {
+    let (mut inventory, mut rule, root) = pool_fixture().await;
+    let apply = &mut rule.adapter.as_mut().unwrap().apply;
+    apply.argv[2] = "sleep".into();
+    apply.max_timeout_secs = 1;
+    let failed = inventory.apply(&rule, CommandCancelToken::default()).await;
+    assert_eq!(failed.status, Some(PortForwardRuntimeStatus::Failed));
+    assert!(inventory.retains_owner(rule.id));
+    assert!(
+        tokio::fs::read_dir(inventory.root.as_ref().unwrap().join("requests"))
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (removed, failures) = inventory
+        .remove_replaced(
+            &AgentPortForwardingConfig::default(),
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed, vec![rule.id]);
+    assert!(failures.is_empty());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_adapter_rejects_observations_for_unconfigured_endpoints() {
+    let (mut inventory, rule, root) = pool_fixture().await;
+    assert_eq!(
+        inventory
+            .apply(&rule, CommandCancelToken::default())
+            .await
+            .status,
+        Some(PortForwardRuntimeStatus::Applied)
+    );
+    let state = root.join("v2-state.json");
+    let mut json: Value = serde_json::from_slice(&tokio::fs::read(&state).await.unwrap()).unwrap();
+    json["upstream_observations"][0]["port"] = serde_json::json!(65535);
+    tokio::fs::write(state, serde_json::to_vec(&json).unwrap())
+        .await
+        .unwrap();
+    let config = AgentPortForwardingConfig {
+        schema_version: 3,
+        rules: vec![rule],
+        ..Default::default()
+    };
+    let status = inventory
+        .inspect(&config, CommandCancelToken::default())
+        .await;
+    assert_eq!(status[0].status, Some(PortForwardRuntimeStatus::Failed));
+    assert!(status[0].upstream_observations.is_empty());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
     PortForwardAdapterCommands, PortForwardAddressFamily, PortForwardMapping, PortForwardMode,
-    PortForwardProtocol, PortForwardRuntimeSnapshot,
+    PortForwardPool, PortForwardProtocol, PortForwardRuntimeSnapshot,
+    PortForwardUpstreamObservation,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -20,6 +21,9 @@ pub(crate) struct PortForwardRuleView {
     pub(crate) target_ip: Option<IpAddr>,
     pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
+    pub(crate) pool: Option<PortForwardPool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) upstream_observations: Vec<PortForwardUpstreamObservation>,
     pub(crate) masquerade: bool,
     pub(crate) enabled: bool,
     pub(crate) revision: i64,
@@ -84,6 +88,7 @@ pub(crate) struct PortForwardRuleRecord {
     pub(crate) target_ip: Option<IpAddr>,
     pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
+    pub(crate) pool: Option<PortForwardPool>,
     pub(crate) masquerade: bool,
     pub(crate) enabled: bool,
     pub(crate) revision: i64,
@@ -114,6 +119,8 @@ pub(crate) struct CreatePortForwardRuleRequest {
     #[serde(default)]
     pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
+    #[serde(default)]
+    pub(crate) pool: Option<PortForwardPool>,
     #[serde(default = "default_true")]
     pub(crate) masquerade: bool,
     #[serde(default = "default_true")]
@@ -139,11 +146,31 @@ pub(crate) struct UpdatePortForwardRuleRequest {
     #[serde(default)]
     pub(crate) target_hostname: UpdateTargetHostname,
     pub(crate) mappings: Vec<PortForwardMapping>,
+    #[serde(default)]
+    pub(crate) pool: UpdatePortForwardPool,
     #[serde(default = "default_true")]
     pub(crate) masquerade: bool,
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum UpdatePortForwardPool {
+    #[default]
+    Omitted,
+    Replace(Option<PortForwardPool>),
+}
+
+impl<'de> Deserialize<'de> for UpdatePortForwardPool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::Replace(Option::<PortForwardPool>::deserialize(
+            deserializer,
+        )?))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

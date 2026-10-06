@@ -6,6 +6,8 @@ mod job_search;
 mod network_adapter_mutations;
 #[path = "tests_postgres_port_forward_bulk.rs"]
 mod port_forward_bulk;
+#[path = "tests_postgres_port_forward_pools.rs"]
+mod port_forward_pools;
 #[path = "tests_postgres_schedule_failures.rs"]
 mod schedule_failures;
 #[path = "tests_postgres_schedule_timeout.rs"]
@@ -36812,6 +36814,7 @@ async fn postgres_port_forward_runtime_rejects_stale_state_and_confirmation() {
         .repo
         .create_port_forward_rule(
             &CreatePortForwardRuleRequest {
+                pool: Default::default(),
                 client_id: client_id.to_string(),
                 name: "stale-runtime-rule".to_string(),
                 protocol: PortForwardProtocol::Tcp,
@@ -38127,8 +38130,15 @@ async fn postgres_port_forward_modes_migration_preserves_existing_dnat_rows() {
     crate::repository::migrate_postgres_database(&database_options, &workspace_migrations_dir())
         .await
         .unwrap();
-    let after:Vec<Value> = sqlx::query_scalar::<_,SqlJson<Value>>("SELECT to_jsonb(rule)-ARRAY['mode','address_family','adapter_definition_id'] FROM port_forward_rules rule ORDER BY id").fetch_all(&db.pool).await.unwrap().into_iter().map(|row|row.0).collect();
+    let after:Vec<Value> = sqlx::query_scalar::<_,SqlJson<Value>>("SELECT to_jsonb(rule)-ARRAY['mode','address_family','adapter_definition_id','pool'] FROM port_forward_rules rule ORDER BY id").fetch_all(&db.pool).await.unwrap().into_iter().map(|row|row.0).collect();
     assert_eq!(before, after);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM port_forward_rules WHERE pool IS NULL")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        2
+    );
     let config = db
         .repo
         .port_forwarding_config_for_client("legacy-forward")
@@ -40599,6 +40609,7 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
     assert!(revoked_revision_is_newer);
 
     let create_rule = |name: &str, listen: &str, target: &str| CreatePortForwardRuleRequest {
+        pool: Default::default(),
         client_id: client_id.to_string(),
         name: name.to_string(),
         protocol: PortForwardProtocol::Tcp,
@@ -40683,6 +40694,7 @@ async fn postgres_port_forward_hostname_context_round_trips_with_literal_target(
         .repo
         .create_port_forward_rule(
             &CreatePortForwardRuleRequest {
+                pool: Default::default(),
                 client_id: "edge-domain".to_string(),
                 name: "resolved-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
@@ -40750,6 +40762,7 @@ async fn postgres_port_forward_hostname_context_round_trips_with_literal_target(
         .update_port_forward_rule(
             created.id,
             &UpdatePortForwardRuleRequest {
+                pool: Default::default(),
                 expected_revision: disabled.revision,
                 name: disabled.name.clone(),
                 protocol: disabled.protocol,
@@ -40856,6 +40869,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
         .repo
         .create_port_forward_rule(
             &CreatePortForwardRuleRequest {
+                pool: Default::default(),
                 client_id: "edge-a".to_string(),
                 name: "healthy-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
@@ -40877,6 +40891,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
         .repo
         .create_port_forward_rule(
             &CreatePortForwardRuleRequest {
+                pool: Default::default(),
                 client_id: "edge-a".to_string(),
                 name: "repair-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
@@ -40922,6 +40937,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
         .update_port_forward_rule(
             corrupt_rule.id,
             &UpdatePortForwardRuleRequest {
+                pool: Default::default(),
                 expected_revision: corrupt_rule.revision,
                 name: "repair-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,

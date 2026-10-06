@@ -113,7 +113,8 @@ the control plane receives a fresh capability snapshot before enabling rules.
 
 1. Select one VPS and enter a unique rule name.
 2. Select the mode, then TCP, UDP, or Both.
-3. Enter the incoming and target port expressions.
+3. Choose **Port mapping** for fixed translation, or **Upstream pool** when the
+   selected DNAT host/custom adapter supports it. Enter the incoming ports.
 4. For DNAT, enter a target IP, or resolve a hostname and select a literal
    address. REDIRECT selects IPv4, IPv6, or Both instead. Custom selects a
    reusable adapter, with an optional target IP or resolved hostname.
@@ -155,10 +156,203 @@ Status must exit successfully and return JSON with `state` equal to `applied`,
 Remove by `absent`. Failed commands or invalid status output report failure.
 Each command uses its configured timeout/output budget from the adapter editor.
 
-Definitions cannot be changed or deleted while referenced by an active,
-disabled, or cleanup-pending rule. Switching adapters or modes removes the
-previous owner's resources first. The agent records custom ownership before
-Apply and retains it until removal is verified, including across restarts.
+Definition command edits use the existing affected-resource review and dispatch
+workflow. An edit cannot remove capabilities required by an attached pool,
+including disabled drafts. Definitions cannot be deleted while referenced.
+Switching adapters or modes removes the previous owner's resources first. The
+agent records exact custom ownership before Apply, including commands and rule
+inputs needed to remove interrupted/partial applies after a restart. Failed
+cleanup remains explicit evidence even when a replacement is subsequently applied.
+
+### Upstream Pools
+
+Pools explicitly balance every incoming port over the entire configured set of
+upstream IP:port endpoints. There is no positional mapping between incoming and
+target ranges: `443` can balance across `192.0.2.1:8000-8002` and
+`192.0.2.2:9000`, and multiple incoming ports can use that same pool. Fixed port
+mapping retains its original equal-range/multiple-to-one behavior. REDIRECT has
+no pool policy.
+
+Each compact upstream row owns its literal IP, port range, positive integer
+weight, primary/backup role, enabled state and optional failure policy. Weight
+applies to **each expanded endpoint**: weight 2 on three ports contributes six
+shares, while weight 1 on one port contributes one. Disabled endpoints retain
+their settings but receive no new selections. At least one endpoint must be
+enabled and one primary must remain configured; enabled backups may take over
+while all configured primaries are disabled. Duplicate/overlapping port ranges
+on the same IP are rejected, including disabled rows.
+
+A hostname groups its explicitly selected resolved IPs in the editor. It is
+provenance only, never a runtime DNS target. Resolve again to review membership;
+existing IP settings and disappeared answers remain until explicitly removed.
+New IPs copy the selected row template. No background DNS refresh or automatic
+backup promotion occurs.
+
+| Forwarder | Strategies | Other supported pool settings |
+| --- | --- | --- |
+| Native DNAT | Weighted round robin, random, source-IP hash | One address family per pool; existing masquerade/preserve-source behavior |
+| Custom adapter v2 | Only strategies advertised by its definition | Only advertised families, mixed-family support, backup strategies, failure exclusion and connection settings |
+
+Native selection occurs on a flow's first packet, then conntrack retains its
+destination. Round robin rotates weighted shares; random chooses a weighted
+share; source-IP hash keeps a source on the same endpoint while ordered
+membership/weights remain unchanged. Its rule-stable seed preserves affinity
+across unrelated native table rebuilds. Shared source addresses behind NAT share
+affinity. Native pools do not probe health, count active connections, retry a
+failed connection, or provide backup roles.
+
+The agent checks native pool grammar independently using `nft --check`; failure
+hides pools without disabling supported fixed DNAT/REDIRECT. Pools/custom v2
+require forwarding schema 3 and command protocol 12. Existing mappings continue
+using their previous schema/protocol. Upgrade the server, frontend and affected
+agents before enabling pools. Existing database rows migrate with no pool.
+
+### Pool Settings Have Fixed Scopes
+
+These meanings are part of vpsman's contract, not configurable adapter scopes:
+
+| Setting | Scope and behavior |
+| --- | --- |
+| `connect_timeout_secs` | This rule; deadline for each upstream connection attempt, independent of retry being on/off/default |
+| `retry_policy` | One incoming connection in this rule; Off or retry connection-establishment failures |
+| `max_attempts` | Total attempts, including the first, for that connection |
+| `retry_budget_secs` | Elapsed limit for starting another attempt; not an established-connection lifetime or a hard cap on an already-started attempt |
+| Temporary failure threshold/window/exclusion | Each expanded IP:port separately within this rule; no shared state with sibling ports, domain IPs or other rules |
+| Backup role | Select only when this rule's eligible primary endpoints are unavailable; supported strategies only |
+
+Omitted settings inherit the adapter's documented defaults. Explicit failure
+Off disables failure counting/exclusion, and explicit retry Off disables trying
+another endpoint. Positive values are required when a threshold/limit is supplied.
+Whole-range failure aggregation is not implemented. Runtime exclusion is
+temporary eligibility evidence, not a permanent edit of the configured enabled
+flag or a failure to apply the rule.
+
+For an NGINX stream implementation, rule-specific stream `server` blocks can own
+`proxy_connect_timeout` and `proxy_next_upstream*`, while distinct rule-owned
+upstream groups own each IP:port's `max_fails`/`fail_timeout`. This permits rules
+on one NGINX instance to have different settings without changing shared stream
+defaults. NGINX links the failure-count window and exclusion interval, does not
+support backup with hash/random, and ignores passive-failure settings for a
+single-server group. Advertise these restrictions; do not silently approximate
+unsupported settings. Standard NGINX does not expose per-peer live exclusion
+state through this contract automatically. Omit unavailable observations.
+See [NGINX upstream directives](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html#server)
+and [connection/retry directives](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_connect_timeout).
+
+### Custom Adapter Contract 2
+
+vpsman ships the contract, validation and lifecycle, not an NGINX implementation.
+Operators supply and install their adapter on each target VPS. Register its
+definition through the network-adapter API with `adapter_kind: "port_forward"`;
+the existing registry edits its commands with the usual impact review.
+
+```json
+{
+  "contract_version": 2,
+  "pool_capabilities": {
+    "strategies": ["round_robin", "least_connections", "source_ip_hash", "consistent_source_ip_hash", "random"],
+    "protocols": ["tcp", "udp"],
+    "address_families": ["ipv4", "ipv6"],
+    "mixed_families": true,
+    "backup_strategies": ["round_robin", "least_connections"],
+    "failure_exclusion": {
+      "protocols": ["tcp"], "linked_timeout": true, "min_endpoints": 2,
+      "description": "Temporary TCP connection-failure exclusion per IP:port in this rule."
+    },
+    "connect_timeout": {"protocols": ["tcp"], "description": "Deadline per connection attempt in this rule."},
+    "retries": {"protocols": ["tcp"], "description": "Retry failed connection establishment within this rule."}
+  },
+  "apply_command": {"argv": ["/opt/operator/forward-adapter", "apply", "{rule_config_path}"], "max_timeout_secs": 30, "max_output_bytes": 16384},
+  "remove_command": {"argv": ["/opt/operator/forward-adapter", "remove", "{rule_config_path}"], "max_timeout_secs": 30, "max_output_bytes": 16384},
+  "status_command": {"argv": ["/opt/operator/forward-adapter", "status", "{rule_config_path}"], "max_timeout_secs": 30, "max_output_bytes": 16384}
+}
+```
+
+This illustrates an NGINX-like capability profile, not executable behavior.
+Advertise only implemented features. Unsupported controls are hidden. Capability
+protocol/family lists contain concrete values (`tcp`/`udp`, `ipv4`/`ipv6`), not
+`both`. A Both rule needs support for both protocols. Optional feature objects
+and `backup_strategies` may be omitted; an adapter v2 may omit pool capabilities
+entirely and support only fixed mappings. `min_endpoints` counts configured
+expanded endpoints, including disabled/backup entries; it defaults to 1.
+
+Every v2 command must include `{rule_config_path}`. The agent writes an immutable
+mode-0600 JSON file in its private state directory for that invocation. Read it
+before returning; do not retain its path, modify it, or start a listener that
+depends on that file. It is removed after the command exits or is canceled.
+Each request has the following structure (the embedded rule omits adapter
+commands/capabilities and DNS provenance):
+
+```json
+{
+  "contract_version": 2,
+  "client_id": "v-example",
+  "config_hash": "64 lowercase hexadecimal characters",
+  "rule": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "revision": 1, "name": "application", "mode": "custom_adapter",
+    "protocol": "tcp", "masquerade": false, "mappings": [],
+    "pool": {
+      "incoming": [{"start": 443, "end": 443}], "strategy": "round_robin",
+      "upstreams": [{
+        "id": "22222222-2222-4222-8222-222222222222",
+        "target_ip": "192.0.2.10", "ports": {"start": 8000, "end": 8002},
+        "weight": 2, "role": "primary", "enabled": true,
+        "failure_policy": {"mode": "temporary", "threshold": 2, "window_secs": 10, "retry_after_secs": 10}
+      }],
+      "connect_timeout_secs": 3,
+      "retry_policy": {"mode": "connect_failure", "max_attempts": 3, "retry_budget_secs": 10}
+    }
+  }
+}
+```
+
+Fixed mappings instead have no `pool`, retain `mappings` and may omit `target_ip`
+for an adapter-defined local target. V1 argv placeholders remain available, but
+pool rules have no scalar target/target-port mapping: use the JSON file. The
+configuration hash is opaque to the adapter; store it with the successfully
+loaded generation and report that observed value. Merely echoing the incoming
+hash or matching a file on disk is not proof that a service loaded it.
+
+Apply must be idempotent and return after the exact generation is active. Remove
+receives the saved owner's inputs and must remove **all** resources for that
+stable rule ID, including previous revisions/partial applies. Preserve unrelated
+rules and other service configuration. Status must be able to verify absence
+by rule ID even when rejected Apply inputs cannot be rendered, so a failed
+creation or edit remains removable. Define serialization/atomic replacement,
+syntax checks, reload verification and recovery appropriate to your service.
+The agent saves the owner before Apply and verifies Status after Apply/Remove.
+Nonzero exit, timeout, truncated output, malformed status or a mismatched loaded
+hash cannot acknowledge success.
+
+```json
+{
+  "state": "applied",
+  "config_hash": "the hash of the loaded generation",
+  "message": "optional diagnostic",
+  "upstream_observations": [{
+    "upstream_id": "22222222-2222-4222-8222-222222222222",
+    "port": 8001, "state": "excluded", "reason": "connection failures",
+    "retry_after_unix": 1791244810
+  }]
+}
+```
+
+`state` is `applied`, `absent` or `drifted`. Only Applied requires a matching
+`config_hash`; Absent confirms cleanup. Optional upstream observations use
+`eligible`, `excluded` or `unknown`, with configured row IDs/ports, no duplicate
+endpoints, and reasons of at most 1024 bytes. Do not invent eligibility when the
+service cannot observe it. The UI shows unknown when evidence is unavailable;
+stale configuration evidence is never shown as live endpoint health. Management
+command timeout/output bounds remain separate from forwarding connection settings.
+
+Create/update API requests use `pool` with `mappings: []` and `target_ip: null`.
+Pool hostnames may be included in upstream rows as API-only provenance. Updating
+an existing pool must send its complete pool or explicit `pool: null` when
+converting back to mapping/REDIRECT; omission is rejected to protect against old
+clients erasing pools. Existing mapping requests may continue omitting `pool`.
+The usual revision fence, confirmation, enable/disable, bulk deletion, audit and
+cleanup receipt workflows apply unchanged.
 
 ### Port Expressions
 

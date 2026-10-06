@@ -91,6 +91,7 @@ fn validates_default_agent_config_shape() {
 #[test]
 fn bootstrap_config_rejects_server_managed_port_forwarding() {
     let rules = vec![PortForwardRule {
+        pool: Default::default(),
         id: uuid::Uuid::parse_str("018f89ac-a5ec-7d71-a249-7ccddc0a0001").unwrap(),
         revision: 1,
         name: "web".to_string(),
