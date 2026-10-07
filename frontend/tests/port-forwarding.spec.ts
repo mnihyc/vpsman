@@ -268,7 +268,8 @@ test("custom adapters are reusable in the forwarding drawer and work independent
     newId,
     "Local application adapter",
   );
-  await expect(details).toContainText("Custom adapters supported");
+  await expect(details).toContainText("Controlled by adapter");
+  await expect(details).not.toContainText("Custom adapters supported");
   await expect(details).toContainText("Local service manager");
   await expect(details).not.toContainText("nftables");
   await expect(details).not.toContainText("NAT matches");

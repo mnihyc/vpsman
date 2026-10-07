@@ -1071,7 +1071,7 @@ export function PortForwardingPanel({
           <div
             className="portForwardRemovalNotice"
             role="alert"
-            title="A stored rule that cannot be parsed must be removed and recreated before it can return to normal lifecycle management."
+            title="This lists invalid stored rules across all forwarding modes. If the error identifies an adapter definition, correct that definition to restore its rules. Delete and recreate a rule only when its own configuration cannot be repaired."
           >
             <ShieldAlert size={17} />
             <div>

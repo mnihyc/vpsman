@@ -4196,6 +4196,7 @@ export async function installConsoleApiMock(
       window: string;
     }>;
     networkSpeedSecondDispatchFailure?: boolean;
+    networkAdapterDefinitionsOverride?: NetworkAdapterDefinitionRecord[];
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
     operatorScopesOverride?: string[];
@@ -9786,6 +9787,14 @@ export async function installConsoleApiMock(
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
           const definition = mutableNetworkAdapterDefinitions.find((record) => record.id === definitionId);
           if (!definition) return jsonResponse({ error: "network_adapter_not_found" }, 404);
+          if (body.adapter_kind === "port_forward") {
+            const candidate = asFixtureRecord(body.definition);
+            if (candidate?.contract_version !== 2 || Object.keys(candidate).some((key) =>
+              !["contract_version", "apply_command", "remove_command", "status_command"].includes(key)
+            )) {
+              return jsonResponse({ error: "network_adapter_definition_invalid" }, 400);
+            }
+          }
           const affected = adapterAffectedResources(definition);
           const preview: NetworkAdapterPreviewResponse = {
             review_hash: (++networkAdapterReviewSequence).toString(16).padStart(64, "0"),
@@ -13119,7 +13128,7 @@ export async function installConsoleApiMock(
       systemDashboardFixture: systemDashboard,
       configurationPresetsFixture: configurationPresets,
       configurationSourcesFixture: configurationSources,
-      networkAdapterDefinitionsFixture: networkAdapterDefinitions,
+      networkAdapterDefinitionsFixture: options.networkAdapterDefinitionsOverride ?? networkAdapterDefinitions,
       runtimeConfigApplyStatesFixture: runtimeConfigApplyStates,
       runtimeConfigApplyFailureFixture:
         options.runtimeConfigApplyFailure ?? false,

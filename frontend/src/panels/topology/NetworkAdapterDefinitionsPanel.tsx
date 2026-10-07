@@ -158,7 +158,10 @@ export function NetworkAdapterDefinitionsPanel({
     setKind(record.adapter_kind);
     setName(record.name);
     setDescription(record.description ?? "");
-    setDefinition(asObject(record.definition));
+    const commands = asObject(record.definition);
+    setDefinition(record.adapter_kind === "port_forward" && mode === "commands"
+      ? portForwardAdapterDefinition(commands)
+      : commands);
     setError(null);
     setFeedback(null);
     setEditor({ mode, definition: record });
@@ -835,6 +838,17 @@ function AdapterCommandFields({
   );
 }
 
+function portForwardAdapterDefinition(
+  commands: Record<string, JsonValue>,
+): Record<string, JsonValue> {
+  return {
+    contract_version: 2,
+    apply_command: asObject(commands.apply_command),
+    remove_command: asObject(commands.remove_command),
+    status_command: asObject(commands.status_command),
+  };
+}
+
 function defaultAdapterDefinition(
   kind: NetworkAdapterKind,
 ): Record<string, JsonValue> {
@@ -851,12 +865,11 @@ function defaultAdapterDefinition(
         "{forwarding_type}",
         "{rule_config_json}",
       );
-    return {
-      contract_version: 2,
+    return portForwardAdapterDefinition({
       apply_command: operation("apply"),
       remove_command: operation("remove"),
       status_command: operation("status"),
-    };
+    });
   }
   if (kind === "routing_cost") {
     return {

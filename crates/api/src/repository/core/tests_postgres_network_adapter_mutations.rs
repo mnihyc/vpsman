@@ -506,6 +506,183 @@ async fn postgres_adapter_mutation_forwarding_includes_pending_cleanup_without_d
 }
 
 #[tokio::test]
+async fn postgres_adapter_mutation_current_forwarding_definition_restores_bound_rules() {
+    use crate::model_port_forwarding::PortForwardRuleListItem;
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "forward-client", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let command = |action| {
+        json!({
+            "argv":["/opt/operator/forwarding",action,"{forwarding_type}","{rule_config_json}"],
+            "max_timeout_secs":60,"max_output_bytes":16384
+        })
+    };
+    let request = UpsertNetworkAdapterDefinitionRequest {
+        adapter_kind: "port_forward".into(),
+        name: "external proxy".into(),
+        description: None,
+        definition: json!({"contract_version":2,"apply_command":command("apply"),
+            "remove_command":command("remove"),"status_command":command("status")}),
+    };
+    let adapter = db
+        .repo
+        .create_network_adapter_definition(&request, &operator)
+        .await
+        .unwrap();
+    let custom = db.repo.create_port_forward_rule(&serde_json::from_value(json!({
+        "client_id":"forward-client","name":"proxy rule","mode":"custom_adapter",
+        "protocol":"tcp","target_ip":"127.0.0.1","adapter_definition_id":adapter.id,
+        "mappings":pair_port_expressions("18080","8080").unwrap(),"enabled":true,"confirmed":true
+    })).unwrap(), &operator).await.unwrap();
+    let redirect = db.repo.create_port_forward_rule(&serde_json::from_value(json!({
+        "client_id":"forward-client","name":"local redirect","mode":"custom_adapter",
+        "protocol":"tcp","target_ip":"127.0.0.1","adapter_definition_id":adapter.id,
+        "mappings":pair_port_expressions("18081","8081").unwrap(),"enabled":true,"confirmed":true
+    })).unwrap(), &operator).await.unwrap();
+    let redirect = db
+        .repo
+        .update_port_forward_rule(
+            redirect.id,
+            &serde_json::from_value(json!({
+                "expected_revision":redirect.revision,"name":redirect.name,"mode":"redirect",
+                "protocol":"tcp","address_family":"ipv4","mappings":redirect.mappings,
+                "enabled":true,"confirmed":true
+            }))
+            .unwrap(),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(redirect.adapter_definition_id.is_none());
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM port_forward_adapter_owners WHERE rule_id=$1)"
+    )
+    .bind(redirect.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    let before: Vec<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(rule) FROM port_forward_rules rule ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+
+    // Both an ordinary reviewed edit and a direct definition update must restore
+    // the existing bindings. Neither needs a rule rewrite or a version fallback.
+    for reviewed_edit in [true, false] {
+        let mut invalid = request.clone();
+        invalid.definition["contract_version"] = json!(1);
+        sqlx::query("UPDATE network_adapter_definitions SET definition=$2,updated_at=clock_timestamp() WHERE id=$1")
+            .bind(adapter.id).bind(SqlJson(&invalid.definition)).execute(&db.pool).await.unwrap();
+        let items = db.repo.list_port_forward_rule_items().await.unwrap();
+        assert!(items.iter().any(|item| matches!(item, PortForwardRuleListItem::Corrupt(rule)
+            if rule.id == custom.id && rule.configuration_error.contains("port_forward_adapter_definition_invalid"))));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, PortForwardRuleListItem::Rule(rule)
+            if rule.id == redirect.id)));
+        let sync_error = db
+            .repo
+            .port_forwarding_config_for_client("forward-client")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(sync_error.contains(&format!(
+            "port_forward_rule_configuration_corrupt:{}:forward-client:port_forward_adapter_definition_invalid",
+            custom.id
+        )));
+        assert!(db
+            .repo
+            .preview_network_adapter_definition(adapter.id, &invalid)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("network_adapter_contract_version_invalid"));
+        clear_queued(&db).await;
+
+        if reviewed_edit {
+            let preview = db
+                .repo
+                .preview_network_adapter_definition(adapter.id, &request)
+                .await
+                .unwrap();
+            assert_eq!(preview.target_client_ids, ["forward-client"]);
+            assert_eq!(preview.affected_resources.len(), 2);
+            assert!(preview
+                .affected_resources
+                .iter()
+                .any(|resource| resource.resource_id == custom.id && resource.enabled));
+            assert!(preview
+                .affected_resources
+                .iter()
+                .any(|resource| resource.resource_id == redirect.id
+                    && resource.cleanup_pending
+                    && !resource.enabled));
+            db.repo
+                .update_network_adapter_definition(
+                    adapter.id,
+                    &request,
+                    &operator,
+                    &preview.review_hash,
+                )
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE network_adapter_definitions SET definition=$2,updated_at=clock_timestamp() WHERE id=$1")
+                .bind(adapter.id).bind(SqlJson(&request.definition)).execute(&db.pool).await.unwrap();
+        }
+        assert_eq!(
+            queued(&db).await,
+            [(
+                "forward-client".into(),
+                "network_adapter_definition_updated".into()
+            )]
+        );
+        let items = db.repo.list_port_forward_rule_items().await.unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .all(|item| matches!(item, PortForwardRuleListItem::Rule(_))));
+        let config = db
+            .repo
+            .port_forwarding_config_for_client("forward-client")
+            .await
+            .unwrap();
+        assert_eq!(config.rules.len(), 2);
+        assert_eq!(config.cleanup_rules.len(), 1);
+        assert_eq!(config.cleanup_rules[0].rule_id, redirect.id);
+        let commands = config
+            .rules
+            .iter()
+            .find(|rule| rule.id == custom.id)
+            .unwrap()
+            .adapter
+            .as_ref()
+            .unwrap();
+        assert_eq!(commands.contract_version, 2);
+        assert_eq!(
+            commands.apply.argv,
+            [
+                "/opt/operator/forwarding",
+                "apply",
+                "{forwarding_type}",
+                "{rule_config_json}"
+            ]
+        );
+        let after: Vec<Value> =
+            sqlx::query_scalar("SELECT to_jsonb(rule) FROM port_forward_rules rule ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(after, before);
+    }
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_adapter_mutation_route_requires_command_privilege_even_unbound() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
