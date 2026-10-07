@@ -305,7 +305,6 @@ impl Repository {
                     select_postgres_port_forward_rules_for_client(&mut tx, &candidate.client_id)
                         .await?;
                 ensure_candidate_valid(&candidate, &existing, None)?;
-                ensure_pool_agent_support(&mut tx, &candidate).await?;
                 sqlx::query(
                     r#"
                     INSERT INTO port_forward_rules (
@@ -444,7 +443,6 @@ impl Repository {
                 };
                 resolve_postgres_port_forward_adapter(&mut tx, &mut candidate).await?;
                 ensure_candidate_valid(&candidate, &existing, Some(id))?;
-                ensure_pool_agent_support(&mut tx, &candidate).await?;
                 let result = sqlx::query(
                     r#"
                     UPDATE port_forward_rules
@@ -846,7 +844,6 @@ impl Repository {
                 let mut candidates = Vec::with_capacity(selected.len());
                 for mut record in selected {
                     apply_bulk_action(&mut record, action, &now, reason, operator)?;
-                    ensure_pool_agent_support(&mut tx, &record).await?;
                     candidates.push(record);
                 }
                 for client_id in &client_ids {
@@ -1766,40 +1763,6 @@ async fn resolve_postgres_port_forward_adapter(
         ).bind(id).fetch_optional(&mut **tx).await?
             .context("port_forward_adapter_definition_not_found")?;
         record.adapter = Some(port_forward_adapter_from_definition(&definition.0)?);
-    }
-    Ok(())
-}
-
-async fn ensure_pool_agent_support(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    record: &PortForwardRuleRecord,
-) -> Result<()> {
-    let rule = runtime_rule_from_record(record);
-    if !record.enabled || record.deleted_at.is_some() || rule.required_schema_version() < 3 {
-        return Ok(());
-    }
-    let cap = sqlx::query_scalar::<_, SqlJson<vpsman_common::PortForwardCapability>>(
-        "SELECT COALESCE(capabilities->'port_forwarding', '{}'::jsonb) FROM clients WHERE id=$1",
-    )
-    .bind(&record.client_id)
-    .fetch_one(&mut **tx)
-    .await?
-    .0;
-    anyhow::ensure!(
-        cap.schema_version >= 3 && cap.supports_mode(record.mode),
-        "port_forward_pool_agent_capability_required"
-    );
-    if let Some(pool) = rule
-        .pool
-        .as_ref()
-        .filter(|_| record.mode == PortForwardMode::Dnat)
-    {
-        let native = cap
-            .pool
-            .as_ref()
-            .context("port_forward_pool_agent_capability_required")?;
-        vpsman_common::validate_port_forward_pool(pool, record.mode, record.protocol, native)
-            .context("port_forward_pool_agent_capability_required")?;
     }
     Ok(())
 }

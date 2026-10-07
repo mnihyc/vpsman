@@ -81,16 +81,7 @@ pub(crate) fn port_forward_adapter_from_definition(
         definition_id: definition.id,
         definition_name: definition.name.clone(),
         definition_hash: payload_hash(&serde_json::to_vec(&definition.definition)?),
-        contract_version: definition
-            .definition
-            .get("contract_version")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(1) as u16,
-        pool_capabilities: definition
-            .definition
-            .get("pool_capabilities")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()?,
+        contract_version: vpsman_common::PORT_FORWARD_ADAPTER_CONTRACT_VERSION,
         apply: required_command(&definition.definition, "apply_command")?,
         remove: required_command(&definition.definition, "remove_command")?,
         status: required_command(&definition.definition, "status_command")?,

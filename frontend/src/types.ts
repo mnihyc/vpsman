@@ -984,7 +984,6 @@ export type PortForwardCapability = {
   supported_modes?: PortForwardMode[];
   nft_version?: string | null;
   reason?: string | null;
-  pool?: PortForwardPoolCapabilities;
 };
 
 export type PortForwardProtocol = "tcp" | "udp" | "both";
@@ -1001,30 +1000,12 @@ export type PortForwardMapping = {
   target: PortRange;
 };
 
-// Frontend pool contract for the capability-gated UI preview. Backend support
-// is intentionally separate; older agents do not advertise these capabilities.
 export type PortForwardPoolStrategy =
   | "round_robin"
   | "random"
   | "source_ip_hash"
   | "least_connections"
   | "consistent_source_ip_hash";
-
-export type PortForwardPoolCapabilities = {
-  strategies: PortForwardPoolStrategy[];
-  protocols: Array<"tcp" | "udp">;
-  address_families: Array<"ipv4" | "ipv6">;
-  mixed_families?: boolean;
-  backup_strategies?: PortForwardPoolStrategy[];
-  failure_exclusion?: {
-    protocols: Array<"tcp" | "udp">;
-    linked_timeout: boolean;
-    min_endpoints?: number;
-    description: string;
-  };
-  connect_timeout?: { protocols: Array<"tcp" | "udp">; description: string };
-  retries?: { protocols: Array<"tcp" | "udp">; description: string };
-};
 
 export type PortForwardUpstream = {
   id: string;

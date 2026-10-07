@@ -741,9 +741,7 @@ function AdapterCommandFields({
         {kind === "runtime_tunnel"
           ? "New definitions contain editable examples. Replace the executable and argument layout for your adapter; values such as {interface}, {remote_underlay}, and {local_address} are replaced from each endpoint's tunnel plan."
           : kind === "port_forward"
-            ? definition.contract_version === 2
-              ? 'Every command requires {rule_config_path}: a private JSON snapshot of this rule and its configuration hash. Applied Status must report the hash of the loaded configuration; absent confirms cleanup. Pool endpoints and settings are in the JSON file. The adapter owns listener collisions and must keep rule and endpoint settings within their documented scopes.'
-              : 'Available placeholders: {rule_id}, {client_id}, {revision}, {protocol}, {incoming_ports}, {target_ports}, {target_ip}. An omitted target supplies an empty argument. Status prints JSON: {"state":"applied|absent|drifted","message":"optional"}. Applied confirms the supplied configuration; absent confirms cleanup. The adapter owns address family, binding, source handling, and port collisions.'
+            ? 'Use {forwarding_type} for port_mapping or upstream_pool. Every command requires {rule_config_json}, passed as one JSON argument containing contract_version, client_id, config_hash, and rule (ID, revision, protocol, and mapping pairs or pool ports, upstreams, strategy, failure and retry settings). Status returns JSON with state applied, absent, or drifted; applied also returns the request config_hash. Settings follow the forwarding contract; the adapter owns listener collisions and reports execution failures. See docs/port-forwarding.md for the full JSON structure and command contract.'
             : "New definitions contain editable examples. vpsman replaces {plan_id}, {interface}, {endpoint_side}, and {desired_cost} in direct argv and sends no stdin. Read cost must print one number from 1 to 65535. Update reports failure by exit code; its output is retained as the message, then vpsman reads the cost again to verify it."}
       </span>
       {fields.map(({ field, hint, label, required }) => {
@@ -850,23 +848,11 @@ function defaultAdapterDefinition(
       command(
         "/opt/operator/port-forward-adapter",
         action,
-        "--rule-id",
-        "{rule_id}",
-        "--client-id",
-        "{client_id}",
-        "--revision",
-        "{revision}",
-        "--protocol",
-        "{protocol}",
-        "--incoming-ports",
-        "{incoming_ports}",
-        "--target-ports",
-        "{target_ports}",
-        "--target-ip",
-        "{target_ip}",
+        "{forwarding_type}",
+        "{rule_config_json}",
       );
     return {
-      contract_version: 1,
+      contract_version: 2,
       apply_command: operation("apply"),
       remove_command: operation("remove"),
       status_command: operation("status"),

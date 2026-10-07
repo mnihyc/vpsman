@@ -343,9 +343,6 @@ impl PortForwardingConsumer {
             capability
                 .supported_modes
                 .extend([PortForwardMode::Dnat, PortForwardMode::Redirect]);
-            if pools::probe().await {
-                capability.pool = Some(vpsman_common::PortForwardPoolCapabilities::native());
-            }
         }
         if capability.supported() && self.monitor.is_none() {
             if let Some(nft) = resolve_nft_binary() {

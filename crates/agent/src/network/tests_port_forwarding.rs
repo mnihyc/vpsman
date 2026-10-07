@@ -104,15 +104,24 @@ async fn bulk_removal_reports_all_native_and_custom_cleanup() {
     use vpsman_common::{PortForwardAdapterCommands, PortForwardCleanupRule, RuntimeTunnelCommand};
     let root = crate::state_dir::agent_state_dir().unwrap();
     std::fs::create_dir_all(&root).unwrap();
-    let command = |script: &str| RuntimeTunnelCommand {
+    let command = |action: &str| RuntimeTunnelCommand {
         argv: vec![
-            "/bin/sh".into(),
+            "/usr/bin/python3".into(),
             "-c".into(),
-            script.into(),
-            "fixture".into(),
-            root.join("listener-{rule_id}")
-                .to_string_lossy()
-                .into_owned(),
+            r#"import json,pathlib,sys
+action,root,request_json=sys.argv[1:]
+request=json.loads(request_json)
+state=pathlib.Path(root)/('listener-'+request['rule']['id'])
+if action=='apply':
+ state.write_text(json.dumps({'state':'applied','config_hash':request['config_hash']}))
+elif action=='remove':
+ state.write_text('{"state":"absent"}')
+else:
+ print(state.read_text())"#
+                .into(),
+            action.into(),
+            root.to_string_lossy().into_owned(),
+            "{rule_config_json}".into(),
         ],
         max_timeout_secs: 5,
         max_output_bytes: 16384,
@@ -155,7 +164,7 @@ async fn bulk_removal_reports_all_native_and_custom_cleanup() {
         ),
     ] {
         let mut desired = AgentPortForwardingConfig {
-            schema_version: 2,
+            schema_version: 3,
             ..Default::default()
         };
         for (index, mode) in modes.into_iter().enumerate() {
@@ -170,14 +179,13 @@ async fn bulk_removal_reports_all_native_and_custom_cleanup() {
             rule.mappings = pair_port_expressions(&(18080 + index).to_string(), "8080").unwrap();
             if mode == PortForwardMode::CustomAdapter {
                 rule.adapter = Some(PortForwardAdapterCommands {
-                    contract_version: 1,
-                    pool_capabilities: None,
+                    contract_version: vpsman_common::PORT_FORWARD_ADAPTER_CONTRACT_VERSION,
                     definition_id: uuid::Uuid::new_v4(),
                     definition_name: "fixture".into(),
                     definition_hash: "fixture".into(),
-                    apply: command("printf '%s' '{\"state\":\"applied\"}' > \"$1\""),
-                    remove: command("printf '%s' '{\"state\":\"absent\"}' > \"$1\""),
-                    status: command("cat \"$1\""),
+                    apply: command("apply"),
+                    remove: command("remove"),
+                    status: command("status"),
                 });
             }
             desired.rules.push(rule);
@@ -464,20 +472,19 @@ fn nft_monitor_start_owner_is_released_when_spawn_fails() {
 fn custom_changes_do_not_change_native_program_or_native_identity() {
     let native = config();
     let mut mixed = native.clone();
-    mixed.schema_version = 2;
+    mixed.schema_version = 3;
     let mut custom = native.rules[0].clone();
     custom.id = uuid::Uuid::new_v4();
     custom.mode = PortForwardMode::CustomAdapter;
     custom.target_ip = None;
     custom.masquerade = false;
     let command = vpsman_common::RuntimeTunnelCommand {
-        argv: vec!["/bin/true".to_string()],
+        argv: vec!["/bin/true".to_string(), "{rule_config_json}".into()],
         max_timeout_secs: 30,
         max_output_bytes: 16 * 1024,
     };
     custom.adapter = Some(vpsman_common::PortForwardAdapterCommands {
-        contract_version: 1,
-        pool_capabilities: None,
+        contract_version: vpsman_common::PORT_FORWARD_ADAPTER_CONTRACT_VERSION,
         definition_id: uuid::Uuid::new_v4(),
         definition_name: "service".to_string(),
         definition_hash: "fixture".to_string(),

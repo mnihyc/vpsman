@@ -88,69 +88,33 @@ fn invalid_pool_ranges_weights_and_modes_are_rejected_before_expansion() {
 }
 
 #[test]
-fn independent_connect_timeout_and_linked_failure_policy_follow_advertised_contract() {
+fn custom_pool_needs_commands_but_no_host_or_adapter_support_declaration() {
     let mut r = rule();
+    let command = json!({"argv":["/not-installed/forwarder", "{forwarding_type}", "{rule_config_json}"], "max_timeout_secs":30,"max_output_bytes":16384});
+    r.mode = PortForwardMode::CustomAdapter;
+    r.masquerade = false;
+    r.adapter = Some(serde_json::from_value(json!({
+        "template_id":Uuid::new_v4(),"template_name":"custom","definition_hash":"hash","contract_version":2,
+        "apply":command,"remove":command,"status":command
+    })).unwrap());
     let p = r.pool.as_mut().unwrap();
-    let mut cap = PortForwardPoolCapabilities::native();
-    cap.connect_timeout = Some(PortForwardConnectionCapability {
-        protocols: vec![PortForwardProtocol::Tcp],
-        description: String::new(),
-    });
+    p.strategy = PortForwardPoolStrategy::LeastConnections;
     p.connect_timeout_secs = Some(3);
-    validate_port_forward_pool(
-        p,
-        PortForwardMode::CustomAdapter,
-        PortForwardProtocol::Tcp,
-        &cap,
-    )
-    .unwrap();
-    assert!(validate_port_forward_pool(
-        p,
-        PortForwardMode::CustomAdapter,
-        PortForwardProtocol::Both,
-        &cap
-    )
-    .is_err());
-    cap.retries = cap.connect_timeout.clone();
     p.retry_policy = Some(PortForwardRetryPolicy::Off);
-    cap.failure_exclusion = Some(PortForwardFailureCapability {
-        protocols: vec![PortForwardProtocol::Tcp],
-        linked_timeout: true,
-        min_endpoints: 2,
-        description: String::new(),
-    });
     p.upstreams[0].failure_policy = Some(PortForwardFailurePolicy::Temporary {
         threshold: 2,
         window_secs: 10,
         retry_after_secs: 10,
     });
-    validate_port_forward_pool(
-        p,
-        PortForwardMode::CustomAdapter,
-        PortForwardProtocol::Tcp,
-        &cap,
-    )
-    .unwrap();
-    p.upstreams[0].failure_policy = Some(PortForwardFailurePolicy::Temporary {
-        threshold: 2,
-        window_secs: 10,
-        retry_after_secs: 20,
-    });
-    assert!(validate_port_forward_pool(
-        p,
-        PortForwardMode::CustomAdapter,
-        PortForwardProtocol::Tcp,
-        &cap
-    )
-    .is_err());
-    cap.failure_exclusion.as_mut().unwrap().linked_timeout = false;
-    validate_port_forward_pool(
-        p,
-        PortForwardMode::CustomAdapter,
-        PortForwardProtocol::Tcp,
-        &cap,
-    )
-    .unwrap();
+    // Custom execution is not subject to nft's expanded 32-bit selector width.
+    p.upstreams[0].weight = u32::MAX;
+    p.upstreams[1].target_ip = "::1".parse().unwrap();
+    validate_port_forwarding_config(&config(vec![r.clone()])).unwrap();
+    r.pool.as_mut().unwrap().connect_timeout_secs = Some(0);
+    assert!(validate_port_forward_rule(&r).is_err());
+    r.pool.as_mut().unwrap().connect_timeout_secs = Some(3);
+    r.adapter = None;
+    assert!(validate_port_forward_rule(&r).is_err());
 }
 
 #[test]

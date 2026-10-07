@@ -1,28 +1,10 @@
 use super::*;
-use vpsman_common::{
-    PortForwardCapability, PortForwardCapabilityStatus, PortForwardPoolCapabilities,
-};
 
 fn pool() -> Value {
     json!({"incoming":[{"start":18443,"end":18444}],"strategy":"round_robin", "upstreams":[
         {"id":Uuid::new_v4(),"target_ip":"192.0.2.1","target_hostname":"BACKEND.Example.","ports":{"start":8000,"end":8002},"weight":2,"role":"primary","enabled":true},
         {"id":Uuid::new_v4(),"target_ip":"192.0.2.2","ports":{"start":9000,"end":9000},"weight":1,"role":"primary","enabled":true}
     ]})
-}
-
-async fn enable_pool_capability(db: &PgReliabilityTestDb, client: &str) {
-    let capability = PortForwardCapability {
-        schema_version: 3,
-        status: PortForwardCapabilityStatus::Supported,
-        supported_modes: vec![
-            vpsman_common::PortForwardMode::Dnat,
-            vpsman_common::PortForwardMode::CustomAdapter,
-        ],
-        pool: Some(PortForwardPoolCapabilities::native()),
-        ..Default::default()
-    };
-    sqlx::query("UPDATE clients SET capabilities=jsonb_set(capabilities,'{port_forwarding}',$2) WHERE id=$1")
-        .bind(client).bind(sqlx::types::Json(capability)).execute(&db.pool).await.unwrap();
 }
 
 #[tokio::test]
@@ -39,7 +21,6 @@ async fn postgres_port_forward_reapply_routes_produce_work_without_a_source_muta
     {
         if index != 1 {
             insert_client(&db.pool, client, Some(Uuid::new_v4())).await;
-            enable_pool_capability(&db, client).await;
         }
         let mut request = json!({"client_id":client,"name":format!("rule-{index}"),"protocol":"tcp","mappings":[],"pool":pool(),"enabled":true});
         if index == 1 {
@@ -232,13 +213,6 @@ async fn postgres_port_forward_pool_roundtrip_updates_and_explicit_mapping_trans
             .as_deref(),
         Some("backend.example")
     );
-    let error = db
-        .repo
-        .set_port_forward_rule_enabled(saved.id, 1, true, &operator)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("pool_agent_capability_required"));
-    enable_pool_capability(&db, "pool-native").await;
     let saved = db
         .repo
         .set_port_forward_rule_enabled(saved.id, 1, true, &operator)
@@ -313,14 +287,13 @@ async fn postgres_port_forward_pool_roundtrip_updates_and_explicit_mapping_trans
 }
 
 #[tokio::test]
-async fn postgres_port_forward_pool_capability_loss_and_corruption_do_not_block_cleanup() {
+async fn postgres_port_forward_pool_missing_capability_allows_enable_and_corruption_cleanup() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
     let operator = postgres_network_operator(&db.repo).await;
     let client = "pool-cleanup";
     insert_client(&db.pool, client, Some(Uuid::new_v4())).await;
-    enable_pool_capability(&db, client).await;
     let request = serde_json::from_value(json!({
         "client_id":client,"name":"cleanup","protocol":"tcp",
         "mappings":[],"pool":pool(),"enabled":true
@@ -342,7 +315,7 @@ async fn postgres_port_forward_pool_capability_loss_and_corruption_do_not_block_
         .await
         .unwrap();
     assert_eq!(disabled.pool, saved.pool);
-    let error = db
+    let enabled = db
         .repo
         .bulk_mutate_port_forward_rules(
             PortForwardBulkAction::Enable,
@@ -354,17 +327,11 @@ async fn postgres_port_forward_pool_capability_loss_and_corruption_do_not_block_
             &operator,
         )
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("pool_agent_capability_required"));
-    let unchanged = db
-        .repo
-        .get_port_forward_rule(saved.id)
-        .await
         .unwrap()
-        .unwrap();
-    assert_eq!(unchanged.revision, disabled.revision);
-    assert!(!unchanged.enabled);
-    assert_eq!(unchanged.pool, saved.pool);
+        .remove(0);
+    assert_eq!(enabled.revision, disabled.revision + 1);
+    assert!(enabled.enabled);
+    assert_eq!(enabled.pool, saved.pool);
 
     // Corrupt execution data must not be needed to retire a rule or generate
     // its native cleanup request. Fresh absence, rather than disabling, retires it.
@@ -381,7 +348,7 @@ async fn postgres_port_forward_pool_capability_loss_and_corruption_do_not_block_
         .unwrap();
     let deleted = db
         .repo
-        .delete_corrupt_port_forward_rule(saved.id, disabled.revision, None, &error, &operator)
+        .delete_corrupt_port_forward_rule(saved.id, enabled.revision, None, &error, &operator)
         .await
         .unwrap();
     assert!(deleted.removal_confirmed_at.is_none());
@@ -414,19 +381,19 @@ async fn postgres_port_forward_pool_capability_loss_and_corruption_do_not_block_
 }
 
 #[tokio::test]
-async fn postgres_port_forward_pool_adapter_edits_keep_attached_contract_and_cleanup() {
+async fn postgres_port_forward_pool_adapter_edits_allow_repair_without_capability_and_keep_cleanup()
+{
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
     let operator = postgres_network_operator(&db.repo).await;
     insert_client(&db.pool, "pool-custom", Some(Uuid::new_v4())).await;
-    enable_pool_capability(&db, "pool-custom").await;
-    let command = json!({"argv":["/opt/operator/adapter","{rule_config_path}"],"max_timeout_secs":30,"max_output_bytes":16384});
+    let command = json!({"argv":["/opt/operator/adapter","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384});
     let mut definition = crate::model::UpsertNetworkAdapterDefinitionRequest {
         adapter_kind: "port_forward".into(),
         name: "pool-adapter".into(),
         description: None,
-        definition: json!({"contract_version":2,"pool_capabilities":PortForwardPoolCapabilities::native(),
+        definition: json!({"contract_version":2,
             "apply_command":command,"remove_command":command,"status_command":command}),
     };
     let adapter = db
@@ -441,30 +408,23 @@ async fn postgres_port_forward_pool_adapter_edits_keep_attached_contract_and_cle
         .create_port_forward_rule(&request, &operator)
         .await
         .unwrap();
-    definition
-        .definition
-        .as_object_mut()
-        .unwrap()
-        .remove("pool_capabilities");
-    let error = db
+    definition.definition["apply_command"]["argv"][0] = json!("/opt/operator/repaired-adapter");
+    let preview = db
         .repo
         .preview_network_adapter_definition(adapter.id, &definition)
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("pool_required_by_binding"));
+        .unwrap();
+    assert_eq!(preview.affected_resources.len(), 1);
     let disabled = db
         .repo
         .set_port_forward_rule_enabled(saved.id, saved.revision, false, &operator)
         .await
         .unwrap();
     assert!(disabled.pool.is_some());
-    assert!(
-        db.repo
-            .preview_network_adapter_definition(adapter.id, &definition)
-            .await
-            .is_err(),
-        "disabled drafts retain their contract"
-    );
+    db.repo
+        .preview_network_adapter_definition(adapter.id, &definition)
+        .await
+        .unwrap();
     let cleanup = db
         .repo
         .port_forwarding_config_for_client("pool-custom")

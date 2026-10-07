@@ -37362,15 +37362,24 @@ async fn postgres_port_forward_modes_preserve_native_and_adapter_ownership() {
     };
     let client_id = "forward-modes";
     insert_client(&db.pool, client_id, None).await;
+    sqlx::query("UPDATE clients SET capabilities = $2 WHERE id = $1")
+        .bind(client_id)
+        .bind(
+            json!({"port_forwarding":{"status":"supported","schema_version":3,
+            "supported_modes":["dnat","redirect","custom_adapter"]}}),
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
     let operator = postgres_network_operator(&db.repo).await;
     let adapter_request = crate::model::UpsertNetworkAdapterDefinitionRequest {
         adapter_kind: "port_forward".into(),
         name: "service-forward".into(),
         description: None,
-        definition: json!({"contract_version":1,
-            "apply_command":{"argv":["/usr/bin/true","{rule_id}","{target_ip}"],"max_timeout_secs":30,"max_output_bytes":16384},
-            "remove_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384},
-            "status_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384}}),
+        definition: json!({"contract_version":2,
+            "apply_command":{"argv":["/usr/bin/true","{forwarding_type}","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "remove_command":{"argv":["/usr/bin/true","{forwarding_type}","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "status_command":{"argv":["/usr/bin/true","{forwarding_type}","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384}}),
     };
     let adapter = db
         .repo
@@ -37446,7 +37455,7 @@ async fn postgres_port_forward_modes_preserve_native_and_adapter_ownership() {
         .port_forwarding_config_for_client(client_id)
         .await
         .unwrap();
-    assert_eq!(config.schema_version, 2);
+    assert_eq!(config.schema_version, 3);
     assert_eq!(config.rules.len(), 2);
     let custom_runtime = config
         .rules
@@ -37651,7 +37660,8 @@ async fn postgres_port_forward_modes_preserve_native_and_adapter_ownership() {
 }
 
 #[tokio::test]
-async fn postgres_port_forward_modes_gate_capabilities_and_preserve_cleanup_across_mode_changes() {
+async fn postgres_port_forward_modes_allow_runtime_failure_and_preserve_cleanup_across_mode_changes(
+) {
     use vpsman_common::{PortForwardCleanupRule, PortForwardMode};
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -37666,10 +37676,10 @@ async fn postgres_port_forward_modes_gate_capabilities_and_preserve_cleanup_acro
         .unwrap();
     let (operator, headers) = postgres_operator_session(&db.repo, "forward-mode-admin").await;
     let definition_request:crate::model::UpsertNetworkAdapterDefinitionRequest = serde_json::from_value(json!({
-        "adapter_kind":"port_forward","name":"local-proxy","definition":{"contract_version":1,
-            "apply_command":{"argv":["/usr/bin/true"],"max_timeout_secs":30,"max_output_bytes":16384},
-            "remove_command":{"argv":["/usr/bin/true"],"max_timeout_secs":30,"max_output_bytes":16384},
-            "status_command":{"argv":["/usr/bin/true"],"max_timeout_secs":30,"max_output_bytes":16384}}})).unwrap();
+        "adapter_kind":"port_forward","name":"local-proxy","definition":{"contract_version":2,
+            "apply_command":{"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "remove_command":{"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384},
+            "status_command":{"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384}}})).unwrap();
     let definition = db
         .repo
         .create_network_adapter_definition(&definition_request, &operator)
@@ -37690,8 +37700,17 @@ async fn postgres_port_forward_modes_gate_capabilities_and_preserve_cleanup_acro
             .insert(CONTENT_TYPE, "application/json".parse().unwrap());
         request
     };
-    let unsupported = router.clone().oneshot(send(body.clone())).await.unwrap();
-    assert_eq!(unsupported.status(), StatusCode::CONFLICT);
+    let mut unconfirmed = body.clone();
+    unconfirmed["confirmed"] = json!(false);
+    let response = router.clone().oneshot(send(unconfirmed)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        response["error"],
+        "port_forward_mutation_confirmation_required"
+    );
     let mut draft_body = body.clone();
     draft_body["enabled"] = json!(false);
     let draft_request: CreatePortForwardRuleRequest = serde_json::from_value(draft_body).unwrap();
@@ -37718,9 +37737,7 @@ async fn postgres_port_forward_modes_gate_capabilities_and_preserve_cleanup_acro
     assert!(draft_config.cleanup_rules.is_empty());
     assert!(draft_config.rules.is_empty());
 
-    // External adapters are advertised independently of native nft support.
-    sqlx::query("UPDATE clients SET capabilities=$2 WHERE id=$1").bind(client_id)
-        .bind(SqlJson(json!({"port_forwarding":{"status":"nft_missing","schema_version":2,"supported_modes":["custom_adapter"]}}))).execute(&db.pool).await.unwrap();
+    // Desired rules can be enabled before a host advertises custom support.
     let mut active_body = body;
     active_body["name"] = json!("external proxy");
     let owned_request = crate::model::UpsertNetworkAdapterDefinitionRequest {

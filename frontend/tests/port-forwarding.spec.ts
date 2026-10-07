@@ -190,7 +190,10 @@ test("custom adapters are reusable in the forwarding drawer and work independent
     "port_forward",
   );
   await expect(drawer.getByLabel("Apply adapter command")).toContainText(
-    "{rule_id}",
+    "{rule_config_json}",
+  );
+  await expect(drawer.getByLabel("Apply adapter command")).toContainText(
+    "{forwarding_type}",
   );
   await expect(drawer.getByLabel("Remove adapter command")).toBeVisible();
   await expect(drawer.getByLabel("Status adapter command")).toBeVisible();
@@ -1131,9 +1134,9 @@ test("a late hostname resolution cannot overwrite a newly opened editor", async 
   ).toHaveCount(0);
 });
 
-test("unsupported agents allow disabled drafts but not enabled apply", async ({
+test("unsupported agents allow enabled rules and lifecycle retries", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.getByRole("button", { name: "Create rule" }).click();
   const editor = page.locator(".portForwardEditor");
   await editor.getByLabel("Port-forward rule VPS").fill("backup-nyc");
@@ -1146,15 +1149,9 @@ test("unsupported agents allow disabled drafts but not enabled apply", async ({
   await editor.getByLabel("Target ports").fill("443");
   await editor.getByLabel("Target IP or hostname").fill("10.30.0.9");
   await editor.getByLabel("Enabled").check();
-  await expect(editor).toContainText(
-    "Agent lacks CAP_NET_ADMIN in the host network namespace",
-  );
-  await expect(
-    editor.getByRole("button", { name: "Create rule" }),
-  ).toBeDisabled();
-
-  await editor.getByLabel("Enabled").uncheck();
+  await expect(editor.getByRole("button", { name: "Create rule" })).toBeEnabled();
   await editor.getByRole("button", { name: "Create rule" }).click();
+  await page.getByLabel("Confirm rule creation").getByRole("button", { name: "Create and apply" }).click();
   await expect(page.getByText("Rule created")).toBeVisible();
   await expect(page.getByText("Future service", { exact: true })).toBeVisible();
   const requests = await page.evaluate(
@@ -1167,9 +1164,64 @@ test("unsupported agents allow disabled drafts but not enabled apply", async ({
   );
   expect(requests[0]).toMatchObject({
     action: "create",
-    body: { target_hostname: null, target_ip: "10.30.0.9" },
+    body: { target_hostname: null, target_ip: "10.30.0.9", enabled: true },
   });
+  const id = await page.evaluate(async () => {
+    const rules = await (await fetch("/api/v1/port-forward-rules")).json();
+    return rules.find((rule: {name: string}) => rule.name === "Future service").id as string;
+  });
+  for (const action of ["Reapply", "Disable", "Enable"]) {
+    await invokePortForwardAction(page, testInfo, portForwardRecord(page, testInfo, id, "Future service"), action);
+    const confirmation = page.getByLabel(new RegExp(`^Confirm (bulk )?${action.toLowerCase()}$`));
+    await confirmation.getByRole("button", { name: new RegExp(action, "i") }).click();
+    await expect(confirmation).toBeHidden();
+  }
+
 });
+
+for (const mode of ["DNAT", "Custom adapter"] as const) {
+  test(`${mode} pools can be authored before support is reported`, async ({ page }, testInfo) => {
+    await page.getByRole("button", { name: "Create rule", exact: true }).click();
+    const editor = page.locator(".portForwardEditor");
+    const policy = editor.getByLabel("Mapping policy", { exact: true });
+    await expect(policy).toBeVisible();
+    await policy.selectOption("pool");
+    await editor.getByLabel("Incoming ports").fill("18443");
+    await editor.getByLabel("Upstream 1 address").fill("192.0.2.12");
+    await editor.getByLabel("Upstream 1 ports").fill("8000-8002");
+    const modes = editor.getByRole("group", { name: "Forwarding mode" });
+    await modes.getByRole("button", { name: "REDIRECT", exact: true }).click();
+    await expect(policy).toHaveCount(0);
+    await expect(editor.getByLabel("Upstream 1 address")).toHaveCount(0);
+    await modes.getByRole("button", { name: mode, exact: true }).click();
+    await expect(policy).toHaveValue("pool");
+    await expect(editor.getByLabel("Upstream 1 ports")).toHaveValue("8000-8002");
+    await editor.getByLabel("Name", { exact: true }).fill("Configure first pool");
+    await editor.getByLabel("Port-forward rule VPS").fill("backup-nyc");
+    await page.getByRole("listbox", { name: "Port-forward rule VPS options" }).getByRole("option", { name: /backup-nyc-03/ }).click();
+    if (mode === "Custom adapter") {
+      await editor.getByRole("button", { name: "Create adapter", exact: true }).click();
+      const drawer = page.getByLabel("New port forwarding adapter", { exact: true });
+      await drawer.getByLabel("Adapter definition name").fill("Future pool adapter");
+      await drawer.getByRole("button", { name: "Create adapter definition", exact: true }).click();
+      await expect(drawer).toBeHidden();
+      await expect(editor.getByLabel("Port-forward adapter definition")).not.toHaveValue("");
+    }
+    await editor.getByLabel("Enabled", { exact: true }).check();
+    await page.screenshot({ path: testInfo.outputPath("configure-first-pool.png"), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    await editor.getByRole("button", { name: "Create rule", exact: true }).click();
+    const confirmation = page.getByLabel("Confirm rule creation");
+    await expect(confirmation).toContainText("192.0.2.12");
+    await confirmation.getByRole("button", { name: "Create and apply" }).click();
+    await expect(editor).toBeHidden();
+    expect((await portForwardRequests(page)).at(-1)).toMatchObject({
+      action: "create", body: { enabled: true, mode: mode === "DNAT" ? "dnat" : "custom_adapter",
+        pool: { upstreams: [{ target_ip: "192.0.2.12", ports: { start: 8000, end: 8002 } }] } },
+    });
+    await expect(page.getByText("Configure first pool", { exact: true })).toBeVisible();
+  });
+}
 
 test("never-applied disabled drafts explain and complete immediate deletion", async ({
   page,
@@ -1410,14 +1462,14 @@ test("bulk actions state their exact eligible subset", async ({ page }) => {
     .click();
   await expect(grid).toContainText("4 selected");
   await grid.getByRole("button", { name: "Actions", exact: true }).click();
-  await expect(page.getByRole("menuitem", { name: "Enable" })).toBeDisabled();
+  await expect(page.getByRole("menuitem", { name: "Enable" })).toBeEnabled();
   await expect(page.getByRole("menuitem", { name: "Disable" })).toHaveAttribute(
     "title",
     "Review disabling 2 selected enabled rules.",
   );
   await expect(page.getByRole("menuitem", { name: "Reapply" })).toHaveAttribute(
     "title",
-    "Review reapplying the complete forwarding table on 2 eligible VPSs.",
+    "Review reconciling forwarding on the VPSs of 3 eligible rules.",
   );
   await expect(page.getByRole("menuitem", { name: "Delete" })).toHaveAttribute(
     "title",

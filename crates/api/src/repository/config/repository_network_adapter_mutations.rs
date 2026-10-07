@@ -268,44 +268,6 @@ async fn preview_in_tx(
                 cleanup_pending: owned && !enabled,
             };
             let snapshot: sqlx::types::Json<Value> = row.try_get("snapshot")?;
-            if command_change
-                && enabled
-                && candidate.definition["contract_version"].as_u64() == Some(2)
-            {
-                let cap = sqlx::query_scalar::<_, sqlx::types::Json<vpsman_common::PortForwardCapability>>(
-                    "SELECT COALESCE(capabilities->'port_forwarding','{}'::jsonb) FROM clients WHERE id=$1",
-                ).bind(row.try_get::<String,_>("client_id")?).fetch_one(&mut **tx).await?.0;
-                anyhow::ensure!(
-                    cap.schema_version >= 3
-                        && cap.supports_mode(vpsman_common::PortForwardMode::CustomAdapter),
-                    "network_adapter_pool_agent_capability_required"
-                );
-            }
-            // A definition edit must preserve the meaning of every attached,
-            // non-deleted pool, including drafts that may be enabled later.
-            if command_change
-                && !row.try_get::<bool, _>("deleted")?
-                && row.try_get::<Option<Uuid>, _>("adapter_definition_id")? == Some(current.id)
-                && !snapshot.0["pool"].is_null()
-            {
-                let pool: vpsman_common::PortForwardPool =
-                    serde_json::from_value(snapshot.0["pool"].clone())?;
-                let protocol = serde_json::from_value(snapshot.0["protocol"].clone())?;
-                anyhow::ensure!(
-                    candidate.definition["contract_version"].as_u64() == Some(2),
-                    "network_adapter_pool_required_by_binding"
-                );
-                let capabilities =
-                    serde_json::from_value(candidate.definition["pool_capabilities"].clone())
-                        .context("network_adapter_pool_required_by_binding")?;
-                vpsman_common::validate_port_forward_pool(
-                    &pool,
-                    vpsman_common::PortForwardMode::CustomAdapter,
-                    protocol,
-                    &capabilities,
-                )
-                .context("network_adapter_pool_required_by_binding")?;
-            }
             snapshots
                 .push(serde_json::json!({"resource": &resource,"rule":snapshot.0,"owned":owned}));
             affected.push(resource);

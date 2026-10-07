@@ -403,13 +403,17 @@ async fn postgres_adapter_mutation_forwarding_includes_pending_cleanup_without_d
         return;
     };
     insert_client(&db.pool, "forward-client", None).await;
+    sqlx::query("UPDATE clients SET capabilities=$2 WHERE id=$1")
+        .bind("forward-client")
+        .bind(SqlJson(json!({"port_forwarding":{"status":"nft_missing","schema_version":3,"supported_modes":["custom_adapter"]}})))
+        .execute(&db.pool).await.unwrap();
     let operator = postgres_network_operator(&db.repo).await;
-    let command = json!({"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384});
+    let command = json!({"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384});
     let request = UpsertNetworkAdapterDefinitionRequest {
         adapter_kind: "port_forward".into(),
         name: "external proxy".into(),
         description: None,
-        definition: json!({"contract_version":1,"apply_command":command,"remove_command":command,"status_command":command}),
+        definition: json!({"contract_version":2,"apply_command":command,"remove_command":command,"status_command":command}),
     };
     let old = db
         .repo
@@ -423,7 +427,8 @@ async fn postgres_adapter_mutation_forwarding_includes_pending_cleanup_without_d
         .await
         .unwrap();
     let mut commands = candidate(&old);
-    commands.definition["apply_command"]["argv"] = json!(["/usr/bin/new-proxy", "{rule_id}"]);
+    commands.definition["apply_command"]["argv"] =
+        json!(["/usr/bin/new-proxy", "{rule_config_json}"]);
     let preview = db
         .repo
         .preview_network_adapter_definition(old.id, &commands)
@@ -470,7 +475,8 @@ async fn postgres_adapter_mutation_forwarding_includes_pending_cleanup_without_d
         .update_port_forward_rule(rule.id, &native, &operator)
         .await
         .unwrap();
-    commands.definition["status_command"]["argv"] = json!(["/usr/bin/new-status", "{rule_id}"]);
+    commands.definition["status_command"]["argv"] =
+        json!(["/usr/bin/new-status", "{rule_config_json}"]);
     let cleanup_review = db
         .repo
         .preview_network_adapter_definition(old.id, &commands)

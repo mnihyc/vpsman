@@ -1945,7 +1945,6 @@ pub(crate) fn validate_network_adapter_definition(
         "routing_cost" => &["contract_version", "status_command", "update_command"][..],
         "port_forward" => &[
             "contract_version",
-            "pool_capabilities",
             "apply_command",
             "remove_command",
             "status_command",
@@ -1956,15 +1955,13 @@ pub(crate) fn validate_network_adapter_definition(
         object.keys().all(|key| allowed.contains(&key.as_str())),
         "network_adapter_definition_unknown_field"
     );
-    let expected_contract_version = if request.adapter_kind == "routing_cost" {
-        u64::from(vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION)
-    } else {
-        1
+    let expected_contract_version = match request.adapter_kind.as_str() {
+        "routing_cost" => u64::from(vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION),
+        "port_forward" => u64::from(vpsman_common::PORT_FORWARD_ADAPTER_CONTRACT_VERSION),
+        _ => 1,
     };
     anyhow::ensure!(
-        object.get("contract_version").and_then(Value::as_u64) == Some(expected_contract_version)
-            || (request.adapter_kind == "port_forward"
-                && object.get("contract_version").and_then(Value::as_u64) == Some(2)),
+        object.get("contract_version").and_then(Value::as_u64) == Some(expected_contract_version),
         "network_adapter_contract_version_invalid"
     );
     let command = |field: &str, required: bool| -> Result<Option<PresetCommand>> {
@@ -1997,27 +1994,14 @@ pub(crate) fn validate_network_adapter_definition(
             "network_adapter_remove_command_required"
         );
     } else if request.adapter_kind == "port_forward" {
-        let version = object
-            .get("contract_version")
-            .and_then(Value::as_u64)
-            .unwrap_or(1);
-        if let Some(capabilities) = object.get("pool_capabilities") {
-            anyhow::ensure!(version == 2, "network_adapter_pool_contract_v2_required");
-            let cap: vpsman_common::PortForwardPoolCapabilities =
-                serde_json::from_value(capabilities.clone())
-                    .context("network_adapter_pool_capabilities_invalid")?;
-            vpsman_common::validate_port_forward_pool_capabilities(&cap)
-                .context("network_adapter_pool_capabilities_invalid")?;
-        }
         for field in ["apply_command", "remove_command", "status_command"] {
             let parsed = command(field, true)?.expect("required command");
             anyhow::ensure!(
-                version != 2
-                    || parsed
-                        .argv
-                        .iter()
-                        .any(|arg| arg.contains("{rule_config_path}")),
-                "network_adapter_rule_config_path_required"
+                parsed
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("{rule_config_json}")),
+                "network_adapter_rule_config_json_required"
             );
         }
     } else {

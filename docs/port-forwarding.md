@@ -18,12 +18,13 @@ An enabled built-in DNAT or REDIRECT rule requires the following on the VPS:
 
 The agent probes this exact capability and reports a reason when it is not
 available. `vpsman` does not install nftables, write firewall configuration,
-change sysctls, or select a distribution-specific persistence service. A rule
-may be saved disabled on an unsupported VPS, but it cannot be enabled or
-reapplied until the capability is reported as supported.
+change sysctls, or select a distribution-specific persistence service. A valid rule may be saved, enabled, or reapplied before the host is ready.
+The agent reports execution failure/unsupported state without disabling or
+discarding the desired rule. Repair the host and use **Reapply** to retry.
 
-Custom adapters do not require nftables. They require an agent advertising
-custom-adapter support and the programs named by the selected definition.
+Custom adapters do not require nftables. The agent executes the programs named by the
+selected definition. No capability declaration or executable preflight is
+required to save or dispatch a rule; missing programs fail at execution.
 
 For built-in modes, the agent owns one table only:
 
@@ -105,16 +106,16 @@ connected: external changes are reported as Drifted, and **Reapply** is the
 explicit immediate repair action. Reconnect is a lifecycle boundary and also
 repairs a missing or drifted owned table from current database desired state.
 
-Capability is advertised when the agent connects. After installing `nft` or
-changing the agent's host-network privileges, reconnect or restart the agent so
-the control plane receives a fresh capability snapshot before enabling rules.
+Capability is advertised when the agent connects and is diagnostic information,
+not a prerequisite for authoring or retrying rules. The agent probes current
+host state during reconciliation, so a repaired host can be retried with **Reapply**.
 
 ## Rule Workflow
 
 1. Select one VPS and enter a unique rule name.
 2. Select the mode, then TCP, UDP, or Both.
-3. Choose **Port mapping** for fixed translation, or **Upstream pool** when the
-   selected DNAT host/custom adapter supports it. Enter the incoming ports.
+3. Choose **Port mapping** for fixed translation, or **Upstream pool** for
+   DNAT or Custom adapter. Enter the incoming ports.
 4. For DNAT, enter a target IP, or resolve a hostname and select a literal
    address. REDIRECT selects IPv4, IPv6, or Both instead. Custom selects a
    reusable adapter, with an optional target IP or resolved hostname.
@@ -143,11 +144,13 @@ to a loopback destination. Define their required **Apply**, **Remove**, and
 directly, without implicit shell parsing. An Apply command must start or reload
 its service and return; it must not remain attached to a foreground daemon.
 
-Available placeholders are `{rule_id}`, `{client_id}`, `{revision}`, `{protocol}`,
-`{incoming_ports}`, `{target_ports}`, and `{target_ip}`. Port expressions retain
-their corresponding ordering; `both` remains one protocol value. An omitted
-target IP expands to an empty argument. Family selection and listener conflicts
-belong to the adapter; built-in overlap validation does not claim custom ports.
+Both Port mapping and Upstream pool use forwarding adapter contract 2.
+`{forwarding_type}` expands to `port_mapping` or `upstream_pool`;
+`{rule_config_json}` supplies the complete request as one JSON argv value.
+Every command must include `{rule_config_json}`. Mapping pairs, protocol,
+optional target IP and pool settings are read from that request. Family selection
+and listener conflicts belong to the adapter; built-in overlap validation does
+not claim custom ports.
 
 Apply must idempotently establish the exact supplied rule under its stable rule
 ID. Remove must remove all resources for that ID, including partial applies.
@@ -157,8 +160,8 @@ Remove by `absent`. Failed commands or invalid status output report failure.
 Each command uses its configured timeout/output budget from the adapter editor.
 
 Definition command edits use the existing affected-resource review and dispatch
-workflow. An edit cannot remove capabilities required by an attached pool,
-including disabled drafts. Definitions cannot be deleted while referenced.
+workflow, including when affected hosts currently fail execution. Definitions
+cannot be deleted while referenced.
 Switching adapters or modes removes the previous owner's resources first. The
 agent records exact custom ownership before Apply, including commands and rule
 inputs needed to remove interrupted/partial applies after a restart. Failed
@@ -191,7 +194,7 @@ backup promotion occurs.
 | Forwarder | Strategies | Other supported pool settings |
 | --- | --- | --- |
 | Native DNAT | Weighted round robin, random, source-IP hash | One address family per pool; existing masquerade/preserve-source behavior |
-| Custom adapter v2 | Only strategies advertised by its definition | Only advertised families, mixed-family support, backup strategies, failure exclusion and connection settings |
+| Custom adapter | Weighted round robin, random, source-IP hash, least connections, consistent source-IP hash | Mixed families; backups with round robin/least connections; TCP failure exclusion and connection settings |
 
 Native selection occurs on a flow's first packet, then conntrack retains its
 destination. Round robin rotates weighted shares; random chooses a weighted
@@ -201,11 +204,12 @@ across unrelated native table rebuilds. Shared source addresses behind NAT share
 affinity. Native pools do not probe health, count active connections, retry a
 failed connection, or provide backup roles.
 
-The agent checks native pool grammar independently using `nft --check`; failure
-hides pools without disabling supported fixed DNAT/REDIRECT. Pools/custom v2
-require forwarding schema 3 and command protocol 12. Existing mappings continue
-using their previous schema/protocol. Upgrade the server, frontend and affected
-agents before enabling pools. Existing database rows migrate with no pool.
+The agent applies the requested native pool using nftables and reports any
+unsupported host features at runtime. Pool and custom rules require forwarding
+schema 3 and command protocol 12; native fixed mappings retain their existing
+schema/protocol. A transport-version mismatch is reported by dispatch after
+desired state is saved. Update the affected agent and Reapply. Existing database
+rows have no pool unless one is configured.
 
 ### Pool Settings Have Fixed Scopes
 
@@ -223,7 +227,10 @@ These meanings are part of vpsman's contract, not configurable adapter scopes:
 Omitted settings inherit the adapter's documented defaults. Explicit failure
 Off disables failure counting/exclusion, and explicit retry Off disables trying
 another endpoint. Positive values are required when a threshold/limit is supplied.
-Whole-range failure aggregation is not implemented. Runtime exclusion is
+The supported failure policy uses the same interval for the counting window
+and temporary exclusion, with at least two configured endpoints (including
+disabled/backup entries). Connection settings and failure exclusion apply to
+TCP pools. Whole-range failure aggregation is not implemented. Runtime exclusion is
 temporary eligibility evidence, not a permanent edit of the configured enabled
 flag or a failure to apply the rule.
 
@@ -233,13 +240,14 @@ upstream groups own each IP:port's `max_fails`/`fail_timeout`. This permits rule
 on one NGINX instance to have different settings without changing shared stream
 defaults. NGINX links the failure-count window and exclusion interval, does not
 support backup with hash/random, and ignores passive-failure settings for a
-single-server group. Advertise these restrictions; do not silently approximate
-unsupported settings. Standard NGINX does not expose per-peer live exclusion
+single-server group. These restrictions are reflected in the pool controls.
+An implementation that cannot apply a requested setting must fail its command
+rather than silently approximate the setting. Standard NGINX does not expose per-peer live exclusion
 state through this contract automatically. Omit unavailable observations.
 See [NGINX upstream directives](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html#server)
 and [connection/retry directives](https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_connect_timeout).
 
-### Custom Adapter Contract 2
+### Custom Adapter Contract
 
 vpsman ships the contract, validation and lifecycle, not an NGINX implementation.
 Operators supply and install their adapter on each target VPS. Register its
@@ -249,39 +257,26 @@ the existing registry edits its commands with the usual impact review.
 ```json
 {
   "contract_version": 2,
-  "pool_capabilities": {
-    "strategies": ["round_robin", "least_connections", "source_ip_hash", "consistent_source_ip_hash", "random"],
-    "protocols": ["tcp", "udp"],
-    "address_families": ["ipv4", "ipv6"],
-    "mixed_families": true,
-    "backup_strategies": ["round_robin", "least_connections"],
-    "failure_exclusion": {
-      "protocols": ["tcp"], "linked_timeout": true, "min_endpoints": 2,
-      "description": "Temporary TCP connection-failure exclusion per IP:port in this rule."
-    },
-    "connect_timeout": {"protocols": ["tcp"], "description": "Deadline per connection attempt in this rule."},
-    "retries": {"protocols": ["tcp"], "description": "Retry failed connection establishment within this rule."}
-  },
-  "apply_command": {"argv": ["/opt/operator/forward-adapter", "apply", "{rule_config_path}"], "max_timeout_secs": 30, "max_output_bytes": 16384},
-  "remove_command": {"argv": ["/opt/operator/forward-adapter", "remove", "{rule_config_path}"], "max_timeout_secs": 30, "max_output_bytes": 16384},
-  "status_command": {"argv": ["/opt/operator/forward-adapter", "status", "{rule_config_path}"], "max_timeout_secs": 30, "max_output_bytes": 16384}
+  "apply_command": {"argv": ["/opt/operator/forward-adapter", "apply", "{forwarding_type}", "{rule_config_json}"], "max_timeout_secs": 30, "max_output_bytes": 16384},
+  "remove_command": {"argv": ["/opt/operator/forward-adapter", "remove", "{forwarding_type}", "{rule_config_json}"], "max_timeout_secs": 30, "max_output_bytes": 16384},
+  "status_command": {"argv": ["/opt/operator/forward-adapter", "status", "{forwarding_type}", "{rule_config_json}"], "max_timeout_secs": 30, "max_output_bytes": 16384}
 }
 ```
 
-This illustrates an NGINX-like capability profile, not executable behavior.
-Advertise only implemented features. Unsupported controls are hidden. Capability
-protocol/family lists contain concrete values (`tcp`/`udp`, `ipv4`/`ipv6`), not
-`both`. A Both rule needs support for both protocols. Optional feature objects
-and `backup_strategies` may be omitted; an adapter v2 may omit pool capabilities
-entirely and support only fixed mappings. `min_endpoints` counts configured
-expanded endpoints, including disabled/backup entries; it defaults to 1.
+Definitions contain commands, not claims about executable support. Both
+forwarding types use the same definition; `{forwarding_type}` identifies the
+requested policy. The operator can configure a rule first, inspect a failed
+attempt, install or repair the executable, and Reapply the same rule. Runtime
+support belongs to the agent and invoked command; the editor's controls follow
+vpsman's forwarding policy and do not depend on a host capability snapshot.
 
-Every v2 command must include `{rule_config_path}`. The agent writes an immutable
-mode-0600 JSON file in its private state directory for that invocation. Read it
-before returning; do not retain its path, modify it, or start a listener that
-depends on that file. It is removed after the command exits or is canceled.
-Each request has the following structure (the embedded rule omits adapter
-commands/capabilities and DNS provenance):
+The agent substitutes `{rule_config_json}` with the serialized request directly
+in argv, preserving spaces, quotes and nested settings within that one argument.
+There is no shell parsing or recursive placeholder expansion. The adapter reads
+the JSON argument; no request file is involved. Normal operating-system argument
+limits apply, and command execution errors are reported through the existing job
+lifecycle. Each request has the following structure (the embedded rule omits
+adapter commands and DNS provenance):
 
 ```json
 {
@@ -308,27 +303,38 @@ commands/capabilities and DNS provenance):
 ```
 
 Fixed mappings instead have no `pool`, retain `mappings` and may omit `target_ip`
-for an adapter-defined local target. V1 argv placeholders remain available, but
-pool rules have no scalar target/target-port mapping: use the JSON file. The
-configuration hash is opaque to the adapter; store it with the successfully
-loaded generation and report that observed value. Merely echoing the incoming
-hash or matching a file on disk is not proof that a service loaded it.
+for an adapter-defined local target. The configuration hash is opaque request
+correlation. After checking the requested
+configuration through the service's normal configuration and status controls,
+return that request's hash with Applied. It does not require a separate stored
+hash, configuration-version registry or verification listener. Document what
+the adapter checks; returning the hash alone is not a configuration check.
 
-Apply must be idempotent and return after the exact generation is active. Remove
-receives the saved owner's inputs and must remove **all** resources for that
-stable rule ID, including previous revisions/partial applies. Preserve unrelated
+Apply must be idempotent and complete its configuration and service reload
+commands before returning. Remove receives the saved owner's inputs and must
+remove **all** resources for that stable rule ID, including previous revisions
+and partial applies. Preserve unrelated
 rules and other service configuration. Status must be able to verify absence
 by rule ID even when rejected Apply inputs cannot be rendered, so a failed
 creation or edit remains removable. Define serialization/atomic replacement,
-syntax checks, reload verification and recovery appropriate to your service.
+syntax checks and service status checks appropriate to your service.
 The agent saves the owner before Apply and verifies Status after Apply/Remove.
-Nonzero exit, timeout, truncated output, malformed status or a mismatched loaded
+Nonzero exit, timeout, truncated output, malformed status or a mismatched request
 hash cannot acknowledge success.
+
+Existing deployments must update their adapter executables and definitions to
+this contract before enabling custom forwarding with the updated bundle. Using
+the currently installed version, disable the affected custom rules and wait for
+confirmed removal first. Then update the server, frontend and agents, install
+the updated adapter, and edit the existing definitions to use the JSON argv
+commands above. Keep the definition and rule IDs, then enable the same rules.
+Older positional and file-based command layouts are not supported or rewritten
+automatically. Native DNAT/REDIRECT rules do not need this adapter update.
 
 ```json
 {
   "state": "applied",
-  "config_hash": "the hash of the loaded generation",
+  "config_hash": "the hash of the request checked by Status",
   "message": "optional diagnostic",
   "upstream_observations": [{
     "upstream_id": "22222222-2222-4222-8222-222222222222",

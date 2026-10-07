@@ -34,7 +34,7 @@ import { VpsCombobox } from "../../components/VpsCombobox";
 import { NetworkAdapterDefinitionsPanel, type NetworkAdapterReviewControls } from "./NetworkAdapterDefinitionsPanel";
 import { PortForwardPoolFields, PortForwardPoolDetails } from "./PortForwardPoolFields";
 import {
-  buildPool, literalIpFamily, newPool, newUpstream, poolCapabilities,
+  buildPool, literalIpFamily, newPool, newUpstream, poolOptions,
   poolDraftFromSaved, poolSummary, poolTooltip, POOL_STRATEGIES,
   retrySummary, upstreamAddress, upstreamSummary, type PoolDraft,
 } from "../../portForwardPools";
@@ -484,16 +484,11 @@ export function PortForwardingPanel({
     event.preventDefault();
     if (!editor || pending || !canWrite) return;
     try {
-      const adapter = adapterDefinitions.find((item) => item.id === editor.draft.adapterDefinitionId);
-      const capabilities = poolCapabilities(editor.draft.mode, editor.draft.protocol,
-        agentById.get(editor.draft.clientId), adapter);
+      const options = poolOptions(editor.draft.mode, editor.draft.protocol);
       const isPool = editor.draft.mode !== "redirect" && editor.draft.mappingPolicy === "pool";
-      if (isPool && !capabilities) {
-        throw new Error("This forwarder cannot use the stored pool. Select Port mapping to convert it, or return to a compatible forwarder.");
-      }
-      const pool = isPool && capabilities
-        ? buildPool(editor.draft.incoming, editor.draft.pool, capabilities) : undefined;
-      validateEditor(editor.draft, agentById.get(editor.draft.clientId), Boolean(pool), adapter);
+      const pool = isPool && options
+        ? buildPool(editor.draft.incoming, editor.draft.pool, options) : undefined;
+      validateEditor(editor.draft, agentById.get(editor.draft.clientId), Boolean(pool));
       if (!pool) pairPortExpressions(editor.draft.incoming, editor.draft.target);
       if (editor.draft.enabled || editor.editing?.enabled) {
         setFeedback(null);
@@ -686,18 +681,8 @@ export function PortForwardingPanel({
     return rows.filter((rule) => !rule.deleted_at);
   }
 
-  function supportsRule(rule: PortForwardRuleRecord) {
-    const agent = agentById.get(rule.client_id);
-    const adapter = adapterDefinitions.find((item) => item.id === rule.adapter_definition_id);
-    return supportsMode(agent, rule.mode, adapter)
-      && (!rule.pool || Boolean(poolCapabilities(rule.mode, rule.protocol, agent, adapter)));
-  }
-
   function enableRows(rows: PortForwardRuleRecord[]) {
-    return activeRows(rows).filter(
-      (rule) =>
-        !rule.enabled && supportsRule(rule),
-    );
+    return activeRows(rows).filter((rule) => !rule.enabled);
   }
 
   function disableRows(rows: PortForwardRuleRecord[]) {
@@ -705,7 +690,7 @@ export function PortForwardingPanel({
   }
 
   function reapplyRows(rows: PortForwardRuleRecord[]) {
-    return activeRows(rows).filter(supportsRule);
+    return activeRows(rows);
   }
 
   function reviewMutation(
@@ -911,24 +896,11 @@ export function PortForwardingPanel({
                 : rule.runtime_status
             }
           />
-          <Detail
+          {rule.mode !== "custom_adapter" && <Detail
             label="Capability"
-            title={
-              agentById.get(rule.client_id)?.capabilities.port_forwarding
-                ?.reason ?? undefined
-            }
-            value={
-              rule.pool && !supportsRule(rule)
-                ? "Pool support not reported"
-                : rule.mode === "custom_adapter"
-                  ? supportsRule(rule)
-                    ? "Custom adapters supported"
-                    : "Selected adapter support not reported"
-                  : capabilitySummary(
-                      agentById.get(rule.client_id)?.capabilities.port_forwarding,
-                    )
-            }
-          />
+            title={agentById.get(rule.client_id)?.capabilities.port_forwarding?.reason ?? undefined}
+            value={capabilitySummary(agentById.get(rule.client_id)?.capabilities.port_forwarding)}
+          />}
           {rule.mode === "dnat" && (
             <Detail
               label={`${familyLabel(rule.address_family)} forwarding`}
@@ -1419,17 +1391,14 @@ const PortForwardEditor = forwardRef<
       };
     }
   }, [draft.incoming, draft.target]);
-  const selectedAgent = agents.find((agent) => agent.id === draft.clientId);
-  const capability = selectedAgent?.capabilities.port_forwarding;
   const selectedAdapter = adapterDefinitions.find(
     (definition) => definition.id === draft.adapterDefinitionId,
   );
-  const poolSupport = poolCapabilities(draft.mode, draft.protocol, selectedAgent, selectedAdapter);
+  const poolFields = poolOptions(draft.mode, draft.protocol);
   const isPool = draft.mode !== "redirect" && draft.mappingPolicy === "pool";
   const poolPreview = (() => {
-    if (!isPool) return { pool: null, error: null };
-    if (!poolSupport) return { pool: null, error: "This forwarder cannot use the stored pool. Select Port mapping to convert it, or return to a compatible forwarder." };
-    try { return { pool: buildPool(draft.incoming, draft.pool, poolSupport), error: null }; }
+    if (!isPool || !poolFields) return { pool: null, error: null };
+    try { return { pool: buildPool(draft.incoming, draft.pool, poolFields), error: null }; }
     catch (error) { return { pool: null, error: (error as Error).message }; }
   })();
   const previewStarted = isPool ? Boolean(draft.incoming.trim() || draft.pool.upstreams.some((row) => row.address.trim())) : mappingStarted;
@@ -1453,9 +1422,7 @@ const PortForwardEditor = forwardRef<
                 ? "Select a port-forward adapter definition"
                 : previewError
                   ? previewError
-                  : draft.enabled && !supportsMode(selectedAgent, draft.mode, selectedAdapter)
-                    ? modeCapabilityLabel(selectedAgent, draft.mode, selectedAdapter)
-                    : null;
+                  : null;
   const saveDisabled = saveDisabledReason !== null;
 
   useEffect(() => {
@@ -1725,9 +1692,9 @@ const PortForwardEditor = forwardRef<
             />
           </label>
         )}
-        {(poolSupport || isPool) && <label className="poolMappingPolicy" title="Port mapping retains positional translation. An upstream pool selects from all configured endpoints for every incoming port.">
+        {draft.mode !== "redirect" && <label className="poolMappingPolicy" title="Port mapping retains positional translation. An upstream pool selects from all configured endpoints for every incoming port.">
           <span>Mapping policy</span>
-          <select aria-label="Mapping policy" disabled={pending} value={isPool ? poolSupport ? "pool" : "" : "mapped"} onChange={(event) => {
+          <select aria-label="Mapping policy" disabled={pending} value={isPool ? "pool" : "mapped"} onChange={(event) => {
             const mappingPolicy = event.target.value as EditorDraft["mappingPolicy"];
             let pool = draft.pool;
             if (mappingPolicy === "pool" && pool.upstreams.every((row) => !row.address && !row.ports) && draft.targetIp) {
@@ -1737,7 +1704,7 @@ const PortForwardEditor = forwardRef<
               } catch { /* Preserve the pool draft while the port mapping is incomplete. */ }
             }
             onChange({ mappingPolicy, pool });
-          }}>{isPool && !poolSupport && <option value="" disabled>Choose a mapping policy…</option>}<option value="mapped">Port mapping</option>{poolSupport && <option value="pool">Upstream pool</option>}</select>
+          }}><option value="mapped">Port mapping</option><option value="pool">Upstream pool</option></select>
         </label>}
         <label title="Local listener ports matched by this rule; enter a port, range, or comma-separated mappings.">
           <span>Incoming ports</span>
@@ -1765,7 +1732,7 @@ const PortForwardEditor = forwardRef<
           />
           <small>One port for all, or corresponding items</small>
         </label>}
-        {isPool && poolSupport && <PortForwardPoolFields draft={draft.pool} capabilities={poolSupport} mode={draft.mode} protocol={draft.protocol} pending={pending}
+        {isPool && poolFields && <PortForwardPoolFields draft={draft.pool} options={poolFields} mode={draft.mode} protocol={draft.protocol} pending={pending}
           onChange={(pool) => onChange({ pool })} onResolve={onResolveHostname} onResolutionPendingChange={setPoolResolutionPending} />}
         {!isPool && (draft.mode === "redirect" ? (
           <div className="portForwardLocalHint fieldFull">
@@ -1947,14 +1914,6 @@ const PortForwardEditor = forwardRef<
             </>
           )}
         </div>
-        {selectedAgent && !supportsMode(selectedAgent, draft.mode, selectedAdapter) && (
-          <div className="portForwardCapabilityNotice">
-            <ShieldAlert size={16} />
-            <span title={capability?.reason ?? capability?.status ?? "unknown"}>
-              {modeCapabilityLabel(selectedAgent, draft.mode, selectedAdapter)}
-            </span>
-          </div>
-        )}
         <div className="consoleFormActions fieldFull">
           <button
             className="secondaryAction"
@@ -2134,7 +2093,7 @@ function capabilitySummary(
     : status;
 }
 
-function validateEditor(draft: EditorDraft, agent: AgentView | undefined, isPool = false, adapter?: NetworkAdapterDefinitionRecord) {
+function validateEditor(draft: EditorDraft, agent: AgentView | undefined, isPool = false) {
   if (!draft.name.trim()) throw new Error("Rule name is required");
   if (utf8ByteLength(draft.name.trim()) > MAX_RULE_NAME_BYTES)
     throw new Error(
@@ -2145,24 +2104,6 @@ function validateEditor(draft: EditorDraft, agent: AgentView | undefined, isPool
   if (targetError) throw new Error(targetError);
   if (draft.mode === "custom_adapter" && !draft.adapterDefinitionId)
     throw new Error("Select a port-forward adapter definition");
-  if (draft.enabled && !supportsMode(agent, draft.mode, adapter))
-    throw new Error(modeCapabilityLabel(agent, draft.mode, adapter));
-}
-
-function capabilityLabel(status?: string, reason?: string | null) {
-  if (reason) return reason;
-  switch (status) {
-    case "nft_missing":
-      return "nft is not installed on this VPS";
-    case "insufficient_privilege":
-      return "Agent lacks CAP_NET_ADMIN in the host network namespace";
-    case "inet_nat_unsupported":
-      return "Kernel or nft userspace does not support the required inet NAT features";
-    case "probe_failed":
-      return "Agent nftables capability probe failed";
-    default:
-      return "Agent has not reported port-forwarding capability";
-  }
 }
 
 function modeLabel(mode: PortForwardMode) {
@@ -2196,42 +2137,16 @@ function returnPathLabel(mode: PortForwardMode, masquerade: boolean) {
       : "Preserve source";
 }
 
-function adapterUsesContract2(adapter: NetworkAdapterDefinitionRecord | undefined) {
-  const definition = adapter?.definition;
-  return definition !== null && typeof definition === "object"
-    && !Array.isArray(definition) && definition.contract_version === 2;
-}
-
-function supportsMode(agent: AgentView | undefined, mode: PortForwardMode, adapter?: NetworkAdapterDefinitionRecord) {
+function supportsMode(agent: AgentView | undefined, mode: PortForwardMode) {
   const capability = agent?.capabilities.port_forwarding;
   if (!capability) return false;
   if (mode === "dnat") return capability.status === "supported";
-  if (mode === "custom_adapter" && adapterUsesContract2(adapter)
-    && (capability.schema_version ?? 1) < 3) return false;
+  if (mode === "custom_adapter" && (capability.schema_version ?? 1) < 3) return false;
   return (
     (capability.schema_version ?? 1) >= 2 &&
     capability.supported_modes?.includes(mode) === true &&
     (mode === "custom_adapter" || capability.status === "supported")
   );
-}
-
-function modeCapabilityLabel(
-  agent: AgentView | undefined,
-  mode: PortForwardMode,
-  adapter?: NetworkAdapterDefinitionRecord,
-) {
-  const capability = agent?.capabilities.port_forwarding;
-  if (mode === "custom_adapter" && adapterUsesContract2(adapter)
-    && (capability?.schema_version ?? 1) < 3)
-    return "Upgrade this agent to use the selected adapter";
-  if (
-    mode !== "dnat" &&
-    (!capability?.schema_version || capability.schema_version < 2)
-  )
-    return `Upgrade this agent to use ${modeLabel(mode)}`;
-  return mode === "custom_adapter"
-    ? "This agent has not reported support for custom port-forward adapters"
-    : capabilityLabel(capability?.status, capability?.reason);
 }
 
 function destinationError(draft: EditorDraft): string | null {
@@ -2435,8 +2350,7 @@ function confirmationItems(
   if (!state) return [];
   if (state.kind === "save") {
     if (state.pool) {
-      const capabilities = poolCapabilities(state.draft.mode, state.draft.protocol,
-        agents.get(state.draft.clientId), adapterDefinitions.find((item) => item.id === state.draft.adapterDefinitionId));
+      const options = poolOptions(state.draft.mode, state.draft.protocol);
       return [
         { label: "VPS", value: agents.get(state.draft.clientId)?.display_name || state.draft.clientId },
         { label: "Mode", value: modeLabel(state.draft.mode) },
@@ -2444,8 +2358,8 @@ function confirmationItems(
         { label: "Incoming", value: `${state.draft.protocol.toUpperCase()} ${state.pool.incoming.map(formatPortRange).join(",")}` },
         { label: "Pool strategy", value: POOL_STRATEGIES[state.pool.strategy].label },
         ...state.pool.upstreams.map((row) => ({ label: upstreamAddress(row), value: upstreamSummary(row), title: upstreamSummary(row) })),
-        ...(capabilities?.connect_timeout ? [{ label: "Connect timeout", value: state.pool.connect_timeout_secs !== undefined ? `${state.pool.connect_timeout_secs}s per attempt` : "Default", title: "Applies to every upstream connection attempt for this rule, independently of retry and failure exclusion settings." }] : []),
-        ...(capabilities?.retries ? [{ label: "Connection retry", value: retrySummary(state.pool) }] : []),
+        ...(options?.connect_timeout ? [{ label: "Connect timeout", value: state.pool.connect_timeout_secs !== undefined ? `${state.pool.connect_timeout_secs}s per attempt` : "Default", title: "Applies to every upstream connection attempt for this rule, independently of retry and failure exclusion settings." }] : []),
+        ...(options?.retries ? [{ label: "Connection retry", value: retrySummary(state.pool) }] : []),
         { label: "Return", value: returnPathLabel(state.draft.mode, state.draft.masquerade) },
       ];
     }

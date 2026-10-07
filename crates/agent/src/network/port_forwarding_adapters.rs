@@ -238,12 +238,8 @@ impl AdapterInventory {
             .adapter
             .as_ref()
             .context("saved custom owner has no adapter")?;
-        let root = self
-            .root
-            .as_deref()
-            .context("adapter inventory is not loaded")?;
-        run(&adapter.remove, entry, cancel.clone(), "remove", root).await?;
-        let status = observe(entry, cancel, root).await?;
+        run(&adapter.remove, entry, cancel.clone(), "remove").await?;
+        let status = observe(entry, cancel).await?;
         anyhow::ensure!(
             status.state == AdapterState::Absent,
             "adapter removal verification: {}",
@@ -289,12 +285,8 @@ impl AdapterInventory {
             receipts.remove(&rule.id);
             self.store(owners, receipts, self.cleanup_failures.clone())
                 .await?;
-            let root = self
-                .root
-                .as_deref()
-                .context("adapter inventory is not loaded")?;
-            run(&adapter.apply, &entry, cancel.clone(), "apply", root).await?;
-            let status = observe(&entry, cancel, root).await?;
+            run(&adapter.apply, &entry, cancel.clone(), "apply").await?;
+            let status = observe(&entry, cancel).await?;
             anyhow::ensure!(
                 status.state == AdapterState::Applied,
                 "adapter apply verification: {}",
@@ -372,15 +364,7 @@ impl AdapterInventory {
                 client_id: self.client_id.clone(),
                 rule: rule.clone(),
             };
-            let Some(root) = self.root.as_deref() else {
-                stats.push(error_stat(
-                    rule,
-                    "adapter_inventory_failed",
-                    "adapter inventory is not loaded",
-                ));
-                continue;
-            };
-            match observe(&entry, cancel_token.clone(), root).await {
+            match observe(&entry, cancel_token.clone()).await {
                 Ok(status) => {
                     let mut stat = runtime_stat(
                         rule,
@@ -539,25 +523,21 @@ impl AdapterObservation {
     }
 }
 
-async fn observe(
-    entry: &OwnedRule,
-    cancel: CommandCancelToken,
-    root: &Path,
-) -> Result<AdapterObservation> {
+async fn observe(entry: &OwnedRule, cancel: CommandCancelToken) -> Result<AdapterObservation> {
     let adapter = entry
         .rule
         .adapter
         .as_ref()
         .context("custom rule has no adapter")?;
-    let bytes = run(&adapter.status, entry, cancel, "status", root).await?;
+    let bytes = run(&adapter.status, entry, cancel, "status").await?;
     let mut status: AdapterObservation = serde_json::from_slice(&bytes)
         .context("adapter status must return JSON state applied, absent, or drifted")?;
-    if adapter.contract_version == 2 && status.state == AdapterState::Applied {
+    if status.state == AdapterState::Applied {
         let expected = PortForwardAdapterRequest::new(&entry.client_id, &entry.rule);
         if status.config_hash.as_deref() != Some(expected.config_hash.as_str()) {
             status.state = AdapterState::Drifted;
             status.message =
-                Some("adapter has not confirmed the requested loaded configuration hash".into());
+                Some("adapter has not acknowledged the requested configuration hash".into());
             status.upstream_observations.clear();
             return Ok(status);
         }
@@ -589,87 +569,32 @@ async fn observe(
             );
         }
     } else {
-        // Legacy status has no verified pool identity; stale observations are not live evidence.
+        // Only Applied observations describe the inspected request.
         status.upstream_observations.clear();
     }
     Ok(status)
 }
 
 fn render(command: &RuntimeTunnelCommand, entry: &OwnedRule) -> Result<Vec<String>> {
-    render_with_path(command, entry, None)
-}
-
-fn render_with_path(
-    command: &RuntimeTunnelCommand,
-    entry: &OwnedRule,
-    config_path: Option<&Path>,
-) -> Result<Vec<String>> {
     anyhow::ensure!(
         !command.argv.is_empty() && !command.argv[0].trim().is_empty(),
         "adapter command requires an executable"
     );
-    let rule = &entry.rule;
-    let ports = |incoming| {
-        let ranges = if incoming {
-            rule.incoming_ranges()
-        } else {
-            rule.mappings.iter().map(|mapping| mapping.target).collect()
-        };
-        ranges
-            .into_iter()
-            .map(|range| render_port_range(range.start, range.end))
-            .collect::<Vec<_>>()
-            .join(",")
+    let forwarding_type = if entry.rule.pool.is_some() {
+        "upstream_pool"
+    } else {
+        "port_mapping"
     };
-    let placeholders = [
-        (
-            "{rule_config_path}",
-            config_path
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        ),
-        ("{rule_id}", rule.id.to_string()),
-        ("{client_id}", entry.client_id.clone()),
-        ("{revision}", rule.revision.to_string()),
-        (
-            "{protocol}",
-            match rule.protocol {
-                vpsman_common::PortForwardProtocol::Tcp => "tcp",
-                vpsman_common::PortForwardProtocol::Udp => "udp",
-                vpsman_common::PortForwardProtocol::Both => "both",
-            }
-            .to_string(),
-        ),
-        ("{incoming_ports}", ports(true)),
-        ("{target_ports}", ports(false)),
-        (
-            "{target_ip}",
-            rule.target_ip.map(|ip| ip.to_string()).unwrap_or_default(),
-        ),
-    ];
+    let request = serde_json::to_string(&PortForwardAdapterRequest::new(
+        &entry.client_id,
+        &entry.rule,
+    ))?;
     Ok(command
         .argv
         .iter()
         .map(|arg| {
-            let mut rendered = String::with_capacity(arg.len());
-            let mut remaining = arg.as_str();
-            while !remaining.is_empty() {
-                if let Some((key, value)) = placeholders
-                    .iter()
-                    .find(|(key, _)| remaining.starts_with(key))
-                {
-                    rendered.push_str(value);
-                    remaining = &remaining[key.len()..];
-                } else {
-                    let character = remaining
-                        .chars()
-                        .next()
-                        .expect("nonempty argument remainder");
-                    rendered.push(character);
-                    remaining = &remaining[character.len_utf8()..];
-                }
-            }
-            rendered
+            arg.replace("{forwarding_type}", forwarding_type)
+                .replace("{rule_config_json}", &request)
         })
         .collect())
 }
@@ -679,46 +604,8 @@ async fn run(
     entry: &OwnedRule,
     cancel: CommandCancelToken,
     phase: &str,
-    root: &Path,
 ) -> Result<Vec<u8>> {
-    let config_path = if entry
-        .rule
-        .adapter
-        .as_ref()
-        .is_some_and(|adapter| adapter.contract_version == 2)
-    {
-        let requests = root.join("requests");
-        ensure_private_dir_async(&requests).await?;
-        // The inventory worker serializes commands. A stable path bounds files left by a crash;
-        // each invocation gets a fresh atomic snapshot, retained until its process exits.
-        let path = requests.join(format!("{}.json", entry.rule.id));
-        let request = PortForwardAdapterRequest::new(&entry.client_id, &entry.rule);
-        write_private_file_atomically_async(&path, &serde_json::to_vec(&request)?).await?;
-        Some(path)
-    } else {
-        None
-    };
-    let result = run_with_path(command, entry, cancel, phase, config_path.as_deref()).await;
-    if let Some(path) = config_path {
-        tokio::fs::remove_file(path)
-            .await
-            .context("cannot remove adapter invocation file")?;
-    }
-    result
-}
-
-async fn run_with_path(
-    command: &RuntimeTunnelCommand,
-    entry: &OwnedRule,
-    cancel: CommandCancelToken,
-    phase: &str,
-    config_path: Option<&Path>,
-) -> Result<Vec<u8>> {
-    let argv = if config_path.is_some() {
-        render_with_path(command, entry, config_path)?
-    } else {
-        render(command, entry)?
-    };
+    let argv = render(command, entry)?;
     let mut child = Command::new(&argv[0]);
     child.args(&argv[1..]).stdin(Stdio::null());
     let result = crate::child_process::run_child_with_bounded_output_cancelable(

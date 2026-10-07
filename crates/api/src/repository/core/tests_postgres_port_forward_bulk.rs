@@ -12,10 +12,10 @@ async fn postgres_port_forward_bulk_delete_confirms_all_clients_and_modes() {
             adapter_kind: "port_forward".into(),
             name: "bulk-cleanup".into(),
             description: None,
-            definition: json!({"contract_version":1,
-                "apply_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384},
-                "remove_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384},
-                "status_command":{"argv":["/usr/bin/true","{rule_id}"],"max_timeout_secs":30,"max_output_bytes":16384}}),
+            definition: json!({"contract_version":2,
+                "apply_command":{"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384},
+                "remove_command":{"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384},
+                "status_command":{"argv":["/usr/bin/true","{rule_config_json}"],"max_timeout_secs":30,"max_output_bytes":16384}}),
         }, &operator,
     ).await.unwrap();
     let clients = ["bulk-forward-a", "bulk-forward-b"];
@@ -23,6 +23,15 @@ async fn postgres_port_forward_bulk_delete_confirms_all_clients_and_modes() {
     let mut survivors = Vec::new();
     for client in clients {
         insert_client(&db.pool, client, Some(Uuid::new_v4())).await;
+        sqlx::query("UPDATE clients SET capabilities = $2 WHERE id = $1")
+            .bind(client)
+            .bind(
+                json!({"port_forwarding":{"status":"supported","schema_version":3,
+                "supported_modes":["dnat","redirect","custom_adapter"]}}),
+            )
+            .execute(&db.pool)
+            .await
+            .unwrap();
         // Two custom owners catch receipt truncation; native modes share one table.
         for (index, mode) in [
             "dnat",

@@ -71,80 +71,6 @@ pub enum PortForwardRetryPolicy {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortForwardPoolCapabilities {
-    pub strategies: Vec<PortForwardPoolStrategy>,
-    pub protocols: Vec<PortForwardProtocol>,
-    pub address_families: Vec<PortForwardAddressFamily>,
-    #[serde(default)]
-    pub mixed_families: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub backup_strategies: Vec<PortForwardPoolStrategy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_exclusion: Option<PortForwardFailureCapability>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connect_timeout: Option<PortForwardConnectionCapability>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retries: Option<PortForwardConnectionCapability>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortForwardFailureCapability {
-    pub protocols: Vec<PortForwardProtocol>,
-    pub linked_timeout: bool,
-    #[serde(default = "one_usize")]
-    pub min_endpoints: usize,
-    pub description: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortForwardConnectionCapability {
-    pub protocols: Vec<PortForwardProtocol>,
-    pub description: String,
-}
-
-const fn one_usize() -> usize {
-    1
-}
-
-impl PortForwardPoolCapabilities {
-    pub fn native() -> Self {
-        Self {
-            strategies: vec![
-                PortForwardPoolStrategy::RoundRobin,
-                PortForwardPoolStrategy::Random,
-                PortForwardPoolStrategy::SourceIpHash,
-            ],
-            protocols: vec![PortForwardProtocol::Tcp, PortForwardProtocol::Udp],
-            address_families: vec![
-                PortForwardAddressFamily::Ipv4,
-                PortForwardAddressFamily::Ipv6,
-            ],
-            mixed_families: false,
-            backup_strategies: Vec::new(),
-            failure_exclusion: None,
-            connect_timeout: None,
-            retries: None,
-        }
-    }
-}
-
-pub fn port_forward_pool_protocol_supported(
-    protocols: &[PortForwardProtocol],
-    protocol: PortForwardProtocol,
-) -> bool {
-    match protocol {
-        PortForwardProtocol::Both => {
-            protocols.contains(&PortForwardProtocol::Tcp)
-                && protocols.contains(&PortForwardProtocol::Udp)
-        }
-        _ => protocols.contains(&protocol),
-    }
-}
-
 fn pool_check(condition: bool, message: &str) -> Result<(), PortForwardValidationError> {
     if condition {
         Ok(())
@@ -153,82 +79,24 @@ fn pool_check(condition: bool, message: &str) -> Result<(), PortForwardValidatio
     }
 }
 
-fn unique_values<T: PartialEq>(values: &[T]) -> bool {
-    values
-        .iter()
-        .enumerate()
-        .all(|(i, value)| !values[..i].contains(value))
-}
-
-pub fn validate_port_forward_pool_capabilities(
-    cap: &PortForwardPoolCapabilities,
-) -> Result<(), PortForwardValidationError> {
-    let unique = unique_values::<PortForwardPoolStrategy>;
-    pool_check(
-        !cap.strategies.is_empty() && unique(&cap.strategies),
-        "pool strategies must be nonempty and unique",
-    )?;
-    pool_check(
-        !cap.protocols.is_empty()
-            && unique_values(&cap.protocols)
-            && !cap.protocols.contains(&PortForwardProtocol::Both),
-        "capability protocols must list unique tcp and/or udp",
-    )?;
-    pool_check(
-        !cap.address_families.is_empty()
-            && unique_values(&cap.address_families)
-            && !cap
-                .address_families
-                .contains(&PortForwardAddressFamily::Both),
-        "capability families must list unique ipv4 and/or ipv6",
-    )?;
-    pool_check(
-        unique(&cap.backup_strategies)
-            && cap
-                .backup_strategies
-                .iter()
-                .all(|value| cap.strategies.contains(value)),
-        "backup strategies must be supported pool strategies",
-    )?;
-    let feature_protocols = |protocols: &[PortForwardProtocol], description: &str| {
-        pool_check(
-            !protocols.is_empty()
-                && unique_values(protocols)
-                && protocols.iter().all(|value| {
-                    *value != PortForwardProtocol::Both && cap.protocols.contains(value)
-                })
-                && description.len() <= 4096,
-            "invalid pool feature protocols or description",
-        )
-    };
-    if let Some(failure) = &cap.failure_exclusion {
-        feature_protocols(&failure.protocols, &failure.description)?;
-        pool_check(
-            failure.min_endpoints > 0,
-            "minimum failure-tracked endpoint count must be positive",
-        )?;
-    }
-    for feature in [&cap.connect_timeout, &cap.retries].into_iter().flatten() {
-        feature_protocols(&feature.protocols, &feature.description)?;
-    }
-    Ok(())
-}
-
 pub fn validate_port_forward_pool(
     pool: &PortForwardPool,
     mode: PortForwardMode,
     protocol: PortForwardProtocol,
-    cap: &PortForwardPoolCapabilities,
 ) -> Result<(), PortForwardValidationError> {
-    validate_port_forward_pool_capabilities(cap)?;
     pool_check(
         mode != PortForwardMode::Redirect,
         "REDIRECT cannot use an upstream pool",
     )?;
     pool_check(
-        cap.strategies.contains(&pool.strategy)
-            && port_forward_pool_protocol_supported(&cap.protocols, protocol),
-        "pool strategy or protocol is unsupported",
+        mode != PortForwardMode::Dnat
+            || matches!(
+                pool.strategy,
+                PortForwardPoolStrategy::RoundRobin
+                    | PortForwardPoolStrategy::Random
+                    | PortForwardPoolStrategy::SourceIpHash
+            ),
+        "DNAT pools use round robin, random, or source IP hash",
     )?;
     pool_check(
         !pool.incoming.is_empty() && pool.incoming.len() <= MAX_PORT_FORWARD_MAPPINGS,
@@ -276,10 +144,6 @@ pub fn validate_port_forward_pool(
         } else {
             PortForwardAddressFamily::Ipv6
         };
-        pool_check(
-            cap.address_families.contains(&family),
-            "upstream address family is unsupported",
-        )?;
         if !families.contains(&family) {
             families.push(family);
         }
@@ -291,20 +155,23 @@ pub fn validate_port_forward_pool(
         )?;
         pool_check(
             row.role != PortForwardUpstreamRole::Backup
-                || cap.backup_strategies.contains(&pool.strategy),
+                || (mode == PortForwardMode::CustomAdapter
+                    && matches!(
+                        pool.strategy,
+                        PortForwardPoolStrategy::RoundRobin
+                            | PortForwardPoolStrategy::LeastConnections
+                    )),
             "pool strategy does not support backups",
         )?;
         if row.enabled {
             total_weight += u64::from(row.weight) * u64::from(row.ports.cardinality());
         }
         if let Some(policy) = &row.failure_policy {
-            let failure = cap.failure_exclusion.as_ref().ok_or_else(|| {
-                PortForwardValidationError::PoolInvalid("failure exclusion is unsupported".into())
-            })?;
             pool_check(
-                port_forward_pool_protocol_supported(&failure.protocols, protocol)
-                    && endpoint_count >= failure.min_endpoints as u64,
-                "failure exclusion is unsupported for this protocol or endpoint count",
+                mode == PortForwardMode::CustomAdapter
+                    && protocol == PortForwardProtocol::Tcp
+                    && endpoint_count >= 2,
+                "failure exclusion requires a custom TCP pool with at least two endpoints",
             )?;
             if let PortForwardFailurePolicy::Temporary {
                 threshold,
@@ -317,35 +184,32 @@ pub fn validate_port_forward_pool(
                     "failure thresholds and intervals must be positive",
                 )?;
                 pool_check(
-                    !failure.linked_timeout || window_secs == retry_after_secs,
-                    "failure window and exclusion interval must match for this forwarder",
+                    window_secs == retry_after_secs,
+                    "failure window and exclusion interval must match",
                 )?;
             }
         }
     }
     pool_check(
-        cap.mixed_families || families.len() == 1,
+        mode != PortForwardMode::Dnat || families.len() == 1,
         "pool cannot mix address families",
     )?;
     pool_check(
-        total_weight <= u64::from(u32::MAX),
+        mode != PortForwardMode::Dnat || total_weight <= u64::from(u32::MAX),
         "expanded endpoint weights exceed 4294967295",
     )?;
     if let Some(timeout) = pool.connect_timeout_secs {
         pool_check(
             timeout > 0
-                && cap.connect_timeout.as_ref().is_some_and(|cap| {
-                    port_forward_pool_protocol_supported(&cap.protocols, protocol)
-                }),
-            "connect timeout must be positive and supported for this protocol",
+                && mode == PortForwardMode::CustomAdapter
+                && protocol == PortForwardProtocol::Tcp,
+            "connect timeout must be positive and applies to custom TCP pools",
         )?;
     }
     if let Some(retry) = &pool.retry_policy {
         pool_check(
-            cap.retries
-                .as_ref()
-                .is_some_and(|cap| port_forward_pool_protocol_supported(&cap.protocols, protocol)),
-            "connection retry is unsupported for this protocol",
+            mode == PortForwardMode::CustomAdapter && protocol == PortForwardProtocol::Tcp,
+            "connection retry applies to custom TCP pools",
         )?;
         if let PortForwardRetryPolicy::ConnectFailure {
             max_attempts,
@@ -381,8 +245,8 @@ pub enum PortForwardUpstreamState {
     Unknown,
 }
 
-/// Version 2 argv commands read this immutable private file for the invocation.
-/// Commands/capabilities are not sent back to the adapter as part of its rule.
+/// Forwarding argv commands receive this immutable JSON request as an argument.
+/// Commands are not sent back to the adapter as part of its rule.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortForwardAdapterRequest {
@@ -400,7 +264,7 @@ impl PortForwardAdapterRequest {
             &serde_json::to_vec(&(client_id, &rule)).expect("serializable forwarding rule"),
         );
         Self {
-            contract_version: 2,
+            contract_version: PORT_FORWARD_ADAPTER_CONTRACT_VERSION,
             client_id: client_id.to_string(),
             config_hash,
             rule,

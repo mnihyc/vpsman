@@ -197,13 +197,15 @@ fn dual_family_redirect_claims_both_native_families_but_not_custom_listeners() {
     custom.address_family = None;
     custom.target_ip = Some("127.0.0.1".parse().unwrap());
     let command = crate::RuntimeTunnelCommand {
-        argv: vec!["/usr/local/bin/forward-adapter".into(), "{rule_id}".into()],
+        argv: vec![
+            "/usr/local/bin/forward-adapter".into(),
+            "{rule_config_json}".into(),
+        ],
         max_timeout_secs: 30,
         max_output_bytes: 16384,
     };
     custom.adapter = Some(PortForwardAdapterCommands {
-        contract_version: 1,
-        pool_capabilities: None,
+        contract_version: PORT_FORWARD_ADAPTER_CONTRACT_VERSION,
         definition_id: Uuid::new_v4(),
         definition_name: "listener".into(),
         definition_hash: "test".into(),
@@ -238,6 +240,8 @@ fn new_modes_require_schema_two_and_advertised_capability() {
     capability.schema_version = PORT_FORWARDING_MODES_SCHEMA_VERSION;
     capability.status = PortForwardCapabilityStatus::NftMissing;
     capability.supported_modes = vec![PortForwardMode::CustomAdapter];
+    assert!(!capability.supports_mode(PortForwardMode::CustomAdapter));
+    capability.schema_version = PORT_FORWARDING_POOLS_SCHEMA_VERSION;
     assert!(capability.supports_mode(PortForwardMode::CustomAdapter));
     assert!(!capability.supports_mode(PortForwardMode::Redirect));
 }

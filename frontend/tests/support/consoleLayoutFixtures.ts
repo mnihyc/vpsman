@@ -1037,7 +1037,7 @@ const rootCapabilities = {
   effective_uid: 0,
   privilege_mode: "root",
   port_forwarding: {
-    schema_version: 2,
+    schema_version: 3,
     supported_modes: ["dnat", "redirect", "custom_adapter"],
     nft_version: "nftables v1.1.3",
     reason: null,
@@ -1053,7 +1053,7 @@ const unprivilegedCapabilities = {
   effective_uid: 1000,
   privilege_mode: "unprivileged",
   port_forwarding: {
-    schema_version: 2,
+    schema_version: 3,
     supported_modes: ["custom_adapter"],
     nft_version: "nftables v1.0.9",
     reason: "Agent lacks CAP_NET_ADMIN in the host network namespace",

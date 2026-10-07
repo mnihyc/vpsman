@@ -1,7 +1,7 @@
 import { formatPortRange, parsePortExpression } from "./portForwarding";
 import type {
-  AgentView, NetworkAdapterDefinitionRecord, PortForwardMode, PortForwardPool,
-  PortForwardPoolCapabilities, PortForwardPoolStrategy, PortForwardProtocol,
+  PortForwardMode, PortForwardPool,
+  PortForwardPoolStrategy, PortForwardProtocol,
   PortForwardUpstream,
 } from "./types";
 
@@ -66,43 +66,41 @@ export function poolDraftFromSaved(pool: PortForwardPool): PoolDraft {
   };
 }
 
-export function supportsPoolProtocol(protocols: Array<"tcp" | "udp">, protocol: PortForwardProtocol) {
-  return protocol === "both" ? protocols.includes("tcp") && protocols.includes("udp") : protocols.includes(protocol);
-}
+// Form options follow the forwarding policy, never cached host capability or
+// operator declarations about an executable's implementation.
+export type PortForwardPoolOptions = {
+  mode: PortForwardMode;
+  strategies: PortForwardPoolStrategy[];
+  address_families: Array<"ipv4" | "ipv6">;
+  mixed_families: boolean;
+  backup_strategies: PortForwardPoolStrategy[];
+  failure_exclusion?: { linked_timeout: boolean; min_endpoints: number; description: string };
+  connect_timeout?: { description: string };
+  retries?: { description: string };
+};
 
-export function poolCapabilities(
-  mode: PortForwardMode,
-  protocol: PortForwardProtocol,
-  agent: AgentView | undefined,
-  adapter: NetworkAdapterDefinitionRecord | undefined,
-): PortForwardPoolCapabilities | null {
-  const capability = agent?.capabilities.port_forwarding;
-  if (mode === "redirect" || (capability?.schema_version ?? 0) < 3) return null;
-  if (mode === "dnat" ? capability?.status !== "supported" : !capability?.supported_modes?.includes(mode)) return null;
-  const definition = adapter?.definition && typeof adapter.definition === "object" && !Array.isArray(adapter.definition) ? adapter.definition : null;
-  const candidate = mode === "dnat"
-    ? agent?.capabilities.port_forwarding?.pool
-    : definition?.contract_version === 2
-      ? definition.pool_capabilities as PortForwardPoolCapabilities | undefined
-      : undefined;
-  if (!candidate || !Array.isArray(candidate.strategies) || !Array.isArray(candidate.protocols)
-    || !Array.isArray(candidate.address_families) || !supportsPoolProtocol(candidate.protocols, protocol)) return null;
-  const strategies = candidate.strategies.filter((item) => Object.prototype.hasOwnProperty.call(POOL_STRATEGIES, item));
-  if (!strategies.length) return null;
+export function poolOptions(mode: PortForwardMode, protocol: PortForwardProtocol): PortForwardPoolOptions | null {
+  if (mode === "redirect") return null;
+  const custom = mode === "custom_adapter";
+  const tcp = custom && protocol === "tcp";
   return {
-    ...candidate, strategies,
-    failure_exclusion: candidate.failure_exclusion && supportsPoolProtocol(candidate.failure_exclusion.protocols, protocol) ? candidate.failure_exclusion : undefined,
-    connect_timeout: candidate.connect_timeout && supportsPoolProtocol(candidate.connect_timeout.protocols, protocol) ? candidate.connect_timeout : undefined,
-    retries: candidate.retries && supportsPoolProtocol(candidate.retries.protocols, protocol) ? candidate.retries : undefined,
+    mode,
+    strategies: custom ? ["round_robin", "least_connections", "source_ip_hash", "consistent_source_ip_hash", "random"] : ["round_robin", "random", "source_ip_hash"],
+    address_families: ["ipv4", "ipv6"],
+    mixed_families: custom,
+    backup_strategies: custom ? ["round_robin", "least_connections"] : [],
+    failure_exclusion: tcp ? { linked_timeout: true, min_endpoints: 2, description: "Temporary TCP connection-failure exclusion per IP:port in this rule." } : undefined,
+    connect_timeout: tcp ? { description: "Deadline per connection attempt in this rule." } : undefined,
+    retries: tcp ? { description: "Retry failed connection establishment within this rule." } : undefined,
   };
 }
 
-export function allowsBackup(draft: PoolDraft, capabilities: PortForwardPoolCapabilities) {
-  return capabilities.backup_strategies?.includes(draft.strategy) ?? false;
+export function allowsBackup(draft: PoolDraft, options: PortForwardPoolOptions) {
+  return options.backup_strategies?.includes(draft.strategy) ?? false;
 }
 
-export function poolFailureCapability(draft: PoolDraft, capabilities: PortForwardPoolCapabilities) {
-  const failure = capabilities.failure_exclusion;
+export function poolFailureOptions(draft: PoolDraft, options: PortForwardPoolOptions) {
+  const failure = options.failure_exclusion;
   if (!failure) return undefined;
   const endpoints = draft.upstreams.reduce((count, row) => {
     if (!literalIpFamily(row.address)) return count;
@@ -137,35 +135,35 @@ function positiveInteger(value: string, label: string): number {
   return Number(value);
 }
 
-export function upstreamError(row: UpstreamDraft, capabilities: PortForwardPoolCapabilities): string | null {
+export function upstreamError(row: UpstreamDraft, options: PortForwardPoolOptions): string | null {
   try {
     const family = literalIpFamily(row.address);
     if (!family) throw new Error(row.address.trim() ? "Resolve the hostname and select addresses" : "Enter an IP or hostname");
-    if (!capabilities.address_families.includes(family)) throw new Error("Address family is not supported by this forwarder");
+    if (!options.address_families.includes(family)) throw new Error("Address family is not supported by this forwarder");
     const ports = parsePortExpression(row.ports, "Target port");
     if (ports.length !== 1) throw new Error("Use one port or contiguous range per row");
     positiveInteger(row.weight, "Weight");
-    if (capabilities.failure_exclusion && row.failureMode === "temporary") {
+    if (options.failure_exclusion && row.failureMode === "temporary") {
       positiveInteger(row.threshold, "Failure threshold");
       positiveInteger(row.window, "Failure window");
-      if (!capabilities.failure_exclusion.linked_timeout) positiveInteger(row.retryAfter, "Retry after");
+      if (!options.failure_exclusion.linked_timeout) positiveInteger(row.retryAfter, "Retry after");
     }
     return null;
   } catch (error) { return (error as Error).message; }
 }
 
-export function buildPool(incoming: string, draft: PoolDraft, capabilities: PortForwardPoolCapabilities): PortForwardPool {
+export function buildPool(incoming: string, draft: PoolDraft, options: PortForwardPoolOptions): PortForwardPool {
   const ranges = parsePortExpression(incoming, "Incoming port");
-  if (!capabilities.strategies.includes(draft.strategy)) throw new Error("Choose a strategy supported by this forwarder");
+  if (!options.strategies.includes(draft.strategy)) throw new Error("Choose a strategy supported by this forwarder");
   if (!draft.upstreams.length) throw new Error("Add at least one upstream");
   if (draft.upstreams.length > 256) throw new Error("Use no more than 256 upstream rows");
-  const backup = allowsBackup(draft, capabilities);
-  const failure = poolFailureCapability(draft, capabilities);
+  const backup = allowsBackup(draft, options);
+  const failure = poolFailureOptions(draft, options);
   if (!backup && draft.upstreams.some((row) => row.role === "backup")) {
     throw new Error("This strategy cannot use backups. Change backup rows to primary with the previous forwarder or strategy, or remove those rows.");
   }
   const upstreams: PortForwardUpstream[] = draft.upstreams.map((row, index) => {
-    const error = upstreamError(row, { ...capabilities, failure_exclusion: failure });
+    const error = upstreamError(row, { ...options, failure_exclusion: failure });
     if (error) throw new Error(`Upstream ${index + 1}: ${error}`);
     return {
       id: row.id, target_ip: normalizedIp(row.address), target_hostname: row.hostname,
@@ -182,7 +180,7 @@ export function buildPool(incoming: string, draft: PoolDraft, capabilities: Port
   if (!upstreams.some((row) => row.enabled)) throw new Error("Enable at least one upstream, or remove this pool");
   if (!upstreams.some((row) => row.role === "primary")) throw new Error("Keep at least one primary upstream");
   const families = new Set(upstreams.map((row) => literalIpFamily(row.target_ip)));
-  if (!capabilities.mixed_families && families.size > 1) throw new Error("Use one address family in this pool; create a separate rule for the other family");
+  if (!options.mixed_families && families.size > 1) throw new Error("Use one address family in this pool; create a separate rule for the other family");
   for (let index = 0; index < upstreams.length; index++) {
     const current = upstreams[index]!;
     const duplicate = upstreams.slice(0, index).findIndex((other) => other.target_ip === current.target_ip
@@ -190,12 +188,12 @@ export function buildPool(incoming: string, draft: PoolDraft, capabilities: Port
     if (duplicate >= 0) throw new Error(`Upstreams ${duplicate + 1} and ${index + 1} overlap at ${current.target_ip}; adjust ports or weight instead`);
   }
   const totalWeight = upstreams.filter((row) => row.enabled).reduce((sum, row) => sum + (row.ports.end - row.ports.start + 1) * row.weight, 0);
-  if (totalWeight > 0xffffffff) throw new Error("Expanded endpoint weights exceed 4294967295; reduce weights proportionally");
+  if (options.mode === "dnat" && totalWeight > 0xffffffff) throw new Error("Expanded endpoint weights exceed 4294967295; reduce weights proportionally");
   const pool: PortForwardPool = { incoming: ranges, strategy: draft.strategy, upstreams };
-  if (capabilities.connect_timeout && draft.connectTimeout) {
+  if (options.connect_timeout && draft.connectTimeout) {
     pool.connect_timeout_secs = positiveInteger(draft.connectTimeout, "Connect timeout");
   }
-  if (capabilities.retries && draft.retryMode !== "default") {
+  if (options.retries && draft.retryMode !== "default") {
     pool.retry_policy = { mode: draft.retryMode };
     if (draft.retryMode === "connect_failure") {
       for (const [key, value, label] of [

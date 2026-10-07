@@ -11,6 +11,7 @@ pub use pools::*;
 pub const PORT_FORWARDING_SCHEMA_VERSION: u16 = 1;
 pub const PORT_FORWARDING_MODES_SCHEMA_VERSION: u16 = 2;
 pub const PORT_FORWARDING_POOLS_SCHEMA_VERSION: u16 = 3;
+pub const PORT_FORWARD_ADAPTER_CONTRACT_VERSION: u16 = 2;
 pub const MAX_PORT_FORWARD_RULES: usize = 512;
 pub const MAX_PORT_FORWARD_MAPPINGS: usize = 256;
 pub const MAX_PORT_FORWARD_NAME_BYTES: usize = 128;
@@ -48,13 +49,7 @@ pub struct PortForwardAdapterCommands {
     #[serde(rename = "template_name")]
     pub definition_name: String,
     pub definition_hash: String,
-    #[serde(
-        default = "default_adapter_contract_version",
-        skip_serializing_if = "is_legacy_adapter_contract"
-    )]
     pub contract_version: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pool_capabilities: Option<PortForwardPoolCapabilities>,
     pub apply: crate::RuntimeTunnelCommand,
     pub remove: crate::RuntimeTunnelCommand,
     pub status: crate::RuntimeTunnelCommand,
@@ -155,12 +150,7 @@ impl PortForwardRule {
     }
 
     pub fn required_schema_version(&self) -> u16 {
-        if self.pool.is_some()
-            || self
-                .adapter
-                .as_ref()
-                .is_some_and(|adapter| adapter.contract_version == 2)
-        {
+        if self.pool.is_some() || self.mode == PortForwardMode::CustomAdapter {
             PORT_FORWARDING_POOLS_SCHEMA_VERSION
         } else if self.mode != PortForwardMode::Dnat {
             PORT_FORWARDING_MODES_SCHEMA_VERSION
@@ -257,8 +247,6 @@ pub struct PortForwardCapability {
     pub schema_version: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_modes: Vec<PortForwardMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pool: Option<PortForwardPoolCapabilities>,
 }
 
 impl Default for PortForwardCapability {
@@ -269,7 +257,6 @@ impl Default for PortForwardCapability {
             reason: None,
             schema_version: PORT_FORWARDING_SCHEMA_VERSION,
             supported_modes: Vec::new(),
-            pool: None,
         }
     }
 }
@@ -288,7 +275,7 @@ impl PortForwardCapability {
                     && self.supported_modes.contains(&mode)
             }
             PortForwardMode::CustomAdapter => {
-                self.schema_version >= PORT_FORWARDING_MODES_SCHEMA_VERSION
+                self.schema_version >= PORT_FORWARDING_POOLS_SCHEMA_VERSION
                     && self.supported_modes.contains(&mode)
             }
         }
@@ -515,22 +502,16 @@ pub fn validate_port_forward_rule(
                 .adapter
                 .as_ref()
                 .ok_or(PortForwardValidationError::ModeFieldsInvalid)?;
-            if !matches!(adapter.contract_version, 1 | 2)
-                || (adapter.contract_version == 1 && adapter.pool_capabilities.is_some())
-            {
+            if adapter.contract_version != PORT_FORWARD_ADAPTER_CONTRACT_VERSION {
                 return Err(PortForwardValidationError::AdapterCommandInvalid);
-            }
-            if let Some(cap) = &adapter.pool_capabilities {
-                validate_port_forward_pool_capabilities(cap)?;
             }
             // Share the existing adapter command budget and direct-argv contract.
             for command in [&adapter.apply, &adapter.remove, &adapter.status] {
                 if command.argv.is_empty()
-                    || (adapter.contract_version == 2
-                        && !command
-                            .argv
-                            .iter()
-                            .any(|arg| arg.contains("{rule_config_path}")))
+                    || !command
+                        .argv
+                        .iter()
+                        .any(|arg| arg.contains("{rule_config_json}"))
                     || command.argv.len() > 32
                     || !std::path::Path::new(&command.argv[0]).is_absolute()
                     || command
@@ -549,19 +530,7 @@ pub fn validate_port_forward_rule(
         if !rule.mappings.is_empty() || rule.target_ip.is_some() {
             return Err(PortForwardValidationError::ModeFieldsInvalid);
         }
-        let native = PortForwardPoolCapabilities::native();
-        let cap = if rule.mode == PortForwardMode::Dnat {
-            &native
-        } else {
-            rule.adapter
-                .as_ref()
-                .filter(|adapter| adapter.contract_version == 2)
-                .and_then(|adapter| adapter.pool_capabilities.as_ref())
-                .ok_or_else(|| {
-                    PortForwardValidationError::PoolInvalid("adapter does not support pools".into())
-                })?
-        };
-        validate_port_forward_pool(pool, rule.mode, rule.protocol, cap)
+        validate_port_forward_pool(pool, rule.mode, rule.protocol)
     } else {
         validate_mappings(&rule.mappings)
     }
@@ -794,13 +763,6 @@ const fn default_port_forwarding_schema_version() -> u16 {
 
 const fn default_true() -> bool {
     true
-}
-
-const fn default_adapter_contract_version() -> u16 {
-    1
-}
-fn is_legacy_adapter_contract(version: &u16) -> bool {
-    *version == 1
 }
 
 #[cfg(test)]

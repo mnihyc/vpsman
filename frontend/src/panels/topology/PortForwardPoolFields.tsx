@@ -2,12 +2,12 @@ import { ChevronDown, ChevronRight, CirclePlus, RefreshCcw, Trash2 } from "lucid
 import { useEffect, useRef, useState } from "react";
 import {
   allowsBackup, failureLabel, literalIpFamily, newUpstream,
-  normalizedIp, poolFailureCapability, POOL_STRATEGIES, retrySummary, upstreamError, upstreamSummary,
-  type PoolDraft, type UpstreamDraft,
+  normalizedIp, poolFailureOptions, POOL_STRATEGIES, retrySummary, upstreamError, upstreamSummary,
+  type PoolDraft, type UpstreamDraft, type PortForwardPoolOptions,
 } from "../../portForwardPools";
 import { formatPortRange, parsePortExpression } from "../../portForwarding";
 import type {
-  PortForwardMode, PortForwardPool, PortForwardPoolCapabilities,
+  PortForwardMode, PortForwardPool,
   PortForwardProtocol, PortForwardUpstreamObservation, ResolveHostnameResponse,
 } from "../../types";
 import { ActionFeedback } from "../../components/ActionFeedback";
@@ -36,10 +36,10 @@ function upstreamGroups<T extends { id: string }>(rows: T[], hostnameOf: (row: T
 }
 
 export function PortForwardPoolFields({
-  draft, capabilities, mode, protocol, pending, onChange, onResolve, onResolutionPendingChange,
+  draft, options, mode, protocol, pending, onChange, onResolve, onResolutionPendingChange,
 }: {
   draft: PoolDraft;
-  capabilities: PortForwardPoolCapabilities;
+  options: PortForwardPoolOptions;
   mode: PortForwardMode;
   protocol: PortForwardProtocol;
   pending: boolean;
@@ -53,7 +53,7 @@ export function PortForwardPoolFields({
   const currentDraft = useRef(draft);
   currentDraft.current = draft;
   const generation = useRef(0);
-  const contextKey = JSON.stringify([mode, protocol, capabilities]);
+  const contextKey = JSON.stringify([mode, protocol, options]);
   useEffect(() => {
     generation.current++;
     setResolution(null);
@@ -64,11 +64,11 @@ export function PortForwardPoolFields({
     return () => onResolutionPendingChange(false);
   }, [resolution !== null, onResolutionPendingChange]);
 
-  const backup = allowsBackup(draft, capabilities);
-  const failure = poolFailureCapability(draft, capabilities);
+  const backup = allowsBackup(draft, options);
+  const failure = poolFailureOptions(draft, options);
   const strategy = draft.strategy;
-  const strategies = capabilities.strategies.filter((item) =>
-    !draft.upstreams.some((row) => row.role === "backup") || capabilities.backup_strategies?.includes(item));
+  const strategies = options.strategies.filter((item) =>
+    !draft.upstreams.some((row) => row.role === "backup") || options.backup_strategies?.includes(item));
   const layout = `poolUpstreamGrid${backup ? " withBackup" : ""}`;
   const groups = upstreamGroups(draft.upstreams, (row) => row.hostname);
   const indices = new Map(draft.upstreams.map((row, index) => [row.id, index]));
@@ -113,7 +113,7 @@ export function PortForwardPoolFields({
       const candidates = new Map<string, Candidate>();
       for (const item of result.candidates) {
         const family = literalIpFamily(item.address);
-        if (!family || !capabilities.address_families.includes(family)) continue;
+        if (!family || !options.address_families.includes(family)) continue;
         const address = normalizedIp(item.address);
         candidates.set(address, { address, family, retained: currentIps.has(address), returned: true });
       }
@@ -121,7 +121,7 @@ export function PortForwardPoolFields({
         const address = normalizedIp(item.address);
         if (!candidates.has(address)) candidates.set(address, { address, family: literalIpFamily(address)!, retained: true, returned: false });
       }
-      const fixedFamily = !capabilities.mixed_families
+      const fixedFamily = !options.mixed_families
         ? current.upstreams.map((item) => literalIpFamily(item.address)).find(Boolean)
         : null;
       const usable = [...candidates.values()].filter((item) => item.retained || !fixedFamily || item.family === fixedFamily);
@@ -162,7 +162,7 @@ export function PortForwardPoolFields({
     const value = resolution;
     const group = resolutionRows(value);
     const template = group.find((row) => row.id === value.templateId);
-    const visibleCandidates = value.candidates.filter((candidate) => capabilities.mixed_families || candidate.family === value.family || candidate.retained);
+    const visibleCandidates = value.candidates.filter((candidate) => options.mixed_families || candidate.family === value.family || candidate.retained);
     const dnsFamilies = [...new Set(value.candidates.map((candidate) => candidate.family))];
     function conflicts(candidate: Candidate) {
       if (candidate.retained || !template) return false;
@@ -178,7 +178,7 @@ export function PortForwardPoolFields({
     const selectedConflict = visibleCandidates.some((candidate) => value.selected.includes(candidate.address) && conflicts(candidate));
     return <div className="poolDnsPicker" aria-label={`DNS addresses for ${value.hostname}`}>
       <div className="poolDnsHeading"><strong>DNS addresses</strong>
-        {!capabilities.mixed_families && dnsFamilies.length > 1 && <select aria-label="DNS address family" disabled={pending || value.busy || value.candidates.some((candidate) => candidate.retained)} value={value.family} onChange={(event) => setResolution({ ...value, family: event.target.value as "ipv4" | "ipv6", selected: [] })}>{dnsFamilies.map((family) => <option key={family} value={family}>{family === "ipv4" ? "IPv4" : "IPv6"}</option>)}</select>}
+        {!options.mixed_families && dnsFamilies.length > 1 && <select aria-label="DNS address family" disabled={pending || value.busy || value.candidates.some((candidate) => candidate.retained)} value={value.family} onChange={(event) => setResolution({ ...value, family: event.target.value as "ipv4" | "ipv6", selected: [] })}>{dnsFamilies.map((family) => <option key={family} value={family}>{family === "ipv4" ? "IPv4" : "IPv6"}</option>)}</select>}
         <button className="secondaryAction compactAction" disabled={pending} type="button" onClick={cancelResolution}>Cancel</button>
       </div>
       {value.busy ? <span className="formHint" role="status">Resolving…</span> : value.error ? <ActionFeedback tone="danger" message={value.error} /> : <>
@@ -236,7 +236,7 @@ export function PortForwardPoolFields({
           <div className={group.hostname ? "poolDomainChildren" : undefined}>
         {group.rows.map((row) => {
           const index = indices.get(row.id)!;
-          const error = upstreamError(row, { ...capabilities, failure_exclusion: failure });
+          const error = upstreamError(row, { ...options, failure_exclusion: failure });
           const isHostname = Boolean(row.address.trim()) && !literalIpFamily(row.address);
           const showDns = isHostname && !group.hostname;
           const rowResolution = resolution?.rowId === row.id ? resolution : null;
@@ -295,12 +295,12 @@ export function PortForwardPoolFields({
         </div>)}
       </div>
       <div className="poolFooter"><button className="secondaryAction compactAction" disabled={pending} type="button" onClick={() => { setNotice(null); onChange({ ...draft, upstreams: [...draft.upstreams, newUpstream()] }); }}><CirclePlus size={14} /> Add upstream</button>{notice && <span className="formHint" role="status">{notice}</span>}</div>
-      {(capabilities.connect_timeout || capabilities.retries) && <details className="topologyAdvancedFields poolConnectionOptions">
+      {(options.connect_timeout || options.retries) && <details className="topologyAdvancedFields poolConnectionOptions">
         <summary title="Settings for this forwarding rule, shared by its incoming ports and upstreams. They do not modify other rules or service-wide defaults.">Connection options</summary>
         <div className="poolConnectionSettings topologyFormGrid fourColumn compactNumericGrid">
-          {capabilities.connect_timeout && <label title={`${capabilities.connect_timeout.description} Applies to each upstream connection attempt for this rule, even when retries are off. This is not the established connection's idle timeout. Blank retains the adapter default.`}><span>Connect timeout (s)</span><input aria-label="Pool connect timeout" disabled={pending} type="number" min={1} step={1} placeholder="Default" value={draft.connectTimeout} onChange={(event) => onChange({ ...draft, connectTimeout: event.target.value })} /></label>}
-          {capabilities.retries && <label title={`${capabilities.retries.description} Default retains the adapter's configured behavior. This affects one incoming connection; it neither configures nor disables an upstream's temporary failure exclusion.`}><span>Retry</span><select aria-label="Connection retry" disabled={pending} value={draft.retryMode} onChange={(event) => onChange({ ...draft, retryMode: event.target.value as PoolDraft["retryMode"] })}><option value="default">Default</option><option value="off">Off</option><option value="connect_failure">On connect failure</option></select></label>}
-          {capabilities.retries && draft.retryMode === "connect_failure" && <>
+          {options.connect_timeout && <label title={`${options.connect_timeout.description} Applies to each upstream connection attempt for this rule, even when retries are off. This is not the established connection's idle timeout. Blank retains the adapter default.`}><span>Connect timeout (s)</span><input aria-label="Pool connect timeout" disabled={pending} type="number" min={1} step={1} placeholder="Default" value={draft.connectTimeout} onChange={(event) => onChange({ ...draft, connectTimeout: event.target.value })} /></label>}
+          {options.retries && <label title={`${options.retries.description} Default retains the adapter's configured behavior. This affects one incoming connection; it neither configures nor disables an upstream's temporary failure exclusion.`}><span>Retry</span><select aria-label="Connection retry" disabled={pending} value={draft.retryMode} onChange={(event) => onChange({ ...draft, retryMode: event.target.value as PoolDraft["retryMode"] })}><option value="default">Default</option><option value="off">Off</option><option value="connect_failure">On connect failure</option></select></label>}
+          {options.retries && draft.retryMode === "connect_failure" && <>
             <label title="Maximum upstream attempts for one incoming flow, including the first attempt. Blank retains the adapter default."><span>Maximum attempts</span><input aria-label="Pool maximum attempts" disabled={pending} type="number" min={1} step={1} placeholder="Default" value={draft.maxAttempts} onChange={(event) => onChange({ ...draft, maxAttempts: event.target.value })} /></label>
             <label title="Elapsed-time limit for starting another upstream attempt on one incoming connection. An attempt already running may finish after this limit. This does not limit an established connection or an endpoint's exclusion period. Blank retains the adapter default."><span>Retry budget (s)</span><input aria-label="Pool retry budget" disabled={pending} type="number" min={1} step={1} placeholder="Default" value={draft.retryBudget} onChange={(event) => onChange({ ...draft, retryBudget: event.target.value })} /></label>
           </>}

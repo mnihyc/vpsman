@@ -33,6 +33,41 @@ fn operator_visible_names_reject_control_characters() {
 }
 
 #[test]
+fn port_forward_definition_requires_current_contract_and_json_arguments() {
+    let command = serde_json::json!({
+        "argv": ["/opt/operator/forward-adapter", "{forwarding_type}", "{rule_config_json}"],
+        "max_timeout_secs": 30, "max_output_bytes": 16384
+    });
+    let mut request = UpsertNetworkAdapterDefinitionRequest {
+        adapter_kind: "port_forward".into(),
+        name: "Forwarding".into(),
+        description: None,
+        definition: serde_json::json!({
+            "contract_version": vpsman_common::PORT_FORWARD_ADAPTER_CONTRACT_VERSION,
+            "apply_command": command, "remove_command": command, "status_command": command
+        }),
+    };
+    assert!(validate_network_adapter_definition(&request).is_ok());
+    for version in [1, 3] {
+        request.definition["contract_version"] = serde_json::json!(version);
+        assert!(validate_network_adapter_definition(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("contract_version_invalid"));
+    }
+    request.definition["contract_version"] =
+        serde_json::json!(vpsman_common::PORT_FORWARD_ADAPTER_CONTRACT_VERSION);
+    for field in ["apply_command", "remove_command", "status_command"] {
+        let mut invalid = request.clone();
+        invalid.definition[field]["argv"] = serde_json::json!(["/opt/operator/forward-adapter"]);
+        assert!(validate_network_adapter_definition(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("rule_config_json_required"));
+    }
+}
+
+#[test]
 fn preset_definitions_reject_missing_discriminators_and_unknown_fields() {
     assert!(
         validate_configuration_preset_definition("latency_probe", &serde_json::json!({})).is_err()

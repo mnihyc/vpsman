@@ -1,8 +1,5 @@
 use super::*;
-use vpsman_common::{
-    PortForwardPool, PortForwardPoolStrategy, PortForwardProtocol, PortForwardUpstream,
-    PortForwardUpstreamRole, PortRange,
-};
+use vpsman_common::PortForwardPoolStrategy;
 
 pub(super) fn render_map(script: &mut String, index: usize, rule: &PortForwardRule) {
     let pool = rule.pool.as_ref().expect("pool rendering");
@@ -64,79 +61,4 @@ pub(super) fn render_translation(
         script,
         "    meta l4proto {transport} dnat {family} addr . port to {selector} map @pf_{index}_pool"
     );
-}
-
-fn probe_script() -> Result<String> {
-    let mut rules = Vec::new();
-    for address in ["192.0.2.1", "2001:db8::1"] {
-        for strategy in [
-            PortForwardPoolStrategy::RoundRobin,
-            PortForwardPoolStrategy::Random,
-            PortForwardPoolStrategy::SourceIpHash,
-        ] {
-            let index = rules.len() as u16;
-            rules.push(PortForwardRule {
-                id: uuid::Uuid::from_u128(u128::from(index) + 1),
-                revision: 1,
-                name: format!("pool-probe-{index}"),
-                protocol: PortForwardProtocol::Both,
-                mode: PortForwardMode::Dnat,
-                address_family: None,
-                adapter: None,
-                target_ip: None,
-                mappings: Vec::new(),
-                masquerade: true,
-                pool: Some(PortForwardPool {
-                    incoming: vec![PortRange {
-                        start: 64000 + index,
-                        end: 64000 + index,
-                    }],
-                    strategy,
-                    upstreams: vec![PortForwardUpstream {
-                        id: uuid::Uuid::from_u128(1),
-                        target_ip: address.parse()?,
-                        target_hostname: None,
-                        ports: PortRange {
-                            start: 8080,
-                            end: 8081,
-                        },
-                        weight: 2,
-                        role: PortForwardUpstreamRole::Primary,
-                        enabled: true,
-                        failure_policy: None,
-                    }],
-                    connect_timeout_secs: None,
-                    retry_policy: None,
-                }),
-            });
-        }
-    }
-    let config = AgentPortForwardingConfig {
-        schema_version: 3,
-        desired_hash: port_forwarding_desired_hash(&rules),
-        rules,
-        ..Default::default()
-    };
-    Ok(render_apply_script(&config, false)?.replace(
-        OWNED_TABLE_NAME,
-        &format!("vpsman_pool_probe_{}", std::process::id()),
-    ))
-}
-
-pub(super) async fn probe() -> bool {
-    let Some(nft) = resolve_nft_binary() else {
-        return false;
-    };
-    let Ok(script) = probe_script() else {
-        return false;
-    };
-    // A failed pool probe hides only pools. Existing native mappings stay supported.
-    run_nft_script(
-        &nft,
-        true,
-        script.into_bytes(),
-        CommandCancelToken::default(),
-    )
-    .await
-    .is_ok()
 }
