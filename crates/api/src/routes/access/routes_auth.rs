@@ -193,7 +193,7 @@ pub(crate) async fn setup_operator_totp(
         TotpSetupOutcome::Created(response) => {
             state
                 .repo
-                .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
+                .clear_operator_auth_management_success(&operator.operator.username)
                 .await
                 .map_err(ApiError::internal_mapper(
                     "operator_auth_throttle_clear_failed",
@@ -234,7 +234,7 @@ pub(crate) async fn confirm_operator_totp(
         TotpUpdateOutcome::Updated(updated) => {
             state
                 .repo
-                .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
+                .clear_operator_auth_management_success(&operator.operator.username)
                 .await
                 .map_err(ApiError::internal_mapper(
                     "operator_auth_throttle_clear_failed",
@@ -276,7 +276,7 @@ pub(crate) async fn disable_operator_totp(
         TotpUpdateOutcome::Updated(updated) => {
             state
                 .repo
-                .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
+                .clear_operator_auth_management_success(&operator.operator.username)
                 .await
                 .map_err(ApiError::internal_mapper(
                     "operator_auth_throttle_clear_failed",

@@ -42790,6 +42790,10 @@ async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence()
         failed_attempt_window_secs: 300,
         lockout_secs: 60,
     };
+    db.repo
+        .record_operator_totp_management_failure("admin", "203.0.113.43", &throttle)
+        .await
+        .unwrap();
     install_rejected_audit_action_trigger(&db.pool).await;
     set_rejected_audit_action(&db.pool, "operator_auth.login_success").await;
     let password_login = LoginRequest {
@@ -42807,6 +42811,15 @@ async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence()
         )
         .await
         .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT failed_attempts FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = 'admin'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
             .fetch_one(&db.pool)
@@ -42831,6 +42844,15 @@ async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence()
             .unwrap(),
         crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
     ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operator_auth_throttle WHERE scope_kind = 'username'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
 
     let actor = AuthContext {
         operator: auth.operator,
@@ -42867,6 +42889,10 @@ async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence()
         totp_code: Some(login_code),
     };
 
+    db.repo
+        .record_operator_totp_management_failure("admin", "203.0.113.43", &throttle)
+        .await
+        .unwrap();
     set_rejected_audit_action(&db.pool, "operator_auth.login_success").await;
     assert!(db
         .repo
@@ -42878,6 +42904,15 @@ async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence()
         )
         .await
         .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT failed_attempts FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = 'admin'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
             .fetch_one(&db.pool)
@@ -42912,6 +42947,15 @@ async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence()
             .unwrap(),
         crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
     ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operator_auth_throttle WHERE scope_kind = 'username'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
             .fetch_one(&db.pool)
@@ -43039,7 +43083,7 @@ async fn postgres_password_login_rejects_concurrent_operator_credential_change()
 }
 
 #[tokio::test]
-async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() {
+async fn postgres_operator_login_throttle_persists_per_username_across_ips() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
@@ -43060,7 +43104,7 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
         .operator
         .id;
 
-    for _ in 0..2 {
+    for remote_ip in ["203.0.113.30", "203.0.113.31"] {
         assert!(matches!(
             db.repo
                 .login_operator_with_throttle(
@@ -43069,7 +43113,7 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
                         password: "wrong-password-123".to_string(),
                         totp_code: None,
                     },
-                    "203.0.113.30",
+                    remote_ip,
                     None,
                     &throttle,
                 )
@@ -43103,14 +43147,22 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
                     password: "admin-password-123".to_string(),
                     totp_code: None,
                 },
-                "203.0.113.31",
+                "203.0.113.32",
                 None,
                 &throttle,
             )
             .await
             .unwrap(),
-        crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+        crate::repository_auth::OperatorLoginAttempt::Throttled
     ));
+    assert!(second_repo
+        .operator_auth_identity_locked(" ADMIN ", "203.0.113.33")
+        .await
+        .unwrap());
+    assert!(!second_repo
+        .operator_auth_identity_locked("other", "203.0.113.30")
+        .await
+        .unwrap());
 
     let row = sqlx::query(
         r#"
@@ -43118,7 +43170,7 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
                locked_until IS NOT NULL AND locked_until > now() AS locked,
                scope_key
         FROM operator_auth_throttle
-        WHERE scope_kind = 'username_ip'
+        WHERE scope_kind = 'username'
         "#,
     )
     .fetch_one(&db.pool)
@@ -43129,7 +43181,7 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
     let scope_key: String = row.try_get("scope_key").unwrap();
     assert_eq!(failed_attempts, 2);
     assert!(locked);
-    assert_eq!(scope_key, "5:admin|203.0.113.30");
+    assert_eq!(scope_key, "admin");
     let failed_login_audit = sqlx::query(
         r#"
         SELECT actor_id, target, metadata
@@ -43166,6 +43218,213 @@ async fn postgres_operator_login_throttle_persists_per_client_identity_bucket() 
         .await
         .unwrap();
     assert_eq!(audit_count, 1);
+
+    // Expiry permits a correct login from another network even while the
+    // original failure window is still active; success clears account failures.
+    sqlx::query(
+        "UPDATE operator_auth_throttle SET locked_until = now() - interval '1 second' WHERE scope_kind = 'username'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        second_repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "admin-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.32",
+                None,
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operator_auth_throttle WHERE scope_kind = 'username'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_operator_login_throttle_success_clears_username_but_preserves_ip() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    db.repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 2,
+        ip_failed_attempt_limit: 3,
+        failed_attempt_window_secs: 60,
+        lockout_secs: 60,
+    };
+    let valid = LoginRequest {
+        username: "admin".to_string(),
+        password: "admin-password-123".to_string(),
+        totp_code: None,
+    };
+    let invalid = LoginRequest {
+        username: "admin".to_string(),
+        password: "wrong-password-123".to_string(),
+        totp_code: None,
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            db.repo
+                .login_operator_with_throttle(&invalid, "203.0.113.40", None, &throttle)
+                .await
+                .unwrap(),
+            crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
+        ));
+        assert!(matches!(
+            db.repo
+                .login_operator_with_throttle(&valid, "203.0.113.41", None, &throttle)
+                .await
+                .unwrap(),
+            crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+        ));
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'operator_auth.login_success' AND metadata->>'cleared_previous_failures' = 'true'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    // A different attempted username still contributes to the same IP limit.
+    assert!(matches!(
+        db.repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "unknown".to_string(),
+                    ..invalid
+                },
+                "203.0.113.40",
+                None,
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
+    ));
+    assert!(matches!(
+        db.repo
+            .login_operator_with_throttle(&valid, "203.0.113.40", None, &throttle)
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Throttled
+    ));
+    assert!(matches!(
+        db.repo
+            .login_operator_with_throttle(&valid, "203.0.113.42", None, &throttle)
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
+    assert!(db
+        .repo
+        .operator_auth_identity_locked("admin", "203.0.113.40")
+        .await
+        .unwrap());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_operator_login_throttle_shares_management_failures_and_resets_window() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 2,
+        ip_failed_attempt_limit: 100,
+        failed_attempt_window_secs: 60,
+        lockout_secs: 60,
+    };
+    let (left, right) = tokio::join!(
+        db.repo
+            .record_operator_totp_management_failure("admin", "203.0.113.50", &throttle),
+        db.repo
+            .record_operator_totp_management_failure(" ADMIN ", "203.0.113.51", &throttle),
+    );
+    left.unwrap();
+    right.unwrap();
+    assert!(matches!(
+        db.repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "admin-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.52",
+                None,
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Throttled
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT failed_attempts FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = 'admin'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    sqlx::query(
+        "UPDATE operator_auth_throttle SET window_started_at = now() - interval '61 seconds', locked_until = now() - interval '1 second' WHERE scope_kind = 'username'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo
+        .record_operator_totp_management_failure("admin", "203.0.113.53", &throttle)
+        .await
+        .unwrap();
+    assert!(!db
+        .repo
+        .operator_auth_identity_locked("admin", "203.0.113.54")
+        .await
+        .unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT failed_attempts FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = 'admin'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    db.repo
+        .clear_operator_auth_management_success(" ADMIN ")
+        .await
+        .unwrap();
+    let counts = sqlx::query_as::<_, (String, i64)>(
+        "SELECT scope_kind, count(*) FROM operator_auth_throttle GROUP BY scope_kind",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![("ip".to_string(), 3)]);
     db.cleanup().await;
 }
 
@@ -43461,29 +43720,36 @@ async fn postgres_incorrect_totp_code_preserves_factor_and_creates_no_session() 
             })
         })
         .expect("six surrounding TOTP steps cannot exhaust the code space");
-    let attempt = db
+    for remote_ip in ["203.0.113.83", "203.0.113.84"] {
+        let attempt = db
+            .repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: password.to_string(),
+                    totp_code: Some(wrong_code.clone()),
+                },
+                remote_ip,
+                Some("totp-wrong-code"),
+                &crate::state::OperatorAuthThrottleConfig {
+                    username_failed_attempt_limit: 2,
+                    ip_failed_attempt_limit: 100,
+                    failed_attempt_window_secs: 300,
+                    lockout_secs: 60,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            attempt,
+            crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
+        ));
+    }
+    assert!(db
         .repo
-        .login_operator_with_throttle(
-            &LoginRequest {
-                username: "admin".to_string(),
-                password: password.to_string(),
-                totp_code: Some(wrong_code),
-            },
-            "203.0.113.83",
-            Some("totp-wrong-code"),
-            &crate::state::OperatorAuthThrottleConfig {
-                username_failed_attempt_limit: 100,
-                ip_failed_attempt_limit: 100,
-                failed_attempt_window_secs: 300,
-                lockout_secs: 60,
-            },
-        )
+        .operator_auth_identity_locked("admin", "203.0.113.85")
         .await
-        .unwrap();
-    assert!(matches!(
-        attempt,
-        crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
-    ));
+        .unwrap());
 
     let factor_after = sqlx::query_as::<
         _,

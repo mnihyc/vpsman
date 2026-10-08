@@ -1,7 +1,7 @@
 {
   "name": "vpsman-frontend",
   "private": true,
-  "version": "0.5.40",
+  "version": "0.5.41",
   "author": "mnihyc",
   "type": "module",
   "engines": {

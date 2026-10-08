@@ -258,13 +258,21 @@ address is pinned. A deployment that exposes the API directly must instead
 restrict `[api].trusted_proxy_cidrs` or
 `VPSMAN_TRUSTED_PROXY_CIDRS` to its actual proxy peers.
 
-Authentication failures feed two bounded lockout buckets: one for the
-username/client-IP pair and one for the client IP across usernames. A hostile
-client therefore cannot lock an operator out from every network, while a single
-source still cannot rotate usernames without being throttled. The historical
-`operator_auth_username_failed_attempt_limit` setting controls the
-username/client-IP bucket. Both buckets default to 8 failures within 15
-minutes, followed by a 15-minute lockout.
+Authentication failures feed two lockout buckets: one for the username across
+all client IPs and one for the client IP across usernames. Rotating source IPs
+does not reset the username's failure count; rotating usernames does not reset
+the IP's count. `operator_auth_username_failed_attempt_limit` and
+`operator_auth_ip_failed_attempt_limit` control those limits respectively. Both
+default to 8 failures within 15 minutes, followed by a 15-minute lockout; the
+window and lockout settings apply to both buckets. Password and TOTP failures
+share these counters, including TOTP management failures.
+
+Either active lockout blocks login and TOTP management, even with valid
+credentials. Successful authentication clears the username's failures without
+clearing IP failures. Existing sessions remain valid. An account lockout affects
+every source, including an operator's internal network; restricting the website
+to internal access stops external attempts, but an existing lockout must still
+expire. Requests rejected by an active lockout do not extend it.
 
 Fleet WebSocket streams use the same bearer-session authority as HTTP routes.
 The server periodically revalidates token expiry, session revocation, operator

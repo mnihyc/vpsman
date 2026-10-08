@@ -211,7 +211,7 @@ impl Repository {
         user_agent: Option<&str>,
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<OperatorLoginAttempt> {
-        let username_key = normalize_auth_throttle_identity(&request.username, remote_ip);
+        let username_key = normalize_auth_throttle_username(&request.username);
         let ip_key = normalize_auth_throttle_ip(remote_ip);
         if self
             .operator_auth_throttle_locked(&username_key, &ip_key)
@@ -455,7 +455,7 @@ impl Repository {
         username: &str,
         remote_ip: &str,
     ) -> Result<bool> {
-        let username_key = normalize_auth_throttle_identity(username, remote_ip);
+        let username_key = normalize_auth_throttle_username(username);
         let ip_key = normalize_auth_throttle_ip(remote_ip);
         self.operator_auth_throttle_locked(&username_key, &ip_key)
             .await
@@ -467,7 +467,7 @@ impl Repository {
         remote_ip: &str,
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<()> {
-        let username_key = normalize_auth_throttle_identity(username, remote_ip);
+        let username_key = normalize_auth_throttle_username(username);
         let ip_key = normalize_auth_throttle_ip(remote_ip);
         self.record_operator_auth_failure(
             &username_key,
@@ -481,9 +481,8 @@ impl Repository {
     pub(crate) async fn clear_operator_auth_management_success(
         &self,
         username: &str,
-        remote_ip: &str,
     ) -> Result<()> {
-        let username_key = normalize_auth_throttle_identity(username, remote_ip);
+        let username_key = normalize_auth_throttle_username(username);
         self.clear_operator_auth_success(&username_key).await
     }
 
@@ -500,7 +499,7 @@ impl Repository {
                         SELECT 1
                         FROM operator_auth_throttle
                         WHERE (
-                            (scope_kind = 'username_ip' AND scope_key = $1)
+                            (scope_kind = 'username' AND scope_key = $1)
                             OR (scope_kind = 'ip' AND scope_key = $2)
                         )
                           AND locked_until IS NOT NULL
@@ -530,7 +529,7 @@ impl Repository {
                 let mut lockouts = Vec::new();
                 if let Some(lockout) = record_postgres_throttle_failure(
                     &mut tx,
-                    "username_ip",
+                    "username",
                     username_key,
                     throttle.username_failed_attempt_limit,
                     throttle.failed_attempt_window_secs,
@@ -577,7 +576,7 @@ impl Repository {
                         SELECT 1
                         FROM operator_auth_throttle
                         WHERE (
-                            (scope_kind = 'username_ip' AND scope_key = $1)
+                            (scope_kind = 'username' AND scope_key = $1)
                         )
                           AND failed_attempts > 0
                           AND (
@@ -600,7 +599,7 @@ impl Repository {
         match self {
             Self::Postgres(pool) => {
                 sqlx::query(
-                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username_ip' AND scope_key = $1",
+                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = $1",
                 )
                 .bind(username_key)
                 .execute(pool)
@@ -2133,7 +2132,7 @@ impl Repository {
                     context.cleared_previous_failures,
                 );
                 sqlx::query(
-                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username_ip' AND scope_key = $1",
+                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = $1",
                 )
                 .bind(context.username_key)
                 .execute(&mut *tx)
@@ -2196,7 +2195,7 @@ impl Repository {
                 let operator = operator_view_from_row(&row)?;
                 if let Some(context) = success_context {
                     sqlx::query(
-                        "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username_ip' AND scope_key = $1",
+                        "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = $1",
                     )
                     .bind(context.username_key)
                     .execute(&mut *tx)
@@ -2509,12 +2508,6 @@ fn normalize_auth_throttle_username(username: &str) -> String {
     } else {
         normalized
     }
-}
-
-fn normalize_auth_throttle_identity(username: &str, remote_ip: &str) -> String {
-    let username = normalize_auth_throttle_username(username);
-    let remote_ip = normalize_auth_throttle_ip(remote_ip);
-    format!("{}:{username}|{remote_ip}", username.len())
 }
 
 fn normalize_auth_throttle_ip(remote_ip: &str) -> String {

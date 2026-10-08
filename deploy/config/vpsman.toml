@@ -6,6 +6,7 @@ gateway_control_url = "unix:/var/lib/vpsman/gateway-control.sock"
 job_output_artifact_min_bytes = 32768
 artifact_max_bytes = 134217728
 require_registered_agent_updates = false
+# Username failures are shared across all IPs; IP failures across all usernames.
 operator_auth_username_failed_attempt_limit = 8
 operator_auth_ip_failed_attempt_limit = 8
 operator_auth_failed_attempt_window_secs = 900
