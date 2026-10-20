@@ -29,6 +29,14 @@ export class ApiUnauthorizedError extends Error {
   }
 }
 
+/** Authentication rejected the request before it could execute. */
+export class ApiAuthRecoveredError extends Error {
+  constructor() {
+    super("The request was rejected while credentials changed. Your session has recovered; review and retry the action. It was not automatically resubmitted.");
+    this.name = "ApiAuthRecoveredError";
+  }
+}
+
 export class ApiTransportError extends Error {
   constructor(browserDetail: string | null = null, readonly transient = false) {
     const detail = browserDetail ? ` Browser reported: ${browserDetail}.` : "";
@@ -297,13 +305,14 @@ export async function authenticatedApiFetch(
     if (response.status !== 401) return response;
     await renewAuthSession(session, credentials.revision, credentials.attempt);
     if (!safeAuthRetry) {
-      throw new Error("The request was rejected while credentials changed. Your session has recovered; review and retry the action. It was not automatically resubmitted.");
+      throw new ApiAuthRecoveredError();
     }
     const renewed = await readCurrentSessionCredentials(session);
     response = await send(renewed.accessToken);
     if (response.status === 401) {
-      // One recovery cannot become an unbounded renewal loop. Only refresh's
-      // authoritative rejection ends the login, not an individual API error.
+      // Resolve the current login once more without replaying the read again.
+      // A newer revision wins over this rejection; only refresh 401 ends login.
+      await renewAuthSession(session, renewed.revision, renewed.attempt);
       throw await apiErrorFromResponse(response);
     }
     return response;

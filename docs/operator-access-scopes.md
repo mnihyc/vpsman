@@ -249,6 +249,22 @@ access token lifetime is one day. Admin-targeted changes and changes that grant
 the admin role require an explicit admin-risk acknowledgement in the dashboard,
 CLI, VTY, and API payload.
 
+Browser tabs coordinate credential renewal while keeping the same login identity,
+so ordinary renewal preserves open editors, drafts and terminal state. After a
+temporary renewal failure, starting the console, returning to a hidden/restored
+page, reconnecting, or using **Retry** permits another coordinated attempt.
+Healthy tab switches do not renew credentials, and background polls share a
+failed attempt instead of repeatedly retrying it.
+An initial Home snapshot that failed during renewal retries after credentials
+recover; successful snapshots are not reinitialized by rotation.
+
+Renewal lock waits and HTTP responses have a 60-second deadline. A temporary
+failure keeps the workspace and its Retry notice; an authoritative refresh-token
+rejection returns all tabs to Sign in. Operator actions are never automatically
+resubmitted. Saved privilege verification can retry once with a fresh assertion
+after authentication rejected its first request. If a refresh was committed but
+its replacement response was lost, signing in again may be necessary.
+
 Login throttling and auth history use the operator client IP. The bundled API
 has no published host port and is reached through the frontend reverse proxy,
 so its deployment config trusts the complete forwarded client chain. Nginx

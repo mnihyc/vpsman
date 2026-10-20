@@ -1,4 +1,4 @@
-import type { AuthSession } from "./authSession";
+import { AuthRenewalUnavailableError, readCurrentSessionCredentials, type AuthSession } from "./authSession";
 import {
   Suspense,
   useCallback,
@@ -21,7 +21,7 @@ import { JobEvidencePanel } from "./panels/audit/JobEvidencePanel";
 import { SessionEvidencePanel } from "./panels/audit/SessionEvidencePanel";
 import { JobArtifactsPanel } from "./panels/jobs/JobArtifactsPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
-import { ApiResponseError, apiPost } from "./api";
+import { ApiAuthRecoveredError, ApiResponseError, apiPost } from "./api";
 import type {
   ActiveView,
   AgentView,
@@ -174,34 +174,45 @@ async function verifyPrivilegeMaterial(
     confirmed: true,
     target: operatorId,
   });
-  const privilegeAssertion = await buildPrivilegeAssertion({
-    intent,
-    privilegeMaterial: derivedMaterial,
-    ttlSecs: 60,
-  });
-  try {
-    const response = await apiPost<PrivilegeVerificationResponse>(
-      "/api/v1/auth/privilege/verify",
-      apiToken,
-      { privilege_assertion: privilegeAssertion },
-    );
-    if (response.verified !== true) {
-      throw new Error(
-        "Privilege verification returned no approval. The console remains locked.",
+  for (let attempt = 0; ; attempt += 1) {
+    // Authentication is checked before verification consumes the nonce.
+    // After a rejected request, rebuild the assertion with a fresh lifetime.
+    const privilegeAssertion = await buildPrivilegeAssertion({
+      intent,
+      privilegeMaterial: derivedMaterial,
+      ttlSecs: 60,
+    });
+    try {
+      const response = await apiPost<PrivilegeVerificationResponse>(
+        "/api/v1/auth/privilege/verify",
+        apiToken,
+        { privilege_assertion: privilegeAssertion },
       );
+      if (response.verified !== true) {
+        throw new Error(
+          "Privilege verification returned no approval. The console remains locked.",
+        );
+      }
+      return derivedMaterial;
+    } catch (error) {
+      if (error instanceof ApiAuthRecoveredError && attempt === 0) continue;
+      if (attempt === 0 && apiToken && error instanceof AuthRenewalUnavailableError &&
+          error.credentialRevision !== null) {
+        // Another tab may have recovered before this older failure was delivered.
+        const current = await readCurrentSessionCredentials(apiToken);
+        if (current.revision > error.credentialRevision) continue;
+      }
+      if (
+        error instanceof ApiResponseError &&
+        error.status === 403 &&
+        error.code.startsWith("privilege_verification")
+      ) {
+        throw new PrivilegeVerificationDeniedError(
+          "Super password or privilege salt did not match. Check both values and try again.",
+        );
+      }
+      throw error;
     }
-    return derivedMaterial;
-  } catch (error) {
-    if (
-      error instanceof ApiResponseError &&
-      error.status === 403 &&
-      error.code.startsWith("privilege_verification")
-    ) {
-      throw new PrivilegeVerificationDeniedError(
-        "Super password or privilege salt did not match. Check both values and try again.",
-      );
-    }
-    throw error;
   }
 }
 
@@ -1031,6 +1042,7 @@ export function App() {
     const stored = storedPrivilegeGrant.grant;
     if (
       privilegeSessionChanged ||
+      dashboard.authRefreshError ||
       !stored ||
       !dashboard.apiToken ||
       !dashboard.operator?.id
@@ -1074,6 +1086,11 @@ export function App() {
         if (error instanceof PrivilegeVerificationSupersededError) {
           return;
         }
+        if (error instanceof AuthRenewalUnavailableError) {
+          // Keep the restore candidate. The session notice owns Retry, and
+          // clearing that notice after recovery resumes this same restoration.
+          return;
+        }
         setPrivilegeGrant(null);
         setStoredPrivilegeGrant({
           clearInvalidRecord: false,
@@ -1103,6 +1120,7 @@ export function App() {
     };
   }, [
     dashboard.apiToken,
+    dashboard.authRefreshError,
     dashboard.operator?.id,
     privilegeSessionChanged,
     setPrivilegeMaterial,

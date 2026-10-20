@@ -162,6 +162,10 @@ test("shares one single-use renewal across two tabs and does not renew on tab sw
   });
   const challengedTabs = new Set<Page>();
   const recoveredTabs = new Set<Page>();
+  let homeReads = 0;
+  context.on("request", request => {
+    if (new URL(request.url()).pathname === "/api/v1/home/snapshot") homeReads++;
+  });
   context.on("response", (response) => {
     const request = response.request();
     if (request.method() !== "GET" || !new URL(request.url()).pathname.startsWith("/api/")) return;
@@ -186,6 +190,7 @@ test("shares one single-use renewal across two tabs and does not renew on tab sw
   await secondSnapshot;
   await expectAuthenticatedConsoleShell(secondTab);
   await expect(secondTab.getByTitle("Refresh dashboard telemetry", { exact: true })).toBeEnabled();
+  const initialHomeReads = homeReads;
   await Promise.all([setHidden(page, true), setHidden(secondTab, true)]);
   authMock.expireAccess();
   await Promise.all([setHidden(page, false), setHidden(secondTab, false)]);
@@ -197,6 +202,7 @@ test("shares one single-use renewal across two tabs and does not renew on tab sw
   }
   await expect.poll(() => recoveredTabs.size).toBe(2);
   expect(refreshTokens).toEqual([refreshToken]);
+  expect(homeReads).toBe(initialHomeReads);
   for (const tab of [page, secondTab]) {
     await expectAuthenticatedConsoleShell(tab);
     expect(await readSessionStorage(tab)).toEqual({ access: rotatedAccessToken, refresh: rotatedRefreshToken });
@@ -414,6 +420,491 @@ test("sign out clears local authentication when server revocation fails", async 
     access: null,
     refresh: null,
   });
+});
+
+async function signInForRecovery(page: Page) {
+  await page.goto("/");
+  await page.getByLabel("Username").fill("session-admin");
+  await page.getByLabel("Password").fill("session-password-123");
+  await activate(page.getByRole("button", { name: "Sign in", exact: true }));
+  await expectAuthenticatedConsoleShell(page);
+}
+
+async function savePrivilegeGrant(page: Page) {
+  await page.evaluate(() => localStorage.setItem("vpsman.privilegeGrant", JSON.stringify({
+    version: 1,
+    operatorId: "99999999-aaaa-4bbb-8ccc-000000000001",
+    material: { superKeyHex: "11".repeat(32) },
+  })));
+}
+
+async function openRecoveryPeer(context: BrowserContext) {
+  const peer = await context.newPage();
+  await peer.route("**/__late-auth-peer", route => route.fulfill({
+    contentType: "text/html", body: "<!doctype html><title>Authentication peer</title>",
+  }));
+  await peer.goto("/__late-auth-peer");
+  await peer.evaluate(async () => {
+    const path = "/src/authSession.ts";
+    const auth = await import(path);
+    await auth.initializeAuthSession();
+  });
+  return peer;
+}
+
+async function resumeSessionPage(page: Page, trigger: string) {
+  if (trigger === "reload") {
+    await page.reload();
+  } else {
+    await page.evaluate(trigger => {
+      if (trigger === "visible") {
+        Object.defineProperty(document, "hidden", { configurable: true, value: true });
+        document.dispatchEvent(new Event("visibilitychange"));
+        Object.defineProperty(document, "hidden", { configurable: true, value: false });
+        document.dispatchEvent(new Event("visibilitychange"));
+      } else if (trigger === "pageshow") {
+        window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+      } else {
+        window.dispatchEvent(new Event("online"));
+      }
+    }, trigger);
+  }
+}
+
+test("restores saved privilege after expired canonical credentials without opening Unlock", async ({ page }, testInfo) => {
+  const authMock = await installAuthSessionApiMock(page);
+  await signInForRecovery(page);
+  const initial = await readCanonicalAuthSession(page);
+  await savePrivilegeGrant(page);
+  let releaseRefresh!: () => void;
+  const verificationChallenged = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  let refreshes = 0;
+  const assertions: Array<{ nonce_hex: string }> = [];
+  await page.route("**/api/v1/auth/privilege/verify", async route => {
+    assertions.push(route.request().postDataJSON().privilege_assertion);
+    if (route.request().headers().authorization === `Bearer ${accessToken}`) {
+      await route.fulfill({ status: 401, json: { error: "invalid_operator_session" } });
+      releaseRefresh();
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.route("**/api/v1/auth/refresh", async route => {
+    refreshes++;
+    await verificationChallenged;
+    const auth = authMock.rotate(route.request().postDataJSON().refresh_token);
+    await route.fulfill({ status: auth ? 200 : 401, json: auth ?? { error: "invalid_refresh_token" } });
+  });
+  authMock.expireAccess();
+  try {
+    await page.reload();
+    await expectPrivilegeVerifiedForViewport(page);
+    await expect(page.getByRole("dialog", { name: "Unlock privilege" })).toHaveCount(0);
+    expect(refreshes).toBe(1);
+    expect(assertions).toHaveLength(2);
+    expect(assertions[0].nonce_hex).toBeTruthy();
+    expect(assertions[1].nonce_hex).not.toBe(assertions[0].nonce_hex);
+    expect((await readCanonicalAuthSession(page))?.epoch).toBe(initial?.epoch);
+    await page.screenshot({ path: testInfo.outputPath("privilege-restored.png") });
+  } finally {
+    releaseRefresh();
+  }
+});
+
+test("retains pending privilege restoration while renewal is unavailable and resumes on reconnect", async ({ page }, testInfo) => {
+  const authMock = await installAuthSessionApiMock(page);
+  let snapshots = 0;
+  page.on("response", response => {
+    if (new URL(response.url()).pathname === "/api/v1/home/snapshot" && response.status() === 200) snapshots++;
+  });
+  await signInForRecovery(page);
+  await savePrivilegeGrant(page);
+  let available = false;
+  let refreshes = 0;
+  let verifications = 0;
+  await page.route("**/api/v1/auth/privilege/verify", async route => {
+    verifications++;
+    await route.fallback();
+  });
+  await page.route("**/api/v1/auth/refresh", async route => {
+    refreshes++;
+    const auth = available ? authMock.rotate(route.request().postDataJSON().refresh_token) : null;
+    await route.fulfill({
+      status: available ? (auth ? 200 : 401) : 503,
+      json: auth ?? { error: available ? "invalid_refresh_token" : "refresh_service_unavailable" },
+    });
+  });
+  authMock.expireAccess();
+  await page.reload();
+  const notice = page.getByRole("alert").filter({ hasText: "Session refresh unavailable" });
+  await expect(notice).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Unlock privilege" })).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean(localStorage.getItem("vpsman.privilegeGrant")))).toBe(true);
+  expect(refreshes).toBe(1);
+  available = true;
+  await resumeSessionPage(page, "online");
+  await expect(notice).toHaveCount(0);
+  await expectPrivilegeVerifiedForViewport(page);
+  await expect(page.getByRole("dialog", { name: "Unlock privilege" })).toHaveCount(0);
+  expect(refreshes).toBe(2);
+  expect(verifications).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => snapshots).toBe(2);
+  await expect(page.locator(".shell")).not.toContainText("Home snapshot: Session renewal");
+  await page.screenshot({ path: testInfo.outputPath("privilege-reconnected.png") });
+});
+
+for (const trigger of ["visible", "online", "pageshow", "reload"]) {
+  for (const revoked of [false, true]) {
+    test(`recovers a saved renewal failure on ${trigger} and ${revoked ? "shows Sign in after revocation" : "keeps the same login"}`, async ({ page }) => {
+      const authMock = await installAuthSessionApiMock(page);
+      await signInForRecovery(page);
+      const initial = await readCanonicalAuthSession(page);
+      let unavailable = true;
+      let refreshes = 0;
+      await page.route("**/api/v1/auth/refresh", async route => {
+        refreshes++;
+        const auth = !unavailable && !revoked
+          ? authMock.rotate(route.request().postDataJSON().refresh_token)
+          : null;
+        await route.fulfill({
+          status: unavailable ? 503 : auth ? 200 : 401,
+          json: auth ?? { error: unavailable ? "refresh_service_unavailable" : "invalid_refresh_token" },
+        });
+      });
+      authMock.expireAccess();
+      await page.reload();
+      const notice = page.getByRole("alert").filter({ hasText: "Session refresh unavailable" });
+      await expect(notice).toBeVisible();
+      expect(refreshes).toBe(1);
+      await page.clock.setSystemTime(new Date(Date.now() + 3 * 86_400_000));
+      unavailable = false;
+      await resumeSessionPage(page, trigger);
+      if (revoked) {
+        await expectOperatorAccessShell(page);
+        expect((await readCanonicalAuthSession(page))?.status).toBe("ended");
+      } else {
+        await expect(notice).toHaveCount(0);
+        await expect.poll(() => readSessionStorage(page)).toEqual({
+          access: rotatedAccessToken, refresh: rotatedRefreshToken,
+        });
+        expect((await readCanonicalAuthSession(page))?.epoch).toBe(initial?.epoch);
+        await expectAuthenticatedConsoleShell(page);
+      }
+      expect(refreshes).toBe(2);
+    });
+  }
+}
+
+test("resolves a renewed read's 401 through refresh and returns the UI to Sign in", async ({ page }) => {
+  const authMock = await installAuthSessionApiMock(page);
+  await signInForRecovery(page);
+  let refreshes = 0;
+  let rejectedReads = 0;
+  await page.route("**/api/v1/home/snapshot**", async route => {
+    rejectedReads++;
+    await route.fulfill({ status: 401, json: { error: "invalid_operator_session" } });
+  });
+  await page.route("**/api/v1/auth/refresh", async route => {
+    refreshes++;
+    const auth = refreshes === 1 ? authMock.rotate(route.request().postDataJSON().refresh_token) : null;
+    await route.fulfill({ status: auth ? 200 : 401, json: auth ?? { error: "invalid_refresh_token" } });
+  });
+  await page.reload();
+  await expectOperatorAccessShell(page);
+  expect(rejectedReads).toBe(2);
+  expect(refreshes).toBe(2);
+  expect((await readCanonicalAuthSession(page))?.status).toBe("ended");
+});
+
+test("reload reopens an unavailable attempt once while ordinary reads keep sharing its failure", async ({ page }) => {
+  const authMock = await installAuthSessionApiMock(page);
+  await signInForRecovery(page);
+  let refreshes = 0;
+  await page.route("**/api/v1/auth/refresh", route => {
+    refreshes++;
+    return route.fulfill({ status: 503, json: { error: "refresh_service_unavailable" } });
+  });
+  authMock.expireAccess();
+  await page.reload();
+  const notice = page.getByRole("alert").filter({ hasText: "Session refresh unavailable" });
+  await expect(notice).toBeVisible();
+  const firstFailure = (await readCanonicalAuthSession(page))?.attempt?.id;
+  expect(refreshes).toBe(1);
+  await page.reload();
+  await expect.poll(async () => (await readCanonicalAuthSession(page))?.attempt?.id).not.toBe(firstFailure);
+  await expect(notice).toBeVisible();
+  expect(refreshes).toBe(2);
+  const refresh = page.getByTitle("Refresh dashboard telemetry", { exact: true });
+  await expect(refresh).toBeEnabled();
+  const read = page.waitForResponse(response =>
+    response.request().method() === "GET" &&
+    new URL(response.url()).pathname.startsWith("/api/v1/") && response.status() === 401);
+  await activate(refresh);
+  await read;
+  await expect(refresh).toBeEnabled();
+  expect(refreshes).toBe(2);
+});
+
+test("late renewal failure cannot strand saved privilege after another tab already recovered", async ({ page, context }) => {
+  const authMock = await installAuthSessionApiMock(context);
+  await signInForRecovery(page);
+  await savePrivilegeGrant(page);
+  const peer = await openRecoveryPeer(context);
+  await page.addInitScript(() => {
+    const state = window as typeof window & {
+      __failureHeld?: boolean;
+      __releaseFailure?: () => void;
+    };
+    const original = navigator.locks.request.bind(navigator.locks);
+    let delayed = false;
+    navigator.locks.request = ((name: string, ...args: unknown[]) => {
+      const result = Reflect.apply(original, navigator.locks, [name, ...args]);
+      if (name !== "vpsman.authSession" || delayed) return result;
+      delayed = true;
+      // Deliver the rejection after the owner has released the lock, as when
+      // this renderer resumes after another tab recovered the same login.
+      return result.catch(async (error: unknown) => {
+        state.__failureHeld = true;
+        await new Promise<void>(resolve => { state.__releaseFailure = resolve; });
+        throw error;
+      });
+    }) as LockManager["request"];
+  });
+  let releaseRefresh!: () => void;
+  const verificationRejected = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  let available = false;
+  let refreshes = 0;
+  await context.route("**/api/v1/auth/privilege/verify", async route => {
+    if (route.request().headers().authorization === `Bearer ${accessToken}`) {
+      await route.fulfill({ status: 401, json: { error: "invalid_operator_session" } });
+      releaseRefresh();
+    } else {
+      await route.fallback();
+    }
+  });
+  await context.route("**/api/v1/auth/refresh", async route => {
+    refreshes++;
+    if (!available) {
+      await verificationRejected;
+      await route.fulfill({ status: 503, json: { error: "refresh_service_unavailable" } });
+    } else {
+      const auth = authMock.rotate(route.request().postDataJSON().refresh_token);
+      await route.fulfill({ status: auth ? 200 : 401, json: auth ?? { error: "invalid_refresh_token" } });
+    }
+  });
+  try {
+    authMock.expireAccess();
+    await page.reload();
+    await page.waitForFunction(() => (window as typeof window & { __failureHeld?: boolean }).__failureHeld);
+    available = true;
+    await peer.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect.poll(async () => (await readCanonicalAuthSession(peer))?.revision).toBe(1);
+    await page.evaluate(() => (window as typeof window & { __releaseFailure: () => void }).__releaseFailure());
+    await expectPrivilegeVerifiedForViewport(page);
+    await expect(page.getByRole("dialog", { name: "Unlock privilege" })).toHaveCount(0);
+    await expect(page.locator(".shell")).not.toContainText("Home snapshot: Session renewal");
+    expect(refreshes).toBe(2);
+    expect((await readCanonicalAuthSession(page))?.revision).toBe(1);
+  } finally {
+    releaseRefresh();
+    await page.evaluate(() => (window as typeof window & { __releaseFailure?: () => void }).__releaseFailure?.());
+    await peer.close();
+  }
+});
+
+test("a disconnected refresh preserves the login and resumes on the online event", async ({ page }) => {
+  const authMock = await installAuthSessionApiMock(page);
+  await signInForRecovery(page);
+  const initial = await readCanonicalAuthSession(page);
+  let disconnected = true;
+  let refreshes = 0;
+  await page.route("**/api/v1/auth/refresh", async route => {
+    refreshes++;
+    if (disconnected) await route.abort("internetdisconnected");
+    else await route.fallback();
+  });
+  authMock.expireAccess();
+  await page.reload();
+  const notice = page.getByRole("alert").filter({ hasText: "Session refresh unavailable" });
+  await expect(notice).toBeVisible();
+  expect(await readCanonicalAuthSession(page)).toMatchObject({
+    epoch: initial?.epoch, status: "active", accessToken, refreshToken,
+  });
+  expect(refreshes).toBe(1);
+  disconnected = false;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect(notice).toHaveCount(0);
+  await expect.poll(async () => (await readCanonicalAuthSession(page))?.revision).toBe(1);
+  await expect(page.locator(".shell")).not.toContainText("Home snapshot:");
+  expect((await readCanonicalAuthSession(page))?.epoch).toBe(initial?.epoch);
+  expect(refreshes).toBe(2);
+});
+
+for (const { trigger, lateOutcome, newerOutcome } of [
+  { trigger: "manual Retry", lateOutcome: "failure", newerOutcome: "success" },
+  { trigger: "manual Retry", lateOutcome: "success", newerOutcome: "failure" },
+  { trigger: "manual Retry", lateOutcome: "failure", newerOutcome: "failure" },
+  { trigger: "online recovery", lateOutcome: "failure", newerOutcome: "failure" },
+] as const) {
+  test(`a late ${trigger} ${lateOutcome} cannot overwrite a newer cross-tab ${newerOutcome}`, async ({ page, context }) => {
+    const authMock = await installAuthSessionApiMock(context);
+    await signInForRecovery(page);
+    const peer = await openRecoveryPeer(context);
+    await page.bringToFront();
+    let available = false;
+    let failureStatus = 503;
+    let refreshes = 0;
+    await context.route("**/api/v1/auth/refresh", async route => {
+      refreshes++;
+      const auth = available ? authMock.rotate(route.request().postDataJSON().refresh_token) : null;
+      await route.fulfill({
+        status: available ? (auth ? 200 : 401) : failureStatus,
+        json: auth ?? { error: available ? "invalid_refresh_token" : "refresh_service_unavailable" },
+      });
+    });
+    try {
+      authMock.expireAccess();
+      await page.reload();
+      const notice = page.getByRole("alert").filter({ hasText: "Session refresh unavailable" });
+      await expect(notice).toBeVisible();
+      expect(refreshes).toBe(1);
+      await page.evaluate(outcome => {
+        const state = window as typeof window & {
+          __settlementHeld?: boolean;
+          __releaseSettlement?: () => void;
+        };
+        const original = navigator.locks.request.bind(navigator.locks);
+        let delayed = false;
+        const delay = async () => {
+          state.__settlementHeld = true;
+          await new Promise<void>(resolve => { state.__releaseSettlement = resolve; });
+        };
+        navigator.locks.request = ((name: string, ...args: unknown[]) => {
+          const result = Reflect.apply(original, navigator.locks, [name, ...args]);
+          if (name !== "vpsman.authSession" || delayed) return result;
+          delayed = true;
+          return outcome === "success"
+            ? result.then(async (value: unknown) => { await delay(); return value; })
+            : result.catch(async (error: unknown) => { await delay(); throw error; });
+        }) as LockManager["request"];
+      }, lateOutcome);
+      available = lateOutcome === "success";
+      if (trigger === "manual Retry") {
+        await notice.getByRole("button", { name: "Retry", exact: true }).click();
+      } else {
+        await page.evaluate(() => window.dispatchEvent(new Event("online")));
+      }
+      await page.waitForFunction(() => (window as typeof window & { __settlementHeld?: boolean }).__settlementHeld);
+      expect(refreshes).toBe(2);
+      if (newerOutcome === "success") {
+        available = true;
+        await peer.evaluate(() => window.dispatchEvent(new Event("online")));
+        await expect.poll(async () => (await readCanonicalAuthSession(peer))?.revision).toBe(1);
+      } else {
+        available = false;
+        failureStatus = 502;
+        if (lateOutcome === "success") {
+          authMock.expireAccess();
+          await peer.evaluate(async () => {
+            const authPath = "/src/authSession.ts";
+            const apiPath = "/src/api.ts";
+            const auth = await import(authPath);
+            const api = await import(apiPath);
+            await api.apiGet("/api/v1/auth/me", auth.getCurrentAuthSession()).catch(() => undefined);
+          });
+        } else {
+          await peer.evaluate(() => window.dispatchEvent(new Event("online")));
+        }
+        await expect.poll(async () => (await readCanonicalAuthSession(peer))?.attempt?.error).toContain("502");
+        await expect(notice).toBeVisible();
+      }
+      // Synchronize this renderer before delivering its obsolete callback.
+      await page.evaluate(async () => {
+        const path = performance.getEntriesByType("resource").map(entry => entry.name)
+          .filter(url => new URL(url).pathname === "/src/authSession.ts").at(-1)!;
+        const auth = await import(path);
+        await auth.readCurrentSessionCredentials(auth.getCurrentAuthSession());
+        (window as typeof window & { __releaseSettlement: () => void }).__releaseSettlement();
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      if (newerOutcome === "success") {
+        await expect(notice).toHaveCount(0);
+        expect((await readCanonicalAuthSession(page))?.attempt?.error).toBeNull();
+      } else {
+        await expect(notice).toBeVisible();
+        await expect(notice).toContainText("502");
+        expect((await readCanonicalAuthSession(page))?.attempt?.error).toContain("502");
+      }
+      expect(refreshes).toBe(3);
+      expect((await readCanonicalAuthSession(page))?.revision).toBe(lateOutcome === "success" || newerOutcome === "success" ? 1 : 0);
+    } finally {
+      await page.evaluate(() => (window as typeof window & { __releaseSettlement?: () => void }).__releaseSettlement?.());
+      await peer.close();
+    }
+  });
+}
+
+test("Retry joining an unsettled failure keeps the notice available for another attempt", async ({ page, context }) => {
+  const authMock = await installAuthSessionApiMock(context);
+  await signInForRecovery(page);
+  let available = false;
+  let refreshes = 0;
+  await context.route("**/api/v1/auth/refresh", async route => {
+    refreshes++;
+    if (available) await route.fallback();
+    else await route.fulfill({ status: 503, json: { error: "refresh_service_unavailable" } });
+  });
+  authMock.expireAccess();
+  await page.reload();
+  const notice = page.getByRole("alert").filter({ hasText: "Session refresh unavailable" });
+  await expect(notice).toBeVisible();
+  await page.evaluate(async () => {
+    const state = window as typeof window & {
+      __failureHeld?: boolean;
+      __releaseFailure?: () => void;
+      __pendingFailure?: Promise<void>;
+    };
+    const path = performance.getEntriesByType("resource").map(entry => entry.name)
+      .filter(url => new URL(url).pathname === "/src/authSession.ts").at(-1)!;
+    const auth = await import(path);
+    const original = navigator.locks.request.bind(navigator.locks);
+    let delayed = false;
+    navigator.locks.request = ((name: string, ...args: unknown[]) => {
+      const result = Reflect.apply(original, navigator.locks, [name, ...args]);
+      if (name !== "vpsman.authSession" || delayed) return result;
+      delayed = true;
+      return result.catch(async (error: unknown) => {
+        state.__failureHeld = true;
+        await new Promise<void>(resolve => { state.__releaseFailure = resolve; });
+        throw error;
+      });
+    }) as LockManager["request"];
+    const session = auth.getCurrentAuthSession();
+    const credentials = await auth.readCurrentSessionCredentials(session);
+    state.__pendingFailure = auth.renewAuthSession(session, credentials.revision, credentials.attempt, true)
+      .catch(() => undefined);
+  });
+  try {
+    await page.waitForFunction(() => (window as typeof window & { __failureHeld?: boolean }).__failureHeld);
+    expect(refreshes).toBe(2);
+    await notice.getByRole("button", { name: "Retry", exact: true }).click();
+    await page.evaluate(async () => {
+      const state = window as typeof window & { __releaseFailure: () => void; __pendingFailure: Promise<void> };
+      state.__releaseFailure();
+      await state.__pendingFailure;
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("503");
+    expect(refreshes).toBe(2);
+    available = true;
+    await notice.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(notice).toHaveCount(0);
+    await expect.poll(async () => (await readCanonicalAuthSession(page))?.revision).toBe(1);
+    expect(refreshes).toBe(3);
+  } finally {
+    await page.evaluate(() => (window as typeof window & { __releaseFailure?: () => void }).__releaseFailure?.());
+  }
 });
 
 async function installAuthSessionApiMock(

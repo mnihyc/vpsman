@@ -29,7 +29,14 @@ const listeners = new Set<(session: AuthSession | null) => void>();
 const credentialListeners = new Set<() => void>();
 const authorityListeners = new Set<() => void>();
 const errorListeners = new Set<(error: string | null) => void>();
-const renewals = new Map<string, Promise<void>>();
+// Renewal is a small database transaction. Bound its lock/network wait without
+// imposing this deadline on operator jobs, uploads, or terminal operations.
+const RENEWAL_TIMEOUT_MS = 60_000;
+const renewals = new Map<string, {
+  promise: Promise<void>;
+  controller: AbortController;
+  expiresAt: number;
+}>();
 
 export class AuthSessionEndedError extends Error {
   constructor() {
@@ -37,7 +44,11 @@ export class AuthSessionEndedError extends Error {
   }
 }
 
-export class AuthRenewalUnavailableError extends Error {}
+export class AuthRenewalUnavailableError extends Error {
+  constructor(message: string, readonly credentialRevision: number | null = null) {
+    super(message);
+  }
+}
 
 export function authSessionEnvironmentError(): string | null {
   return typeof navigator !== "undefined" && navigator.locks && typeof globalThis.crypto?.randomUUID === "function" &&
@@ -151,20 +162,46 @@ function observeRecord(next: SessionRecord | null): void {
   if (handle(previous) !== handle(next)) {
     for (const listener of listeners) listener(handle(next));
   }
-  if (previous?.epoch !== next?.epoch || previous?.status !== next?.status ||
-      previous?.revision !== next?.revision) {
+  const credentialsChanged = previous?.epoch !== next?.epoch || previous?.status !== next?.status ||
+    previous?.revision !== next?.revision;
+  if (credentialsChanged) {
     for (const listener of credentialListeners) listener();
   }
   if (authority(previous) !== authority(next)) {
     for (const listener of authorityListeners) listener();
   }
-  if (previous?.attempt?.error !== next?.attempt?.error) {
+  if (credentialsChanged || previous?.attempt?.id !== next?.attempt?.id ||
+      previous?.attempt?.error !== next?.attempt?.error) {
     for (const listener of errorListeners) listener(next?.attempt?.error ?? null);
   }
 }
 
-function synchronize(): void {
-  void withStateLock(() => undefined).catch(error => {
+function synchronize(retryFailure = false): void {
+  let recoverySession: AuthSession | null = null;
+  let recoveryRevision = 0;
+  void (async () => {
+    if (retryFailure) {
+      // A suspended timer must not give an old request another full deadline.
+      const overdue = [...renewals.values()].filter(renewal => Date.now() >= renewal.expiresAt);
+      for (const renewal of overdue) renewal.controller.abort();
+      if (overdue.length) await Promise.allSettled(overdue.map(renewal => renewal.promise));
+    }
+    // Start known recovery before visibility catch-up reads are dispatched.
+    // The renewal owner still rereads canonical state under the origin lock.
+    const record = retryFailure && observed?.status === "active" && observed.attempt?.error
+      ? observed
+      : await withStateLock(() => observed);
+    if (retryFailure && record?.status === "active" && record.attempt?.error) {
+      recoverySession = handle(record)!;
+      recoveryRevision = record.revision;
+      await renewAuthSession(recoverySession, record.revision, record.attempt.id, true);
+    }
+  })().catch(error => {
+    if (error instanceof AuthSessionEndedError ||
+        // Renewal outcomes were already published by their owner.
+        (error instanceof AuthRenewalUnavailableError && error.credentialRevision !== null) ||
+        (recoverySession && (getCurrentAuthSession() !== recoverySession ||
+          readSessionCredentials(recoverySession)?.revision !== recoveryRevision))) return;
     const message = error instanceof Error ? error.message : "Browser session storage is unavailable.";
     for (const listener of errorListeners) listener(message);
   });
@@ -177,7 +214,11 @@ if (typeof window !== "undefined") {
     }
   });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) synchronize();
+    if (!document.hidden) synchronize(true);
+  });
+  window.addEventListener("online", () => synchronize(true));
+  window.addEventListener("pageshow", event => {
+    if (event.persisted) synchronize(true);
   });
 }
 
@@ -196,10 +237,10 @@ async function publish(record: SessionRecord): Promise<void> {
   publishHint(record);
 }
 
-async function withAuthLock<T>(work: () => Promise<T>): Promise<T> {
+async function withAuthLock<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const unavailable = authSessionEnvironmentError();
   if (unavailable) throw new AuthRenewalUnavailableError(unavailable);
-  return navigator.locks.request(LOCK_NAME, work);
+  return navigator.locks.request(LOCK_NAME, { signal }, work);
 }
 
 // State commits never wait on HTTP. Logout can invalidate a login while its
@@ -295,7 +336,7 @@ export function subscribeSessionAuthority(session: AuthSession, listener: () => 
 }
 
 export async function initializeAuthSession(): Promise<AuthSession | null> {
-  return withStateLock(async () => {
+  const session = await withStateLock(async () => {
     if (!observed) {
       const legacy = storedHint();
       if (isSessionRecord(legacy)) {
@@ -315,6 +356,8 @@ export async function initializeAuthSession(): Promise<AuthSession | null> {
     window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
     return getCurrentAuthSession();
   });
+  if (session && observed?.attempt?.error) synchronize(true);
+  return session;
 }
 
 async function revoke(accessToken: string): Promise<void> {
@@ -369,16 +412,22 @@ export async function logoutAuthSession(session: AuthSession): Promise<void> {
 
 export function renewAuthSession(session: AuthSession, challengedRevision: number, challengedAttempt?: string | null, retryFailedAttempt = false): Promise<void> {
   const running = renewals.get(session.epoch);
-  if (running) return running;
+  if (running) return running.promise;
   const record = observed?.epoch === session.epoch ? observed : null;
   const observedAttempt = challengedAttempt === undefined ? (record?.attempt?.id ?? null) : challengedAttempt;
+  const controller = new AbortController();
+  const expiresAt = Date.now() + RENEWAL_TIMEOUT_MS;
+  const timeout = globalThis.setTimeout(() => controller.abort(), RENEWAL_TIMEOUT_MS);
+  const failureMessage = (error: unknown) => controller.signal.aborted
+    ? `Session renewal timed out after ${RENEWAL_TIMEOUT_MS / 1000} seconds. Retry when the connection or other tab is responsive.`
+    : error instanceof Error ? error.message : "Session renewal is unavailable.";
   const request = withAuthLock(async () => {
     const latest = await withStateLock(() => current(session));
     if (latest.revision !== challengedRevision) return;
-    // Background polling cannot turn one transient failure into an endless
-    // refresh loop. The existing Retry action owns another failed attempt.
+    // Pollers share the failed attempt. Startup, resume, reconnect, and explicit
+    // Retry may reopen it; a newer attempt's outcome always wins.
     if (latest.attempt?.error && (!retryFailedAttempt || latest.attempt.id !== observedAttempt)) {
-      throw new AuthRenewalUnavailableError(latest.attempt.error);
+      throw new AuthRenewalUnavailableError(latest.attempt.error, challengedRevision);
     }
     if (!latest.refreshToken) {
       await withStateLock(async () => { if (getCurrentAuthSession() === session) await end(current(session)); });
@@ -388,6 +437,7 @@ export function renewAuthSession(session: AuthSession, challengedRevision: numbe
       const response = await fetch("/api/v1/auth/refresh", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: latest.refreshToken }),
+        signal: controller.signal,
       });
       if (response.status === 401) {
         await withStateLock(async () => {
@@ -430,18 +480,33 @@ export function renewAuthSession(session: AuthSession, challengedRevision: numbe
       }
     } catch (error) {
       if (error instanceof AuthSessionEndedError) throw error;
-      const message = error instanceof Error ? error.message : "Session renewal is unavailable.";
+      const message = failureMessage(error);
+      // Publish the outcome before handing the single-use credential to the
+      // next lock owner, so concurrent callers share this failed attempt.
       await withStateLock(async () => {
         if (getCurrentAuthSession() === session && current(session).revision === challengedRevision) {
           await publish({ ...current(session), attempt: { id: crypto.randomUUID(), error: message } });
         }
       });
-      throw new AuthRenewalUnavailableError(message);
+      throw new AuthRenewalUnavailableError(message, challengedRevision);
     }
+  }, controller.signal).catch(async error => {
+    if (error instanceof AuthSessionEndedError || error instanceof AuthRenewalUnavailableError) throw error;
+    const message = failureMessage(error);
+    const recovered = await withStateLock(() => {
+      const active = current(session);
+      if (active.revision !== challengedRevision) return true;
+      // Lock acquisition failed. Report locally without overwriting the owner.
+      for (const listener of errorListeners) listener(message);
+      return false;
+    });
+    if (recovered) return;
+    throw new AuthRenewalUnavailableError(message, challengedRevision);
   });
-  renewals.set(session.epoch, request);
+  renewals.set(session.epoch, { promise: request, controller, expiresAt });
   void request.finally(() => {
-    if (renewals.get(session.epoch) === request) renewals.delete(session.epoch);
+    globalThis.clearTimeout(timeout);
+    if (renewals.get(session.epoch)?.promise === request) renewals.delete(session.epoch);
   }).catch(() => undefined);
   return request;
 }

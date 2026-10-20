@@ -4,9 +4,11 @@ import type { OperatorView } from "../../src/types";
 type StoredAuthSession = {
   epoch: string;
   status: "active" | "ended";
+  revision: number;
   accessToken: string;
   refreshToken: string;
   operator: OperatorView | null;
+  attempt: { id: string; error: string | null } | null;
 };
 
 /** Read the committed browser record without importing another app singleton. */

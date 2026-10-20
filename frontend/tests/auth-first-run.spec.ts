@@ -35,7 +35,7 @@ for (const bootstrapRequired of [false, true]) {
     await page.goto("/");
     const submitLabel = bootstrapRequired ? "Create first operator" : "Sign in";
     await expect(page.getByRole("heading", { name: submitLabel })).toBeVisible();
-    await expect(page.getByRole("alert")).toContainText(/HTTPS|localhost/);
+    await expect(page.locator("#operator-access-status")).toContainText(/HTTPS|localhost/);
     await page.getByLabel("Username").fill("operator");
     await page.getByLabel("Password").fill("correct-horse-battery-staple");
     await expect(page.getByRole("button", { name: submitLabel })).toBeDisabled();
@@ -46,7 +46,7 @@ for (const bootstrapRequired of [false, true]) {
     });
     await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve())));
     expect(credentialPosts).toBe(0);
-    await expect(page.getByRole("alert")).toContainText(/Web Locks|browser/);
+    await expect(page.locator("#operator-access-status")).toContainText(/Web Locks|browser/);
   });
 }
 

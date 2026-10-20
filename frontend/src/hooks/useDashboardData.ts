@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, isApiUnauthorized } from "../api";
 import {
+  AuthRenewalUnavailableError,
   getCurrentAuthSession, getSessionOperator, hasStoredAuthSession,
   initializeAuthSession, installAuthSession, logoutAuthSession,
   readCurrentSessionCredentials, readSessionCredentials, renewAuthSession, subscribeAuthSession,
@@ -288,6 +289,8 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   const jobDetailsInvalidationGenerationRef = useRef(0);
   const homeSnapshotGenerationRef = useRef(0);
   const homeSnapshotStartedKeyRef = useRef("");
+  const homeSnapshotAuthFailure = useRef<{ visit: string; revision: number } | null>(null);
+  const [homeSnapshotRetry, setHomeSnapshotRetry] = useState(0);
   const homeVisitRef = useRef<{ token: AuthSession | null; active: boolean; sequence: number }>({ token: null, active: false, sequence: 0 });
   const routeVisitRef = useRef<{ token: AuthSession | null; route: string; sequence: number }>({ token: null, route: "", sequence: 0 });
   const [homeSnapshotSettledKey, setHomeSnapshotSettledKey] = useState("");
@@ -406,6 +409,15 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     });
   }, [apiToken]);
 
+  useEffect(() => {
+    if (!apiToken) return;
+    return subscribeSessionCredentials(apiToken, () => {
+      if (getCurrentAuthSession() === apiToken && homeSnapshotAuthFailure.current) {
+        setHomeSnapshotRetry(value => value + 1);
+      }
+    });
+  }, [apiToken]);
+
   const refreshStoredAuth = useCallback(() => {
     if (refreshAuthRef.current) {
       return refreshAuthRef.current;
@@ -417,9 +429,9 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
       return Promise.resolve();
     }
     const authGeneration = authGenerationRef.current;
-    setAuthRefreshError(null);
+    // Keep the notice until the manager publishes recovery. Joining an
+    // unsettled failed attempt must not hide the only available Retry action.
     const request = renewAuthSession(session, credentials.revision, credentials.attempt, true)
-      .then(() => { setAuthRefreshError(null); })
       .catch((error) => {
         if (authGeneration !== authGenerationRef.current) {
           return;
@@ -428,6 +440,10 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
           adoptSession(getCurrentAuthSession());
           return;
         }
+        // The manager has already published this attempt's outcome. A delayed
+        // UI callback must not replace a newer cross-tab success or failure.
+        if (error instanceof AuthRenewalUnavailableError && error.credentialRevision !== null) return;
+        if (readSessionCredentials(session)?.revision !== credentials.revision) return;
         setAuthRefreshError(
           error instanceof Error
             ? `Session refresh failed: ${error.message}`
@@ -531,6 +547,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   const clearDashboardData = useCallback(() => {
     homeSnapshotGenerationRef.current += 1;
     homeSnapshotStartedKeyRef.current = "";
+    homeSnapshotAuthFailure.current = null;
     homeVisitRef.current = { token: null, active: false, sequence: 0 };
     routeVisitRef.current = { token: null, route: "", sequence: 0 };
     setHomeSnapshotSettledKey("");
@@ -929,14 +946,19 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
   ]);
 
   useEffect(() => {
+    const failure = homeSnapshotAuthFailure.current;
+    const credentials = apiToken ? readSessionCredentials(apiToken) : null;
+    const retryRecoveredSnapshot = failure?.visit === homeVisitKey && credentials &&
+      credentials.revision > failure.revision;
     if (
       !apiToken ||
       !documentVisible ||
       !homeSnapshotOwnsVisit ||
-      homeSnapshotStartedKeyRef.current === homeVisitKey
+      (homeSnapshotStartedKeyRef.current === homeVisitKey && !retryRecoveredSnapshot)
     ) {
       return;
     }
+    homeSnapshotAuthFailure.current = null;
     homeSnapshotStartedKeyRef.current = homeVisitKey;
     setHomeSnapshotPendingKey(homeVisitKey);
     const generation = homeSnapshotGenerationRef.current + 1;
@@ -1011,6 +1033,12 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
           requireAuth();
           return;
         }
+        if (error instanceof AuthRenewalUnavailableError && error.credentialRevision !== null) {
+          homeSnapshotAuthFailure.current = { visit: homeVisitKey, revision: error.credentialRevision };
+          // Also recheck when recovery completed before this rejection arrived.
+          // Only this failed read is retried; a normal rotation is not a visit.
+          setHomeSnapshotRetry(value => value + 1);
+        }
         const message =
           error instanceof Error
             ? `Home snapshot: ${error.message}`
@@ -1075,6 +1103,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     fleet.beginHomeFleetHydration,
     fleet.hydrateHomeFleet,
     homeSnapshotOwnsVisit,
+    homeSnapshotRetry,
     homeVisitKey,
     jobs.beginHomeJobsHydration,
     jobs.hydrateHomeJobs,
