@@ -1,7 +1,7 @@
 {
   "name": "vpsman-frontend",
   "private": true,
-  "version": "0.5.43",
+  "version": "0.5.44",
   "author": "mnihyc",
   "type": "module",
   "engines": {
@@ -47,6 +47,6 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "typescript": "^5.7.3",
-    "vite": "^8.0.14"
+    "vite": "^8.2.4"
   }
 }
