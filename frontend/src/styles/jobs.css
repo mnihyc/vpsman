@@ -2,6 +2,12 @@
   overflow: hidden;
 }
 
+/* Job archive actions share a compact row and wrap together on narrow screens. */
+.outputActions.jobArchiveActions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .jobConsoleStack {
   display: grid;
   gap: 18px;

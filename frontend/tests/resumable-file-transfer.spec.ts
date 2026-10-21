@@ -22,6 +22,7 @@ function runningTarget(startedAt: string, deadlineAt: string): JobTargetRecord {
   return {
     job_id: "job-a",
     client_id: "client-a",
+    display_name: TARGET.display_name,
     status: "running" as JobTargetStatus,
     message: null,
     exit_code: null,
@@ -175,6 +176,7 @@ test("bulk progress aggregates target-specific jobs into one operation", async (
       {
         ...runningTarget("1700000000", "1700000120"),
         client_id: "client-b",
+        display_name: "vps-b",
         completed_at: "1700000011",
         job_id: "job-b",
         status: "completed" as JobTargetStatus,

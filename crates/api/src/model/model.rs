@@ -542,6 +542,7 @@ pub(crate) struct JobSubmittedRequestView {
 pub(crate) struct JobTargetView {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
+    pub(crate) display_name: Option<String>,
     pub(crate) status: String,
     pub(crate) message: Option<String>,
     pub(crate) exit_code: Option<i32>,

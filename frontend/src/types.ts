@@ -2641,6 +2641,7 @@ export type TopologyGraph = {
 export type JobTargetRecord = {
   job_id: string;
   client_id: string;
+  display_name: string | null;
   status: JobTargetStatus;
   message?: string | null;
   exit_code: number | null;

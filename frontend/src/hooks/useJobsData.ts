@@ -1467,6 +1467,20 @@ export function useJobsData(
     [apiToken, rethrowDirectRequestError],
   );
 
+  const downloadJobArchive = useCallback(
+    async (jobId: string) => {
+      try {
+        return await apiGetBlob(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/download`,
+          apiToken,
+        );
+      } catch (error) {
+        return rethrowDirectRequestError(error);
+      }
+    },
+    [apiToken, rethrowDirectRequestError],
+  );
+
   const downloadJobOutputArchive = useCallback(
     async (jobId: string, clientIds: string[]) => {
       try {
@@ -2128,6 +2142,7 @@ export function useJobsData(
     downloadJobOutputStream,
     downloadFileDownloadForClient,
     downloadJobOutputArchive,
+    downloadJobArchive,
     downloadJobTargetStatuses,
     downloadFileTransferHandoff,
     downloadFileTransferSource,

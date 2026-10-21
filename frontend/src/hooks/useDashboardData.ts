@@ -2065,6 +2065,7 @@ export function useDashboardData(activeView: ActiveView, activeSubpage: string) 
     downloadJobOutputStream: jobs.downloadJobOutputStream,
     downloadFileDownloadForClient: jobs.downloadFileDownloadForClient,
     downloadJobOutputArchive: jobs.downloadJobOutputArchive,
+    downloadJobArchive: jobs.downloadJobArchive,
     downloadJobTargetStatuses: jobs.downloadJobTargetStatuses,
     saveFileTransferHandoff: jobs.saveFileTransferHandoff,
     loadJob: jobs.loadJob,

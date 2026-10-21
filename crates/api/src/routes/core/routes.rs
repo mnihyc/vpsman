@@ -83,11 +83,11 @@ use crate::{
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
-        download_job_output_archive, download_job_output_chunk, download_job_output_stream,
-        download_job_target_statuses, get_audit_log, get_job, get_job_submitted_request,
-        list_audit_logs, list_exact_job_target_statuses, list_job_outputs, list_job_targets,
-        list_jobs, list_network_observation_trends, list_network_observations,
-        list_process_supervisor_inventory,
+        download_job_archive, download_job_output_archive, download_job_output_chunk,
+        download_job_output_stream, download_job_target_statuses, get_audit_log, get_job,
+        get_job_submitted_request, list_audit_logs, list_exact_job_target_statuses,
+        list_job_outputs, list_job_targets, list_jobs, list_network_observation_trends,
+        list_network_observations, list_process_supervisor_inventory,
     },
     routes_job_rollouts::{
         get_job_rollout, list_job_rollouts, pause_job_rollout, resume_job_rollout,
@@ -639,6 +639,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(list_exact_job_target_statuses),
         )
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
+        .route("/api/v1/jobs/{job_id}/download", get(download_job_archive))
         .route(
             "/api/v1/jobs/{job_id}/targets/download",
             get(download_job_target_statuses),

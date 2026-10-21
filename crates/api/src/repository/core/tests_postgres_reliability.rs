@@ -1,5 +1,7 @@
 #[path = "tests_postgres_directional_ospf.rs"]
 mod directional_ospf;
+#[path = "tests_postgres_job_downloads.rs"]
+mod job_downloads;
 #[path = "tests_postgres_job_search.rs"]
 mod job_search;
 #[path = "tests_postgres_network_adapter_mutations.rs"]

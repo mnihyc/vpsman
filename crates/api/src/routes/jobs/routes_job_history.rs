@@ -35,7 +35,9 @@ use crate::{
     repository_network_observations::NetworkObservationFilter,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_key_lifecycle::validate_client_id,
-    security::{SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ},
+    security::{
+        operator_has_scope, SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ,
+    },
     state::AppState,
     util::limit_or_default,
 };
@@ -273,6 +275,122 @@ pub(crate) async fn download_job_target_statuses(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&archive_size.to_string())
             .map_err(|_| ApiError::conflict("job_target_status_size_invalid"))?,
+    );
+    response.headers_mut().insert(
+        "x-vpsman-artifact-delivery",
+        HeaderValue::from_static("spooled-filesystem"),
+    );
+    Ok(response)
+}
+
+pub(crate) async fn download_job_archive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<Uuid>,
+) -> Result<Response<Body>, ApiError> {
+    let operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
+    // The combined export includes both output and target-status evidence.
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_FLEET_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    state
+        .repo
+        .get_job(job_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_unavailable",
+            "The job could not be loaded.",
+        ))?
+        .ok_or_else(|| ApiError::not_found("job_not_found"))?;
+    let targets = state
+        .repo
+        .list_job_targets(job_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_targets_unavailable",
+            "Job targets could not be loaded.",
+        ))?;
+    let outputs = load_job_outputs_for_export(
+        &state,
+        job_id,
+        None,
+        None,
+        MAX_JOB_OUTPUT_EXPORT_ROWS,
+        "job_archive_output_limit_exceeded",
+    )
+    .await?;
+    let mut by_client: BTreeMap<String, Vec<JobOutputView>> = BTreeMap::new();
+    for output in outputs {
+        by_client
+            .entry(output.client_id.clone())
+            .or_default()
+            .push(output);
+    }
+    let mut file_statuses = BTreeMap::new();
+    let mut budget_outputs = Vec::new();
+    for (client_id, outputs) in &mut by_client {
+        outputs.sort_by_key(|output| output.seq);
+        budget_outputs.extend(outputs.iter());
+        if let Some(status) = latest_file_download_status(outputs) {
+            // The named file and the raw stdout stream are both in this archive.
+            budget_outputs.extend(outputs.iter().filter(|output| output.stream == "stdout"));
+            file_statuses.insert(client_id.clone(), status);
+        }
+    }
+    enforce_output_export_budget(
+        &budget_outputs,
+        state.artifact_max_bytes(),
+        "job_archive_too_large",
+    )?;
+    let mut stream_entries = Vec::new();
+    let mut file_entries = Vec::new();
+    for (client_id, outputs) in by_client {
+        stream_entries
+            .extend(spool_job_output_archive_entries(&state, &client_id, &outputs).await?);
+        if let Some(status) = file_statuses.remove(&client_id) {
+            let payload = spool_file_download_payload(&state, &outputs).await?;
+            validate_spooled_file_download_payload(&status, &payload)?;
+            file_entries.push(SpooledFileDownloadBundleEntry {
+                client_id,
+                status,
+                payload,
+            });
+        }
+    }
+    let archive_temp = TempDownloadFile::new("vpsman-job-archive", "tar")?;
+    let archive_path = archive_temp.path().to_path_buf();
+    let archive_size = tokio::task::spawn_blocking(move || {
+        write_job_archive(&archive_path, targets, stream_entries, file_entries)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::internal(
+            "job_export_failed",
+            "The job export could not be prepared.",
+            anyhow::anyhow!(error),
+        )
+    })?
+    .map_err(ApiError::internal_mapper(
+        "job_export_failed",
+        "The job export could not be prepared.",
+    ))?;
+    let body = streaming_temp_file_body(archive_temp).await?;
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-tar"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"job-{job_id}.tar\""))
+            .map_err(|_| ApiError::conflict("job_archive_filename_invalid"))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&archive_size.to_string())
+            .map_err(|_| ApiError::conflict("job_archive_size_invalid"))?,
     );
     response.headers_mut().insert(
         "x-vpsman-artifact-delivery",
@@ -782,9 +900,6 @@ async fn spool_job_output_archive_entries(
 ) -> Result<Vec<SpooledJobOutputArchiveEntry>, ApiError> {
     let mut by_stream: BTreeMap<String, Vec<&JobOutputView>> = BTreeMap::new();
     for output in outputs {
-        if !matches!(output.stream.as_str(), "stdout" | "stderr") {
-            continue;
-        }
         by_stream
             .entry(output.stream.clone())
             .or_default()
@@ -914,7 +1029,7 @@ fn write_file_download_bundle_archive(
     let archive_file = create_private_file_new(archive_path)?;
     let mut builder = tar::Builder::new(archive_file);
     for entry in entries {
-        append_file_download_bundle_entry(&mut builder, &entry)?;
+        append_file_download_bundle_entry(&mut builder, &entry, "")?;
     }
     builder.finish()?;
     let archive_file = builder.into_inner()?;
@@ -925,11 +1040,12 @@ fn write_file_download_bundle_archive(
 fn append_file_download_bundle_entry(
     builder: &mut tar::Builder<std::fs::File>,
     entry: &SpooledFileDownloadBundleEntry,
+    prefix: &str,
 ) -> anyhow::Result<()> {
     let filename = entry.status.filename.as_deref().unwrap_or("download.bin");
     let entry_name = format!(
-        "{}/{}",
-        safe_tar_component(&entry.client_id),
+        "{prefix}{}/{}",
+        archive_client_component(&entry.client_id),
         safe_tar_component(filename)
     );
     let mut payload_file = std::fs::File::open(entry.payload.temp.path())?;
@@ -940,7 +1056,7 @@ fn append_file_download_bundle_entry(
     builder.append_data(&mut header, entry_name, &mut payload_file)?;
     append_json_archive_entry(
         builder,
-        &target_status_entry_name(&entry.client_id),
+        &format!("{prefix}{}", target_status_entry_name(&entry.client_id)),
         &entry.status,
     )?;
     Ok(())
@@ -952,18 +1068,26 @@ fn write_job_target_status_archive(
 ) -> anyhow::Result<u64> {
     let archive_file = create_private_file_new(archive_path)?;
     let mut builder = tar::Builder::new(archive_file);
-    append_json_archive_entry(&mut builder, "targets.json", &targets)?;
-    for target in &targets {
-        append_json_archive_entry(
-            &mut builder,
-            &target_status_entry_name(&target.client_id),
-            target,
-        )?;
-    }
+    append_job_target_status_entries(&mut builder, &targets)?;
     builder.finish()?;
     let archive_file = builder.into_inner()?;
     archive_file.sync_data()?;
     Ok(archive_file.metadata()?.len())
+}
+
+fn append_job_target_status_entries(
+    builder: &mut tar::Builder<std::fs::File>,
+    targets: &[JobTargetView],
+) -> anyhow::Result<()> {
+    append_json_archive_entry(builder, "targets.json", &targets)?;
+    for target in targets {
+        append_json_archive_entry(
+            builder,
+            &target_status_entry_name(&target.client_id),
+            target,
+        )?;
+    }
+    Ok(())
 }
 
 fn append_json_archive_entry<T: Serialize>(
@@ -987,7 +1111,7 @@ fn write_job_output_archive(
     let archive_file = create_private_file_new(archive_path)?;
     let mut builder = tar::Builder::new(archive_file);
     for entry in entries {
-        append_job_output_archive_entry(&mut builder, &entry)?;
+        append_job_output_archive_entry(&mut builder, &entry, "")?;
     }
     builder.finish()?;
     let archive_file = builder.into_inner()?;
@@ -998,10 +1122,11 @@ fn write_job_output_archive(
 fn append_job_output_archive_entry(
     builder: &mut tar::Builder<std::fs::File>,
     entry: &SpooledJobOutputArchiveEntry,
+    prefix: &str,
 ) -> anyhow::Result<()> {
     let entry_name = format!(
-        "{}/{}",
-        safe_tar_component(&entry.client_id),
+        "{prefix}{}/{}",
+        archive_client_component(&entry.client_id),
         safe_output_stream_filename(&entry.stream)
     );
     let mut payload_file = std::fs::File::open(entry.payload.temp.path())?;
@@ -1013,12 +1138,51 @@ fn append_job_output_archive_entry(
     Ok(())
 }
 
+fn write_job_archive(
+    archive_path: &FsPath,
+    targets: Vec<JobTargetView>,
+    outputs: Vec<SpooledJobOutputArchiveEntry>,
+    files: Vec<SpooledFileDownloadBundleEntry>,
+) -> anyhow::Result<u64> {
+    let archive_file = create_private_file_new(archive_path)?;
+    let mut builder = tar::Builder::new(archive_file);
+    append_job_target_status_entries(&mut builder, &targets)?;
+    for output in outputs {
+        append_job_output_archive_entry(&mut builder, &output, "outputs/")?;
+    }
+    for file in files {
+        append_file_download_bundle_entry(&mut builder, &file, "files/")?;
+    }
+    builder.finish()?;
+    let archive_file = builder.into_inner()?;
+    archive_file.sync_data()?;
+    Ok(archive_file.metadata()?.len())
+}
+
 fn safe_output_stream_filename(stream: &str) -> String {
     format!("{}.bin", safe_tar_component(stream))
 }
 
 fn target_status_entry_name(client_id: &str) -> String {
-    format!("{}_status.json", safe_tar_component(client_id))
+    format!("{}_status.json", archive_client_component(client_id))
+}
+
+fn archive_client_component(client_id: &str) -> String {
+    // Escape bytes instead of replacing them: distinct valid IDs such as
+    // "edge:a" and "edge_a" must never overwrite each other's evidence.
+    let dot_segment = matches!(client_id, "." | "..");
+    let mut component = String::new();
+    for byte in client_id.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_')
+            || (byte == b'.' && !dot_segment)
+        {
+            component.push(char::from(byte));
+        } else {
+            component.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    component
 }
 
 async fn streaming_temp_file_body(temp: TempDownloadFile) -> Result<Body, ApiError> {

@@ -31,6 +31,7 @@ pub(crate) const JOB_TARGET_STATUS_BATCH_SQL: &str = r#"
     SELECT
         exact.job_id,
         exact.client_id,
+        client.display_name,
         exact.status,
         exact.message,
         exact.exit_code,
@@ -43,6 +44,7 @@ pub(crate) const JOB_TARGET_STATUS_BATCH_SQL: &str = r#"
     JOIN job_targets AS exact
       ON exact.job_id = requested.job_id
      AND exact.client_id = requested.client_id
+    LEFT JOIN clients AS client ON client.id = exact.client_id
     ORDER BY requested.input_ordinal
 "#;
 
@@ -2315,18 +2317,20 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        job_id,
-                        client_id,
-                        status,
-                        message,
-                        exit_code,
-                        started_at::text AS started_at,
-                        deadline_at::text AS deadline_at,
-                        completed_at::text AS completed_at,
-                        process_incarnation_id
-                    FROM job_targets
-                    WHERE job_id = $1
-                    ORDER BY client_id
+                        target.job_id,
+                        target.client_id,
+                        client.display_name,
+                        target.status,
+                        target.message,
+                        target.exit_code,
+                        target.started_at::text AS started_at,
+                        target.deadline_at::text AS deadline_at,
+                        target.completed_at::text AS completed_at,
+                        target.process_incarnation_id
+                    FROM job_targets AS target
+                    LEFT JOIN clients AS client ON client.id = target.client_id
+                    WHERE target.job_id = $1
+                    ORDER BY target.client_id
                     "#,
                 )
                 .bind(job_id)
@@ -2337,6 +2341,7 @@ impl Repository {
                         Ok(JobTargetView {
                             job_id: row.try_get("job_id")?,
                             client_id: row.try_get("client_id")?,
+                            display_name: row.try_get("display_name")?,
                             status: row.try_get("status")?,
                             message: row.try_get("message")?,
                             exit_code: row.try_get("exit_code")?,
@@ -2371,6 +2376,7 @@ impl Repository {
                     Ok(JobTargetView {
                         job_id: row.try_get("job_id")?,
                         client_id: row.try_get("client_id")?,
+                        display_name: row.try_get("display_name")?,
                         status: row.try_get("status")?,
                         message: row.try_get("message")?,
                         exit_code: row.try_get("exit_code")?,
@@ -2397,19 +2403,21 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        job_id,
-                        client_id,
-                        status,
-                        message,
-                        exit_code,
-                        started_at::text AS started_at,
-                        deadline_at::text AS deadline_at,
-                        completed_at::text AS completed_at,
-                        process_incarnation_id
-                    FROM job_targets
-                    WHERE job_id = ANY($1::uuid[])
-                      AND client_id = ANY($2::text[])
-                    ORDER BY job_id, client_id
+                        target.job_id,
+                        target.client_id,
+                        client.display_name,
+                        target.status,
+                        target.message,
+                        target.exit_code,
+                        target.started_at::text AS started_at,
+                        target.deadline_at::text AS deadline_at,
+                        target.completed_at::text AS completed_at,
+                        target.process_incarnation_id
+                    FROM job_targets AS target
+                    LEFT JOIN clients AS client ON client.id = target.client_id
+                    WHERE target.job_id = ANY($1::uuid[])
+                      AND target.client_id = ANY($2::text[])
+                    ORDER BY target.job_id, target.client_id
                     "#,
                 )
                 .bind(job_ids)
@@ -2421,6 +2429,7 @@ impl Repository {
                         Ok(JobTargetView {
                             job_id: row.try_get("job_id")?,
                             client_id: row.try_get("client_id")?,
+                            display_name: row.try_get("display_name")?,
                             status: row.try_get("status")?,
                             message: row.try_get("message")?,
                             exit_code: row.try_get("exit_code")?,

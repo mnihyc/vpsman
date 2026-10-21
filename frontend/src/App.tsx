@@ -2685,6 +2685,7 @@ export function App() {
         onDownloadOutputStream={dashboard.downloadJobOutputStream}
         onDownloadFileForClient={dashboard.downloadFileDownloadForClient}
         onDownloadOutputArchive={dashboard.downloadJobOutputArchive}
+        onDownloadArchive={dashboard.downloadJobArchive}
         onDownloadTargetStatusArchive={dashboard.downloadJobTargetStatuses}
         onDownloadFileTransferSource={dashboard.downloadFileTransferSource}
         onDispatchPresetApplied={() => setJobDispatchPreset(null)}

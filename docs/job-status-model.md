@@ -277,8 +277,16 @@ duplicate submissions after a malformed proxy or server response.
 
 ## Download Archives
 
-Job output and status downloads are intentionally separate so operators can
-review payloads without confusing them with execution metadata:
+Job details offer a combined download and individual exports:
+
+- `Download all` archives all target execution metadata at the root
+  (`targets.json` and `<target>_status.json`), all retained output streams under
+  `outputs/<target>/<stream>.bin`, and completed file-download payloads and their
+  metadata under `files/`. Output streams include structured `status` chunks and
+  `pty` output, concatenated in sequence order without changing their bytes.
+  Separate directories prevent file payloads from colliding with output or
+  execution-status filenames. It exports the whole job, independently of the
+  loaded output page, filters, or comparison selection.
 
 - `Download outputs` archives retained output payload streams by target, such
   as `stdout.bin` and `stderr.bin`.
@@ -289,6 +297,25 @@ review payloads without confusing them with execution metadata:
 - `Download status` archives target execution status only. It contains root
   `targets.json` for all target records plus root-level
   `<target>_status.json` entries for each target.
+
+Target execution metadata includes the stable `client_id` and current
+`display_name`, matching the fleet name used by the console. A retained target
+whose client record is absent keeps its ID and has a null display name. Names
+are not historical snapshots and are not used as archive paths.
+Client-ID path components preserve letters, digits, hyphens, underscores and
+ordinary dots. Other bytes and the standalone `.` / `..` components are
+percent-escaped, so IDs such as `edge:a` and `edge_a` remain distinct on
+extraction. Ordinary IDs such as `v-123` keep their existing paths.
+
+The combined download requires both existing `fleet:read` and `jobs:read`
+permissions. It uses the existing output row, stream-size and aggregate payload
+limits; named file copies count toward the aggregate limit as well as raw output.
+Targets without output remain in the archive. Missing or deleted payloads,
+integrity failures and limit violations are reported rather than silently
+returning a partial export. Individual export contents are unchanged apart from
+the additional display-name metadata in target statuses; they use the same
+unambiguous client-ID path encoding as the combined archive. Payload filenames
+retain their existing normalization.
 
 ## Shared Workflow Contracts
 

@@ -285,6 +285,7 @@ export function JobsPanel({
   onCreateJob,
   onDownloadFileBundle,
   onDownloadOutputArchive,
+  onDownloadArchive,
   onDownloadTargetStatusArchive,
   onDownloadOutputChunk,
   onDownloadOutputStream,
@@ -346,6 +347,7 @@ export function JobsPanel({
     clientIds: string[],
   ) => Promise<Blob>;
   onDownloadTargetStatusArchive: (jobId: string) => Promise<Blob>;
+  onDownloadArchive: (jobId: string) => Promise<Blob>;
   onDownloadFileBundle: (jobId: string, clientIds: string[]) => Promise<Blob>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDispatchPresetApplied?: () => void;
@@ -449,7 +451,7 @@ export function JobsPanel({
   const [fileDownloadPendingClientId, setFileDownloadPendingClientId] =
     useState<string | null>(null);
   const [archivePendingKey, setArchivePendingKey] = useState<
-    "files" | "outputs" | "status" | null
+    "all" | "files" | "outputs" | "status" | null
   >(null);
   const scheduleRunJobs = jobs.filter((job) =>
     job.command_type.startsWith("scheduled_"),
@@ -1494,6 +1496,10 @@ export function JobsPanel({
     }
   }, [jobDetailsInvalidation, startBackgroundDetailRefresh]);
 
+  function setDownloadErrorForJob(jobId: string, message: string | null) {
+    if (selectedJobIdRef.current === jobId) setDownloadError(message);
+  }
+
   async function downloadOutputStreamForClient(
     clientId: string,
     stream: OutputDownloadStream,
@@ -1505,7 +1511,7 @@ export function JobsPanel({
     setStreamPendingKey(pendingKey);
     await runPanelAction(
       () => undefined,
-      setDownloadError,
+      (message) => setDownloadErrorForJob(selectedJobId, message),
       async () => {
         const blob = await onDownloadOutputStream(
           selectedJobId,
@@ -1533,7 +1539,7 @@ export function JobsPanel({
     setFileDownloadPendingClientId(clientId);
     await runPanelAction(
       () => undefined,
-      setDownloadError,
+      (message) => setDownloadErrorForJob(selectedJobId, message),
       async () => {
         const blob = await onDownloadFileForClient(selectedJobId, clientId);
         saveBlob(blob, filename);
@@ -1543,7 +1549,7 @@ export function JobsPanel({
   }
 
   async function downloadSelectedJobArchive(
-    kind: "files" | "outputs" | "status",
+    kind: "all" | "files" | "outputs" | "status",
   ) {
     if (!selectedJobId) {
       return;
@@ -1551,21 +1557,25 @@ export function JobsPanel({
     setArchivePendingKey(kind);
     await runPanelAction(
       () => undefined,
-      setDownloadError,
+      (message) => setDownloadErrorForJob(selectedJobId, message),
       async () => {
         const blob =
-          kind === "files"
-            ? await onDownloadFileBundle(selectedJobId, [])
-            : kind === "outputs"
-              ? await onDownloadOutputArchive(selectedJobId, [])
-              : await onDownloadTargetStatusArchive(selectedJobId);
+          kind === "all"
+            ? await onDownloadArchive(selectedJobId)
+            : kind === "files"
+              ? await onDownloadFileBundle(selectedJobId, [])
+              : kind === "outputs"
+                ? await onDownloadOutputArchive(selectedJobId, [])
+                : await onDownloadTargetStatusArchive(selectedJobId);
         saveBlob(
           blob,
-          kind === "files"
-            ? `file-download-${shortId(selectedJobId)}.tar`
-            : kind === "outputs"
-              ? `job-outputs-${shortId(selectedJobId)}.tar`
-              : `job-status-${shortId(selectedJobId)}.tar`,
+          kind === "all"
+            ? `job-${shortId(selectedJobId)}.tar`
+            : kind === "files"
+              ? `file-download-${shortId(selectedJobId)}.tar`
+              : kind === "outputs"
+                ? `job-outputs-${shortId(selectedJobId)}.tar`
+                : `job-status-${shortId(selectedJobId)}.tar`,
         );
       },
     );
@@ -1892,7 +1902,24 @@ export function JobsPanel({
                           : `${outputs.length} chunks`}
                       </span>
                     </div>
-                    <div className="outputActions">
+                    <div className="outputActions jobArchiveActions">
+                      <button
+                        className="secondaryAction compactAction"
+                        title="Download target statuses, all retained output streams, and completed file payloads in one archive."
+                        data-tooltip-disabled-reason={
+                          outputsLoading || targetsLoading
+                            ? "Job results are still loading"
+                            : archivePendingKey !== null
+                              ? "Another job archive download is in progress"
+                              : undefined
+                        }
+                        disabled={outputsLoading || targetsLoading || archivePendingKey !== null}
+                        onClick={() => void downloadSelectedJobArchive("all")}
+                        type="button"
+                      >
+                        <Download size={14} />
+                        <span>{archivePendingKey === "all" ? "Downloading" : "Download all"}</span>
+                      </button>
                       {fileDownloadStatus && (
                         <button
                           className="secondaryAction compactAction"
